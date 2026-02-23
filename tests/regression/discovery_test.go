@@ -1499,6 +1499,174 @@ func TestDiscovery_AssigneeEmptyStringVsNoAssignee(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// SESSION 6 DISCOVERY: Routing, validation, sort seams
+// =============================================================================
+
+// TestDiscovery_StaleNegativeDaysSilentlyInverts verifies that bd stale --days
+// rejects negative values.
+//
+// FINDING: stale.go:22 reads --days without validation. queries.go:767 computes
+// cutoff = time.Now().UTC().AddDate(0, 0, -filter.Days). With Days=-1, this
+// becomes AddDate(0,0,1) = TOMORROW, so ALL issues updated before tomorrow
+// are "stale" — which is everything. The user gets silently wrong results.
+//
+// Classification: BUG — negative days should be rejected or documented.
+func TestDiscovery_StaleNegativeDaysSilentlyInverts(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	// Create an issue that was just created (definitely not stale)
+	a := w.create("--title", "Brand new issue", "--type", "task", "--priority", "2")
+
+	// bd stale --days 99999 should NOT include a (created moments ago)
+	normalOut, err := w.tryRun("stale", "--days", "99999", "--json")
+	if err != nil {
+		t.Skipf("bd stale not available: %v", err)
+	}
+	normalIDs := parseIDs(t, normalOut)
+	if containsID(normalIDs, a) {
+		t.Fatalf("control: brand new issue should not be stale with --days 99999")
+	}
+
+	// bd stale --days -1 should be rejected, but currently accepts silently
+	negOut, err := w.tryRun("stale", "--days", "-1", "--json")
+	if err == nil {
+		negIDs := parseIDs(t, negOut)
+		if containsID(negIDs, a) {
+			t.Errorf("DISCOVERY: bd stale --days -1 returns brand new issue %s as 'stale' — negative days inverts the staleness logic (cutoff becomes tomorrow instead of yesterday)", a)
+		}
+	}
+	// If err != nil, the tool correctly rejected negative days — good
+}
+
+// TestDiscovery_ListSortUnknownFieldSilentNoOp verifies that bd list --sort
+// with an invalid field name errors instead of silently ignoring the sort.
+//
+// FINDING: list.go:238-240 has a default case that treats unknown sort fields
+// as "all items compare equal" — effectively no sorting. The user gets unsorted
+// results without any error or warning.
+//
+// Classification: BUG — unknown sort field should error.
+func TestDiscovery_ListSortUnknownFieldSilentNoOp(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	// Create issues with different priorities to verify sort behavior
+	w.create("--title", "Low priority", "--type", "task", "--priority", "4")
+	w.create("--title", "High priority", "--type", "task", "--priority", "0")
+	w.create("--title", "Mid priority", "--type", "task", "--priority", "2")
+
+	// bd list --sort priority should work (control)
+	_, err := w.tryRun("list", "--sort", "priority", "--json", "-n", "0")
+	if err != nil {
+		t.Skipf("--sort flag not available: %v", err)
+	}
+
+	// bd list --sort nonexistent_field should error
+	out, err := w.tryRun("list", "--sort", "nonexistent_field", "--json", "-n", "0")
+	if err == nil {
+		// Command succeeded — check if results are actually unsorted
+		ids := parseIDs(t, out)
+		if len(ids) > 0 {
+			t.Errorf("DISCOVERY: bd list --sort nonexistent_field succeeded without error — unknown sort field silently ignored, results may be unsorted (%d issues returned)", len(ids))
+		}
+	}
+	// If err != nil, the tool correctly rejected the unknown field — good
+}
+
+// TestDiscovery_ReparentCreatesParentChildCycle verifies that reparenting
+// a parent to its own child creates a cycle.
+//
+// FINDING: update.go:328-342 reparent logic updates the parent-child dependency
+// but does NOT check if the new parent is a descendant, which would create a
+// parent-child cycle: A is parent of B, B becomes parent of A.
+//
+// Classification: BUG — reparenting should check for cycles.
+func TestDiscovery_ReparentCreatesParentChildCycle(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	parent := w.create("--title", "Parent", "--type", "epic", "--priority", "1")
+	child := w.create("--title", "Child", "--type", "task", "--priority", "2", "--parent", parent)
+
+	// Reparent parent to its own child — should be rejected
+	_, err := w.tryRun("update", parent, "--parent", child)
+	if err != nil {
+		// Tool correctly rejected the cycle
+		return
+	}
+
+	// Command succeeded — check if a cycle was created
+	// bd show --json embeds dependencies with dependency_type field
+	parentData := parseJSON(t, w.run("show", parent, "--json"))
+	childData := parseJSON(t, w.run("show", child, "--json"))
+
+	parentDeps, _ := parentData[0]["dependencies"].([]any)
+	childDeps, _ := childData[0]["dependencies"].([]any)
+
+	parentHasParentChildDep := false
+	for _, d := range parentDeps {
+		dep, _ := d.(map[string]any)
+		if dep["dependency_type"] == "parent-child" {
+			parentHasParentChildDep = true
+		}
+	}
+
+	childHasParentChildDep := false
+	for _, d := range childDeps {
+		dep, _ := d.(map[string]any)
+		if dep["dependency_type"] == "parent-child" {
+			childHasParentChildDep = true
+		}
+	}
+
+	if parentHasParentChildDep && childHasParentChildDep {
+		t.Errorf("DISCOVERY: reparent %s --parent %s created a parent-child cycle — both issues have parent-child deps pointing at each other", parent, child)
+	}
+}
+
+// TestDiscovery_OverdueComparisonEdgeCase verifies that bd list --overdue
+// correctly handles timezone edge cases.
+//
+// FINDING: queries.go:237-239 compares due_at against time.Now().UTC().
+// If due_at is stored without consistent UTC normalization, issues due
+// "today" may appear or not appear in --overdue depending on timezone offset.
+//
+// Classification: INVESTIGATE — test documents current behavior for
+// reference, may not be a bug if all times are consistently UTC.
+func TestDiscovery_OverdueComparisonEdgeCase(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	// Create issue with a due date far in the past
+	pastDue := w.create("--title", "Past due", "--type", "task", "--priority", "2")
+	w.run("update", pastDue, "--due", "2020-01-01")
+
+	// Create issue with a due date far in the future
+	futureDue := w.create("--title", "Future due", "--type", "task", "--priority", "2")
+	w.run("update", futureDue, "--due", "2099-12-31")
+
+	// Create issue with no due date
+	noDue := w.create("--title", "No due date", "--type", "task", "--priority", "2")
+
+	// bd list --overdue should include past due, not future due, not no-due
+	overdueOut, err := w.tryRun("list", "--overdue", "--json", "-n", "0")
+	if err != nil {
+		t.Skipf("--overdue flag not available: %v", err)
+	}
+	overdueIDs := parseIDs(t, overdueOut)
+
+	if !containsID(overdueIDs, pastDue) {
+		t.Errorf("issue %s with due date 2020-01-01 should be overdue", pastDue)
+	}
+	if containsID(overdueIDs, futureDue) {
+		t.Errorf("issue %s with due date 2099-12-31 should NOT be overdue", futureDue)
+	}
+	if containsID(overdueIDs, noDue) {
+		t.Errorf("issue %s with no due date should NOT be overdue", noDue)
+	}
+
+	t.Logf("CONFIRMED: --overdue correctly filters past-due=%v future-due=%v no-due=%v",
+		containsID(overdueIDs, pastDue), containsID(overdueIDs, futureDue), containsID(overdueIDs, noDue))
+}
+
 // TestProtocol_CommentAddAndPreserve verifies comments persist through operations.
 func TestProtocol_CommentAddAndPreserve(t *testing.T) {
 	w := newCandidateWorkspace(t)

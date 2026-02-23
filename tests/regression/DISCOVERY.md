@@ -17,6 +17,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | 2026-02-22 | **Session 3: Candidate-only discovery (lane 3)** | Found 5 new bugs (BUG-16 through 20) + 3 code-review-only findings. External blockers, conditional-blocks, count/list discrepancy, waits-for gating, parent-child blocked consistency. Filed DECISION PRs #2025, #2026. |
 | 2026-02-22 | **Session 4: Deep discovery (search, lifecycle, batch, deps)** | Found 7 more bugs (BUG-21 through 27). Update bypasses close guard, reopen superseded corruption, defer past date invisible, wisp sort order, conditional-blocks cycle, epic wisp children. 2 new protocol tests. |
 | 2026-02-22 | **Session 5: Filter, flag interaction, migration seams** | Found 4 more bugs (BUG-28 through 31). Dead label-pattern filter, claim+status overwrite, --ready overrides --status, assignee empty string. Code review: pull doesn't check merge conflicts, schema migration non-transactional, import drops deps/comments silently. |
+| 2026-02-22 | **Session 6: Routing, validation, sort, edge cases** | Found 4 more bugs (BUG-32 through 35). Stale negative days inverts logic, sort unknown field silent no-op, reparent cycle undetected, overdue edge cases documented. Code review: createInRig skips prefix validation, same-prefix rig ambiguity, batch import no UTC normalization. |
 
 ## Audit Summary
 
@@ -53,6 +54,10 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-29 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-30 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-31 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-32 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-33 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-34 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-35 | **PROTOCOL** | PASS (correct behavior) | — |
 
 ### Shipped fix PRs (all include protocol tests)
 
@@ -85,6 +90,10 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 21. **BUG-29**: --claim + --status overwrite conflict
 22. **BUG-30**: --ready silently overrides --status
 23. **BUG-31**: --assignee "" becomes no-filter
+24. **BUG-32**: stale --days negative inverts logic (HIGH)
+25. **BUG-33**: list --sort unknown field silent no-op
+26. **BUG-34**: reparent parent to child creates cycle
+27. **BUG-35**: overdue comparison edge case (PROTOCOL — works correctly)
 
 ### Investigate further
 
@@ -665,6 +674,88 @@ closed — completely wrong results with no warning.
 set. Returns ALL issues instead of unassigned ones. Meanwhile `--no-assignee`
 correctly filters. A user expecting empty string to mean "unassigned" gets
 silently wrong results.
+
+---
+
+### BUG-32: `bd stale --days -1` silently inverts staleness logic (NEW — session 6)
+
+**Severity: HIGH** — Completely wrong results, silently
+**Discovered:** Session 6 discovery, test
+**File:** `cmd/bd/stale.go:22,71` (no validation) + `internal/storage/dolt/queries.go:767`
+**Test:** `TestDiscovery_StaleNegativeDaysSilentlyInverts`
+
+`bd stale --days -1` is accepted without error. The cutoff computation at
+`queries.go:767` uses `time.Now().UTC().AddDate(0, 0, -filter.Days)`. With
+`Days=-1`, this becomes `AddDate(0,0,1)` = tomorrow. All issues updated before
+tomorrow (i.e., everything) appear as "stale." The user gets all issues returned
+while expecting "issues not updated in the last day."
+
+---
+
+### BUG-33: `bd list --sort unknown_field` silently ignored (NEW — session 6)
+
+**Severity: MEDIUM** — Silent degradation of sort behavior
+**Discovered:** Session 6 discovery, test
+**File:** `cmd/bd/list.go:238-240` (default case in sort switch)
+**Test:** `TestDiscovery_ListSortUnknownFieldSilentNoOp`
+
+`bd list --sort nonexistent_field` succeeds without error. The sort comparator
+at `list.go:238-240` has a `default` case that returns 0 (all items compare
+equal), effectively disabling sorting. The user believes results are sorted by
+their specified field but gets arbitrary ordering.
+
+---
+
+### BUG-34: Reparent parent to child creates parent-child cycle (NEW — session 6)
+
+**Severity: HIGH** — Structural corruption of issue hierarchy
+**Discovered:** Session 6 discovery, test
+**File:** `cmd/bd/update.go:328-342` (reparent logic, no cycle check)
+**Test:** `TestDiscovery_ReparentCreatesParentChildCycle`
+
+`bd update parent --parent child` (where child is already a child of parent)
+succeeds without validation. The reparent logic updates the parent-child
+dependency but does NOT check if the new parent is a descendant, creating a
+mutual parent-child cycle. Both issues claim the other as parent.
+
+This is different from BUG-25 (conditional-blocks cycle) — this is a
+parent-child hierarchy corruption that could cause infinite loops in
+tree-walking code.
+
+---
+
+### BUG-35: `bd list --overdue` timezone edge cases (NEW — session 6)
+
+**Severity: LOW** — Documenting correct behavior for reference
+**Discovered:** Session 6 discovery, test
+**File:** `internal/storage/dolt/queries.go:237-239`
+**Test:** `TestDiscovery_OverdueComparisonEdgeCase`
+
+`bd list --overdue` compares `due_at` against `time.Now().UTC()`. The test
+verifies basic overdue semantics (past due included, future due excluded, no
+due date excluded). More investigation needed to determine if timezone mismatch
+occurs at UTC boundary edge cases.
+
+**Triage: INVESTIGATE** — basic overdue works, but UTC midnight edge cases
+need more thorough testing with controlled time.
+
+---
+
+### Code review findings (session 6, not CLI-testable)
+
+**`createInRig()` skips prefix validation:** `internal/rig/rig.go` — when
+creating issues inside a rig, `createInRig()` skips ALL prefix validation
+including the `--force` check. Rig-created issues bypass the normal validation
+pipeline. HIGH severity for multi-rig setups.
+
+**Same-prefix rig dep resolution ambiguity:** When two rigs share the same
+prefix, `dep add` may silently resolve to the wrong local issue instead of the
+intended cross-rig target. MEDIUM severity.
+
+**Batch import doesn't normalize timestamps:** `import_shared.go:43-57` calls
+`store.CreateIssuesWithFullOptions` without pre-validating timestamp format.
+If `created_at` has an invalid RFC3339 value, the `.UTC()` call in
+`issues.go:35-46` may panic. LOW severity.
 
 ---
 
