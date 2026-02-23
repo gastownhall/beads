@@ -1013,6 +1013,116 @@ func TestDiscovery_ConditionalBlocksNotEvaluated(t *testing.T) {
 // because ephemeral issue dep routing requires different test setup.
 // See PR #1999 (BUG-7 fix) for the shared root cause.
 
+// TestDiscovery_CountVsListDefaultFilter verifies that bd count and bd list
+// agree on default filtering behavior.
+//
+// FINDING: bd count (no flags) counts ALL issues including closed.
+// bd list (no flags) excludes closed issues by default.
+// This means bd count and bd list -n 0 --json | jq length give different numbers.
+//
+// Root cause: count.go doesn't apply ExcludeStatus for closed issues by default,
+// while list.go:410 does: filter.ExcludeStatus = []types.Status{types.StatusClosed}
+//
+// Classification: BUG — commands that report the same metric should agree on defaults.
+func TestDiscovery_CountVsListDefaultFilter(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	// Create 3 open and 2 closed issues
+	w.create("--title", "Open1", "--type", "task", "--priority", "2")
+	w.create("--title", "Open2", "--type", "task", "--priority", "2")
+	w.create("--title", "Open3", "--type", "task", "--priority", "2")
+	c1 := w.create("--title", "WillClose1", "--type", "task", "--priority", "2")
+	c2 := w.create("--title", "WillClose2", "--type", "task", "--priority", "2")
+	w.run("close", c1)
+	w.run("close", c2)
+
+	// bd list (no flags) should exclude closed → 3 issues
+	listOut := parseJSON(t, w.run("list", "--json", "-n", "0"))
+	listCount := len(listOut)
+
+	// bd count (no flags) should match list count
+	var countResult struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal([]byte(w.run("count", "--json")), &countResult); err != nil {
+		t.Fatalf("parsing count: %v", err)
+	}
+
+	if countResult.Count != listCount {
+		t.Errorf("DISCOVERY: bd count (%d) disagrees with bd list (%d) on default filtering — count includes closed issues, list excludes them",
+			countResult.Count, listCount)
+	}
+}
+
+// TestDiscovery_WaitsForBlocksReadiness verifies that waits-for deps
+// actually block readiness as declared by AffectsReadyWork().
+//
+// FINDING: AffectsReadyWork() returns true for waits-for, and computeBlockedIDs()
+// includes waits-for in its SQL query. However, waits-for gating has additional
+// metadata semantics (gate_type: all-children vs any-children) that may cause
+// the basic case (no gate metadata) to behave differently.
+//
+// Classification: INVESTIGATE — need to understand if bare waits-for (no gate
+// metadata) is expected to block or only gates with proper metadata.
+func TestDiscovery_WaitsForBlocksReadiness(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	spawner := w.create("--title", "Spawner", "--type", "task", "--priority", "1")
+	waiter := w.create("--title", "Waiter", "--type", "task", "--priority", "2")
+
+	// waiter waits-for spawner (bare dep, no gate metadata)
+	w.run("dep", "add", waiter, spawner, "--type", "waits-for")
+
+	// Per AffectsReadyWork(), waiter should be blocked while spawner is open
+	readyIDs := parseIDs(t, w.run("ready", "-n", "0", "--json"))
+	if containsID(readyIDs, waiter) {
+		t.Errorf("DISCOVERY: waits-for dep doesn't block readiness — waiter %s appears in bd ready while spawner %s is open (AffectsReadyWork() says it should block)", waiter, spawner)
+	}
+
+	blockedIDs := parseIDs(t, w.run("blocked", "--json"))
+	if !containsID(blockedIDs, waiter) {
+		t.Errorf("DISCOVERY: waiter %s with waits-for dep not in bd blocked", waiter)
+	}
+}
+
+// TestDiscovery_ParentBlockedChildrenConsistency verifies that children of a
+// blocked parent are consistently reported across bd ready and bd blocked.
+//
+// FINDING: computeBlockedIDs() correctly propagates blocking to children of
+// blocked parents for bd ready (children excluded). But bd blocked does NOT
+// list these transitively-blocked children. This creates an inconsistency:
+// the child is invisible — not in ready, not in blocked, just in list.
+//
+// Classification: BUG — child is excluded from ready but not shown in blocked,
+// making it hard for users to understand why an issue isn't showing in ready.
+func TestDiscovery_ParentBlockedChildrenConsistency(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	parent := w.create("--title", "Parent", "--type", "epic", "--priority", "1")
+	blocker := w.create("--title", "Blocker", "--type", "task", "--priority", "1")
+	child := w.create("--title", "Child", "--type", "task", "--priority", "2", "--parent", parent)
+
+	// Block the parent
+	w.run("dep", "add", parent, blocker, "--type", "blocks")
+
+	// Parent should be blocked
+	blockedIDs := parseIDs(t, w.run("blocked", "--json"))
+	if !containsID(blockedIDs, parent) {
+		t.Fatalf("parent %s should be blocked", parent)
+	}
+
+	// Child correctly NOT in ready (parent is blocked → child transitively blocked)
+	readyIDs := parseIDs(t, w.run("ready", "-n", "0", "--json"))
+	if containsID(readyIDs, child) {
+		t.Errorf("child %s of blocked parent %s should NOT be in bd ready", child, parent)
+	}
+
+	// Child should also appear in blocked list for consistency
+	if !containsID(blockedIDs, child) {
+		t.Errorf("DISCOVERY: child %s of blocked parent %s is excluded from bd ready but NOT listed in bd blocked — user has no way to discover why it's missing from ready", child, parent)
+	}
+}
+
 // TestProtocol_CommentAddAndPreserve verifies comments persist through operations.
 func TestProtocol_CommentAddAndPreserve(t *testing.T) {
 	w := newCandidateWorkspace(t)

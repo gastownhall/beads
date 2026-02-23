@@ -14,6 +14,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | 2026-02-22 | Code review of labels.go, schema.go, dependencies.go for BUG-5 and BUG-7 root cause | BUG-5 upgraded to INVESTIGATE (not clearly wontfix). BUG-7 downgraded to FILE ISSUE (intentionally coded upsert, needs product decision). BUG-4 upgraded to DOCS FIX (help text promises "blocked" as a status). |
 | 2026-02-22 | **Phase 1-3: Snapshot harness + full parity run** | Replaced bd export with snapshot (list+show). Fixed database isolation (unique prefixes per workspace). Normalization for show-vs-export field differences. **Result: 95+ PASS, 15 FAIL (all known bugs), 10 SKIP.** |
 | 2026-02-22 | **Phase 4: Ship fix PRs with tests** | BUG-2+3 already merged (PR #1992). BUG-10 PR #2014, BUG-11+12+14 PR #1994, BUG-4 PR #2017. All PRs include protocol tests. |
+| 2026-02-22 | **Session 3: Candidate-only discovery (lane 3)** | Found 5 new bugs (BUG-16 through 20) + 3 code-review-only findings. External blockers, conditional-blocks, count/list discrepancy, waits-for gating, parent-child blocked consistency. Filed DECISION PRs #2025, #2026. |
 
 ## Audit Summary
 
@@ -33,6 +34,12 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-12 | **FIX PR** | **PR OPEN** | PR #1994 |
 | BUG-13 | **DECISION PR** | **PR OPEN** | PR #2000 |
 | BUG-14 | **FIX PR** | **PR OPEN** | PR #1994 |
+| BUG-15 | **INVESTIGATE** | OPEN | — |
+| BUG-16 | **DECISION PR** | **PR OPEN** | PR #2025 |
+| BUG-17 | **DECISION PR** | **PR OPEN** | PR #2026 |
+| BUG-18 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-19 | **INVESTIGATE** | OPEN (not PR'd yet) | — |
+| BUG-20 | **BUG** | OPEN (not PR'd yet) | — |
 
 ### Shipped fix PRs (all include protocol tests)
 
@@ -46,6 +53,14 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 5. **BUG-7**: dep add type overwrite — PR #1999
 6. **BUG-8**: reparent dual parent — PR #2001
 7. **BUG-13**: reopen clears defer_until — PR #2000
+8. **BUG-16**: external blockers ignored by readiness — PR #2025
+9. **BUG-17**: conditional-blocks not evaluated — PR #2026
+
+### Not yet PR'd (discovered session 3, holding for maintainer feedback)
+
+10. **BUG-18**: count vs list default filter discrepancy
+11. **BUG-19**: waits-for bare dep doesn't block (needs investigation)
+12. **BUG-20**: children of blocked parent not in bd blocked
 
 ### Investigate further
 
@@ -361,6 +376,114 @@ correctly shows labels.
 
 **Triage: INVESTIGATE** — Need to check if this is a deliberate field selection
 difference in the Dolt backend's show query vs the SQLite backend.
+
+---
+
+### BUG-16: External blockers silently ignored by `computeBlockedIDs()` (NEW — session 3)
+
+**Severity: HIGH** — Silent loss of blocking semantics
+**Discovered:** Lane 3 candidate-only discovery, code review + test
+**File:** `internal/storage/dolt/queries.go:902-915`
+**PR:** #2025 (DECISION)
+**Test:** `TestDiscovery_ExternalBlockerIgnoredByReady`
+
+`computeBlockedIDs()` only marks issues blocked if BOTH issue AND blocker are
+in the local `activeIDs` map. External blockers (`external:project:capability`)
+are never in `activeIDs`, so issues with external blocking deps silently appear
+in `bd ready` and can be closed without close guard intervention.
+
+**Impact:** Cross-project blocking relationships are completely ignored for
+readiness and close guard. An issue that should be blocked by an external
+dependency is treated as unblocked.
+
+**DECISION:** Should external blockers gate readiness or remain advisory-only?
+
+---
+
+### BUG-17: `conditional-blocks` deps not evaluated in readiness (NEW — session 3)
+
+**Severity: MEDIUM** — Inconsistency between type system and query engine
+**Discovered:** Lane 3 candidate-only discovery, code review + test
+**File:** `internal/storage/dolt/queries.go:885-888`
+**PR:** #2026 (DECISION)
+**Test:** `TestDiscovery_ConditionalBlocksNotEvaluated`
+
+`types.AffectsReadyWork()` returns true for `conditional-blocks`, but
+`computeBlockedIDs()` SQL only queries `WHERE type IN ('blocks', 'waits-for')`.
+`conditional-blocks` is never evaluated, so issues that should be conditionally
+blocked appear as ready.
+
+**DECISION:** Should conditional-blocks gate readiness while precondition is open?
+
+---
+
+### BUG-18: `bd count` vs `bd list` disagree on default filtering (NEW — session 3)
+
+**Severity: LOW-MEDIUM** — Silent discrepancy between related commands
+**Discovered:** Lane 3 candidate-only discovery, code review + test
+**File:** `cmd/bd/count.go:106-110` vs `cmd/bd/list.go:410-412`
+**Test:** `TestDiscovery_CountVsListDefaultFilter`
+
+`bd count` (no flags) counts ALL issues including closed.
+`bd list` (no flags) excludes closed issues by default.
+Running `bd count` and `bd list -n 0 --json | jq length` gives different numbers.
+
+**Root cause:** `count.go` doesn't apply `ExcludeStatus` for closed issues,
+while `list.go:410` does: `filter.ExcludeStatus = []types.Status{types.StatusClosed}`.
+
+---
+
+### BUG-19: `waits-for` dep doesn't block readiness despite AffectsReadyWork() (NEW — session 3)
+
+**Severity: MEDIUM** — Type system says blocking, query engine disagrees
+**Discovered:** Lane 3 candidate-only discovery, test
+**File:** `internal/storage/dolt/queries.go:916-932`
+**Test:** `TestDiscovery_WaitsForBlocksReadiness`
+
+`waits-for` IS included in the `computeBlockedIDs()` SQL, but a bare `waits-for`
+dep (created via `bd dep add X Y --type waits-for` without gate metadata) does
+NOT block readiness. The issue appears in `bd ready` and is not in `bd blocked`.
+
+Likely cause: the waits-for processing path in `computeBlockedIDs()` (lines
+916-932) requires specific gate metadata to evaluate. A bare waits-for dep
+without metadata may be silently skipped.
+
+**Triage: INVESTIGATE** — need to determine if bare waits-for is expected to not
+block (gate metadata required) or if this is a bug.
+
+---
+
+### BUG-20: Children of blocked parent not in `bd blocked` (NEW — session 3)
+
+**Severity: LOW-MEDIUM** — Inconsistency between ready and blocked commands
+**Discovered:** Lane 3 candidate-only discovery, test
+**Test:** `TestDiscovery_ParentBlockedChildrenConsistency`
+
+`computeBlockedIDs()` correctly propagates blocking to children of blocked
+parents for `bd ready` (children excluded). But `bd blocked` does NOT list
+these transitively-blocked children. This creates an inconsistency: the child
+is not in ready, not in blocked — invisible to the user.
+
+**Impact:** User runs `bd ready` → child missing. Runs `bd blocked` → child
+not there either. Has no way to discover why the child isn't showing in ready.
+
+---
+
+### Code review findings (not CLI-testable)
+
+**Interactions table not cleaned on delete:** `DeleteIssue()` at `issues.go:602`
+cleans up dependencies, events, comments, labels — but NOT the `interactions`
+table. Orphaned records accumulate silently. LOW severity.
+
+**PromoteFromEphemeral() non-atomic:** At `ephemeral_routing.go:57-128`, wisp
+promotion runs multiple operations without a wrapping transaction. If the
+process crashes mid-promotion, data is in an inconsistent state (issue in both
+ephemeral and permanent tables). Event and comment copy errors are silently
+swallowed with `_, _ = s.execContext()`. HIGH severity (code review only).
+
+**Transaction isolation:** `RunInTransaction()` uses default isolation level
+(`nil` TxOptions). Concurrent updates to the same field are last-writer-wins
+with no conflict detection. MEDIUM severity.
 
 ---
 
