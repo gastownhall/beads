@@ -203,8 +203,8 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 
 	var closeProtocol string
 	if stealthMode || localOnly {
-		// Stealth mode or local-only: only export to JSONL, no git operations
-		closeProtocol = "Before saying \"done\": bd export"
+		// Stealth mode or local-only: close issues, no git operations
+		closeProtocol = "Before saying \"done\": bd close <completed-ids>"
 	} else if ephemeral {
 		closeProtocol = "Before saying \"done\": git status → git add → git commit (no push - ephemeral branch)"
 	} else if noPush {
@@ -246,14 +246,13 @@ func outputCLIContext(w io.Writer, stealthMode bool) error {
 	var gitWorkflowRule string
 
 	if stealthMode || localOnly {
-		// Stealth mode or local-only: only export to JSONL, no git operations
-		closeProtocol = `[ ] bd export                  (export beads to JSONL)`
+		// Stealth mode or local-only: close issues, no git operations
+		closeProtocol = `[ ] bd close <id1> <id2> ...   (close completed issues)`
 		syncSection = `### Sync & Collaboration
-- ` + "`bd export`" + ` - Export beads to JSONL`
+- ` + "`bd search <query>`" + ` - Search issues by keyword`
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
-bd export                   # Export to JSONL
 ` + "```"
 		// Only show local-only note if not in stealth mode (stealth is explicit user choice)
 		if localOnly && !stealthMode {
