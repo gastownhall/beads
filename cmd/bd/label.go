@@ -4,13 +4,15 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var labelCmd = &cobra.Command{
@@ -19,36 +21,43 @@ var labelCmd = &cobra.Command{
 	Short:   "Manage issue labels",
 }
 
-// Helper function to process label operations for multiple issues
+// processBatchLabelOperation wraps label add/remove for multiple issues in a
+// single transaction for atomicity.
 func processBatchLabelOperation(issueIDs []string, label string, operation string, jsonOut bool,
-	storeFunc func(context.Context, string, string, string) error) {
+	txFunc func(context.Context, storage.Transaction, string, string, string) error) {
 	ctx := rootCtx
-	results := []map[string]interface{}{}
-	for _, issueID := range issueIDs {
-		var err error
-		err = storeFunc(ctx, issueID, label, actor)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error %s label %s %s: %v\n", operation, operation, issueID, err)
-			continue
+	commitMsg := fmt.Sprintf("bd: label %s '%s' on %d issue(s)", operation, label, len(issueIDs))
+	err := transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
+		for _, issueID := range issueIDs {
+			if err := txFunc(ctx, tx, issueID, label, actor); err != nil {
+				return fmt.Errorf("%s label '%s' on %s: %w", operation, label, issueID, err)
+			}
 		}
-		if jsonOut {
+		return nil
+	})
+	if err != nil {
+		FatalErrorRespectJSON("label %s: %v", operation, err)
+	}
+	if jsonOut {
+		results := make([]map[string]interface{}, 0, len(issueIDs))
+		for _, issueID := range issueIDs {
 			results = append(results, map[string]interface{}{
 				"status":   operation,
 				"issue_id": issueID,
 				"label":    label,
 			})
-		} else {
-			verb := "Added"
-			prep := "to"
-			if operation == "removed" {
-				verb = "Removed"
-				prep = "from"
-			}
+		}
+		outputJSON(results)
+	} else {
+		verb := "Added"
+		prep := "to"
+		if operation == "removed" {
+			verb = "Removed"
+			prep = "from"
+		}
+		for _, issueID := range issueIDs {
 			fmt.Printf("%s %s label '%s' %s %s\n", ui.RenderPass("✓"), verb, label, prep, issueID)
 		}
-	}
-	if jsonOut && len(results) > 0 {
-		outputJSON(results)
 	}
 }
 func parseLabelArgs(args []string) (issueIDs []string, label string) {
@@ -88,8 +97,8 @@ var labelAddCmd = &cobra.Command{
 		}
 
 		processBatchLabelOperation(issueIDs, label, "added", jsonOutput,
-			func(ctx context.Context, issueID, lbl, act string) error {
-				return store.AddLabel(ctx, issueID, lbl, act)
+			func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
+				return tx.AddLabel(ctx, issueID, lbl, act)
 			})
 	},
 }
@@ -118,8 +127,8 @@ var labelRemoveCmd = &cobra.Command{
 		}
 		issueIDs = resolvedIDs
 		processBatchLabelOperation(issueIDs, label, "removed", jsonOutput,
-			func(ctx context.Context, issueID, lbl, act string) error {
-				return store.RemoveLabel(ctx, issueID, lbl, act)
+			func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
+				return tx.RemoveLabel(ctx, issueID, lbl, act)
 			})
 	},
 }

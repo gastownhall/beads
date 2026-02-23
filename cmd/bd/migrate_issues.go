@@ -615,7 +615,7 @@ func confirmMigration(plan migrationPlan) bool {
 }
 
 func executeMigration(ctx context.Context, s *dolt.DoltStore, migrationSet []string, to string) error {
-	return s.RunInTransaction(ctx, fmt.Sprintf("bd: migrate %d issues to %s", len(migrationSet), to), func(tx storage.Transaction) error {
+	return transact(ctx, s, fmt.Sprintf("bd: migrate %d issues to %s", len(migrationSet), to), func(tx storage.Transaction) error {
 		for _, id := range migrationSet {
 			if err := tx.UpdateIssue(ctx, id, map[string]interface{}{
 				"source_repo": to,

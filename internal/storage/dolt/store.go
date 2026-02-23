@@ -478,39 +478,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 	}
 
-	// Branch-per-polecat: if BD_BRANCH is set, checkout polecat-specific branch.
-	// Each polecat writes to its own Dolt branch to eliminate optimistic lock
-	// contention between concurrent writers. Merges happen at gt done time.
-	if bdBranch := os.Getenv("BD_BRANCH"); bdBranch != "" {
-		// Force single connection to ensure branch checkout applies to all operations.
-		// This is safe because each polecat is a separate bd process.
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-		if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", bdBranch); err != nil {
-			// Branch doesn't exist — auto-create from current branch, then checkout.
-			// This makes polecats self-healing: they create their own branches
-			// if Gas Town hasn't pre-created them (race condition, cleanup, etc.).
-			if _, createErr := db.ExecContext(ctx, "CALL DOLT_BRANCH(?)", bdBranch); createErr != nil {
-				_ = store.Close()
-				return nil, fmt.Errorf("failed to create Dolt branch %s: %w (checkout error: %v)", bdBranch, createErr, err)
-			}
-			if _, coErr := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", bdBranch); coErr != nil {
-				_ = store.Close()
-				return nil, fmt.Errorf("failed to checkout Dolt branch %s after creation: %w", bdBranch, coErr)
-			}
-		}
-		store.branch = bdBranch
-
-		// Re-run schema init on the working branch. Untracked tables
-		// (wisps, wisp_*) exist only in the working set and are lost on
-		// branch checkout. Re-init is idempotent and recreates them.
-		if !cfg.ReadOnly {
-			if err := store.initSchema(ctx); err != nil {
-				_ = store.Close()
-				return nil, fmt.Errorf("failed to initialize schema on branch %s: %w", bdBranch, err)
-			}
-		}
-	}
+	// All writers operate on main — transaction isolation via RunInTransaction
+	// replaces the former branch-per-polecat approach (BD_BRANCH).
+	store.branch = "main"
 
 	return store, nil
 }

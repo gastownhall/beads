@@ -161,64 +161,55 @@ Force: Delete and orphan dependents
 			fmt.Printf("To proceed, run: %s\n\n", ui.RenderWarn("bd delete "+issueID+" --force"))
 			return
 		}
-		// Actually delete
-		// 1. Update text references in connected issues (all text fields)
+		// Actually delete — all writes in a single transaction
 		updatedIssueCount := 0
-		for id, connIssue := range connectedIssues {
-			updates := make(map[string]interface{})
-			// Replace in description
-			if re.MatchString(connIssue.Description) {
-				newDesc := re.ReplaceAllString(connIssue.Description, replacementText)
-				updates["description"] = newDesc
-			}
-			// Replace in notes
-			if connIssue.Notes != "" && re.MatchString(connIssue.Notes) {
-				newNotes := re.ReplaceAllString(connIssue.Notes, replacementText)
-				updates["notes"] = newNotes
-			}
-			// Replace in design
-			if connIssue.Design != "" && re.MatchString(connIssue.Design) {
-				newDesign := re.ReplaceAllString(connIssue.Design, replacementText)
-				updates["design"] = newDesign
-			}
-			// Replace in acceptance_criteria
-			if connIssue.AcceptanceCriteria != "" && re.MatchString(connIssue.AcceptanceCriteria) {
-				newAC := re.ReplaceAllString(connIssue.AcceptanceCriteria, replacementText)
-				updates["acceptance_criteria"] = newAC
-			}
-			if len(updates) > 0 {
-				if err := store.UpdateIssue(ctx, id, updates, actor); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: Failed to update references in %s: %v\n", id, err)
-				} else {
+		totalDepsRemoved := 0
+		deleteErr := transact(ctx, store, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
+			// 1. Update text references in connected issues
+			for id, connIssue := range connectedIssues {
+				updates := make(map[string]interface{})
+				if re.MatchString(connIssue.Description) {
+					updates["description"] = re.ReplaceAllString(connIssue.Description, replacementText)
+				}
+				if connIssue.Notes != "" && re.MatchString(connIssue.Notes) {
+					updates["notes"] = re.ReplaceAllString(connIssue.Notes, replacementText)
+				}
+				if connIssue.Design != "" && re.MatchString(connIssue.Design) {
+					updates["design"] = re.ReplaceAllString(connIssue.Design, replacementText)
+				}
+				if connIssue.AcceptanceCriteria != "" && re.MatchString(connIssue.AcceptanceCriteria) {
+					updates["acceptance_criteria"] = re.ReplaceAllString(connIssue.AcceptanceCriteria, replacementText)
+				}
+				if len(updates) > 0 {
+					if err := tx.UpdateIssue(ctx, id, updates, actor); err != nil {
+						return fmt.Errorf("update references in %s: %w", id, err)
+					}
 					updatedIssueCount++
 				}
 			}
-		}
-		// 2. Remove all dependency links (outgoing)
-		outgoingRemoved := 0
-		for _, dep := range depRecords {
-			if err := store.RemoveDependency(ctx, dep.IssueID, dep.DependsOnID, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to remove dependency %s → %s: %v\n",
-					dep.IssueID, dep.DependsOnID, err)
-			} else {
-				outgoingRemoved++
+			// 2. Remove outgoing dependency links
+			for _, dep := range depRecords {
+				if err := tx.RemoveDependency(ctx, dep.IssueID, dep.DependsOnID, actor); err != nil {
+					return fmt.Errorf("remove dependency %s → %s: %w", dep.IssueID, dep.DependsOnID, err)
+				}
+				totalDepsRemoved++
 			}
-		}
-		// 3. Remove inbound dependency links (issues that depend on this one)
-		inboundRemoved := 0
-		for _, dep := range dependents {
-			if err := store.RemoveDependency(ctx, dep.ID, issueID, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to remove dependency %s → %s: %v\n",
-					dep.ID, issueID, err)
-			} else {
-				inboundRemoved++
+			// 3. Remove inbound dependency links
+			for _, dep := range dependents {
+				if err := tx.RemoveDependency(ctx, dep.ID, issueID, actor); err != nil {
+					return fmt.Errorf("remove dependency %s → %s: %w", dep.ID, issueID, err)
+				}
+				totalDepsRemoved++
 			}
+			// 4. Delete the issue
+			if err := tx.DeleteIssue(ctx, issueID); err != nil {
+				return fmt.Errorf("delete %s: %w", issueID, err)
+			}
+			return nil
+		})
+		if deleteErr != nil {
+			FatalError("deleting issue: %v", deleteErr)
 		}
-		// 4. Delete the issue from the database
-		if err := deleteIssue(ctx, issueID); err != nil {
-			FatalError("deleting issue: %v", err)
-		}
-		totalDepsRemoved := outgoingRemoved + inboundRemoved
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"deleted":              issueID,

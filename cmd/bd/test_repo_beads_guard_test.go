@@ -88,17 +88,7 @@ func testMainInner(m *testing.M) int {
 		}
 	}()
 
-	// Clear BD_BRANCH to prevent polecat branch checkout in tests.
-	// When BD_BRANCH is set, dolt.New() checks out a per-polecat branch.
-	// On that branch, dolt_ignore'd tables (wisps, wisp_*) don't exist because
-	// they were created in the working set of main and never committed.
-	origBdBranch := os.Getenv("BD_BRANCH")
-	os.Unsetenv("BD_BRANCH")
-	defer func() {
-		if origBdBranch != "" {
-			os.Setenv("BD_BRANCH", origBdBranch)
-		}
-	}()
+	// BD_BRANCH is no longer used (all writers operate on main with transactions).
 
 	// Start shared test Dolt server if the hook is registered (CGO builds).
 	// This must happen after HOME is changed so dolt config goes to the temp dir.

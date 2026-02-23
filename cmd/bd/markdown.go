@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
@@ -325,82 +326,73 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 
 	ctx := rootCtx
 	createdIssues := []*types.Issue{}
-	failedIssues := []string{}
 
-	// Create each issue
-	for _, template := range templates {
-		issue := &types.Issue{
-			Title:              template.Title,
-			Description:        template.Description,
-			Design:             template.Design,
-			AcceptanceCriteria: template.AcceptanceCriteria,
-			Status:             types.StatusOpen,
-			Priority:           template.Priority,
-			IssueType:          template.IssueType,
-			Assignee:           template.Assignee,
-		}
-
-		if err := store.CreateIssue(ctx, issue, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating issue '%s': %v\n", template.Title, err)
-			failedIssues = append(failedIssues, template.Title)
-			continue
-		}
-
-		// Add labels
-		for _, label := range template.Labels {
-			if err := store.AddLabel(ctx, issue.ID, label, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to add label %s to %s: %v\n", label, issue.ID, err)
-			}
-		}
-
-		// Add dependencies
-		for _, depSpec := range template.Dependencies {
-			depSpec = strings.TrimSpace(depSpec)
-			if depSpec == "" {
-				continue
+	// Create all issues, labels, and dependencies in a single transaction
+	commitMsg := fmt.Sprintf("bd: create %d issue(s) from %s", len(templates), filepath)
+	txErr := transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
+		for _, template := range templates {
+			issue := &types.Issue{
+				Title:              template.Title,
+				Description:        template.Description,
+				Design:             template.Design,
+				AcceptanceCriteria: template.AcceptanceCriteria,
+				Status:             types.StatusOpen,
+				Priority:           template.Priority,
+				IssueType:          template.IssueType,
+				Assignee:           template.Assignee,
 			}
 
-			var depType types.DependencyType
-			var dependsOnID string
+			if err := tx.CreateIssue(ctx, issue, actor); err != nil {
+				return fmt.Errorf("creating issue '%s': %w", template.Title, err)
+			}
 
-			// Parse format: "type:id" or just "id" (defaults to "blocks")
-			if strings.Contains(depSpec, ":") {
-				parts := strings.SplitN(depSpec, ":", 2)
-				if len(parts) != 2 {
-					fmt.Fprintf(os.Stderr, "Warning: invalid dependency format '%s' for %s\n", depSpec, issue.ID)
+			for _, label := range template.Labels {
+				if err := tx.AddLabel(ctx, issue.ID, label, actor); err != nil {
+					return fmt.Errorf("adding label %s to %s: %w", label, issue.ID, err)
+				}
+			}
+
+			for _, depSpec := range template.Dependencies {
+				depSpec = strings.TrimSpace(depSpec)
+				if depSpec == "" {
 					continue
 				}
-				depType = types.DependencyType(strings.TrimSpace(parts[0]))
-				dependsOnID = strings.TrimSpace(parts[1])
-			} else {
-				depType = types.DepBlocks
-				dependsOnID = depSpec
+
+				var depType types.DependencyType
+				var dependsOnID string
+
+				if strings.Contains(depSpec, ":") {
+					parts := strings.SplitN(depSpec, ":", 2)
+					if len(parts) != 2 {
+						return fmt.Errorf("invalid dependency format '%s' for %s", depSpec, issue.ID)
+					}
+					depType = types.DependencyType(strings.TrimSpace(parts[0]))
+					dependsOnID = strings.TrimSpace(parts[1])
+				} else {
+					depType = types.DepBlocks
+					dependsOnID = depSpec
+				}
+
+				if !depType.IsValid() {
+					return fmt.Errorf("invalid dependency type '%s' for %s", depType, issue.ID)
+				}
+
+				dep := &types.Dependency{
+					IssueID:     issue.ID,
+					DependsOnID: dependsOnID,
+					Type:        depType,
+				}
+				if err := tx.AddDependency(ctx, dep, actor); err != nil {
+					return fmt.Errorf("adding dependency %s -> %s: %w", issue.ID, dependsOnID, err)
+				}
 			}
 
-			if !depType.IsValid() {
-				fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' for %s\n", depType, issue.ID)
-				continue
-			}
-
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: dependsOnID,
-				Type:        depType,
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to add dependency %s -> %s: %v\n", issue.ID, dependsOnID, err)
-			}
+			createdIssues = append(createdIssues, issue)
 		}
-
-		createdIssues = append(createdIssues, issue)
-	}
-
-	// Report failures if any
-	if len(failedIssues) > 0 {
-		fmt.Fprintf(os.Stderr, "\n%s Failed to create %d issues:\n", ui.RenderFail("✗"), len(failedIssues))
-		for _, title := range failedIssues {
-			fmt.Fprintf(os.Stderr, "  - %s\n", title)
-		}
+		return nil
+	})
+	if txErr != nil {
+		FatalError("creating issues from markdown: %v", txErr)
 	}
 
 	if jsonOutput {
