@@ -15,6 +15,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"os"
@@ -256,7 +257,13 @@ func newWorkspace(t *testing.T, bdPath string) *workspace {
 	w.git("add", ".")
 	w.git("commit", "-m", "initial")
 
-	w.run("init", "--prefix", "test", "--quiet")
+	// Use a unique prefix per workspace so each gets its own Dolt database
+	// (beads_t<hash>). The init command creates database "beads_<prefix>",
+	// and subsequent commands read the database name from metadata.json.
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(dir))
+	prefix := fmt.Sprintf("t%d", h.Sum64()%100000)
+	w.run("init", "--prefix", prefix, "--quiet")
 
 	return w
 }
@@ -540,43 +547,39 @@ func normalizeIssue(m map[string]any) {
 		})
 	}
 
-	// Normalize dependencies: strip volatile fields and empty metadata,
-	// normalize field names (show --json uses "dependency_type", export used "type"),
-	// sort by (depends_on_id, type)
-	if deps, ok := m["dependencies"].([]any); ok {
-		for _, d := range deps {
-			if dm, ok := d.(map[string]any); ok {
-				delete(dm, "created_at")
-				delete(dm, "thread_id")
-				// Normalize dependency_type → type
-				if dt, ok := dm["dependency_type"]; ok {
-					if _, hasType := dm["type"]; !hasType {
-						dm["type"] = dt
-					}
-					delete(dm, "dependency_type")
-				}
-				// Dolt stores metadata="{}" where SQLite omits it entirely
-				if md, ok := dm["metadata"]; ok {
-					if mdStr, _ := md.(string); mdStr == "" || mdStr == "{}" {
-						delete(dm, "metadata")
-					}
-				}
-				// Remove dep-internal fields not in export schema
-				delete(dm, "created_by")
+	// normalizeDepSubobject strips volatile/internal fields from a dependency
+	// or dependent sub-object as returned by bd show --json.
+	normalizeDepSubobject := func(dm map[string]any) {
+		delete(dm, "created_at")
+		delete(dm, "updated_at")
+		delete(dm, "closed_at")
+		delete(dm, "close_reason")
+		delete(dm, "thread_id")
+		delete(dm, "created_by")
+		// Normalize dependency_type → type
+		if dt, ok := dm["dependency_type"]; ok {
+			if _, hasType := dm["type"]; !hasType {
+				dm["type"] = dt
+			}
+			delete(dm, "dependency_type")
+		}
+		// Dolt stores metadata="{}" where SQLite omits it entirely
+		if md, ok := dm["metadata"]; ok {
+			if mdStr, _ := md.(string); mdStr == "" || mdStr == "{}" {
+				delete(dm, "metadata")
 			}
 		}
-		sort.Slice(deps, func(i, j int) bool {
-			di, _ := deps[i].(map[string]any)
-			dj, _ := deps[j].(map[string]any)
-			a, _ := di["depends_on_id"].(string)
-			b, _ := dj["depends_on_id"].(string)
-			if a != b {
-				return a < b
+	}
+
+	// Normalize dependencies and dependents arrays
+	for _, field := range []string{"dependencies", "dependents"} {
+		if deps, ok := m[field].([]any); ok {
+			for _, d := range deps {
+				if dm, ok := d.(map[string]any); ok {
+					normalizeDepSubobject(dm)
+				}
 			}
-			ta, _ := di["type"].(string)
-			tb, _ := dj["type"].(string)
-			return ta < tb
-		})
+		}
 	}
 
 	// Remove nil, empty strings, empty collections to handle omitempty differences.
@@ -625,12 +628,19 @@ func canonicalizeIDs(m map[string]any, idMap map[string]string) {
 	}
 
 	replaceID("id", m)
+	replaceID("parent", m)
 
-	if deps, ok := m["dependencies"].([]any); ok {
-		for _, d := range deps {
-			if dm, ok := d.(map[string]any); ok {
-				replaceID("issue_id", dm)
-				replaceID("depends_on_id", dm)
+	// Canonicalize IDs in dependencies and dependents sub-objects.
+	// bd show --json embeds full issue-like objects with "id" field,
+	// while the old export format used "issue_id" and "depends_on_id".
+	for _, field := range []string{"dependencies", "dependents"} {
+		if deps, ok := m[field].([]any); ok {
+			for _, d := range deps {
+				if dm, ok := d.(map[string]any); ok {
+					replaceID("id", dm)
+					replaceID("issue_id", dm)
+					replaceID("depends_on_id", dm)
+				}
 			}
 		}
 	}
@@ -648,19 +658,29 @@ func canonicalizeIDs(m map[string]any, idMap map[string]string) {
 // Must be called after canonicalizeIDs, since real IDs are random and
 // pre-canonicalization sort order is non-deterministic across runs.
 func sortSubobjects(m map[string]any) {
-	if deps, ok := m["dependencies"].([]any); ok && len(deps) > 1 {
-		sort.Slice(deps, func(i, j int) bool {
-			di, _ := deps[i].(map[string]any)
-			dj, _ := deps[j].(map[string]any)
-			a, _ := di["depends_on_id"].(string)
-			b, _ := dj["depends_on_id"].(string)
-			if a != b {
-				return a < b
-			}
-			ta, _ := di["type"].(string)
-			tb, _ := dj["type"].(string)
-			return ta < tb
-		})
+	// Sort both dependencies and dependents by (id, type)
+	for _, field := range []string{"dependencies", "dependents"} {
+		if deps, ok := m[field].([]any); ok && len(deps) > 1 {
+			sort.Slice(deps, func(i, j int) bool {
+				di, _ := deps[i].(map[string]any)
+				dj, _ := deps[j].(map[string]any)
+				// Try canonical id first, then depends_on_id
+				a, _ := di["id"].(string)
+				b, _ := dj["id"].(string)
+				if a == "" {
+					a, _ = di["depends_on_id"].(string)
+				}
+				if b == "" {
+					b, _ = dj["depends_on_id"].(string)
+				}
+				if a != b {
+					return a < b
+				}
+				ta, _ := di["type"].(string)
+				tb, _ := dj["type"].(string)
+				return ta < tb
+			})
+		}
 	}
 	if comments, ok := m["comments"].([]any); ok && len(comments) > 1 {
 		sort.Slice(comments, func(i, j int) bool {
