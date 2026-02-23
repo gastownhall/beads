@@ -34,6 +34,18 @@ func CheckBeadsRole(path string) DoctorCheck {
 		return validateRole(role)
 	}
 
+	// Check if we're even in a git repository. If not, skip the check rather
+	// than warn about missing config that may be correctly set in a worktree
+	// (e.g., rig roots use .repo.git instead of .git).
+	if !isGitRepo(path) {
+		return DoctorCheck{
+			Name:     "Role Configuration",
+			Status:   StatusOK,
+			Message:  "N/A (not a git repository)",
+			Category: CategoryData,
+		}
+	}
+
 	// Neither git config nor database has the role configured
 	return DoctorCheck{
 		Name:     "Role Configuration",
@@ -43,6 +55,15 @@ func CheckBeadsRole(path string) DoctorCheck {
 		Fix:      "bd config set beads.role maintainer",
 		Category: CategoryData,
 	}
+}
+
+// isGitRepo checks whether the given path is inside a git repository.
+func isGitRepo(path string) bool {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	if path != "" {
+		cmd.Dir = path
+	}
+	return cmd.Run() == nil
 }
 
 // validateRole checks that the role value is valid and returns the appropriate check.
