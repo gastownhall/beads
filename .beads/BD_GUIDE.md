@@ -132,6 +132,60 @@ history/
 - ✅ Preserves planning history for archeological research
 - ✅ Reduces noise when browsing the project
 
+### Counter Mode (Sequential IDs)
+
+By default, beads assigns hash-based IDs (e.g., `bd-a3f2`). For projects that prefer
+human-readable sequential IDs (e.g., `bd-1`, `bd-2`), enable counter mode:
+
+```bash
+bd config set issue_id_mode counter
+```
+
+**When to use counter mode:**
+
+- Project-management workflows where stakeholders reference issue numbers in conversations
+- Multi-agent coordination where readable IDs reduce confusion (e.g., "fix bd-42")
+- Teams migrating from Jira/Linear/GitHub Issues that expect sequential numbering
+
+**When to keep hash IDs (default):**
+
+- Multi-agent or multi-branch workflows where issues may be created concurrently on different branches
+- Hash IDs are collision-free by construction; counter IDs can diverge if parallel branches both create issues
+
+**How to enable:**
+
+```bash
+# Enable for this project
+bd config set issue_id_mode counter
+
+# New issues now get sequential IDs
+bd create "Fix login bug" -p 1    # → bd-1
+bd create "Add dark mode" -p 2    # → bd-2
+```
+
+**Migration considerations:**
+
+If the repo already has hash-based IDs, those existing IDs are unchanged. New issues created
+after enabling counter mode will start from 1 (or wherever the counter currently sits). To
+avoid collisions with any existing sequential IDs (e.g., from a previous counter-mode period),
+check the highest integer ID in use before switching.
+
+**Explicit --id overrides counter mode:**
+
+Passing `--id` on `bd create` always uses the provided ID and does not increment the counter:
+
+```bash
+bd create "Backport fix" -p 1 --id bd-special
+# → bd-special (counter unchanged)
+```
+
+**Per-prefix isolation:**
+
+Each prefix has its own counter. If this project routes to multiple prefixes, each prefix
+counts independently (e.g., `bd-1`, `bd-2` and `plug-1`, `plug-2` are separate sequences).
+
+See [docs/CONFIG.md](../docs/CONFIG.md) for full `issue_id_mode` reference.
+
 ### Important Rules
 
 - ✅ Use bd for ALL task tracking

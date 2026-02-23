@@ -291,3 +291,50 @@ func TestMigrateWispsTable(t *testing.T) {
 		t.Fatalf("expected title 'Test Wisp', got %q", title)
 	}
 }
+
+func TestMigrateIssueCounterTable(t *testing.T) {
+	db := openTestDolt(t)
+
+	// Verify issue_counter table does not exist yet
+	exists, err := tableExists(db, "issue_counter")
+	if err != nil {
+		t.Fatalf("failed to check table: %v", err)
+	}
+	if exists {
+		t.Fatal("issue_counter should not exist yet")
+	}
+
+	// Run migration
+	if err := MigrateIssueCounterTable(db); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	// Verify issue_counter table now exists
+	exists, err = tableExists(db, "issue_counter")
+	if err != nil {
+		t.Fatalf("failed to check table after migration: %v", err)
+	}
+	if !exists {
+		t.Fatal("issue_counter should exist after migration")
+	}
+
+	// Run migration again (idempotent)
+	if err := MigrateIssueCounterTable(db); err != nil {
+		t.Fatalf("re-running migration should be idempotent: %v", err)
+	}
+
+	// Verify we can INSERT and query from issue_counter
+	_, err = db.Exec("INSERT INTO issue_counter (prefix, last_id) VALUES ('bd', 5)")
+	if err != nil {
+		t.Fatalf("failed to insert into issue_counter: %v", err)
+	}
+
+	var lastID int
+	err = db.QueryRow("SELECT last_id FROM issue_counter WHERE prefix = 'bd'").Scan(&lastID)
+	if err != nil {
+		t.Fatalf("failed to query issue_counter: %v", err)
+	}
+	if lastID != 5 {
+		t.Errorf("expected last_id 5, got %d", lastID)
+	}
+}

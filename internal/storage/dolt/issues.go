@@ -1084,9 +1084,115 @@ func recordEvent(ctx context.Context, tx *sql.Tx, issueID string, eventType type
 	return err
 }
 
-// generateIssueID generates a unique hash-based ID for an issue
-// Uses adaptive length based on database size and tries multiple nonces on collision
+// seedCounterFromExistingIssuesTx scans existing issues to find the highest numeric suffix
+// for the given prefix, then seeds the issue_counter table if no row exists yet.
+// This is called when counter mode is first enabled on a repo that already has issues,
+// to prevent counter collisions with manually-created sequential IDs (GH#2002).
+// It is idempotent: if a counter row already exists for this prefix, it does nothing.
+func seedCounterFromExistingIssuesTx(ctx context.Context, tx *sql.Tx, prefix string) error {
+	// Check whether a counter row already exists for this prefix.
+	// If it does, we must not overwrite it (the counter may already be in use).
+	var existing int
+	err := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&existing)
+	if err == nil {
+		// Row exists - counter is already initialized, nothing to do.
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check issue_counter for prefix %q: %w", prefix, err)
+	}
+
+	// No counter row yet. Scan existing issues to find the highest numeric suffix.
+	likePattern := prefix + "-%"
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM issues WHERE id LIKE ?", likePattern)
+	if err != nil {
+		return fmt.Errorf("failed to query existing issues for prefix %q: %w", prefix, err)
+	}
+	defer rows.Close()
+
+	maxNum := 0
+	prefixDash := prefix + "-"
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("failed to scan issue id: %w", err)
+		}
+		// Strip the prefix and attempt to parse the remainder as an integer.
+		suffix := strings.TrimPrefix(id, prefixDash)
+		if suffix == id {
+			// id did not start with prefix- (should not happen given LIKE, but be safe)
+			continue
+		}
+		var num int
+		if _, parseErr := fmt.Sscanf(suffix, "%d", &num); parseErr == nil && fmt.Sprintf("%d", num) == suffix {
+			if num > maxNum {
+				maxNum = num
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to iterate existing issues for prefix %q: %w", prefix, err)
+	}
+
+	// Only insert a seed row if we found at least one numeric ID.
+	// If no numeric IDs exist, the counter will naturally start at 1 on first use.
+	if maxNum > 0 {
+		_, err = tx.ExecContext(ctx,
+			"INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)",
+			prefix, maxNum)
+		if err != nil {
+			return fmt.Errorf("failed to seed issue_counter for prefix %q at %d: %w", prefix, maxNum, err)
+		}
+	}
+
+	return nil
+}
+
+// generateIssueID generates a unique ID for an issue.
+// If issue_id_mode=counter is configured, generates sequential IDs (bd-1, bd-2, ...).
+// Otherwise uses the default hash-based ID generation.
 func generateIssueID(ctx context.Context, tx *sql.Tx, prefix string, issue *types.Issue, actor string) (string, error) {
+	// Check issue_id_mode config (within the current transaction)
+	var idMode string
+	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_id_mode").Scan(&idMode)
+	if err != nil && err != sql.ErrNoRows {
+		return "", fmt.Errorf("failed to read issue_id_mode config: %w", err)
+	}
+
+	if idMode == "counter" {
+		// Sequential counter mode: increment atomically within this transaction.
+		// If no counter row exists yet, seed from existing issues first to avoid
+		// collisions with manually-created sequential IDs (GH#2002).
+		var lastID int
+		err2 := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
+		if err2 == sql.ErrNoRows {
+			// No counter row yet - seed from existing issues before proceeding.
+			if seedErr := seedCounterFromExistingIssuesTx(ctx, tx, prefix); seedErr != nil {
+				return "", fmt.Errorf("failed to seed issue counter for prefix %q: %w", prefix, seedErr)
+			}
+			// Re-read the (possibly just-seeded) counter value.
+			err2 = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
+			if err2 != nil && err2 != sql.ErrNoRows {
+				return "", fmt.Errorf("failed to read issue counter after seeding for prefix %q: %w", prefix, err2)
+			}
+			if err2 == sql.ErrNoRows {
+				lastID = 0
+			}
+		} else if err2 != nil {
+			return "", fmt.Errorf("failed to read issue counter for prefix %q: %w", prefix, err2)
+		}
+		nextID := lastID + 1
+		_, err3 := tx.ExecContext(ctx, `
+			INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE last_id = ?
+		`, prefix, nextID, nextID)
+		if err3 != nil {
+			return "", fmt.Errorf("failed to update issue counter for prefix %q: %w", prefix, err3)
+		}
+		return fmt.Sprintf("%s-%d", prefix, nextID), nil
+	}
+
+	// Default hash-based ID generation
 	// Get adaptive base length based on current database size
 	baseLength, err := GetAdaptiveIDLengthTx(ctx, tx, prefix)
 	if err != nil {

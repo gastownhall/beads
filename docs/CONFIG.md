@@ -311,6 +311,7 @@ Configuration keys use dot-notation namespaces to organize settings:
 
 - `compact_*` - Compaction settings (see EXTENDING.md)
 - `issue_prefix` - Issue ID prefix (managed by `bd init`)
+- `issue_id_mode` - ID generation mode: `hash` (default) or `counter` (sequential integers)
 - `max_collision_prob` - Maximum collision probability for adaptive hash IDs (default: 0.25)
 - `min_hash_length` - Minimum hash ID length (default: 4)
 - `max_hash_length` - Maximum hash ID length (default: 8)
@@ -332,6 +333,83 @@ Use these namespaces for external integrations:
 - `linear.*` - Linear integration settings
 - `github.*` - GitHub integration settings
 - `custom.*` - Custom integration settings
+
+### Example: Sequential Counter IDs (issue_id_mode=counter)
+
+By default, beads generates hash-based IDs (e.g., `bd-a3f2`, `bd-7f3a8`). For projects that prefer
+short sequential IDs (e.g., `bd-1`, `bd-2`, `bd-3`), enable counter mode:
+
+```bash
+bd config set issue_id_mode counter
+```
+
+**Valid values:**
+
+| Value | Behavior |
+|-------|----------|
+| `hash` | (default) Hash-based IDs, adaptive length, collision-safe |
+| `counter` | Sequential integers per prefix: `bd-1`, `bd-2`, `bd-3`, ... |
+
+**Counter mode behavior:**
+- Each prefix (`bd`, `plug`, etc.) has its own independent counter
+- Counter is stored atomically in the database; concurrent creates within a single Dolt session are safe
+- Explicit `--id` flag always overrides counter mode (the counter is not incremented)
+
+**Enabling counter mode:**
+
+```bash
+bd config set issue_id_mode counter
+
+# Now new issues get sequential IDs
+bd create "First issue" -p 1
+# → bd-1
+
+bd create "Second issue" -p 2
+# → bd-2
+```
+
+**Migration warning:** If you switch an existing repository to counter mode, seed the counter
+to avoid collisions with existing IDs. Find your highest current integer ID and set the counter
+accordingly:
+
+```bash
+# Check your highest existing sequential ID (if any)
+bd list --json | jq -r '.[].id' | grep -E '^bd-[0-9]+$' | sort -t- -k2 -n | tail -1
+
+# Seed the counter (e.g., if highest existing ID is bd-42)
+bd config set issue_id_mode counter
+# The counter auto-initializes at 0; new issues start at 1
+# If you already have bd-1 through bd-42, manually set counter:
+# (no direct CLI for seeding — use bd dolt sql or create/delete N issues)
+```
+
+For fresh repositories switching to counter mode before any issues exist, no seeding is needed.
+
+**Per-prefix counter isolation:**
+
+Each issue prefix maintains its own counter independently. In multi-repo or routed setups,
+`bd-*` issues and `plug-*` issues each start at 1:
+
+```bash
+# Prefix "bd" and prefix "plug" have independent counters
+bd create "Core task" -p 1          # → bd-1
+bd create "Plugin task" -p 1        # → plug-1 (if prefix is "plug")
+```
+
+**Tradeoff — hash vs. counter:**
+
+| | Hash IDs | Counter IDs |
+|---|---|---|
+| Human readability | Lower (e.g., `bd-a3f2`) | Higher (e.g., `bd-1`) |
+| Distributed/concurrent safety | Excellent (collision-free across branches) | Needs care (counters can diverge on parallel branches) |
+| Predictability | Unpredictable | Sequential |
+| Best for | Multi-agent, multi-branch workflows | Single-writer or project-management UIs |
+
+Counter IDs are well-suited for linear project-management workflows and human-facing issue tracking.
+Hash IDs are safer when multiple agents or branches create issues concurrently, since each hash is
+independently unique without coordination.
+
+See [ADAPTIVE_IDS.md](ADAPTIVE_IDS.md) for full documentation on hash-based ID generation.
 
 ### Example: Adaptive Hash ID Configuration
 

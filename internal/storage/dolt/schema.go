@@ -3,7 +3,7 @@ package dolt
 // currentSchemaVersion is bumped whenever the schema or migrations change.
 // initSchemaOnDB checks this against the stored version and skips re-initialization
 // when they match, avoiding ~20 DDL statements per bd invocation.
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // schema defines the MySQL-compatible database schema for Dolt.
 const schema = `
@@ -200,6 +200,12 @@ CREATE TABLE IF NOT EXISTS routes (
     path VARCHAR(512) NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Issue counter table (for issue_id_mode=counter sequential IDs, GH#2002)
+CREATE TABLE IF NOT EXISTS issue_counter (
+    prefix VARCHAR(255) PRIMARY KEY,
+    last_id INT NOT NULL DEFAULT 0
 );
 
 -- Interactions table (agent audit log)

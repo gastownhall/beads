@@ -1218,3 +1218,55 @@ func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string
 
 	return fmt.Sprintf("%s.%d", parentID, nextChild), nil
 }
+
+// GetNextIssueCounter atomically increments and returns the next sequential
+// issue number for the given prefix. This is used when issue_id_mode=counter
+// is configured to generate IDs like bd-1, bd-2, plug-1, plug-2, etc.
+// The counter is stored in the issue_counter table, one row per prefix.
+// If no counter row exists yet, the counter is seeded from existing issues
+// to avoid collisions with manually-created sequential IDs (GH#2002).
+func (s *DoltStore) GetNextIssueCounter(ctx context.Context, prefix string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	// Get or create counter for this prefix.
+	// If no counter row exists yet, seed from existing issues first to avoid
+	// collisions with manually-created sequential IDs (GH#2002).
+	var lastID int
+	err = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
+	if err == sql.ErrNoRows {
+		// No counter row yet - seed from existing issues before proceeding.
+		if seedErr := seedCounterFromExistingIssuesTx(ctx, tx, prefix); seedErr != nil {
+			return 0, fmt.Errorf("failed to seed issue counter for prefix %q: %w", prefix, seedErr)
+		}
+		// Re-read the (possibly just-seeded) counter value.
+		err = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
+		if err != nil && err != sql.ErrNoRows {
+			return 0, fmt.Errorf("failed to read issue counter after seeding for prefix %q: %w", prefix, err)
+		}
+		if err == sql.ErrNoRows {
+			lastID = 0
+		}
+	} else if err != nil {
+		return 0, fmt.Errorf("failed to read issue counter for prefix %q: %w", prefix, err)
+	}
+
+	nextID := lastID + 1
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)
+		ON DUPLICATE KEY UPDATE last_id = ?
+	`, prefix, nextID, nextID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to update issue counter for prefix %q: %w", prefix, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit issue counter for prefix %q: %w", prefix, err)
+	}
+
+	return nextID, nil
+}

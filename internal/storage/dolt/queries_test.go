@@ -1413,3 +1413,337 @@ func TestGetStaleIssues_ExcludesEphemeral(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// GetNextIssueCounter tests
+// =============================================================================
+
+func TestGetNextIssueCounter_Sequential(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// First call: should return 1
+	n, err := store.GetNextIssueCounter(ctx, "plug")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1, got %d", n)
+	}
+
+	// Second call: should return 2
+	n, err = store.GetNextIssueCounter(ctx, "plug")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2, got %d", n)
+	}
+
+	// Third call: should return 3
+	n, err = store.GetNextIssueCounter(ctx, "plug")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("expected 3, got %d", n)
+	}
+}
+
+func TestGetNextIssueCounter_MultiplePrefixes(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Each prefix has its own independent counter
+	n1, err := store.GetNextIssueCounter(ctx, "bd")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	n2, err := store.GetNextIssueCounter(ctx, "plug")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	n3, err := store.GetNextIssueCounter(ctx, "bd")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if n1 != 1 {
+		t.Errorf("bd first counter: expected 1, got %d", n1)
+	}
+	if n2 != 1 {
+		t.Errorf("plug first counter: expected 1, got %d", n2)
+	}
+	if n3 != 2 {
+		t.Errorf("bd second counter: expected 2, got %d", n3)
+	}
+}
+
+func TestCreateIssue_CounterMode(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Enable counter mode
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to set issue_id_mode: %v", err)
+	}
+
+	// Create first issue - should get test-1
+	issue1 := &types.Issue{
+		Title:     "First issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue1, "tester"); err != nil {
+		t.Fatalf("failed to create issue1: %v", err)
+	}
+	if issue1.ID != "test-1" {
+		t.Errorf("expected test-1, got %q", issue1.ID)
+	}
+
+	// Create second issue - should get test-2
+	issue2 := &types.Issue{
+		Title:     "Second issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue2, "tester"); err != nil {
+		t.Fatalf("failed to create issue2: %v", err)
+	}
+	if issue2.ID != "test-2" {
+		t.Errorf("expected test-2, got %q", issue2.ID)
+	}
+}
+
+func TestCreateIssue_ExplicitIDOverridesCounter(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Enable counter mode
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to set issue_id_mode: %v", err)
+	}
+
+	// Create issue with explicit ID - counter should NOT be used
+	issue := &types.Issue{
+		ID:        "test-explicit",
+		Title:     "Explicit ID issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if issue.ID != "test-explicit" {
+		t.Errorf("expected test-explicit, got %q", issue.ID)
+	}
+}
+
+func TestCreateIssue_HashModeDefault(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// No issue_id_mode set (default = hash mode)
+	issue := &types.Issue{
+		Title:     "Hash ID issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	// Hash IDs have format "prefix-<alphanum>", not "prefix-<int>"
+	if issue.ID == "" {
+		t.Error("expected non-empty ID in hash mode")
+	}
+	// Hash mode IDs should NOT be purely numeric after the prefix
+	// (they use base36: 0-9a-z, so length > 1 and not just digits)
+	if issue.ID == "test-1" || issue.ID == "test-2" {
+		t.Errorf("hash mode should not generate sequential IDs, got %q", issue.ID)
+	}
+}
+
+// =============================================================================
+// Counter mode seeding tests (GH#2002)
+// =============================================================================
+
+// TestCounterMode_SeedsFromExistingIssues verifies that enabling counter mode
+// on a repo with pre-existing sequential IDs seeds the counter from the max
+// existing ID rather than starting at 1 (which would cause collisions).
+func TestCounterMode_SeedsFromExistingIssues(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Create issues with explicit sequential IDs (simulating manual creation
+	// before counter mode was enabled).
+	for _, id := range []string{"test-5", "test-10", "test-3"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "Pre-existing issue " + id,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", id, err)
+		}
+	}
+
+	// Now enable counter mode (simulating the user running bd config set issue_id_mode counter).
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+
+	// The next auto-generated issue should be test-11 (max existing was 10).
+	next := &types.Issue{
+		Title:     "First counter-mode issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, next, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if next.ID != "test-11" {
+		t.Errorf("expected test-11 (seeded from max existing id 10), got %q", next.ID)
+	}
+}
+
+// TestCounterMode_SeedsFromMixed verifies that when existing issues contain a
+// mix of hash-based IDs and numeric IDs, only the numeric ones are counted
+// for seeding purposes.
+func TestCounterMode_SeedsFromMixed(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Create a mix: one hash-based ID and one numeric ID.
+	hashIssue := &types.Issue{
+		ID:        "test-a3f2",
+		Title:     "Hash-based issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	numericIssue := &types.Issue{
+		ID:        "test-7",
+		Title:     "Numeric issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	for _, iss := range []*types.Issue{hashIssue, numericIssue} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", iss.ID, err)
+		}
+	}
+
+	// Enable counter mode.
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+
+	// Only the numeric ID (test-7) should count; next should be test-8.
+	next := &types.Issue{
+		Title:     "First counter-mode issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, next, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if next.ID != "test-8" {
+		t.Errorf("expected test-8 (seeded from max numeric id 7, ignoring hash id), got %q", next.ID)
+	}
+}
+
+// TestCounterMode_NoExistingIssues verifies that a fresh repo with counter mode
+// enabled starts the counter at 1 (existing behavior preserved).
+func TestCounterMode_NoExistingIssues(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Enable counter mode immediately (no prior issues).
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+
+	first := &types.Issue{
+		Title:     "First issue in fresh repo",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, first, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if first.ID != "test-1" {
+		t.Errorf("expected test-1 in fresh repo, got %q", first.ID)
+	}
+}
+
+// TestCounterMode_AlreadySeeded verifies that if a counter row already exists
+// (e.g., the counter is at 20), seeding is skipped even if higher manually-
+// created IDs like test-99 exist. The counter must NOT regress.
+func TestCounterMode_AlreadySeeded(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Manually insert a counter row at 20 (simulates an already-running counter).
+	_, err := store.db.ExecContext(ctx,
+		"INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)", "test", 20)
+	if err != nil {
+		t.Fatalf("failed to seed counter: %v", err)
+	}
+
+	// Create a manually-specified issue with a higher ID than the counter.
+	highIssue := &types.Issue{
+		ID:        "test-99",
+		Title:     "High manual ID",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, highIssue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Enable counter mode.
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+
+	// Next issue should be test-21 (counter was at 20; seeding must NOT override
+	// the existing counter row even though test-99 exists).
+	next := &types.Issue{
+		Title:     "Next counter issue",
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, next, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if next.ID != "test-21" {
+		t.Errorf("expected test-21 (counter must not re-seed over existing row), got %q", next.ID)
+	}
+}
