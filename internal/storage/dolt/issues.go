@@ -1339,13 +1339,20 @@ func nullIntVal(i int) interface{} {
 	return i
 }
 
-// jsonMetadata returns the metadata as a string, or "{}" if empty.
-// Dolt's JSON column type requires valid JSON, so we can't insert empty strings.
+// jsonMetadata returns the metadata as a validated JSON string, or "{}" if empty.
+// Dolt's JSON column type requires valid JSON, so we normalize nil/empty to "{}"
+// and validate that non-empty metadata is well-formed JSON.
 func jsonMetadata(m []byte) string {
 	if len(m) == 0 {
 		return "{}"
 	}
-	return string(m)
+	s := string(m)
+	if !json.Valid(m) {
+		// Fall back to empty object for invalid JSON rather than storing garbage
+		_, _ = fmt.Fprintf(os.Stderr, "Warning: invalid JSON metadata, using empty object\n")
+		return "{}"
+	}
+	return s
 }
 
 func parseJSONStringArray(s string) []string {
