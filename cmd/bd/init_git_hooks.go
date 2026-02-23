@@ -221,7 +221,7 @@ fi
 }
 
 // preCommitHookBody returns the common pre-commit hook logic.
-// Delegates to 'bd hook pre-commit' which handles all backends (Dolt
+// Delegates to 'bd hooks run pre-commit' which handles all backends (Dolt
 // export, sync-branch routing, JSONL staging) without lock deadlocks.
 func preCommitHookBody() string {
 	return `# Check if bd is available
@@ -230,10 +230,10 @@ if ! command -v bd >/dev/null 2>&1; then
     exit 0
 fi
 
-# Delegate to bd hook pre-commit for all backends.
+# Delegate to bd hooks run pre-commit for all backends.
 # The Go code handles Dolt export in-process (no lock deadlocks),
 # sync-branch routing, and JSONL staging.
-exec bd hook pre-commit "$@"
+exec bd hooks run pre-commit "$@"
 `
 }
 
