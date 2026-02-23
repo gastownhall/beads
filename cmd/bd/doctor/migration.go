@@ -1,15 +1,11 @@
 package doctor
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // PendingMigration represents a single pending migration
@@ -100,43 +96,3 @@ func hasGitRemote(repoPath string) bool {
 	return len(strings.TrimSpace(string(output))) > 0
 }
 
-// checkDatabaseVersionMismatch returns a description if database version is old
-func checkDatabaseVersionMismatch(beadsDir string) string {
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-	}
-
-	// Skip if no database
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return ""
-	}
-
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
-	if err != nil {
-		return ""
-	}
-	defer db.Close()
-
-	// Get stored version
-	var storedVersion string
-	err = db.QueryRow("SELECT value FROM metadata WHERE key = 'bd_version'").Scan(&storedVersion)
-	if err != nil {
-		if strings.Contains(err.Error(), "no such table") {
-			return "Database schema needs update (pre-metadata table)"
-		}
-		// No version stored
-		return ""
-	}
-
-	// Note: We can't compare to current version here since we don't have access
-	// to the Version variable from main package. The individual check does this.
-	// This function is just for detecting obviously old databases.
-	if storedVersion == "" || storedVersion == "unknown" {
-		return "Database version unknown"
-	}
-
-	return ""
-}

@@ -5,14 +5,12 @@ package doctor
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/utils"
@@ -100,7 +98,7 @@ func CheckMigrationReadiness(path string) (DoctorCheck, MigrationValidationResul
 	}
 
 	// Validate JSONL integrity
-	jsonlCount, malformed, ids, err := validateJSONLForMigration(jsonlPath)
+	jsonlCount, malformed, _, err := validateJSONLForMigration(jsonlPath)
 	result.JSONLCount = jsonlCount
 	result.JSONLMalformed = malformed
 	if err != nil {
@@ -122,33 +120,7 @@ func CheckMigrationReadiness(path string) (DoctorCheck, MigrationValidationResul
 		result.Warnings = append(result.Warnings, fmt.Sprintf("%d malformed lines in JSONL (skipped)", malformed))
 	}
 
-	// Check SQLite database if it exists
-	dbPath := getSQLiteDBPath(beadsDir)
-	if _, err := os.Stat(dbPath); err == nil {
-		result.Backend = "sqlite"
-
-		// Compare JSONL with SQLite
-		sqliteCount, missingInDB, missingInJSONL, err := compareSQLiteWithJSONL(dbPath, ids)
-		result.SQLiteCount = sqliteCount
-		result.MissingInDB = missingInDB
-		result.MissingInJSONL = missingInJSONL
-
-		if err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("SQLite comparison failed: %v", err))
-		}
-
-		if len(missingInDB) > 0 {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("%d issues in JSONL not in SQLite (will be imported during migration)", len(missingInDB)))
-		}
-
-		if len(missingInJSONL) > 0 {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("%d issues in SQLite not in JSONL (ephemeral or deleted)", len(missingInJSONL)))
-		}
-	} else {
-		result.Backend = "jsonl-only"
-	}
+	result.Backend = "jsonl-only"
 
 	// Build status message
 	if len(result.Errors) > 0 {
@@ -394,14 +366,6 @@ func findJSONLFile(beadsDir string) string {
 	return ""
 }
 
-// getSQLiteDBPath returns the path to the SQLite database.
-func getSQLiteDBPath(beadsDir string) string {
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		return cfg.DatabasePath(beadsDir)
-	}
-	return filepath.Join(beadsDir, beads.CanonicalDatabaseName)
-}
-
 // validateJSONLForMigration validates a JSONL file for migration readiness.
 // Returns: count of valid issues, count of malformed lines, set of valid IDs, and error if blocking.
 func validateJSONLForMigration(jsonlPath string) (int, int, map[string]bool, error) {
@@ -458,56 +422,6 @@ func validateJSONLForMigration(jsonlPath string) (int, int, map[string]bool, err
 	}
 
 	return len(ids), malformed, ids, nil
-}
-
-// compareSQLiteWithJSONL compares SQLite database with JSONL file.
-// Returns: SQLite count, IDs in JSONL but not SQLite, IDs in SQLite but not JSONL, error.
-func compareSQLiteWithJSONL(dbPath string, jsonlIDs map[string]bool) (int, []string, []string, error) {
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("failed to open SQLite: %w", err)
-	}
-	defer db.Close()
-
-	// Get all non-ephemeral IDs from SQLite
-	rows, err := db.Query("SELECT id FROM issues WHERE ephemeral = 0 OR ephemeral IS NULL")
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("failed to query SQLite: %w", err)
-	}
-	defer rows.Close()
-
-	sqliteIDs := make(map[string]bool)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			continue
-		}
-		sqliteIDs[id] = true
-	}
-
-	// Find differences (sample first 100)
-	var missingInDB []string
-	var missingInJSONL []string
-
-	for id := range jsonlIDs {
-		if !sqliteIDs[id] {
-			missingInDB = append(missingInDB, id)
-			if len(missingInDB) >= 100 {
-				break
-			}
-		}
-	}
-
-	for id := range sqliteIDs {
-		if !jsonlIDs[id] {
-			missingInJSONL = append(missingInJSONL, id)
-			if len(missingInJSONL) >= 100 {
-				break
-			}
-		}
-	}
-
-	return len(sqliteIDs), missingInDB, missingInJSONL, nil
 }
 
 // compareDoltWithJSONL compares Dolt database with JSONL IDs.

@@ -102,26 +102,6 @@ func TestValidateJSONLForMigration_FileNotFound(t *testing.T) {
 	}
 }
 
-func TestGetSQLiteDBPath(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-migration-validation-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("failed to create .beads: %v", err)
-	}
-
-	// Test default path
-	path := getSQLiteDBPath(beadsDir)
-	expected := filepath.Join(beadsDir, "beads.db")
-	if path != expected {
-		t.Errorf("path = %q, want %q", path, expected)
-	}
-}
-
 func TestCheckMigrationReadinessResult_NoBeadsDir(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "bd-migration-validation-*")
 	if err != nil {

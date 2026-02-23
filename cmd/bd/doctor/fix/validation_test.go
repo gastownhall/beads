@@ -124,11 +124,6 @@ func TestFixFunctions_RequireBeadsDir(t *testing.T) {
 	}
 }
 
-// The following tests created SQLite databases directly via openDB() to test
-// fix functions. Since the fix functions use openAnyDB() which supports both
-// SQLite and Dolt, these tests will be re-enabled with Dolt fixtures when the
-// fix functions are fully converted to Dolt (bd-o0u.5).
-
 func TestChildParentDependencies_NoBadDeps(t *testing.T) {
 	dir := t.TempDir()
 	store := newFixTestStore(t, dir, "bd")
