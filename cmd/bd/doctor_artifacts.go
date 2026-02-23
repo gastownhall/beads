@@ -29,7 +29,6 @@ func runArtifactsCheck(path string, clean bool, yes bool) {
 		result := map[string]interface{}{
 			"total_count":       report.TotalCount,
 			"safe_delete_count": report.SafeDeleteCount,
-			"jsonl_artifacts":   len(report.JSONLArtifacts),
 			"sqlite_artifacts":  len(report.SQLiteArtifacts),
 			"cruft_beads_dirs":  len(report.CruftBeadsDirs),
 			"redirect_issues":   len(report.RedirectIssues),
@@ -37,7 +36,7 @@ func runArtifactsCheck(path string, clean bool, yes bool) {
 
 		var findings []map[string]interface{}
 		for _, lists := range [][]doctor.ArtifactFinding{
-			report.JSONLArtifacts, report.SQLiteArtifacts,
+			report.SQLiteArtifacts,
 			report.CruftBeadsDirs, report.RedirectIssues,
 		} {
 			for _, f := range lists {
@@ -56,19 +55,6 @@ func runArtifactsCheck(path string, clean bool, yes bool) {
 
 	// Human-readable output
 	fmt.Printf("Found %d classic artifact(s) (%d safe to delete):\n\n", report.TotalCount, report.SafeDeleteCount)
-
-	if len(report.JSONLArtifacts) > 0 {
-		fmt.Printf("JSONL Artifacts (%d):\n", len(report.JSONLArtifacts))
-		for _, f := range report.JSONLArtifacts {
-			safeTag := ""
-			if f.SafeDelete {
-				safeTag = " [safe]"
-			}
-			fmt.Printf("  %s%s\n", f.Path, safeTag)
-			fmt.Printf("    %s\n", ui.RenderMuted(f.Description))
-		}
-		fmt.Println()
-	}
 
 	if len(report.SQLiteArtifacts) > 0 {
 		fmt.Printf("SQLite Artifacts (%d):\n", len(report.SQLiteArtifacts))

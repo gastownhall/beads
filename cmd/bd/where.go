@@ -1,11 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -143,38 +141,9 @@ func findOriginalBeadsDir() string {
 	return ""
 }
 
-// detectPrefixFromDir tries to detect the issue prefix from files in the beads directory
-func detectPrefixFromDir(beadsDir string) string {
-	// Try to read from issues.jsonl and extract prefix from first issue ID
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-	// #nosec G304 -- jsonlPath is constructed from trusted beadsDir
-	data, err := os.ReadFile(jsonlPath)
-	if err != nil {
-		return ""
-	}
-
-	// Find first line that looks like an issue
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Quick JSON parse to get ID
-		var issue struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			continue
-		}
-
-		// Extract prefix from ID (e.g., "bd-123" -> "bd")
-		if idx := strings.LastIndex(issue.ID, "-"); idx > 0 {
-			return issue.ID[:idx]
-		}
-	}
-
+// detectPrefixFromDir tries to detect the issue prefix from files in the beads directory.
+// Returns empty string if prefix cannot be determined.
+func detectPrefixFromDir(_ string) string {
 	return ""
 }
 

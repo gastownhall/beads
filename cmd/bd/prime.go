@@ -44,7 +44,7 @@ Workflow customization:
 - Place a .beads/PRIME.md file to override the default output entirely.
 - Use --export to dump the default content for customization.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Find .beads/ directory (supports both database and JSONL-only mode)
+		// Find .beads/ directory
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			// Not in a beads project - silent exit with success

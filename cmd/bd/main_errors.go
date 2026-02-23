@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -30,49 +29,16 @@ func handleFreshCloneError(err error, beadsDir string) bool {
 		return false
 	}
 
-	// Look for JSONL file in the .beads directory
-	jsonlPath := ""
-	issueCount := 0
-
-	if beadsDir != "" {
-		// Check for issues.jsonl (canonical) first, then beads.jsonl (legacy)
-		for _, name := range []string{"issues.jsonl", "beads.jsonl"} {
-			candidate := filepath.Join(beadsDir, name)
-			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-				jsonlPath = candidate
-				// Count lines (approximately = issue count)
-				// #nosec G304 -- candidate is constructed from beadsDir which is .beads/
-				if data, readErr := os.ReadFile(candidate); readErr == nil {
-					for _, line := range strings.Split(string(data), "\n") {
-						if strings.TrimSpace(line) != "" {
-							issueCount++
-						}
-					}
-				}
-				break
-			}
-		}
-	}
-
 	fmt.Fprintf(os.Stderr, "Error: Database not initialized\n\n")
 	fmt.Fprintf(os.Stderr, "This appears to be a fresh clone or the database needs initialization.\n")
-
-	if jsonlPath != "" && issueCount > 0 {
-		fmt.Fprintf(os.Stderr, "Found: %s (%d issues)\n\n", jsonlPath, issueCount)
-		fmt.Fprintf(os.Stderr, "To initialize from the JSONL file, run:\n")
-		fmt.Fprintf(os.Stderr, "  bd import -i %s\n\n", jsonlPath)
-	} else {
-		fmt.Fprintf(os.Stderr, "\nTo initialize a new database, run:\n")
-		fmt.Fprintf(os.Stderr, "  bd init --prefix <your-prefix>\n\n")
-	}
-
+	fmt.Fprintf(os.Stderr, "\nTo initialize a new database, run:\n")
+	fmt.Fprintf(os.Stderr, "  bd init --prefix <your-prefix>\n\n")
 	fmt.Fprintf(os.Stderr, "For more information: bd init --help\n")
 	return true
 }
 
 // isWispOperation returns true if the command operates on ephemeral wisps.
-// Wisp operations auto-bypass the daemon because wisps are local-only
-// (Ephemeral=true issues are never exported to JSONL).
+// Wisp operations auto-bypass the daemon because wisps are local-only.
 // Detects:
 //   - mol wisp subcommands (create, list, gc, or direct proto invocation)
 //   - mol burn (only operates on wisps)

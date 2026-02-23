@@ -621,12 +621,6 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, pollutionCheck)
 	// Don't fail overall check for test pollution, just warn
 
-	// Check 25: Git conflicts in JSONL (from bd validate)
-	conflictsCheck := convertDoctorCheck(doctor.CheckGitConflicts(path))
-	result.Checks = append(result.Checks, conflictsCheck)
-	if conflictsCheck.Status == statusError {
-		result.OverallOK = false
-	}
 
 	// Check 26: Stale closed issues (maintenance)
 	staleClosedCheck := convertDoctorCheck(doctor.CheckStaleClosedIssues(path))

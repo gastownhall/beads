@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -229,111 +228,9 @@ func TestGitHooks_EdgeCases(t *testing.T) {
 	})
 }
 
-// TestUntrackedJSONL_EdgeCases tests UntrackedJSONL with edge cases
+// TestUntrackedJSONL_EdgeCases — removed: UntrackedJSONL function removed (bd-9ni.2)
 func TestUntrackedJSONL_EdgeCases(t *testing.T) {
-	t.Run("staged but uncommitted JSONL files", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-
-		// Create initial commit
-		testFile := filepath.Join(dir, "test.txt")
-		if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
-			t.Fatalf("failed to create test file: %v", err)
-		}
-		runGit(t, dir, "add", "test.txt")
-		runGit(t, dir, "commit", "-m", "initial")
-
-		// Create a JSONL file and stage it but don't commit
-		jsonlFile := filepath.Join(dir, ".beads", "deletions.jsonl")
-		if err := os.WriteFile(jsonlFile, []byte(`{"id":"test-1","ts":"2024-01-01T00:00:00Z","by":"user"}`+"\n"), 0600); err != nil {
-			t.Fatalf("failed to create JSONL file: %v", err)
-		}
-		runGit(t, dir, "add", ".beads/deletions.jsonl")
-
-		// Check git status - should show staged file
-		output := runGit(t, dir, "status", "--porcelain", ".beads/")
-		if !strings.Contains(output, "A  .beads/deletions.jsonl") {
-			t.Logf("git status output: %s", output)
-			t.Error("expected file to be staged")
-		}
-
-		// UntrackedJSONL should not process staged files (only untracked)
-		err := UntrackedJSONL(dir)
-		if err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-
-		// File should still be staged, not committed again
-		output = runGit(t, dir, "status", "--porcelain", ".beads/")
-		if !strings.Contains(output, "A  .beads/deletions.jsonl") {
-			t.Error("file should still be staged after UntrackedJSONL")
-		}
-	})
-
-	t.Run("mixed tracked and untracked JSONL files", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-
-		// Create initial commit with one JSONL file
-		trackedFile := filepath.Join(dir, ".beads", "issues.jsonl")
-		if err := os.WriteFile(trackedFile, []byte(`{"id":"test-1"}`+"\n"), 0600); err != nil {
-			t.Fatalf("failed to create tracked JSONL: %v", err)
-		}
-		runGit(t, dir, "add", ".beads/issues.jsonl")
-		runGit(t, dir, "commit", "-m", "initial")
-
-		// Create an untracked JSONL file
-		untrackedFile := filepath.Join(dir, ".beads", "deletions.jsonl")
-		if err := os.WriteFile(untrackedFile, []byte(`{"id":"test-2"}`+"\n"), 0600); err != nil {
-			t.Fatalf("failed to create untracked JSONL: %v", err)
-		}
-
-		// UntrackedJSONL should only process the untracked file
-		err := UntrackedJSONL(dir)
-		if err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-
-		// Verify untracked file was committed
-		output := runGit(t, dir, "status", "--porcelain", ".beads/")
-		if output != "" {
-			t.Errorf("expected clean status, got: %s", output)
-		}
-
-		// Verify both files are now tracked
-		output = runGit(t, dir, "ls-files", ".beads/")
-		if !strings.Contains(output, "issues.jsonl") || !strings.Contains(output, "deletions.jsonl") {
-			t.Errorf("expected both files to be tracked, got: %s", output)
-		}
-	})
-
-	t.Run("JSONL file outside .beads directory is ignored", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-
-		// Create initial commit
-		testFile := filepath.Join(dir, "test.txt")
-		if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
-			t.Fatalf("failed to create test file: %v", err)
-		}
-		runGit(t, dir, "add", "test.txt")
-		runGit(t, dir, "commit", "-m", "initial")
-
-		// Create a JSONL file outside .beads
-		outsideFile := filepath.Join(dir, "data.jsonl")
-		if err := os.WriteFile(outsideFile, []byte(`{"test":"data"}`+"\n"), 0600); err != nil {
-			t.Fatalf("failed to create outside JSONL: %v", err)
-		}
-
-		// UntrackedJSONL should ignore it
-		err := UntrackedJSONL(dir)
-		if err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-
-		// Verify the file is still untracked
-		output := runGit(t, dir, "status", "--porcelain")
-		if !strings.Contains(output, "?? data.jsonl") {
-			t.Error("expected file outside .beads to remain untracked")
-		}
-	})
+	t.Skip("UntrackedJSONL removed as part of JSONL removal (bd-9ni.2)")
 }
 
 // TestPermissions_EdgeCases tests Permissions with edge cases

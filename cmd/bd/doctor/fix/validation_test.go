@@ -20,7 +20,6 @@ func TestFixFunctions_RequireBeadsDir(t *testing.T) {
 		{"GitHooks", GitHooks},
 		{"DatabaseVersion", DatabaseVersion},
 		{"SchemaCompatibility", SchemaCompatibility},
-		{"UntrackedJSONL", UntrackedJSONL},
 		{"ChildParentDependencies", func(dir string) error { return ChildParentDependencies(dir, false) }},
 		{"OrphanedDependencies", func(dir string) error { return OrphanedDependencies(dir, false) }},
 	}

@@ -28,18 +28,8 @@ func CheckIDFormat(path string) DoctorCheck {
 		dbPath = cfg.DatabasePath(beadsDir)
 	}
 
-	// Check if using JSONL-only mode (or uninitialized DB).
+	// Check if database exists
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// Check if JSONL exists (--no-db mode)
-		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-		if _, err := os.Stat(jsonlPath); err == nil {
-			return DoctorCheck{
-				Name:    "Issue IDs",
-				Status:  StatusOK,
-				Message: "N/A (JSONL-only mode)",
-			}
-		}
-		// No database and no JSONL
 		return DoctorCheck{
 			Name:    "Issue IDs",
 			Status:  StatusOK,
@@ -292,20 +282,7 @@ func CheckDeletionsManifest(path string) DoctorCheck {
 		}
 	}
 
-	// No deletions.jsonl and no .migrated file - check if JSONL exists
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		jsonlPath = filepath.Join(beadsDir, "beads.jsonl")
-		if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-			return DoctorCheck{
-				Name:    "Deletions Manifest",
-				Status:  StatusOK,
-				Message: "N/A (no JSONL file)",
-			}
-		}
-	}
-
-	// JSONL exists but no deletions tracking - expected for Dolt-native repos
+	// No deletions.jsonl - expected for Dolt-native repos
 	return DoctorCheck{
 		Name:    "Deletions Manifest",
 		Status:  StatusOK,

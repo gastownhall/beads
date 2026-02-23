@@ -79,59 +79,9 @@ func TestGitHooks_E2E(t *testing.T) {
 	})
 }
 
-// TestUntrackedJSONL_E2E tests the full UntrackedJSONL fix flow
+// TestUntrackedJSONL_E2E - UntrackedJSONL was removed in bd-9ni.2
 func TestUntrackedJSONL_E2E(t *testing.T) {
-	t.Run("commits untracked JSONL files", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-
-		// Create initial commit so we can make more commits
-		testFile := filepath.Join(dir, "README.md")
-		if err := os.WriteFile(testFile, []byte("# Test\n"), 0644); err != nil {
-			t.Fatalf("failed to create test file: %v", err)
-		}
-		runGit(t, dir, "add", "README.md")
-		runGit(t, dir, "commit", "-m", "initial commit")
-
-		// Create untracked JSONL file in .beads
-		jsonlPath := filepath.Join(dir, ".beads", "deletions.jsonl")
-		if err := os.WriteFile(jsonlPath, []byte(`{"id":"test-1"}`+"\n"), 0644); err != nil {
-			t.Fatalf("failed to create JSONL: %v", err)
-		}
-
-		// Verify it's untracked
-		output := runGit(t, dir, "status", "--porcelain", ".beads/")
-		if !strings.Contains(output, "??") {
-			t.Fatalf("expected untracked file, got: %s", output)
-		}
-
-		// Run fix
-		err := UntrackedJSONL(dir)
-		if err != nil {
-			t.Fatalf("UntrackedJSONL fix failed: %v", err)
-		}
-
-		// Verify file was committed
-		output = runGit(t, dir, "status", "--porcelain", ".beads/")
-		if strings.Contains(output, "??") {
-			t.Error("JSONL file still untracked after fix")
-		}
-
-		// Verify commit was made
-		output = runGit(t, dir, "log", "--oneline", "-1")
-		if !strings.Contains(output, "untracked JSONL") {
-			t.Errorf("expected commit message about untracked JSONL, got: %s", output)
-		}
-	})
-
-	t.Run("handles no untracked files gracefully", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-
-		// No untracked files - should succeed without error
-		err := UntrackedJSONL(dir)
-		if err != nil {
-			t.Errorf("expected no error with no untracked files, got: %v", err)
-		}
-	})
+	t.Skip("UntrackedJSONL removed in bd-9ni.2")
 }
 
 // =============================================================================
@@ -281,97 +231,9 @@ func TestGitHooksWithExistingHooks_E2E(t *testing.T) {
 	})
 }
 
-// TestUntrackedJSONLWithUncommittedChanges_E2E tests handling uncommitted changes
+// TestUntrackedJSONLWithUncommittedChanges_E2E — removed: UntrackedJSONL function removed (bd-9ni.2)
 func TestUntrackedJSONLWithUncommittedChanges_E2E(t *testing.T) {
-	t.Run("commits untracked JSONL with staged changes present", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-
-		// Create initial commit
-		testFile := filepath.Join(dir, "README.md")
-		if err := os.WriteFile(testFile, []byte("# Test\n"), 0644); err != nil {
-			t.Fatalf("failed to create test file: %v", err)
-		}
-		runGit(t, dir, "add", "README.md")
-		runGit(t, dir, "commit", "-m", "initial commit")
-
-		// Create untracked JSONL file
-		jsonlPath := filepath.Join(dir, ".beads", "deletions.jsonl")
-		if err := os.WriteFile(jsonlPath, []byte(`{"id":"test-1"}`+"\n"), 0644); err != nil {
-			t.Fatalf("failed to create JSONL: %v", err)
-		}
-
-		// Create staged changes
-		testFile2 := filepath.Join(dir, "file2.md")
-		if err := os.WriteFile(testFile2, []byte("staged content"), 0644); err != nil {
-			t.Fatalf("failed to create test file: %v", err)
-		}
-		runGit(t, dir, "add", "file2.md")
-
-		// Run fix
-		err := UntrackedJSONL(dir)
-		if err != nil {
-			t.Fatalf("UntrackedJSONL fix failed: %v", err)
-		}
-
-		// Verify JSONL was committed
-		output := runGit(t, dir, "status", "--porcelain", ".beads/")
-		if strings.Contains(output, "??") && strings.Contains(output, "deletions.jsonl") {
-			t.Error("JSONL file still untracked after fix")
-		}
-
-		// Verify staged changes are still staged (not committed by fix)
-		output = runGit(t, dir, "status", "--porcelain", "file2.md")
-		if !strings.Contains(output, "A ") && !strings.Contains(output, "file2.md") {
-			t.Error("staged changes should remain staged")
-		}
-	})
-
-	t.Run("commits untracked JSONL with unstaged changes present", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-
-		// Create initial commit
-		testFile := filepath.Join(dir, "README.md")
-		if err := os.WriteFile(testFile, []byte("# Test\n"), 0644); err != nil {
-			t.Fatalf("failed to create test file: %v", err)
-		}
-		runGit(t, dir, "add", "README.md")
-		runGit(t, dir, "commit", "-m", "initial commit")
-
-		// Create untracked JSONL file
-		jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
-		if err := os.WriteFile(jsonlPath, []byte(`{"id":"test-2"}`+"\n"), 0644); err != nil {
-			t.Fatalf("failed to create JSONL: %v", err)
-		}
-
-		// Create unstaged changes to existing file
-		if err := os.WriteFile(testFile, []byte("# Test Modified\n"), 0644); err != nil {
-			t.Fatalf("failed to modify test file: %v", err)
-		}
-
-		// Verify unstaged changes exist
-		statusOutput := runGit(t, dir, "status", "--porcelain")
-		if !strings.Contains(statusOutput, " M ") && !strings.Contains(statusOutput, "README.md") {
-			t.Logf("expected unstaged changes, got: %s", statusOutput)
-		}
-
-		// Run fix
-		err := UntrackedJSONL(dir)
-		if err != nil {
-			t.Fatalf("UntrackedJSONL fix failed: %v", err)
-		}
-
-		// Verify JSONL was committed
-		output := runGit(t, dir, "status", "--porcelain", ".beads/")
-		if strings.Contains(output, "??") && strings.Contains(output, "issues.jsonl") {
-			t.Error("JSONL file still untracked after fix")
-		}
-
-		// Verify unstaged changes remain unstaged
-		output = runGit(t, dir, "status", "--porcelain", "README.md")
-		if !strings.Contains(output, " M") {
-			t.Error("unstaged changes should remain unstaged")
-		}
-	})
+	t.Skip("UntrackedJSONL removed as part of JSONL removal (bd-9ni.2)")
 }
 
 // TestPermissionsWithWrongPermissions_E2E tests fixing wrong permissions on .beads

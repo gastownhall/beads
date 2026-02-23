@@ -165,13 +165,6 @@ func runContributorWizard(ctx context.Context, store *dolt.DoltStore) error {
 			return fmt.Errorf("failed to create .beads in planning repo: %w", err)
 		}
 
-		// Create issues.jsonl (canonical name, bd-6xd)
-		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-		// #nosec G306 -- planning repo JSONL must be shareable across collaborators
-		if err := os.WriteFile(jsonlPath, []byte{}, 0644); err != nil {
-			return fmt.Errorf("failed to create issues.jsonl: %w", err)
-		}
-
 		// Create README in planning repo
 		readmePath := filepath.Join(planningPath, "README.md")
 		readmeContent := fmt.Sprintf(`# Beads Planning Repository

@@ -71,24 +71,9 @@ func TestGitHooks_Validation(t *testing.T) {
 	})
 }
 
-// TestUntrackedJSONL_Validation tests UntrackedJSONL validation
+// TestUntrackedJSONL_Validation — removed: UntrackedJSONL function removed (bd-9ni.2)
 func TestUntrackedJSONL_Validation(t *testing.T) {
-	t.Run("not a git repository", func(t *testing.T) {
-		dir := setupTestWorkspace(t)
-		err := UntrackedJSONL(dir)
-		if err == nil {
-			t.Error("expected error for non-git repository")
-		}
-	})
-
-	t.Run("no untracked files", func(t *testing.T) {
-		dir := setupTestGitRepo(t)
-		err := UntrackedJSONL(dir)
-		// Should succeed with no untracked files
-		if err != nil {
-			t.Errorf("expected no error, got: %v", err)
-		}
-	})
+	t.Skip("UntrackedJSONL removed as part of JSONL removal (bd-9ni.2)")
 }
 
 // TestIsWithinWorkspace tests the isWithinWorkspace helper

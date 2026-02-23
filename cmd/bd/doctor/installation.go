@@ -170,7 +170,3 @@ func FixPermissions(path string) error {
 	return fix.Permissions(path)
 }
 
-// FixUntrackedJSONL stages and commits untracked .beads/*.jsonl files
-func FixUntrackedJSONL(path string) error {
-	return fix.UntrackedJSONL(path)
-}

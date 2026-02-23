@@ -4,7 +4,6 @@ package doctor
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -394,54 +393,3 @@ func CheckChildParentDependencies(path string) DoctorCheck {
 	}
 }
 
-// CheckGitConflicts detects git conflict markers in JSONL file.
-func CheckGitConflicts(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:    "Git Conflicts",
-			Status:  "ok",
-			Message: "N/A (no JSONL file)",
-		}
-	}
-
-	data, err := os.ReadFile(jsonlPath) // #nosec G304 - path constructed safely
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Git Conflicts",
-			Status:  "ok",
-			Message: "N/A (unable to read JSONL)",
-		}
-	}
-
-	// Look for conflict markers at start of lines
-	lines := bytes.Split(data, []byte("\n"))
-	var conflictLines []int
-	for i, line := range lines {
-		trimmed := bytes.TrimSpace(line)
-		if bytes.HasPrefix(trimmed, []byte("<<<<<<< ")) ||
-			bytes.Equal(trimmed, []byte("=======")) ||
-			bytes.HasPrefix(trimmed, []byte(">>>>>>> ")) {
-			conflictLines = append(conflictLines, i+1)
-		}
-	}
-
-	if len(conflictLines) == 0 {
-		return DoctorCheck{
-			Name:    "Git Conflicts",
-			Status:  "ok",
-			Message: "No git conflicts in JSONL",
-		}
-	}
-
-	return DoctorCheck{
-		Name:    "Git Conflicts",
-		Status:  "error",
-		Message: fmt.Sprintf("Git conflict markers found at %d location(s)", len(conflictLines)),
-		Detail:  fmt.Sprintf("Conflict markers at lines: %v", conflictLines),
-		Fix:     "Resolve conflicts manually: git checkout --ours or --theirs .beads/issues.jsonl",
-	}
-}

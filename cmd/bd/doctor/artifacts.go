@@ -17,7 +17,6 @@ type ArtifactFinding struct {
 
 // ArtifactReport contains all findings from an artifact scan.
 type ArtifactReport struct {
-	JSONLArtifacts  []ArtifactFinding
 	SQLiteArtifacts []ArtifactFinding
 	CruftBeadsDirs  []ArtifactFinding
 	RedirectIssues  []ArtifactFinding
@@ -46,9 +45,6 @@ func CheckClassicArtifacts(path string) DoctorCheck {
 
 	// Build summary message
 	var parts []string
-	if len(report.JSONLArtifacts) > 0 {
-		parts = append(parts, fmt.Sprintf("%d JSONL artifact(s)", len(report.JSONLArtifacts)))
-	}
 	if len(report.SQLiteArtifacts) > 0 {
 		parts = append(parts, fmt.Sprintf("%d SQLite artifact(s)", len(report.SQLiteArtifacts)))
 	}
@@ -64,7 +60,7 @@ func CheckClassicArtifacts(path string) DoctorCheck {
 	// Build detail showing examples
 	var details []string
 	for _, findings := range [][]ArtifactFinding{
-		report.JSONLArtifacts, report.SQLiteArtifacts,
+		report.SQLiteArtifacts,
 		report.CruftBeadsDirs, report.RedirectIssues,
 	} {
 		for i, f := range findings {
@@ -120,11 +116,11 @@ func ScanForArtifacts(rootPath string) ArtifactReport {
 		return filepath.SkipDir
 	})
 
-	report.TotalCount = len(report.JSONLArtifacts) + len(report.SQLiteArtifacts) +
+	report.TotalCount = len(report.SQLiteArtifacts) +
 		len(report.CruftBeadsDirs) + len(report.RedirectIssues)
 
 	for _, findings := range [][]ArtifactFinding{
-		report.JSONLArtifacts, report.SQLiteArtifacts,
+		report.SQLiteArtifacts,
 		report.CruftBeadsDirs, report.RedirectIssues,
 	} {
 		for _, f := range findings {
@@ -139,29 +135,21 @@ func ScanForArtifacts(rootPath string) ArtifactReport {
 
 // scanBeadsDir checks a single .beads directory for artifacts.
 func scanBeadsDir(beadsDir string, report *ArtifactReport) {
-	// Check if this is a dolt-native directory (has dolt/ subdirectory)
-	hasDolt := isDoltNative(beadsDir)
-
 	// Check if this should be a redirect-only directory
 	isRedirectExpected := isRedirectExpectedDir(beadsDir)
 
 	// Check if it has a redirect file
 	hasRedirect := hasRedirectFile(beadsDir)
 
-	// 1. Check for JSONL artifacts in dolt-native directories
-	if hasDolt {
-		scanJSONLArtifacts(beadsDir, report)
-	}
-
-	// 2. Check for SQLite artifacts
+	// 1. Check for SQLite artifacts
 	scanSQLiteArtifacts(beadsDir, report)
 
-	// 3. Check for cruft .beads directories (should be redirect-only)
+	// 2. Check for cruft .beads directories (should be redirect-only)
 	if isRedirectExpected {
 		scanCruftBeadsDir(beadsDir, hasRedirect, report)
 	}
 
-	// 4. Validate redirect files
+	// 3. Validate redirect files
 	if hasRedirect {
 		validateRedirect(beadsDir, report)
 	}
@@ -230,40 +218,6 @@ func hasSibling(dir string, siblingName string) bool {
 func hasRedirectFile(beadsDir string) bool {
 	_, err := os.Stat(filepath.Join(beadsDir, "redirect"))
 	return err == nil
-}
-
-// scanJSONLArtifacts checks for stale JSONL files in a dolt-native .beads directory.
-func scanJSONLArtifacts(beadsDir string, report *ArtifactReport) {
-	jsonlFiles := []struct {
-		name string
-		desc string
-	}{
-		// Note: issues.jsonl is NOT an artifact — the pre-commit hook exports
-		// Dolt → JSONL on every git commit so the file is tracked in git.
-		{"issues.jsonl.new", "JSONL export artifact"},
-		{"beads.left.jsonl", "merge leftover"},
-		{"interactions.jsonl", "interactions log (usually empty)"},
-	}
-
-	for _, jf := range jsonlFiles {
-		path := filepath.Join(beadsDir, jf.name)
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-
-		// Skip empty files for interactions.jsonl since they're harmless
-		if jf.name == "interactions.jsonl" && info.Size() == 0 {
-			continue
-		}
-
-		report.JSONLArtifacts = append(report.JSONLArtifacts, ArtifactFinding{
-			Path:        path,
-			Type:        "jsonl",
-			Description: jf.desc,
-			SafeDelete:  jf.name != "issues.jsonl", // issues.jsonl needs care
-		})
-	}
 }
 
 // scanSQLiteArtifacts checks for leftover SQLite database files.
