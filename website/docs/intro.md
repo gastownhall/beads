@@ -14,7 +14,7 @@ slug: /
 Traditional issue trackers (Jira, GitHub Issues) weren't designed for AI agents. Beads was built from the ground up for:
 
 - **AI-native workflows** - Hash-based IDs prevent collisions when multiple agents work concurrently
-- **Git-backed storage** - Issues sync via JSONL files, enabling collaboration across branches
+- **Dolt-backed storage** - Issues stored in a version-controlled SQL database, enabling collaboration via Dolt-native replication
 - **Dependency-aware execution** - `bd ready` shows only unblocked work
 - **Formula system** - Declarative templates for repeatable workflows
 - **Multi-agent coordination** - Routing, gates, and molecules for complex workflows
@@ -72,14 +72,14 @@ See the [Claude Code integration](/integrations/claude-code) for detailed agent 
 ## Architecture
 
 ```
-SQLite DB (.beads/beads.db, gitignored)
-    ↕ auto-sync (5s debounce)
-JSONL (.beads/issues.jsonl, git-tracked)
-    ↕ git push/pull
-Remote JSONL (shared across machines)
+Dolt DB (.beads/dolt/, gitignored)
+    ↕ dolt commit
+Local Dolt history
+    ↕ dolt push/pull
+Remote Dolt repository (shared across machines)
 ```
 
-The magic is automatic synchronization between a local SQLite database and git-tracked JSONL files.
+The magic is automatic synchronization via Dolt's version-controlled database with built-in replication.
 
 ## Next Steps
 

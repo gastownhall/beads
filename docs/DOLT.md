@@ -153,22 +153,22 @@ bd federation status
 
 When someone clones a repository that uses Dolt backend:
 
-1. They see the `issues.jsonl` file (committed to git)
-2. On first `bd` command (e.g., `bd list`), bootstrap runs automatically
-3. JSONL is imported into a fresh Dolt database
+1. On first `bd` command (e.g., `bd list`), bootstrap runs automatically
+2. A fresh Dolt database is created
+3. If a Dolt remote is configured, data is pulled from the remote
 4. Work continues normally
 
 **No manual steps required.** The bootstrap:
-- Detects fresh clone (JSONL exists, Dolt doesn't)
+- Detects fresh clone (no Dolt database yet)
 - Acquires a lock to prevent race conditions
-- Imports issues, routes, interactions, labels, dependencies
-- Creates initial Dolt commit "Bootstrap from JSONL"
+- Initializes the Dolt database and pulls from configured remotes
+- Creates initial Dolt commit
 
 ### Verifying Bootstrap Worked
 
 ```bash
 bd list              # Should show issues
-bd vc log            # Should show "Bootstrap from JSONL" commit
+bd vc log            # Should show initial commit
 ```
 
 ## Troubleshooting
@@ -194,7 +194,6 @@ gt dolt status       # Check if running
 
 **Check:**
 ```bash
-ls .beads/issues.jsonl     # Should exist
 ls .beads/dolt/            # Should NOT exist (pre-bootstrap)
 BD_DEBUG=1 bd list         # See bootstrap output
 ```
@@ -223,10 +222,10 @@ bd doctor --server         # Server mode checks (if applicable)
    bd doctor --fix
    ```
 
-2. **Rebuild from JSONL:**
+2. **Rebuild from remote:**
    ```bash
    rm -rf .beads/dolt
-   bd list                  # Re-triggers bootstrap from JSONL
+   bd list                  # Re-triggers bootstrap
    ```
 
 ### Lock Contention (Embedded Mode)

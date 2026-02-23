@@ -69,7 +69,7 @@ A good test:
 | Priority | What | Why | Examples in beads |
 |----------|------|-----|-------------------|
 | **High** | Core business logic | This is what users depend on | `sync`, `doctor`, `export`, `import` |
-| **High** | Error paths that could corrupt data | Data loss is catastrophic | Config handling, git operations, JSONL integrity |
+| **High** | Error paths that could corrupt data | Data loss is catastrophic | Config handling, git operations, database integrity |
 | **Medium** | Edge cases from production bugs | Discovered through real issues | Orphan handling, ID collision detection |
 | **Low** | Display/formatting | Visual output, can be manually verified | Table formatting, color output |
 

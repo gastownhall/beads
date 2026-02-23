@@ -6,21 +6,19 @@ sidebar_position: 6
 
 # Sync & Export Commands
 
-Commands for synchronizing with git.
+Commands for synchronizing with Dolt.
 
 ## bd sync
 
-Full sync cycle: export, commit, push.
+Full sync cycle: Dolt commit and push.
 
 ```bash
 bd sync [flags]
 ```
 
 **What it does:**
-1. Exports database to `.beads/issues.jsonl`
-2. Stages the JSONL file
-3. Commits with auto-generated message
-4. Pushes to remote
+1. Dolt commit (snapshot current database state)
+2. Dolt push to remote
 
 **Flags:**
 ```bash
@@ -41,7 +39,7 @@ bd sync --json
 
 ## bd export
 
-Export database to JSONL.
+Export database to JSONL format (for backup and migration).
 
 ```bash
 bd export [flags]
@@ -49,7 +47,7 @@ bd export [flags]
 
 **Flags:**
 ```bash
---output, -o    Output file (default: .beads/issues.jsonl)
+--output, -o    Output file (default: stdout)
 --dry-run       Preview without writing
 --json          JSON output
 ```
@@ -61,9 +59,11 @@ bd export -o backup.jsonl
 bd export --dry-run
 ```
 
+**When to use:** `bd export` is for backup and data migration, not day-to-day sync. Dolt handles sync natively via `bd dolt push`/`bd dolt pull`.
+
 ## bd import
 
-Import from JSONL file.
+Import from JSONL file (for migration and recovery).
 
 ```bash
 bd import -i <file> [flags]
@@ -88,11 +88,13 @@ bd import -i <file> [flags]
 
 **Examples:**
 ```bash
-bd import -i .beads/issues.jsonl
+bd import -i backup.jsonl
 bd import -i backup.jsonl --dry-run
 bd import -i issues.jsonl --orphan-handling resurrect
 bd import -i issues.jsonl --dedupe-after --json
 ```
+
+**When to use:** `bd import` is for loading data from external JSONL files or migrating from a legacy setup. For day-to-day sync, use `bd dolt push`/`bd dolt pull`.
 
 ## bd migrate
 
@@ -147,8 +149,7 @@ bd hooks uninstall
 
 When the Dolt server is running, sync is handled automatically:
 - Dolt auto-commit tracks changes
-- JSONL export happens after changes (5s debounce)
-- Imports from JSONL when newer
+- Dolt-native replication handles remote sync
 
 Start the Dolt server with `bd dolt start`.
 
@@ -156,40 +157,27 @@ Start the Dolt server with `bd dolt start`.
 
 In CI/CD pipelines and ephemeral environments, no server is needed:
 - Changes written directly to the database
-- Must manually export/sync
+- Must manually sync
 
 ```bash
 bd create "CI-generated task"
-bd export  # Manual export needed
+bd sync  # Manual sync needed
 ```
 
 ## Conflict Resolution
 
-### Merge Driver (Recommended)
-
-Install the beads merge driver:
-
-```bash
-bd init  # Prompts for merge driver setup
-```
-
-The driver automatically:
-- Merges non-conflicting changes
-- Preserves both sides for real conflicts
-- Uses latest timestamp for same-issue edits
-
-### Manual Resolution
+Dolt handles conflict resolution at the database level using its built-in
+merge capabilities. When conflicts arise during `dolt pull`, Dolt identifies
+conflicting rows and allows resolution through SQL.
 
 ```bash
-# After merge conflict
-git checkout --ours .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
-bd sync
+# Check for conflicts after sync
+bd doctor --fix
 ```
 
 ## Deletion Tracking
 
-Deletions sync via `.beads/deletions.jsonl`:
+Deletions are tracked in the Dolt database:
 
 ```bash
 # Delete issue
@@ -199,13 +187,12 @@ bd delete bd-42
 bd deleted
 bd deleted --since=30d
 
-# Deletions propagate via git
-git pull  # Imports deletions from remote
+# Deletions propagate via Dolt sync
+bd sync
 ```
 
 ## Best Practices
 
 1. **Always sync at session end** - `bd sync`
 2. **Install git hooks** - `bd hooks install`
-3. **Use merge driver** - Avoids manual conflict resolution
-4. **Check sync status** - `bd info` shows sync state
+3. **Check sync status** - `bd info` shows sync state

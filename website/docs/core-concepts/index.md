@@ -12,9 +12,9 @@ Understanding the fundamental concepts behind beads.
 
 Beads was built with these principles:
 
-1. **Git as source of truth** - Issues sync via JSONL files, enabling collaboration across branches
+1. **Dolt as source of truth** - Issues stored in a version-controlled SQL database (Dolt), enabling collaboration via Dolt-native replication
 2. **AI-native workflows** - Hash-based IDs, JSON output, dependency-aware execution
-3. **Local-first operation** - SQLite database for fast queries, background sync
+3. **Local-first operation** - Dolt database for fast queries, background sync
 4. **Declarative workflows** - Formulas define repeatable patterns
 
 ## Key Components
@@ -48,16 +48,16 @@ Dolt provides the database backend for beads:
 - Logs available at `.beads/dolt/sql-server.log`
 - Check health with `bd doctor`
 
-### JSONL Sync
+### Dolt Sync
 
 The synchronization mechanism:
 
 ```
-SQLite DB (.beads/beads.db)
-    ↕ auto-sync
-JSONL (.beads/issues.jsonl)
-    ↕ git
-Remote repository
+Dolt DB (.beads/dolt/)
+    ↕ dolt commit
+Local Dolt history
+    ↕ dolt push/pull
+Remote Dolt repository
 ```
 
 ### Formulas
@@ -72,5 +72,5 @@ Declarative workflow templates:
 
 - [Issues & Dependencies](/core-concepts/issues)
 - [Dolt Server Mode](/core-concepts/dolt-server)
-- [JSONL Sync](/core-concepts/jsonl-sync)
+- [Dolt Sync](/core-concepts/dolt-sync)
 - [Hash-based IDs](/core-concepts/hash-ids)

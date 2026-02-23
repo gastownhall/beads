@@ -178,11 +178,10 @@ my-project/
 │   ├── beads-worktrees/       # Hidden worktree directory
 │   │   └── beads-metadata/    # Lightweight checkout of sync branch
 │   │       └── .beads/
-│   │           └── issues.jsonl
+│   │           └── dolt/
 │   └── ...
 ├── .beads/                    # Main beads directory (in your workspace)
-│   ├── beads.db               # SQLite database
-│   ├── issues.jsonl            # JSONL export
+│   ├── dolt/                  # Dolt database (source of truth)
 │   └── config.yaml            # Beads configuration
 ├── src/                       # Your application code
 │   └── ...
@@ -211,12 +210,12 @@ my-project/
 
 ### Troubleshooting
 
-**"Merge conflicts in issues.jsonl"**
+**"Merge conflicts during sync"**
 
-JSONL is append-only and line-based, so conflicts are rare. If they occur:
-1. Both versions are usually valid - keep both lines
-2. If same issue updated differently, keep the line with newer `updated_at`
-3. After resolving: `bd import` to update database
+Dolt handles merges natively using three-way merge. If conflicts occur:
+1. Run `bd sql "SELECT * FROM dolt_conflicts"` to view them
+2. Resolve with `bd sql "CALL dolt_conflicts_resolve('--ours')"` or `'--theirs'`
+3. Complete with `bd sync`
 
 **"Worktree doesn't exist"**
 

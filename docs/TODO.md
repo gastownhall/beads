@@ -140,8 +140,8 @@ A: No, TODOs are just task-type issues. The `bd todo` command provides shortcuts
 **Q: Can TODOs have dependencies?**
 A: Yes! Use `bd dep add <todo-id> <blocks-id>` like any other issue.
 
-**Q: Do TODOs sync with git?**
-A: Yes, they're exported to `.beads/issues.jsonl` like all other issues.
+**Q: Do TODOs sync across machines?**
+A: Yes, they're stored in the Dolt database and synced via Dolt remotes like all other issues.
 
 **Q: Can I use TODOs with bd ready?**
 A: Yes! `bd ready` shows all unblocked issues, including task-type TODOs.
@@ -154,7 +154,7 @@ A: Use `bd todo` for quick, informal tasks. Use `bd create -t task` for tasks th
 The TODO command follows beads' philosophy of **minimal surface area**:
 
 1. **No new types**: TODOs are task-type issues
-2. **No special storage**: Same database and JSONL as everything else
+2. **No special storage**: Same Dolt database as everything else
 3. **Convenience layer**: Just shortcuts for common operations
 4. **Fully compatible**: Works with all bd features and commands
 

@@ -26,11 +26,11 @@ Yes, beads is used in production for AI-assisted development. The API is stable 
 
 ## Architecture
 
-### Why SQLite + JSONL instead of just one?
+### Why Dolt instead of plain SQLite?
 
-- **SQLite** for fast local queries and complex filtering
-- **JSONL** for git-friendly versioning and sync
-- Auto-sync keeps them aligned
+- **Dolt** provides a version-controlled SQL database with built-in replication
+- Git-like branching, diffing, and merging at the database level
+- No need for a separate sync format -- Dolt handles it natively
 
 ### Why hash-based IDs instead of sequential?
 
@@ -61,12 +61,11 @@ bd sync
 
 ### How do I handle merge conflicts?
 
-Install the beads merge driver:
+Dolt handles merge conflicts at the database level. If conflicts arise during sync:
 ```bash
-bd init  # Prompts for merge driver
+bd doctor --fix
+bd sync
 ```
-
-Or manually resolve and reimport.
 
 ### Can multiple agents work on the same repo?
 

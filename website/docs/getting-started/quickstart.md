@@ -13,11 +13,8 @@ Get up and running with Beads in 2 minutes.
 First time in a repository:
 
 ```bash
-# Basic setup
+# Basic setup (uses Dolt backend)
 bd init
-
-# Dolt backend (version-controlled SQL database)
-bd init --backend dolt
 
 # For AI agents (non-interactive)
 bd init --quiet
@@ -39,9 +36,8 @@ The wizard will:
 - Prompt to configure git merge driver (recommended)
 
 Notes:
-- SQLite backend stores data in `.beads/beads.db`.
-- Dolt backend stores data in `.beads/dolt/` and records `"database": "dolt"` in `.beads/metadata.json`.
-- Dolt backend uses a Dolt server for database access (`bd dolt start/stop`).
+- Dolt stores data in `.beads/dolt/` and records `"database": "dolt"` in `.beads/metadata.json`.
+- The Dolt server handles database access (`bd dolt start/stop`).
 
 ## Your First Issues
 
@@ -149,9 +145,7 @@ bd stats
 
 ## Database Location
 
-By default, the database is in `.beads/beads.db` (gitignored).
-
-The JSONL file `.beads/issues.jsonl` is git-tracked and syncs automatically.
+By default, the Dolt database is in `.beads/dolt/` (gitignored). Sync is handled via Dolt-native replication.
 
 ## Next Steps
 

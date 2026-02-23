@@ -113,18 +113,6 @@ Add cycle detection for dependency graphs
 - Update documentation with examples
 ```
 
-### Important: Don't Include .beads/issues.jsonl Changes
-
-The `.beads/issues.jsonl` file is the project's issue database. **Do not include changes to this file in your PR.** CI will fail if this file is modified.
-
-If you accidentally committed changes to this file, fix it with:
-
-```bash
-git checkout origin/main -- .beads/issues.jsonl
-git commit --amend
-git push --force
-```
-
 ### Pull Requests
 
 - Keep PRs focused on a single feature or fix
@@ -132,7 +120,6 @@ git push --force
 - Update documentation as needed
 - Ensure CI passes before requesting review
 - Respond to review feedback promptly
-- **Do not include `.beads/issues.jsonl` changes** (see above)
 
 ## Testing Guidelines
 

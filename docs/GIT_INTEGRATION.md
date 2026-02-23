@@ -87,19 +87,17 @@ See [PROTECTED_BRANCHES.md](PROTECTED_BRANCHES.md) for complete setup guide, tro
 ### Installation
 
 ```bash
-# Install hooks for JSONL export on commit
+# Install hooks
 bd hooks install --beads
 ```
 
 ### What Gets Installed
 
 **pre-commit hook:**
-- Exports Dolt database to JSONL before commit
-- Ensures JSONL stays current in git for portability
+- Runs pre-commit checks for beads data consistency
 
 **post-merge hook:**
-- Imports updated JSONL after pull/merge
-- Keeps Dolt database current after remote changes
+- Ensures Dolt database is current after pull/merge operations
 
 ### Hook Implementation Details
 
@@ -140,7 +138,7 @@ The `detectExistingHooks()` function scans for existing hooks and classifies the
 ```
 ┌──────────────┐      ┌─────────────────┐
 │  OSS Contrib │─────▶│ Planning Repo   │
-│  (Fork)      │      │ (.beads/*.jsonl)│
+│  (Fork)      │      │ (.beads/dolt/)  │
 └──────────────┘      └─────────────────┘
        │
        │ PR
@@ -201,9 +199,7 @@ See [MULTI_REPO_MIGRATION.md](MULTI_REPO_MIGRATION.md) for complete guide.
 
 ### Git LFS Considerations
 
-**Do NOT use Git LFS for `.beads/issues.jsonl`:**
-- File size stays reasonable (<1MB per 10K issues)
-- Text diffs are valuable for review
+The Dolt database directory (`.beads/dolt/`) should be gitignored, not tracked via LFS or regular git.
 
 ## See Also
 

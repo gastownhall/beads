@@ -36,7 +36,7 @@ Tests on graphs with different topologies (linear chains, trees, dense graphs):
 ### Ready Work / Filtering
 - **BenchmarkGetReadyWork_Large** - Filter unblocked issues (10K dataset)
 - **BenchmarkGetReadyWork_XLarge** - Filter unblocked issues (20K dataset)
-- **BenchmarkGetReadyWork_FromJSONL** - Ready work on JSONL-imported database
+- **BenchmarkGetReadyWork_FromJSONL** - Ready work on imported database
 
 ### Search Operations
 - **BenchmarkSearchIssues_Large_NoFilter** - Search all open issues (10K dataset)
@@ -71,7 +71,7 @@ Tests on graphs with different topologies (linear chains, trees, dense graphs):
 Benchmark datasets are cached in `/tmp/beads-bench-cache/`:
 - `large.db` - 10,000 issues (16.6 MB)
 - `xlarge.db` - 20,000 issues (generated on demand)
-- `large-jsonl.db` - 10K issues via JSONL import
+
 
 Cached databases are reused across runs. To regenerate:
 ```bash

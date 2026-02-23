@@ -7,13 +7,12 @@ Synchronize issues with git remote in a single operation.
 
 ## Sync Steps
 
-1. Export pending changes to JSONL
-2. Commit changes to git
-3. Pull from remote (with conflict resolution)
-4. Import updated JSONL
-5. Push local commits to remote
+1. Commit pending changes to Dolt
+2. Pull from remote (with conflict resolution)
+3. Merge any updates
+4. Push to remote
 
-Wraps the entire git-based sync workflow for multi-device use.
+Wraps the Dolt sync workflow for multi-device use.
 
 ## Usage
 
@@ -22,8 +21,8 @@ Wraps the entire git-based sync workflow for multi-device use.
 - **Custom message**: `bd sync --message "Closed sprint issues"`
 - **Pull only**: `bd sync --no-push`
 - **Push only**: `bd sync --no-pull`
-- **Flush only**: `bd sync --flush-only` (export to JSONL without git operations)
-- **Import only**: `bd sync --import-only` (import from JSONL without git operations)
+- **Flush only**: `bd sync --flush-only` (commit to Dolt without pushing)
+- **Import only**: `bd sync --import-only` (pull without pushing)
 
 ## Separate Branch Workflow
 

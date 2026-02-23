@@ -8,9 +8,8 @@
 ## Problem Statement
 
 When contributors work on beads-the-project using beads-the-tool, their personal
-work-tracking issues leak into PRs. The `.beads/issues.jsonl` file is intentionally
-git-tracked (it's the project's canonical issue database), but contributors' local
-issues pollute the diff.
+work-tracking issues can leak into PRs. The `.beads/` directory contains the project's
+canonical issue database, but contributors' local issues can pollute the diff.
 
 This is a **recursion problem unique to self-hosting projects**.
 
@@ -19,13 +18,13 @@ This is a **recursion problem unique to self-hosting projects**.
 ```
 beads-the-project/
 ├── .beads/
-│   └── issues.jsonl    ← Project bugs, features, tasks (SHOULD be in PRs)
+│   └── dolt/           ← Project bugs, features, tasks (SHOULD be in PRs)
 └── src/
     └── ...
 
 contributor-working-on-beads/
 ├── .beads/
-│   └── issues.jsonl    ← Project issues PLUS personal tracking (POLLUTES PRs)
+│   └── dolt/           ← Project issues PLUS personal tracking (POLLUTES PRs)
 └── src/
     └── ...
 ```
@@ -35,7 +34,7 @@ When a contributor:
 2. Uses `bd create "My TODO: fix tests before lunch"` to track their work
 3. Creates a PR
 
-The PR diff includes their personal issues in `.beads/issues.jsonl`.
+The PR diff includes their personal issues in the beads database.
 
 ### Why This Matters
 
@@ -200,7 +199,7 @@ Options:
      Creates ~/.beads-planning for personal tracking
 
   2. Continue to current repo
-     Issue will appear in .beads/issues.jsonl (affects PRs)
+     Issue will appear in the project database (affects PRs)
 
 Choice [1]:
 ```
@@ -264,7 +263,7 @@ Contributor routing works independently of the project repo's sync configuration
 |-----------|--------------|---------------|-------|
 | **Direct** | Uses `.beads/` directly | Uses `~/.beads-planning/.beads/` | Both use direct storage, no interaction |
 | **Sync-branch** | Uses separate branch for beads | Uses direct storage | Planning repo does NOT inherit `sync.branch` config |
-| **No-db mode** | JSONL-only operations | Routes JSONL operations to planning repo | Planning repo still uses database |
+| **No-db mode** | Lightweight operations | Routes operations to planning repo | Planning repo still uses database |
 | **Server mode** | Background Dolt server | Server bypassed for routed issues | Planning repo operations are synchronous |
 | **Local-only** | No git remote | Works normally | Planning repo can have its own git remote independently |
 | **External (BEADS_DIR)** | Uses separate repo via env var | BEADS_DIR takes precedence over routing | If `BEADS_DIR` is set, routing config is ignored |
@@ -331,7 +330,7 @@ bd doctor                    # Diagnoses database at $BEADS_DIR
 
 ### Routing Not Working
 
-**Symptom**: Issues appear in `./.beads/issues.jsonl` instead of planning repo
+**Symptom**: Issues appear in the current repo's database instead of planning repo
 
 **Diagnosis**:
 ```bash

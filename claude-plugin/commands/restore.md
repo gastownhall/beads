@@ -8,10 +8,9 @@ Restore full history of a compacted issue from git version control.
 When an issue is compacted, the git commit hash is saved. This command:
 
 1. Reads the compacted_at_commit from the database
-2. Checks out that commit temporarily
-3. Reads the full issue from JSONL at that point in history
-4. Displays the full issue history (description, events, etc.)
-5. Returns to the current git state
+2. Retrieves the full issue from Dolt history at that point
+3. Displays the full issue history (description, events, etc.)
+4. Returns to the current state
 
 ## Usage
 

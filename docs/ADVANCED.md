@@ -162,7 +162,7 @@ When agents discover duplicate issues, they should:
 
 Git worktrees work with bd. Each worktree can have its own `.beads` directory, or worktrees can share a database via redirects (see [Database Redirects](#database-redirects)).
 
-**With Dolt backend:** Each worktree operates directly on the database — no special coordination needed. Use `bd sync` to synchronize JSONL with git when ready.
+**With Dolt backend:** Each worktree operates directly on the database — no special coordination needed. Use `bd dolt push` to sync with Dolt remotes when ready.
 
 **With Dolt server mode:** Multiple worktrees can connect to the same Dolt server for concurrent access without conflicts.
 
@@ -234,9 +234,24 @@ bd where --json
 - Long-lived forks (they should have their own issues)
 - Git worktrees (each should have its own `.beads` directory)
 
-## Handling Git Merge Conflicts
+## Handling Merge Conflicts
 
 **With hash-based IDs (v0.20.1+), ID collisions are eliminated.** Different issues get different hash IDs, so concurrent creation doesn't cause conflicts.
+
+### Dolt Native Merge (Default)
+
+Dolt handles merge conflicts natively with cell-level merge. When concurrent changes affect the same issue field, Dolt detects and resolves conflicts automatically where possible:
+
+```bash
+# Pull with automatic merge
+bd dolt pull
+
+# Check for unresolved conflicts
+bd vc conflicts
+
+# Resolve if needed
+bd vc resolve
+```
 
 ### Understanding Same-ID Scenarios
 
@@ -248,8 +263,8 @@ When you encounter the same ID during import, it's an **update operation**, not 
 
 **Preview changes before importing:**
 ```bash
-# After git merge or pull
-bd import -i .beads/issues.jsonl --dry-run
+# Preview an import
+bd import -i data.jsonl --dry-run
 
 # Output shows:
 # Exact matches (idempotent): 15
@@ -261,41 +276,9 @@ bd import -i .beads/issues.jsonl --dry-run
 #   bd-b8e1: Add feature (changed: description)
 ```
 
-### Git Merge Conflicts
-
-The conflicts you'll encounter are **git merge conflicts** in the JSONL file when the same issue was modified on both branches (different timestamps/fields). This is not an ID collision.
-
-**Resolution:**
-```bash
-# After git merge creates conflict
-git checkout --theirs .beads/issues.jsonl  # Accept remote version
-# OR
-git checkout --ours .beads/issues.jsonl    # Keep local version
-# OR manually resolve in editor (keep line with newer updated_at)
-
-# Import the resolved JSONL
-bd import -i .beads/issues.jsonl
-
-# Commit the merge
-git add .beads/issues.jsonl
-git commit
-```
-
-### Advanced: Intelligent Merge Tools
-
-For Git merge conflicts in `.beads/issues.jsonl`, consider using **[beads-merge](https://github.com/neongreen/mono/tree/main/beads-merge)** - a specialized merge tool by @neongreen that:
-
-- Matches issues across conflicted JSONL files
-- Merges fields intelligently (e.g., combines labels, picks newer timestamps)
-- Resolves conflicts automatically where possible
-- Leaves remaining conflicts for manual resolution
-- Works as a Git/jujutsu merge driver
-
-After using beads-merge to resolve the git conflict, just run `bd import` to update your database.
-
 ## Custom Git Hooks
 
-Git hooks keep the JSONL file in sync with the Dolt database for git portability:
+Git hooks can be used to integrate beads with your git workflow:
 
 ### Using the Installer (Recommended)
 
@@ -303,38 +286,15 @@ Git hooks keep the JSONL file in sync with the Dolt database for git portability
 bd hooks install
 ```
 
-This installs:
-- **pre-commit** — Exports Dolt changes to JSONL and stages it
-- **post-merge** — Imports pulled JSONL changes into Dolt (using branch-then-merge for cell-level conflict resolution)
-- **post-checkout** — Imports JSONL after branch checkout
+This installs hooks for beads data consistency checks during git operations.
 
-### Manual Setup
-
-Create `.git/hooks/pre-commit`:
-```bash
-#!/bin/bash
-bd export -o .beads/issues.jsonl
-git add .beads/issues.jsonl
-```
-
-Create `.git/hooks/post-merge`:
-```bash
-#!/bin/bash
-bd import -i .beads/issues.jsonl
-```
-
-Make hooks executable:
-```bash
-chmod +x .git/hooks/pre-commit .git/hooks/post-merge
-```
-
-See [DOLT.md](DOLT.md) for details on how hooks work with the Dolt backend.
+See [DOLT.md](DOLT.md) for details on how the Dolt backend handles sync natively.
 
 ## Extensible Database
 
 > **Note:** Custom table extensions via `UnderlyingDB()` are a **SQLite-only** pattern.
 > With the Dolt backend, build standalone integration tools using bd's CLI with `--json`
-> flags, or use the JSONL files directly. See [EXTENDING.md](EXTENDING.md) for details.
+> flags, or use `bd query` for direct SQL access. See [EXTENDING.md](EXTENDING.md) for details.
 
 For SQLite-backend users, you can extend bd with your own tables and queries:
 

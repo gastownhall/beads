@@ -125,5 +125,5 @@ Check the import configuration:
 
 ```bash
 bd config get import.orphan_handling
-bd import -i .beads/issues.jsonl --orphan-handling allow
+bd import -i backup.jsonl --orphan-handling allow
 ```

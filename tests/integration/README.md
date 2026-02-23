@@ -20,6 +20,6 @@ Integration tests should:
 1. Use temporary workspaces (cleaned up automatically)
 2. Test real bd CLI commands, not just internal APIs
 3. Use embedded mode for fast execution (no Dolt server dependency)
-4. Verify behavior in `.beads/issues.jsonl` when relevant
+4. Verify behavior via `bd show --json` or `bd list --json` when relevant
 5. Clean up resources in `finally` blocks
 6. Provide clear output showing what's being tested

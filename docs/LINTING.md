@@ -51,8 +51,8 @@ All file paths are either:
 **Status**: Acceptable for user-facing database files
 
 - G301: 0755 for database directories (allows other users to read)
-- G302: 0644 for JSONL files (version controlled, needs to be readable)
-- G306: 0644 for new JSONL files (consistency with existing files)
+- G302: 0644 for data files (needs to be readable)
+- G306: 0644 for new data files (consistency with existing files)
 
 **Pattern 4**: G201/G202 - SQL string formatting/concatenation (3 issues)
 **Status**: Safe - using placeholders and bounded queries

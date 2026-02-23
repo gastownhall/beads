@@ -167,10 +167,8 @@ bd sync [flags]
 ```
 
 Performs:
-1. Export database to JSONL
-2. Git add `.beads/issues.jsonl`
-3. Git commit
-4. Git push
+1. Dolt commit (snapshot current database state)
+2. Dolt push to remote
 
 **Examples:**
 ```bash

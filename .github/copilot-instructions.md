@@ -6,7 +6,7 @@
 
 **Key Features:**
 - Dependency-aware issue tracking
-- Auto-sync with Git via JSONL
+- Auto-sync via Dolt-native replication
 - AI-optimized CLI with JSON output
 - Dolt server mode for background operations
 - MCP server integration for Claude and other AI assistants
@@ -14,7 +14,7 @@
 ## Tech Stack
 
 - **Language**: Go 1.21+
-- **Storage**: Dolt (internal/storage/dolt/)
+- **Storage**: Dolt (version-controlled SQL database)
 - **CLI Framework**: Cobra
 - **Testing**: Go standard testing + table-driven tests
 - **CI/CD**: GitHub Actions
@@ -36,7 +36,7 @@
 
 ### Git Workflow
 - Install git hooks: `bd hooks install`
-- Use `bd dolt push` / `bd dolt pull` for remote sync
+- Use `bd sync` for remote sync (Dolt-native replication)
 
 ## Issue Tracking with bd
 
@@ -59,7 +59,7 @@ bd list --status open --priority 1 --json
 bd show <id> --json
 
 # Sync (if remote configured)
-bd dolt push  # Push to Dolt remote
+bd sync  # Sync with Dolt remote
 ```
 
 ### Workflow
@@ -69,7 +69,7 @@ bd dolt push  # Push to Dolt remote
 3. **Work on it**: Implement, test, document
 4. **Discover new work?** `bd create "Found bug" --description="What was found and why" -p 1 --deps discovered-from:<parent-id> --json`
 5. **Complete**: `bd close <id> --reason "Done" --json`
-6. **Sync**: `bd dolt push` (push to Dolt remote if configured)
+6. **Sync**: `bd sync` (sync with Dolt remote if configured)
 
 **IMPORTANT**: Always include `--description` when creating issues. Issues without descriptions lack context for future work.
 
@@ -95,8 +95,7 @@ beads/
 ├── examples/            # Integration examples
 ├── docs/                # Documentation
 └── .beads/
-    ├── dolt/            # Dolt database (DO NOT COMMIT)
-    └── issues.jsonl     # Git-synced issue storage
+    └── dolt/            # Dolt database (source of truth)
 ```
 
 ## Available Resources
@@ -122,11 +121,11 @@ Use the beads MCP server for native function calls instead of shell commands:
 
 - ✅ Use bd for ALL task tracking
 - ✅ Always use `--json` flag for programmatic use
-- ✅ Use `bd dolt push` for remote sync
+- ✅ Use `bd sync` for remote sync
 - ✅ Test with `t.TempDir() in Go tests`
 - ❌ Do NOT create markdown TODO lists
 - ❌ Do NOT create test issues in production DB
-- ❌ Do NOT commit `.beads/dolt/` (JSONL only)
+- ❌ Do NOT manually modify `.beads/dolt/`
 
 ---
 

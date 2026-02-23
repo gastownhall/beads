@@ -1,65 +1,53 @@
 ---
 sidebar_position: 3
 title: Merge Conflicts
-description: Resolve JSONL merge conflicts
+description: Resolve Dolt merge conflicts
 ---
 
 # Merge Conflicts Recovery
 
-This runbook helps you resolve JSONL merge conflicts that occur during Git operations.
+This runbook helps you resolve merge conflicts that occur during Dolt sync operations.
 
 ## Symptoms
 
-- Git merge conflicts in `.beads/*.jsonl` files
 - `bd sync` fails with conflict errors
 - Different issue states between clones
 
 ## Diagnosis
 
 ```bash
-# Check for conflicted files
-git status
+# Check database health
+bd doctor
 
-# Look for conflict markers
-grep -l "<<<<<<" .beads/*.jsonl
+# Check for Dolt conflicts
+bd doctor --fix
 ```
 
 ## Solution
 
-:::warning
-JSONL files are append-only logs. Manual editing requires care.
-:::
-
-**Step 1:** Identify conflicted files
+**Step 1:** Check for conflicts
 ```bash
-git diff --name-only --diff-filter=U
+bd doctor
 ```
 
-**Step 2:** For each conflicted JSONL file, keep both versions
-```bash
-# Accept both changes (append-only is safe)
-git checkout --ours .beads/issues.jsonl
-git add .beads/issues.jsonl
-```
-
-**Step 3:** Force rebuild to reconcile
+**Step 2:** Force rebuild to reconcile
 ```bash
 bd doctor --fix
 ```
 
-**Step 4:** Verify state
+**Step 3:** Verify state
 ```bash
 bd list
-bd status
+bd stats
 ```
 
-**Step 5:** Complete the merge
+**Step 4:** Sync resolved state
 ```bash
-git commit -m "Resolved beads merge conflicts"
+bd sync
 ```
 
 ## Prevention
 
-- Sync before and after Git operations
+- Sync before and after work sessions
 - Use `bd sync` regularly
-- Avoid concurrent modifications from multiple clones
+- Avoid concurrent modifications from multiple clones without the Dolt server running

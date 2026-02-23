@@ -32,11 +32,10 @@ your-project/
 │   ├── beads-worktrees/          # Beads-created worktrees live here
 │   │   └── beads-sync/           # Default sync branch worktree
 │   │       └── .beads/
-│   │           └── issues.jsonl  # Issue data committed here
+│   │           └── dolt/         # Dolt database
 │   └── worktrees/                # Standard git worktrees directory
 ├── .beads/                       # Your working copy
-│   ├── beads.db                  # Local SQLite database
-│   └── issues.jsonl              # Local JSONL (may differ from sync branch)
+│   └── dolt/                     # Local Dolt database
 └── src/                          # Your code (untouched by sync)
 ```
 
@@ -109,7 +108,6 @@ Main Repository
 ├── .git/                    # Shared git directory
 ├── .beads/                  # Shared database (main repo)
 │   ├── dolt/               # Dolt database directory
-│   ├── issues.jsonl        # Issue data (git-tracked)
 │   └── config.yaml         # Configuration
 ├── feature-branch/         # Worktree 1
 │   └── (code files only)
@@ -121,7 +119,7 @@ Main Repository
 - ✅ **One database** - All worktrees share the same `.beads` directory in main repo
 - ✅ **Automatic discovery** - Database found regardless of which worktree you're in
 - ✅ **Concurrent access** - Database locking prevents corruption
-- ✅ **Git integration** - Issues sync via JSONL in main repo
+- ✅ **Dolt sync** - Issues sync via Dolt remotes
 
 ### Worktree Detection
 
@@ -176,10 +174,9 @@ bd intelligently finds the correct database:
 Pre-commit hooks adapt to worktree context:
 
 ```bash
-# In main repo: Stages JSONL normally
-git add .beads/issues.jsonl
+# In main repo: Runs beads checks normally
 
-# In worktree: Safely skips staging (files outside working tree)
+# In worktree: Safely handles shared database context
 # Hook detects context and handles appropriately
 ```
 
@@ -190,7 +187,7 @@ Worktree-aware sync operations:
 - **Repository root detection**: Uses `git rev-parse --show-toplevel` for main repo
 - **Git directory handling**: Distinguishes between `.git` (file) and `.git/` (directory)
 - **Path resolution**: Converts between worktree and main repo paths
-- **Concurrent safety**: SQLite locking prevents corruption
+- **Concurrent safety**: Database locking prevents corruption
 
 ## Setup Examples
 
@@ -344,13 +341,13 @@ bd config set dolt.auto-commit true
 - **Reduced overhead**: One database instead of per-worktree copies
 - **Instant sync**: Changes visible across all worktrees immediately
 - **Memory efficient**: Single database instance vs multiple
-- **Git efficient**: One JSONL file to track vs multiple
+- **Storage efficient**: One Dolt database vs multiple
 
 ### Concurrent Access
 
 - **Database locking**: Prevents corruption during simultaneous access (use Dolt server mode via `bd dolt start` for multi-writer)
 - **Git operations**: Safe concurrent commits from different worktrees
-- **Sync coordination**: JSONL-based sync prevents conflicts
+- **Sync coordination**: Dolt-based sync with cell-level merge prevents conflicts
 
 ## Migration from Limited Support
 
@@ -415,7 +412,7 @@ For users who want complete separation between code history and issue tracking, 
 ### Why Use a Separate Repo?
 
 - **Clean code history** - No beads commits polluting your project's git log
-- **Shared across worktrees** - All worktrees can use the same BEADS_DIR
+- **Shared across worktrees** - All worktrees can use the same Dolt database via BEADS_DIR
 - **Platform agnostic** - Works even if your main project isn't git-based
 - **Monorepo friendly** - Single beads repo for multiple projects
 

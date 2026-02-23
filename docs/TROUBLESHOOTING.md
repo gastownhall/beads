@@ -265,9 +265,9 @@ You're trying to import issues that conflict with existing ones. Options:
 # Skip existing issues (only import new ones)
 bd import -i issues.jsonl --skip-existing
 
-# Or clear database and re-import everything
+# Or clear database and re-import from an export
 rm -rf .beads/dolt
-bd import -i .beads/issues.jsonl
+bd import -i backup.jsonl
 ```
 
 ### Import fails with missing parent errors
@@ -277,17 +277,16 @@ If you see errors like `parent issue bd-abc does not exist` when importing hiera
 **Quick fix using resurrection:**
 
 ```bash
-# Auto-resurrect deleted parents from JSONL history
+# Auto-resurrect deleted parents from import data
 bd import -i issues.jsonl --orphan-handling resurrect
 
 # Or set as default behavior
 bd config set import.orphan_handling "resurrect"
-bd sync  # Now uses resurrect mode
 ```
 
 **What resurrection does:**
 
-1. Searches the full JSONL file for the missing parent issue
+1. Searches the import data for the missing parent issue
 2. Recreates it as a tombstone (Status=Closed, Priority=4)
 3. Preserves the parent's original title and description
 4. Maintains referential integrity for hierarchical children
@@ -310,7 +309,7 @@ bd config set import.orphan_handling "strict"
 
 - Parent issue was deleted using `bd delete`
 - Branch merge where one side deleted the parent
-- Manual JSONL editing that removed parent entries
+- Manual editing that removed parent entries
 - Database corruption or incomplete import
 
 **Prevention:**
@@ -327,8 +326,8 @@ See [CONFIG.md](CONFIG.md#example-import-orphan-handling) for complete configura
 
 **Cause:** `bd admin reset --force` only removes **local** beads data. Old data can return from:
 
-1. **Remote sync branch** - If you configured a sync branch (via `bd init --branch` or `bd config set sync.branch`), old JSONL data may exist on the remote
-2. **Git history** - JSONL files committed to git are preserved in history
+1. **Dolt remotes** - If you have configured Dolt remotes, old data may exist there
+2. **Remote sync branch** - If you configured a sync branch, old data may exist on the remote
 3. **Other machines** - Other clones may push old data after you reset
 
 **Solution for complete clean slate:**
@@ -344,14 +343,7 @@ bd config get sync.branch
 git push origin --delete <sync-branch-name>
 # Common names: beads-sync, beads-metadata
 
-# 3. Remove JSONL from git history (optional, destructive)
-# Only do this if you want to completely erase beads history
-git filter-branch --force --index-filter \
-  'git rm --cached --ignore-unmatch .beads/issues.jsonl' \
-  --prune-empty -- --all
-git push origin --force --all
-
-# 4. Re-initialize
+# 3. Re-initialize
 bd init
 ```
 
@@ -380,17 +372,19 @@ bd config set sync.branch ""  # Disable sync branch feature
 For **physical database corruption** (disk failures, power loss, filesystem errors):
 
 ```bash
-# If corrupted, reimport from JSONL (source of truth in git)
+# If corrupted, rebuild from a Dolt remote or from an export backup
 mv .beads/dolt .beads/dolt.backup
 bd init
-bd import -i .beads/issues.jsonl
+bd dolt pull    # Pull from Dolt remote if configured
+# Or import from a backup export:
+# bd import -i backup.jsonl
 ```
 
 For **logical consistency issues** (ID collisions from branch merges, parallel workers):
 
 ```bash
-# This is NOT corruption - use collision resolution instead
-bd import -i .beads/issues.jsonl
+# This is NOT corruption - use Dolt merge or bd doctor --fix
+bd doctor --fix
 ```
 
 See [FAQ](FAQ.md#whats-the-difference-between-database-corruption-and-id-collisions) for the distinction.
@@ -452,42 +446,19 @@ This means bd found multiple `.beads` directories in your directory hierarchy. T
 
 ## Git and Sync Issues
 
-### Git merge conflict in `issues.jsonl`
+### Merge conflicts
 
-When both sides add issues, you'll get conflicts. Resolution:
+Dolt handles merge conflicts natively with cell-level merge. When concurrent changes affect the same issue field, Dolt detects the conflict and allows resolution via SQL:
 
-1. Open `.beads/issues.jsonl`
-2. Look for `<<<<<<< HEAD` markers
-3. Most conflicts can be resolved by **keeping both sides**
-4. Each line is independent unless IDs conflict
-5. For same-ID conflicts, keep the newest (check `updated_at`)
-
-Example resolution:
 ```bash
-# After resolving conflicts manually
-git add .beads/issues.jsonl
-git commit
-bd import -i .beads/issues.jsonl  # Sync to SQLite
+# Check for conflicts after a Dolt pull
+bd dolt pull
+
+# Resolve conflicts if any
+bd vc conflicts
 ```
-
-See [ADVANCED.md](ADVANCED.md) for detailed merge strategies.
-
-### Git merge conflicts in JSONL
 
 **With hash-based IDs (v0.20.1+), ID collisions don't occur.** Different issues get different hash IDs.
-
-If git shows a conflict in `.beads/issues.jsonl`, it's because the same issue was modified on both branches:
-
-```bash
-# Preview what will be updated
-bd import -i .beads/issues.jsonl --dry-run
-
-# Resolve git conflict (keep newer version or manually merge)
-git checkout --theirs .beads/issues.jsonl  # Or --ours, or edit manually
-
-# Import updates the database
-bd import -i .beads/issues.jsonl
-```
 
 See [ADVANCED.md#handling-git-merge-conflicts](ADVANCED.md#handling-git-merge-conflicts) for details.
 
@@ -550,21 +521,19 @@ See [WORKTREES.md](WORKTREES.md) for details on how beads uses worktrees.
 
 ### Auto-sync not working
 
-Check if auto-sync is enabled:
+Check if Dolt server is running and configured:
 
 ```bash
 # Check if Dolt server is running
 bd doctor
 
-# Manually export/import
-bd export -o .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
+# Manual sync with Dolt remotes
+bd dolt push
+bd dolt pull
 
-# Install git hooks for guaranteed sync
-bd hooks install
+# Check sync configuration
+bd config get sync.mode
 ```
-
-If you disabled auto-sync with `--no-auto-flush` or `--no-auto-import`, remove those flags or use `bd sync` manually.
 
 ## Ready Work and Dependencies
 
@@ -628,7 +597,7 @@ For large databases (10k+ issues):
 
 ```bash
 # Export only open issues
-bd export --format=jsonl --status=open -o .beads/issues.jsonl
+bd export --format=jsonl --status=open -o open-issues.jsonl
 
 # Or filter by priority
 bd export --format=jsonl --priority=0 --priority=1 -o critical.jsonl
@@ -649,20 +618,13 @@ bd admin compact --dry-run --all
 
 # Compact old closed issues
 bd admin compact --days 90
+
+# Run Dolt garbage collection
+cd .beads/dolt && dolt gc
 ```
 
-### Large JSONL files
-
-If `.beads/issues.jsonl` is very large:
-
+Consider splitting large projects into multiple databases:
 ```bash
-# Check file size
-ls -lh .beads/issues.jsonl
-
-# Remove old closed issues
-bd admin compact --days 90
-
-# Or split into multiple projects
 cd ~/project/component1 && bd init --prefix comp1
 cd ~/project/component2 && bd init --prefix comp2
 ```
@@ -735,12 +697,12 @@ See [integrations/beads-mcp/README.md](../integrations/beads-mcp/README.md) for 
 **Issue:** Sandboxed environments restrict permissions, preventing server control and causing "out of sync" errors.
 
 **Common symptoms:**
-- "Database out of sync with JSONL" errors that persist after running `bd import`
+- "Database out of sync" errors that persist after running `bd import`
 - `bd dolt stop` fails with "operation not permitted"
-- JSONL hash mismatch warnings (bd-160)
+- Hash mismatch warnings (bd-160)
 - Commands intermittently fail with staleness errors
 
-**Root cause:** The sandbox can't signal/kill the existing Dolt server process, so the DB stays stale and refuses to import.
+**Root cause:** The sandbox can't signal/kill the existing Dolt server process, so the DB stays stale.
 
 ---
 
@@ -761,8 +723,8 @@ bd --sandbox update bd-42 --status in_progress
 
 **What sandbox mode does:**
 - Uses embedded database mode (no server needed)
-- Disables auto-export to JSONL
-- Disables auto-import from JSONL
+- Disables auto-export
+- Disables auto-import
 - Allows bd to work in network-restricted environments
 
 **Note:** You'll need to manually sync when outside the sandbox:
@@ -789,7 +751,7 @@ bd import --force
 # Fixes: stuck state caused by stale server cache
 ```
 
-**Shows:** `Metadata updated (database already in sync with JSONL)`
+**Shows:** `Metadata updated (database already in sync)`
 
 **2. Skip staleness check (`--allow-stale` global flag)**
 
@@ -811,7 +773,7 @@ bd --allow-stale list --status open
 ```bash
 # Most reliable for sandboxed environments
 bd --sandbox ready
-bd --sandbox import -i .beads/issues.jsonl
+bd --sandbox import -i backup.jsonl
 ```
 
 ---
@@ -825,7 +787,7 @@ If stuck in a sandboxed environment:
 bd --sandbox ready
 
 # Step 2: If you get staleness errors, force import
-bd import --force -i .beads/issues.jsonl
+bd import --force
 
 # Step 3: If still blocked, use allow-stale (emergency only)
 bd --allow-stale ready

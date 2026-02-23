@@ -286,8 +286,7 @@ bd --sandbox <command>
 
 **What it does:**
 - Uses embedded database mode (no server needed)
-- Disables auto-export to JSONL
-- Disables auto-import from JSONL
+- Disables auto-sync operations
 
 **When to use:** Sandboxed environments where the Dolt server can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
 
@@ -297,7 +296,7 @@ bd --sandbox <command>
 # Skip staleness check (emergency escape hatch)
 bd --allow-stale <command>
 
-# Example: access database even if out of sync with JSONL
+# Example: access database even if it appears out of sync
 bd --allow-stale ready --json
 bd --allow-stale list --status open --json
 ```
@@ -315,7 +314,7 @@ bd import --force -i .beads/issues.jsonl
 
 **When to use:** `bd import` reports "0 created, 0 updated" but staleness errors persist.
 
-**Shows:** `Metadata updated (database already in sync with JSONL)`
+**Shows:** `Metadata updated (database already in sync)`
 
 ### Other Global Flags
 
@@ -324,8 +323,8 @@ bd import --force -i .beads/issues.jsonl
 bd --json <command>
 
 # Disable auto-sync
-bd --no-auto-flush <command>    # Disable auto-export to JSONL
-bd --no-auto-import <command>   # Disable auto-import from JSONL
+bd --no-auto-flush <command>    # Disable auto-flush
+bd --no-auto-import <command>   # Disable auto-import
 
 # Custom database path
 bd --db /path/to/.beads/beads.db <command>
@@ -419,15 +418,15 @@ bd admin reset --force
 ```
 
 **What gets removed:**
-- `.beads/` directory (database, JSONL, config)
+- `.beads/` directory (database, config)
 - Git hooks installed by bd
 - Merge driver configuration
 - Sync branch worktrees (`.git/beads-worktrees/`)
 
 **What does NOT get removed:**
 - Remote sync branch (if configured)
-- JSONL history in git commits
-- Remote repository data
+- Remote Dolt repository data
+- Historical git commits
 
 **Important:** If you want a complete clean slate (including remote data), see [Troubleshooting: Old data returns after reset](TROUBLESHOOTING.md#old-data-returns-after-reset).
 
@@ -661,15 +660,14 @@ bd migrate sync beads-sync --orphan                    # Delete and recreate as 
 ### Sync Operations
 
 ```bash
-# Manual sync (force immediate export/import/commit/push)
+# Manual sync (force immediate commit/push)
 bd sync
 
 # What it does:
-# 1. Export pending changes to JSONL
-# 2. Commit to git
-# 3. Pull from remote
-# 4. Import any updates
-# 5. Push to remote
+# 1. Commit pending changes to Dolt
+# 2. Pull from remote
+# 3. Merge any updates
+# 4. Push to remote
 ```
 
 ### Key-Value Store
@@ -698,8 +696,7 @@ bd kv list --json                      # Machine-readable output
 
 **Storage notes:**
 - KV data is stored in the local database with a `kv.` prefix
-- In `dolt-native` or `belt-and-suspenders` sync modes, KV data syncs via Dolt remotes
-- In `git-portable` mode, KV data stays local (not exported to JSONL)
+- KV data syncs via Dolt remotes
 
 **Use cases:**
 - Feature flags: `bd set debug_mode true`
@@ -753,7 +750,7 @@ Only `blocks` dependencies affect the ready work queue.
 The `--external-ref` flag (v0.9.2+) links beads issues to external trackers:
 
 - Supports short form (`gh-123`) or full URL (`https://github.com/...`)
-- Portable via JSONL - survives sync across machines
+- Portable via Dolt - survives sync across machines
 - Custom prefixes work for any tracker (`jira-PROJ-456`, `linear-789`)
 
 ## Output Formats

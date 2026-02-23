@@ -172,7 +172,7 @@ bd delete bd-42
 bd delete bd-42 -f --json
 ```
 
-**Note:** Deletions are tracked in `.beads/deletions.jsonl` for sync.
+**Note:** Deletions are tracked in the Dolt database for sync.
 
 ## bd search
 

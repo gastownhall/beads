@@ -40,7 +40,7 @@ bd doctor --check=pollution              # Detect test issues
 bd doctor --check=pollution --clean      # Delete test issues
 
 # Recovery modes
-bd doctor --fix --source=jsonl           # Rebuild DB from JSONL
+bd doctor --fix --source=dolt            # Rebuild from Dolt history
 bd doctor --fix --force                  # Force repair on corrupted DB
 ```
 
@@ -374,9 +374,8 @@ bd --no-auto-flush --no-auto-import <command>
 ```
 
 **What it does:**
-- Uses embedded mode (direct database access, no Dolt server)
-- Disables auto-export to JSONL
-- Disables auto-import from JSONL
+- Uses embedded mode (direct database access, no Dolt server needed)
+- Disables auto-sync operations
 
 **When to use:** Sandboxed environments where the Dolt server can't be controlled (permission restrictions), or when auto-detection doesn't trigger.
 
@@ -386,7 +385,7 @@ bd --no-auto-flush --no-auto-import <command>
 # Skip staleness check (emergency escape hatch)
 bd --allow-stale <command>
 
-# Example: access database even if out of sync with JSONL
+# Example: access database even if it appears out of sync
 bd --allow-stale ready --json
 bd --allow-stale list --status open --json
 ```
@@ -404,7 +403,7 @@ bd import --force -i .beads/issues.jsonl
 
 **When to use:** `bd import` reports "0 created, 0 updated" but staleness errors persist.
 
-**Shows:** `Metadata updated (database already in sync with JSONL)`
+**Shows:** `Metadata updated (database already in sync)`
 
 ### Other Global Flags
 
@@ -416,8 +415,8 @@ bd --json <command>
 bd --embedded <command>
 
 # Disable auto-sync
-bd --no-auto-flush <command>    # Disable auto-export to JSONL
-bd --no-auto-import <command>   # Disable auto-import from JSONL
+bd --no-auto-flush <command>    # Disable auto-flush
+bd --no-auto-import <command>   # Disable auto-import
 
 # Custom database path
 bd --db /path/to/.beads/beads.db <command>
@@ -504,7 +503,7 @@ bd sync  # Now uses resurrect mode by default
 **Orphan handling modes:**
 
 - **`allow` (default)** - Import orphaned children without parent validation. Most permissive, ensures no data loss even if hierarchy is temporarily broken.
-- **`resurrect`** - Search JSONL history for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data. Dependencies are also resurrected on best-effort basis.
+- **`resurrect`** - Search history for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data. Dependencies are also resurrected on best-effort basis.
 - **`skip`** - Skip orphaned children with warning. Partial import succeeds but some issues are excluded.
 - **`strict`** - Fail import immediately if a child's parent is missing. Use when database integrity is critical.
 
@@ -552,16 +551,10 @@ These invariants prevent data loss and would have caught issues like GH #201 (mi
 bd sync
 
 # What it does:
-# 1. Export pending changes to JSONL
-# 2. Commit to git
-# 3. Pull from remote
-# 4. Import any updates
-# 5. Push to remote
-
-# Resolve JSONL merge conflict markers (v0.47.0+)
-bd resolve-conflicts                          # Resolve in mechanical mode
-bd resolve-conflicts --dry-run --json         # Preview resolution
-# Mechanical mode rules: updated_at wins, closed beats open, higher priority wins
+# 1. Commit pending changes to Dolt
+# 2. Pull from remote
+# 3. Merge any updates
+# 4. Push to remote
 ```
 
 ## Issue Types
@@ -598,7 +591,7 @@ Only `blocks` dependencies affect the ready work queue.
 The `--external-ref` flag (v0.9.2+) links beads issues to external trackers:
 
 - Supports short form (`gh-123`) or full URL (`https://github.com/...`)
-- Portable via JSONL - survives sync across machines
+- Portable via Dolt - survives sync across machines
 - Custom prefixes work for any tracker (`jira-PROJ-456`, `linear-789`)
 
 ## Output Formats

@@ -18,9 +18,7 @@ We will respond within 48 hours and work with you to address the issue.
 
 ### Database Security
 
-bd stores issue data locally in:
-- Dolt database (`.beads/dolt/`) - local only, gitignored
-- JSONL files (`.beads/issues.jsonl`) - committed to git
+bd stores issue data locally in a Dolt database (`.beads/dolt/`), which is gitignored.
 
 **Important**:
 - Do not store sensitive information (passwords, API keys, secrets) in issue descriptions or metadata
@@ -64,7 +62,7 @@ Once version 1.0 is released, we will support the latest major version and one p
 ## Best Practices
 
 1. **Don't commit secrets** - Never put API keys, passwords, or credentials in issue descriptions
-2. **Review before export** - Check `.beads/issues.jsonl` before committing sensitive project details
+2. **Review before sharing** - Check issue content before sharing project details
 3. **Use private repos** - If your issues contain proprietary information, use private git repositories
 4. **Validate git hooks** - If using automated export/import hooks, review them for safety
 5. **Regular updates** - Keep bd updated to the latest version: `go install github.com/steveyegge/beads/cmd/bd@latest`
@@ -72,7 +70,7 @@ Once version 1.0 is released, we will support the latest major version and one p
 ## Known Limitations
 
 - bd is designed for **development/internal use**, not production secret management
-- Issue data is stored in plain text (both Dolt and JSONL)
+- Issue data is stored in plain text in the Dolt database
 - No built-in encryption or access control (relies on filesystem permissions)
 - No audit logging beyond git history
 

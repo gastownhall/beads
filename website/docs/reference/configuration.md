@@ -67,9 +67,7 @@ dedupe_on_import = false      # Run duplicate detection after import
 
 ```toml
 [export]
-path = ".beads/issues.jsonl"  # Export file location
-auto_export = true            # Auto-export on changes
-debounce_seconds = 5          # Debounce interval
+path = ".beads/issues.jsonl"  # Default export file path (for bd export command)
 ```
 
 ### Git

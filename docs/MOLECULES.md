@@ -247,7 +247,7 @@ Molecules (bond, squash, burn)            ← workflow operations
     ↓
 Epics (parent-child, dependencies)        ← DATA PLANE (the core)
     ↓
-Issues (JSONL, git-backed)                ← STORAGE
+Issues (Dolt, version-controlled)          ← STORAGE
 ```
 
 **Most users only need the bottom two layers.** Protos and formulas are for reusable patterns and complex composition.

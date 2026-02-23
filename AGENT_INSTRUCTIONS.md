@@ -60,7 +60,7 @@ func TestMyFeature(t *testing.T) {
    - For full CGO validation: `make test-full-cgo`
 2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
 3. **Update docs**: If you changed behavior, update README.md or other docs
-4. **Commit**: With git hooks installed (`bd hooks install`), JSONL is auto-exported on commit
+4. **Commit**: With git hooks installed (`bd hooks install`), Dolt changes are auto-committed
 
 ### Commit Message Convention
 
@@ -75,24 +75,22 @@ This enables `bd doctor` to detect **orphaned issues** - work that was committed
 
 ### Git Workflow
 
-bd uses **Dolt** as its primary database. Changes are committed to Dolt history automatically (one Dolt commit per write command). JSONL is maintained for git portability via hooks.
+bd uses **Dolt** as its primary database. Changes are committed to Dolt history automatically (one Dolt commit per write command).
 
-**Install git hooks** for automatic JSONL sync:
+**Install git hooks** for automatic sync:
 ```bash
 bd hooks install
 ```
 
-This ensures JSONL is exported on commit and imported after pull/merge.
-
 ### Git Integration
 
-**JSONL portability**: JSONL is exported via git hooks for sharing through git. The Dolt database is the source of truth.
+**Dolt sync**: Dolt handles sync natively via `bd sync`. No JSONL export/import needed.
 
 **Protected branches**: Use `bd init --branch beads-metadata` to commit to separate branch. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
 
 **Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/ADVANCED.md](docs/ADVANCED.md).
 
-**Merge conflicts**: Rare with hash IDs. If conflicts occur in JSONL, use `git checkout --theirs .beads/issues.jsonl` and `bd import`. Dolt uses cell-level 3-way merge for better conflict resolution.
+**Merge conflicts**: Rare with hash IDs. Dolt uses cell-level 3-way merge for conflict resolution.
 
 ## Landing the Plane
 
@@ -110,11 +108,6 @@ This ensures JSONL is exported on commit and imported after pull/merge.
    ```bash
    # Pull first to catch any remote changes
    git pull --rebase
-
-   # If conflicts in .beads/issues.jsonl, resolve thoughtfully:
-   #   - git checkout --theirs .beads/issues.jsonl (accept remote)
-   #   - bd import -i .beads/issues.jsonl (re-import)
-   #   - Or manual merge, then import
 
    # MANDATORY: Push everything to remote
    # DO NOT STOP BEFORE THIS COMMAND COMPLETES
@@ -158,10 +151,6 @@ bd close bd-42 bd-43 --reason "Completed" --json
 
 # 4. PUSH TO REMOTE - MANDATORY, NO STOPPING BEFORE THIS IS DONE
 git pull --rebase
-# If conflicts in .beads/issues.jsonl, resolve thoughtfully:
-#   - git checkout --theirs .beads/issues.jsonl (accept remote)
-#   - bd import -i .beads/issues.jsonl (re-import)
-#   - Or manual merge, then import
 git push       # MANDATORY - THE PLANE IS STILL IN THE AIR UNTIL THIS SUCCEEDS
 git status     # MUST verify "up to date with origin/main"
 
@@ -215,8 +204,8 @@ bd dolt push
 
 This installs:
 
-- **pre-commit** — Exports Dolt changes to JSONL and stages it
-- **post-merge** — Imports pulled JSONL changes into Dolt
+- **pre-commit** — Commits pending Dolt changes
+- **post-merge** — Pulls remote Dolt changes after git merge
 
 **Note:** Hooks are embedded in the bd binary and work for all bd users (not just source repo users).
 
@@ -398,6 +387,6 @@ gh issue view 201
 
 - **README.md** - Main documentation (keep this updated!)
 - **EXTENDING.md** - Database extension guide
-- **ADVANCED.md** - JSONL format analysis
+- **ADVANCED.md** - Advanced features (rename, merge, compaction)
 - **CONTRIBUTING.md** - Contribution guidelines
 - **SECURITY.md** - Security policy

@@ -23,7 +23,7 @@ Common issues encountered when using bd and how to resolve them.
 - [Status Updates Not Visible](#status-updates-not-visible)
 - [Dolt Server Won't Start](#dolt-server-wont-start)
 - [Database Errors on Cloud Storage](#database-errors-on-cloud-storage)
-- [JSONL File Not Created](#jsonl-file-not-created)
+- [Database Not Initialized](#database-not-initialized)
 - [Version Requirements](#version-requirements)
 
 ---
@@ -89,10 +89,10 @@ If dependencies still don't persist after updating:
    # Use: bd dep add ...  (let the Dolt server handle it)
    ```
 
-3. **Check JSONL file:**
+3. **Check database directly:**
    ```bash
-   cat .beads/issues.jsonl | jq '.dependencies'
-   # Should show dependency array
+   bd sql "SELECT * FROM dependencies WHERE issue_id = '<id>'"
+   # Should show dependency rows
    ```
 
 4. **Report to beads GitHub** with:
@@ -116,14 +116,13 @@ bd show issue-1
 This is **expected behavior** when using embedded mode. Understanding requires knowing bd's architecture:
 
 **BD Architecture:**
-- **JSONL files** (`.beads/issues.jsonl`): Human-readable export format
-- **Dolt database** (`.beads/dolt/`): Source of truth for queries
-- **Dolt server**: Syncs JSONL and Dolt database
+- **Dolt database** (`.beads/dolt/`): Source of truth for all data
+- **Dolt server**: Handles concurrent access and replication
 
 **In embedded mode (without Dolt server):**
-- **Writes**: Go directly to JSONL file
-- **Reads**: Still come from the database
-- **Sync delay**: The Dolt server imports JSONL periodically
+- **Writes**: Go directly to the Dolt database
+- **Reads**: Also from the Dolt database
+- **Sync delay**: Embedded mode may have brief delays reflecting writes
 
 ### Resolution
 
@@ -178,7 +177,6 @@ bd dolt start
 ### Root Cause
 The Dolt server requires a **git repository** because it uses git for:
 - Syncing issues to git remote (optional)
-- Version control of `.beads/*.jsonl` files
 - Commit history of issue changes
 
 ### Resolution
@@ -243,9 +241,9 @@ This is a **known SQLite limitation**, not a bd bug.
    bd init myproject
    ```
 
-3. **Import existing issues (if you had JSONL export):**
+3. **Import existing issues (if you have a JSONL backup):**
    ```bash
-   bd import < issues-backup.jsonl
+   bd import -i issues-backup.jsonl
    ```
 
 **Alternative: Use global `~/.beads/` database**
@@ -268,41 +266,26 @@ bd create "My task"
 
 ---
 
-## JSONL File Not Created
+## Database Not Initialized
 
 ### Symptom
 ```bash
-bd init myproject
 bd create "Test" -t task
-ls .beads/
-# Only shows: .gitignore, myproject.db
-# Missing: issues.jsonl
+# Error: database not found
 ```
 
 ### Root Cause
-**JSONL initialization coupling.** The `issues.jsonl` file is created by the Dolt server on first startup, not by `bd init`.
+`bd init` was not run in the project directory.
 
 ### Resolution
 
-**Start Dolt server once to initialize JSONL:**
+**Initialize bd in the project:**
 ```bash
-bd dolt start
-# Wait for initialization
-sleep 2
-
-# Now JSONL file exists
-ls .beads/issues.jsonl
-# File created
-
-# Create issues normally
+bd init myproject
 bd create "Task 1" -t task
-cat .beads/issues.jsonl
+bd show <id>
 # Shows task data
 ```
-
-**Why this matters:**
-- The Dolt server owns the JSONL export format
-- First server run creates empty JSONL skeleton
 
 **Pattern for batch scripts:**
 ```bash
@@ -317,9 +300,6 @@ sleep 3                     # Wait for initialization
 for item in "${items[@]}"; do
     bd create "$item" -t feature
 done
-
-# Server syncs in background
-sleep 5  # Wait for final sync
 
 # Query results
 bd stats
@@ -355,7 +335,7 @@ claude plugin update beads
 
 **v0.14.0:**
 - Architecture changes
-- Auto-sync JSONL behavior introduced
+- Dolt storage backend introduced
 
 ---
 
@@ -428,8 +408,8 @@ ls -la .beads/
 git status
 git log --oneline -1
 
-# 5. JSONL contents (for dependency issues)
-cat .beads/issues.jsonl | jq '.' | head -50
+# 5. Database contents (for dependency issues)
+bd sql "SELECT * FROM dependencies" --json | head -50
 ```
 
 ### Report to beads GitHub
@@ -466,7 +446,7 @@ If the **bd-issue-tracking skill** provides incorrect guidance:
 | Status updates lag | Use server mode (ensure Dolt server is running) |
 | Dolt server won't start | Run `git init` first |
 | Database errors on Google Drive | Move to local filesystem |
-| JSONL file missing | Start Dolt server once: `bd dolt start` |
+| Database not initialized | Run `bd init` in the project directory |
 | Dependencies backwards (MCP) | Update to v0.15.0+, use `issue_id/depends_on_id` correctly |
 
 ---

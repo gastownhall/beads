@@ -30,7 +30,7 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 
 ## 🛠 Features
 
-* **[Dolt](https://github.com/dolthub/dolt)-Powered:** Version-controlled SQL database with cell-level merge and native branching. JSONL maintained for git portability.
+* **[Dolt](https://github.com/dolthub/dolt)-Powered:** Version-controlled SQL database with cell-level merge, native branching, and built-in sync via Dolt remotes.
 * **Agent-Optimized:** JSON output, dependency tracking, and auto-ready task detection.
 * **Zero Conflict:** Hash-based IDs (`bd-a1b2`) prevent merge collisions in multi-agent/multi-branch workflows.
 * **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.

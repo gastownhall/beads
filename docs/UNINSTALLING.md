@@ -45,7 +45,7 @@ Beads installs these hooks in `.git/hooks/`:
 
 | Hook | Purpose |
 |------|---------|
-| `pre-commit` | Syncs JSONL before commits |
+| `pre-commit` | Runs beads pre-commit checks |
 | `prepare-commit-msg` | Adds beads metadata to commit messages |
 | `post-merge` | Imports changes after merges |
 | `pre-push` | Syncs before pushing |
@@ -83,20 +83,16 @@ git config --unset merge.beads.name
 
 ### 4. Remove .gitattributes Entry
 
-Beads adds a line to `.gitattributes` for JSONL merge handling:
+Beads may have added a line to `.gitattributes` for merge handling. Check and remove if present:
 
-```
-.beads/issues.jsonl merge=beads
-```
-
-Either remove the entire file (if it only contains this line):
 ```bash
+# Check if .gitattributes contains beads config
+cat .gitattributes
+
+# Remove the entire file if it only contains beads config
 rm -f .gitattributes
-```
 
-Or edit it to remove just the beads line:
-```bash
-# Edit .gitattributes and remove the line containing "merge=beads"
+# Or edit to remove just the beads line
 ```
 
 ### 5. Remove .beads Directory
@@ -108,10 +104,10 @@ The `.beads/` directory contains:
 | `dolt/` | Dolt database directory |
 | `dolt/sql-server.pid` | Running Dolt server PID (if server mode) |
 | `dolt/sql-server.log` | Dolt server logs (if server mode) |
-| `issues.jsonl` | Git-tracked issue data |
+| `issues.jsonl` | Legacy issue data (if present) |
 | `config.yaml` | Project configuration |
 | `metadata.json` | Version tracking |
-| `deletions.jsonl` | Soft-deleted issues |
+| `deletions.jsonl` | Soft-deleted issues (if present) |
 | `README.md` | Human-readable overview |
 
 Remove everything:
@@ -121,7 +117,7 @@ rm -rf .beads
 
 **Warning:** This permanently deletes all issue data. Consider backing up first:
 ```bash
-cp .beads/issues.jsonl ~/beads-backup-$(date +%Y%m%d).jsonl
+bd export -o ~/beads-backup-$(date +%Y%m%d).jsonl
 ```
 
 ### 6. Remove Sync Worktree

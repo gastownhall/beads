@@ -1,59 +1,51 @@
 ---
-description: How to resolve merge conflicts in .beads/issues.jsonl
+description: How to resolve merge conflicts in the beads Dolt database
 ---
 
-# Resolving `issues.jsonl` Merge Conflicts
+# Resolving Beads Merge Conflicts
 
-If you encounter a merge conflict in `.beads/issues.jsonl` that doesn't have standard git conflict markers (or if `bd merge` failed automatically), follow this procedure.
+Beads uses Dolt as its storage backend. Dolt handles merges natively using its built-in three-way merge, similar to git.
 
-## 1. Identify the Conflict
-Check if `issues.jsonl` is in conflict:
-```powershell
-git status
+## 1. Check for Conflicts
+
+```bash
+bd doctor
+bd sync
 ```
 
-## 2. Extract the 3 Versions
-Git stores three versions of conflicted files in its index:
-1. Base (common ancestor)
-2. Ours (current branch)
-3. Theirs (incoming branch)
+If `bd sync` reports merge conflicts, Dolt will list the conflicting tables and rows.
 
-Extract them to temporary files:
-```powershell
-git show :1:.beads/issues.jsonl > beads.base.jsonl
-git show :2:.beads/issues.jsonl > beads.ours.jsonl
-git show :3:.beads/issues.jsonl > beads.theirs.jsonl
+## 2. Resolve Conflicts
+
+Dolt provides SQL-based conflict resolution:
+
+```bash
+# View conflicts
+bd sql "SELECT * FROM dolt_conflicts"
+
+# Resolve by accepting ours or theirs
+bd sql "CALL dolt_conflicts_resolve('--ours')"
+# OR
+bd sql "CALL dolt_conflicts_resolve('--theirs')"
 ```
 
-## 3. Run `bd merge` Manually
-Run the `bd merge` tool manually with the `--debug` flag to see what's happening.
-Syntax: `bd merge <output> <base> <ours> <theirs>`
+## 3. Verify and Complete
 
-```powershell
-bd merge beads.merged.jsonl beads.base.jsonl beads.ours.jsonl beads.theirs.jsonl --debug
+```bash
+# Verify the resolution
+bd list --json | head
+
+# Complete the sync
+bd sync
 ```
 
-## 4. Verify the Result
-Check the output of the command.
-- **Exit Code 0**: Success. `beads.merged.jsonl` contains the clean merge.
-- **Exit Code 1**: Conflicts remain. `beads.merged.jsonl` will contain conflict markers. You must edit it manually to resolve them.
+## Legacy: JSONL Merge Conflicts
 
-Optionally, verify the content (e.g., check for missing IDs if you suspect data loss).
+If you encounter merge conflicts in `.beads/issues.jsonl` from a legacy setup, import the resolved file:
 
-## 5. Apply the Merge
-Overwrite the conflicted file with the resolved version:
-```powershell
-cp beads.merged.jsonl .beads/issues.jsonl
-```
-
-## 6. Cleanup and Continue
-Stage the resolved file and continue the merge:
-```powershell
+```bash
+# Resolve the git conflict in the JSONL file manually, then:
+bd import -i .beads/issues.jsonl
 git add .beads/issues.jsonl
 git merge --continue
-```
-
-## 7. Cleanup Temporary Files
-```powershell
-rm beads.base.jsonl beads.ours.jsonl beads.theirs.jsonl beads.merged.jsonl
 ```

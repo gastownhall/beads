@@ -13,7 +13,7 @@ This runbook helps you recover from SQLite database corruption in Beads.
 - SQLite error messages during `bd` commands
 - "database is locked" errors that persist
 - Missing issues that should exist
-- Inconsistent state between JSONL and database
+- Inconsistent database state
 
 ## Diagnosis
 
@@ -43,7 +43,7 @@ bd dolt stop
 cp -r .beads .beads.backup
 ```
 
-**Step 3:** Rebuild from JSONL (source of truth)
+**Step 3:** Rebuild database
 ```bash
 bd doctor --fix
 ```

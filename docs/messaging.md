@@ -85,7 +85,7 @@ bd cleanup --ephemeral --older-than 7 --force
 
 Ephemeral messages are:
 - Excluded from `bd ready` by default
-- Not exported to JSONL (transient)
+- Not synced to remotes (transient)
 - Eligible for bulk deletion when closed
 
 ## Identity

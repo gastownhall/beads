@@ -319,19 +319,19 @@ done
 
 ## Integration with Git Workflow
 
-Labels are automatically synced to `.beads/issues.jsonl` along with all issue data:
+Labels are stored in the Dolt database and synced automatically with all issue data:
 
 ```bash
 # Make changes
 bd create "Fix bug" -l backend,urgent
 bd label add bd-42 needs-review
 
-# Auto-exported after 5 seconds (or use git hooks for immediate export)
-git add .beads/issues.jsonl
-git commit -m "Add backend issue"
+# Changes are committed to Dolt history automatically
+# Sync with remotes when ready:
+bd dolt push
 
-# After git pull, labels are auto-imported
-git pull
+# After pulling changes:
+bd dolt pull
 bd list --label backend  # Fresh data including labels
 ```
 
@@ -766,18 +766,18 @@ bd list --label backend       # Won't match
 bd label list-all
 ```
 
-### Syncing Labels with Git
-Labels are included in `.beads/issues.jsonl` export. If labels seem out of sync:
+### Syncing Labels
+Labels are stored in the Dolt database. If labels seem out of sync:
 ```bash
-# Force export
-bd export -o .beads/issues.jsonl
+# Pull from Dolt remote
+bd dolt pull
 
-# After pull, force import
-bd import -i .beads/issues.jsonl
+# Or run doctor to diagnose
+bd doctor
 ```
 
 ## See Also
 
 - [README.md](../README.md) - Main documentation
 - [AGENTS.md](../AGENTS.md) - AI agent integration guide
-- [ADVANCED.md](ADVANCED.md) - JSONL format details
+- [ADVANCED.md](ADVANCED.md) - Advanced features and configuration

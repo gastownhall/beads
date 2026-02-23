@@ -26,9 +26,9 @@ bd import -i issues.jsonl --dry-run
 # Shows: new issues, updates, exact matches
 ```
 
-## Automatic Import
+## When to Use
 
-The Dolt server automatically imports from `.beads/issues.jsonl` when it's newer than the database (e.g., after `git pull`). Manual import is rarely needed.
+Dolt is the primary storage backend, so manual import is rarely needed. Use `bd import` when you need to load data from an external JSONL file or migrate from a legacy JSONL-based setup.
 
 ## Options
 

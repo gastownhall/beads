@@ -238,26 +238,19 @@ Benefits:
 
 ## Conflict Resolution
 
-Hash-based IDs prevent most conflicts. If conflicts occur:
+Hash-based IDs prevent most conflicts. Dolt handles merges natively using three-way merge, similar to git. If conflicts occur during `bd sync`:
 
 ```bash
-# During git pull/merge
-git pull origin beads-metadata
-# CONFLICT in .beads/issues.jsonl
+# View conflicts
+bd sql "SELECT * FROM dolt_conflicts"
 
-# Option 1: Accept remote
-git checkout --theirs .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
+# Resolve by accepting ours or theirs
+bd sql "CALL dolt_conflicts_resolve('--ours')"
+# OR
+bd sql "CALL dolt_conflicts_resolve('--theirs')"
 
-# Option 2: Accept local
-git checkout --ours .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
-
-# Option 3: Use beads-merge tool (recommended)
-# See docs/GIT_INTEGRATION.md for merge conflict resolution
-
-git add .beads/issues.jsonl
-git commit
+# Complete the sync
+bd sync
 ```
 
 ## Protected Branch Best Practices
@@ -298,10 +291,10 @@ git commit
 
 ### Q: How do team members see each other's issues?
 
-A: Issues are stored in `.beads/issues.jsonl` which is version-controlled. Pull from git to sync.
+A: Issues are stored in Dolt, which supports distributed sync. Use `bd sync` to pull and push changes.
 
 ```bash
-git pull
+bd sync
 bd list  # See everyone's issues
 ```
 
@@ -363,16 +356,17 @@ bd dolt stop
 bd dolt start
 ```
 
-### Issue: Merge conflicts in JSONL
+### Issue: Merge conflicts
 
-Use beads-merge or resolve manually (see [GIT_INTEGRATION.md](../../docs/GIT_INTEGRATION.md)):
+Dolt handles merges natively. If conflicts occur during sync:
 
 ```bash
-git checkout --theirs .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
-git add .beads/issues.jsonl
-git commit
+bd sql "SELECT * FROM dolt_conflicts"
+bd sql "CALL dolt_conflicts_resolve('--ours')"
+bd sync
 ```
+
+See [GIT_INTEGRATION.md](../../docs/GIT_INTEGRATION.md) for details.
 
 ### Issue: Issues not syncing
 

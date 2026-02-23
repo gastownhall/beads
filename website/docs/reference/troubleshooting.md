@@ -63,9 +63,14 @@ bd list
 ### Corrupted database
 
 ```bash
-# Restore from JSONL
-rm .beads/beads.db
-bd import -i .beads/issues.jsonl
+# Check and fix database
+bd doctor --fix
+
+# Or pull from Dolt remote
+bd dolt pull
+
+# Or restore from a JSONL backup if available
+bd import -i backup.jsonl
 ```
 
 ## Dolt Server Issues
@@ -109,7 +114,7 @@ bd hooks status
 
 ```bash
 # Allow orphans
-bd import -i .beads/issues.jsonl --orphan-handling allow
+bd import -i backup.jsonl --orphan-handling allow
 
 # Check for duplicates after
 bd duplicates
@@ -118,12 +123,10 @@ bd duplicates
 ### Merge conflicts
 
 ```bash
-# Use merge driver
-bd init  # Setup merge driver
+# Check for and fix Dolt conflicts
+bd doctor --fix
 
-# Or manual resolution
-git checkout --ours .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
+# Re-sync
 bd sync
 ```
 

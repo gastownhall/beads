@@ -46,8 +46,8 @@ export BD_FEDERATION_SOVEREIGNTY="T2"
 
 | Mode | Description | Federation Support |
 |------|-------------|-------------------|
-| `git-portable` | JSONL export to git (default) | No |
-| `dolt-native` | Dolt remotes only | Yes |
+| `dolt-native` | Dolt remotes (default) | Yes |
+| `git-portable` | Legacy JSONL export to git | No |
 | `belt-and-suspenders` | Dolt + JSONL backup | Yes |
 
 ### Data Sovereignty Tiers

@@ -21,7 +21,7 @@ The core merge algorithm from beads-merge has been adapted and integrated into b
 ### Changes Made
 
 - Adapted to use bd's `internal/types.Issue` instead of custom types
-- Integrated with bd's JSONL export/import system
+- Integrated with bd's Dolt storage and import/export system
 - Added support for bd-specific fields (Design, AcceptanceCriteria, etc.)
 - Exposed as `bd merge` CLI command and library API
 

@@ -11,20 +11,18 @@ How beads integrates with git.
 ## Overview
 
 Beads uses git for:
-- **JSONL sync** - Issues stored in `.beads/issues.jsonl`
-- **Deletion tracking** - `.beads/deletions.jsonl`
-- **Conflict resolution** - Custom merge driver
+- **Project hosting** - Your code repository also hosts beads configuration
 - **Hooks** - Auto-sync on git operations
+
+Data storage and sync are handled by Dolt (a version-controlled SQL database).
 
 ## File Structure
 
 ```
 .beads/
-├── beads.db           # SQLite database (gitignored)
-├── issues.jsonl       # Issue data (git-tracked)
-├── deletions.jsonl    # Deletion manifest (git-tracked)
 ├── config.toml        # Project config (git-tracked)
-└── dolt/              # Dolt server data (gitignored)
+├── metadata.json      # Backend metadata (git-tracked)
+└── dolt/              # Dolt database and server data (gitignored)
 ```
 
 ## Git Hooks
@@ -36,9 +34,9 @@ bd hooks install
 ```
 
 Installs:
-- **pre-commit** - Exports database to JSONL
-- **post-merge** - Imports from JSONL after pull
-- **pre-push** - Ensures sync before push
+- **pre-commit** - Triggers Dolt commit
+- **post-merge** - Triggers Dolt sync after pull
+- **pre-push** - Ensures Dolt sync before push
 
 ### Status
 
@@ -52,34 +50,15 @@ bd hooks status
 bd hooks uninstall
 ```
 
-## Merge Driver
+## Conflict Resolution
 
-### Purpose
-
-The beads merge driver handles JSONL conflicts automatically:
-- Merges non-conflicting changes
-- Uses latest timestamp for same-issue edits
-- Preserves both sides for real conflicts
-
-### Installation
+Dolt handles merge conflicts at the database level using its built-in
+merge capabilities. When conflicts arise during sync, Dolt identifies
+conflicting rows and allows resolution through SQL.
 
 ```bash
-bd init  # Prompts for merge driver setup
-```
-
-Or manually add to `.gitattributes`:
-
-```gitattributes
-.beads/issues.jsonl merge=beads
-.beads/deletions.jsonl merge=beads
-```
-
-And `.git/config`:
-
-```ini
-[merge "beads"]
-    name = Beads JSONL merge driver
-    driver = bd merge-driver %O %A %B
+# Check for and fix conflicts
+bd doctor --fix
 ```
 
 ## Protected Branches
@@ -130,30 +109,13 @@ bd sync
 
 ```bash
 bd init --team
-# All team members share issues.jsonl
-git pull  # Auto-imports via hook
-```
-
-## Conflict Resolution
-
-### With Merge Driver
-
-Automatic - driver handles most conflicts.
-
-### Manual Resolution
-
-```bash
-# After conflict
-git checkout --ours .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
-bd sync
-git add .beads/
-git commit
+# All team members share the Dolt database
+bd sync  # Pulls latest changes via Dolt replication
 ```
 
 ### Duplicate Detection
 
-After merge:
+After merging branches:
 
 ```bash
 bd duplicates --auto-merge
@@ -162,7 +124,6 @@ bd duplicates --auto-merge
 ## Best Practices
 
 1. **Install hooks** - `bd hooks install`
-2. **Use merge driver** - Avoid manual conflict resolution
-3. **Sync regularly** - `bd sync` at session end
-4. **Pull before work** - Get latest issues
-5. **Worktrees use embedded mode automatically**
+2. **Sync regularly** - `bd sync` at session end
+3. **Pull before work** - Get latest issues
+4. **Worktrees use embedded mode automatically**

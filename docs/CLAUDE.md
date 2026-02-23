@@ -35,15 +35,13 @@ Beads uses **Dolt** as its storage backend — a version-controlled SQL database
 ```
 Dolt DB (.beads/dolt/)
     ↕ Dolt commits (automatic per write)
-    ↕ JSONL export (git hooks, for portability)
-JSONL (.beads/issues.jsonl, git-tracked)
-    ↕ git push/pull
-Remote (shared across machines)
+    ↕ Dolt push/pull (native sync)
+Remote (Dolt remotes: DoltHub, S3, GCS, etc.)
 ```
 
 - **Write path**: CLI → Dolt → auto-commit to Dolt history
 - **Read path**: Direct SQL queries against Dolt
-- **Sync**: JSONL maintained via git hooks for portability; Dolt handles versioning natively
+- **Sync**: Dolt handles versioning and sync natively; `bd import`/`bd export` available for migration
 - **Hash-based IDs**: Automatic collision prevention (v0.20+)
 
 Core implementation:

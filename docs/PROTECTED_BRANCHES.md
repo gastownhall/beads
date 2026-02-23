@@ -54,15 +54,13 @@ git push origin main  # Or create a PR if required
 
 Files that should be committed to your protected branch (main):
 - `.beads/.gitignore` - Tells git what to ignore in .beads/ directory
-- `.gitattributes` - Configures merge driver for intelligent JSONL conflict resolution
+- `.gitattributes` - Configures merge driver for beads data
 
 Files that are automatically gitignored (do NOT commit):
-- `.beads/beads.db` - SQLite database (local only, regenerated from JSONL)
+- `.beads/dolt/` - Dolt database directory (local only)
 - `.beads/dolt/sql-server.pid`, `sql-server.log` - Dolt server runtime files
-- `.beads/beads.left.jsonl`, `beads.right.jsonl` - Temporary merge artifacts
 
 The sync branch (beads-sync) will contain:
-- `.beads/issues.jsonl` - Issue data in JSONL format (committed automatically via git hooks)
 - `.beads/metadata.json` - Metadata about the beads installation
 - `.beads/config.yaml` - Configuration template (optional)
 
@@ -100,10 +98,9 @@ your-project/
 │   └── beads-worktrees/
 │       └── beads-sync/  # Worktree (only .beads/ checked out)
 │           └── .beads/
-│               └── issues.jsonl
+│               └── dolt/
 ├── .beads/                  # Your main copy
-│   ├── beads.db
-│   ├── issues.jsonl
+│   ├── dolt/
 │   └── .gitignore
 ├── .gitattributes           # Merge driver config (in main branch)
 └── src/                     # Your code (untouched)
@@ -116,12 +113,11 @@ Main branch (protected):
 - `.gitattributes` - Merge driver configuration
 
 Sync branch (beads-sync):
-- `.beads/issues.jsonl` - Issue data (committed via git hooks)
 - `.beads/metadata.json` - Repository metadata
 - `.beads/config.yaml` - Configuration template
 
 Not tracked (gitignored):
-- `.beads/beads.db` - SQLite database (local only)
+- `.beads/dolt/` - Dolt database directory (local only)
 - `.beads/dolt/sql-server.*` - Dolt server runtime files
 
 **Key points:**
@@ -135,11 +131,10 @@ Not tracked (gitignored):
 
 When you update an issue:
 
-1. Issue is updated in `.beads/beads.db` (SQLite database)
-2. Git hooks export to `.beads/issues.jsonl` (JSONL file)
-3. JSONL is copied to worktree (`.git/beads-worktrees/beads-sync/.beads/`)
-4. Git hooks commit the change in the worktree to `beads-sync` branch
-5. Main branch stays untouched (no commits on `main`)
+1. Issue is updated in the Dolt database (`.beads/dolt/`)
+2. Dolt automatically commits the change to its version history
+3. Changes are synced to remotes via `bd dolt push` or `bd sync`
+4. Main branch stays untouched (no commits on `main`)
 
 ## Setup
 
@@ -177,7 +172,7 @@ For automatic commits to the sync branch, install git hooks:
 bd hooks install
 ```
 
-Git hooks automatically export to JSONL and commit after each change. Use `bd sync` for manual sync when needed.
+Git hooks help maintain sync consistency. Use `bd sync` for manual sync when needed.
 
 ### Environment Variables
 
@@ -222,7 +217,7 @@ This shows the diff between `beads-sync` and `main` (or your current branch).
 **Manual commit:**
 
 ```bash
-bd sync --flush-only  # Export to JSONL and commit to sync branch
+bd sync --flush-only  # Commit pending changes to sync branch
 ```
 
 **Pull changes from remote:**
@@ -285,47 +280,22 @@ If you encounter conflicts during merge:
 ```bash
 # bd sync --merge will detect conflicts and show:
 Error: Merge conflicts detected
-Conflicting files:
-  .beads/issues.jsonl
+Conflicting files detected.
 
 To resolve:
-1. Fix conflicts in .beads/issues.jsonl
-2. git add .beads/issues.jsonl
-3. git commit
-4. bd import  # Reimport to sync database
+1. Use bd vc conflicts to view conflicts
+2. Resolve conflicts
+3. Commit the resolution
 ```
 
-**Resolving JSONL conflicts:**
+**Resolving merge conflicts:**
 
-JSONL files are append-only and line-based, so conflicts are rare. When they occur:
-
-1. Open `.beads/issues.jsonl` and look for conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
-2. Both versions are usually valid - keep both lines
-3. Remove the conflict markers
-4. Save and commit
-
-Example conflict resolution:
-
-```jsonl
-<<<<<<< HEAD
-{"id":"bd-a1b2","title":"Feature A","status":"closed","updated_at":"2025-11-02T10:00:00Z"}
-=======
-{"id":"bd-a1b2","title":"Feature A","status":"in_progress","updated_at":"2025-11-02T09:00:00Z"}
->>>>>>> beads-sync
-```
-
-**Resolution:** Keep the line with the newer `updated_at`:
-
-```jsonl
-{"id":"bd-a1b2","title":"Feature A","status":"closed","updated_at":"2025-11-02T10:00:00Z"}
-```
-
-Then:
+Dolt handles merge conflicts natively with cell-level merge. When concurrent changes affect the same issue field, Dolt detects the conflict and allows resolution:
 
 ```bash
-git add .beads/issues.jsonl
-git commit -m "Resolve issues.jsonl merge conflict"
-bd import  # Import to database (will use latest timestamp)
+# After a Dolt pull with conflicts
+bd vc conflicts     # View conflicts
+bd vc resolve       # Resolve conflicts
 ```
 
 ## Troubleshooting

@@ -149,8 +149,8 @@ bd repo list
 
 Multi-repo hydration imports issues from all configured repos into the current database:
 
-1. **JSONL as source of truth**: Each repo maintains its own `issues.jsonl`
-2. **Periodic import**: Beads imports from `repos.additional` every sync cycle
+1. **Dolt database as source of truth**: Each repo maintains its own Dolt database
+2. **Periodic sync**: Beads syncs from `repos.additional` every sync cycle
 3. **Source tracking**: Each issue tagged with `source_repo` field
 4. **Unified view**: `bd list` shows issues from all repos
 
@@ -167,7 +167,7 @@ cd ~/.beads-planning
 bd dolt start
 ```
 
-Without running servers, JSONL files become stale and hydration only sees old data.
+Without running servers, hydration only sees old data.
 
 ### Troubleshooting
 

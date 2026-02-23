@@ -26,42 +26,30 @@ bd's core design enables a distributed, git-backed issue tracker that feels like
 │  - Fast queries, indexes, foreign keys                           │
 │  - Issues, dependencies, labels, comments, events                │
 │  - Automatic Dolt commits on every write                         │
+│  - Native push/pull to Dolt remotes                              │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
-                          JSONL export
-                        (git hooks, portability)
+                        Dolt push/pull
+                    (or federation peer sync)
                                │
                                v
 ┌─────────────────────────────────────────────────────────────────┐
-│                       JSONL File                                 │
-│                   (.beads/issues.jsonl)                          │
+│                     Remote (Dolt or Git)                          │
 │                                                                  │
-│  - Git-tracked for portability and distribution                  │
-│  - One JSON line per entity (issue, dep, label, comment)         │
-│  - Merge-friendly: additions rarely conflict                     │
-│  - Shared across machines via git push/pull                      │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                          git push/pull
-                               │
-                               v
-┌─────────────────────────────────────────────────────────────────┐
-│                     Remote Repository                            │
-│                    (GitHub, GitLab, etc.)                        │
-│                                                                  │
-│  - Stores JSONL as part of normal repo history                   │
+│  - Dolt remotes (DoltHub, S3, GCS, filesystem)                   │
 │  - All collaborators share the same issue database               │
+│  - Cell-level merge for conflict resolution                      │
 │  - Protected branch support via separate sync branch             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Why This Design?
 
-**Dolt for versioned SQL:** Queries complete in milliseconds with full SQL support. Dolt adds native version control — every write is automatically committed to Dolt history, providing a complete audit trail.
+**Dolt for versioned SQL:** Queries complete in milliseconds with full SQL support. Dolt adds native version control — every write is automatically committed to Dolt history, providing a complete audit trail. Cell-level merge resolves conflicts automatically.
 
-**JSONL for git:** One entity per line means git diffs are readable and merges usually succeed automatically. JSONL is maintained for portability across machines via git.
+**Dolt for distribution:** Native push/pull to Dolt remotes (DoltHub, S3, GCS). No special sync server needed. Issues travel with your code. Offline work just works.
 
-**Git for distribution:** No special sync server needed. Issues travel with your code. Offline work just works.
+**Import/export for portability:** `bd import` and `bd export` support JSONL format for data migration, bootstrapping new clones, and interoperability.
 
 ## Write Path
 
@@ -71,51 +59,34 @@ When you create or modify an issue:
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   CLI Command   │───▶│   Dolt Write    │───▶│  Dolt Commit    │
 │   (bd create)   │    │  (immediate)    │    │  (automatic)    │
-└─────────────────┘    └─────────────────┘    └────────┬────────┘
-                                                       │
-                                                  git hooks
-                                                       │
-                                                       v
-                       ┌─────────────────┐    ┌─────────────────┐
-                       │   Git Commit    │◀───│  JSONL Export   │
-                       │   (git hooks)   │    │  (incremental)  │
-                       └─────────────────┘    └─────────────────┘
+└─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
 1. **Command executes:** `bd create "New feature"` writes to Dolt immediately
 2. **Dolt commit:** Every write is automatically committed to Dolt history
-3. **JSONL export:** Git hooks export changes to JSONL for portability
-4. **Git commit:** If git hooks are installed, JSONL changes auto-commit
+3. **Sync:** Use `bd dolt push` to share changes with Dolt remotes
 
 Key implementation:
-- Export: `cmd/bd/export.go`
 - Dolt storage: `internal/storage/dolt/`
+- Export (for portability): `cmd/bd/export.go`
 
 ## Read Path
 
-When you query issues after a `git pull`:
+All queries run directly against the local Dolt database:
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   git pull      │───▶│  Auto-Import    │───▶│  Dolt Update    │
-│   (new JSONL)   │    │  (on next cmd)  │    │  (merge logic)  │
-└─────────────────┘    └─────────────────┘    └────────┬────────┘
-                                                       │
-                                                       v
-                                               ┌─────────────────┐
-                                               │  CLI Query      │
-                                               │  (bd ready)     │
-                                               └─────────────────┘
+┌─────────────────┐    ┌─────────────────┐
+│   CLI Query     │───▶│   Dolt Query    │
+│   (bd ready)    │    │   (SQL)         │
+└─────────────────┘    └─────────────────┘
 ```
 
-1. **Git pull:** Fetches updated JSONL from remote
-2. **Auto-import detection:** First bd command checks if JSONL is newer than DB
-3. **Import to Dolt:** Parse JSONL, merge with local state using content hashes
-4. **Query:** Commands read from fast local Dolt database
+1. **Query:** Commands read from fast local Dolt database via SQL
+2. **Sync:** Use `bd dolt pull` to fetch updates from Dolt remotes
 
 Key implementation:
-- Import: `cmd/bd/import.go`
-- Auto-import logic: `internal/autoimport/autoimport.go`
+- Import (for bootstrapping/migration): `cmd/bd/import.go`
+- Dolt storage: `internal/storage/dolt/`
 
 ## Hash-Based Collision Prevention
 
@@ -149,8 +120,9 @@ Branch B: bd create "Add Stripe"  → bd-f14c (no collision)
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Import Logic                              │
+│                  (used by bd import for migration)               │
 │                                                                  │
-│  For each issue in JSONL:                                       │
+│  For each issue in import data:                                  │
 │    1. Compute content hash                                       │
 │    2. Look up existing issue by ID                               │
 │    3. Compare hashes:                                            │
@@ -233,9 +205,9 @@ open ──▶ in_progress ──▶ closed
          (reopen)
 ```
 
-### JSONL Issue Schema
+### Issue Schema
 
-Each issue in `.beads/issues.jsonl` is a JSON object with the following fields. Fields marked with `(optional)` use `omitempty` and are excluded when empty/zero.
+Each issue in the Dolt database (and in JSONL exports via `bd export`) has the following fields. Fields marked with `(optional)` use `omitempty` and are excluded when empty/zero.
 
 **Core Identification:**
 
@@ -301,14 +273,13 @@ Each issue in `.beads/issues.jsonl` is a JSON object with the following fields. 
 | `delete_reason` | string | Why deleted (optional) |
 | `original_type` | string | Issue type before deletion (optional) |
 
-**Note:** Fields with `json:"-"` tags (like `content_hash`, `source_repo`, `id_prefix`) are internal and never exported to JSONL.
+**Note:** Fields with `json:"-"` tags (like `content_hash`, `source_repo`, `id_prefix`) are internal and not included in exports.
 
 ## Directory Structure
 
 ```
 .beads/
 ├── dolt/             # Dolt database, sql-server.pid, sql-server.log (gitignored)
-├── issues.jsonl      # JSONL export (git-tracked, for portability)
 ├── metadata.json     # Backend config (local, gitignored)
 └── config.yaml       # Project config (optional)
 ```
@@ -321,8 +292,8 @@ Each issue in `.beads/issues.jsonl` is a JSON object with the following fields. 
 | Storage interface | `internal/storage/storage.go` |
 | Dolt implementation | `internal/storage/dolt/` |
 | RPC protocol | `internal/rpc/protocol.go`, `server_*.go` |
-| Export logic | `cmd/bd/export.go` |
-| Import logic | `cmd/bd/import.go` |
+| Export logic (portability) | `cmd/bd/export.go` |
+| Import logic (migration) | `cmd/bd/import.go` |
 
 ## Wisps and Molecules
 
@@ -348,7 +319,7 @@ Each issue in `.beads/issues.jsonl` is a JSON object with the following fields. 
 Wisps are intentionally **local-only**:
 
 - They exist only in the spawning agent's local database
-- They are **never exported to JSONL**
+- They are **never exported or synced**
 - They cannot resurrect from other clones (they were never there)
 - They are **hard-deleted** when squashed (no tombstones needed)
 
@@ -363,7 +334,7 @@ This design enables:
 
 | Aspect | Regular Issues | Wisps |
 |--------|---------------|-------|
-| Exported to JSONL | Yes | No |
+| Synced to remotes | Yes | No |
 | Tombstone on delete | Yes | No |
 | Can resurrect | Yes (without tombstone) | No (never synced) |
 | Deletion method | `CreateTombstone()` | `DeleteIssue()` (hard delete) |

@@ -78,8 +78,8 @@ Most frequently used:
 | Command | Description |
 |---------|-------------|
 | `bd sync` | Full sync cycle |
-| `bd export` | Export to JSONL |
-| `bd import` | Import from JSONL |
+| `bd export` | Export data to JSONL |
+| `bd import` | Import data from JSONL |
 | `bd migrate` | Migrate database schema |
 
 ### System
@@ -165,14 +165,14 @@ bd blocked
 ### Syncing
 
 ```bash
-# Full sync (export + commit + push)
+# Full sync (Dolt commit + push)
 bd sync
 
-# Force export
-bd export
+# Export to file
+bd export -o backup.jsonl
 
 # Import from file
-bd import -i .beads/issues.jsonl
+bd import -i backup.jsonl
 ```
 
 ## See Also

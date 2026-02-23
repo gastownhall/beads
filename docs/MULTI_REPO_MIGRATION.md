@@ -14,12 +14,12 @@ This guide helps you adopt beads' multi-repo workflow for OSS contributions, tea
 
 ## What is Multi-Repo Mode?
 
-By default, beads stores issues in `.beads/issues.jsonl` in your current repository. Multi-repo mode lets you:
+By default, beads stores issues in its Dolt database within `.beads/dolt/` in your current repository. Multi-repo mode lets you:
 
 - **Route issues to different repositories** based on your role (maintainer vs. contributor)
 - **Aggregate issues from multiple repos** into a unified view
 - **Keep contributor planning separate** from upstream projects
-- **Maintain git ledger everywhere** - no gitignored files
+- **Maintain data integrity everywhere** - Dolt version control in every repo
 
 ## When Do You Need Multi-Repo?
 
@@ -222,10 +222,8 @@ bd create "Try alternative approach" -p 2 --repo ~/.beads-planning-personal
 bd ready
 bd list --json
 
-# Complete team work
-git add .beads/issues.jsonl
-git commit -m "Updated issue tracker"
-git push origin main
+# Complete team work and sync
+bd dolt push
 ```
 
 ## Multi-Phase Development
@@ -394,11 +392,11 @@ bd sync
 bd list --json
 ```
 
-### Git merge conflicts in .beads/issues.jsonl
+### Merge conflicts
 
-**Problem:** Multiple repos modifying same JSONL file.
+**Problem:** Multiple repos with conflicting changes.
 
-**Solution:** See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#git-merge-conflicts) and consider [beads-merge](https://github.com/neongreen/mono/tree/main/beads-merge) tool.
+**Solution:** Dolt handles merge conflicts natively with cell-level merge. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#merge-conflicts) for details.
 
 ### Discovered issues in wrong repository
 
@@ -432,12 +430,12 @@ No migration needed! Multi-repo mode is opt-in:
 ```bash
 # Before (single repo)
 bd create "Issue" -p 1
-# → Creates in .beads/issues.jsonl
+# → Creates in local Dolt database
 
 # After (multi-repo configured)
 bd create "Issue" -p 1
 # → Auto-routed based on role
-# → Old issues in .beads/issues.jsonl still work
+# → Old issues in local database still work
 ```
 
 ### Disabling Multi-Repo
@@ -461,10 +459,10 @@ bd create "Issue" -p 1
 - ❌ Don't mix planning and implementation in the same repo
 
 ### Teams
-- ✅ Commit `.beads/issues.jsonl` to shared repository
+- ✅ Use `bd dolt push` to sync the shared Dolt database
 - ✅ Use protected branch workflow for main/master
 - ✅ Review issue changes in PRs like code changes
-- ❌ Don't gitignore `.beads/` - you lose the git ledger
+- ❌ Don't delete `.beads/` - you lose all issue data
 
 ### Multi-Phase Projects
 - ✅ Use clear phase naming (`planning`, `impl`, `maint`)
@@ -481,14 +479,7 @@ bd create "Issue" -p 1
 
 ## Related Issues
 
-<<<<<<< HEAD
 - `bd-8rd` - Migration and onboarding epic
 - `bd-mlcz` - `bd migrate` command (planned)
-- `bd-kla1` - `bd init --contributor` wizard ✅ implemented
-- `bd-twlr` - `bd init --team` wizard ✅ implemented
-=======
-- [bd-8rd](/.beads/issues.jsonl#bd-8rd) - Migration and onboarding epic
-- [bd-mlcz](/.beads/issues.jsonl#bd-mlcz) - `bd migrate` command (planned)
-- [bd-kla1](/.beads/issues.jsonl#bd-kla1) - `bd init --contributor` wizard ✅ implemented
-- [bd-twlr](/.beads/issues.jsonl#bd-twlr) - `bd init --team` wizard ✅ implemented
->>>>>>> origin/bd-l0pg-slit
+- `bd-kla1` - `bd init --contributor` wizard - implemented
+- `bd-twlr` - `bd init --team` wizard - implemented

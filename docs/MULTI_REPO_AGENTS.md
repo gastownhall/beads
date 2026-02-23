@@ -129,10 +129,10 @@ bd list --json | jq '.[] | select(.source_repo == "~/.beads-planning")'
 ```
 
 **How it works:**
-1. Beads reads JSONL from all configured repos
-2. Imports into unified SQLite database
+1. Beads reads from all configured Dolt databases
+2. Aggregates into unified view
 3. Maintains `source_repo` field for provenance
-4. Exports route issues back to correct JSONL files
+4. Routes issues back to correct databases
 
 ## Common Patterns
 
@@ -302,10 +302,10 @@ bd doctor quick # Validate local installation health
 - ❌ Don't manually override routing without good reason
 
 ### Teams
-- ✅ Commit `.beads/issues.jsonl` to shared repo
+- ✅ Use `bd dolt push` to sync the shared Dolt database
 - ✅ Use `bd sync` to ensure changes are committed/pushed
 - ✅ Link related issues across repos with dependencies
-- ❌ Don't gitignore `.beads/` - you lose the git ledger
+- ❌ Don't delete `.beads/` - you lose all issue data
 
 ### Multi-Phase Projects
 - ✅ Use clear repo names (`planning`, `impl`, `maint`)
@@ -327,14 +327,14 @@ Multi-repo mode is fully backward compatible:
 **Without multi-repo config:**
 ```bash
 bd create "Issue" -p 1
-# → Creates in .beads/issues.jsonl (single-repo mode)
+# → Creates in local Dolt database (single-repo mode)
 ```
 
 **With multi-repo config:**
 ```bash
 bd create "Issue" -p 1
 # → Auto-routed based on config
-# → Old issues in .beads/issues.jsonl still work
+# → Old issues in local database still work
 ```
 
 **Disabling multi-repo:**

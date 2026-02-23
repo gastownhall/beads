@@ -8,7 +8,7 @@ Beads (`bd`) is an issue tracker designed specifically for AI-supervised coding 
 - Track work with a simple CLI
 - Discover and link related tasks during development
 - Maintain context across coding sessions
-- Auto-sync issues via JSONL for git workflows
+- Auto-sync issues via Dolt for distributed workflows
 
 ## Installation
 
@@ -219,8 +219,8 @@ The MCP server supports these environment variables:
 - **`BEADS_PATH`** - Path to bd executable (default: `bd` in PATH)
 - **`BEADS_DB`** - Path to beads database file (default: auto-discover from cwd)
 - **`BEADS_ACTOR`** - Actor name for audit trail (default: `$USER`)
-- **`BEADS_NO_AUTO_FLUSH`** - Disable automatic JSONL sync (default: `false`)
-- **`BEADS_NO_AUTO_IMPORT`** - Disable automatic JSONL import (default: `false`)
+- **`BEADS_NO_AUTO_FLUSH`** - Disable automatic sync (default: `false`)
+- **`BEADS_NO_AUTO_IMPORT`** - Disable automatic import (default: `false`)
 
 To customize, edit your Claude Code MCP settings or the plugin configuration.
 
@@ -270,25 +270,21 @@ To customize, edit your Claude Code MCP settings or the plugin configuration.
 # 6. Repeat
 ```
 
-## Auto-Sync with Git
+## Auto-Sync with Dolt
 
-Beads automatically syncs issues to `.beads/issues.jsonl`:
-- **Export**: After any CRUD operation (5-second debounce)
-- **Import**: When JSONL is newer than DB (e.g., after `git pull`)
+Beads automatically commits changes to Dolt history after every write operation. This enables seamless collaboration:
 
-This enables seamless collaboration:
 ```bash
 # Make changes
 bd create "Add feature" -p 1
 
-# Changes auto-export after 5 seconds
-# Commit when ready
-git add .beads/issues.jsonl
-git commit -m "Add feature tracking"
+# Changes are automatically committed to Dolt history
+# Sync with remotes when ready:
+bd dolt push
 
-# After pull, JSONL auto-imports
-git pull
-bd ready  # Shows issues ready to work on (with fresh data from git)
+# Pull changes from collaborators:
+bd dolt pull
+bd ready  # Shows issues ready to work on (with fresh data)
 ```
 
 ## Updating
