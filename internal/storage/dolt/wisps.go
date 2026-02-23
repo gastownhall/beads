@@ -116,11 +116,22 @@ func recordEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, 
 	return err
 }
 
-// generateIssueIDInTable generates a unique hash-based ID, checking for collisions
-// in the specified table.
+// generateIssueIDInTable generates a unique ID, checking for collisions
+// in the specified table. Supports counter mode for non-ephemeral issues.
 //
 //nolint:gosec // G201: table is a hardcoded constant
 func generateIssueIDInTable(ctx context.Context, tx *sql.Tx, table, prefix string, issue *types.Issue, actor string) (string, error) {
+	// Counter mode only applies to the issues table (not wisps).
+	if table == "issues" {
+		counterMode, err := isCounterModeTx(ctx, tx)
+		if err != nil {
+			return "", err
+		}
+		if counterMode {
+			return nextCounterIDTx(ctx, tx, prefix)
+		}
+	}
+
 	baseLength := getAdaptiveIDLengthFromTable(ctx, tx, table, prefix)
 
 	var err error

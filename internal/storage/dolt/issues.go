@@ -1148,48 +1148,59 @@ func seedCounterFromExistingIssuesTx(ctx context.Context, tx *sql.Tx, prefix str
 	return nil
 }
 
+// nextCounterIDTx increments and returns the next sequential issue ID for the
+// given prefix within an existing transaction. Returns the full ID string
+// (e.g., "bd-1"). Used by both generateIssueID and generateIssueIDInTable.
+func nextCounterIDTx(ctx context.Context, tx *sql.Tx, prefix string) (string, error) {
+	var lastID int
+	err := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
+	if err == sql.ErrNoRows {
+		// No counter row yet - seed from existing issues before proceeding.
+		if seedErr := seedCounterFromExistingIssuesTx(ctx, tx, prefix); seedErr != nil {
+			return "", fmt.Errorf("failed to seed issue counter for prefix %q: %w", prefix, seedErr)
+		}
+		// Re-read the (possibly just-seeded) counter value.
+		err = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
+		if err != nil && err != sql.ErrNoRows {
+			return "", fmt.Errorf("failed to read issue counter after seeding for prefix %q: %w", prefix, err)
+		}
+		if err == sql.ErrNoRows {
+			lastID = 0
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("failed to read issue counter for prefix %q: %w", prefix, err)
+	}
+	nextID := lastID + 1
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)
+		ON DUPLICATE KEY UPDATE last_id = ?
+	`, prefix, nextID, nextID)
+	if err != nil {
+		return "", fmt.Errorf("failed to update issue counter for prefix %q: %w", prefix, err)
+	}
+	return fmt.Sprintf("%s-%d", prefix, nextID), nil
+}
+
+// isCounterModeTx checks whether issue_id_mode=counter is configured.
+func isCounterModeTx(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var idMode string
+	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_id_mode").Scan(&idMode)
+	if err != nil && err != sql.ErrNoRows {
+		return false, fmt.Errorf("failed to read issue_id_mode config: %w", err)
+	}
+	return idMode == "counter", nil
+}
+
 // generateIssueID generates a unique ID for an issue.
 // If issue_id_mode=counter is configured, generates sequential IDs (bd-1, bd-2, ...).
 // Otherwise uses the default hash-based ID generation.
 func generateIssueID(ctx context.Context, tx *sql.Tx, prefix string, issue *types.Issue, actor string) (string, error) {
-	// Check issue_id_mode config (within the current transaction)
-	var idMode string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_id_mode").Scan(&idMode)
-	if err != nil && err != sql.ErrNoRows {
-		return "", fmt.Errorf("failed to read issue_id_mode config: %w", err)
+	counterMode, err := isCounterModeTx(ctx, tx)
+	if err != nil {
+		return "", err
 	}
-
-	if idMode == "counter" {
-		// Sequential counter mode: increment atomically within this transaction.
-		// If no counter row exists yet, seed from existing issues first to avoid
-		// collisions with manually-created sequential IDs (GH#2002).
-		var lastID int
-		err2 := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
-		if err2 == sql.ErrNoRows {
-			// No counter row yet - seed from existing issues before proceeding.
-			if seedErr := seedCounterFromExistingIssuesTx(ctx, tx, prefix); seedErr != nil {
-				return "", fmt.Errorf("failed to seed issue counter for prefix %q: %w", prefix, seedErr)
-			}
-			// Re-read the (possibly just-seeded) counter value.
-			err2 = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
-			if err2 != nil && err2 != sql.ErrNoRows {
-				return "", fmt.Errorf("failed to read issue counter after seeding for prefix %q: %w", prefix, err2)
-			}
-			if err2 == sql.ErrNoRows {
-				lastID = 0
-			}
-		} else if err2 != nil {
-			return "", fmt.Errorf("failed to read issue counter for prefix %q: %w", prefix, err2)
-		}
-		nextID := lastID + 1
-		_, err3 := tx.ExecContext(ctx, `
-			INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)
-			ON DUPLICATE KEY UPDATE last_id = ?
-		`, prefix, nextID, nextID)
-		if err3 != nil {
-			return "", fmt.Errorf("failed to update issue counter for prefix %q: %w", prefix, err3)
-		}
-		return fmt.Sprintf("%s-%d", prefix, nextID), nil
+	if counterMode {
+		return nextCounterIDTx(ctx, tx, prefix)
 	}
 
 	// Default hash-based ID generation
