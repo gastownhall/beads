@@ -19,6 +19,9 @@ import (
 )
 
 func TestInitCommand(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("skipping: dolt not installed")
+	}
 	tests := []struct {
 		name           string
 		prefix         string
