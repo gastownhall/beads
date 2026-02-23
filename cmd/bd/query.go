@@ -37,7 +37,7 @@ Boolean operators (case-insensitive):
   (expr)            Grouping with parentheses
 
 Supported fields:
-  status            Issue status (open, in_progress, blocked, deferred, closed)
+  status            Stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues stay "open"; use 'bd blocked' to find them
   priority          Priority level (0-4)
   type              Issue type (bug, feature, task, epic, chore, decision)
   assignee          Assigned user (use "none" for unassigned)
