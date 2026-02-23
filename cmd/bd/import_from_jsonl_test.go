@@ -104,6 +104,61 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
+	t.Run("re-import with duplicate IDs succeeds via upsert", func(t *testing.T) {
+		// GH#2061: importing the same JSONL twice should not fail with
+		// "duplicate primary key" — the second import should upsert.
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlContent := `{"id":"test-dup1","title":"Original title","type":"bug","status":"open","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-dup2","title":"Second issue","type":"task","status":"open","priority":3,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+
+		// First import
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("first importFromLocalJSONL failed: %v", err)
+		}
+		if count != 2 {
+			t.Errorf("Expected 2 issues imported on first import, got %d", count)
+		}
+
+		// Second import with same IDs — should succeed (upsert), not fail
+		updatedContent := `{"id":"test-dup1","title":"Updated title","type":"bug","status":"closed","priority":1,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-06-01T00:00:00Z"}
+{"id":"test-dup2","title":"Second issue","type":"task","status":"open","priority":3,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		if err := os.WriteFile(jsonlPath, []byte(updatedContent), 0644); err != nil {
+			t.Fatalf("Failed to write updated JSONL file: %v", err)
+		}
+
+		count2, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("second importFromLocalJSONL failed (duplicate key?): %v", err)
+		}
+		if count2 != 2 {
+			t.Errorf("Expected 2 issues on re-import, got %d", count2)
+		}
+
+		// Verify the first issue was updated (upsert, not just inserted)
+		issue, err := store.GetIssue(ctx, "test-dup1")
+		if err != nil {
+			t.Fatalf("Failed to get upserted issue: %v", err)
+		}
+		if issue.Title != "Updated title" {
+			t.Errorf("Expected title 'Updated title' after upsert, got %q", issue.Title)
+		}
+		if issue.Status != "closed" {
+			t.Errorf("Expected status 'closed' after upsert, got %q", issue.Status)
+		}
+	})
+
 	t.Run("sets prefix from first issue when not configured", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "dolt")

@@ -233,11 +233,26 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			}
 		}
 
+		// Check if issue already exists before inserting (GH#2061).
+		// insertIssue uses ON DUPLICATE KEY UPDATE, so the INSERT always succeeds,
+		// but we need to know whether it was a create or an update to avoid
+		// recording redundant "created" events on re-import.
+		var existingCount int
+		if issue.ID != "" {
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, issue.ID).Scan(&existingCount); err != nil {
+				return fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
+			}
+		}
+
 		if err := insertIssue(ctx, tx, issue); err != nil {
 			return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
 		}
-		if err := recordEvent(ctx, tx, issue.ID, types.EventCreated, actor, "", ""); err != nil {
-			return fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
+
+		// Only record "created" event for genuinely new issues (not upserts).
+		if existingCount == 0 {
+			if err := recordEvent(ctx, tx, issue.ID, types.EventCreated, actor, "", ""); err != nil {
+				return fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
+			}
 		}
 
 		// Persist labels from the issue struct into the labels table (GH#1844).
@@ -254,6 +269,7 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		}
 
 		// Persist comments from the issue struct into the comments table (GH#1844).
+		// Use ON DUPLICATE KEY UPDATE to handle re-imports gracefully (GH#2061).
 		for _, comment := range issue.Comments {
 			createdAt := comment.CreatedAt
 			if createdAt.IsZero() {
@@ -262,6 +278,7 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			_, err := tx.ExecContext(ctx, `
 				INSERT INTO comments (issue_id, author, text, created_at)
 				VALUES (?, ?, ?, ?)
+				ON DUPLICATE KEY UPDATE text = VALUES(text)
 			`, issue.ID, comment.Author, comment.Text, createdAt)
 			if err != nil {
 				return fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
