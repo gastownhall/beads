@@ -1123,6 +1123,151 @@ func TestDiscovery_ParentBlockedChildrenConsistency(t *testing.T) {
 	}
 }
 
+// TestDiscovery_UpdateStatusClosedBypassesCloseGuard verifies that
+// bd update --status closed bypasses the close guard that bd close enforces.
+//
+// FINDING: bd close checks for open blockers and rejects the close.
+// bd update --status closed does NOT check for blockers — it sets status
+// directly, bypassing the close guard, gate checks, and close hooks.
+// It also leaves close_reason empty (losing audit trail).
+//
+// Classification: BUG — update should either reject --status closed for
+// blocked issues or route through the same validation as bd close.
+func TestDiscovery_UpdateStatusClosedBypassesCloseGuard(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Blocked issue", "--type", "task", "--priority", "2")
+	b := w.create("--title", "Blocker", "--type", "task", "--priority", "1")
+	w.run("dep", "add", a, b, "--type", "blocks")
+
+	// bd close should reject (close guard)
+	out := w.run("close", a)
+	showOut := parseJSON(t, w.run("show", a, "--json"))
+	if showOut[0]["status"] == "closed" {
+		t.Fatalf("control failed: bd close should not close blocked issue")
+	}
+	_ = out
+
+	// bd update --status closed should ALSO reject for blocked issues
+	w.run("update", a, "--status", "closed")
+	showOut2 := parseJSON(t, w.run("show", a, "--json"))
+	if showOut2[0]["status"] == "closed" {
+		t.Errorf("DISCOVERY: bd update --status closed bypassed close guard — blocked issue %s was closed without --force", a)
+	}
+}
+
+// TestDiscovery_ReopenSupersededSemanticCorruption verifies that reopening a
+// superseded issue creates a semantically incoherent state.
+//
+// FINDING: bd supersede A --with B creates a supersedes dep and closes A.
+// bd reopen A sets status to open but does NOT remove the supersedes dep.
+// Result: A is "open but superseded by B" — a contradictory state.
+// The supersedes dep is non-blocking, so A appears in bd ready.
+//
+// Classification: DECISION — should reopen remove supersedes/duplicates deps,
+// or should reopen be rejected for superseded/duplicated issues?
+func TestDiscovery_ReopenSupersededSemanticCorruption(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	old := w.create("--title", "Old approach", "--type", "feature", "--priority", "2")
+	new := w.create("--title", "New approach", "--type", "feature", "--priority", "2")
+
+	w.run("supersede", old, "--with", new)
+
+	// Verify old is closed with supersedes dep
+	data := parseJSON(t, w.run("show", old, "--json"))
+	if data[0]["status"] != "closed" {
+		t.Fatalf("superseded issue should be closed")
+	}
+
+	// Reopen the superseded issue
+	w.run("reopen", old)
+
+	// After reopen, the supersedes dep should be removed (or reopen should be rejected)
+	data = parseJSON(t, w.run("show", old, "--json"))
+	if data[0]["status"] != "open" {
+		t.Fatalf("reopened issue should be open, got %v", data[0]["status"])
+	}
+
+	deps, _ := data[0]["dependencies"].([]any)
+	hasSupersedes := false
+	for _, d := range deps {
+		dep, _ := d.(map[string]any)
+		if dep["dependency_type"] == "supersedes" {
+			hasSupersedes = true
+		}
+	}
+	if hasSupersedes {
+		t.Errorf("DISCOVERY: reopened issue %s still has supersedes dep — semantically incoherent state (open but superseded)", old)
+	}
+}
+
+// TestDiscovery_DeferPastDateInvisible verifies that deferring with a past date
+// doesn't create an invisible issue.
+//
+// FINDING: bd defer X --until 2020-01-01 sets status=deferred and defer_until
+// to a past date. Nothing transitions status back to open when defer_until
+// passes. The issue is not in bd ready (status is deferred, not open) and not
+// in any other actionable view. It becomes invisible.
+//
+// Note: bd update --defer warns about past dates but bd defer does NOT.
+//
+// Classification: BUG — either reject past dates or auto-transition to open.
+func TestDiscovery_DeferPastDateInvisible(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Past deferred", "--type", "task", "--priority", "2")
+
+	// Defer with a past date
+	w.run("defer", a, "--until", "2020-01-01")
+
+	// Issue should still be actionable since defer date has passed
+	readyIDs := parseIDs(t, w.run("ready", "-n", "0", "--json"))
+	if !containsID(readyIDs, a) {
+		// Check if it's in deferred list
+		deferredOut := w.run("list", "--status", "deferred", "--json", "-n", "0")
+		deferredIDs := parseIDs(t, deferredOut)
+		if containsID(deferredIDs, a) {
+			t.Errorf("DISCOVERY: issue %s deferred with past date (2020-01-01) is in deferred list but not in ready — defer_until passed but status never transitions back to open", a)
+		} else {
+			t.Errorf("DISCOVERY: issue %s deferred with past date (2020-01-01) is not in ready AND not in deferred list — invisible to user", a)
+		}
+	}
+}
+
+// TestDiscovery_SearchIncludesClosedByDefault verifies that bd search returns
+// closed issues while bd list does not, creating a consistency gap.
+//
+// FINDING: bd search "term" returns ALL matching issues (including closed).
+// bd list excludes closed by default. A user who searches for an issue by
+// keyword and then tries to find it with list may not see it.
+//
+// Classification: INVESTIGATE — may be intentional (search is exhaustive)
+// but the difference is undocumented and surprising.
+func TestDiscovery_SearchIncludesClosedByDefault(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Searchable unique token xyzzy", "--type", "task", "--priority", "2")
+	w.run("close", a)
+
+	// bd search should find it
+	searchOut := w.run("search", "xyzzy", "--json")
+	searchIDs := parseIDs(t, searchOut)
+
+	// bd list should NOT find it (excludes closed by default)
+	listOut := w.run("list", "--json", "-n", "0")
+	listIDs := parseIDs(t, listOut)
+
+	if containsID(searchIDs, a) && !containsID(listIDs, a) {
+		// This is the expected finding — search includes closed, list doesn't
+		t.Logf("CONFIRMED: bd search includes closed issue %s, bd list excludes it (intentional but undocumented)", a)
+	}
+
+	if !containsID(searchIDs, a) {
+		t.Errorf("bd search should find closed issue %s by keyword", a)
+	}
+}
+
 // TestProtocol_CommentAddAndPreserve verifies comments persist through operations.
 func TestProtocol_CommentAddAndPreserve(t *testing.T) {
 	w := newCandidateWorkspace(t)

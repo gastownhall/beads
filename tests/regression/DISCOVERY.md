@@ -15,6 +15,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | 2026-02-22 | **Phase 1-3: Snapshot harness + full parity run** | Replaced bd export with snapshot (list+show). Fixed database isolation (unique prefixes per workspace). Normalization for show-vs-export field differences. **Result: 95+ PASS, 15 FAIL (all known bugs), 10 SKIP.** |
 | 2026-02-22 | **Phase 4: Ship fix PRs with tests** | BUG-2+3 already merged (PR #1992). BUG-10 PR #2014, BUG-11+12+14 PR #1994, BUG-4 PR #2017. All PRs include protocol tests. |
 | 2026-02-22 | **Session 3: Candidate-only discovery (lane 3)** | Found 5 new bugs (BUG-16 through 20) + 3 code-review-only findings. External blockers, conditional-blocks, count/list discrepancy, waits-for gating, parent-child blocked consistency. Filed DECISION PRs #2025, #2026. |
+| 2026-02-22 | **Session 4: Deep discovery (search, lifecycle, batch)** | Found 4 more bugs (BUG-21 through 24). Update bypasses close guard, reopen superseded semantic corruption, defer past date creates invisible issue, wisp sort order loss. |
 
 ## Audit Summary
 
@@ -40,6 +41,10 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-18 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-19 | **INVESTIGATE** | OPEN (not PR'd yet) | — |
 | BUG-20 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-21 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-22 | **DECISION** | OPEN (not PR'd yet) | — |
+| BUG-23 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-24 | **BUG** (code review) | OPEN (not PR'd yet) | — |
 
 ### Shipped fix PRs (all include protocol tests)
 
@@ -56,11 +61,15 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 8. **BUG-16**: external blockers ignored by readiness — PR #2025
 9. **BUG-17**: conditional-blocks not evaluated — PR #2026
 
-### Not yet PR'd (discovered session 3, holding for maintainer feedback)
+### Not yet PR'd (holding for maintainer feedback)
 
 10. **BUG-18**: count vs list default filter discrepancy
 11. **BUG-19**: waits-for bare dep doesn't block (needs investigation)
 12. **BUG-20**: children of blocked parent not in bd blocked
+13. **BUG-21**: update --status closed bypasses close guard
+14. **BUG-22**: reopen superseded = semantic corruption (DECISION)
+15. **BUG-23**: defer with past date creates invisible issue
+16. **BUG-24**: wisp sort order loss (code review, no test)
 
 ### Investigate further
 
@@ -466,6 +475,77 @@ is not in ready, not in blocked — invisible to the user.
 
 **Impact:** User runs `bd ready` → child missing. Runs `bd blocked` → child
 not there either. Has no way to discover why the child isn't showing in ready.
+
+---
+
+### BUG-21: `bd update --status closed` bypasses close guard (NEW — session 4)
+
+**Severity: HIGH** — Silent bypass of safety mechanism
+**Discovered:** Session 4 deep discovery, test
+**File:** `cmd/bd/update.go` (no blocker check) vs `cmd/bd/close.go:109-119`
+**Test:** `TestDiscovery_UpdateStatusClosedBypassesCloseGuard`
+
+`bd close X` checks for open blockers and rejects the close. `bd update X
+--status closed` does NOT check for blockers — it sets status directly,
+bypassing the close guard, gate checks, and close hooks. It also leaves
+`close_reason` empty (losing audit trail).
+
+**Impact:** Scripts or agents using `bd update --status closed` can close
+blocked issues silently, violating the blocking contract.
+
+---
+
+### BUG-22: Reopening superseded issue creates semantic corruption (NEW — session 4)
+
+**Severity: MEDIUM** — Semantically incoherent state
+**Discovered:** Session 4 deep discovery, test
+**Test:** `TestDiscovery_ReopenSupersededSemanticCorruption`
+
+`bd supersede A --with B` creates a `supersedes` dep and closes A. `bd reopen A`
+sets status to open but does NOT remove the supersedes dep. Result: A is "open
+but superseded by B" — a contradictory state. The `supersedes` dep is non-blocking,
+so A appears in `bd ready` as actionable work despite being superseded.
+
+**DECISION:** Should reopen remove supersedes/duplicates deps, or should reopen
+be rejected for superseded/duplicated issues?
+
+---
+
+### BUG-23: Defer with past date creates invisible issue (NEW — session 4)
+
+**Severity: MEDIUM** — Issue becomes invisible to all workflows
+**Discovered:** Session 4 deep discovery, test
+**File:** `cmd/bd/defer.go:37-44` (no past-date validation)
+**Test:** `TestDiscovery_DeferPastDateInvisible`
+
+`bd defer X --until 2020-01-01` sets status=deferred and defer_until to a past
+date. Nothing transitions status back to open when defer_until passes. The issue
+is not in `bd ready` (status is deferred, not open) and not in any other
+actionable view. Note: `bd update --defer` warns about past dates but
+`bd defer` does NOT.
+
+**Impact:** The user thinks "it will reappear after 2020-01-01" but it never
+does. The issue is silently lost.
+
+---
+
+### BUG-24: `scanWispIDs` loses SQL sort order (NEW — session 4, code review)
+
+**Severity: MEDIUM** — Silent sort order violation
+**Discovered:** Session 4 deep discovery, code review
+**File:** `internal/storage/dolt/wisps.go:719-738`
+
+`searchWisps()` uses `ORDER BY priority ASC, created_at DESC` but `scanWispIDs()`
+calls `getWispsByIDs()` which issues `SELECT ... WHERE id IN (...)` with no
+ORDER BY and no order-restoration logic. Compare with `scanIssueIDs` in
+`dependencies.go:869-883` which has explicit order restoration (GH#1880 fix).
+
+Additionally, `SearchIssues()` at `queries.go:321-337` appends wisp results
+after Dolt results without re-sorting the merged list. A P0 wisp appears after
+a P4 permanent issue.
+
+**Impact:** Any query returning both permanent and ephemeral issues has broken
+sort order. Hard to notice with small wisp counts.
 
 ---
 
