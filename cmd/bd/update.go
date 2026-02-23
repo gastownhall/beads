@@ -42,6 +42,20 @@ create, update, show, or close operation).`,
 
 		if cmd.Flags().Changed("status") {
 			status, _ := cmd.Flags().GetString("status")
+			var customStatuses []string
+			if store != nil {
+				cs, err := store.GetCustomStatuses(rootCtx)
+				if err != nil {
+					if !jsonOutput {
+						fmt.Fprintf(os.Stderr, "%s Failed to get custom statuses: %v\n", ui.RenderWarn("!"), err)
+					}
+				} else {
+					customStatuses = cs
+				}
+			}
+			if !types.Status(status).IsValidWithCustom(customStatuses) {
+				FatalErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", status)
+			}
 			updates["status"] = status
 
 			// If status is being set to closed, include session if provided
