@@ -281,7 +281,7 @@ func extractFromSQLite(ctx context.Context, dbPath string) (*migrationData, erro
 			COALESCE(compaction_level,0), COALESCE(compacted_at,''), compacted_at_commit,
 			COALESCE(original_size,0),
 			COALESCE(sender,''), COALESCE(ephemeral,0), COALESCE(pinned,0),
-			COALESCE(is_template,0), COALESCE(crystallizes,''),
+			COALESCE(is_template,0), COALESCE(crystallizes,0),
 			COALESCE(mol_type,''), COALESCE(work_type,''), quality_score,
 			COALESCE(source_system,''), COALESCE(source_repo,''), COALESCE(close_reason,''),
 			COALESCE(event_kind,''), COALESCE(actor,''), COALESCE(target,''), COALESCE(payload,''),

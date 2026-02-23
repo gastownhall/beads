@@ -410,6 +410,11 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// Auto-migrate SQLite to Dolt if a legacy beads.db is detected (bd-3dx).
+		// This must run BEFORE database path resolution because FindDatabasePath()
+		// only looks for Dolt databases — a SQLite-only .beads/ would be invisible.
+		autoMigrateSQLiteToDolt()
+
 		// Initialize database path
 		if dbPath == "" {
 			// Use public API to find database (same logic as extensions)
