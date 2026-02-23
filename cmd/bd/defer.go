@@ -40,6 +40,12 @@ Examples:
 			if err != nil {
 				FatalError("invalid --until format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", untilStr)
 			}
+			// Warn if defer date is in the past (user probably meant future)
+			if t.Before(time.Now()) && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
+					ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+				fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --until=+1h or --until=tomorrow\n")
+			}
 			deferUntil = &t
 		}
 
