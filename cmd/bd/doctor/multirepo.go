@@ -1,15 +1,15 @@
 package doctor
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // CheckMultiRepoTypes discovers and reports custom types used by child repos in multi-repo setups.
@@ -95,26 +95,27 @@ func discoverChildTypes(repoPath string) []string {
 
 // readTypesFromDB reads types.custom from the database config table
 func readTypesFromDB(beadsDir string) ([]string, error) {
-	// Get database path
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return nil, fmt.Errorf("no config")
+	}
+	if cfg.GetBackend() != configfile.BackendDolt {
+		return nil, fmt.Errorf("not dolt backend")
 	}
 
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	doltPath := filepath.Join(beadsDir, "dolt")
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
 
-	var typesStr string
-	err = db.QueryRow("SELECT value FROM config WHERE key = 'types.custom'").Scan(&typesStr)
+	typesStr, err := store.GetConfig(ctx, "types.custom")
 	if err != nil {
 		return nil, err
 	}
@@ -191,23 +192,25 @@ func readTypesFromYAML(beadsDir string) ([]string, error) {
 func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRepoConfig) []string {
 	beadsDir := filepath.Join(repoPath, ".beads")
 
-	// Get database path
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		dbPath = filepath.Join(beadsDir, beads.CanonicalDatabaseName)
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return nil
 	}
-
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	if cfg.GetBackend() != configfile.BackendDolt {
 		return nil
 	}
 
-	db, err := sql.Open("sqlite3", sqliteConnString(dbPath, true))
+	doltPath := filepath.Join(beadsDir, "dolt")
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return nil
 	}
-	defer db.Close()
+	defer func() { _ = store.Close() }()
 
 	// Collect all known types (core work types + parent custom + all child custom)
 	// Only core work types are built-in; Gas Town types require types.custom config.
@@ -216,8 +219,8 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	}
 
 	// Add parent's custom types
-	var parentTypes string
-	if err := db.QueryRow("SELECT value FROM config WHERE key = 'types.custom'").Scan(&parentTypes); err == nil {
+	parentTypes, err := store.GetConfig(ctx, "types.custom")
+	if err == nil && parentTypes != "" {
 		for _, t := range strings.Split(parentTypes, ",") {
 			t = strings.TrimSpace(t)
 			if t != "" {
@@ -235,7 +238,8 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	}
 
 	// Find issues with types not in knownTypes
-	rows, err := db.Query(`
+	db := store.UnderlyingDB()
+	rows, err := db.QueryContext(ctx, `
 		SELECT DISTINCT issue_type FROM issues
 		WHERE source_repo != '' AND source_repo != '.'
 	`)
