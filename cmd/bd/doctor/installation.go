@@ -169,4 +169,3 @@ func CheckUntrackedBeadsFiles(path string) DoctorCheck {
 func FixPermissions(path string) error {
 	return fix.Permissions(path)
 }
-

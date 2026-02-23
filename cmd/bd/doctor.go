@@ -621,7 +621,6 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, pollutionCheck)
 	// Don't fail overall check for test pollution, just warn
 
-
 	// Check 26: Stale closed issues (maintenance)
 	staleClosedCheck := convertDoctorCheck(doctor.CheckStaleClosedIssues(path))
 	result.Checks = append(result.Checks, staleClosedCheck)

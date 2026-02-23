@@ -81,6 +81,7 @@ func collectValidateChecks(path string) []validateCheckResult {
 		{check: convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorGastown, gastownDuplicatesThreshold))},
 		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path)), fixable: true},
 		{check: convertDoctorCheck(doctor.CheckTestPollution(path))},
+		{check: convertDoctorCheck(doctor.CheckGitConflicts(path))},
 	}
 }
 

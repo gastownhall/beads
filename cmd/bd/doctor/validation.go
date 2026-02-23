@@ -325,6 +325,70 @@ func CheckTestPollution(path string) DoctorCheck {
 	}
 }
 
+// CheckGitConflicts detects unresolved git merge conflict markers in JSONL files.
+func CheckGitConflicts(path string) DoctorCheck {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusOK,
+			Message: "N/A (no .beads directory)",
+		}
+	}
+
+	// Scan all JSONL files for conflict markers
+	matches, err := filepath.Glob(filepath.Join(beadsDir, "*.jsonl"))
+	if err != nil || len(matches) == 0 {
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusOK,
+			Message: "No JSONL files to check",
+		}
+	}
+
+	var conflictFiles []string
+	for _, fpath := range matches {
+		f, err := os.Open(fpath) // #nosec G304 - path constructed from beadsDir
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		hasConflict := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "<<<<<<<") || strings.HasPrefix(line, ">>>>>>>") || strings.HasPrefix(line, "=======") {
+				hasConflict = true
+				break
+			}
+		}
+		_ = f.Close()
+		if hasConflict {
+			if rel, err := filepath.Rel(beadsDir, fpath); err == nil {
+				conflictFiles = append(conflictFiles, rel)
+			} else {
+				conflictFiles = append(conflictFiles, filepath.Base(fpath))
+			}
+		}
+	}
+
+	if len(conflictFiles) == 0 {
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusOK,
+			Message: "No conflict markers found",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Git Conflicts",
+		Status:  StatusError,
+		Message: fmt.Sprintf("Unresolved git conflicts in %d file(s)", len(conflictFiles)),
+		Detail:  strings.Join(conflictFiles, ", "),
+		Fix:     "Resolve merge conflicts in .beads/ files, then commit",
+	}
+}
+
 // CheckChildParentDependencies detects child→parent blocking dependencies.
 // These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
 // However, they may be intentional in some workflows, so removal requires explicit opt-in.
@@ -392,4 +456,3 @@ func CheckChildParentDependencies(path string) DoctorCheck {
 		Category: CategoryMetadata,
 	}
 }
-
