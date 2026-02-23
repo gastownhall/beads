@@ -17,7 +17,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | 2026-02-22 | **Session 3: Candidate-only discovery (lane 3)** | Found 5 new bugs (BUG-16 through 20) + 3 code-review-only findings. External blockers, conditional-blocks, count/list discrepancy, waits-for gating, parent-child blocked consistency. Filed DECISION PRs #2025, #2026. |
 | 2026-02-22 | **Session 4: Deep discovery (search, lifecycle, batch, deps)** | Found 7 more bugs (BUG-21 through 27). Update bypasses close guard, reopen superseded corruption, defer past date invisible, wisp sort order, conditional-blocks cycle, epic wisp children. 2 new protocol tests. |
 | 2026-02-22 | **Session 5: Filter, flag interaction, migration seams** | Found 4 more bugs (BUG-28 through 31). Dead label-pattern filter, claim+status overwrite, --ready overrides --status, assignee empty string. Code review: pull doesn't check merge conflicts, schema migration non-transactional, import drops deps/comments silently. |
-| 2026-02-22 | **Session 6: Routing, validation, sort, edge cases** | Found 7 more bugs (BUG-32 through 38) + 1 protocol test (BUG-39). Stale negative days, sort unknown field, reparent cycle, reversed ranges (priority, date), negative limit. Code review: createInRig skips prefix validation, same-prefix rig ambiguity, batch import no UTC normalization. |
+| 2026-02-22 | **Session 6: Routing, validation, sort, edge cases** | Found 10 more bugs (BUG-32 through 42) + 2 protocol tests (BUG-35, 39). Stale negative days, sort unknown field, reparent cycle, reversed ranges, negative limit, whitespace title, config ambiguity, dep rm false positive. Code review: createInRig skips prefix validation, same-prefix rig ambiguity, batch import no UTC. |
 
 ## Audit Summary
 
@@ -62,6 +62,9 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-37 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-38 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-39 | **PROTOCOL** | PASS (correct behavior) | — |
+| BUG-40 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-41 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-42 | **BUG** | OPEN (not PR'd yet) | — |
 
 ### Shipped fix PRs (all include protocol tests)
 
@@ -102,6 +105,9 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 29. **BUG-37**: --created-after > --created-before silently returns empty
 30. **BUG-38**: bd list -n -1 accepted as unlimited (no validation)
 31. **BUG-39**: bd duplicate on closed issue succeeds (PROTOCOL — correct)
+32. **BUG-40**: update --title whitespace-only accepted (extends BUG-12)
+33. **BUG-41**: config set "" then config get shows "(not set)" — ambiguous
+34. **BUG-42**: dep rm nonexistent says "Removed dependency" — false positive
 
 ### Investigate further
 
@@ -798,6 +804,47 @@ either reject negative values or document that negative means unlimited.
 is already closed. The status update is idempotent and the duplicate-of dep
 is correctly added. This is reasonable behavior — the dep link is what matters,
 not the status transition. Classified as PROTOCOL (correct behavior).
+
+---
+
+### BUG-40: `bd update --title "   "` accepts whitespace-only title (NEW — session 6)
+
+**Severity: LOW** — Data quality issue (extension of BUG-12)
+**Discovered:** Session 6 discovery, test
+**File:** `cmd/bd/update.go:66-68` (no whitespace validation)
+**Test:** `TestDiscovery_WhitespaceOnlyTitleAccepted`
+
+`bd update X --title "   "` succeeds and stores a whitespace-only title. The
+issue becomes effectively untitled. `bd create` rejects empty titles but
+`bd update` doesn't validate for whitespace-only content.
+
+---
+
+### BUG-41: `bd config get` shows "(not set)" for empty-string values (NEW — session 6)
+
+**Severity: LOW** — UX ambiguity
+**Discovered:** Session 6 discovery, test
+**File:** `cmd/bd/config.go:207` (empty string check)
+**Test:** `TestDiscovery_ConfigEmptyValueAmbiguous`
+
+After `bd config set key ""`, `bd config get key` displays "(not set)" — the
+same as for a key that was never set. JSON output correctly distinguishes:
+`{"key": "test.key", "value": ""}` vs `{"key": "test.key", "value": null}`.
+But human-readable output is ambiguous.
+
+---
+
+### BUG-42: `bd dep rm` on nonexistent dep reports success (NEW — session 6)
+
+**Severity: LOW** — False positive confirmation
+**Discovered:** Session 6 discovery, test
+**File:** `internal/storage/dolt/dependencies.go:89-109` (no rows-affected check)
+**Test:** `TestDiscovery_DepRmNonexistentSilentSuccess`
+
+`bd dep rm A B` where no dep exists between A and B reports
+"Removed dependency: A no longer depends on B" even though nothing was removed.
+The DELETE statement succeeds with 0 rows affected but the command doesn't
+check the result.
 
 ---
 

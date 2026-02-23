@@ -1821,6 +1821,149 @@ func TestDiscovery_DuplicateAlreadyClosedSucceeds(t *testing.T) {
 	}
 }
 
+// TestDiscovery_WhitespaceOnlyTitleAccepted verifies that bd update --title
+// with whitespace-only content is handled correctly.
+//
+// FINDING: update.go:66-68 accepts --title without any whitespace validation.
+// Unlike create.go which requires non-empty title, update lets you set a
+// whitespace-only title like "   " which is effectively empty.
+//
+// Classification: BUG — extension of BUG-12 (empty title accepted).
+func TestDiscovery_WhitespaceOnlyTitleAccepted(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Has a title", "--type", "task", "--priority", "2")
+
+	// Setting whitespace-only title should fail
+	_, err := w.tryRun("update", a, "--title", "   ")
+	if err == nil {
+		data := parseJSON(t, w.run("show", a, "--json"))
+		title := fmt.Sprintf("%v", data[0]["title"])
+		if strings.TrimSpace(title) == "" {
+			t.Errorf("DISCOVERY: update --title '   ' accepted whitespace-only title — effectively blank")
+		}
+	}
+	// If err != nil, the tool correctly rejected whitespace-only title — good
+}
+
+// TestDiscovery_ConfigEmptyValueAmbiguous verifies that bd config set key ""
+// is distinguishable from key not set.
+//
+// FINDING: config.go:207 displays "(not set)" for empty string values, which
+// is the same as for keys that haven't been set. In JSON output, empty string
+// is distinguishable from null, but in human-readable output they look the same.
+//
+// Classification: BUG (low) — ambiguous UX between "set to empty" and "not set".
+func TestDiscovery_ConfigEmptyValueAmbiguous(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	// Set a config key to a value then clear it
+	w.run("config", "set", "test.discovery.key", "hello")
+
+	// Verify it shows the value
+	out := w.run("config", "get", "test.discovery.key")
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("config get should show 'hello', got: %s", out)
+	}
+
+	// Set to empty string
+	w.run("config", "set", "test.discovery.key", "")
+
+	// In human-readable output, this should say "(not set)" or "empty"
+	// but the user can't tell if the key exists with empty value vs not set
+	out = w.run("config", "get", "test.discovery.key")
+
+	// In JSON mode, we can check the actual value
+	jsonOut, err := w.tryRun("config", "get", "test.discovery.key", "--json")
+	if err != nil {
+		t.Skipf("bd config get --json not available: %v", err)
+	}
+
+	t.Logf("human output: %q, json output: %q", strings.TrimSpace(out), strings.TrimSpace(jsonOut))
+
+	if strings.Contains(out, "not set") {
+		t.Errorf("DISCOVERY: config get after setting to empty string shows '(not set)' — ambiguous with key never being set")
+	}
+}
+
+// TestProtocol_CountByStatusSumMatchesTotal verifies that bd count --by-status
+// groups sum to the same total as bd count.
+func TestProtocol_CountByStatusSumMatchesTotal(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	// Create issues in various states
+	w.create("--title", "Open1", "--type", "task", "--priority", "2")
+	inProgress := w.create("--title", "InProg", "--type", "task", "--priority", "2")
+	w.run("update", inProgress, "--status", "in_progress")
+	closed := w.create("--title", "Closed1", "--type", "task", "--priority", "2")
+	w.run("close", closed)
+	deferred := w.create("--title", "Deferred1", "--type", "task", "--priority", "2")
+	w.run("defer", deferred, "--until", "2099-12-31")
+
+	// Get total count (includes ALL statuses)
+	var countResult struct {
+		Count int `json:"count"`
+	}
+	countJSON := w.run("count", "--status", "all", "--json")
+	if err := json.Unmarshal([]byte(countJSON), &countResult); err != nil {
+		t.Fatalf("parsing count: %v", err)
+	}
+
+	// Get by-status grouping
+	var groupResult struct {
+		Total  int `json:"total"`
+		Groups []struct {
+			Group string `json:"group"`
+			Count int    `json:"count"`
+		} `json:"groups"`
+	}
+	groupJSON := w.run("count", "--by-status", "--json")
+	if err := json.Unmarshal([]byte(groupJSON), &groupResult); err != nil {
+		t.Fatalf("parsing count --by-status: %v", err)
+	}
+
+	// Sum of groups should match total
+	groupSum := 0
+	for _, g := range groupResult.Groups {
+		groupSum += g.Count
+	}
+
+	if groupSum != groupResult.Total {
+		t.Errorf("count --by-status group sum (%d) != reported total (%d)", groupSum, groupResult.Total)
+	}
+
+	if groupResult.Total != countResult.Count {
+		t.Errorf("count --by-status total (%d) != count --status all (%d)", groupResult.Total, countResult.Count)
+	}
+}
+
+// TestDiscovery_DepRmNonexistentSilentSuccess verifies that dep rm on a
+// dep that doesn't exist gives feedback.
+//
+// FINDING: dependencies.go:89-109 executes DELETE without checking rows
+// affected. Returns success even if 0 rows were deleted.
+//
+// Classification: BUG (low) — should warn that no dep was found to remove.
+func TestDiscovery_DepRmNonexistentSilentSuccess(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Source", "--type", "task", "--priority", "2")
+	b := w.create("--title", "Target", "--type", "task", "--priority", "2")
+
+	// No dep exists between a and b
+	// Removing a nonexistent dep should error or warn
+	out, err := w.tryRun("dep", "rm", a, b)
+	if err == nil {
+		// Command succeeded — was there any indication nothing was removed?
+		if !strings.Contains(strings.ToLower(out), "not found") &&
+			!strings.Contains(strings.ToLower(out), "no dep") &&
+			!strings.Contains(strings.ToLower(out), "warning") {
+			t.Errorf("DISCOVERY: dep rm on nonexistent dependency succeeded silently with no warning (output: %s)", strings.TrimSpace(out))
+		}
+	}
+	// If err != nil, the tool correctly rejected the operation — good
+}
+
 // TestProtocol_CommentAddAndPreserve verifies comments persist through operations.
 func TestProtocol_CommentAddAndPreserve(t *testing.T) {
 	w := newCandidateWorkspace(t)
