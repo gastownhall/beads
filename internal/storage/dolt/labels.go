@@ -83,7 +83,7 @@ func (s *DoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []string) (
 	}
 
 	// Partition into wisp and dolt IDs
-	ephIDs, doltIDs := partitionIDs(issueIDs)
+	ephIDs, doltIDs := s.partitionByWispStatus(ctx, issueIDs)
 
 	result := make(map[string][]string)
 

@@ -655,7 +655,7 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 	}
 
 	// Route wisp IDs to wisp deletion; process regular IDs in batch below.
-	ephIDs, regularIDs := partitionIDs(ids)
+	ephIDs, regularIDs := s.partitionByWispStatus(ctx, ids)
 	wispDeleteCount := 0
 	for _, eid := range ephIDs {
 		if s.isActiveWisp(ctx, eid) {

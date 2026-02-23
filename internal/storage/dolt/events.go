@@ -11,9 +11,9 @@ import (
 
 // AddComment adds a comment event to an issue
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	table := wispEventTable(issueID)
-	if IsEphemeralID(issueID) && !s.isActiveWisp(ctx, issueID) {
-		table = "events" // Promoted wisp — use permanent table
+	table := "events"
+	if s.isActiveWisp(ctx, issueID) {
+		table = "wisp_events"
 	}
 
 	//nolint:gosec // G201: table is hardcoded
@@ -29,9 +29,9 @@ func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment stri
 
 // GetEvents retrieves events for an issue
 func (s *DoltStore) GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error) {
-	table := wispEventTable(issueID)
-	if IsEphemeralID(issueID) && !s.isActiveWisp(ctx, issueID) {
-		table = "events" // Promoted wisp — use permanent table
+	table := "events"
+	if s.isActiveWisp(ctx, issueID) {
+		table = "wisp_events"
 	}
 
 	//nolint:gosec // G201: table is hardcoded
@@ -86,11 +86,11 @@ func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text s
 // This prevents comment timestamp drift across import/export cycles.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	// Verify issue exists — route to wisps table for active wisps
-	issueTable := wispIssueTable(issueID)
-	commentTable := wispCommentTable(issueID)
-	if IsEphemeralID(issueID) && !s.isActiveWisp(ctx, issueID) {
-		issueTable = "issues"
-		commentTable = "comments"
+	issueTable := "issues"
+	commentTable := "comments"
+	if s.isActiveWisp(ctx, issueID) {
+		issueTable = "wisps"
+		commentTable = "wisp_comments"
 	}
 
 	// Verify issue exists — use queryRowContext for server-mode retry.
@@ -131,9 +131,9 @@ func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, tex
 
 // GetIssueComments retrieves all comments for an issue
 func (s *DoltStore) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
-	table := wispCommentTable(issueID)
-	if IsEphemeralID(issueID) && !s.isActiveWisp(ctx, issueID) {
-		table = "comments" // Promoted wisp — use permanent table
+	table := "comments"
+	if s.isActiveWisp(ctx, issueID) {
+		table = "wisp_comments"
 	}
 
 	//nolint:gosec // G201: table is hardcoded
@@ -158,18 +158,18 @@ func (s *DoltStore) GetCommentsForIssues(ctx context.Context, issueIDs []string)
 	}
 
 	result := make(map[string][]*types.Comment)
-	ephIDs, doltIDs := partitionIDs(issueIDs)
+	wispIDs, permIDs := s.partitionByWispStatus(ctx, issueIDs)
 
-	// Query dolt comments table
-	if len(doltIDs) > 0 {
-		if err := s.getCommentsForIDsInto(ctx, "comments", doltIDs, result); err != nil {
+	// Query permanent comments table
+	if len(permIDs) > 0 {
+		if err := s.getCommentsForIDsInto(ctx, "comments", permIDs, result); err != nil {
 			return nil, err
 		}
 	}
 
 	// Query wisp_comments table
-	if len(ephIDs) > 0 {
-		if err := s.getCommentsForIDsInto(ctx, "wisp_comments", ephIDs, result); err != nil {
+	if len(wispIDs) > 0 {
+		if err := s.getCommentsForIDsInto(ctx, "wisp_comments", wispIDs, result); err != nil {
 			return nil, err
 		}
 	}
@@ -217,18 +217,18 @@ func (s *DoltStore) GetCommentCounts(ctx context.Context, issueIDs []string) (ma
 	}
 
 	result := make(map[string]int)
-	ephIDs, doltIDs := partitionIDs(issueIDs)
+	wispIDs, permIDs := s.partitionByWispStatus(ctx, issueIDs)
 
-	// Query dolt comments table
-	if len(doltIDs) > 0 {
-		if err := s.getCommentCountsInto(ctx, "comments", doltIDs, result); err != nil {
+	// Query permanent comments table
+	if len(permIDs) > 0 {
+		if err := s.getCommentCountsInto(ctx, "comments", permIDs, result); err != nil {
 			return nil, err
 		}
 	}
 
 	// Query wisp_comments table
-	if len(ephIDs) > 0 {
-		if err := s.getCommentCountsInto(ctx, "wisp_comments", ephIDs, result); err != nil {
+	if len(wispIDs) > 0 {
+		if err := s.getCommentCountsInto(ctx, "wisp_comments", wispIDs, result); err != nil {
 			return nil, err
 		}
 	}

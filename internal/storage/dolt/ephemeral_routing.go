@@ -55,7 +55,9 @@ func allEphemeral(ids []string) bool {
 	return len(ids) > 0
 }
 
-// partitionIDs separates IDs into ephemeral and dolt groups.
+// partitionIDs separates IDs into ephemeral and dolt groups based on ID pattern only.
+// NOTE: This misses explicit-ID ephemerals (GH#2053). For correct routing, use
+// partitionByWispStatus which checks the wisps table as source of truth.
 func partitionIDs(ids []string) (ephIDs, doltIDs []string) {
 	for _, id := range ids {
 		if IsEphemeralID(id) {
@@ -65,6 +67,75 @@ func partitionIDs(ids []string) (ephIDs, doltIDs []string) {
 		}
 	}
 	return
+}
+
+// partitionByWispStatus separates IDs into wisp (ephemeral) and permanent groups,
+// using the wisps table as source of truth. Unlike partitionIDs (which only checks
+// the ID pattern), this correctly handles explicit-ID ephemerals (GH#2053).
+func (s *DoltStore) partitionByWispStatus(ctx context.Context, ids []string) (wispIDs, permIDs []string) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// Fast partition by ID pattern — handles -wisp- IDs correctly
+	wispIDs, permIDs = partitionIDs(ids)
+
+	// Check if any permanent IDs are actually explicit-ID wisps (GH#2053)
+	if len(permIDs) == 0 {
+		return
+	}
+
+	activeSet := s.batchWispExists(ctx, permIDs)
+	if len(activeSet) == 0 {
+		return
+	}
+
+	var realPerm []string
+	for _, id := range permIDs {
+		if activeSet[id] {
+			wispIDs = append(wispIDs, id)
+		} else {
+			realPerm = append(realPerm, id)
+		}
+	}
+	permIDs = realPerm
+	return
+}
+
+// batchWispExists returns the set of IDs that exist in the wisps table.
+// Used by partitionByWispStatus to detect explicit-ID ephemerals in a single query.
+func (s *DoltStore) batchWispExists(ctx context.Context, ids []string) map[string]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	//nolint:gosec // G201: placeholders contains only ? markers
+	rows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf("SELECT id FROM wisps WHERE id IN (%s)", strings.Join(placeholders, ",")),
+		args...)
+	if err != nil {
+		return nil // On error, assume no wisps (safe fallback)
+	}
+	defer rows.Close()
+
+	result := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			result[id] = true
+		}
+	}
+	return result
 }
 
 // PromoteFromEphemeral copies an issue from the wisps table to the issues table,

@@ -337,7 +337,7 @@ func (s *DoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs 
 	}
 
 	// Partition and merge from wisps and issues tables
-	ephIDs, doltIDs := partitionIDs(issueIDs)
+	ephIDs, doltIDs := s.partitionByWispStatus(ctx, issueIDs)
 	if len(ephIDs) > 0 {
 		result := make(map[string][]*types.Dependency)
 		for _, id := range ephIDs {
@@ -423,7 +423,7 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 	}
 
 	// Partition and merge wisp and dolt IDs
-	ephIDs, doltIDs := partitionIDs(issueIDs)
+	ephIDs, doltIDs := s.partitionByWispStatus(ctx, issueIDs)
 	if len(ephIDs) > 0 {
 		// For wisp IDs, query wisp_dependencies
 		for _, ephID := range ephIDs {
@@ -890,7 +890,7 @@ func (s *DoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.
 	}
 
 	// Partition IDs between wisps and issues tables
-	ephIDs, doltIDs := partitionIDs(ids)
+	ephIDs, doltIDs := s.partitionByWispStatus(ctx, ids)
 	if len(ephIDs) > 0 {
 		var allIssues []*types.Issue
 		wispIssues, err := s.getWispsByIDs(ctx, ephIDs)
