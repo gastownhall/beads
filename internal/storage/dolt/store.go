@@ -451,6 +451,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	store := &DoltStore{
 		db:             db,
+		dbPath:         cfg.Path,
 		connStr:        connStr,
 		committerName:  cfg.CommitterName,
 		committerEmail: cfg.CommitterEmail,
