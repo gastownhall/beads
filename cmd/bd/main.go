@@ -516,7 +516,7 @@ var rootCmd = &cobra.Command{
 
 		if err != nil {
 			// Check for fresh clone scenario
-			if handleFreshCloneError(err, beadsDir) {
+			if handleFreshCloneError(err) {
 				os.Exit(1)
 			}
 			FatalError("failed to open database: %v", err)

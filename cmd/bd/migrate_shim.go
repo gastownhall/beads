@@ -356,7 +356,7 @@ func queryJSON(dbPath, query string) ([]map[string]interface{}, error) {
 
 // verifySQLiteFile checks that a file starts with the SQLite magic bytes.
 func verifySQLiteFile(path string) error {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is constructed internally, not from user input
 	if err != nil {
 		return fmt.Errorf("cannot open %s: %w", filepath.Base(path), err)
 	}

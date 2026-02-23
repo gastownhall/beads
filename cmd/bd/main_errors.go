@@ -24,7 +24,7 @@ func isFreshCloneError(err error) bool {
 // handleFreshCloneError displays a helpful message when a fresh clone is detected
 // and returns true if the error was handled (so caller should exit).
 // If not a fresh clone error, returns false and does nothing.
-func handleFreshCloneError(err error, beadsDir string) bool {
+func handleFreshCloneError(err error) bool {
 	if !isFreshCloneError(err) {
 		return false
 	}
