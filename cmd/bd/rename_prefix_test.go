@@ -46,7 +46,7 @@ func TestRenamePrefixCommand(t *testing.T) {
 
 	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer testStore.Close()
 
@@ -174,7 +174,7 @@ func TestRenamePrefixInDB(t *testing.T) {
 
 	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create test database: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	t.Cleanup(func() {
 		testStore.Close()

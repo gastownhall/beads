@@ -22,7 +22,7 @@ func TestUpdateMetadataInlineJSON(t *testing.T) {
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("failed to create storage: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 

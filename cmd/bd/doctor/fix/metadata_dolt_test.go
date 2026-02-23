@@ -57,7 +57,7 @@ func setupDoltWorkspace(t *testing.T) string {
 		Database: "beads",
 	})
 	if err != nil {
-		t.Fatalf("failed to create Dolt store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("failed to close Dolt store: %v", err)

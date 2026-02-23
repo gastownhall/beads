@@ -47,7 +47,7 @@ func TestCheckDuplicateIssues_ClosedIssuesExcluded(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -96,7 +96,7 @@ func TestCheckDuplicateIssues_OpenDuplicatesDetected(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -144,7 +144,7 @@ func TestCheckDuplicateIssues_DifferentDesignNotDuplicate(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -191,7 +191,7 @@ func TestCheckDuplicateIssues_MixedOpenClosed(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -245,7 +245,7 @@ func TestCheckDuplicateIssues_DeletedExcluded(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -319,7 +319,7 @@ func TestCheckDuplicateIssues_GastownUnderThreshold(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -370,7 +370,7 @@ func TestCheckDuplicateIssues_GastownOverThreshold(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -417,7 +417,7 @@ func TestCheckDuplicateIssues_GastownCustomThreshold(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -465,7 +465,7 @@ func TestCheckDuplicateIssues_NonGastownMode(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -516,7 +516,7 @@ func TestCheckDuplicateIssues_MultipleDuplicateGroups(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
@@ -580,7 +580,7 @@ func TestCheckDuplicateIssues_ZeroDuplicatesNullHandling(t *testing.T) {
 
 	store, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
 	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
+		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	defer store.Close()
 
