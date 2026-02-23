@@ -13,34 +13,35 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | 2026-02-22 | Audit of all bugs for fix vs wontfix | 5-6 clear fix PRs, 2 need design discussion, 5-6 wontfix/by-design |
 | 2026-02-22 | Code review of labels.go, schema.go, dependencies.go for BUG-5 and BUG-7 root cause | BUG-5 upgraded to INVESTIGATE (not clearly wontfix). BUG-7 downgraded to FILE ISSUE (intentionally coded upsert, needs product decision). BUG-4 upgraded to DOCS FIX (help text promises "blocked" as a status). |
 | 2026-02-22 | **Phase 1-3: Snapshot harness + full parity run** | Replaced bd export with snapshot (list+show). Fixed database isolation (unique prefixes per workspace). Normalization for show-vs-export field differences. **Result: 95+ PASS, 15 FAIL (all known bugs), 10 SKIP.** |
+| 2026-02-22 | **Phase 4: Ship fix PRs with tests** | BUG-2+3 already merged (PR #1992). BUG-10 PR #2014, BUG-11+12+14 PR #1994, BUG-4 PR #2017. All PRs include protocol tests. |
 
 ## Audit Summary
 
-| Bug | Verdict | Reasoning |
-|-----|---------|-----------|
-| BUG-1 | WONTFIX | `bd export` removal was intentional (Dolt migration). Test harness needs adaptation, not a product bug. |
-| BUG-2 | **FIX PR** | Real user complaint (GH#1954). Clear root cause, small fix. |
-| BUG-3 | **FIX PR** | Follows from BUG-2 fix. Bundle together. |
-| BUG-4 | **DOCS FIX** | "blocked" is computed by design, but help text for `list --status` and `count --status` explicitly lists it as a valid value. At minimum the help text should be corrected. |
-| BUG-5 | **INVESTIGATE** | Labels use `INSERT IGNORE` into junction table (no read-modify-write), but each INSERT is its own `BeginTx/Commit` via `execContext`. Concurrent Dolt working-set commits may lose writes. Not proven to be purely Dolt — beads could mitigate by batching INSERT+event in single tx, or serializing. |
-| BUG-6 | WONTFIX | By-design for collaboration. Only affects test infrastructure. |
-| BUG-7 | **FILE ISSUE** | `ON DUPLICATE KEY UPDATE type = VALUES(type)` at `dependencies.go:78` is intentionally coded. `PRIMARY KEY (issue_id, depends_on_id)` excludes `type`. This is a deliberate upsert, not a bug per se — but the silent data loss of blocking relationships needs a product decision: allow multiple types per pair, reject, or warn. |
-| BUG-8 | FILE ISSUE | Real but needs design discussion — LIKE clause may be intentional for performance. |
-| BUG-9 | WONTFIX | Documented in help text already. |
-| BUG-10 | **FIX PR** | Commands should exit non-zero when all operations fail. |
-| BUG-11 | **FIX PR** | Missing status validation on update. Bundle with BUG-12+14. |
-| BUG-12 | **FIX PR** | Missing empty-title validation on update. Bundle with BUG-11+14. |
-| BUG-13 | FILE ISSUE | Edge case. `bd list --deferred` (filters on `defer_until IS NOT NULL`) may still surface these issues, so "invisible" is overstated. Needs Steve's opinion on desired reopen-of-deferred behavior. |
-| BUG-14 | **FIX PR** | Missing empty-label validation. Bundle with BUG-11+12. |
+| Bug | Verdict | Status | PR/Issue |
+|-----|---------|--------|----------|
+| BUG-1 | WONTFIX | RESOLVED | Snapshot harness (PR #2012) |
+| BUG-2 | **FIX PR** | **MERGED** | PR #1992 |
+| BUG-3 | **FIX PR** | **MERGED** | PR #1992 |
+| BUG-4 | **DOCS FIX** | **PR OPEN** | PR #2017 |
+| BUG-5 | **INVESTIGATE** | OPEN | — |
+| BUG-6 | WONTFIX | RESOLVED | Unique prefix per workspace |
+| BUG-7 | **FILE ISSUE** | OPEN | — |
+| BUG-8 | FILE ISSUE | OPEN | — |
+| BUG-9 | WONTFIX | RESOLVED | — |
+| BUG-10 | **FIX PR** | **PR OPEN** | PR #2014 |
+| BUG-11 | **FIX PR** | **PR OPEN** | PR #1994 |
+| BUG-12 | **FIX PR** | **PR OPEN** | PR #1994 |
+| BUG-13 | FILE ISSUE | OPEN | — |
+| BUG-14 | **FIX PR** | **PR OPEN** | PR #1994 |
 
-### Planned mini fix PRs
+### Shipped fix PRs (all include protocol tests)
 
-1. **BUG-2+3**: dep tree ParentID + ready annotation (highest value — addresses GH#1954)
-2. **BUG-10**: exit codes for close guard / claim failures
-3. **BUG-11+12+14**: input validation gaps (status, title, label)
-4. **BUG-4**: docs fix — remove "blocked" from `--status` help text, point to `bd blocked`
+1. **BUG-2+3**: dep tree ParentID + ready annotation — PR #1992 **MERGED**
+2. **BUG-10**: exit codes for close guard / claim failures — PR #2014
+3. **BUG-11+12+14**: input validation gaps (status, title, label) — PR #1994
+4. **BUG-4**: clarify --status flag vs bd blocked — PR #2017
 
-### File issues first (need product decisions)
+### File issues (need product decisions)
 
 5. **BUG-7**: dep add type overwrite — intentionally coded upsert, needs decision on semantics
 6. **BUG-8**: reparent dual parent — LIKE clause vs dependency-only parent lookup
