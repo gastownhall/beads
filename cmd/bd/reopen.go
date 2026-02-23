@@ -39,6 +39,16 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 				continue
 			}
+			// Skip if already open — avoid false "Reopened" message
+			issue, err := store.GetIssue(ctx, fullID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", fullID, err)
+				continue
+			}
+			if issue.Status == types.StatusOpen {
+				fmt.Fprintf(os.Stderr, "%s is already open\n", fullID)
+				continue
+			}
 			// UpdateIssue automatically clears closed_at when status changes from closed
 			updates := map[string]interface{}{
 				"status": string(types.StatusOpen),

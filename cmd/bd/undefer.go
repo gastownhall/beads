@@ -48,6 +48,17 @@ Examples:
 				continue
 			}
 
+			// Skip if not deferred — avoid false "Undeferred" message
+			issue, err := store.GetIssue(ctx, fullID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", fullID, err)
+				continue
+			}
+			if issue.Status != types.StatusDeferred {
+				fmt.Fprintf(os.Stderr, "%s is not deferred (status: %s)\n", fullID, string(issue.Status))
+				continue
+			}
+
 			updates := map[string]interface{}{
 				"status":      string(types.StatusOpen),
 				"defer_until": nil, // Clear defer_until timestamp (GH#820)
