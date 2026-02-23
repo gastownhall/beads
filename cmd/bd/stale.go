@@ -23,6 +23,9 @@ This helps identify:
 		status, _ := cmd.Flags().GetString("status")
 		limit, _ := cmd.Flags().GetInt("limit")
 		// Use global jsonOutput set by PersistentPreRun
+		if days < 1 {
+			FatalError("--days must be at least 1")
+		}
 		// Validate status if provided
 		if status != "" && status != "open" && status != "in_progress" && status != "blocked" && status != "deferred" {
 			FatalError("invalid status '%s'. Valid values: open, in_progress, blocked, deferred", status)

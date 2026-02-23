@@ -180,6 +180,16 @@ func (w *workspace) run(args ...string) string {
 	return string(out)
 }
 
+// tryRun runs a bd command and returns output + error (does not fatal on failure).
+func (w *workspace) tryRun(args ...string) (string, error) {
+	w.t.Helper()
+	cmd := exec.Command(w.bd, args...)
+	cmd.Dir = w.dir
+	cmd.Env = w.env()
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // create runs bd create --silent and returns the issue ID.
 func (w *workspace) create(args ...string) string {
 	w.t.Helper()
