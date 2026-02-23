@@ -16,6 +16,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | 2026-02-22 | **Phase 4: Ship fix PRs with tests** | BUG-2+3 already merged (PR #1992). BUG-10 PR #2014, BUG-11+12+14 PR #1994, BUG-4 PR #2017. All PRs include protocol tests. |
 | 2026-02-22 | **Session 3: Candidate-only discovery (lane 3)** | Found 5 new bugs (BUG-16 through 20) + 3 code-review-only findings. External blockers, conditional-blocks, count/list discrepancy, waits-for gating, parent-child blocked consistency. Filed DECISION PRs #2025, #2026. |
 | 2026-02-22 | **Session 4: Deep discovery (search, lifecycle, batch, deps)** | Found 7 more bugs (BUG-21 through 27). Update bypasses close guard, reopen superseded corruption, defer past date invisible, wisp sort order, conditional-blocks cycle, epic wisp children. 2 new protocol tests. |
+| 2026-02-22 | **Session 5: Filter, flag interaction, migration seams** | Found 4 more bugs (BUG-28 through 31). Dead label-pattern filter, claim+status overwrite, --ready overrides --status, assignee empty string. Code review: pull doesn't check merge conflicts, schema migration non-transactional, import drops deps/comments silently. |
 
 ## Audit Summary
 
@@ -48,6 +49,10 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-25 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-26 | **DECISION** | OPEN (not PR'd yet) | — |
 | BUG-27 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-28 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-29 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-30 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-31 | **BUG** | OPEN (not PR'd yet) | — |
 
 ### Shipped fix PRs (all include protocol tests)
 
@@ -76,6 +81,10 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 17. **BUG-25**: conditional-blocks cycle undetected
 18. **BUG-26**: reopen superseded = semantic corruption (DECISION)
 19. **BUG-27**: defer with past date creates invisible issue
+20. **BUG-28**: --label-pattern filter is dead code (HIGH)
+21. **BUG-29**: --claim + --status overwrite conflict
+22. **BUG-30**: --ready silently overrides --status
+23. **BUG-31**: --assignee "" becomes no-filter
 
 ### Investigate further
 
@@ -602,6 +611,82 @@ date. Nothing transitions status back to open when defer_until passes. The issue
 is not in `bd ready` (status is "deferred", not "open") and IS in
 `list --status deferred`, but the user expects it to reappear automatically.
 Note: `bd update --defer` warns about past dates but `bd defer` does NOT.
+
+---
+
+### BUG-28: `--label-pattern` and `--label-regex` filters are dead code (NEW — session 5)
+
+**Severity: HIGH** — Complete silent filter failure
+**Discovered:** Session 5 deep discovery, code review + test
+**File:** `cmd/bd/list.go:436-441` (sets filter) vs `internal/storage/dolt/queries.go` (never reads it)
+**Test:** `TestDiscovery_LabelPatternFilterDeadCode`
+
+`bd list --label-pattern "tech-*"` sets `filter.LabelPattern` in the IssueFilter
+struct, but `SearchIssues()` in queries.go NEVER reads or processes `LabelPattern`
+or `LabelRegex`. The SQL query builder completely ignores these fields. The user
+gets unfiltered results while believing they filtered by label glob/regex.
+
+---
+
+### BUG-29: `--claim` + `--status` flag overwrite conflict (NEW — session 5)
+
+**Severity: MEDIUM** — Silent contradictory state
+**Discovered:** Session 5 deep discovery, test
+**File:** `cmd/bd/update.go:276-306` (sequential non-transactional ops)
+**Test:** `TestDiscovery_ClaimThenStatusOverwrite`
+
+`bd update X --claim --status open` first calls `ClaimIssue` (sets status=in_progress),
+then calls `UpdateIssue` with status=open — silently overwriting the claim. The
+user sees "Updated" with no warning about the contradictory flags.
+
+---
+
+### BUG-30: `--ready` silently overrides `--status` on bd list (NEW — session 5)
+
+**Severity: MEDIUM** — Silent filter override
+**Discovered:** Session 5 deep discovery, test
+**File:** `cmd/bd/list.go:401-408` (if-else precedence)
+**Test:** `TestDiscovery_ListReadyOverridesStatusFlag`
+
+`bd list --status closed --ready` silently discards `--status closed` because
+`--ready` takes precedence in the if-else chain. Returns open issues instead of
+closed — completely wrong results with no warning.
+
+---
+
+### BUG-31: `--assignee ""` silently becomes no-filter (NEW — session 5)
+
+**Severity: MEDIUM** — Silent filter bypass
+**Discovered:** Session 5 deep discovery, test
+**File:** `cmd/bd/list.go:423-425` (empty string check)
+**Test:** `TestDiscovery_AssigneeEmptyStringVsNoAssignee`
+
+`bd list --assignee ""` fails the `!= ""` check, so the assignee filter is never
+set. Returns ALL issues instead of unassigned ones. Meanwhile `--no-assignee`
+correctly filters. A user expecting empty string to mean "unassigned" gets
+silently wrong results.
+
+---
+
+### Code review findings (session 5, not CLI-testable)
+
+**Pull doesn't check merge conflicts:** `DoltStore.Pull()` at `store.go:979-1006`
+returns nil on success but never checks `dolt_conflicts` table. Silent merge
+conflicts can corrupt query results.
+
+**Schema migration non-transactional:** `initSchemaOnDB` at `store.go:591-676`
+runs DDL as individual statements without a transaction. If interrupted, partial
+schema state is possible. Migrations are individually idempotent but there is no
+migration tracking table — all migrations re-run every time.
+
+**Import silently drops dependencies:** `ImportIssues` at `issues.go:276-282`
+silently skips deps whose target doesn't exist. `ImportResult.Created` is always
+`len(issues)` regardless of how many were actually created or how many deps were
+dropped.
+
+**SQLite-to-Dolt migration drops all comments:** `extractFromSQLite` at
+`migrate_dolt.go:249-418` extracts issues, labels, deps, events, config — but
+NOT the `comments` table. Structured comments are silently lost during migration.
 
 ---
 

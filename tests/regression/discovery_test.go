@@ -1374,6 +1374,131 @@ func TestDiscovery_ConditionalBlocksCycleUndetected(t *testing.T) {
 	}
 }
 
+// TestDiscovery_LabelPatternFilterDeadCode verifies that --label-pattern
+// actually filters results.
+//
+// FINDING: bd list --label-pattern "tech-*" sets filter.LabelPattern in the
+// IssueFilter struct, but SearchIssues() in queries.go NEVER reads or processes
+// this field. The SQL query builder completely ignores it. The user gets
+// unfiltered results while believing they filtered.
+//
+// Classification: BUG — dead filter gives silently wrong results.
+func TestDiscovery_LabelPatternFilterDeadCode(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Tech debt item", "--type", "task", "--priority", "2")
+	b := w.create("--title", "Normal item", "--type", "task", "--priority", "2")
+	w.run("label", "add", a, "tech-debt")
+
+	// bd list --label-pattern "tech-*" should return only a
+	patternOut, err := w.tryRun("list", "--label-pattern", "tech-*", "--json", "-n", "0")
+	if err != nil {
+		t.Skipf("--label-pattern flag not supported: %v", err)
+	}
+	patternIDs := parseIDs(t, patternOut)
+
+	if containsID(patternIDs, b) {
+		t.Errorf("DISCOVERY: --label-pattern 'tech-*' returned issue %s which has no matching label — filter is dead code in SearchIssues()", b)
+	}
+	if !containsID(patternIDs, a) {
+		t.Errorf("--label-pattern 'tech-*' should return issue %s with label 'tech-debt'", a)
+	}
+}
+
+// TestDiscovery_ClaimThenStatusOverwrite verifies that --claim and --status
+// on the same update command interact correctly.
+//
+// FINDING: ClaimIssue sets status=in_progress first, then UpdateIssue applies
+// --status in a separate non-transactional call, silently overwriting the
+// claimed status. No warning or error is raised.
+//
+// Classification: BUG — contradictory flags should error or warn.
+func TestDiscovery_ClaimThenStatusOverwrite(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Claim conflict", "--type", "task", "--priority", "2")
+
+	// Claim and set status=open in the same command
+	w.run("update", a, "--claim", "--status", "open")
+
+	data := parseJSON(t, w.run("show", a, "--json"))
+	status := data[0]["status"]
+
+	// After --claim, status should be in_progress.
+	// If --status open overwrites it, that's a conflict the tool should catch.
+	if status == "open" {
+		t.Errorf("DISCOVERY: --claim set in_progress but --status open silently overwrote it — contradictory flags not detected")
+	} else if status != "in_progress" {
+		t.Errorf("unexpected status after --claim --status open: %v", status)
+	}
+}
+
+// TestDiscovery_ListReadyOverridesStatusFlag verifies that --ready silently
+// wins over explicit --status.
+//
+// FINDING: In list.go:401-408, --ready sets filter.Status=open in an if-else
+// chain that takes precedence over --status. If you pass --status closed --ready,
+// the --status flag is silently ignored and you get open issues.
+//
+// Classification: BUG — should error on contradictory filter flags.
+func TestDiscovery_ListReadyOverridesStatusFlag(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	open := w.create("--title", "Open one", "--type", "task", "--priority", "2")
+	closed := w.create("--title", "Closed one", "--type", "task", "--priority", "2")
+	w.run("close", closed)
+
+	// --status closed --ready — what should this return?
+	out, err := w.tryRun("list", "--status", "closed", "--ready", "--json", "-n", "0")
+	if err != nil {
+		t.Skipf("flag combination not supported: %v", err)
+	}
+	ids := parseIDs(t, out)
+
+	// If --ready wins silently, we get open issues instead of closed
+	if containsID(ids, open) && !containsID(ids, closed) {
+		t.Errorf("DISCOVERY: --ready silently overrides --status closed — got open issue %s instead of closed issue %s", open, closed)
+	}
+}
+
+// TestDiscovery_AssigneeEmptyStringVsNoAssignee verifies that --assignee ""
+// and --no-assignee return the same results.
+//
+// FINDING: --assignee "" fails the != "" check in list.go:423, so the filter
+// is never set — returning ALL issues. --no-assignee correctly filters to
+// unassigned issues only. A user expecting --assignee "" to mean "unassigned"
+// gets silently wrong results.
+//
+// Classification: BUG — empty string should either be rejected or treated as --no-assignee.
+func TestDiscovery_AssigneeEmptyStringVsNoAssignee(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	assigned := w.create("--title", "Assigned", "--type", "task", "--priority", "2")
+	w.run("update", assigned, "--assignee", "alice")
+	unassigned := w.create("--title", "Unassigned", "--type", "task", "--priority", "2")
+
+	// --no-assignee should return only unassigned
+	noAssigneeOut := w.run("list", "--no-assignee", "--json", "-n", "0")
+	noAssigneeIDs := parseIDs(t, noAssigneeOut)
+	if containsID(noAssigneeIDs, assigned) {
+		t.Fatalf("control: --no-assignee should not include assigned issue")
+	}
+	if !containsID(noAssigneeIDs, unassigned) {
+		t.Fatalf("control: --no-assignee should include unassigned issue")
+	}
+
+	// --assignee "" should behave the same as --no-assignee
+	emptyOut, err := w.tryRun("list", "--assignee", "", "--json", "-n", "0")
+	if err != nil {
+		t.Skipf("--assignee flag not available: %v", err)
+	}
+	emptyIDs := parseIDs(t, emptyOut)
+
+	if containsID(emptyIDs, assigned) && !containsID(noAssigneeIDs, assigned) {
+		t.Errorf("DISCOVERY: --assignee '' returns ALL issues (including assigned %s) while --no-assignee correctly filters — empty string filter silently becomes no-filter", assigned)
+	}
+}
+
 // TestProtocol_CommentAddAndPreserve verifies comments persist through operations.
 func TestProtocol_CommentAddAndPreserve(t *testing.T) {
 	w := newCandidateWorkspace(t)
