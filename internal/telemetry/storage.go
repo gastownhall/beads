@@ -390,9 +390,9 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 
 // ── Transactions ─────────────────────────────────────────────────────────────
 
-func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, fn func(tx storage.Transaction) error) error {
-	ctx, span, t := s.op(ctx, "RunInTransaction")
-	err := s.inner.RunInTransaction(ctx, fn)
+func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
+	ctx, span, t := s.op(ctx, "RunInTransaction", attribute.String("db.commit_msg", commitMsg))
+	err := s.inner.RunInTransaction(ctx, commitMsg, fn)
 	s.done(ctx, span, t, err)
 	return err
 }
