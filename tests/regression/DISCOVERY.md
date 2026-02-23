@@ -18,6 +18,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | 2026-02-22 | **Session 4: Deep discovery (search, lifecycle, batch, deps)** | Found 7 more bugs (BUG-21 through 27). Update bypasses close guard, reopen superseded corruption, defer past date invisible, wisp sort order, conditional-blocks cycle, epic wisp children. 2 new protocol tests. |
 | 2026-02-22 | **Session 5: Filter, flag interaction, migration seams** | Found 4 more bugs (BUG-28 through 31). Dead label-pattern filter, claim+status overwrite, --ready overrides --status, assignee empty string. Code review: pull doesn't check merge conflicts, schema migration non-transactional, import drops deps/comments silently. |
 | 2026-02-22 | **Session 6: Routing, validation, sort, edge cases** | Found 10 more bugs (BUG-32 through 42) + 2 protocol tests (BUG-35, 39). Stale negative days, sort unknown field, reparent cycle, reversed ranges, negative limit, whitespace title, config ambiguity, dep rm false positive. Code review: createInRig skips prefix validation, same-prefix rig ambiguity, batch import no UTC. |
+| 2026-02-22 | **Session 7: State corruption, filter conflicts, hierarchy** | Found 4 more bugs (BUG-43 through 46) + 1 protocol test (BUG-47). Deferred without date, comma status, assignee conflict, child of closed parent. Code review: bd sync is no-op, doctor --fix checks are no-ops. |
 
 ## Audit Summary
 
@@ -65,6 +66,11 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-40 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-41 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-42 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-43 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-44 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-45 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-46 | **DECISION** | OPEN (not PR'd yet) | — |
+| BUG-47 | **PROTOCOL** | PASS (by design) | — |
 
 ### Shipped fix PRs (all include protocol tests)
 
@@ -108,6 +114,11 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 32. **BUG-40**: update --title whitespace-only accepted (extends BUG-12)
 33. **BUG-41**: config set "" then config get shows "(not set)" — ambiguous
 34. **BUG-42**: dep rm nonexistent says "Removed dependency" — false positive
+35. **BUG-43**: update --status deferred without --defer = permanently deferred
+36. **BUG-44**: list --status "open,closed" silently returns empty
+37. **BUG-45**: list --assignee alice --no-assignee contradictory, returns empty
+38. **BUG-46**: create --parent of closed issue succeeds (DECISION)
+39. **BUG-47**: dep add --type custom accepted by design (PROTOCOL)
 
 ### Investigate further
 
@@ -845,6 +856,87 @@ But human-readable output is ambiguous.
 "Removed dependency: A no longer depends on B" even though nothing was removed.
 The DELETE statement succeeds with 0 rows affected but the command doesn't
 check the result.
+
+---
+
+### BUG-43: `bd update --status deferred` without `--defer` = permanently deferred (NEW — session 7)
+
+**Severity: MEDIUM** — State corruption, issue can't wake up
+**Discovered:** Session 7 discovery, test
+**File:** `cmd/bd/update.go:43-199` (status and defer are independent)
+**Test:** `TestDiscovery_DeferredStatusWithoutDate`
+
+`bd update X --status deferred` (without `--defer`) sets status=deferred but
+leaves defer_until empty. The issue is excluded from bd ready (status check)
+and appears in `list --status deferred`, but has no date to ever transition
+back to open. User must manually `bd undefer` or `bd update --status open`.
+
+---
+
+### BUG-44: `bd list --status "open,closed"` silently returns empty (NEW — session 7)
+
+**Severity: MEDIUM** — Silent wrong results
+**Discovered:** Session 7 discovery, test
+**File:** `cmd/bd/list.go:255,405` (GetString not GetStringSlice)
+**Test:** `TestDiscovery_CommaStatusSilentlyReturnsEmpty`
+
+`--status` is a simple string flag, not a slice. "open,closed" is treated as a
+single literal status value, matching no issues. Returns empty array with no
+error. Contrast with `--id` which DOES parse comma-separated values.
+
+---
+
+### BUG-45: `--assignee alice --no-assignee` contradictory, returns empty (NEW — session 7)
+
+**Severity: MEDIUM** — Contradictory flags silently produce wrong results
+**Discovered:** Session 7 discovery, test
+**File:** `cmd/bd/list.go:423-424,514-515` (both set independently)
+**Test:** `TestDiscovery_AssigneeAndNoAssigneeConflict`
+
+Both flags are processed independently and both set on the filter struct.
+The storage layer applies both constraints (assignee=alice AND no_assignee=true),
+which is always false. Returns empty with no error or warning.
+
+---
+
+### BUG-46: `bd create --parent <closed>` succeeds (NEW — session 7)
+
+**Severity: MEDIUM** — Creates child under dead parent
+**Discovered:** Session 7 discovery, test
+**File:** `cmd/bd/create.go:422-437` (only checks existence, not status)
+**Test:** `TestDiscovery_CreateChildOfClosedParent`
+
+`bd create --parent <closed-issue>` validates that the parent exists but does
+NOT check if the parent is open/active. The child is created and appears in
+`bd ready` even though its parent is closed.
+
+**DECISION:** May be intentional for post-mortem documentation. Maintainer
+should decide if children of closed parents are valid.
+
+---
+
+### BUG-47: `bd dep add --type custom` accepted by design (NEW — session 7)
+
+**Severity: N/A** — Documenting correct behavior
+**Discovered:** Session 7 discovery, test
+**File:** `internal/types/types.go:715-717` (length check only)
+**Test:** `TestDiscovery_DepAddInvalidTypeSilentlyAccepted`
+
+`bd dep add A B --type "not-a-real-type"` succeeds and stores the custom dep
+type. This is by design — custom dep types are supported. The only validation
+is non-empty and ≤50 chars. Classified as PROTOCOL (correct behavior).
+
+---
+
+### Code review findings (session 7, not CLI-testable)
+
+**`bd sync` is a deprecated no-op:** `cmd/bd/sync.go:9-37` — all flags
+(--message, --dry-run, --no-push, --import, --export) are accepted but
+ignored. Silently succeeds with no actual work done.
+
+**Multiple `bd doctor --fix` checks are no-ops:** `cmd/bd/doctor_fix.go:253-315` —
+"Sync Divergence", "JSONL Config", "Duplicate Issues", "Test Pollution",
+"Git Conflicts", "Large Database" fixes all print messages but do nothing.
 
 ---
 

@@ -1964,6 +1964,205 @@ func TestDiscovery_DepRmNonexistentSilentSuccess(t *testing.T) {
 	// If err != nil, the tool correctly rejected the operation — good
 }
 
+// =============================================================================
+// SESSION 7 DISCOVERY: State corruption, filter conflicts, hierarchy
+// =============================================================================
+
+// TestDiscovery_DeferredStatusWithoutDate verifies that setting status to
+// "deferred" without a defer date creates a valid state.
+//
+// FINDING: update.go treats --status and --defer as independent flags.
+// bd update X --status deferred (without --defer) sets status=deferred but
+// leaves defer_until empty. The issue is excluded from bd ready (status check)
+// but has no date to ever "wake up." This creates a permanently deferred issue
+// unless the user remembers to also set defer_until.
+//
+// Classification: BUG — status=deferred without defer_until should either
+// error or automatically set defer_until to some reasonable default.
+func TestDiscovery_DeferredStatusWithoutDate(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Deferred no date", "--type", "task", "--priority", "2")
+
+	// Set status to deferred without --defer
+	w.run("update", a, "--status", "deferred")
+
+	data := parseJSON(t, w.run("show", a, "--json"))
+	status := data[0]["status"]
+	deferUntil := data[0]["defer_until"]
+
+	if status == "deferred" && (deferUntil == nil || deferUntil == "") {
+		// Not in ready
+		readyIDs := parseIDs(t, w.run("ready", "-n", "0", "--json"))
+		if containsID(readyIDs, a) {
+			t.Errorf("deferred issue should not be in ready")
+		}
+
+		// Not in deferred list either?
+		deferredOut := w.run("list", "--status", "deferred", "--json", "-n", "0")
+		deferredIDs := parseIDs(t, deferredOut)
+		if containsID(deferredIDs, a) {
+			t.Errorf("DISCOVERY: status=deferred without defer_until creates permanently deferred issue %s — no date to wake up, user must manually undefer", a)
+		} else {
+			t.Errorf("DISCOVERY: status=deferred without defer_until creates invisible issue %s — not in ready, not in deferred list", a)
+		}
+	}
+}
+
+// TestDiscovery_CommaStatusSilentlyReturnsEmpty verifies that bd list --status
+// with comma-separated values is handled correctly.
+//
+// FINDING: list.go:255 reads --status as a simple string (not slice). The value
+// "open,closed" is treated as a single literal status, which matches nothing.
+// The user gets empty results with no error.
+//
+// Classification: BUG — should either parse comma-separated values or error.
+func TestDiscovery_CommaStatusSilentlyReturnsEmpty(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	w.create("--title", "Open issue", "--type", "task", "--priority", "2")
+	closed := w.create("--title", "Closed issue", "--type", "task", "--priority", "2")
+	w.run("close", closed)
+
+	// Single status works (control)
+	openOut := w.run("list", "--status", "open", "--json", "-n", "0")
+	openIDs := parseIDs(t, openOut)
+	if len(openIDs) == 0 {
+		t.Fatalf("control: --status open should return at least 1 issue")
+	}
+
+	// Comma-separated should either work or error
+	commaOut, err := w.tryRun("list", "--status", "open,closed", "--json", "-n", "0")
+	if err == nil {
+		commaIDs := parseIDs(t, commaOut)
+		if len(commaIDs) == 0 {
+			t.Errorf("DISCOVERY: --status 'open,closed' silently returns empty — comma-separated status not parsed, treated as invalid literal status")
+		}
+	}
+	// If err != nil, the tool correctly rejected comma-separated — good
+}
+
+// TestDiscovery_AssigneeAndNoAssigneeConflict verifies that --assignee and
+// --no-assignee on the same command are handled correctly.
+//
+// FINDING: list.go:423-424 sets filter.Assignee, then list.go:514-515 sets
+// filter.NoAssignee. Both are set on the filter struct. The storage layer
+// must decide which wins — undefined behavior.
+//
+// Classification: BUG — contradictory flags should error.
+func TestDiscovery_AssigneeAndNoAssigneeConflict(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	assigned := w.create("--title", "Assigned", "--type", "task", "--priority", "2")
+	w.run("update", assigned, "--assignee", "alice")
+	unassigned := w.create("--title", "Unassigned", "--type", "task", "--priority", "2")
+
+	// --assignee alice (control)
+	assigneeOut := w.run("list", "--assignee", "alice", "--json", "-n", "0")
+	assigneeIDs := parseIDs(t, assigneeOut)
+	if !containsID(assigneeIDs, assigned) {
+		t.Fatalf("control: --assignee alice should include assigned issue")
+	}
+
+	// --no-assignee (control)
+	noAssigneeOut := w.run("list", "--no-assignee", "--json", "-n", "0")
+	noAssigneeIDs := parseIDs(t, noAssigneeOut)
+	if !containsID(noAssigneeIDs, unassigned) {
+		t.Fatalf("control: --no-assignee should include unassigned issue")
+	}
+
+	// --assignee alice --no-assignee together should error
+	conflictOut, err := w.tryRun("list", "--assignee", "alice", "--no-assignee", "--json", "-n", "0")
+	if err == nil {
+		conflictIDs := parseIDs(t, conflictOut)
+		if len(conflictIDs) == 0 {
+			t.Errorf("DISCOVERY: --assignee alice --no-assignee returns empty — contradictory flags not detected, result is undefined")
+		} else if containsID(conflictIDs, assigned) && !containsID(conflictIDs, unassigned) {
+			t.Errorf("DISCOVERY: --assignee alice --no-assignee returns assigned issues only — --no-assignee silently ignored")
+		} else if containsID(conflictIDs, unassigned) && !containsID(conflictIDs, assigned) {
+			t.Errorf("DISCOVERY: --assignee alice --no-assignee returns unassigned only — --assignee silently ignored")
+		}
+	}
+	// If err != nil, the tool correctly rejected contradictory flags — good
+}
+
+// TestDiscovery_CreateChildOfClosedParent verifies that creating a child
+// under a closed parent is handled correctly.
+//
+// FINDING: create.go:422-437 validates that the parent EXISTS but does NOT
+// check if the parent is open/active. Creating a child of a closed parent
+// succeeds silently. The child points to a closed parent, potentially breaking
+// hierarchy-aware queries.
+//
+// Classification: DECISION — may be intentional for post-mortem documentation,
+// but surprising and undocumented.
+func TestDiscovery_CreateChildOfClosedParent(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	parent := w.create("--title", "Will close", "--type", "epic", "--priority", "1")
+	w.run("close", parent)
+
+	// Create child of closed parent — should warn or reject
+	child, err := w.tryCreate("--title", "Orphan child", "--type", "task", "--priority", "2", "--parent", parent)
+	if err != nil {
+		// Tool correctly rejected creating child of closed parent
+		return
+	}
+
+	// Child was created under closed parent
+	if child != "" {
+		childData := parseJSON(t, w.run("show", child, "--json"))
+		t.Logf("child created under closed parent: %v", childData[0]["id"])
+
+		// Is the child in ready?
+		readyIDs := parseIDs(t, w.run("ready", "-n", "0", "--json"))
+		if containsID(readyIDs, child) {
+			t.Errorf("DISCOVERY: child %s of closed parent %s was created and appears in bd ready — no validation that parent is open", child, parent)
+		} else {
+			t.Errorf("DISCOVERY: child %s of closed parent %s was created successfully but excluded from ready — creating children of closed parents accepted silently", child, parent)
+		}
+	}
+}
+
+// TestDiscovery_DepAddInvalidTypeSilentlyAccepted verifies that dep add
+// with an unknown type is handled correctly.
+//
+// FINDING: dep.go:273-275 accepts the dep type with minimal validation.
+// types.go:715-717 only checks length (>0 and ≤50 chars). Any non-empty
+// string is valid, including meaningless types like "xyz123".
+//
+// Classification: INVESTIGATE — custom types may be by design, but unknown
+// types don't affect readiness or blocking and create confusing dep relationships.
+func TestDiscovery_DepAddInvalidTypeSilentlyAccepted(t *testing.T) {
+	w := newCandidateWorkspace(t)
+
+	a := w.create("--title", "Source", "--type", "task", "--priority", "2")
+	b := w.create("--title", "Target", "--type", "task", "--priority", "2")
+
+	// Add dep with unknown type
+	out, err := w.tryRun("dep", "add", a, b, "--type", "not-a-real-type")
+	if err == nil {
+		// Command succeeded — check if the dep was actually stored
+		data := parseJSON(t, w.run("show", a, "--json"))
+		deps, _ := data[0]["dependencies"].([]any)
+
+		foundCustomDep := false
+		for _, d := range deps {
+			dep, _ := d.(map[string]any)
+			if dep["dependency_type"] == "not-a-real-type" {
+				foundCustomDep = true
+			}
+		}
+
+		if foundCustomDep {
+			t.Logf("CONFIRMED: dep add --type 'not-a-real-type' accepted and stored — custom dep types are supported (output: %s)", strings.TrimSpace(out))
+		} else {
+			t.Errorf("dep add succeeded but dep type 'not-a-real-type' not found in show output")
+		}
+	}
+	// If err != nil, the tool correctly rejected invalid type — good
+}
+
 // TestProtocol_CommentAddAndPreserve verifies comments persist through operations.
 func TestProtocol_CommentAddAndPreserve(t *testing.T) {
 	w := newCandidateWorkspace(t)
