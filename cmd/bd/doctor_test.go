@@ -393,12 +393,12 @@ func TestCheckDatabaseVersionJSONLMode(t *testing.T) {
 
 	check := doctor.CheckDatabaseVersion(tmpDir, Version)
 
-	// Dolt backend sees JSONL without dolt/ dir → fresh clone warning
-	if check.Status != doctor.StatusWarning {
-		t.Errorf("Expected warning status for Dolt fresh clone, got %s", check.Status)
+	// Post-JSONL removal: no dolt dir → error (no more JSONL-only mode)
+	if check.Status != doctor.StatusError {
+		t.Errorf("Expected error status for missing dolt database, got %s", check.Status)
 	}
-	if !strings.Contains(check.Message, "Fresh clone") {
-		t.Errorf("Expected fresh clone message, got %s", check.Message)
+	if !strings.Contains(check.Message, "No dolt database found") {
+		t.Errorf("Expected 'No dolt database found' message, got %s", check.Message)
 	}
 }
 
@@ -419,11 +419,12 @@ func TestCheckDatabaseVersionFreshClone(t *testing.T) {
 
 	check := doctor.CheckDatabaseVersion(tmpDir, Version)
 
-	if check.Status != doctor.StatusWarning {
-		t.Errorf("Expected warning status for fresh clone, got %s", check.Status)
+	// Post-JSONL removal: no dolt dir → error (JSONL presence is irrelevant)
+	if check.Status != doctor.StatusError {
+		t.Errorf("Expected error status for missing dolt database, got %s", check.Status)
 	}
-	if !strings.Contains(check.Message, "Fresh clone detected") {
-		t.Errorf("Expected fresh clone message, got %s", check.Message)
+	if !strings.Contains(check.Message, "No dolt database found") {
+		t.Errorf("Expected 'No dolt database found' message, got %s", check.Message)
 	}
 	if check.Fix == "" {
 		t.Error("Expected fix field to recommend 'bd init'")

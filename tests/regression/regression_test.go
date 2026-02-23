@@ -48,6 +48,10 @@ func TestMain(m *testing.M) {
 
 	// Start an isolated Dolt server so regression tests don't pollute
 	// the production database on port 3307.
+	if _, err := exec.LookPath("dolt"); err != nil {
+		fmt.Fprintln(os.Stderr, "SKIP: dolt not found in PATH; regression tests require dolt")
+		os.Exit(0)
+	}
 	cleanupServer := startTestDoltServer()
 
 	tmpDir, err := os.MkdirTemp("", "bd-regression-bin-*")
