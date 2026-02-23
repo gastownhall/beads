@@ -18,10 +18,16 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-func TestInitCommand(t *testing.T) {
+// skipIfNoDolt skips the test when dolt binary is not in PATH.
+func skipIfNoDolt(t *testing.T) {
+	t.Helper()
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("skipping: dolt not installed")
 	}
+}
+
+func TestInitCommand(t *testing.T) {
+	skipIfNoDolt(t)
 	tests := []struct {
 		name           string
 		prefix         string
@@ -179,6 +185,7 @@ func TestInitCommand(t *testing.T) {
 // on errors, which makes it difficult to test in a unit test context.
 
 func TestInitAlreadyInitialized(t *testing.T) {
+	skipIfNoDolt(t)
 	// Reset global state
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
@@ -786,6 +793,7 @@ func TestInitPromptRoleConfig(t *testing.T) {
 
 // TestInitPromptSkippedWithFlags verifies that --contributor and --team flags skip the prompt
 func TestInitPromptSkippedWithFlags(t *testing.T) {
+	skipIfNoDolt(t)
 	t.Run("contributor flag skips prompt and runs wizard", func(t *testing.T) {
 		// Reset global state
 		origDBPath := dbPath
@@ -878,6 +886,7 @@ func TestInitPromptTTYDetection(t *testing.T) {
 
 // TestInitPromptNonGitRepo verifies prompt is skipped in non-git directories
 func TestInitPromptNonGitRepo(t *testing.T) {
+	skipIfNoDolt(t)
 	// Reset global state
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
@@ -915,6 +924,7 @@ func TestInitPromptNonGitRepo(t *testing.T) {
 
 // TestInitPromptExistingRole verifies behavior when beads.role is already set
 func TestInitPromptExistingRole(t *testing.T) {
+	skipIfNoDolt(t)
 	t.Run("existing role is preserved on reinit with --force", func(t *testing.T) {
 		// Reset global state
 		origDBPath := dbPath
@@ -981,6 +991,7 @@ func TestInitPromptExistingRole(t *testing.T) {
 // not in the local .beads directory. (GH#bd-0qel)
 // TestInitRedirect groups redirect-related init tests.
 func TestInitRedirect(t *testing.T) {
+	skipIfNoDolt(t)
 	resetRedirectState := func(t *testing.T) {
 		t.Helper()
 		origDBPath := dbPath
@@ -1121,6 +1132,7 @@ func TestInitRedirect(t *testing.T) {
 // TestInitBEADS_DIR groups BEADS_DIR-related init tests.
 // Tests requirements FR-001, FR-002, FR-004, NFR-001.
 func TestInitBEADS_DIR(t *testing.T) {
+	skipIfNoDolt(t)
 	// resetBeadsDirState resets global state and env vars for each subtest.
 	resetBeadsDirState := func(t *testing.T) {
 		t.Helper()
@@ -1439,6 +1451,7 @@ func TestInit_WithBEADS_DIR_DoltBackend(t *testing.T) {
 // all 3 tracking metadata fields (bd_version, repo_id, clone_id) via verifyMetadata.
 // Covers FR-001, FR-002, FR-003, FR-004.
 func TestInitDoltMetadata(t *testing.T) {
+	skipIfNoDolt(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping Dolt metadata test on Windows")
 	}
@@ -1525,6 +1538,7 @@ func openDoltStoreForTest(t *testing.T, ctx context.Context, doltPath, dbName st
 // verifyMetadata now takes *dolt.DoltStore (concrete type), making interface-based
 // mocking impossible. The failure paths are simple error-to-stderr logic.
 func TestVerifyMetadataSuccess(t *testing.T) {
+	skipIfNoDolt(t)
 	ctx := context.Background()
 
 	tmpDir := t.TempDir()
@@ -1551,6 +1565,7 @@ func TestVerifyMetadataSuccess(t *testing.T) {
 // Verifies warning output; actual metadata persistence checked by e2e tests.
 // Covers FR-015 (skip repo_id outside git).
 func TestInitDoltMetadataNoGit(t *testing.T) {
+	skipIfNoDolt(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping Dolt metadata test on Windows")
 	}
