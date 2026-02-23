@@ -541,11 +541,6 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, gitignoreCheck)
 	// Don't fail overall check for gitignore, just warn
 
-	// Check 14a: issues.jsonl tracking (catches global gitignore conflicts)
-	issuesTrackingCheck := convertWithCategory(doctor.CheckIssuesTracking(), doctor.CategoryGit)
-	result.Checks = append(result.Checks, issuesTrackingCheck)
-	// Don't fail overall check for tracking issues, just warn
-
 	// Check 14b: redirect file tracking (worktree redirect files shouldn't be committed)
 	redirectTrackingCheck := convertWithCategory(doctor.CheckRedirectNotTracked(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, redirectTrackingCheck)

@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -35,12 +33,6 @@ func ensureStoreActive() error {
 	// based on metadata.json configuration
 	store, err := dolt.NewFromConfig(getRootContext(), beadsDir)
 	if err != nil {
-		// Check for fresh clone scenario (JSONL exists but no database)
-		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-		if _, statErr := os.Stat(jsonlPath); statErr == nil {
-			return fmt.Errorf("found JSONL file but no database: %s\n"+
-				"Hint: run 'bd init' to create the database and import issues", jsonlPath)
-		}
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 

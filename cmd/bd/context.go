@@ -25,7 +25,6 @@ type CommandContext struct {
 	JSONOutput   bool
 	SandboxMode  bool
 	AllowStale   bool
-	NoDb         bool
 	ReadonlyMode bool
 	LockTimeout  time.Duration
 	Verbose      bool
@@ -249,22 +248,6 @@ func isQuiet() bool {
 	return cmdCtx.Quiet
 }
 
-// isNoDb returns true if no-db mode is enabled.
-func isNoDb() bool {
-	if shouldUseGlobals() {
-		return noDb
-	}
-	return cmdCtx.NoDb
-}
-
-// setNoDb updates the no-db flag.
-func setNoDb(nd bool) {
-	if cmdCtx != nil {
-		cmdCtx.NoDb = nd
-	}
-	noDb = nd
-}
-
 // isSandboxMode returns true if sandbox mode is enabled.
 func isSandboxMode() bool {
 	if shouldUseGlobals() {
@@ -382,7 +365,6 @@ func syncCommandContext() {
 	cmdCtx.JSONOutput = jsonOutput
 	cmdCtx.SandboxMode = sandboxMode
 	cmdCtx.AllowStale = allowStale
-	cmdCtx.NoDb = noDb
 	cmdCtx.ReadonlyMode = readonlyMode
 	cmdCtx.LockTimeout = lockTimeout
 	cmdCtx.Verbose = verboseFlag

@@ -15,7 +15,7 @@ import (
 type Issue struct {
 	// ===== Core Identification =====
 	ID          string `json:"id"`
-	ContentHash string `json:"-"` // Internal: SHA256 of canonical content - NOT exported to JSONL
+	ContentHash string `json:"-"` // Internal: SHA256 of canonical content
 
 	// ===== Issue Content =====
 	Title              string `json:"title"`
@@ -62,7 +62,7 @@ type Issue struct {
 	CompactedAtCommit *string    `json:"compacted_at_commit,omitempty"` // Git commit hash when compacted
 	OriginalSize      int        `json:"original_size,omitempty"`
 
-	// ===== Internal Routing (not exported to JSONL) =====
+	// ===== Internal Routing (not serialized) =====
 	SourceRepo     string `json:"-"` // Which repo owns this issue (multi-repo support)
 	IDPrefix       string `json:"-"` // Override prefix for ID generation (appends to config prefix)
 	PrefixOverride string `json:"-"` // Completely replace config prefix (for cross-rig creation)
@@ -74,7 +74,7 @@ type Issue struct {
 
 	// ===== Messaging Fields (inter-agent communication) =====
 	Sender    string   `json:"sender,omitempty"`    // Who sent this (for messages)
-	Ephemeral bool     `json:"ephemeral,omitempty"` // If true, not exported to JSONL
+	Ephemeral bool     `json:"ephemeral,omitempty"` // If true, ephemeral (TTL-managed)
 	WispType  WispType `json:"wisp_type,omitempty"` // Classification for TTL-based compaction (gt-9br)
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.

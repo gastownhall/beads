@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
@@ -376,116 +375,6 @@ func TestInitWithCustomDBPath(t *testing.T) {
 			t.Error(".beads/ directory should not be created in CWD when BEADS_DB is set")
 		}
 	})
-}
-
-func TestInitNoDbMode(t *testing.T) {
-	t.Skip("no-db mode has been removed; beads now requires Dolt")
-	// Reset global state
-	origDBPath := dbPath
-	origNoDb := noDb
-	defer func() {
-		dbPath = origDBPath
-		noDb = origNoDb
-	}()
-	dbPath = ""
-	noDb = false
-
-	// Reset Cobra flags - critical for --no-db to work correctly
-	rootCmd.PersistentFlags().Set("no-db", "false")
-
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-
-	// Set BEADS_DIR to prevent git repo detection from finding project's .beads
-	origBeadsDir := os.Getenv("BEADS_DIR")
-	os.Setenv("BEADS_DIR", filepath.Join(tmpDir, ".beads"))
-	// Reset caches so RepoContext picks up new BEADS_DIR and CWD
-	beads.ResetCaches()
-	git.ResetCaches()
-	defer func() {
-		if origBeadsDir != "" {
-			os.Setenv("BEADS_DIR", origBeadsDir)
-		} else {
-			os.Unsetenv("BEADS_DIR")
-		}
-		// Reset caches on cleanup too
-		beads.ResetCaches()
-		git.ResetCaches()
-	}()
-
-	// Initialize with --no-db flag
-	rootCmd.SetArgs([]string{"init", "--no-db", "--prefix", "test", "--quiet"})
-
-	t.Logf("DEBUG: noDb before Execute=%v", noDb)
-
-	if err := rootCmd.Execute(); err != nil {
-		t.Fatalf("Init with --no-db failed: %v", err)
-	}
-
-	t.Logf("DEBUG: noDb after Execute=%v", noDb)
-
-	// Debug: Check where files were created
-	beadsDirEnv := os.Getenv("BEADS_DIR")
-	t.Logf("DEBUG: tmpDir=%s", tmpDir)
-	t.Logf("DEBUG: BEADS_DIR=%s", beadsDirEnv)
-	t.Logf("DEBUG: CWD=%s", func() string { cwd, _ := os.Getwd(); return cwd }())
-
-	// Check what files exist in tmpDir
-	entries, _ := os.ReadDir(tmpDir)
-	t.Logf("DEBUG: entries in tmpDir: %v", entries)
-	if beadsDirEnv != "" {
-		beadsEntries, err := os.ReadDir(beadsDirEnv)
-		t.Logf("DEBUG: entries in BEADS_DIR: %v (err: %v)", beadsEntries, err)
-	}
-
-	// Verify issues.jsonl was created
-	jsonlPath := filepath.Join(tmpDir, ".beads", "issues.jsonl")
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		// Also check at BEADS_DIR directly
-		beadsDirJsonlPath := filepath.Join(beadsDirEnv, "issues.jsonl")
-		if _, err2 := os.Stat(beadsDirJsonlPath); err2 == nil {
-			t.Logf("DEBUG: issues.jsonl found at BEADS_DIR path: %s", beadsDirJsonlPath)
-		}
-		t.Error("issues.jsonl was not created in --no-db mode")
-	}
-
-	// Verify config.yaml was created with no-db: true
-	configPath := filepath.Join(tmpDir, ".beads", "config.yaml")
-	configContent, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("Failed to read config.yaml: %v", err)
-	}
-
-	configStr := string(configContent)
-	if !strings.Contains(configStr, "no-db: true") {
-		t.Error("config.yaml should contain 'no-db: true' in --no-db mode")
-	}
-	if !strings.Contains(configStr, "issue-prefix:") {
-		t.Error("config.yaml should contain issue-prefix in --no-db mode")
-	}
-
-	// Reset config so it picks up the newly created config.yaml
-	// (simulates a new process invocation which would load fresh config)
-	initConfigForTest(t)
-
-	// Verify config has correct values
-	if !config.GetBool("no-db") {
-		t.Error("config should have no-db=true after init --no-db")
-	}
-	if config.GetString("issue-prefix") != "test" {
-		t.Errorf("config should have issue-prefix='test', got %q", config.GetString("issue-prefix"))
-	}
-
-	// NOTE: Testing subsequent command execution in the same process is complex
-	// due to cobra's flag caching and global state. The key functionality
-	// (init creating proper config.yaml for no-db mode) is verified above.
-	// Real-world usage works correctly since each command is a fresh process.
-
-	// Verify no SQLite database was created
-	dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
-	if _, err := os.Stat(dbPath); err == nil {
-		t.Error("SQLite database should not be created in --no-db mode")
-	}
 }
 
 // TestSetupClaudeSettings_InvalidJSON verifies that invalid JSON in existing

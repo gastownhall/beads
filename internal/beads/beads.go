@@ -290,7 +290,6 @@ func FindDatabasePath() string {
 // Returns true if the directory contains any of:
 // - metadata.json or config.yaml (project configuration)
 // - Any *.db file (excluding backups and vc.db)
-// - Any *.jsonl file (JSONL-only mode or git-tracked issues)
 //
 // Returns false for directories that only contain daemon registry files.
 // This prevents FindBeadsDir from returning ~/.beads/ which only has registry.json.
@@ -312,17 +311,11 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 		}
 	}
 
-	// Check for JSONL files (JSONL-only mode or fresh clone)
-	jsonlMatches, _ := filepath.Glob(filepath.Join(beadsDir, "*.jsonl"))
-	if len(jsonlMatches) > 0 {
-		return true
-	}
-
 	return false
 }
 
 // FindBeadsDir finds the .beads/ directory in the current directory tree
-// Returns empty string if not found. Supports both database and JSONL-only mode.
+// Returns empty string if not found.
 // Stops at the git repository root to avoid finding unrelated directories.
 // Validates that the directory contains actual project files.
 // Redirect files are supported: if a .beads/redirect file exists, its contents

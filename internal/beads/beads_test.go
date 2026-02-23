@@ -164,9 +164,9 @@ func TestHasBeadsProjectFiles(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "has issues.jsonl",
+			name:     "has only jsonl (no longer counted)",
 			files:    []string{"issues.jsonl"},
-			expected: true,
+			expected: false,
 		},
 		{
 			name:     "has metadata.json",
@@ -625,7 +625,7 @@ func TestFindBeadsDirWithRedirect(t *testing.T) {
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(targetDir, "issues.jsonl"), []byte("{}"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(targetDir, "metadata.json"), []byte(`{"database":"dolt"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
