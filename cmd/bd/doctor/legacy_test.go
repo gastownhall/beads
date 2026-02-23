@@ -336,7 +336,7 @@ func TestCheckDatabaseConfig_IgnoresSystemJSONLs(t *testing.T) {
 
 	// Configure issues.jsonl, but only create interactions.jsonl.
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db","jsonl_export":"issues.jsonl"}`), 0644); err != nil {
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "interactions.jsonl"), []byte(`{"id":"x"}`), 0644); err != nil {
@@ -346,29 +346,6 @@ func TestCheckDatabaseConfig_IgnoresSystemJSONLs(t *testing.T) {
 	check := CheckDatabaseConfig(tmpDir)
 	if check.Status != "ok" {
 		t.Fatalf("expected ok, got %s: %s\n%s", check.Status, check.Message, check.Detail)
-	}
-}
-
-func TestCheckDatabaseConfig_SystemJSONLExportIsError(t *testing.T) {
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.Mkdir(beadsDir, 0750); err != nil {
-		t.Fatal(err)
-	}
-
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db","jsonl_export":"interactions.jsonl"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "interactions.jsonl"), []byte(`{"id":"x"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	check := CheckDatabaseConfig(tmpDir)
-	// With Dolt-only backend, GetBackend() always returns BackendDolt,
-	// so this check returns early with OK ("Dolt backend (data on server)")
-	if check.Status != "ok" {
-		t.Fatalf("expected ok (Dolt-only backend), got %s: %s", check.Status, check.Message)
 	}
 }
 

@@ -82,7 +82,7 @@ func TestDoctorFix_UpgradesLegacySchemaWithoutSpecID(t *testing.T) {
 	}
 
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db","jsonl_export":"issues.jsonl"}`), 0o600); err != nil {
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db"}`), 0o600); err != nil {
 		t.Fatalf("write metadata.json: %v", err)
 	}
 

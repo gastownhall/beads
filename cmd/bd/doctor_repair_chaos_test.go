@@ -78,11 +78,11 @@ func TestDoctorRepair_CorruptDatabase_NoJSONL_FixFails(t *testing.T) {
 		t.Fatalf("expected auto-recover error, got:\n%s", out)
 	}
 
-	// Ensure we don't mis-configure jsonl_export to a system file during failure.
+	// Ensure metadata.json doesn't reference system files during failure recovery.
 	metadata, readErr := os.ReadFile(filepath.Join(ws, ".beads", "metadata.json"))
 	if readErr == nil {
 		if strings.Contains(string(metadata), "interactions.jsonl") {
-			t.Fatalf("unexpected metadata.json jsonl_export set to interactions.jsonl:\n%s", string(metadata))
+			t.Fatalf("unexpected system file reference in metadata.json:\n%s", string(metadata))
 		}
 	}
 }

@@ -27,7 +27,7 @@ func TestMigrateRespectsConfigJSON(t *testing.T) {
 
 	// Create metadata.json with custom database name
 	configPath := filepath.Join(beadsDir, "metadata.json")
-	configData := `{"database": "beady.db", "version": "0.21.1", "jsonl_export": "beady.jsonl"}`
+	configData := `{"database": "beady.db", "version": "0.21.1"}`
 	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
 		t.Fatalf("Failed to create metadata.json: %v", err)
 	}
