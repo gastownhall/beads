@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"testing"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
@@ -171,5 +172,96 @@ func TestGetAdaptiveIDLength_QueryError(t *testing.T) {
 	got := getAdaptiveIDLengthFromTable(ctx, tx, "nonexistent_table", "pfx-")
 	if got != 4 {
 		t.Errorf("expected fallback length 4, got %d", got)
+	}
+}
+
+// TestApplyConfigDefaults_TestModePanicsWithoutPort verifies that
+// applyConfigDefaults panics when BEADS_TEST_MODE=1 but BEADS_DOLT_PORT
+// is not set, preventing accidental connections to the production server.
+func TestApplyConfigDefaults_TestModePanicsWithoutPort(t *testing.T) {
+	// Save and restore env vars.
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		os.Setenv("BEADS_TEST_MODE", origTestMode)
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	os.Setenv("BEADS_TEST_MODE", "1")
+	os.Unsetenv("BEADS_DOLT_PORT")
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when BEADS_TEST_MODE=1 without BEADS_DOLT_PORT, but did not panic")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Fatalf("expected string panic, got %T: %v", r, r)
+		}
+		if msg == "" {
+			t.Fatal("panic message was empty")
+		}
+	}()
+
+	cfg := &Config{} // ServerPort defaults to 0
+	applyConfigDefaults(cfg)
+}
+
+// TestApplyConfigDefaults_TestModeWithPort verifies that applyConfigDefaults
+// does NOT panic when BEADS_TEST_MODE=1 and BEADS_DOLT_PORT is properly set.
+func TestApplyConfigDefaults_TestModeWithPort(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		os.Setenv("BEADS_TEST_MODE", origTestMode)
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	os.Setenv("BEADS_TEST_MODE", "1")
+	os.Setenv("BEADS_DOLT_PORT", "13307")
+
+	cfg := &Config{}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 13307 {
+		t.Errorf("expected ServerPort=13307, got %d", cfg.ServerPort)
+	}
+}
+
+// TestApplyConfigDefaults_ProductionFallback verifies that without
+// BEADS_TEST_MODE, ServerPort falls back to DefaultSQLPort normally.
+func TestApplyConfigDefaults_ProductionFallback(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	os.Unsetenv("BEADS_TEST_MODE")
+	os.Unsetenv("BEADS_DOLT_PORT")
+
+	cfg := &Config{}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != DefaultSQLPort {
+		t.Errorf("expected ServerPort=%d (DefaultSQLPort), got %d", DefaultSQLPort, cfg.ServerPort)
 	}
 }
