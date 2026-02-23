@@ -137,9 +137,7 @@ func TestCheckBeadGate_RigNotFound(t *testing.T) {
 }
 
 func TestCheckBeadGate_TargetClosed(t *testing.T) {
-	// This test previously created a SQLite DB but never passed it to checkBeadGate.
-	// Full integration testing requires routes.jsonl + town/rig infrastructure.
-	t.Skip("Requires routes.jsonl integration setup; SQLite fixture removed in bd-o0u.1")
+	t.Skip("SQLite-specific: created SQLite DB directly; full integration testing requires routes.jsonl + Dolt rig infrastructure")
 }
 
 func TestIsNumericID(t *testing.T) {

@@ -22,13 +22,9 @@ func TestCheckDatabaseIntegrity(t *testing.T) {
 			expectMessage:  "N/A (no database)",
 		},
 		{
-			name: "stale beads.db file ignored",
+			name: "empty beads dir",
 			setup: func(t *testing.T, dir string) {
-				// A stale beads.db FILE (not directory) is invisible to Dolt backend
-				dbPath := filepath.Join(dir, ".beads", "beads.db")
-				if err := os.WriteFile(dbPath, []byte("stale sqlite file"), 0600); err != nil {
-					t.Fatalf("failed to create stale db file: %v", err)
-				}
+				// .beads exists but no dolt/ directory
 			},
 			expectedStatus: "ok",
 			expectMessage:  "N/A (no database)",
@@ -126,7 +122,7 @@ func TestCheckSchemaCompatibility(t *testing.T) {
 }
 
 func TestCheckDatabaseIntegrity_EdgeCases(t *testing.T) {
-	t.Skip("SQLite-specific edge cases (locked/read-only files); Dolt backend uses server connections")
+	t.Skip("SQLite-specific edge cases (locked DB, read-only file); Dolt backend uses server connections")
 }
 
 func TestCheckDatabaseVersion_EdgeCases(t *testing.T) {

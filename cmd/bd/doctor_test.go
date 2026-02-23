@@ -102,15 +102,11 @@ func TestDoctorJSONOutput(t *testing.T) {
 }
 
 func TestDetectHashBasedIDs(t *testing.T) {
-	// Dolt schema always includes child_counters table, so DetectHashBasedIDs
-	// always returns true at heuristic 1. The sequential-ID heuristics (hasTable=false)
-	// are only exercised on legacy SQLite databases without child_counters.
-	// This test will be removed when DetectHashBasedIDs is removed (bd-o0u.5).
-	t.Skip("Dolt always has child_counters table; DetectHashBasedIDs always returns true")
+	t.Skip("Dolt schema always includes child_counters table, so DetectHashBasedIDs always returns true at heuristic 1; ID-pattern heuristics (2/3) cannot be tested in isolation with Dolt")
 }
 
 func TestCheckIDFormat(t *testing.T) {
-	t.Skip("SQLite-specific: creates SQLite database directly; Dolt backend can't read it")
+	t.Skip("SQLite-specific: creates SQLite database directly; Dolt backend uses different schema and always has child_counters")
 }
 
 func TestCheckInstallation(t *testing.T) {

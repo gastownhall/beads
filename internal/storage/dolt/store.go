@@ -754,6 +754,12 @@ func isOnlyComments(stmt string) bool {
 	return true
 }
 
+// DB returns the underlying *sql.DB for direct SQL access.
+// Used by doctor diagnostics and test infrastructure.
+func (s *DoltStore) DB() *sql.DB {
+	return s.db
+}
+
 // Close closes the database connection
 func (s *DoltStore) Close() error {
 	s.closed.Store(true)

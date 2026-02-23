@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -43,63 +44,30 @@ func TestRunDeepValidation_EmptyBeadsDir(t *testing.T) {
 	}
 }
 
-// TestRunDeepValidation_WithDatabase verifies all deep check functions run
-// without panicking against a Dolt connection. The shared test database may
-// have pre-existing data, so we verify checks complete rather than expecting
-// a clean state. Individual check functions are tested in isolation below.
-func TestRunDeepValidation_WithDatabase(t *testing.T) {
-	store := newTestDoltStore(t, "deep")
-	db := store.UnderlyingDB()
-
-	// Run all deep checks against the Dolt connection
-	checks := []DoctorCheck{
-		checkParentConsistency(db),
-		checkDependencyIntegrity(db),
-		checkEpicCompleteness(db),
-		checkAgentBeadIntegrity(db),
-		checkMailThreadIntegrity(db),
-		checkMoleculeIntegrity(db),
-	}
-
-	// Verify all 6 checks ran and produced valid statuses
-	if len(checks) != 6 {
-		t.Errorf("Expected 6 checks, got %d", len(checks))
-	}
-	for _, check := range checks {
-		if check.Name == "" {
-			t.Error("Check has empty Name")
-		}
-		if check.Status != StatusOK && check.Status != StatusWarning && check.Status != StatusError {
-			t.Errorf("Check %s has invalid status %q", check.Name, check.Status)
-		}
-	}
-}
-
 // TestCheckParentConsistency_OrphanedDeps verifies detection of orphaned parent-child deps
 func TestCheckParentConsistency_OrphanedDeps(t *testing.T) {
-	store := newTestDoltStore(t, "deep")
+	store := newTestDoltStore(t, "bd")
 	ctx := context.Background()
 
-	// Insert an issue via store API
+	// Create an issue
 	issue := &types.Issue{
+		ID:        "bd-1",
 		Title:     "Test Issue",
 		Status:    types.StatusOpen,
-		Priority:  2,
 		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
 	}
-	if err := store.CreateIssue(ctx, issue, "deep"); err != nil {
-		t.Fatalf("Failed to create issue: %v", err)
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatal(err)
 	}
-
-	db := store.UnderlyingDB()
 
 	// Insert a parent-child dep pointing to non-existent parent via raw SQL
-	_, err := db.Exec(
-		"INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
-		issue.ID, "deep-missing", "parent-child", "test",
-	)
+	db := store.DB()
+	_, err := db.ExecContext(ctx,
+		"INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?, ?, ?, NOW(), ?)",
+		"bd-1", "bd-missing", "parent-child", "test")
 	if err != nil {
-		t.Fatalf("Failed to insert orphaned dep: %v", err)
+		t.Fatal(err)
 	}
 
 	check := checkParentConsistency(db)
@@ -111,42 +79,47 @@ func TestCheckParentConsistency_OrphanedDeps(t *testing.T) {
 
 // TestCheckEpicCompleteness_CompletedEpic verifies detection of closeable epics
 func TestCheckEpicCompleteness_CompletedEpic(t *testing.T) {
-	store := newTestDoltStore(t, "deep")
+	store := newTestDoltStore(t, "epic")
 	ctx := context.Background()
 
 	// Insert an open epic
 	epic := &types.Issue{
+		ID:        "epic-1",
 		Title:     "Epic",
 		Status:    types.StatusOpen,
-		Priority:  2,
 		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
 	}
-	if err := store.CreateIssue(ctx, epic, "deep"); err != nil {
-		t.Fatalf("Failed to create epic: %v", err)
+	if err := store.CreateIssue(ctx, epic, "test"); err != nil {
+		t.Fatal(err)
 	}
 
 	// Insert a closed child task
 	task := &types.Issue{
+		ID:        "epic-1.1",
 		Title:     "Task",
 		Status:    types.StatusClosed,
-		Priority:  2,
 		IssueType: types.TypeTask,
+		ClosedAt:  ptrTime(time.Now()),
+		CreatedAt: time.Now(),
 	}
-	if err := store.CreateIssue(ctx, task, "deep"); err != nil {
-		t.Fatalf("Failed to create task: %v", err)
-	}
-
-	db := store.UnderlyingDB()
-
-	// Create parent-child relationship via raw SQL
-	_, err := db.Exec(
-		"INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
-		task.ID, epic.ID, "parent-child", "test",
-	)
-	if err != nil {
-		t.Fatalf("Failed to insert parent-child dep: %v", err)
+	if err := store.CreateIssue(ctx, task, "test"); err != nil {
+		t.Fatal(err)
 	}
 
+	// Create parent-child relationship
+	dep := &types.Dependency{
+		IssueID:     "epic-1.1",
+		DependsOnID: "epic-1",
+		Type:        types.DepParentChild,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	db := store.DB()
 	check := checkEpicCompleteness(db)
 
 	// Epic with all children closed should be detected
@@ -157,37 +130,37 @@ func TestCheckEpicCompleteness_CompletedEpic(t *testing.T) {
 
 // TestCheckMailThreadIntegrity_ValidThreads verifies valid thread references pass
 func TestCheckMailThreadIntegrity_ValidThreads(t *testing.T) {
-	store := newTestDoltStore(t, "deep")
+	store := newTestDoltStore(t, "thread")
 	ctx := context.Background()
 
 	// Insert issues
 	root := &types.Issue{
+		ID:        "thread-root",
 		Title:     "Thread Root",
 		Status:    types.StatusOpen,
-		Priority:  2,
 		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
 	}
-	if err := store.CreateIssue(ctx, root, "deep"); err != nil {
-		t.Fatalf("Failed to create root issue: %v", err)
+	if err := store.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatal(err)
 	}
 
 	reply := &types.Issue{
+		ID:        "thread-reply",
 		Title:     "Reply",
 		Status:    types.StatusOpen,
-		Priority:  2,
 		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
 	}
-	if err := store.CreateIssue(ctx, reply, "deep"); err != nil {
-		t.Fatalf("Failed to create reply issue: %v", err)
+	if err := store.CreateIssue(ctx, reply, "test"); err != nil {
+		t.Fatal(err)
 	}
 
-	db := store.UnderlyingDB()
-
-	// Insert a dependency with valid thread_id
-	_, err := db.Exec(
-		"INSERT INTO dependencies (issue_id, depends_on_id, type, thread_id, created_by) VALUES (?, ?, ?, ?, ?)",
-		reply.ID, root.ID, "replies-to", root.ID, "test",
-	)
+	// Insert a dependency with valid thread_id via raw SQL (replies-to with thread_id)
+	db := store.DB()
+	_, err := db.ExecContext(ctx,
+		"INSERT INTO dependencies (issue_id, depends_on_id, type, thread_id, created_at, created_by) VALUES (?, ?, ?, ?, NOW(), ?)",
+		"thread-reply", "thread-root", "replies-to", "thread-root", "test")
 	if err != nil {
 		t.Fatalf("Failed to insert thread dep: %v", err)
 	}

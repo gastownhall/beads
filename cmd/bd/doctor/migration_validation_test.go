@@ -5,53 +5,9 @@ package doctor
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/types"
 )
-
-// newTestDoltStore creates a DoltStore in a temp directory with the given issue prefix.
-func newTestDoltStore(t *testing.T, prefix string) *dolt.DoltStore {
-	t.Helper()
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping test")
-	}
-	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{Path: filepath.Join(t.TempDir(), "test.db")})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		store.Close()
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return store
-}
-
-func newTestIssue(id string) *types.Issue {
-	return &types.Issue{
-		ID:        id,
-		Title:     "Test issue " + id,
-		Status:    types.StatusOpen,
-		Priority:  2,
-		IssueType: types.TypeTask,
-	}
-}
-
-// insertIssueDirectly inserts an issue with a pre-set ID into the dolt store.
-// This simulates cross-rig contamination where foreign-prefix issues end up in the store.
-func insertIssueDirectly(t *testing.T, store *dolt.DoltStore, id string) {
-	t.Helper()
-	ctx := context.Background()
-	issue := newTestIssue(id)
-	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
-		t.Fatalf("failed to insert issue %s: %v", id, err)
-	}
-}
 
 func TestValidateJSONLForMigration(t *testing.T) {
 	tests := []struct {
