@@ -95,18 +95,22 @@ func TestCheckBeadsRole_NotGitRepo(t *testing.T) {
 	// Don't initialize git - just a plain directory
 	check := CheckBeadsRole(tmpDir)
 
-	// Should return warning since git config will fail
-	if check.Status != StatusWarning {
-		t.Errorf("expected status %s, got %s", StatusWarning, check.Status)
+	// Should return OK/N/A since we're not in a git repo — the role may
+	// be correctly configured in a worktree (e.g., rig roots use .repo.git).
+	if check.Status != StatusOK {
+		t.Errorf("expected status %s, got %s", StatusOK, check.Status)
+	}
+	if check.Message != "N/A (not a git repository)" {
+		t.Errorf("expected message 'N/A (not a git repository)', got %q", check.Message)
 	}
 }
 
 func TestCheckBeadsRole_NonexistentPath(t *testing.T) {
-	// Test with a path that doesn't exist
+	// Test with a path that doesn't exist — git will report "not a git repository"
 	check := CheckBeadsRole(filepath.Join(os.TempDir(), "nonexistent-beads-test-dir"))
 
-	// Should return warning since git config will fail
-	if check.Status != StatusWarning {
-		t.Errorf("expected status %s, got %s", StatusWarning, check.Status)
+	// Should return OK/N/A since the path is not a git repository
+	if check.Status != StatusOK {
+		t.Errorf("expected status %s, got %s", StatusOK, check.Status)
 	}
 }

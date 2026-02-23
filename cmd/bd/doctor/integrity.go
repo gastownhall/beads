@@ -360,6 +360,13 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 
 		currentRepoID, err := beads.ComputeRepoID()
 		if err != nil {
+			if strings.Contains(err.Error(), "not a git repository") {
+				return DoctorCheck{
+					Name:    "Repo Fingerprint",
+					Status:  StatusOK,
+					Message: "N/A (not a git repository)",
+				}
+			}
 			return DoctorCheck{
 				Name:    "Repo Fingerprint",
 				Status:  StatusWarning,
@@ -451,6 +458,13 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 	// Compute current repo ID
 	currentRepoID, err := beads.ComputeRepoID()
 	if err != nil {
+		if strings.Contains(err.Error(), "not a git repository") {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusOK,
+				Message: "N/A (not a git repository)",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusWarning,
