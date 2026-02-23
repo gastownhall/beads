@@ -138,12 +138,39 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			for i, issue := range issues {
 				issueIDs[i] = issue.ID
 			}
-			commentCounts, _ := activeStore.GetCommentCounts(ctx, issueIDs) // Best effort: comment counts are supplementary display info
+			// Best effort: display gracefully degrades with empty data
+			labelsMap, _ := activeStore.GetLabelsForIssues(ctx, issueIDs)
+			depCounts, _ := activeStore.GetDependencyCounts(ctx, issueIDs)
+			allDeps, _ := activeStore.GetDependencyRecordsForIssues(ctx, issueIDs)
+			commentCounts, _ := activeStore.GetCommentCounts(ctx, issueIDs)
+
+			// Populate labels and dependencies for JSON output
+			for _, issue := range issues {
+				issue.Labels = labelsMap[issue.ID]
+				issue.Dependencies = allDeps[issue.ID]
+			}
+
+			// Build response with counts + computed parent (consistent with bd list --json)
 			issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
 			for i, issue := range issues {
+				counts := depCounts[issue.ID]
+				if counts == nil {
+					counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
+				}
+				// Compute parent from dependency records
+				var parent *string
+				for _, dep := range allDeps[issue.ID] {
+					if dep.Type == types.DepParentChild {
+						parent = &dep.DependsOnID
+						break
+					}
+				}
 				issuesWithCounts[i] = &types.IssueWithCounts{
-					Issue:        issue,
-					CommentCount: commentCounts[issue.ID],
+					Issue:           issue,
+					DependencyCount: counts.DependencyCount,
+					DependentCount:  counts.DependentCount,
+					CommentCount:    commentCounts[issue.ID],
+					Parent:          parent,
 				}
 			}
 			outputJSON(issuesWithCounts)
