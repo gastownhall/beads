@@ -91,9 +91,6 @@ builds:
       - -X main.Build={{.ShortCommit}}
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
-    hooks:
-      post:
-        - ./scripts/verify-cgo.sh "{{ .Path }}"
 
   - id: bd-darwin-arm64
     main: ./cmd/bd
@@ -113,9 +110,6 @@ builds:
       - -X main.Build={{.ShortCommit}}
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
-    hooks:
-      post:
-        - ./scripts/verify-cgo.sh "{{ .Path }}"
 
   - id: bd-windows-amd64
     main: ./cmd/bd
@@ -187,9 +181,6 @@ builds:
       - -X main.Build={{.ShortCommit}}
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
-    hooks:
-      post:
-        - ./scripts/verify-cgo.sh "{{ .Path }}"
 
 archives:
   - id: bd-archive

@@ -210,6 +210,13 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.56.1",
+		Date:    "2026-02-23",
+		Changes: []string{
+			"FIX: Release CI — remove verify-cgo hook from CGO_ENABLED=0 builds (darwin, freebsd)",
+		},
+	},
+	{
 		Version: "0.56.0",
 		Date:    "2026-02-23",
 		Changes: []string{

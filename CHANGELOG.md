@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.56.1] - 2026-02-23
+
+### Fixed
+
+- **Release CI** — remove `verify-cgo.sh` post-hook from darwin and freebsd builds which intentionally use `CGO_ENABLED=0` (cross-compilation without CGO)
+
 ## [0.56.0] - 2026-02-23
 
 ### Removed
