@@ -30,7 +30,7 @@ The squash operation:
   3. Generates a digest (summary of work done)
   4. Creates a permanent digest issue (Ephemeral=false)
   5. Clears Wisp flag on children (promotes to persistent)
-     OR deletes them with --delete-children
+     OR keeps them with --keep-children (default: delete)
 
 AGENT INTEGRATION:
 Use --summary to provide an AI-generated summary. This keeps bd as a pure
@@ -44,7 +44,7 @@ execution happens, squash compresses the trace into an outcome (digest).
 Example:
   bd mol squash bd-abc123                    # Squash and promote children
   bd mol squash bd-abc123 --dry-run          # Preview what would be squashed
-  bd mol squash bd-abc123 --delete-children  # Delete wisps after digest
+  bd mol squash bd-abc123 --keep-children    # Keep wisps after digest
   bd mol squash bd-abc123 --summary "Agent-generated summary of work done"`,
 	Args: cobra.ExactArgs(1),
 	Run:  runMolSquash,

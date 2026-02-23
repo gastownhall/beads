@@ -223,8 +223,8 @@ func (s *markdownParseState) handleContentLine(line string) {
 		return
 	}
 
-	// First lines after title (before any section) become description
-	if s.currentIssue.Description == "" && line != "" {
+	// Lines after title (before any section) become description
+	if line != "" {
 		if s.currentIssue.Description != "" {
 			s.currentIssue.Description += "\n"
 		}

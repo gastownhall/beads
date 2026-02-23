@@ -1,4 +1,4 @@
-//go:build cgo && integration
+//go:build integration
 
 package dolt
 
