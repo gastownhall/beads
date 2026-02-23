@@ -50,6 +50,11 @@ type CloneOptions struct {
 	// Dynamic bonding fields (for Christmas Ornament pattern)
 	ParentID string // Parent molecule ID to bond under (e.g., "patrol-x7k")
 	ChildRef string // Child reference with variables (e.g., "arm-{{polecat_name}}")
+
+	// Atomic attachment: if set, adds a dependency from the spawned root to
+	// AttachToID within the same transaction as the clone, preventing orphans.
+	AttachToID  string               // Molecule ID to attach spawned root to
+	AttachDepType types.DependencyType // Dependency type for the attachment
 }
 
 // bondedIDPattern validates bonded IDs (alphanumeric, dash, underscore, dot)
@@ -777,6 +782,19 @@ func cloneSubgraph(ctx context.Context, s *dolt.DoltStore, subgraph *TemplateSub
 			}
 			if err := tx.AddDependency(ctx, newDep, opts.Actor); err != nil {
 				return fmt.Errorf("failed to create dependency: %w", err)
+			}
+		}
+
+		// Atomic attachment: link spawned root to target molecule within
+		// the same transaction (bd-wvplu: prevents orphaned spawns)
+		if opts.AttachToID != "" {
+			attachDep := &types.Dependency{
+				IssueID:     idMapping[subgraph.Root.ID],
+				DependsOnID: opts.AttachToID,
+				Type:        opts.AttachDepType,
+			}
+			if err := tx.AddDependency(ctx, attachDep, opts.Actor); err != nil {
+				return fmt.Errorf("attaching to molecule: %w", err)
 			}
 		}
 

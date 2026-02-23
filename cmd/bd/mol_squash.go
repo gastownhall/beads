@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -249,7 +248,8 @@ func squashMolecule(ctx context.Context, s *dolt.DoltStore, root *types.Issue, c
 		KeptChildren:  keepChildren,
 	}
 
-	// Use transaction for atomicity
+	// All squash operations in a single transaction for atomicity (bd-4kgbq):
+	// digest creation, child deletion, and root close
 	err := transact(ctx, s, fmt.Sprintf("bd: squash molecule %s", root.ID), func(tx storage.Transaction) error {
 		// Create digest issue
 		if err := tx.CreateIssue(ctx, digestIssue, actorName); err != nil {
@@ -267,6 +267,25 @@ func squashMolecule(ctx context.Context, s *dolt.DoltStore, root *types.Issue, c
 			return fmt.Errorf("failed to link digest to root: %w", err)
 		}
 
+		// Delete ephemeral children within the same transaction
+		if !keepChildren {
+			for _, id := range childIDs {
+				if err := tx.DeleteIssue(ctx, id); err != nil {
+					return fmt.Errorf("failed to delete child %s: %w", id, err)
+				}
+				result.DeletedCount++
+			}
+		}
+
+		// Auto-close the root if it's a wisp — squash completes the molecule lifecycle
+		if root.Ephemeral {
+			reason := fmt.Sprintf("Squashed: %d steps → digest %s", len(children), result.DigestID)
+			if err := tx.CloseIssue(ctx, root.ID, reason, actorName, ""); err != nil {
+				return fmt.Errorf("failed to close wisp root %s: %w", root.ID, err)
+			}
+			result.WispSquash = true
+		}
+
 		return nil
 	})
 
@@ -274,42 +293,9 @@ func squashMolecule(ctx context.Context, s *dolt.DoltStore, root *types.Issue, c
 		return nil, err
 	}
 
-	// Delete ephemeral children (outside transaction for better error handling)
-	if !keepChildren {
-		deleted, err := deleteWispChildren(ctx, s, childIDs)
-		if err != nil {
-			// Log but don't fail - digest was created successfully
-			fmt.Fprintf(os.Stderr, "Warning: failed to delete some children: %v\n", err)
-		}
-		result.DeletedCount = deleted
-	}
-
-	// Auto-close the root if it's a wisp — squash completes the molecule lifecycle
-	if root.Ephemeral {
-		reason := fmt.Sprintf("Squashed: %d steps → digest %s", len(children), result.DigestID)
-		if err := s.CloseIssue(ctx, root.ID, reason, actorName, ""); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to auto-close wisp root %s: %v\n", root.ID, err)
-		}
-		result.WispSquash = true
-	}
-
 	return result, nil
 }
 
-// deleteWispChildren removes the wisp issues from the database
-func deleteWispChildren(ctx context.Context, s *dolt.DoltStore, ids []string) (int, error) {
-	deleted := 0
-	var lastErr error
-	for _, id := range ids {
-		if err := s.DeleteIssue(ctx, id); err != nil {
-			lastErr = err
-			continue
-		}
-		deleted++
-	}
-
-	return deleted, lastErr
-}
 
 func init() {
 	molSquashCmd.Flags().Bool("dry-run", false, "Preview what would be squashed")

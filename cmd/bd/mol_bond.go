@@ -407,11 +407,28 @@ func bondProtoMolWithSubgraph(ctx context.Context, s *dolt.DoltStore, protoSubgr
 		makeEphemeral = false
 	}
 
+	// Determine dependency type for attachment
+	// Sequential: use blocks (B runs after A completes)
+	// Conditional: use conditional-blocks (B runs only if A fails)
+	// Parallel: use parent-child (organizational, no blocking)
+	var depType types.DependencyType
+	switch bondType {
+	case types.BondTypeSequential:
+		depType = types.DepBlocks
+	case types.BondTypeConditional:
+		depType = types.DepConditionalBlocks
+	default:
+		depType = types.DepParentChild
+	}
+
 	// Build CloneOptions for spawning
+	// AttachToID ensures spawn + attach happen in a single transaction (bd-wvplu)
 	opts := CloneOptions{
-		Vars:      vars,
-		Actor:     actorName,
-		Ephemeral: makeEphemeral,
+		Vars:          vars,
+		Actor:         actorName,
+		Ephemeral:     makeEphemeral,
+		AttachToID:    mol.ID,
+		AttachDepType: depType,
 	}
 
 	// Dynamic bonding: use custom IDs if childRef is provided
@@ -420,40 +437,10 @@ func bondProtoMolWithSubgraph(ctx context.Context, s *dolt.DoltStore, protoSubgr
 		opts.ChildRef = childRef
 	}
 
-	// Spawn the proto with options
+	// Spawn the proto and atomically attach to molecule
 	spawnResult, err := spawnMoleculeWithOptions(ctx, s, subgraph, opts)
 	if err != nil {
-		return nil, fmt.Errorf("spawning proto: %w", err)
-	}
-
-	// Attach spawned molecule to existing molecule
-	err = transact(ctx, s, fmt.Sprintf("bd: bond proto %s to mol %s", proto.ID, mol.ID), func(tx storage.Transaction) error {
-		// Add dependency from spawned root to molecule
-		// Sequential: use blocks (B runs after A completes)
-		// Conditional: use conditional-blocks (B runs only if A fails)
-		// Parallel: use parent-child (organizational, no blocking)
-		// Note: Schema only allows one dependency per (issue_id, depends_on_id) pair
-		var depType types.DependencyType
-		switch bondType {
-		case types.BondTypeSequential:
-			depType = types.DepBlocks
-		case types.BondTypeConditional:
-			depType = types.DepConditionalBlocks
-		default:
-			depType = types.DepParentChild
-		}
-		dep := &types.Dependency{
-			IssueID:     spawnResult.NewEpicID,
-			DependsOnID: mol.ID,
-			Type:        depType,
-		}
-		return tx.AddDependency(ctx, dep, actorName)
-		// Note: bonded_from field tracking is not yet supported by storage layer.
-		// The dependency relationship captures the bonding semantics.
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("attaching to molecule: %w", err)
+		return nil, fmt.Errorf("spawning and attaching proto: %w", err)
 	}
 
 	return &BondResult{
