@@ -1,12 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -57,94 +55,7 @@ func runBDSideDB(t *testing.T, exe, dir, dbPath string, args ...string) (string,
 }
 
 func TestDoctorRepair_CorruptDatabase_RebuildFromJSONL(t *testing.T) {
-	requireTestGuardDisabled(t)
-
-	if testing.Short() {
-		t.Skip("skipping slow repair test in short mode")
-	}
-
-	bdExe := buildBDForTest(t)
-	ws := mkTmpDirInTmp(t, "bd-doctor-repair-*")
-	dbPath := filepath.Join(ws, ".beads", "beads.db")
-	jsonlPath := filepath.Join(ws, ".beads", "issues.jsonl")
-
-	if _, err := runBDSideDB(t, bdExe, ws, dbPath, "init", "--prefix", "chaos", "--quiet"); err != nil {
-		t.Fatalf("bd init failed: %v", err)
-	}
-	if _, err := runBDSideDB(t, bdExe, ws, dbPath, "create", "Chaos issue", "-p", "1"); err != nil {
-		t.Fatalf("bd create failed: %v", err)
-	}
-	if _, err := runBDSideDB(t, bdExe, ws, dbPath, "export", "-o", jsonlPath, "--force"); err != nil {
-		t.Fatalf("bd export failed: %v", err)
-	}
-
-	// Corrupt the SQLite file (truncate) and verify doctor reports an integrity error.
-	if err := os.Truncate(dbPath, 128); err != nil {
-		t.Fatalf("truncate db: %v", err)
-	}
-
-	out, err := runBDSideDB(t, bdExe, ws, dbPath, "doctor", "--json")
-	if err == nil {
-		t.Fatalf("expected bd doctor to fail on corrupt db")
-	}
-	jsonStart := strings.Index(out, "{")
-	if jsonStart < 0 {
-		t.Fatalf("doctor output missing JSON: %s", out)
-	}
-	var before doctorResult
-	if err := json.Unmarshal([]byte(out[jsonStart:]), &before); err != nil {
-		t.Fatalf("unmarshal doctor json: %v\n%s", err, out)
-	}
-	var foundIntegrity bool
-	for _, c := range before.Checks {
-		if c.Name == "Database Integrity" {
-			foundIntegrity = true
-			if c.Status != statusError {
-				t.Fatalf("Database Integrity status=%q want %q", c.Status, statusError)
-			}
-		}
-	}
-	if !foundIntegrity {
-		t.Fatalf("Database Integrity check not found")
-	}
-
-	// Attempt auto-repair.
-	out, err = runBDSideDB(t, bdExe, ws, dbPath, "doctor", "--fix", "--yes")
-	if err != nil {
-		t.Fatalf("bd doctor --fix failed: %v\n%s", err, out)
-	}
-
-	// Doctor should now pass.
-	out, err = runBDSideDB(t, bdExe, ws, dbPath, "doctor", "--json")
-	if err != nil {
-		t.Fatalf("bd doctor after fix failed: %v\n%s", err, out)
-	}
-	jsonStart = strings.Index(out, "{")
-	if jsonStart < 0 {
-		t.Fatalf("doctor output missing JSON: %s", out)
-	}
-	var after doctorResult
-	if err := json.Unmarshal([]byte(out[jsonStart:]), &after); err != nil {
-		t.Fatalf("unmarshal doctor json: %v\n%s", err, out)
-	}
-	if !after.OverallOK {
-		t.Fatalf("expected overall_ok=true after repair")
-	}
-
-	// Data should still be present.
-	out, err = runBDSideDB(t, bdExe, ws, dbPath, "list", "--json")
-	if err != nil {
-		t.Fatalf("bd list failed after repair: %v\n%s", err, out)
-	}
-	jsonStart = strings.Index(out, "[")
-	if jsonStart < 0 {
-		t.Fatalf("list output missing JSON array: %s", out)
-	}
-	var issues []map[string]any
-	if err := json.Unmarshal([]byte(out[jsonStart:]), &issues); err != nil {
-		t.Fatalf("unmarshal list json: %v\n%s", err, out)
-	}
-	if len(issues) != 1 {
-		t.Fatalf("expected 1 issue after repair, got %d", len(issues))
-	}
+	// SQLite file corruption repair test. Dolt backend uses server connections,
+	// not .db files, so corruption/repair scenarios are fundamentally different.
+	t.Skip("SQLite file corruption repair; not applicable to Dolt backend (bd-o0u)")
 }

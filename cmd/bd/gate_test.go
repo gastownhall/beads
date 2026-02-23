@@ -2,14 +2,9 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -142,61 +137,9 @@ func TestCheckBeadGate_RigNotFound(t *testing.T) {
 }
 
 func TestCheckBeadGate_TargetClosed(t *testing.T) {
-	// Create a temporary database that simulates a target rig
-	tmpDir, err := os.MkdirTemp("", "bead_gate_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create a minimal database with a closed issue
-	dbPath := filepath.Join(tmpDir, "beads.db")
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create minimal schema
-	_, err = db.Exec(`
-		CREATE TABLE issues (
-			id TEXT PRIMARY KEY,
-			status TEXT,
-			title TEXT,
-			created_at TEXT,
-			updated_at TEXT
-		)
-	`)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Insert a closed issue
-	now := time.Now().Format(time.RFC3339)
-	_, err = db.Exec(`
-		INSERT INTO issues (id, status, title, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, "gt-test123", string(types.StatusClosed), "Test Issue", now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Insert an open issue
-	_, err = db.Exec(`
-		INSERT INTO issues (id, status, title, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, "gt-open456", string(types.StatusOpen), "Open Issue", now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	db.Close()
-
-	// Note: This test can't fully exercise checkBeadGate because it relies on
-	// routing.ResolveBeadsDirForRig which needs a proper routes.jsonl setup.
-	// The full integration test would need the town/rig infrastructure.
-	// For now, we just verify the function signature and basic error handling.
-	t.Log("Database created with closed issue gt-test123 and open issue gt-open456")
-	t.Log("Full integration testing requires routes.jsonl setup")
+	// This test previously created a SQLite DB but never passed it to checkBeadGate.
+	// Full integration testing requires routes.jsonl + town/rig infrastructure.
+	t.Skip("Requires routes.jsonl integration setup; SQLite fixture removed in bd-o0u.1")
 }
 
 func TestIsNumericID(t *testing.T) {
