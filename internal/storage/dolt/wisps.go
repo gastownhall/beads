@@ -295,6 +295,9 @@ func (s *DoltStore) createWisp(ctx context.Context, issue *types.Issue, actor st
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
+	// Normalize prefix: strip trailing hyphen to prevent double-hyphen IDs (bd-6uly)
+	configPrefix = strings.TrimSuffix(configPrefix, "-")
+
 	// Generate wisp ID if not provided
 	if issue.ID == "" {
 		prefix := wispPrefix(configPrefix, issue)

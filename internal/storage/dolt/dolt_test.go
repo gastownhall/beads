@@ -216,6 +216,98 @@ func TestDoltStoreConfig(t *testing.T) {
 	}
 }
 
+// TestSetConfigNormalizesIssuePrefix verifies that SetConfig strips trailing
+// hyphens from issue_prefix to prevent double-hyphen bead IDs (bd-6uly).
+func TestSetConfigNormalizesIssuePrefix(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Set prefix WITH trailing hyphen — should be normalized
+	if err := store.SetConfig(ctx, "issue_prefix", "gt-"); err != nil {
+		t.Fatalf("SetConfig failed: %v", err)
+	}
+
+	value, err := store.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		t.Fatalf("GetConfig failed: %v", err)
+	}
+	if value != "gt" {
+		t.Errorf("expected issue_prefix 'gt' (trailing hyphen stripped), got %q", value)
+	}
+}
+
+// TestCreateIssueNoDoubleHyphen verifies that issue IDs don't get double
+// hyphens even if the DB somehow has a trailing-hyphen prefix (bd-6uly).
+func TestCreateIssueNoDoubleHyphen(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Bypass SetConfig normalization: write trailing-hyphen prefix directly to DB
+	_, err := store.db.ExecContext(ctx, "UPDATE config SET value = ? WHERE `key` = ?", "gt-", "issue_prefix")
+	if err != nil {
+		t.Fatalf("failed to set raw prefix: %v", err)
+	}
+
+	issue := &types.Issue{
+		Title:     "test double hyphen",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeBug,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	// ID should start with "gt-" not "gt--"
+	if strings.Contains(issue.ID, "--") {
+		t.Errorf("issue ID contains double hyphen: %q", issue.ID)
+	}
+	if !strings.HasPrefix(issue.ID, "gt-") {
+		t.Errorf("issue ID should start with 'gt-', got %q", issue.ID)
+	}
+}
+
+// TestCreateWispNoDoubleHyphen verifies that wisp IDs don't get double
+// hyphens even if the DB has a trailing-hyphen prefix (bd-6uly).
+func TestCreateWispNoDoubleHyphen(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Bypass SetConfig normalization: write trailing-hyphen prefix directly to DB
+	_, err := store.db.ExecContext(ctx, "UPDATE config SET value = ? WHERE `key` = ?", "gt-", "issue_prefix")
+	if err != nil {
+		t.Fatalf("failed to set raw prefix: %v", err)
+	}
+
+	wisp := &types.Issue{
+		Title:     "test wisp double hyphen",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeBug,
+		Ephemeral: true,
+	}
+	if err := store.createWisp(ctx, wisp, "test-user"); err != nil {
+		t.Fatalf("createWisp failed: %v", err)
+	}
+
+	// Wisp ID should contain "gt-wisp-" not "gt--wisp-"
+	if strings.Contains(wisp.ID, "--") {
+		t.Errorf("wisp ID contains double hyphen: %q", wisp.ID)
+	}
+	if !strings.HasPrefix(wisp.ID, "gt-wisp-") {
+		t.Errorf("wisp ID should start with 'gt-wisp-', got %q", wisp.ID)
+	}
+}
+
 func TestGetCustomTypes(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

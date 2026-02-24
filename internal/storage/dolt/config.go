@@ -11,6 +11,11 @@ import (
 
 // SetConfig sets a configuration value
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
+	// Normalize issue_prefix: strip trailing hyphen to prevent double-hyphen IDs (bd-6uly)
+	if key == "issue_prefix" {
+		value = strings.TrimSuffix(value, "-")
+	}
+
 	_, err := s.execContext(ctx, `
 		INSERT INTO config (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)

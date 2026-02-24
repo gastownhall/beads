@@ -81,6 +81,9 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
+	// Normalize prefix: strip trailing hyphen to prevent double-hyphen IDs (bd-6uly)
+	configPrefix = strings.TrimSuffix(configPrefix, "-")
+
 	// Determine prefix for ID generation
 	prefix := configPrefix
 	if issue.PrefixOverride != "" {
