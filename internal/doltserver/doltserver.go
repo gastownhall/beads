@@ -370,9 +370,12 @@ func Start(beadsDir string) (*State, error) {
 			pid, actualPort, err, logPath(beadsDir))
 	}
 
-	// Touch activity and fork idle monitor
+	// Touch activity and fork idle monitor (skip under Gas Town where
+	// the daemon manages server lifecycle)
 	touchActivity(beadsDir)
-	forkIdleMonitor(beadsDir)
+	if !IsDaemonManaged() {
+		forkIdleMonitor(beadsDir)
+	}
 
 	return &State{
 		Running: true,
@@ -382,9 +385,25 @@ func Start(beadsDir string) (*State, error) {
 	}, nil
 }
 
+// IsDaemonManaged returns true if the dolt server is managed by the Gas Town
+// daemon (GT_ROOT is set). In this case, beads should not stop or kill it.
+func IsDaemonManaged() bool {
+	return os.Getenv("GT_ROOT") != ""
+}
+
 // Stop gracefully stops the managed server and its idle monitor.
 // Sends SIGTERM, waits up to 5 seconds, then SIGKILL.
+// Under Gas Town (GT_ROOT set), refuses to stop the daemon-managed server
+// unless force is true.
 func Stop(beadsDir string) error {
+	return StopWithForce(beadsDir, false)
+}
+
+// StopWithForce is like Stop but allows overriding the Gas Town daemon guard.
+func StopWithForce(beadsDir string, force bool) error {
+	if !force && IsDaemonManaged() {
+		return fmt.Errorf("Dolt server is managed by the Gas Town daemon.\nUse 'gt dolt stop' instead, or pass --force to override.")
+	}
 	state, err := IsRunning(beadsDir)
 	if err != nil {
 		return err
@@ -438,7 +457,8 @@ func LogPath(beadsDir string) string {
 
 // KillStaleServers finds and kills orphan dolt sql-server processes
 // not tracked by the canonical PID file. Under Gas Town, the canonical
-// server is at $GT_ROOT/.beads/; in standalone mode, beadsDir is used.
+// server is at $GT_ROOT/.beads/ or $GT_ROOT/daemon/dolt.pid (daemon-managed);
+// in standalone mode, beadsDir is used.
 // Returns the PIDs of killed processes.
 func KillStaleServers(beadsDir string) ([]int, error) {
 	out, err := exec.Command("pgrep", "-f", "dolt sql-server").Output()
@@ -447,12 +467,23 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 		return nil, nil
 	}
 
-	// Determine the canonical PID (the one we should NOT kill)
+	// Collect canonical PIDs (ones we should NOT kill)
+	canonicalPIDs := make(map[int]bool)
 	serverDir := resolveServerDir(beadsDir)
-	var canonicalPID int
 	if serverDir != "" {
 		if data, readErr := os.ReadFile(pidPath(serverDir)); readErr == nil {
-			canonicalPID, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
+				canonicalPIDs[pid] = true
+			}
+		}
+	}
+	// Under Gas Town, also check the daemon-managed PID file
+	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
+		daemonPidFile := filepath.Join(gtRoot, "daemon", "dolt.pid")
+		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil {
+			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
+				canonicalPIDs[pid] = true
+			}
 		}
 	}
 
@@ -462,8 +493,8 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 		if parseErr != nil || pid == 0 || pid == os.Getpid() {
 			continue
 		}
-		if canonicalPID != 0 && pid == canonicalPID {
-			continue // preserve the canonical server
+		if canonicalPIDs[pid] {
+			continue // preserve canonical/daemon-managed server
 		}
 		if !isDoltProcess(pid) {
 			continue

@@ -235,6 +235,20 @@ required. Use this command for explicit control or diagnostics.`,
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
+		if doltserver.IsDaemonManaged() {
+			// Check if daemon's server is already accepting connections
+			cfg := doltserver.DefaultConfig(serverDir)
+			addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+			conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+			if err == nil {
+				_ = conn.Close()
+				fmt.Printf("Dolt server already running on port %d (managed by Gas Town daemon)\n", cfg.Port)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Warning: Dolt server is normally managed by the Gas Town daemon,\n"+
+				"but no server found on port %d. Starting one.\n\n", cfg.Port)
+		}
+
 		state, err := doltserver.Start(serverDir)
 		if err != nil {
 			if strings.Contains(err.Error(), "already running") {
@@ -265,8 +279,9 @@ on the next bd command unless auto-start is disabled.`,
 			os.Exit(1)
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
+		force, _ := cmd.Flags().GetBool("force")
 
-		if err := doltserver.Stop(serverDir); err != nil {
+		if err := doltserver.StopWithForce(serverDir, force); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -389,6 +404,7 @@ one tracked by the current project's PID file.`,
 
 func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
+	doltStopCmd.Flags().Bool("force", false, "Force stop even when managed by Gas Town daemon")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltIdleMonitorCmd.Flags().String("beads-dir", "", "Path to .beads directory")
