@@ -872,12 +872,20 @@ func (s *DoltStore) Commit(ctx context.Context, message string) (retErr error) {
 // This is the primary commit mechanism for batch mode, where multiple bd commands
 // accumulate changes in the working set before committing at a logical boundary.
 func (s *DoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
-	// Check if there are any uncommitted changes
-	status, err := s.Status(ctx)
+	// Check if there are any committable changes (excluding dolt_ignore'd tables
+	// like wisp tables, which appear in dolt_status but can't be staged).
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM dolt_status s
+		WHERE NOT EXISTS (
+			SELECT 1 FROM dolt_ignore di
+			WHERE di.ignored = 1
+			AND s.table_name LIKE di.pattern
+		)`).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("failed to check status: %w", err)
 	}
-	if len(status.Staged) == 0 && len(status.Unstaged) == 0 {
+	if count == 0 {
 		return false, nil // Nothing to commit
 	}
 
@@ -936,8 +944,14 @@ func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) s
 	// This surfaces label, comment, event, and dependency changes that
 	// would otherwise produce a generic fallback message.
 	var otherTables []string
-	statusRows, statusErr := s.db.QueryContext(ctx,
-		`SELECT table_name FROM dolt_status WHERE table_name != 'issues'`)
+	statusRows, statusErr := s.db.QueryContext(ctx, `
+		SELECT table_name FROM dolt_status s
+		WHERE table_name != 'issues'
+		AND NOT EXISTS (
+			SELECT 1 FROM dolt_ignore di
+			WHERE di.ignored = 1
+			AND s.table_name LIKE di.pattern
+		)`)
 	if statusErr == nil {
 		defer statusRows.Close()
 		for statusRows.Next() {
