@@ -28,7 +28,7 @@ bd create "Issue title" --description="What this issue is about" -p 1 --deps dis
 **Claim and update:**
 
 ```bash
-bd update bd-42 --status in_progress --json
+bd update <id> --claim --json
 bd update bd-42 --priority 1 --json
 ```
 
@@ -57,7 +57,7 @@ bd close bd-42 --reason "Completed" --json
 ### Workflow for AI Agents
 
 1. **Check ready work**: `bd ready` shows unblocked issues
-2. **Claim your task**: `bd update <id> --status in_progress`
+2. **Claim your task atomically**: `bd update <id> --claim`
 3. **Work on it**: Implement, test, document
 4. **Discover new work?** Create linked issue:
    - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
