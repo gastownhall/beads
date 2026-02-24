@@ -308,6 +308,48 @@ func TestCreateWispNoDoubleHyphen(t *testing.T) {
 	}
 }
 
+// TestTransactionCreateIssueNoDoubleHyphen verifies that issue IDs created
+// within a transaction don't get double hyphens if the DB has a trailing-hyphen
+// prefix (bd-6uly). This tests the transaction.go code path.
+func TestTransactionCreateIssueNoDoubleHyphen(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Bypass SetConfig normalization: write trailing-hyphen prefix directly to DB
+	_, err := store.db.ExecContext(ctx, "UPDATE config SET value = ? WHERE `key` = ?", "gt-", "issue_prefix")
+	if err != nil {
+		t.Fatalf("failed to set raw prefix: %v", err)
+	}
+
+	var createdID string
+	err = store.RunInTransaction(ctx, "test-tx", func(tx storage.Transaction) error {
+		issue := &types.Issue{
+			Title:     "test tx double hyphen",
+			Status:    types.StatusOpen,
+			Priority:  3,
+			IssueType: types.TypeBug,
+		}
+		if err := tx.CreateIssue(ctx, issue, "test-user"); err != nil {
+			return err
+		}
+		createdID = issue.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction failed: %v", err)
+	}
+
+	if strings.Contains(createdID, "--") {
+		t.Errorf("transaction-created issue ID contains double hyphen: %q", createdID)
+	}
+	if !strings.HasPrefix(createdID, "gt-") {
+		t.Errorf("issue ID should start with 'gt-', got %q", createdID)
+	}
+}
+
 func TestGetCustomTypes(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

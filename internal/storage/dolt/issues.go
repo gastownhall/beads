@@ -179,6 +179,9 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
+	// Normalize prefix: strip trailing hyphen to prevent double-hyphen IDs (bd-6uly)
+	configPrefix = strings.TrimSuffix(configPrefix, "-")
+
 	for _, issue := range issues {
 		now := time.Now().UTC()
 		if issue.CreatedAt.IsZero() {

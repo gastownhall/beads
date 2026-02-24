@@ -121,6 +121,9 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 			return fmt.Errorf("failed to get config: %w", err)
 		}
 
+		// Normalize prefix: strip trailing hyphen to prevent double-hyphen IDs (bd-6uly)
+		configPrefix = strings.TrimSuffix(configPrefix, "-")
+
 		var prefix string
 		if issue.Ephemeral {
 			prefix = wispPrefix(configPrefix, issue)
