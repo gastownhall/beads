@@ -789,8 +789,24 @@ func waitForReady(host string, port int, timeout time.Duration) error {
 	return fmt.Errorf("timeout after %s waiting for server at %s", timeout, addr)
 }
 
-// isDoltProcess verifies that a PID belongs to a dolt sql-server process.
+// isDoltProcess verifies that a PID belongs to a running dolt sql-server process.
+// Zombie/defunct processes are excluded — they have no listening port and should
+// not count against maxDoltServers or be considered adoptable.
 func isDoltProcess(pid int) bool {
+	// Check process state first — reject zombies and defunct processes.
+	// "ps -o state=" returns a single character: R(running), S(sleeping),
+	// Z(zombie), T(stopped), etc. Zombies linger in the process table but
+	// are not functional.
+	stateCmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "state=")
+	stateOut, err := stateCmd.Output()
+	if err != nil {
+		return false
+	}
+	state := strings.TrimSpace(string(stateOut))
+	if len(state) > 0 && (state[0] == 'Z' || state[0] == 'X') {
+		return false
+	}
+
 	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
 	output, err := cmd.Output()
 	if err != nil {

@@ -500,3 +500,17 @@ func TestMonitorPidLifecycle(t *testing.T) {
 		t.Error("expected monitor PID file to be removed")
 	}
 }
+
+func TestIsDoltProcessDeadPID(t *testing.T) {
+	// A non-existent PID should return false (ps will fail)
+	if isDoltProcess(99999999) {
+		t.Error("expected isDoltProcess to return false for dead PID")
+	}
+}
+
+func TestIsDoltProcessSelf(t *testing.T) {
+	// Our own process is not a dolt sql-server, so should return false
+	if isDoltProcess(os.Getpid()) {
+		t.Error("expected isDoltProcess to return false for non-dolt process")
+	}
+}
