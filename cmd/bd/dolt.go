@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -478,21 +479,76 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 
 		fmt.Println()
 		dropped := 0
-		for _, name := range stale {
+		failures := 0
+		consecutiveTimeouts := 0
+		const (
+			batchSize           = 5  // Drop this many before pausing
+			batchPause          = 2 * time.Second
+			backoffPause        = 10 * time.Second
+			timeoutThreshold    = 3  // Consecutive timeouts before backoff
+			perDropTimeout      = 30 * time.Second
+			maxConsecFailures   = 10 // Stop after this many consecutive failures
+		)
+
+		for i, name := range stale {
+			// Circuit breaker: back off when server is overwhelmed
+			if consecutiveTimeouts >= timeoutThreshold {
+				fmt.Fprintf(os.Stderr, "  ⚠ %d consecutive timeouts — backing off %s\n",
+					consecutiveTimeouts, backoffPause)
+				time.Sleep(backoffPause)
+				consecutiveTimeouts = 0
+			}
+
+			// Stop if too many consecutive failures — server is likely unhealthy
+			if failures >= maxConsecFailures {
+				fmt.Fprintf(os.Stderr, "\n✗ Aborting: %d consecutive failures suggest server is unhealthy.\n", failures)
+				fmt.Fprintf(os.Stderr, "  Dropped %d/%d before stopping.\n", dropped, len(stale))
+				os.Exit(1)
+			}
+
 			// Per-operation timeout: DROP DATABASE can be slow on Dolt
-			dropCtx, dropCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			dropCtx, dropCancel := context.WithTimeout(context.Background(), perDropTimeout)
 			// name is from SHOW DATABASES — safe to use in backtick-quoted identifier
 			_, err := db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE `%s`", name)) //nolint:gosec // G201: name from SHOW DATABASES
 			dropCancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  FAIL: %s: %v\n", name, err)
+				failures++
+				if isTimeoutError(err) {
+					consecutiveTimeouts++
+				}
 			} else {
 				fmt.Printf("  Dropped: %s\n", name)
 				dropped++
+				failures = 0
+				consecutiveTimeouts = 0
+			}
+
+			// Rate limiting: pause between batches to let the server breathe
+			if (i+1)%batchSize == 0 && i+1 < len(stale) {
+				fmt.Printf("  [%d/%d] pausing %s...\n", i+1, len(stale), batchPause)
+				time.Sleep(batchPause)
 			}
 		}
 		fmt.Printf("\nDropped %d/%d stale databases.\n", dropped, len(stale))
 	},
+}
+
+// isTimeoutError checks if an error is a context deadline exceeded or timeout.
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == context.DeadlineExceeded {
+		return true
+	}
+	// Check for net.Error timeout (covers TCP and MySQL driver timeouts)
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// Also catch wrapped context.DeadlineExceeded
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 func init() {
