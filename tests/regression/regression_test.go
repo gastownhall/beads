@@ -262,7 +262,7 @@ func newWorkspace(t *testing.T, bdPath string) *workspace {
 	// and subsequent commands read the database name from metadata.json.
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(dir))
-	prefix := fmt.Sprintf("t%d", h.Sum64()%100000)
+	prefix := fmt.Sprintf("t%x", h.Sum64())
 	w.run("init", "--prefix", prefix, "--quiet")
 
 	return w
@@ -345,8 +345,9 @@ func (w *workspace) create(args ...string) string {
 func (w *workspace) snapshot(listArgs ...string) string {
 	w.t.Helper()
 
-	// Step 1: get all issue IDs via bd list
-	args := []string{"list", "--json", "-n", "0"}
+	// Step 1: get all issue IDs via bd list (--all includes closed issues,
+	// matching the old bd export behavior)
+	args := []string{"list", "--json", "-n", "0", "--all"}
 	args = append(args, listArgs...)
 	listOut := w.run(args...)
 
@@ -389,7 +390,9 @@ func (w *workspace) snapshot(listArgs ...string) string {
 		var showObj map[string]any
 		if err := json.Unmarshal([]byte(showOut), &showObj); err == nil {
 			_ = enc.Encode(showObj)
+			continue
 		}
+		w.t.Logf("WARNING: snapshot: bd show %s returned unparseable JSON: %s", id, showOut)
 	}
 	return buf.String()
 }

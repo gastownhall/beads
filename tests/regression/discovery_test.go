@@ -11,17 +11,19 @@ package regression
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// uniquePrefix returns a random prefix for test isolation on shared Dolt server.
-func uniquePrefix(t *testing.T) string {
-	t.Helper()
-	return fmt.Sprintf("t%d", rand.Intn(99999))
+// uniquePrefix returns a unique prefix for test isolation on shared Dolt server.
+// Uses FNV hash of the workspace dir for deterministic, collision-resistant prefixes.
+func uniquePrefix(dir string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(dir))
+	return fmt.Sprintf("d%x", h.Sum64())
 }
 
 // newCandidateWorkspace creates a workspace using only the candidate binary with a unique prefix.
@@ -38,7 +40,7 @@ func newCandidateWorkspace(t *testing.T) *workspace {
 	}
 	w.git("add", ".")
 	w.git("commit", "-m", "initial")
-	w.run("init", "--prefix", uniquePrefix(t), "--quiet")
+	w.run("init", "--prefix", uniquePrefix(dir), "--quiet")
 	return w
 }
 
