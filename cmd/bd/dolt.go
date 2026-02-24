@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net"
 	"os"
@@ -426,16 +427,10 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 
-		s := getStore()
-		if s == nil {
-			fmt.Fprintln(os.Stderr, "Error: no Dolt store available")
-			os.Exit(1)
-		}
-		db := s.DB()
-		if db == nil {
-			fmt.Fprintln(os.Stderr, "Error: no database connection available")
-			os.Exit(1)
-		}
+		// Connect directly to the Dolt server via config instead of getStore(),
+		// which isn't initialized for dolt subcommands (beads-9vt).
+		db, cleanup := openDoltServerConnection()
+		defer cleanup()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -738,6 +733,63 @@ func testServerConnection(cfg *configfile.Config) bool {
 	}
 	_ = conn.Close() // Best effort cleanup
 	return true
+}
+
+// openDoltServerConnection opens a direct MySQL connection to the Dolt server
+// using config from the beads directory. This bypasses getStore() which isn't
+// initialized for dolt subcommands (beads-9vt). Connects without selecting a
+// database so callers can operate on all databases (SHOW DATABASES, DROP DATABASE).
+func openDoltServerConnection() (*sql.DB, func()) {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		fmt.Fprintln(os.Stderr, "Error: not in a beads repository (no .beads directory found)")
+		os.Exit(1)
+	}
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+
+	host := cfg.GetDoltServerHost()
+	port := cfg.GetDoltServerPort()
+	user := cfg.GetDoltServerUser()
+	password := os.Getenv("BEADS_DOLT_PASSWORD")
+
+	var connStr string
+	if password != "" {
+		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/?parseTime=true&timeout=5s",
+			user, password, host, port)
+	} else {
+		connStr = fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true&timeout=5s",
+			user, host, port)
+	}
+
+	db, err := sql.Open("mysql", connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to Dolt server: %v\n", err)
+		os.Exit(1)
+	}
+
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(30 * time.Second)
+
+	// Verify connectivity
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s:%d: %v\n", host, port, err)
+		fmt.Fprintln(os.Stderr, "Start the server with: bd dolt start")
+		os.Exit(1)
+	}
+
+	return db, func() { _ = db.Close() }
 }
 
 // doltServerPidFile returns the path to the PID file for the managed dolt server.
