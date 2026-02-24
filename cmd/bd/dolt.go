@@ -412,7 +412,12 @@ one tracked by the current project's PID file.`,
 // staleDatabasePrefixes identifies test/polecat databases that should not persist
 // on the production Dolt server. These accumulate from interrupted test runs and
 // terminated polecats, wasting server memory.
-var staleDatabasePrefixes = []string{"testdb_", "doctest_", "doctortest_"}
+// - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
+// - doctest_*: doctor test helpers
+// - doctortest_*: doctor test helpers
+// - beads_pt*: gastown patrol_helpers_test.go random prefixes
+// - beads_vr*: gastown mail/router_test.go random prefixes
+var staleDatabasePrefixes = []string{"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr"}
 
 var doltCleanDatabasesCmd = &cobra.Command{
 	Use:   "clean-databases",
@@ -420,7 +425,7 @@ var doltCleanDatabasesCmd = &cobra.Command{
 	Long: `Identify and drop leftover test and polecat databases that accumulate
 on the shared Dolt server from interrupted test runs and terminated polecats.
 
-Stale database prefixes: testdb_*, doctest_*, doctortest_*
+Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*
 
 These waste server memory and can degrade performance under concurrent load.
 Use --dry-run to see what would be dropped without actually dropping.`,
@@ -432,10 +437,10 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 		db, cleanup := openDoltServerConnection()
 		defer cleanup()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+		listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer listCancel()
 
-		rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+		rows, err := db.QueryContext(listCtx, "SHOW DATABASES")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error listing databases: %v\n", err)
 			os.Exit(1)
@@ -474,8 +479,11 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 		fmt.Println()
 		dropped := 0
 		for _, name := range stale {
+			// Per-operation timeout: DROP DATABASE can be slow on Dolt
+			dropCtx, dropCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			// name is from SHOW DATABASES — safe to use in backtick-quoted identifier
-			_, err := db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE `%s`", name)) //nolint:gosec // G201: name from SHOW DATABASES
+			_, err := db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE `%s`", name)) //nolint:gosec // G201: name from SHOW DATABASES
+			dropCancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  FAIL: %s: %v\n", name, err)
 			} else {

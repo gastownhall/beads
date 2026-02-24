@@ -148,10 +148,17 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 // should not exist on the production Dolt server. These accumulate from interrupted
 // test runs and terminated polecats, wasting server memory and potentially
 // contributing to performance degradation under concurrent load.
+// - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
+// - doctest_*: doctor test helpers
+// - doctortest_*: doctor test helpers
+// - beads_pt*: gastown patrol_helpers_test.go random prefixes
+// - beads_vr*: gastown mail/router_test.go random prefixes
 var staleDatabasePrefixes = []string{
 	"testdb_",
 	"doctest_",
 	"doctortest_",
+	"beads_pt",
+	"beads_vr",
 }
 
 // knownProductionDatabases are the databases that should exist on a production server.
