@@ -391,24 +391,27 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.ServerHost == "" {
 		cfg.ServerHost = "127.0.0.1"
 	}
-	if cfg.ServerPort == 0 {
-		// Check environment variable for port override (used by test harness to
-		// redirect all connections to a dedicated test server on a dynamic port).
+	// In test mode, BEADS_DOLT_PORT ALWAYS overrides cfg.ServerPort — even if
+	// already set by NewFromConfigWithOptions reading metadata.json. Without this,
+	// tests that go through the config path silently connect to the prod server.
+	if os.Getenv("BEADS_TEST_MODE") == "1" {
+		if envPort := os.Getenv("BEADS_DOLT_PORT"); envPort != "" {
+			if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
+				cfg.ServerPort = p
+			}
+		} else if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
+			// No test server port set — use sentinel port 1 so connection
+			// fails immediately instead of silently hitting prod.
+			cfg.ServerPort = 1
+		}
+	} else if cfg.ServerPort == 0 {
 		if envPort := os.Getenv("BEADS_DOLT_PORT"); envPort != "" {
 			if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 				cfg.ServerPort = p
 			}
 		}
 		if cfg.ServerPort == 0 {
-			if os.Getenv("BEADS_TEST_MODE") == "1" {
-				// Test mode without BEADS_DOLT_PORT: use a port that will
-				// always fail to connect. This prevents accidentally hitting
-				// a production Dolt server while still allowing tests to
-				// handle the connection error gracefully.
-				cfg.ServerPort = 1 // reserved port, connection will be refused
-			} else {
-				cfg.ServerPort = DefaultSQLPort
-			}
+			cfg.ServerPort = DefaultSQLPort
 		}
 	}
 	if cfg.ServerUser == "" {
@@ -436,6 +439,17 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	applyConfigDefaults(cfg)
+
+	// Hard guard: tests must NEVER connect to the production Dolt server.
+	// If BEADS_TEST_MODE=1 and we're about to hit the default prod port,
+	// something upstream forgot to set BEADS_DOLT_PORT. Panic immediately
+	// so the test fails loudly instead of silently polluting prod.
+	if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.ServerPort == DefaultSQLPort {
+		panic(fmt.Sprintf(
+			"BEADS_TEST_MODE=1 but connecting to prod port %d — set BEADS_DOLT_PORT or use test helpers (database=%q, path=%q)",
+			DefaultSQLPort, cfg.Database, cfg.Path,
+		))
+	}
 
 	return newServerMode(ctx, cfg)
 }
