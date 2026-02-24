@@ -3,8 +3,6 @@ package dolt
 import (
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestCommitExists tests the CommitExists method.
@@ -114,15 +112,13 @@ func TestCommitPending(t *testing.T) {
 			t.Fatalf("failed to get HEAD: %v", err)
 		}
 
-		// Create an issue (DML without Dolt commit)
-		issue := &types.Issue{
-			Title:     "Batch test issue",
-			Status:    types.StatusOpen,
-			Priority:  2,
-			IssueType: types.TypeTask,
-		}
-		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
-			t.Fatalf("CreateIssue failed: %v", err)
+		// Insert directly via SQL to leave changes uncommitted in Dolt working set.
+		// (CreateIssue auto-commits via DOLT_COMMIT, so it can't be used here.)
+		_, err = store.db.ExecContext(ctx,
+			`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
+			 VALUES ('batch-test-1', 'Batch test issue', '', '', '', '', 'open', 2, 'task', NOW(), NOW())`)
+		if err != nil {
+			t.Fatalf("raw INSERT failed: %v", err)
 		}
 
 		// Now commit pending changes
@@ -144,15 +140,13 @@ func TestCommitPending(t *testing.T) {
 	})
 
 	t.Run("generates descriptive message", func(t *testing.T) {
-		// Create another issue to have pending changes
-		issue := &types.Issue{
-			Title:     "Message test issue",
-			Status:    types.StatusOpen,
-			Priority:  2,
-			IssueType: types.TypeTask,
-		}
-		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
-			t.Fatalf("CreateIssue failed: %v", err)
+		// Insert directly via SQL to leave changes uncommitted in Dolt working set.
+		// (CreateIssue auto-commits via DOLT_COMMIT, so it can't be used here.)
+		_, err := store.db.ExecContext(ctx,
+			`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
+			 VALUES ('msg-test-1', 'Message test issue', '', '', '', '', 'open', 2, 'task', NOW(), NOW())`)
+		if err != nil {
+			t.Fatalf("raw INSERT failed: %v", err)
 		}
 
 		// Build the message (without committing)

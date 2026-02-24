@@ -842,6 +842,9 @@ func (s *DoltStore) Commit(ctx context.Context, message string) (retErr error) {
 	// NOTE: In SQL procedure mode, Dolt defaults author to the authenticated SQL user
 	// (e.g. root@localhost). Always pass an explicit author for deterministic history.
 	if _, err := s.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
+		if isDoltNothingToCommit(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to commit: %w", err)
 	}
 	return nil
