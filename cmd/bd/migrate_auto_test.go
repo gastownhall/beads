@@ -234,8 +234,8 @@ func TestAutoMigrate_FullMigration(t *testing.T) {
 	if updatedCfg.Database != "dolt" {
 		t.Errorf("database should be 'dolt', got %q", updatedCfg.Database)
 	}
-	if updatedCfg.DoltDatabase != "beads_mig" {
-		t.Errorf("dolt_database should be 'beads_mig', got %q", updatedCfg.DoltDatabase)
+	if updatedCfg.DoltDatabase != "mig" {
+		t.Errorf("dolt_database should be 'mig', got %q", updatedCfg.DoltDatabase)
 	}
 
 	// Verify: config.yaml has sync.mode
@@ -247,7 +247,7 @@ func TestAutoMigrate_FullMigration(t *testing.T) {
 	}
 
 	// Clean up Dolt test database
-	dropTestDatabase("beads_mig", testDoltServerPort)
+	dropTestDatabase("mig", testDoltServerPort)
 }
 
 func TestAutoMigrate_CorruptedSQLite(t *testing.T) {
@@ -371,5 +371,5 @@ func TestAutoMigrate_MetadataJSONValid(t *testing.T) {
 	}
 
 	// Clean up
-	dropTestDatabase("beads_json", testDoltServerPort)
+	dropTestDatabase("json", testDoltServerPort)
 }

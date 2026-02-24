@@ -258,7 +258,7 @@ environment variable.`,
 		if existingCfg, _ := configfile.Load(beadsDir); existingCfg != nil && existingCfg.DoltDatabase != "" {
 			dbName = existingCfg.DoltDatabase
 		} else if prefix != "" {
-			dbName = "beads_" + prefix
+			dbName = prefix
 		} else {
 			dbName = "beads"
 		}
@@ -362,7 +362,7 @@ environment variable.`,
 				// Only set if not already configured — overwriting a user-renamed database
 				// creates phantom catalog entries that crash information_schema (GH#2051).
 				if cfg.DoltDatabase == "" && prefix != "" {
-					cfg.DoltDatabase = "beads_" + prefix
+					cfg.DoltDatabase = prefix
 				}
 
 				// Always server mode

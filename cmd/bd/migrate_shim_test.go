@@ -188,8 +188,8 @@ func TestShimExtract_FullMigration(t *testing.T) {
 	if updatedCfg.Backend != configfile.BackendDolt {
 		t.Errorf("backend should be 'dolt', got %q", updatedCfg.Backend)
 	}
-	if updatedCfg.DoltDatabase != "beads_shimmig" {
-		t.Errorf("dolt_database should be 'beads_shimmig', got %q", updatedCfg.DoltDatabase)
+	if updatedCfg.DoltDatabase != "shimmig" {
+		t.Errorf("dolt_database should be 'shimmig', got %q", updatedCfg.DoltDatabase)
 	}
 
 	// Verify: config.yaml has sync.mode
@@ -201,7 +201,7 @@ func TestShimExtract_FullMigration(t *testing.T) {
 	}
 
 	// Clean up Dolt test database
-	dropTestDatabase("beads_shimmig", testDoltServerPort)
+	dropTestDatabase("shimmig", testDoltServerPort)
 }
 
 // TestShimExtract_VerifySQLiteFile checks magic byte validation.

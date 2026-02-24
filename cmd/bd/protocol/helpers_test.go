@@ -149,7 +149,7 @@ type workspace struct {
 }
 
 // testPrefix returns a unique prefix with a random suffix to ensure each test
-// invocation gets its own Dolt database (beads_<prefix>), avoiding cross-test
+// invocation gets its own Dolt database (<prefix>), avoiding cross-test
 // pollution and stale data from prior runs.
 func testPrefix(t *testing.T) string {
 	var b [4]byte

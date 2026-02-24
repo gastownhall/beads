@@ -258,7 +258,7 @@ func newWorkspace(t *testing.T, bdPath string) *workspace {
 	w.git("commit", "-m", "initial")
 
 	// Use a unique prefix per workspace so each gets its own Dolt database
-	// (beads_t<hash>). The init command creates database "beads_<prefix>",
+	// (t<hash>). The init command creates database "<prefix>",
 	// and subsequent commands read the database name from metadata.json.
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(dir))

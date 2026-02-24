@@ -84,7 +84,7 @@ func doAutoMigrateSQLiteToDolt(beadsDir string) {
 	// Determine database name from prefix
 	dbName := "beads"
 	if data.prefix != "" {
-		dbName = "beads_" + data.prefix
+		dbName = data.prefix
 	}
 
 	// Load existing config for server connection settings

@@ -1380,7 +1380,7 @@ func TestInitDoltMetadata(t *testing.T) {
 	// Open the dolt store to verify metadata was written
 	ctx := context.Background()
 	doltPath := filepath.Join(tmpDir, ".beads", "dolt")
-	doltStore, err := openDoltStoreForTest(t, ctx, doltPath, "beads_test")
+	doltStore, err := openDoltStoreForTest(t, ctx, doltPath, "test")
 	if err != nil {
 		t.Fatalf("failed to open dolt store for verification: %v", err)
 	}
