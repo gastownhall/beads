@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -457,6 +458,17 @@ func TestRunIdleMonitorDisabled(t *testing.T) {
 		// good — returned immediately
 	case <-time.After(2 * time.Second):
 		t.Fatal("RunIdleMonitor(0) should return immediately")
+	}
+}
+
+func TestFlushWorkingSetUnreachable(t *testing.T) {
+	// FlushWorkingSet should return an error when the server is not reachable.
+	err := FlushWorkingSet("127.0.0.1", 19998)
+	if err == nil {
+		t.Error("expected error when server is unreachable")
+	}
+	if !strings.Contains(err.Error(), "not reachable") {
+		t.Errorf("expected 'not reachable' in error, got: %v", err)
 	}
 }
 

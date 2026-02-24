@@ -15,6 +15,8 @@
 package doltserver
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -25,6 +27,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -552,6 +556,87 @@ func IsDaemonManaged() bool {
 	return os.Getenv("GT_ROOT") != ""
 }
 
+// FlushWorkingSet connects to the running Dolt server and commits any uncommitted
+// working set changes across all databases. This prevents data loss when the server
+// is about to be stopped or restarted. Returns nil if there's nothing to flush or
+// if the server is not reachable (best-effort).
+func FlushWorkingSet(host string, port int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dsn := fmt.Sprintf("root@tcp(%s:%d)/?parseTime=true", host, port)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("flush: failed to open connection: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetConnMaxLifetime(10 * time.Second)
+
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("flush: server not reachable: %w", err)
+	}
+
+	// List all databases, skipping system databases
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return fmt.Errorf("flush: failed to list databases: %w", err)
+	}
+	var databases []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			continue
+		}
+		// Skip Dolt system databases
+		if name == "information_schema" || name == "mysql" || name == "performance_schema" {
+			continue
+		}
+		databases = append(databases, name)
+	}
+	rows.Close()
+
+	if len(databases) == 0 {
+		return nil
+	}
+
+	var flushed int
+	for _, dbName := range databases {
+		// Check for uncommitted changes via dolt_status
+		var hasChanges bool
+		row := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) > 0 FROM `%s`.dolt_status", dbName))
+		if err := row.Scan(&hasChanges); err != nil {
+			// dolt_status may not exist for non-beads databases; skip
+			continue
+		}
+		if !hasChanges {
+			continue
+		}
+
+		// Commit all uncommitted changes
+		_, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", dbName))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "flush: failed to USE %s: %v\n", dbName, err)
+			continue
+		}
+		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'auto-flush: commit working set before server stop')")
+		if err != nil {
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "nothing to commit") || strings.Contains(errStr, "no changes") {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "flush: failed to commit %s: %v\n", dbName, err)
+			continue
+		}
+		flushed++
+	}
+
+	if flushed > 0 {
+		fmt.Fprintf(os.Stderr, "Flushed working set for %d database(s) before server stop\n", flushed)
+	}
+	return nil
+}
+
 // Stop gracefully stops the managed server and its idle monitor.
 // Sends SIGTERM, waits up to 5 seconds, then SIGKILL.
 // Under Gas Town (GT_ROOT set), refuses to stop the daemon-managed server
@@ -572,6 +657,13 @@ func StopWithForce(beadsDir string, force bool) error {
 	}
 	if !state.Running {
 		return fmt.Errorf("Dolt server is not running")
+	}
+
+	// Flush uncommitted working set changes before stopping the server.
+	// This prevents data loss when changes have been written but not yet committed.
+	cfg := DefaultConfig(beadsDir)
+	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
 	}
 
 	process, err := os.FindProcess(state.PID)
