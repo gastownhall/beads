@@ -63,7 +63,9 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		return err
 	}
 
-	// DOLT_COMMIT inside the SQL transaction — atomic with the writes
+	// DOLT_COMMIT ends the SQL transaction implicitly — no tx.Commit() needed after.
+	// Calling tx.Commit() after DOLT_COMMIT can cause connection state issues under
+	// concurrent load (the transaction is already closed by Dolt).
 	if commitMsg != "" {
 		_, err := sqlTx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString())
@@ -71,8 +73,11 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 			_ = sqlTx.Rollback()
 			return fmt.Errorf("dolt commit: %w", err)
 		}
+		// DOLT_COMMIT already ended the transaction; do not call tx.Commit().
+		return nil
 	}
 
+	// No dolt commit requested — commit the SQL transaction normally.
 	return sqlTx.Commit()
 }
 
