@@ -95,4 +95,3 @@ func hasGitRemote(repoPath string) bool {
 	}
 	return len(strings.TrimSpace(string(output))) > 0
 }
-

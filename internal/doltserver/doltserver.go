@@ -499,13 +499,13 @@ func Start(beadsDir string) (*State, error) {
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	// New process group so server survives bd exit
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = detachedProcessAttr()
 
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		return nil, fmt.Errorf("starting dolt sql-server: %w", err)
 	}
-	logFile.Close()
+	_ = logFile.Close()
 
 	pid := cmd.Process.Pid
 
@@ -902,7 +902,7 @@ func forkIdleMonitor(beadsDir string) {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = detachedProcessAttr()
 
 	if err := cmd.Start(); err != nil {
 		return // best effort

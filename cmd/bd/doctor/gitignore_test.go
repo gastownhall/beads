@@ -1981,7 +1981,7 @@ func TestContainsGitignorePattern(t *testing.T) {
 		{"*.db\n.dolt/\n", ".dolt/", true},
 		{"node_modules/\n", ".dolt/", false},
 		{"# .dolt/ is ignored\n", ".dolt/", false}, // comment, not pattern
-		{"  .dolt/  \n", ".dolt/", true},            // whitespace trimmed
+		{"  .dolt/  \n", ".dolt/", true},           // whitespace trimmed
 		{"", ".dolt/", false},
 		{".dolt/foo\n", ".dolt/", false}, // not exact match
 	}
