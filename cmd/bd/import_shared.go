@@ -67,6 +67,7 @@ func importIssuesCore(ctx context.Context, _ string, store *dolt.DoltStore, issu
 // any manual cleanup done to the JSONL file (e.g., via bd compact --purge-tombstones).
 // Returns the number of issues imported and any error.
 func importFromLocalJSONL(ctx context.Context, store *dolt.DoltStore, localPath string) (int, error) {
+	// #nosec G304 -- localPath is provided by internal callers and points to workspace-controlled files.
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read JSONL file %s: %w", localPath, err)

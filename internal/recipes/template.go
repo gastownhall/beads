@@ -21,7 +21,7 @@ bd prime                              # Load complete workflow context
 bd ready                              # Show issues ready to work (no blockers)
 bd list --status=open                 # List all open issues
 bd create --title="..." --type=task   # Create new issue
-bd update <id> --status=in_progress   # Claim work
+bd update <id> --claim                # Claim work atomically
 bd close <id>                         # Mark complete
 bd dep add <issue> <depends-on>       # Add dependency
 bd sync                               # Sync with git remote
@@ -30,7 +30,7 @@ bd sync                               # Sync with git remote
 ## Workflow
 
 1. Check for ready work: ` + "`bd ready`" + `
-2. Claim an issue: ` + "`bd update <id> --status=in_progress`" + `
+2. Claim an issue atomically: ` + "`bd update <id> --claim`" + `
 3. Do the work
 4. Mark complete: ` + "`bd close <id>`" + `
 5. Sync: ` + "`bd sync`" + ` (or let git hooks handle it)

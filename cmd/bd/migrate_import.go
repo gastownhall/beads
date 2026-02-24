@@ -97,41 +97,47 @@ func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationDat
 			issue.ContentHash = issue.ComputeContentHash()
 		}
 
+		// Normalize metadata: nil/empty → "{}"
+		metadataStr := "{}"
+		if len(issue.Metadata) > 0 {
+			metadataStr = string(issue.Metadata)
+		}
+
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO issues (
 				id, content_hash, title, description, design, acceptance_criteria, notes,
 				status, priority, issue_type, assignee, estimated_minutes,
-				created_at, created_by, owner, updated_at, closed_at, external_ref,
+				created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
 				compaction_level, compacted_at, compacted_at_commit, original_size,
-				sender, ephemeral, pinned, is_template, crystallizes,
+				sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
 				mol_type, work_type, quality_score, source_system, source_repo, close_reason,
 				event_kind, actor, target, payload,
 				await_type, await_id, timeout_ns, waiters,
 				hook_bead, role_bead, agent_state, last_activity, role_type, rig,
-				due_at, defer_until
+				due_at, defer_until, metadata
 			) VALUES (
 				?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?, ?, ?,
-				?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?,
-				?, ?, ?, ?, ?,
-				?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?,
+				?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?, ?,
 				?, ?, ?, ?, ?, ?,
-				?, ?
+				?, ?, ?, ?, ?, ?,
+				?, ?, ?, ?,
+				?, ?, ?, ?,
+				?, ?, ?, ?, ?, ?,
+				?, ?, ?
 			)
 		`,
 			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 			issue.Status, issue.Priority, issue.IssueType, nullableString(issue.Assignee), nullableIntPtr(issue.EstimatedMinutes),
-			issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, nullableStringPtr(issue.ExternalRef),
+			issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, nullableStringPtr(issue.ExternalRef), issue.SpecID,
 			issue.CompactionLevel, issue.CompactedAt, nullableStringPtr(issue.CompactedAtCommit), nullableInt(issue.OriginalSize),
-			issue.Sender, issue.Ephemeral, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
+			issue.Sender, issue.Ephemeral, issue.WispType, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
 			issue.MolType, issue.WorkType, nullableFloat32Ptr(issue.QualityScore), issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 			issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 			issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONArray(issue.Waiters),
 			issue.HookBead, issue.RoleBead, issue.AgentState, issue.LastActivity, issue.RoleType, issue.Rig,
-			issue.DueAt, issue.DeferUntil,
+			issue.DueAt, issue.DeferUntil, metadataStr,
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "Duplicate entry") ||

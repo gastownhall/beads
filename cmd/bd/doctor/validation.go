@@ -19,7 +19,7 @@ import (
 func openStoreDB(beadsDir string) (*sql.DB, *dolt.DoltStore, error) {
 	ctx := context.Background()
 	doltPath := filepath.Join(beadsDir, "dolt")
-	cfg := doltServerConfig(beadsDir, doltPath, true)
+	cfg := doltServerConfig(beadsDir, doltPath)
 	store, err := dolt.New(ctx, cfg)
 	if err != nil {
 		return nil, nil, err

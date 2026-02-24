@@ -442,10 +442,10 @@ func Start(beadsDir string) (*State, error) {
 	cmd.SysProcAttr = procAttrDetached()
 
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		return nil, fmt.Errorf("starting dolt sql-server: %w", err)
 	}
-	logFile.Close()
+	_ = logFile.Close()
 
 	pid := cmd.Process.Pid
 

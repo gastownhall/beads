@@ -31,7 +31,7 @@ This project uses **Beads (bd)** for issue tracking. Aider requires explicit com
 - ` + "`bd ready`" + ` - Show unblocked issues
 - ` + "`bd list --status=open`" + ` - List all open issues
 - ` + "`bd create --title=\"...\" --type=task`" + ` - Create new issue
-- ` + "`bd update <id> --status=in_progress`" + ` - Claim work
+- ` + "`bd update <id> --claim`" + ` - Claim work atomically
 - ` + "`bd close <id>`" + ` - Mark complete
 - ` + "`bd dep add <issue> <depends-on>`" + ` - Add dependency (issue depends on depends-on)
 - ` + "`bd sync`" + ` - Sync with git remote
@@ -39,7 +39,7 @@ This project uses **Beads (bd)** for issue tracking. Aider requires explicit com
 ## Workflow Pattern to Suggest
 
 1. **Check ready work**: "Let's run ` + "`/run bd ready`" + ` to see what's available"
-2. **Claim task**: "Run ` + "`/run bd update <id> --status=in_progress`" + ` to claim it"
+2. **Claim task**: "Run ` + "`/run bd update <id> --claim`" + ` to claim it atomically"
 3. **Do the work**
 4. **Complete**: "Run ` + "`/run bd close <id>`" + ` when done"
 5. **Sync**: "Run ` + "`/run bd sync`" + ` to push changes"
@@ -97,7 +97,7 @@ The AI will **suggest** bd commands, but you must confirm them.
 
 3. Claim work:
    ` + "```bash" + `
-   /run bd update bd-42 --status in_progress
+   /run bd update bd-42 --claim
    ` + "```" + `
 
 4. Complete work:
