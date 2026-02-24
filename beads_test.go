@@ -12,7 +12,25 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/testutil"
 )
+
+// testServerPort is the port of the shared test Dolt server (0 = not running).
+var testServerPort int
+
+func TestMain(m *testing.M) {
+	srv, cleanup := testutil.StartTestDoltServer("beads-root-test-*")
+	if srv != nil {
+		testServerPort = srv.Port
+		os.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", srv.Port))
+	}
+
+	code := m.Run()
+
+	os.Unsetenv("BEADS_DOLT_PORT")
+	cleanup()
+	os.Exit(code)
+}
 
 func skipIfNoDolt(t *testing.T) {
 	t.Helper()
@@ -23,9 +41,13 @@ func skipIfNoDolt(t *testing.T) {
 
 func skipIfNoDoltServer(t *testing.T) {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:3307", 200*time.Millisecond)
+	if testServerPort == 0 {
+		t.Skip("Test Dolt server not available, skipping test")
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", testServerPort)
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 	if err != nil {
-		t.Skip("Dolt server not running on 127.0.0.1:3307, skipping test")
+		t.Skipf("Dolt server not running on %s, skipping test", addr)
 	}
 	_ = conn.Close()
 }
