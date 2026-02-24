@@ -418,7 +418,8 @@ one tracked by the current project's PID file.`,
 // - doctortest_*: doctor test helpers
 // - beads_pt*: gastown patrol_helpers_test.go random prefixes
 // - beads_vr*: gastown mail/router_test.go random prefixes
-var staleDatabasePrefixes = []string{"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr"}
+// - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
+var staleDatabasePrefixes = []string{"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t"}
 
 var doltCleanDatabasesCmd = &cobra.Command{
 	Use:   "clean-databases",
@@ -426,7 +427,7 @@ var doltCleanDatabasesCmd = &cobra.Command{
 	Long: `Identify and drop leftover test and polecat databases that accumulate
 on the shared Dolt server from interrupted test runs and terminated polecats.
 
-Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*
+Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*, beads_t*
 
 These waste server memory and can degrade performance under concurrent load.
 Use --dry-run to see what would be dropped without actually dropping.`,

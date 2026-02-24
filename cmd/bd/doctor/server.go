@@ -153,12 +153,14 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 // - doctortest_*: doctor test helpers
 // - beads_pt*: gastown patrol_helpers_test.go random prefixes
 // - beads_vr*: gastown mail/router_test.go random prefixes
+// - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
 var staleDatabasePrefixes = []string{
 	"testdb_",
 	"doctest_",
 	"doctortest_",
 	"beads_pt",
 	"beads_vr",
+	"beads_t",
 }
 
 // knownProductionDatabases are the databases that should exist on a production server.
