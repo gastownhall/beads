@@ -20,13 +20,15 @@ import (
 )
 
 // fixTestServerPort returns the Dolt server port for fix tests.
+// Returns 0 when BEADS_DOLT_PORT is unset so callers fail safely
+// instead of accidentally connecting to a production server on 3307.
 func fixTestServerPort() int {
 	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
 		if port, _ := strconv.Atoi(p); port > 0 {
 			return port
 		}
 	}
-	return 3307 // default dolt sql-server port
+	return 0
 }
 
 // newFixTestStore creates a DoltStore for fix package tests with proper
