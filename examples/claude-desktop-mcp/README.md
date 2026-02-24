@@ -223,7 +223,7 @@ We use Beads (bd) for issue tracking. Available commands:
 
 - `bd ready --json` - Find ready work
 - `bd create "title" -p 1 -t bug --json` - Create issue
-- `bd update bd-1 --claim --json` - Start work
+- `bd update bd-1 --status in_progress --json` - Update status
 - `bd dep add bd-2 bd-1 --type discovered-from` - Link issues
 - `bd close bd-1 --reason "Done" --json` - Complete work
 
