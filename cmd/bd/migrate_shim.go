@@ -98,8 +98,9 @@ func doShimMigrate(beadsDir string) {
 
 	// Load existing config for server connection settings
 	doltCfg := &dolt.Config{
-		Path:     doltPath,
-		Database: dbName,
+		Path:      doltPath,
+		Database:  dbName,
+		AutoStart: os.Getenv("GT_ROOT") == "" && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
 	}
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		doltCfg.ServerHost = cfg.GetDoltServerHost()
@@ -147,9 +148,8 @@ func doShimMigrate(beadsDir string) {
 	cfg.Backend = configfile.BackendDolt
 	cfg.Database = "dolt"
 	cfg.DoltDatabase = dbName
-	if cfg.DoltServerPort == 0 {
-		cfg.DoltServerPort = configfile.DefaultDoltServerPort
-	}
+	// Don't set DoltServerPort — let doltserver.DefaultConfig derive it from
+	// the project path at runtime (same rationale as migrate_dolt.go).
 	if err := cfg.Save(beadsDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to update metadata.json: %v\n", err)
 	}

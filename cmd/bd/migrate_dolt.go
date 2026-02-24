@@ -49,10 +49,11 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 	// Dolt path
 	doltPath := filepath.Join(beadsDir, "dolt")
 
-	// Check if Dolt directory already exists
+	// Track whether the dolt directory pre-existed so cleanup doesn't
+	// destroy data from a prior migration or server start.
+	doltDirExisted := false
 	if _, err := os.Stat(doltPath); err == nil {
-		exitWithError("dolt_exists", fmt.Sprintf("Dolt directory already exists at %s", doltPath),
-			"remove it first if you want to re-migrate")
+		doltDirExisted = true
 	}
 
 	// Extract all data from SQLite
@@ -98,7 +99,11 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 	} else {
 		dbName = "beads"
 	}
-	doltStore, err := dolt.New(ctx, &dolt.Config{Path: doltPath, Database: dbName})
+	doltStore, err := dolt.New(ctx, &dolt.Config{
+		Path:      doltPath,
+		Database:  dbName,
+		AutoStart: os.Getenv("GT_ROOT") == "" && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
+	})
 	if err != nil {
 		exitWithError("dolt_create_failed", err.Error(), "")
 	}
@@ -107,8 +112,14 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 	imported, skipped, importErr := importToDolt(ctx, doltStore, data)
 	if importErr != nil {
 		_ = doltStore.Close()
-		_ = os.RemoveAll(doltPath)
-		exitWithError("import_failed", importErr.Error(), "partial Dolt directory has been cleaned up")
+		if !doltDirExisted {
+			_ = os.RemoveAll(doltPath)
+		}
+		hint := "import failed"
+		if !doltDirExisted {
+			hint = "partial Dolt directory has been cleaned up"
+		}
+		exitWithError("import_failed", importErr.Error(), hint)
 	}
 
 	// Set sync.mode to dolt-native in the DB.
@@ -139,7 +150,9 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 	cfg.Backend = configfile.BackendDolt
 	cfg.Database = "dolt"
 	cfg.DoltDatabase = dbName
-	cfg.DoltServerPort = configfile.DefaultDoltServerPort
+	// Don't set DoltServerPort — let doltserver.DefaultConfig derive it from
+	// the project path at runtime. Writing an explicit port here would freeze
+	// a value that conflicts with the hash-based port in doltserver.DerivePort.
 	if err := cfg.Save(beadsDir); err != nil {
 		exitWithError("config_save_failed", err.Error(),
 			"data was imported but metadata.json was not updated - manually set backend to 'dolt'")

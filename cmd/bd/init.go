@@ -753,10 +753,10 @@ This workspace is already initialized.
 To use the existing database:
   Just run bd commands normally (e.g., %s)
 
-To completely reinitialize (data loss warning):
-  rm -rf %s && bd init --backend dolt --prefix %s
+To force reinitialize (data loss warning):
+  bd init --force --prefix %s
 
-Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), beadsDir, prefix)
+Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 		}
 	}
 
@@ -777,10 +777,10 @@ To use the existing database:
   Just run bd commands normally (e.g., %s)
   The redirect will route to the canonical database.
 
-To reinitialize the canonical location (data loss warning):
-  rm %s && bd init --prefix %s
+To force reinitialize (data loss warning):
+  bd init --force --prefix %s
 
-Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent("bd list"), targetDBPath, prefix)
+Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent("bd list"), prefix)
 		}
 		return nil // Redirect target has no database - safe to init
 	}
@@ -796,10 +796,10 @@ This workspace is already initialized.
 To use the existing database:
   Just run bd commands normally (e.g., %s)
 
-To completely reinitialize (data loss warning):
-  rm -rf %s && bd init --prefix %s
+To force reinitialize (data loss warning):
+  bd init --force --prefix %s
 
-Aborting.`, ui.RenderWarn("⚠"), dbPath, ui.RenderAccent("bd list"), beadsDir, prefix)
+Aborting.`, ui.RenderWarn("⚠"), dbPath, ui.RenderAccent("bd list"), prefix)
 	}
 
 	return nil // No database found, safe to init
