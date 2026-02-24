@@ -218,6 +218,83 @@ func TestSearchIssues_NoMetadataDoesNotMatch(t *testing.T) {
 	}
 }
 
+// TestCreateIssue_WithMetadata verifies metadata is persisted when set at creation time.
+func TestCreateIssue_WithMetadata(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	store := newTestStore(t, tmpDir)
+	ctx := context.Background()
+
+	meta := json.RawMessage(`{"team":"platform","sprint":"Q1","points":5}`)
+	issue := &types.Issue{
+		Title:     "Issue with metadata",
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Metadata:  meta,
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	// Fetch and verify metadata round-trips
+	got, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.Metadata == nil {
+		t.Fatal("expected metadata to be set, got nil")
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(got.Metadata, &parsed); err != nil {
+		t.Fatalf("failed to parse metadata: %v", err)
+	}
+	if parsed["team"] != "platform" {
+		t.Errorf("expected team=platform, got %v", parsed["team"])
+	}
+	if parsed["sprint"] != "Q1" {
+		t.Errorf("expected sprint=Q1, got %v", parsed["sprint"])
+	}
+	// JSON numbers unmarshal as float64
+	if parsed["points"] != float64(5) {
+		t.Errorf("expected points=5, got %v", parsed["points"])
+	}
+}
+
+// TestCreateIssue_WithMetadata_Queryable verifies metadata set at creation time is queryable.
+func TestCreateIssue_WithMetadata_Queryable(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	store := newTestStore(t, tmpDir)
+	ctx := context.Background()
+
+	issue := &types.Issue{
+		Title:     "Queryable metadata",
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Metadata:  json.RawMessage(`{"team":"backend"}`),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	// Search by metadata field
+	results, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		MetadataFields: map[string]string{"team": "backend"},
+	})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].ID != issue.ID {
+		t.Errorf("expected issue %s, got %s", issue.ID, results[0].ID)
+	}
+}
+
 // Key validation unit tests (don't need a store)
 
 func TestValidateMetadataKey(t *testing.T) {

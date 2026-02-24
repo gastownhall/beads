@@ -192,6 +192,28 @@ var createCmd = &cobra.Command{
 			deferUntil = &t
 		}
 
+		// Parse --metadata flag (GH#1406)
+		var metadata json.RawMessage
+		if cmd.Flags().Changed("metadata") {
+			metadataValue, _ := cmd.Flags().GetString("metadata")
+			var metadataJSON string
+			if strings.HasPrefix(metadataValue, "@") {
+				filePath := metadataValue[1:]
+				// #nosec G304 -- user explicitly provides file path via @file.json syntax
+				data, err := os.ReadFile(filePath)
+				if err != nil {
+					FatalError("failed to read metadata file %s: %v", filePath, err)
+				}
+				metadataJSON = string(data)
+			} else {
+				metadataJSON = metadataValue
+			}
+			if !json.Valid([]byte(metadataJSON)) {
+				FatalError("invalid JSON in --metadata: must be valid JSON")
+			}
+			metadata = json.RawMessage(metadataJSON)
+		}
+
 		// Handle --dry-run flag (before --rig to ensure it works with cross-rig creation)
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		if dryRun {
@@ -220,6 +242,7 @@ var createCmd = &cobra.Command{
 				Rig:                agentRig,
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
+				Metadata:           metadata,
 				// Event fields
 				EventKind: eventCategory,
 				Actor:     eventActor,
@@ -497,6 +520,7 @@ var createCmd = &cobra.Command{
 			Payload:            eventPayload,
 			DueAt:              dueAt,
 			DeferUntil:         deferUntil,
+			Metadata:           metadata,
 		}
 
 		ctx := rootCtx
@@ -775,6 +799,7 @@ func init() {
 	//   --defer=tomorrow    Hidden until tomorrow
 	createCmd.Flags().String("due", "", "Due date/time. Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
 	createCmd.Flags().String("defer", "", "Defer until date (issue hidden from bd ready until then). Same formats as --due")
+	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
 }
@@ -861,6 +886,28 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 		deferUntil = &t
 	}
 
+	// Parse --metadata for cross-rig creation
+	var metadata json.RawMessage
+	if cmd.Flags().Changed("metadata") {
+		metadataValue, _ := cmd.Flags().GetString("metadata")
+		var metadataJSON string
+		if strings.HasPrefix(metadataValue, "@") {
+			filePath := metadataValue[1:]
+			// #nosec G304 -- user explicitly provides file path via @file.json syntax
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				FatalError("failed to read metadata file %s: %v", filePath, err)
+			}
+			metadataJSON = string(data)
+		} else {
+			metadataJSON = metadataValue
+		}
+		if !json.Valid([]byte(metadataJSON)) {
+			FatalError("invalid JSON in --metadata: must be valid JSON")
+		}
+		metadata = json.RawMessage(metadataJSON)
+	}
+
 	// Create issue with explicit ID if provided, otherwise CreateIssue will generate one
 	issue := &types.Issue{
 		ID:                 explicitID, // Set explicit ID if provided (empty string if not)
@@ -890,6 +937,7 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 		// Time scheduling fields (bd-xwvo fix)
 		DueAt:      dueAt,
 		DeferUntil: deferUntil,
+		Metadata:   metadata,
 		// Cross-rig routing: use route prefix instead of database config
 		PrefixOverride: prefixOverride,
 	}
