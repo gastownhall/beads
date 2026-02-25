@@ -20,10 +20,10 @@ var testServerPort int
 
 func TestMain(m *testing.M) {
 	srv, cleanup := testutil.StartTestDoltServer("beads-root-test-*")
+	os.Setenv("BEADS_TEST_MODE", "1")
 	if srv != nil {
 		testServerPort = srv.Port
 		os.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", srv.Port))
-		os.Setenv("BEADS_TEST_MODE", "1")
 	}
 
 	code := m.Run()

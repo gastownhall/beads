@@ -14,9 +14,9 @@ import (
 // production server on port 3307.
 func TestMain(m *testing.M) {
 	srv, cleanup := testutil.StartTestDoltServer("fix-test-dolt-*")
+	os.Setenv("BEADS_TEST_MODE", "1")
 	if srv != nil {
 		os.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", srv.Port))
-		os.Setenv("BEADS_TEST_MODE", "1")
 	}
 
 	code := m.Run()

@@ -53,6 +53,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	srv, cleanupServer := testutil.StartTestDoltServer("bd-regression-dolt-*")
+	os.Setenv("BEADS_TEST_MODE", "1")
 	if srv != nil {
 		testDoltServerPort = srv.Port
 		fmt.Fprintf(os.Stderr, "Test Dolt server running on port %d\n", srv.Port)

@@ -28,10 +28,10 @@ func testMainInner(m *testing.M) int {
 	srv, cleanup := testutil.StartTestDoltServer("molecules-pkg-test-*")
 	defer cleanup()
 
+	os.Setenv("BEADS_TEST_MODE", "1")
 	if srv != nil {
 		testServerPort = srv.Port
 		os.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", srv.Port))
-		os.Setenv("BEADS_TEST_MODE", "1")
 
 		// Set up shared database for branch-per-test isolation
 		testSharedDB = "molecules_pkg_shared"
