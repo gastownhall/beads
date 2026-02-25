@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -324,6 +325,9 @@ func TestMaxDoltServers(t *testing.T) {
 }
 
 func TestIsProcessInDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("isProcessInDir always returns false on Windows (CWD not exposed)")
+	}
 	// Our own process should have a CWD we can check
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -346,11 +350,11 @@ func TestIsProcessInDir(t *testing.T) {
 	}
 }
 
-func TestCountDoltServers(t *testing.T) {
+func TestCountDoltProcesses(t *testing.T) {
 	// Just verify it doesn't panic and returns a non-negative number
-	count := countDoltServers()
+	count := countDoltProcesses()
 	if count < 0 {
-		t.Errorf("countDoltServers returned negative: %d", count)
+		t.Errorf("countDoltProcesses returned negative: %d", count)
 	}
 }
 

@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -144,7 +143,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 		if isPortAvailable(host, port) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("port %d is busy but cannot identify the process.\n\nCheck with: lsof -i :%d", port, port)
+		return 0, fmt.Errorf("port %d is busy but cannot identify the process.\n\nCheck with: %s", port, fmt.Sprintf(portConflictHint, port))
 	}
 
 	// Check if it's a dolt sql-server process
@@ -173,18 +172,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 
 	// It's an orphan/stale dolt server on our port — kill it
 	fmt.Fprintf(os.Stderr, "Killing orphan dolt server (PID %d) on port %d\n", pid, port)
-	if proc, findErr := os.FindProcess(pid); findErr == nil {
-		_ = proc.Signal(syscall.SIGTERM)
-		// Wait for graceful exit
-		for i := 0; i < 10; i++ {
-			time.Sleep(500 * time.Millisecond)
-			if proc.Signal(syscall.Signal(0)) != nil {
-				return 0, nil // exited
-			}
-		}
-		_ = proc.Signal(syscall.SIGKILL)
-		time.Sleep(500 * time.Millisecond)
-	}
+	_ = gracefulStop(pid, 5*time.Second)
 
 	if isPortAvailable(host, port) {
 		return 0, nil
@@ -192,54 +180,14 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 	return 0, fmt.Errorf("failed to reclaim port %d from orphan dolt server (PID %d)", port, pid)
 }
 
-// findPIDOnPort uses lsof to find the PID of the process listening on a TCP port.
-// Returns 0 if no process found or on error.
-func findPIDOnPort(port int) int {
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN").Output()
-	if err != nil {
-		return 0
-	}
-	// lsof may return multiple PIDs; take the first one
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if pid, err := strconv.Atoi(strings.TrimSpace(line)); err == nil && pid > 0 {
-			return pid
-		}
-	}
-	return 0
-}
+// countDoltProcesses returns the number of running dolt sql-server processes.
+func countDoltProcesses() int { return len(listDoltProcessPIDs()) }
 
-// countDoltServers returns the number of running dolt sql-server processes.
-func countDoltServers() int {
-	out, err := exec.Command("pgrep", "-f", "dolt sql-server").Output()
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line != "" {
-			count++
-		}
-	}
-	return count
-}
-
-// isProcessInDir checks if a process's working directory matches the given path.
-// Uses lsof to look up the CWD, which is more reliable than checking command-line
-// args since dolt sql-server is started with cmd.Dir (not a --data-dir flag).
-func isProcessInDir(pid int, dir string) bool {
-	out, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
-	if err != nil {
-		return false
-	}
-	absDir, _ := filepath.Abs(dir)
-	// lsof -Fn output format: "p<pid>\nfcwd\nn<path>"
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "n") {
-			cwd := strings.TrimSpace(line[1:])
-			absCwd, _ := filepath.Abs(cwd)
-			if absCwd == absDir {
-				return true
-			}
+// isDoltProcess checks if a PID belongs to a running dolt sql-server.
+func isDoltProcess(pid int) bool {
+	for _, p := range listDoltProcessPIDs() {
+		if p == pid {
+			return true
 		}
 	}
 	return false
@@ -302,19 +250,17 @@ func IsRunning(beadsDir string) (*State, error) {
 		daemonPidFile := filepath.Join(gtRoot, "daemon", "dolt.pid")
 		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil {
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
-				if process, findErr := os.FindProcess(pid); findErr == nil {
-					if process.Signal(syscall.Signal(0)) == nil && isDoltProcess(pid) {
-						port := readPortFile(beadsDir)
-						if port == 0 {
-							port = GasTownPort
-						}
-						return &State{
-							Running: true,
-							PID:     pid,
-							Port:    port,
-							DataDir: filepath.Join(beadsDir, "dolt"),
-						}, nil
+				if isProcessAlive(pid) && isDoltProcess(pid) {
+					port := readPortFile(beadsDir)
+					if port == 0 {
+						port = GasTownPort
 					}
+					return &State{
+						Running: true,
+						PID:     pid,
+						Port:    port,
+						DataDir: filepath.Join(beadsDir, "dolt"),
+					}, nil
 				}
 			}
 		}
@@ -336,13 +282,7 @@ func IsRunning(beadsDir string) (*State, error) {
 	}
 
 	// Check if process is alive
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		_ = os.Remove(pidPath(beadsDir))
-		return &State{Running: false}, nil
-	}
-
-	if err := process.Signal(syscall.Signal(0)); err != nil {
+	if !isProcessAlive(pid) {
 		// Process is dead — stale PID file
 		_ = os.Remove(pidPath(beadsDir))
 		return &State{Running: false}, nil
@@ -460,8 +400,8 @@ func Start(beadsDir string) (*State, error) {
 	}
 
 	// Process census: refuse to start if too many dolt servers already running
-	if count := countDoltServers(); count >= maxDoltServers() {
-		return nil, fmt.Errorf("too many dolt sql-server processes running (%d, max %d).\n\nKill orphans with: bd dolt killall\nList processes: pgrep -la 'dolt sql-server'", count, maxDoltServers())
+	if count := countDoltProcesses(); count >= maxDoltServers() {
+		return nil, fmt.Errorf("too many dolt sql-server processes running (%d, max %d).\n\nKill orphans with: bd dolt killall\nList processes: %s", count, maxDoltServers(), processListHint)
 	}
 
 	// Open log file
@@ -500,7 +440,7 @@ func Start(beadsDir string) (*State, error) {
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	// New process group so server survives bd exit
-	cmd.SysProcAttr = detachedProcessAttr()
+	cmd.SysProcAttr = procAttrDetached()
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
@@ -528,7 +468,7 @@ func Start(beadsDir string) (*State, error) {
 	if err := waitForReady(cfg.Host, actualPort, 10*time.Second); err != nil {
 		// Server started but not responding — clean up
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Signal(syscall.SIGKILL)
+			_ = proc.Kill()
 		}
 		_ = os.Remove(pidPath(beadsDir))
 		_ = os.Remove(portPath(beadsDir))
@@ -750,7 +690,6 @@ func FlushWorkingSet(host string, port int) error {
 }
 
 // Stop gracefully stops the managed server and its idle monitor.
-// Sends SIGTERM, waits up to 5 seconds, then SIGKILL.
 // Under Gas Town (GT_ROOT set), refuses to stop the daemon-managed server
 // unless force is true.
 func Stop(beadsDir string) error {
@@ -778,33 +717,11 @@ func StopWithForce(beadsDir string, force bool) error {
 		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
 	}
 
-	process, err := os.FindProcess(state.PID)
-	if err != nil {
+	if err := gracefulStop(state.PID, 5*time.Second); err != nil {
 		cleanupStateFiles(beadsDir)
-		return fmt.Errorf("finding process %d: %w", state.PID, err)
+		return err
 	}
-
-	// Send SIGTERM for graceful shutdown
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		cleanupStateFiles(beadsDir)
-		return fmt.Errorf("sending SIGTERM to PID %d: %w", state.PID, err)
-	}
-
-	// Wait for graceful shutdown (up to 5 seconds)
-	for i := 0; i < 10; i++ {
-		time.Sleep(500 * time.Millisecond)
-		if err := process.Signal(syscall.Signal(0)); err != nil {
-			// Process has exited
-			cleanupStateFiles(beadsDir)
-			return nil
-		}
-	}
-
-	// Still running — force kill
-	_ = process.Signal(syscall.SIGKILL)
-	time.Sleep(100 * time.Millisecond)
 	cleanupStateFiles(beadsDir)
-
 	return nil
 }
 
@@ -831,9 +748,8 @@ func LogPath(beadsDir string) string {
 // daemon-managed server.
 // Returns the PIDs of killed processes.
 func KillStaleServers(beadsDir string) ([]int, error) {
-	out, err := exec.Command("pgrep", "-f", "dolt sql-server").Output()
-	if err != nil {
-		// pgrep returns exit 1 when no processes match
+	allPIDs := listDoltProcessPIDs()
+	if len(allPIDs) == 0 {
 		return nil, nil
 	}
 
@@ -865,19 +781,15 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 	}
 
 	var killed []int
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		pid, parseErr := strconv.Atoi(strings.TrimSpace(line))
-		if parseErr != nil || pid == 0 || pid == os.Getpid() {
+	for _, pid := range allPIDs {
+		if pid == os.Getpid() {
 			continue
 		}
 		if canonicalPIDs[pid] {
 			continue // preserve canonical/daemon-managed server
 		}
-		if !isDoltProcess(pid) {
-			continue
-		}
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Signal(syscall.SIGKILL)
+			_ = proc.Kill()
 			killed = append(killed, pid)
 		}
 	}
@@ -899,33 +811,6 @@ func waitForReady(host string, port int, timeout time.Duration) error {
 	}
 
 	return fmt.Errorf("timeout after %s waiting for server at %s", timeout, addr)
-}
-
-// isDoltProcess verifies that a PID belongs to a running dolt sql-server process.
-// Zombie/defunct processes are excluded — they have no listening port and should
-// not count against maxDoltServers or be considered adoptable.
-func isDoltProcess(pid int) bool {
-	// Check process state first — reject zombies and defunct processes.
-	// "ps -o state=" returns a single character: R(running), S(sleeping),
-	// Z(zombie), T(stopped), etc. Zombies linger in the process table but
-	// are not functional.
-	stateCmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "state=")
-	stateOut, err := stateCmd.Output()
-	if err != nil {
-		return false
-	}
-	state := strings.TrimSpace(string(stateOut))
-	if len(state) > 0 && (state[0] == 'Z' || state[0] == 'X') {
-		return false
-	}
-
-	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	cmdline := strings.TrimSpace(string(output))
-	return strings.Contains(cmdline, "dolt") && strings.Contains(cmdline, "sql-server")
 }
 
 // ensureDoltIdentity sets dolt global user identity from git config if not already set.
@@ -1014,7 +899,7 @@ func forkIdleMonitor(beadsDir string) {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	cmd.SysProcAttr = detachedProcessAttr()
+	cmd.SysProcAttr = procAttrDetached()
 
 	if err := cmd.Start(); err != nil {
 		return // best effort
@@ -1035,11 +920,7 @@ func isMonitorRunning(beadsDir string) bool {
 	if err != nil {
 		return false
 	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return process.Signal(syscall.Signal(0)) == nil
+	return isProcessAlive(pid)
 }
 
 // stopIdleMonitor kills the idle monitor process if running.
@@ -1054,7 +935,7 @@ func stopIdleMonitor(beadsDir string) {
 		return
 	}
 	if process, err := os.FindProcess(pid); err == nil {
-		_ = process.Signal(syscall.SIGTERM)
+		_ = process.Kill()
 	}
 	_ = os.Remove(monitorPidPath(beadsDir))
 }
