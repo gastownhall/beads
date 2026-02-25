@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevent phantom catalog entries by respecting existing `dolt_database` config in init and migrate paths ([#2051](https://github.com/steveyegge/beads/issues/2051))
+- Replace `information_schema` queries with `SHOW COLUMNS`/`SHOW TABLES` for phantom resilience
+- Add phantom catalog detection to `bd doctor`
+- Fix `bd doctor --server` crash on phantom entries (replace `INFORMATION_SCHEMA.SCHEMATA` with `SHOW DATABASES`)
+
 ## [0.56.1] - 2026-02-23
 
 ### Fixed

@@ -5,14 +5,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
@@ -1510,4 +1513,225 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 	if _, err := os.Stat(sqlitePath); err == nil {
 		t.Errorf("unexpected sqlite database created in dolt mode")
 	}
+}
+
+// buildBDOnce builds the bd binary once for subprocess tests in this file.
+// Uses sync.Once for efficiency when multiple tests need the binary.
+var (
+	initTestBD     string
+	initTestBDOnce sync.Once
+	initTestBDErr  error
+)
+
+func buildBDForInitTests(t *testing.T) string {
+	t.Helper()
+	initTestBDOnce.Do(func() {
+		// Check if bd binary exists in repo root (../../bd from cmd/bd/)
+		bdBinary := "bd"
+		if runtime.GOOS == "windows" {
+			bdBinary = "bd.exe"
+		}
+		repoRoot := filepath.Join("..", "..")
+		existingBD := filepath.Join(repoRoot, bdBinary)
+		if _, err := os.Stat(existingBD); err == nil {
+			initTestBD, _ = filepath.Abs(existingBD)
+			return
+		}
+		// Fall back to building
+		tmpDir, err := os.MkdirTemp("", "bd-init-test-*")
+		if err != nil {
+			initTestBDErr = fmt.Errorf("failed to create temp dir: %w", err)
+			return
+		}
+		initTestBD = filepath.Join(tmpDir, bdBinary)
+		cmd := exec.Command("go", "build", "-o", initTestBD, ".")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			initTestBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
+		}
+	})
+	if initTestBDErr != nil {
+		t.Fatalf("Failed to build bd binary: %v", initTestBDErr)
+	}
+	return initTestBD
+}
+
+// TestInitDatabaseFlag tests the --database flag for bd init.
+// Uses subprocess execution because:
+//   - init manipulates extensive Cobra global state that's difficult to reset
+//   - FatalError calls os.Exit(1) for validation errors, which kills in-process tests
+//
+// Each subtest runs bd init in a temp directory and verifies metadata.json.
+func TestInitDatabaseFlag(t *testing.T) {
+	skipIfNoDolt(t)
+	bd := buildBDForInitTests(t)
+
+	t.Run("metadata_written", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Run init with --database to specify a pre-existing database name
+		cmd := exec.Command(bd, "init", "--database", "myapp_production", "--quiet")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd init --database failed: %v\n%s", err, out)
+		}
+
+		// Verify metadata.json contains the correct database name
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("Failed to load metadata.json: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("metadata.json not found")
+		}
+
+		if cfg.DoltDatabase != "myapp_production" {
+			t.Errorf("Expected DoltDatabase %q, got %q", "myapp_production", cfg.DoltDatabase)
+		}
+		if cfg.DoltMode != configfile.DoltModeServer {
+			t.Errorf("Expected DoltMode %q, got %q", configfile.DoltModeServer, cfg.DoltMode)
+		}
+	})
+
+	t.Run("with_prefix", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Run init with both --database and --prefix
+		// --database should override prefix for DB name, but prefix still sets issue_prefix
+		cmd := exec.Command(bd, "init", "--database", "shared_db", "--prefix", "team-alpha", "--quiet")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd init --database --prefix failed: %v\n%s", err, out)
+		}
+
+		// Verify metadata.json
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("Failed to load metadata.json: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("metadata.json not found")
+		}
+
+		// --database overrides the SQL database name
+		if cfg.DoltDatabase != "shared_db" {
+			t.Errorf("Expected DoltDatabase %q (from --database), got %q", "shared_db", cfg.DoltDatabase)
+		}
+
+		// Verify the database was opened and issue_prefix was set
+		// by reopening the store and checking config
+		dbPath := filepath.Join(beadsDir, "dolt")
+		s, err := openExistingTestDB(t, dbPath)
+		if err != nil {
+			t.Fatalf("Failed to reopen database: %v", err)
+		}
+		defer s.Close()
+
+		ctx := context.Background()
+		issuePrefix, err := s.GetConfig(ctx, "issue_prefix")
+		if err != nil {
+			t.Fatalf("Failed to get issue_prefix: %v", err)
+		}
+		if issuePrefix != "team-alpha" {
+			t.Errorf("Expected issue_prefix %q (from --prefix), got %q", "team-alpha", issuePrefix)
+		}
+	})
+
+	t.Run("server_config_in_metadata", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Run init with --database
+		cmd := exec.Command(bd, "init", "--database", "test_server_cfg", "--quiet")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd init --database failed: %v\n%s", err, out)
+		}
+
+		// Verify metadata.json has both dolt_database and dolt_mode: server
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("Failed to load metadata.json: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("metadata.json not found")
+		}
+
+		if cfg.DoltDatabase != "test_server_cfg" {
+			t.Errorf("Expected DoltDatabase %q, got %q", "test_server_cfg", cfg.DoltDatabase)
+		}
+		if cfg.DoltMode != configfile.DoltModeServer {
+			t.Errorf("Expected DoltMode %q, got %q", configfile.DoltModeServer, cfg.DoltMode)
+		}
+		if cfg.Backend != configfile.BackendDolt {
+			t.Errorf("Expected Backend %q, got %q", configfile.BackendDolt, cfg.Backend)
+		}
+	})
+
+	t.Run("validation_invalid_name", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Run init with an invalid database name (contains semicolon = SQL injection)
+		cmd := exec.Command(bd, "init", "--database", "bad;name", "--quiet")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatal("Expected error for invalid database name, but command succeeded")
+		}
+
+		outStr := string(out)
+		if !strings.Contains(outStr, "invalid database name") {
+			t.Errorf("Expected error to mention 'invalid database name', got: %s", outStr)
+		}
+
+		// Verify no .beads directory was created (early validation prevents side effects)
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if _, err := os.Stat(beadsDir); err == nil {
+			t.Error(".beads directory should not be created when validation fails")
+		}
+	})
+
+	t.Run("validation_name_with_spaces", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Database name with spaces should fail validation
+		cmd := exec.Command(bd, "init", "--database", "my database", "--quiet")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatal("Expected error for database name with spaces, but command succeeded")
+		}
+
+		outStr := string(out)
+		if !strings.Contains(outStr, "invalid database name") {
+			t.Errorf("Expected error to mention 'invalid database name', got: %s", outStr)
+		}
+	})
+
+	t.Run("validation_name_with_backtick", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Database name with backtick injection should fail validation
+		cmd := exec.Command(bd, "init", "--database", "db`; DROP DATABASE x; --", "--quiet")
+		cmd.Dir = tmpDir
+		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatal("Expected error for database name with backtick injection, but command succeeded")
+		}
+
+		outStr := string(out)
+		if !strings.Contains(outStr, "invalid database name") {
+			t.Errorf("Expected error to mention 'invalid database name', got: %s", outStr)
+		}
+	})
 }

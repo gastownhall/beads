@@ -34,9 +34,9 @@ func validateRef(ref string) error {
 	return nil
 }
 
-// validateDatabaseName checks if a database name is safe to use in queries.
+// ValidateDatabaseName checks if a database name is safe to use in queries.
 // Prevents SQL injection via backtick escaping in CREATE DATABASE statements.
-func validateDatabaseName(name string) error {
+func ValidateDatabaseName(name string) error {
 	if name == "" {
 		return fmt.Errorf("database name cannot be empty")
 	}

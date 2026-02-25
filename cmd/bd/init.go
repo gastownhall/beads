@@ -30,6 +30,10 @@ var initCmd = &cobra.Command{
 	Long: `Initialize bd in the current directory by creating a .beads/ directory
 and database file. Optionally specify a custom issue prefix.
 
+Use --database to specify an existing server database name, overriding the
+default prefix-based naming. This is useful when an external tool (e.g. gastown)
+has already created the database.
+
 With --stealth: configures per-repository git settings for invisible beads usage:
   • .git/info/exclude to prevent beads files from being committed
   • Claude Code settings with bd onboard instruction
@@ -53,6 +57,14 @@ environment variable.`,
 		serverHost, _ := cmd.Flags().GetString("server-host")
 		serverPort, _ := cmd.Flags().GetInt("server-port")
 		serverUser, _ := cmd.Flags().GetString("server-user")
+		database, _ := cmd.Flags().GetString("database")
+
+		// Validate --database early, before any side effects
+		if database != "" {
+			if err := dolt.ValidateDatabaseName(database); err != nil {
+				FatalError("invalid database name %q: %v", database, err)
+			}
+		}
 
 		// Dolt is the only supported backend
 		backend := configfile.BackendDolt
@@ -270,6 +282,12 @@ environment variable.`,
 		} else {
 			dbName = "beads"
 		}
+		// --database flag overrides all prefix-based naming. This allows callers
+		// (e.g. gastown) to specify a pre-existing database name, preventing orphan
+		// database creation when the database was already created externally.
+		if database != "" {
+			dbName = database
+		}
 		// Build config. Beads always uses dolt sql-server.
 		// AutoStart is always enabled during init — we need a server to initialize the database.
 		doltCfg := &dolt.Config{
@@ -366,10 +384,13 @@ environment variable.`,
 					cfg.Database = "dolt"
 				}
 
-				// Set prefix-based SQL database name to avoid cross-rig contamination (bd-u8rda).
-				// Only set if not already configured — overwriting a user-renamed database
+				// Set SQL database name. --database flag takes precedence over prefix-based
+				// naming to avoid cross-rig contamination (bd-u8rda). Only set prefix-based
+				// name if not already configured — overwriting a user-renamed database
 				// creates phantom catalog entries that crash information_schema (GH#2051).
-				if cfg.DoltDatabase == "" && prefix != "" {
+				if database != "" {
+					cfg.DoltDatabase = database
+				} else if cfg.DoltDatabase == "" && prefix != "" {
 					cfg.DoltDatabase = prefix
 				}
 
@@ -619,7 +640,7 @@ environment variable.`,
 		}
 		fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
 		fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s:%d", user, host, port)))
-		fmt.Printf("  Database: %s\n", ui.RenderAccent(storagePath))
+		fmt.Printf("  Database: %s\n", ui.RenderAccent(dbName))
 		fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(prefix))
 		fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
 		fmt.Printf("Run %s to get started.\n\n", ui.RenderAccent("bd quickstart"))
@@ -667,6 +688,7 @@ func init() {
 	initCmd.Flags().String("server-host", "", "Dolt server host (default: 127.0.0.1)")
 	initCmd.Flags().Int("server-port", 0, "Dolt server port (default: 3307)")
 	initCmd.Flags().String("server-user", "", "Dolt server MySQL user (default: root)")
+	initCmd.Flags().String("database", "", "Use existing server database name (overrides prefix-based naming)")
 
 	rootCmd.AddCommand(initCmd)
 }
