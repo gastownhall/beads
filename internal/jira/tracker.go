@@ -23,7 +23,8 @@ type Tracker struct {
 	store      storage.Storage
 	jiraURL    string
 	projectKey string
-	apiVersion string // "2" or "3" (default: "3")
+	apiVersion string            // "2" or "3" (default: "3")
+	statusMap  map[string]string // beads status → Jira status name (from jira.status_map.* config)
 }
 
 func (t *Tracker) Name() string         { return "jira" }
@@ -59,6 +60,21 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	}
 	t.apiVersion = apiVersion
 	t.client.APIVersion = apiVersion
+
+	// Load optional custom status map from all jira.status_map.* config keys.
+	// Using GetAllConfig supports arbitrary (including custom) beads status names.
+	if allConfig, err := t.store.GetAllConfig(ctx); err == nil {
+		const prefix = "jira.status_map."
+		statusMap := make(map[string]string)
+		for key, val := range allConfig {
+			if strings.HasPrefix(key, prefix) && val != "" {
+				statusMap[strings.TrimPrefix(key, prefix)] = val
+			}
+		}
+		if len(statusMap) > 0 {
+			t.statusMap = statusMap
+		}
+	}
 
 	return nil
 }
@@ -192,7 +208,7 @@ func (t *Tracker) applyTransition(ctx context.Context, key string, status types.
 }
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
-	return &jiraFieldMapper{apiVersion: t.apiVersion}
+	return &jiraFieldMapper{apiVersion: t.apiVersion, statusMap: t.statusMap}
 }
 
 func (t *Tracker) IsExternalRef(ref string) bool {
