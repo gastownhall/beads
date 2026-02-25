@@ -60,8 +60,9 @@ func CheckClaude() DoctorCheck {
 				"\n" +
 				"See: bd setup claude --help",
 		}
-	} else if !inClaudeCode {
-		// Not in Claude Code - skip plugin suggestion
+	} else if !inClaudeCode || !isClaudePresent() {
+		// Not in Claude Code, or CLAUDECODE=1 was set by another AI tool but
+		// Claude CLI/~/.claude/ are absent — skip plugin suggestion.
 		return DoctorCheck{
 			Name:    "Claude Integration",
 			Status:  "ok",
@@ -406,10 +407,28 @@ func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
 	}
 }
 
+// isClaudePresent returns true when the Claude CLI binary exists in PATH or the
+// ~/.claude/ directory is present.  CLAUDECODE=1 can be set by AI coding tools
+// other than Claude Code itself, so checking for actual Claude artifacts prevents
+// spurious warnings for users who never installed Claude Code.
+func isClaudePresent() bool {
+	if _, err := exec.LookPath("claude"); err == nil {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(home, ".claude"))
+	return err == nil && info.IsDir()
+}
+
 // CheckClaudePlugin checks if the beads Claude Code plugin is installed and up to date.
 func CheckClaudePlugin() DoctorCheck {
-	// Check if running in Claude Code
-	if os.Getenv("CLAUDECODE") != "1" {
+	// Check if running in Claude Code.
+	// CLAUDECODE=1 may be set by AI tools other than Claude Code, so also verify
+	// that the claude CLI or ~/.claude/ directory actually exists.
+	if os.Getenv("CLAUDECODE") != "1" || !isClaudePresent() {
 		return DoctorCheck{
 			Name:    "Claude Plugin",
 			Status:  StatusOK,

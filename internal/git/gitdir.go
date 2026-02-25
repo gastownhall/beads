@@ -308,6 +308,11 @@ func IsColocatedJJGit() bool {
 
 // GetJujutsuRoot returns the root directory of the jujutsu repository.
 // Returns empty string and error if not in a jujutsu repository.
+//
+// Walking stops at a .git boundary: a git repo nested inside a JJ
+// workspace (e.g. a clean-room scratch repo under a JJ-tracked parent) must not
+// inherit the parent's JJ context.  Only the directory that contains .git itself
+// is checked for a co-located .jj; we never walk further up.
 func GetJujutsuRoot() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -321,10 +326,20 @@ func GetJujutsuRoot() (string, error) {
 			return dir, nil
 		}
 
+		// Stop at a git repo boundary. If .git exists here but no .jj was
+		// found at this level, this is a plain git repo (not JJ). Do not
+		// walk further up — the parent may have .jj but it belongs to a
+		// different (ancestor) repository.
+		gitPath := filepath.Join(dir, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
+			break
+		}
+
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", fmt.Errorf("not a jujutsu repository (no .jj directory found)")
+			break
 		}
 		dir = parent
 	}
+	return "", fmt.Errorf("not a jujutsu repository (no .jj directory found)")
 }
