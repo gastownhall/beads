@@ -2062,3 +2062,79 @@ func TestEphemeralExplicitID_SearchIssues(t *testing.T) {
 		t.Errorf("Expected ID %q, got %q", "test-agent-furiosa", results[0].ID)
 	}
 }
+
+// TestCreateEphemeralAutoID verifies that CreateIssue generates a non-empty
+// wisp-prefixed ID for ephemeral issues when no explicit ID is provided.
+// Regression test for GH#2087: bd create --ephemeral generated empty IDs.
+func TestCreateEphemeralAutoID(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		Title:     "Ephemeral auto ID test",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+		t.Fatalf("CreateIssue (ephemeral, no explicit ID) failed: %v", err)
+	}
+
+	// ID must not be empty (the GH#2087 bug)
+	if issue.ID == "" {
+		t.Fatal("ephemeral issue got empty ID — GH#2087 regression")
+	}
+
+	// ID should contain the wisp infix
+	if !strings.Contains(issue.ID, "-wisp-") {
+		t.Errorf("expected wisp-prefixed ID, got %q", issue.ID)
+	}
+
+	// Verify the issue is retrievable from the wisps table
+	got, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(%q) failed: %v", issue.ID, err)
+	}
+	if got.Title != "Ephemeral auto ID test" {
+		t.Errorf("title mismatch: got %q", got.Title)
+	}
+	if !got.Ephemeral {
+		t.Error("expected Ephemeral=true on retrieved issue")
+	}
+}
+
+// TestCreateMultipleEphemeralAutoIDs verifies that multiple ephemeral issues
+// created without explicit IDs each get unique, non-empty IDs.
+// Regression test for GH#2087: second insert hit UNIQUE constraint on empty ID.
+func TestCreateMultipleEphemeralAutoIDs(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	ids := make(map[string]bool)
+	for i := 0; i < 5; i++ {
+		issue := &types.Issue{
+			Title:     fmt.Sprintf("Ephemeral #%d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("CreateIssue #%d failed: %v", i, err)
+		}
+		if issue.ID == "" {
+			t.Fatalf("ephemeral issue #%d got empty ID", i)
+		}
+		if ids[issue.ID] {
+			t.Fatalf("duplicate ID %q on issue #%d", issue.ID, i)
+		}
+		ids[issue.ID] = true
+	}
+}
