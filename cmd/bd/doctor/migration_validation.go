@@ -467,6 +467,11 @@ func checkDoltLocks(beadsDir string) (bool, string) {
 		if err := rows.Scan(&tableName, &staged, &status); err != nil {
 			continue
 		}
+		// Skip wisp tables — they are ephemeral and expected to have
+		// uncommitted changes (covered by dolt_ignore).
+		if isWispTable(tableName) {
+			continue
+		}
 		mark := ""
 		if staged {
 			mark = " (staged)"

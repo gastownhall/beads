@@ -336,6 +336,14 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 	return checkIssueCountWithDB(conn)
 }
 
+// isWispTable returns true if the table name refers to a wisp (ephemeral) table.
+// Wisp tables are expected to have uncommitted changes since they are excluded
+// from Dolt version tracking via dolt_ignore. Reporting them as uncommitted
+// produces self-fulfilling warnings that can never be cleared.
+func isWispTable(tableName string) bool {
+	return tableName == "wisps" || strings.HasPrefix(tableName, "wisp_")
+}
+
 // checkStatusWithDB reports uncommitted changes in Dolt using an existing connection.
 // Separated from CheckDoltStatus to allow connection reuse across checks.
 func checkStatusWithDB(conn *doltConn) DoctorCheck {
@@ -360,6 +368,11 @@ func checkStatusWithDB(conn *doltConn) DoctorCheck {
 		var staged bool
 		var status string
 		if err := rows.Scan(&tableName, &staged, &status); err != nil {
+			continue
+		}
+		// Skip wisp tables — they are ephemeral and expected to have
+		// uncommitted changes (covered by dolt_ignore).
+		if isWispTable(tableName) {
 			continue
 		}
 		stageMark := ""

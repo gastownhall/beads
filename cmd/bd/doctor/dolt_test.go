@@ -194,6 +194,35 @@ func TestCheckLockHealth_HeldNomsLOCK(t *testing.T) {
 	}
 }
 
+func TestIsWispTable(t *testing.T) {
+	tests := []struct {
+		name     string
+		table    string
+		expected bool
+	}{
+		{"wisps table", "wisps", true},
+		{"wisp_events", "wisp_events", true},
+		{"wisp_labels", "wisp_labels", true},
+		{"wisp_dependencies", "wisp_dependencies", true},
+		{"wisp_comments", "wisp_comments", true},
+		{"issues table", "issues", false},
+		{"events table", "events", false},
+		{"labels table", "labels", false},
+		{"dependencies table", "dependencies", false},
+		{"config table", "config", false},
+		{"dolt_ignore", "dolt_ignore", false},
+		{"empty string", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isWispTable(tt.table); got != tt.expected {
+				t.Errorf("isWispTable(%q) = %v, want %v", tt.table, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestCheckLockHealth_NonDoltBackend(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
