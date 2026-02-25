@@ -12,25 +12,45 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// newTestStore creates a dolt store for engine tests with issue_prefix configured
+// newTestStore creates a dolt store on the shared database with branch isolation.
 func newTestStore(t *testing.T) *dolt.DoltStore {
 	t.Helper()
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("Dolt not installed, skipping test")
 	}
+	if testSharedDB == "" {
+		t.Fatal("testSharedDB not set — TestMain did not initialize shared database")
+	}
 	ctx := context.Background()
-	store, err := dolt.New(ctx, &dolt.Config{Path: t.TempDir()})
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:         t.TempDir(),
+		ServerHost:   "127.0.0.1",
+		ServerPort:   testServerPort,
+		Database:     testSharedDB,
+		MaxOpenConns: 1,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create dolt store: %v", err)
 	}
-	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+
+	// Create an isolated branch for this test
+	_, branchCleanup := testutil.StartTestBranch(t, store.DB(), testSharedDB)
+
+	// Re-create dolt_ignore'd tables on the branch
+	if err := dolt.CreateIgnoredTables(store.DB()); err != nil {
+		branchCleanup()
 		store.Close()
-		t.Fatalf("Failed to set issue_prefix: %v", err)
+		t.Fatalf("CreateIgnoredTables failed: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+
+	t.Cleanup(func() {
+		branchCleanup()
+		store.Close()
+	})
 	return store
 }
 

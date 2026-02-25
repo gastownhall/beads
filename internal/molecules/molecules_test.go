@@ -8,8 +8,42 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// newTestMoleculeStore creates a dolt store on the shared database with branch isolation.
+func newTestMoleculeStore(t *testing.T) *dolt.DoltStore {
+	t.Helper()
+	if testSharedDB == "" {
+		t.Skip("shared DB not available")
+	}
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:         t.TempDir(),
+		ServerHost:   "127.0.0.1",
+		ServerPort:   testServerPort,
+		Database:     testSharedDB,
+		MaxOpenConns: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create dolt store: %v", err)
+	}
+
+	_, branchCleanup := testutil.StartTestBranch(t, store.DB(), testSharedDB)
+
+	if err := dolt.CreateIgnoredTables(store.DB()); err != nil {
+		branchCleanup()
+		store.Close()
+		t.Fatalf("CreateIgnoredTables failed: %v", err)
+	}
+
+	t.Cleanup(func() {
+		branchCleanup()
+		store.Close()
+	})
+	return store
+}
 
 func TestLoadMoleculesFromFile(t *testing.T) {
 	// Create a temporary directory
@@ -61,29 +95,13 @@ func TestLoadMoleculesFromNonexistentFile(t *testing.T) {
 
 func TestLoader_LoadAll(t *testing.T) {
 	ctx := context.Background()
+	store := newTestMoleculeStore(t)
 
 	// Create temporary directories
 	tempDir := t.TempDir()
 	beadsDir := filepath.Join(tempDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {
 		t.Fatalf("Failed to create beads dir: %v", err)
-	}
-
-	// Create a test database
-	store, err := dolt.New(ctx, &dolt.Config{Path: t.TempDir()})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer store.Close()
-
-	// Set issue prefix (required by storage)
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set prefix: %v", err)
-	}
-
-	// Configure custom types for Gas Town types (bd-find4)
-	if err := store.SetConfig(ctx, "types.custom", "molecule"); err != nil {
-		t.Fatalf("Failed to set types.custom: %v", err)
 	}
 
 	// Create a project-level molecules.jsonl
@@ -134,29 +152,13 @@ func TestLoader_LoadAll(t *testing.T) {
 
 func TestLoader_SkipExistingMolecules(t *testing.T) {
 	ctx := context.Background()
+	store := newTestMoleculeStore(t)
 
 	// Create temporary directories
 	tempDir := t.TempDir()
 	beadsDir := filepath.Join(tempDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {
 		t.Fatalf("Failed to create beads dir: %v", err)
-	}
-
-	// Create a test database
-	store, err := dolt.New(ctx, &dolt.Config{Path: t.TempDir()})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer store.Close()
-
-	// Set issue prefix
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("Failed to set prefix: %v", err)
-	}
-
-	// Configure custom types for Gas Town types (bd-find4)
-	if err := store.SetConfig(ctx, "types.custom", "molecule"); err != nil {
-		t.Fatalf("Failed to set types.custom: %v", err)
 	}
 
 	// Pre-create a molecule in the database (skip prefix validation for mol-* IDs)

@@ -101,6 +101,10 @@ type Config struct {
 	// When true and the host is localhost, bd will start a dolt sql-server
 	// automatically if one isn't running. Disabled under Gas Town (GT_ROOT set).
 	AutoStart bool
+
+	// MaxOpenConns overrides the connection pool size (0 = default 10).
+	// Set to 1 for branch isolation in tests (DOLT_CHECKOUT is session-level).
+	MaxOpenConns int
 }
 
 // Retry configuration for transient connection errors (stale pool connections,
@@ -590,8 +594,12 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	}
 
 	// Server mode supports multi-writer, configure reasonable pool size
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	maxOpen := 10
+	if cfg.MaxOpenConns > 0 {
+		maxOpen = cfg.MaxOpenConns
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(min(5, maxOpen))
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	// Ensure database exists (may need to create it)

@@ -49,6 +49,25 @@ func RunMigrations(db *sql.DB) error {
 	return nil
 }
 
+// CreateIgnoredTables re-creates dolt_ignore'd tables (wisps, wisp_*)
+// on the current branch. These tables only exist in the working set and
+// are not inherited when branching. Safe to call repeatedly (idempotent).
+// Exported for use by test helpers in other packages.
+func CreateIgnoredTables(db *sql.DB) error {
+	return createIgnoredTables(db)
+}
+
+// createIgnoredTables is the internal implementation.
+func createIgnoredTables(db *sql.DB) error {
+	if err := migrations.MigrateWispsTable(db); err != nil {
+		return fmt.Errorf("wisps table: %w", err)
+	}
+	if err := migrations.MigrateWispAuxiliaryTables(db); err != nil {
+		return fmt.Errorf("wisp auxiliary tables: %w", err)
+	}
+	return nil
+}
+
 // ListMigrations returns the names of all registered migrations.
 func ListMigrations() []string {
 	names := make([]string, len(migrationsList))

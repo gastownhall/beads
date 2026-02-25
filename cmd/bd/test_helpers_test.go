@@ -161,9 +161,9 @@ func writeTestMetadata(t *testing.T, dbPath string, database string) {
 	}
 }
 
-// newTestStore creates a dolt store with issue_prefix configured (bd-166)
-// This prevents "database not initialized" errors in tests.
-// Connects to the shared test Dolt server with a unique database per test.
+// newTestStore creates a dolt store with issue_prefix configured (bd-166).
+// Each test gets its own unique database for isolation.
+// Connects to the shared test Dolt server.
 func newTestStore(t *testing.T, dbPath string) *dolt.DoltStore {
 	t.Helper()
 
@@ -173,49 +173,47 @@ func newTestStore(t *testing.T, dbPath string) *dolt.DoltStore {
 		t.Skip("Dolt test server not available, skipping")
 	}
 
-	cfg := &dolt.Config{Path: dbPath}
-	// Use the shared test Dolt server with a unique database for isolation
-	if testDoltServerPort != 0 {
-		cfg.ServerHost = "127.0.0.1"
-		cfg.ServerPort = testDoltServerPort
-		cfg.Database = uniqueTestDBName(t)
-		// Write metadata.json so NewFromConfig (used by routing) finds the correct DB
-		writeTestMetadata(t, dbPath, cfg.Database)
+	cfg := &dolt.Config{
+		Path:       dbPath,
+		ServerHost: "127.0.0.1",
+		ServerPort: testDoltServerPort,
+		Database:   uniqueTestDBName(t),
 	}
+	// Write metadata.json so NewFromConfig (used by routing) finds the correct DB
+	writeTestMetadata(t, dbPath, cfg.Database)
 
 	// Serialize dolt.New() to avoid race in Dolt's InitStatusVariables (bd-cqjoi)
 	doltNewMutex.Lock()
 	ctx := context.Background()
-	store, err := dolt.New(ctx, cfg)
+	s, err := dolt.New(ctx, cfg)
 	doltNewMutex.Unlock()
 	if err != nil {
 		t.Fatalf("Failed to create dolt store: %v", err)
 	}
 
 	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		store.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		s.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
 
 	// Configure Gas Town custom types for test compatibility (bd-find4)
-	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
-		store.Close()
+	if err := s.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		s.Close()
 		t.Fatalf("Failed to set types.custom: %v", err)
 	}
 
 	t.Cleanup(func() {
-		store.Close()
-		// Drop test database to avoid accumulating test artifacts on the shared server
-		if testDoltServerPort != 0 && cfg.Database != "" {
+		s.Close()
+		if cfg.Database != "" {
 			dropTestDatabase(cfg.Database, testDoltServerPort)
 		}
 	})
-	return store
+	return s
 }
 
 // newTestStoreWithPrefix creates a dolt store with custom issue_prefix configured.
-// Connects to the shared test Dolt server with a unique database per test.
+// Each test gets its own unique database for isolation.
 func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.DoltStore {
 	t.Helper()
 
@@ -225,45 +223,39 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.Do
 		t.Skip("Dolt test server not available, skipping")
 	}
 
-	cfg := &dolt.Config{Path: dbPath}
-	// Use the shared test Dolt server with a unique database for isolation
-	if testDoltServerPort != 0 {
-		cfg.ServerHost = "127.0.0.1"
-		cfg.ServerPort = testDoltServerPort
-		cfg.Database = uniqueTestDBName(t)
-		// Write metadata.json so NewFromConfig (used by routing) finds the correct DB
-		writeTestMetadata(t, dbPath, cfg.Database)
+	cfg := &dolt.Config{
+		Path:       dbPath,
+		ServerHost: "127.0.0.1",
+		ServerPort: testDoltServerPort,
+		Database:   uniqueTestDBName(t),
 	}
+	writeTestMetadata(t, dbPath, cfg.Database)
 
-	// Serialize dolt.New() to avoid race in Dolt's InitStatusVariables (bd-cqjoi)
 	doltNewMutex.Lock()
 	ctx := context.Background()
-	store, err := dolt.New(ctx, cfg)
+	s, err := dolt.New(ctx, cfg)
 	doltNewMutex.Unlock()
 	if err != nil {
 		t.Fatalf("Failed to create dolt store: %v", err)
 	}
 
-	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		store.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		s.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
 
-	// Configure Gas Town custom types for test compatibility (bd-find4)
-	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
-		store.Close()
+	if err := s.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		s.Close()
 		t.Fatalf("Failed to set types.custom: %v", err)
 	}
 
 	t.Cleanup(func() {
-		store.Close()
-		// Drop test database to avoid accumulating test artifacts on the shared server
-		if testDoltServerPort != 0 && cfg.Database != "" {
+		s.Close()
+		if cfg.Database != "" {
 			dropTestDatabase(cfg.Database, testDoltServerPort)
 		}
 	})
-	return store
+	return s
 }
 
 // dropTestDatabase drops a test database from the shared server (best-effort cleanup).

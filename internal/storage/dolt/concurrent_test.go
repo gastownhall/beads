@@ -33,7 +33,7 @@ func concurrentTestContext(t *testing.T) (context.Context, context.CancelFunc) {
 // =============================================================================
 
 func TestConcurrentIssueCreation(t *testing.T) {
-	store, cleanup := setupTestStore(t)
+	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := concurrentTestContext(t)
@@ -112,7 +112,7 @@ func TestConcurrentIssueCreation(t *testing.T) {
 // =============================================================================
 
 func TestSameIssueUpdateRace(t *testing.T) {
-	store, cleanup := setupTestStore(t)
+	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := concurrentTestContext(t)
@@ -184,7 +184,7 @@ func TestSameIssueUpdateRace(t *testing.T) {
 // =============================================================================
 
 func TestReadWriteMix(t *testing.T) {
-	store, cleanup := setupTestStore(t)
+	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := concurrentTestContext(t)
@@ -294,7 +294,7 @@ func TestReadWriteMix(t *testing.T) {
 // =============================================================================
 
 func TestLongTransactionBlocking(t *testing.T) {
-	store, cleanup := setupTestStore(t)
+	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := concurrentTestContext(t)
@@ -393,7 +393,7 @@ func TestLongTransactionBlocking(t *testing.T) {
 // =============================================================================
 
 func TestBranchPerAgentMergeRace(t *testing.T) {
-	store, cleanup := setupTestStore(t)
+	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := concurrentTestContext(t)
@@ -495,7 +495,7 @@ func TestBranchPerAgentMergeRace(t *testing.T) {
 // =============================================================================
 
 func TestWorktreeExportIsolation(t *testing.T) {
-	store, cleanup := setupTestStore(t)
+	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := concurrentTestContext(t)
@@ -570,7 +570,7 @@ func TestWorktreeExportIsolation(t *testing.T) {
 // =============================================================================
 
 func TestConcurrentDependencyOperations(t *testing.T) {
-	store, cleanup := setupTestStore(t)
+	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := concurrentTestContext(t)
@@ -659,7 +659,7 @@ func TestHighContentionStress(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 
-	store, cleanup := setupTestStore(t)
+	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := concurrentTestContext(t)
