@@ -109,6 +109,13 @@ environment variable.`,
 		// The hyphen is added automatically during ID generation
 		prefix = strings.TrimRight(prefix, "-")
 
+		// Sanitize prefix for use as a MySQL database name.
+		// Directory names like "001" (common in temp dirs) are invalid because
+		// MySQL identifiers must start with a letter or underscore.
+		if len(prefix) > 0 && !((prefix[0] >= 'a' && prefix[0] <= 'z') || (prefix[0] >= 'A' && prefix[0] <= 'Z') || prefix[0] == '_') {
+			prefix = "bd_" + prefix
+		}
+
 		// Determine beadsDir first (used for all storage path calculations).
 		// BEADS_DIR takes precedence, otherwise use CWD/.beads (with redirect support).
 		// This must be computed BEFORE initDBPath to ensure consistent path resolution
