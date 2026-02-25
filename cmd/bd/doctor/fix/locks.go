@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // StaleLockFiles removes stale lock files from the .beads directory.
@@ -65,32 +65,13 @@ func StaleLockFiles(path string) error {
 		}
 	}
 
-	// Remove stale Dolt internal LOCK files (noms layer filesystem lock).
-	// These live at .beads/dolt/<database>/.dolt/noms/LOCK and are created
-	// by the Dolt engine. If a process (embedded driver or sql-server) crashes
-	// without closing cleanly, the LOCK file persists and blocks all future
-	// opens with "the database is locked by another dolt process" or a SIGSEGV
-	// nil-pointer dereference.
-	//
-	// In server mode (the only mode now), the Dolt server is the one that opens
-	// these files. If we're running bd doctor --fix, the server is presumably
-	// having trouble, so removing stale locks is safe. We use the shared
-	// CleanStaleNomsLocks helper from the dolt storage package.
+	// Remove stale Dolt noms LOCK files via shared helper.
+	// Same cleanup that runs pre-flight in PersistentPreRun.
 	doltDir := filepath.Join(beadsDir, "dolt")
-	if dbEntries, err := os.ReadDir(doltDir); err == nil {
-		for _, dbEntry := range dbEntries {
-			if !dbEntry.IsDir() {
-				continue
-			}
-			nomsLock := filepath.Join(doltDir, dbEntry.Name(), ".dolt", "noms", "LOCK")
-			if _, statErr := os.Stat(nomsLock); statErr == nil {
-				lockName := fmt.Sprintf("dolt/%s/.dolt/noms/LOCK", dbEntry.Name())
-				if err := os.Remove(nomsLock); err != nil {
-					errors = append(errors, fmt.Sprintf("%s: %v", lockName, err))
-				} else {
-					removed = append(removed, lockName)
-				}
-			}
+	if n, errs := dolt.CleanStaleNomsLocks(doltDir); n > 0 {
+		removed = append(removed, fmt.Sprintf("%d noms LOCK file(s)", n))
+		for _, e := range errs {
+			errors = append(errors, e.Error())
 		}
 	}
 
@@ -125,23 +106,4 @@ func StaleLockFiles(path string) error {
 	}
 
 	return nil
-}
-
-// probeStale checks if the given lock file is NOT held by any process.
-// Returns true if the lock is stale (safe to clean up).
-func probeStale(lockPath string) bool {
-	f, err := os.OpenFile(lockPath, os.O_RDWR, 0) //nolint:gosec // lockPath is constructed internally from .beads directory paths
-	if err != nil {
-		// File doesn't exist or can't open — treat as stale (no active holder)
-		return true
-	}
-	defer f.Close()
-	// Try to acquire exclusive lock non-blocking
-	if err := lockfile.FlockExclusiveNonBlocking(f); err != nil {
-		// Lock is held by another process — NOT stale
-		return false
-	}
-	// We got the lock, meaning no one else holds it — stale
-	_ = lockfile.FlockUnlock(f)
-	return true
 }

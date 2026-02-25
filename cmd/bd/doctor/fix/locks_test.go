@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 func TestStaleLockFiles(t *testing.T) {
@@ -178,45 +176,6 @@ func TestStaleLockFiles(t *testing.T) {
 
 		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 			t.Error("stale bootstrap lock should be removed")
-		}
-	})
-}
-
-func TestProbeStale(t *testing.T) {
-	t.Run("nonexistent file is stale", func(t *testing.T) {
-		if !probeStale("/tmp/nonexistent-lock-test-file") {
-			t.Error("nonexistent lock file should be treated as stale")
-		}
-	})
-
-	t.Run("unheld lock file is stale", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		lockPath := filepath.Join(tmpDir, "test.lock")
-		if err := os.WriteFile(lockPath, []byte(""), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if !probeStale(lockPath) {
-			t.Error("unheld lock file should be stale")
-		}
-	})
-
-	t.Run("held lock is not stale", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		lockPath := filepath.Join(tmpDir, "test.lock")
-
-		// Create and hold an exclusive flock
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer f.Close()
-		if err := lockfile.FlockExclusiveNonBlock(f); err != nil {
-			t.Fatalf("failed to acquire test lock: %v", err)
-		}
-		defer func() { _ = lockfile.FlockUnlock(f) }()
-
-		if probeStale(lockPath) {
-			t.Error("held lock should NOT be treated as stale")
 		}
 	})
 }
