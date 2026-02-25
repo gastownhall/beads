@@ -2,7 +2,8 @@
 // It provides transparent auto-start so that `bd init` and `bd <command>` work
 // without manual server management.
 //
-// Under Gas Town (GT_ROOT set), all worktrees share a single server on port 3307.
+// Under Gas Town (GT_ROOT set, or detected via filesystem heuristic),
+// all worktrees share a single server on port 3307.
 // In standalone mode, each project gets a deterministic port derived from the
 // project path (hash → range 13307–14307). Users with explicit port config in
 // metadata.json always use that port instead.
@@ -483,7 +484,7 @@ func Start(beadsDir string) (*State, error) {
 		_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
 		_ = writePortFile(beadsDir, actualPort)
 		touchActivity(beadsDir)
-		if !IsDaemonManaged() {
+		if !IsDaemonManagedFor(beadsDir) {
 			forkIdleMonitor(beadsDir)
 		}
 		return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
@@ -538,7 +539,7 @@ func Start(beadsDir string) (*State, error) {
 	// Touch activity and fork idle monitor (skip under Gas Town where
 	// the daemon manages server lifecycle)
 	touchActivity(beadsDir)
-	if !IsDaemonManaged() {
+	if !IsDaemonManagedFor(beadsDir) {
 		forkIdleMonitor(beadsDir)
 	}
 
@@ -551,9 +552,120 @@ func Start(beadsDir string) (*State, error) {
 }
 
 // IsDaemonManaged returns true if the dolt server is managed by the Gas Town
-// daemon (GT_ROOT is set). In this case, beads should not stop or kill it.
+// daemon. Checks GT_ROOT first, then falls back to filesystem heuristics
+// that detect Gas Town structure from the working directory.
+// This handles cases where GT_ROOT is not set but the process is running
+// inside a Gas Town workspace (crew sessions, residual tmux sessions, etc.).
 func IsDaemonManaged() bool {
-	return os.Getenv("GT_ROOT") != ""
+	return isDaemonManaged("")
+}
+
+// IsDaemonManagedFor is like IsDaemonManaged but also checks the beadsDir
+// path for Gas Town indicators. Use this when beadsDir is available.
+func IsDaemonManagedFor(beadsDir string) bool {
+	return isDaemonManaged(beadsDir)
+}
+
+func isDaemonManaged(beadsDir string) bool {
+	if os.Getenv("GT_ROOT") != "" {
+		return true
+	}
+	return isGasTownContext(beadsDir)
+}
+
+// gasTownPathSegments are directory names distinctive to Gas Town rig worktrees.
+// A standalone beads project would never have these in its path.
+var gasTownPathSegments = []string{
+	"crew",
+	"polecats",
+	"refinery",
+	"witness",
+	"deacon",
+	"mayor",
+}
+
+// gasTownRootMarkers are subdirectory names that identify a Gas Town root
+// or rig directory. Presence of 2+ of these as siblings is definitive.
+var gasTownRootMarkers = []string{
+	"daemon",
+	"deacon",
+	"warrants",
+	"mayor",
+	"crew",
+	"refinery",
+}
+
+// isGasTownContext detects Gas Town workspace from the working directory
+// and optionally from the beadsDir path.
+func isGasTownContext(beadsDir string) bool {
+	if wd, err := os.Getwd(); err == nil {
+		if HasGasTownPathSegment(wd) {
+			return true
+		}
+		if walkUpForGasTownRoot(wd) {
+			return true
+		}
+	}
+	if beadsDir != "" {
+		if HasGasTownPathSegment(beadsDir) {
+			return true
+		}
+		if walkUpForGasTownRoot(filepath.Dir(beadsDir)) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasGasTownPathSegment reports whether path contains a directory component
+// that is distinctive to Gas Town workspaces.
+func HasGasTownPathSegment(path string) bool {
+	// Split into directory components to avoid substring false positives
+	// (e.g., "screwdriver" should not match "crew").
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for _, part := range parts {
+		for _, seg := range gasTownPathSegments {
+			if part == seg {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isGasTownRoot checks if dir is a Gas Town root by looking for 2+
+// distinctive Gas Town subdirectories as siblings.
+func isGasTownRoot(dir string) bool {
+	count := 0
+	for _, marker := range gasTownRootMarkers {
+		info, err := os.Stat(filepath.Join(dir, marker))
+		if err == nil && info.IsDir() {
+			count++
+			if count >= 2 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// walkUpForGasTownRoot walks up from dir checking each ancestor
+// (including dir itself) for Gas Town root markers.
+func walkUpForGasTownRoot(dir string) bool {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	for {
+		if isGasTownRoot(abs) {
+			return true
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return false
+		}
+		abs = parent
+	}
 }
 
 // FlushWorkingSet connects to the running Dolt server and commits any uncommitted
@@ -647,7 +759,7 @@ func Stop(beadsDir string) error {
 
 // StopWithForce is like Stop but allows overriding the Gas Town daemon guard.
 func StopWithForce(beadsDir string, force bool) error {
-	if !force && IsDaemonManaged() {
+	if !force && IsDaemonManagedFor(beadsDir) {
 		return fmt.Errorf("Dolt server is managed by the Gas Town daemon.\nUse 'gt dolt stop' instead, or pass --force to override.")
 	}
 
@@ -748,7 +860,7 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 	// Under Gas Town, if we can't identify any canonical server, refuse to
 	// kill anything. Without knowing which process is canonical, we'd kill
 	// all dolt servers including the daemon-managed one.
-	if IsDaemonManaged() && len(canonicalPIDs) == 0 {
+	if IsDaemonManagedFor(beadsDir) && len(canonicalPIDs) == 0 {
 		return nil, fmt.Errorf("under Gas Town but no canonical PID file found\n\nThe Dolt server is likely managed by the gt daemon. Use 'gt dolt' commands instead.\nTo force kill all dolt servers: pkill -f 'dolt sql-server'")
 	}
 
@@ -884,7 +996,7 @@ func forkIdleMonitor(beadsDir string) {
 	// Under Gas Town, the daemon manages server lifecycle (health checks,
 	// restart on crash, etc.). Don't fork a beads idle monitor that could
 	// interfere by stopping the shared server.
-	if IsDaemonManaged() {
+	if IsDaemonManagedFor(beadsDir) {
 		return
 	}
 
@@ -973,7 +1085,7 @@ func RunIdleMonitor(beadsDir string, idleTimeout time.Duration) {
 		return
 	}
 	// Belt and suspenders: don't run under Gas Town even if somehow forked.
-	if IsDaemonManaged() {
+	if IsDaemonManagedFor(beadsDir) {
 		return
 	}
 

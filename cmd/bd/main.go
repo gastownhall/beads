@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/molecules"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -511,8 +512,9 @@ var rootCmd = &cobra.Command{
 
 		// Auto-start: enabled by default for standalone users.
 		// Disabled under Gas Town (which manages its own server) or by explicit config.
+		// Gas Town detection uses GT_ROOT and a filesystem heuristic fallback.
 		doltCfg.AutoStart = true
-		if os.Getenv("GT_ROOT") != "" {
+		if doltserver.IsDaemonManaged() {
 			doltCfg.AutoStart = false
 		}
 		if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {

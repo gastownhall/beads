@@ -237,7 +237,7 @@ required. Use this command for explicit control or diagnostics.`,
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
-		if doltserver.IsDaemonManaged() {
+		if doltserver.IsDaemonManagedFor(beadsDir) {
 			// Check if daemon's server is already accepting connections
 			cfg := doltserver.DefaultConfig(serverDir)
 			addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
@@ -396,7 +396,7 @@ one tracked by the current project's PID file.`,
 		killed, err := doltserver.KillStaleServers(beadsDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			if doltserver.IsDaemonManaged() {
+			if doltserver.IsDaemonManagedFor(beadsDir) {
 				fmt.Fprintf(os.Stderr, "\nUnder Gas Town, use 'gt dolt' commands to manage the server.\n")
 			}
 			os.Exit(1)
