@@ -169,3 +169,139 @@ func TestInstallGitHooks_ExistingHookBackup(t *testing.T) {
 		}
 	})
 }
+
+func TestHooksNeedUpdate(t *testing.T) {
+	tests := []struct {
+		name           string
+		setupHooks     bool        // whether to create .git/hooks/ with hook files
+		preCommitBody  string
+		postMergeBody  string
+		skipPostMerge  bool        // skip writing post-merge hook file
+		fileMode       os.FileMode // file mode for hook files (0 = default 0700)
+		wantNeedUpdate bool
+	}{
+		{
+			name:           "no hooks directory",
+			setupHooks:     false,
+			wantNeedUpdate: false,
+		},
+		{
+			name:       "current version hooks",
+			setupHooks: true,
+			preCommitBody: "#!/bin/sh\n# bd-hooks-version: " + Version + "\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			postMergeBody: "#!/bin/sh\n# bd-hooks-version: " + Version + "\n# bd (beads) post-merge hook\nbd import\n",
+			wantNeedUpdate: false,
+		},
+		{
+			name:       "outdated version hooks",
+			setupHooks: true,
+			preCommitBody: "#!/bin/sh\n# bd-hooks-version: 0.40.0\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			postMergeBody: "#!/bin/sh\n# bd-hooks-version: 0.40.0\n# bd (beads) post-merge hook\nbd import\n",
+			wantNeedUpdate: true,
+		},
+		{
+			name:       "inline hooks without version",
+			setupHooks: true,
+			preCommitBody: "#!/bin/sh\n#\n# bd (beads) pre-commit hook\n#\nbd sync --flush-only\n",
+			postMergeBody: "#!/bin/sh\n#\n# bd (beads) post-merge hook\n#\nbd import\n",
+			wantNeedUpdate: true,
+		},
+		{
+			name:       "shim hooks",
+			setupHooks: true,
+			preCommitBody: "#!/bin/sh\n# bd-shim 0.40.0\nexec bd hooks run pre-commit \"$@\"\n",
+			postMergeBody: "#!/bin/sh\n# bd-shim 0.40.0\nexec bd hooks run post-merge \"$@\"\n",
+			wantNeedUpdate: false,
+		},
+		{
+			name:       "non-bd hooks",
+			setupHooks: true,
+			preCommitBody: "#!/bin/sh\necho 'custom pre-commit'\n",
+			postMergeBody: "#!/bin/sh\necho 'custom post-merge'\n",
+			wantNeedUpdate: false,
+		},
+		{
+			name:           "empty hook files",
+			setupHooks:     true,
+			preCommitBody:  "",
+			postMergeBody:  "",
+			wantNeedUpdate: false,
+		},
+		{
+			name:       "version prefix with empty version",
+			setupHooks: true,
+			preCommitBody:  "#!/bin/sh\n# bd-hooks-version: \n# bd (beads) pre-commit hook\n",
+			postMergeBody:  "#!/bin/sh\n# bd-hooks-version: \n# bd (beads) post-merge hook\n",
+			wantNeedUpdate: true,
+		},
+		{
+			name:       "mixed state: one outdated one current",
+			setupHooks: true,
+			preCommitBody: "#!/bin/sh\n# bd-hooks-version: 0.40.0\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			postMergeBody: "#!/bin/sh\n# bd-hooks-version: " + Version + "\n# bd (beads) post-merge hook\nbd import\n",
+			wantNeedUpdate: true,
+		},
+		{
+			name:       "mixed state: shim and outdated template",
+			setupHooks: true,
+			preCommitBody: "#!/bin/sh\n# bd-shim 0.49.6\nexec bd hooks run pre-commit \"$@\"\n",
+			postMergeBody: "#!/bin/sh\n# bd-hooks-version: 0.40.0\n# bd (beads) post-merge hook\n",
+			wantNeedUpdate: true,
+		},
+		{
+			name:          "only pre-commit exists",
+			setupHooks:    true,
+			preCommitBody: "#!/bin/sh\n# bd-hooks-version: 0.40.0\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			skipPostMerge: true,
+			wantNeedUpdate: true,
+		},
+		{
+			name:       "non-executable current version hooks",
+			setupHooks: true,
+			preCommitBody: "#!/bin/sh\n# bd-hooks-version: " + Version + "\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			postMergeBody: "#!/bin/sh\n# bd-hooks-version: " + Version + "\n# bd (beads) post-merge hook\nbd import\n",
+			fileMode:       0644,
+			wantNeedUpdate: false, // hooksNeedUpdate checks version, not permissions
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := newGitRepo(t)
+			runInDir(t, tmpDir, func() {
+				if tt.setupHooks {
+					gitDirPath, err := git.GetGitDir()
+					if err != nil {
+						t.Fatalf("git.GetGitDir() failed: %v", err)
+					}
+					hooksDir := filepath.Join(gitDirPath, "hooks")
+					if err := os.MkdirAll(hooksDir, 0750); err != nil {
+						t.Fatalf("Failed to create hooks directory: %v", err)
+					}
+
+					mode := tt.fileMode
+					if mode == 0 {
+						mode = 0700
+					}
+
+					preCommitPath := filepath.Join(hooksDir, "pre-commit")
+					if err := os.WriteFile(preCommitPath, []byte(tt.preCommitBody), mode); err != nil {
+						t.Fatalf("Failed to write pre-commit hook: %v", err)
+					}
+
+					if !tt.skipPostMerge {
+						postMergePath := filepath.Join(hooksDir, "post-merge")
+						if err := os.WriteFile(postMergePath, []byte(tt.postMergeBody), mode); err != nil {
+							t.Fatalf("Failed to write post-merge hook: %v", err)
+						}
+					}
+				}
+
+				got := hooksNeedUpdate()
+				if got != tt.wantNeedUpdate {
+					t.Errorf("hooksNeedUpdate() = %v, want %v", got, tt.wantNeedUpdate)
+				}
+			})
+		})
+	}
+}

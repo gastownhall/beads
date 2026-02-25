@@ -66,6 +66,45 @@ func hooksInstalled() bool {
 	return true
 }
 
+// hooksNeedUpdate checks if installed bd hooks are outdated and need updating.
+// Returns true if any bd hook has a version different from the current CLI version.
+// Shim hooks are never outdated (they delegate to bd hooks run).
+// Inline hooks without version markers are always considered outdated.
+//
+// On error (e.g. no git hooks dir), returns false. This is safe when called
+// in the init.go condition (!hooksInstalled() || hooksNeedUpdate()) because
+// hooksInstalled() fails the same way, making the OR expression evaluate to true.
+func hooksNeedUpdate() bool {
+	hooksDir, err := git.GetGitHooksDir()
+	if err != nil {
+		return false
+	}
+
+	readErrors := false
+	hookNames := []string{"pre-commit", "post-merge"}
+	for _, name := range hookNames {
+		path := filepath.Join(hooksDir, name)
+		info, err := getHookVersion(path)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Warning: could not read hook %s: %v\n", name, err)
+				readErrors = true
+			}
+			continue
+		}
+		if !info.IsBdHook || info.IsShim {
+			continue
+		}
+		// Outdated if version is missing (inline hooks) or differs from current
+		if info.Version != Version {
+			return true
+		}
+	}
+	// If we couldn't read hooks that hooksInstalled() confirmed exist,
+	// attempt re-install rather than silently skipping the update.
+	return readErrors
+}
+
 // hookInfo contains information about an existing hook
 type hookInfo struct {
 	name                 string
@@ -192,6 +231,7 @@ func buildPreCommitHook(chainHooks bool, existingHooks []hookInfo) string {
 		}
 
 		return `#!/bin/sh
+# bd-hooks-version: ` + Version + `
 #
 # bd (beads) pre-commit hook (chained)
 #
@@ -210,6 +250,7 @@ fi
 	}
 
 	return `#!/bin/sh
+# bd-hooks-version: ` + Version + `
 #
 # bd (beads) pre-commit hook
 #
@@ -250,6 +291,7 @@ func buildPostMergeHook(chainHooks bool, existingHooks []hookInfo) string {
 		}
 
 		return `#!/bin/sh
+# bd-hooks-version: ` + Version + `
 #
 # bd (beads) post-merge hook (chained)
 #
@@ -270,6 +312,7 @@ exit 0
 	}
 
 	return `#!/bin/sh
+# bd-hooks-version: ` + Version + `
 #
 # bd (beads) post-merge hook
 #
@@ -364,6 +407,7 @@ func buildJJPreCommitHook(chainHooks bool, existingHooks []hookInfo) string {
 		}
 
 		return `#!/bin/sh
+# bd-hooks-version: ` + Version + `
 #
 # bd (beads) pre-commit hook (chained, jujutsu mode)
 #
@@ -383,6 +427,7 @@ fi
 	}
 
 	return `#!/bin/sh
+# bd-hooks-version: ` + Version + `
 #
 # bd (beads) pre-commit hook (jujutsu mode)
 #

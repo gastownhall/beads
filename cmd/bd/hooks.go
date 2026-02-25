@@ -133,6 +133,10 @@ func getHookVersion(path string) (hookVersionInfo, error) {
 		lineCount++
 	}
 
+	if err := scanner.Err(); err != nil {
+		return hookVersionInfo{}, fmt.Errorf("reading hook file: %w", err)
+	}
+
 	// Check if it's an inline bd hook (from bd init) - GH#1120
 	// These don't have version markers but have "# bd (beads)" comment
 	if strings.Contains(content.String(), inlineHookMarker) {
