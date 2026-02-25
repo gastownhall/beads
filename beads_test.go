@@ -145,7 +145,18 @@ func TestOpenFromConfig_DefaultsToEmbedded(t *testing.T) {
 }
 
 func TestOpenFromConfig_ServerModeFailsWithoutServer(t *testing.T) {
-	// Server mode should fail-fast when no server is listening
+	// Server mode should fail-fast when no server is listening.
+	// Temporarily unset BEADS_DOLT_PORT/BEADS_TEST_MODE so the config port
+	// isn't overridden by applyConfigDefaults to the test server.
+	if prev := os.Getenv("BEADS_DOLT_PORT"); prev != "" {
+		os.Unsetenv("BEADS_DOLT_PORT")
+		t.Cleanup(func() { os.Setenv("BEADS_DOLT_PORT", prev) })
+	}
+	if prev := os.Getenv("BEADS_TEST_MODE"); prev != "" {
+		os.Unsetenv("BEADS_TEST_MODE")
+		t.Cleanup(func() { os.Setenv("BEADS_TEST_MODE", prev) })
+	}
+
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {

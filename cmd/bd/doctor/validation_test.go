@@ -410,15 +410,25 @@ func TestCheckDuplicateIssues_GastownOverThreshold(t *testing.T) {
 	// Insert 51 duplicate issues (over threshold of 25) via raw SQL for speed.
 	// The original test used 1501 issues/threshold=1000, but that took ~9s of Dolt inserts.
 	// The threshold logic is the same regardless of scale.
+	// Wrap in explicit transaction — test server runs with --no-auto-commit,
+	// so raw db.ExecContext writes are rolled back on connection close.
 	db := store.UnderlyingDB()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
 	for i := 0; i < 51; i++ {
-		_, err := db.ExecContext(ctx,
+		_, err := tx.ExecContext(ctx,
 			`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
 			 VALUES (?, 'Runaway wisps', 'Too many wisps', '', '', '', 'open', 2, 'task', NOW(), NOW())`,
 			fmt.Sprintf("test-%06d", i))
 		if err != nil {
+			_ = tx.Rollback()
 			t.Fatalf("Failed to insert issue %d: %v", i, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Failed to commit transaction: %v", err)
 	}
 
 	store.Close()
@@ -456,15 +466,24 @@ func TestCheckDuplicateIssues_GastownCustomThreshold(t *testing.T) {
 	}
 
 	// Insert 21 duplicate issues (over custom threshold of 10) via raw SQL for speed.
+	// Wrap in explicit transaction — test server runs with --no-auto-commit.
 	db := store.UnderlyingDB()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
 	for i := 0; i < 21; i++ {
-		_, err := db.ExecContext(ctx,
+		_, err := tx.ExecContext(ctx,
 			`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
 			 VALUES (?, 'Custom threshold test', 'Test custom threshold', '', '', '', 'open', 2, 'task', NOW(), NOW())`,
 			fmt.Sprintf("test-%06d", i))
 		if err != nil {
+			_ = tx.Rollback()
 			t.Fatalf("Failed to insert issue %d: %v", i, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Failed to commit transaction: %v", err)
 	}
 
 	store.Close()
