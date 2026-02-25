@@ -365,8 +365,8 @@ Yes! Each agent can:
 5. Sync via git commits
 
 Note: In orchestrated workflows, assignment is usually done by an orchestrator.
-If an agent picks work directly, use `bd update <id> --claim --assignee agent-name`.
 If the issue is already assigned, start with `bd update <id> --status in_progress`.
+If an agent picks work directly, use `bd update <id> --claim --assignee agent-name`.
 
 bd's git-based sync means agents work independently and merge their changes like developers do.
 
