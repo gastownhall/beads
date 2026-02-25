@@ -73,7 +73,13 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 			_ = sqlTx.Rollback()
 			return fmt.Errorf("dolt commit: %w", err)
 		}
-		// DOLT_COMMIT already ended the transaction; do not call tx.Commit().
+		if err != nil {
+			// "nothing to commit" — DOLT_COMMIT did NOT end the transaction.
+			// Commit the SQL transaction to persist writes to dolt_ignore'd
+			// tables (wisps, wisp_labels, wisp_dependencies).
+			return sqlTx.Commit()
+		}
+		// DOLT_COMMIT succeeded and already ended the transaction.
 		return nil
 	}
 
