@@ -234,11 +234,11 @@ Examples:
 			// Release any Dolt locks left by diagnostics before applying fixes.
 			releaseDiagnosticLocks(absPath)
 			applyFixes(result)
-			// Note: we intentionally do NOT re-run diagnostics here.
-			// If any Close() timed out during the first diagnostic pass,
-			// leaked goroutines may hold internal noms locks and a second
-			// open could deadlock. Users should run 'bd doctor' again to verify fixes.
-			fmt.Println("\nRun 'bd doctor' again to verify fixes.")
+			// Re-run diagnostics to verify fixes were applied correctly.
+			// Release any locks that may have been left by the fix phase.
+			releaseDiagnosticLocks(absPath)
+			fmt.Println("\nVerifying fixes...")
+			result = runDiagnostics(absPath)
 		}
 
 		// Add timestamp and platform info for export
