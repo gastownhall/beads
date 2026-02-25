@@ -365,6 +365,7 @@ func WaitForServer(port int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	for time.Now().Before(deadline) {
+		// #nosec G704 -- addr is always loopback (127.0.0.1) with a test-selected local port.
 		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
