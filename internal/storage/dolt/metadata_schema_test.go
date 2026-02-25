@@ -79,10 +79,10 @@ func TestParseFieldSchema(t *testing.T) {
 
 func TestToFloat64(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   interface{}
-		want    float64
-		wantOK  bool
+		name   string
+		input  interface{}
+		want   float64
+		wantOK bool
 	}{
 		{"float64", float64(3.14), 3.14, true},
 		{"int", int(42), 42, true},

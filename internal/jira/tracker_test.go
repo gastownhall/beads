@@ -541,7 +541,7 @@ func (s *configStore) UpdateIssue(_ context.Context, _ string, _ map[string]inte
 	return nil
 }
 func (s *configStore) CloseIssue(_ context.Context, _, _, _, _ string) error { return nil }
-func (s *configStore) DeleteIssue(_ context.Context, _ string) error          { return nil }
+func (s *configStore) DeleteIssue(_ context.Context, _ string) error         { return nil }
 func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
 	return nil, nil
 }
@@ -602,12 +602,12 @@ func (s *configStore) Close() error { return nil }
 func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 	store := &configStore{
 		data: map[string]string{
-			"jira.url":                  "https://example.atlassian.net",
-			"jira.project":              "PROJ",
-			"jira.api_token":            "token123",
-			"jira.status_map.open":      "Backlog",
+			"jira.url":                    "https://example.atlassian.net",
+			"jira.project":                "PROJ",
+			"jira.api_token":              "token123",
+			"jira.status_map.open":        "Backlog",
 			"jira.status_map.in_progress": "Active Sprint",
-			"jira.status_map.review":    "Code Review", // custom non-standard beads status
+			"jira.status_map.review":      "Code Review", // custom non-standard beads status
 		},
 	}
 
@@ -625,7 +625,7 @@ func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 		{types.StatusOpen, "Backlog"},
 		{types.StatusInProgress, "Active Sprint"},
 		{types.Status("review"), "Code Review"},
-		{types.StatusClosed, "Done"},    // not in store → falls back to default
+		{types.StatusClosed, "Done"},     // not in store → falls back to default
 		{types.StatusBlocked, "Blocked"}, // not in store → falls back to default
 	}
 	for _, tt := range tests {
