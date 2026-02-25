@@ -126,6 +126,7 @@ func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorChe
 			{Name: "Dolt Issue Count", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryData},
 			{Name: "Dolt Status", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryData},
 			{Name: "Dolt Lock Health", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryRuntime},
+			{Name: "Phantom Databases", Status: StatusOK, Message: "N/A (SQLite backend)", Category: CategoryData},
 		}
 	}
 
@@ -149,6 +150,7 @@ func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorChe
 		checkIssueCountWithDB(conn),
 		checkStatusWithDB(conn),
 		lockCheck,
+		checkPhantomDatabases(conn),
 	}
 }
 
@@ -493,5 +495,63 @@ func CheckLockHealth(path string) DoctorCheck {
 		Detail:   strings.Join(warnings, "; "),
 		Fix:      "Run 'bd doctor --fix' to clean stale lock files, or wait for the other process to finish",
 		Category: CategoryRuntime,
+	}
+}
+
+// checkPhantomDatabases detects phantom catalog entries from naming convention
+// changes (beads_* prefix or *_beads suffix) that don't match the configured
+// database. These phantom entries can cause INFORMATION_SCHEMA queries to crash
+// (GH#2051). Complementary to checkStaleDatabases in server.go, which targets
+// test/polecat leftovers with different prefixes.
+func checkPhantomDatabases(conn *doltConn) DoctorCheck {
+	rows, err := conn.db.Query("SHOW DATABASES")
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Phantom Databases",
+			Status:   StatusWarning,
+			Message:  "Could not query databases",
+			Detail:   err.Error(),
+			Category: CategoryData,
+		}
+	}
+	defer rows.Close()
+
+	configuredDB := configfile.DefaultDoltDatabase
+	if conn.cfg != nil {
+		configuredDB = conn.cfg.GetDoltDatabase()
+	}
+
+	var phantoms []string
+	for rows.Next() {
+		var dbName string
+		if err := rows.Scan(&dbName); err != nil {
+			continue
+		}
+		// Skip system databases and the configured database
+		if dbName == "information_schema" || dbName == "mysql" || dbName == configuredDB {
+			continue
+		}
+		// Flag entries matching beads naming convention patterns
+		if strings.HasPrefix(dbName, "beads_") || strings.HasSuffix(dbName, "_beads") {
+			phantoms = append(phantoms, dbName)
+		}
+	}
+
+	if len(phantoms) > 0 {
+		return DoctorCheck{
+			Name:     "Phantom Databases",
+			Status:   StatusWarning,
+			Message:  fmt.Sprintf("%d phantom database(s) detected: %s", len(phantoms), strings.Join(phantoms, ", ")),
+			Detail:   fmt.Sprintf("Phantom entries: %v", phantoms),
+			Fix:      "Restart Dolt server to flush phantom entries. See GH#2051.",
+			Category: CategoryData,
+		}
+	}
+
+	return DoctorCheck{
+		Name:     "Phantom Databases",
+		Status:   StatusOK,
+		Message:  "No phantom databases detected",
+		Category: CategoryData,
 	}
 }

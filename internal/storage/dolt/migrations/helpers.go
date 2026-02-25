@@ -2,8 +2,26 @@ package migrations
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
+
+// isTableNotFoundError checks if the error is a MySQL/Dolt "table not found"
+// error (Error 1146). Dolt returns: Error 1146 (HY000): table not found: tablename
+func isTableNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1146
+	}
+	// String fallback for non-MySQL error wrappers
+	return strings.Contains(err.Error(), "table not found")
+}
 
 // columnExists checks if a column exists in a table using SHOW COLUMNS.
 // Uses SHOW COLUMNS FROM ... LIKE instead of information_schema to avoid
@@ -17,6 +35,9 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 	// #nosec G202 -- table and column names come from internal constants, not user input.
 	rows, err := db.Query("SHOW COLUMNS FROM `" + table + "` LIKE '" + column + "'")
 	if err != nil {
+		if isTableNotFoundError(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("failed to check column %s.%s: %w", table, column, err)
 	}
 	defer rows.Close()

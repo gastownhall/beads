@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,8 +29,17 @@ func openTestDolt(t *testing.T) *sql.DB {
 		t.Fatalf("failed to create db dir: %v", err)
 	}
 
-	// Configure dolt identity in the temp root (required for dolt init)
-	doltEnv := append(os.Environ(), "DOLT_ROOT_PATH="+tmpDir)
+	// Filter DOLT_ROOT_PASSWORD to prevent auth interference in Doppler environments.
+	// When DOLT_ROOT_PASSWORD is set, Dolt enables authentication and requires
+	// credentials in the DSN, causing test failures with "root@tcp(...)" connections.
+	var filteredEnv []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "DOLT_ROOT_PASSWORD=") {
+			continue
+		}
+		filteredEnv = append(filteredEnv, e)
+	}
+	doltEnv := append(filteredEnv, "DOLT_ROOT_PATH="+tmpDir)
 	for _, cfg := range []struct{ key, val string }{
 		{"user.name", "Test User"},
 		{"user.email", "test@example.com"},
@@ -355,5 +365,74 @@ func TestMigrateIssueCounterTable(t *testing.T) {
 	}
 	if lastID != 5 {
 		t.Errorf("expected last_id 5, got %d", lastID)
+	}
+}
+
+func TestColumnExistsNoTable(t *testing.T) {
+	db := openTestDolt(t)
+
+	// columnExists on a nonexistent table should return (false, nil),
+	// not propagate the Error 1146 from SHOW COLUMNS.
+	exists, err := columnExists(db, "nonexistent_table", "id")
+	if err != nil {
+		t.Fatalf("columnExists on nonexistent table should not error, got: %v", err)
+	}
+	if exists {
+		t.Fatal("columnExists on nonexistent table should return false")
+	}
+}
+
+func TestColumnExistsWithPhantom(t *testing.T) {
+	db := openTestDolt(t)
+
+	// Create a phantom-like database entry (simulates naming convention phantom)
+	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads_phantom")
+	if err != nil {
+		t.Fatalf("failed to create phantom database: %v", err)
+	}
+
+	// Positive: still finds columns in primary database
+	exists, err := columnExists(db, "issues", "id")
+	if err != nil {
+		t.Fatalf("columnExists failed with phantom present: %v", err)
+	}
+	if !exists {
+		t.Fatal("should find 'id' column even with phantom database present")
+	}
+
+	// Positive: still finds tables
+	exists, err = tableExists(db, "issues")
+	if err != nil {
+		t.Fatalf("tableExists failed with phantom present: %v", err)
+	}
+	if !exists {
+		t.Fatal("should find 'issues' table even with phantom database present")
+	}
+
+	// Negative: missing column still returns false
+	exists, err = columnExists(db, "issues", "nonexistent")
+	if err != nil {
+		t.Fatalf("should not error for missing column: %v", err)
+	}
+	if exists {
+		t.Fatal("should return false for nonexistent column")
+	}
+
+	// Negative: missing table still returns (false, nil)
+	exists, err = tableExists(db, "nonexistent_table")
+	if err != nil {
+		t.Fatalf("should not error for missing table: %v", err)
+	}
+	if exists {
+		t.Fatal("should return false for nonexistent table")
+	}
+
+	// Negative: nonexistent table + column returns (false, nil)
+	exists, err = columnExists(db, "nonexistent_table", "id")
+	if err != nil {
+		t.Fatalf("should not error with phantom database present: %v", err)
+	}
+	if exists {
+		t.Fatal("should return false for column in nonexistent table")
 	}
 }

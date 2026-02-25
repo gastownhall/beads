@@ -366,11 +366,9 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 		}
 	}
 
-	// Check if database exists using parameterized query
-	var exists int
-	err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?",
-		database).Scan(&exists)
+	// Use SHOW DATABASES instead of INFORMATION_SCHEMA.SCHEMATA to avoid
+	// crashing on phantom catalog entries (R-006, GH#2051, GH#2091).
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Database Exists",
@@ -380,8 +378,21 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 			Category: CategoryFederation,
 		}
 	}
+	defer rows.Close()
 
-	if exists == 0 {
+	found := false
+	for rows.Next() {
+		var dbName string
+		if err := rows.Scan(&dbName); err != nil {
+			continue
+		}
+		if dbName == database {
+			found = true
+			break
+		}
+	}
+
+	if !found {
 		return DoctorCheck{
 			Name:     "Database Exists",
 			Status:   StatusError,
