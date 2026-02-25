@@ -575,10 +575,10 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 		blockedSet[id] = true
 	}
 
-	// Step 3: Get blocking + waits-for deps to build BlockedBy lists
+	// Step 3: Get blocking + waits-for + conditional-blocks deps to build BlockedBy lists
 	depRows, err := s.queryContext(ctx, `
 		SELECT issue_id, depends_on_id FROM dependencies
-		WHERE type IN ('blocks', 'waits-for')
+		WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocking dependencies: %w", err)
@@ -917,10 +917,10 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	// Step 2: Get blocking deps and waits-for gates (single-table scan)
+	// Step 2: Get blocking deps, waits-for gates, and conditional-blocks (single-table scan)
 	depRows, err := s.queryContext(ctx, `
 		SELECT issue_id, depends_on_id, type, metadata FROM dependencies
-		WHERE type IN ('blocks', 'waits-for')
+		WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
 	`)
 	if err != nil {
 		return nil, err
@@ -945,7 +945,10 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 		}
 
 		switch depType {
-		case string(types.DepBlocks):
+		case string(types.DepBlocks), string(types.DepConditionalBlocks):
+			// Both blocks and conditional-blocks gate readiness while the
+			// blocker is active. For conditional-blocks ("B runs only if A
+			// fails"), B cannot be ready while A's outcome is still unknown.
 			if activeIDs[issueID] && activeIDs[dependsOnID] {
 				blockedSet[issueID] = true
 			}

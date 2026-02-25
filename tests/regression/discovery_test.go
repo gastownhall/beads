@@ -972,16 +972,11 @@ func TestDiscovery_ExternalBlockerIgnoredByReady(t *testing.T) {
 }
 
 // TestDiscovery_ConditionalBlocksNotEvaluated verifies that conditional-blocks
-// dependencies are evaluated in readiness computation.
+// dependencies gate readiness while the precondition is still open.
 //
-// FINDING: types.AffectsReadyWork() returns true for conditional-blocks, but
-// computeBlockedIDs() SQL only queries WHERE type IN ('blocks', 'waits-for').
-// conditional-blocks is never evaluated, so issues that should be conditionally
-// blocked appear as ready.
-//
-// Classification: DECISION — conditional-blocks semantics are complex (B runs
-// only if A fails). The maintainer must decide if they should gate readiness
-// while A is still open.
+// RESOLVED: conditional-blocks added to computeBlockedIDs() SQL query.
+// While precondition is open, fallback is blocked (outcome unknown).
+// See PR #2026 for discovery, option analysis.
 func TestDiscovery_ConditionalBlocksNotEvaluated(t *testing.T) {
 	w := newCandidateWorkspace(t)
 
