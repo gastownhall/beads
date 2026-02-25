@@ -21,7 +21,7 @@ cd your-project && bd init --quiet
 bd create "Title" -t bug -p 1 --json      # Create issue
 bd list --status open --json              # List issues
 bd show bd-42 --json                      # Show details
-bd update bd-42 --claim      # Update status
+bd update bd-42 --claim      # Start work
 bd close bd-42 --reason "Done"            # Close issue
 bd ready --json                           # Show unblocked work
 bd sync                                   # Sync to git

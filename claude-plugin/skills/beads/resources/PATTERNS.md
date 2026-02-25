@@ -186,7 +186,7 @@ bd update auth-5 --status blocked --notes "BLOCKER: Need OAuth client ID from pr
 **Unblocking**:
 ```bash
 # Once blocker resolved
-bd update auth-5 --claim --notes "UNBLOCKED: Received OAuth credentials. Resuming implementation."
+bd update auth-5 --status in_progress --notes "UNBLOCKED: Received OAuth credentials. Resuming implementation."
 ```
 
 **Completing**:
