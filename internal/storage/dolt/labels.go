@@ -3,7 +3,6 @@ package dolt
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -76,7 +75,8 @@ func (s *DoltStore) GetLabels(ctx context.Context, issueID string) ([]string, er
 	return labels, rows.Err()
 }
 
-// GetLabelsForIssues retrieves labels for multiple issues
+// GetLabelsForIssues retrieves labels for multiple issues, batching queries
+// to avoid oversized IN-clauses that cause slow queries on large databases.
 func (s *DoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]string), nil
@@ -87,49 +87,76 @@ func (s *DoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []string) (
 
 	result := make(map[string][]string)
 
-	// Fetch wisp labels
-	for _, id := range ephIDs {
-		labels, err := s.getWispLabels(ctx, id)
+	// Fetch wisp labels in batches (replaces N+1 single-ID queries).
+	for start := 0; start < len(ephIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(ephIDs) {
+			end = len(ephIDs)
+		}
+		batch := ephIDs[start:end]
+		placeholders, args := doltBuildSQLInClause(batch)
+
+		//nolint:gosec // G201: placeholders contains only ? markers
+		query := fmt.Sprintf(`
+			SELECT issue_id, label FROM wisp_labels
+			WHERE issue_id IN (%s)
+			ORDER BY issue_id, label
+		`, placeholders)
+
+		rows, err := s.queryContext(ctx, query, args...)
 		if err != nil {
+			return nil, fmt.Errorf("failed to get wisp labels: %w", err)
+		}
+
+		for rows.Next() {
+			var issueID, label string
+			if err := rows.Scan(&issueID, &label); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("failed to scan wisp label: %w", err)
+			}
+			result[issueID] = append(result[issueID], label)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
-		if len(labels) > 0 {
-			result[id] = labels
-		}
+		_ = rows.Close()
 	}
 
-	// Fetch dolt labels
-	if len(doltIDs) > 0 {
-		placeholders := make([]string, len(doltIDs))
-		args := make([]interface{}, len(doltIDs))
-		for i, id := range doltIDs {
-			placeholders[i] = "?"
-			args[i] = id
+	// Fetch dolt labels in batches.
+	for start := 0; start < len(doltIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(doltIDs) {
+			end = len(doltIDs)
 		}
+		batch := doltIDs[start:end]
+		placeholders, args := doltBuildSQLInClause(batch)
 
-		// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
+		//nolint:gosec // G201: placeholders contains only ? markers
 		query := fmt.Sprintf(`
 			SELECT issue_id, label FROM labels
 			WHERE issue_id IN (%s)
 			ORDER BY issue_id, label
-		`, strings.Join(placeholders, ","))
+		`, placeholders)
 
 		rows, err := s.queryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get labels for issues: %w", err)
 		}
-		defer rows.Close()
 
 		for rows.Next() {
 			var issueID, label string
 			if err := rows.Scan(&issueID, &label); err != nil {
+				_ = rows.Close()
 				return nil, fmt.Errorf("failed to scan label: %w", err)
 			}
 			result[issueID] = append(result[issueID], label)
 		}
 		if err := rows.Err(); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
+		_ = rows.Close()
 	}
 
 	return result, nil

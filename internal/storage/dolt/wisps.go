@@ -787,79 +787,95 @@ func (s *DoltStore) scanWispIDs(ctx context.Context, rows *sql.Rows) ([]*types.I
 	return s.getWispsByIDs(ctx, ids)
 }
 
-// getWispsByIDs retrieves multiple wisps by ID in a single query.
+// getWispsByIDs retrieves multiple wisps by ID, batching queries to avoid
+// oversized IN-clauses that cause slow queries on large databases.
 func (s *DoltStore) getWispsByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-
-	//nolint:gosec // G201: placeholders contains only ? markers
-	querySQL := fmt.Sprintf(`
-		SELECT %s
-		FROM wisps
-		WHERE id IN (%s)
-	`, issueSelectColumns, strings.Join(placeholders, ","))
-
-	queryRows, err := s.queryContext(ctx, querySQL, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get wisps by IDs: %w", err)
-	}
-	defer queryRows.Close()
-
+	// Fetch wisps in batches to keep IN-clause size bounded.
 	var issues []*types.Issue
-	for queryRows.Next() {
-		issue, err := scanIssueFrom(queryRows)
-		if err != nil {
-			return nil, err
+	issueMap := make(map[string]*types.Issue, len(ids))
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(ids) {
+			end = len(ids)
 		}
-		issues = append(issues, issue)
-	}
-	if err := queryRows.Err(); err != nil {
-		return nil, err
-	}
+		batch := ids[start:end]
 
-	// Hydrate labels for each wisp (batch query)
-	if len(issues) > 0 {
-		labelPlaceholders := make([]string, len(issues))
-		labelArgs := make([]interface{}, len(issues))
-		issueMap := make(map[string]*types.Issue, len(issues))
-		for i, issue := range issues {
-			labelPlaceholders[i] = "?"
-			labelArgs[i] = issue.ID
-			issueMap[issue.ID] = issue
-		}
+		placeholders, args := doltBuildSQLInClause(batch)
 
 		//nolint:gosec // G201: placeholders contains only ? markers
-		labelSQL := fmt.Sprintf(`
-			SELECT issue_id, label FROM wisp_labels
-			WHERE issue_id IN (%s)
-			ORDER BY issue_id, label
-		`, strings.Join(labelPlaceholders, ","))
+		querySQL := fmt.Sprintf(`
+			SELECT %s
+			FROM wisps
+			WHERE id IN (%s)
+		`, issueSelectColumns, placeholders)
 
-		labelRows, err := s.queryContext(ctx, labelSQL, labelArgs...)
+		queryRows, err := s.queryContext(ctx, querySQL, args...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get wisp labels: %w", err)
+			return nil, fmt.Errorf("failed to get wisps by IDs: %w", err)
 		}
-		defer labelRows.Close()
 
-		for labelRows.Next() {
-			var issueID, label string
-			if err := labelRows.Scan(&issueID, &label); err != nil {
+		for queryRows.Next() {
+			issue, err := scanIssueFrom(queryRows)
+			if err != nil {
+				_ = queryRows.Close()
 				return nil, err
 			}
-			if issue, ok := issueMap[issueID]; ok {
-				issue.Labels = append(issue.Labels, label)
-			}
+			issues = append(issues, issue)
+			issueMap[issue.ID] = issue
 		}
-		if err := labelRows.Err(); err != nil {
+		if err := queryRows.Err(); err != nil {
+			_ = queryRows.Close()
 			return nil, err
+		}
+		_ = queryRows.Close()
+	}
+
+	// Hydrate labels in batches.
+	if len(issues) > 0 {
+		allIDs := make([]string, len(issues))
+		for i, issue := range issues {
+			allIDs[i] = issue.ID
+		}
+
+		for start := 0; start < len(allIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(allIDs) {
+				end = len(allIDs)
+			}
+			batch := allIDs[start:end]
+			placeholders, args := doltBuildSQLInClause(batch)
+
+			//nolint:gosec // G201: placeholders contains only ? markers
+			labelSQL := fmt.Sprintf(`
+				SELECT issue_id, label FROM wisp_labels
+				WHERE issue_id IN (%s)
+				ORDER BY issue_id, label
+			`, placeholders)
+
+			labelRows, err := s.queryContext(ctx, labelSQL, args...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get wisp labels: %w", err)
+			}
+
+			for labelRows.Next() {
+				var issueID, label string
+				if err := labelRows.Scan(&issueID, &label); err != nil {
+					_ = labelRows.Close()
+					return nil, err
+				}
+				if issue, ok := issueMap[issueID]; ok {
+					issue.Labels = append(issue.Labels, label)
+				}
+			}
+			if err := labelRows.Err(); err != nil {
+				_ = labelRows.Close()
+				return nil, err
+			}
+			_ = labelRows.Close()
 		}
 	}
 

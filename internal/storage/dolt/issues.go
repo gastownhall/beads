@@ -698,6 +698,12 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 // Kept small to avoid large IN-clause queries. See steveyegge/beads#1692.
 const deleteBatchSize = 50
 
+// queryBatchSize controls the maximum number of IDs per IN-clause in read
+// queries (label hydration, wisp lookups). Without batching, queries like
+// `SELECT ... FROM wisp_labels WHERE issue_id IN (?,?,?,...thousands)` take
+// 20+ seconds on databases with many wisps (e.g., hq with 29K wisps).
+const queryBatchSize = 200
+
 func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
 	if len(ids) == 0 {
 		return &types.DeleteIssuesResult{}, nil
