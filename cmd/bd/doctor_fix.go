@@ -208,8 +208,10 @@ func applyFixList(path string, fixes []doctorCheck) {
 		"Permissions",
 		"Daemon Health",
 		"Database Config",
+		"Config Values",
 		"Database Integrity",
 		"Database",
+		"Fresh Clone",
 		"Schema Compatibility",
 	}
 	priority := make(map[string]int, len(order))
@@ -322,6 +324,10 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.PatrolPollution(path)
 		case "Lock Files":
 			err = fix.StaleLockFiles(path)
+		case "Fresh Clone":
+			err = fix.FreshCloneImport(path, Version)
+		case "Config Values":
+			err = fix.ConfigValues(path)
 		case "Classic Artifacts":
 			err = fix.ClassicArtifacts(path)
 		default:

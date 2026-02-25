@@ -794,6 +794,10 @@ To force reinitialize (data loss warning):
 
 Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 		}
+		// Backend is Dolt but no dolt directory exists yet — this is a fresh
+		// clone. Any beads.db file is a legacy SQLite artifact, not the active
+		// database. Skip the SQLite checks below and allow init to proceed.
+		return nil
 	}
 
 	// Check for redirect file - if present, check the redirect target
