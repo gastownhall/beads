@@ -396,28 +396,22 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.ServerHost == "" {
 		cfg.ServerHost = "127.0.0.1"
 	}
-	// In test mode, BEADS_DOLT_PORT ALWAYS overrides cfg.ServerPort — even if
-	// already set by NewFromConfigWithOptions reading metadata.json. Without this,
-	// tests that go through the config path silently connect to the prod server.
-	if os.Getenv("BEADS_TEST_MODE") == "1" {
-		if envPort := os.Getenv("BEADS_DOLT_PORT"); envPort != "" {
-			if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
-				cfg.ServerPort = p
-			}
-		} else if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
-			// No test server port set — use sentinel port 1 so connection
-			// fails immediately instead of silently hitting prod.
+	// BEADS_DOLT_PORT always overrides cfg.ServerPort (env > config convention).
+	// Callers (standalone CI, Gas Town, etc.) set this to route bd to a specific
+	// Dolt server. Without this override, metadata.json's dolt_server_port wins,
+	// which causes test databases to leak onto production (port 3307).
+	if envPort := os.Getenv("BEADS_DOLT_PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
+			cfg.ServerPort = p
+		}
+	} else if os.Getenv("BEADS_TEST_MODE") == "1" {
+		// Test mode with no explicit port — use sentinel port 1 so connection
+		// fails immediately instead of silently hitting prod.
+		if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
 			cfg.ServerPort = 1
 		}
 	} else if cfg.ServerPort == 0 {
-		if envPort := os.Getenv("BEADS_DOLT_PORT"); envPort != "" {
-			if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
-				cfg.ServerPort = p
-			}
-		}
-		if cfg.ServerPort == 0 {
-			cfg.ServerPort = DefaultSQLPort
-		}
+		cfg.ServerPort = DefaultSQLPort
 	}
 	if cfg.ServerUser == "" {
 		cfg.ServerUser = "root"

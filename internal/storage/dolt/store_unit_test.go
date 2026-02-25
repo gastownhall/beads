@@ -228,6 +228,39 @@ func TestApplyConfigDefaults_TestModeWithPort(t *testing.T) {
 	}
 }
 
+// TestApplyConfigDefaults_EnvOverridesConfig verifies that BEADS_DOLT_PORT
+// overrides a port already set by metadata.json, even outside test mode.
+// This is the fix for hq-27t (test pollution): callers like Gas Town set
+// BEADS_DOLT_PORT to route bd to a test server instead of production.
+func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	os.Unsetenv("BEADS_TEST_MODE") // NOT in test mode
+	os.Setenv("BEADS_DOLT_PORT", "19999")
+
+	// Simulate metadata.json having set port to production default
+	cfg := &Config{ServerPort: DefaultSQLPort}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 19999 {
+		t.Errorf("expected BEADS_DOLT_PORT=19999 to override config port %d, got %d",
+			DefaultSQLPort, cfg.ServerPort)
+	}
+}
+
 // TestApplyConfigDefaults_ProductionFallback verifies that without
 // BEADS_TEST_MODE, ServerPort falls back to DefaultSQLPort normally.
 func TestApplyConfigDefaults_ProductionFallback(t *testing.T) {
