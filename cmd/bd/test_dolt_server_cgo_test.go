@@ -17,15 +17,20 @@ func init() {
 // on a dynamic port using the shared testutil helper. This prevents tests
 // from creating testdb_* databases on the production Dolt server.
 // Returns a cleanup function that stops the server and removes the temp dir.
+// testServer holds the shared test Dolt server instance for crash detection.
+var testServer *testutil.TestDoltServer
+
 func startTestDoltServer() func() {
 	srv, cleanup := testutil.StartTestDoltServer("beads-test-dolt-*")
 	if srv != nil {
+		testServer = srv
 		testDoltServerPort = srv.Port
 		// Set BEADS_DOLT_PORT so that code paths using applyConfigDefaults
 		// (e.g., bd init) connect to the test server instead of port 1.
 		os.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", srv.Port))
 	}
 	return func() {
+		testServer = nil
 		testDoltServerPort = 0
 		os.Unsetenv("BEADS_DOLT_PORT")
 		cleanup()

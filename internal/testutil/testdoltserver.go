@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -18,10 +19,13 @@ const testPidPrefix = "beads-test-dolt-"
 
 // TestDoltServer represents a running test dolt server instance.
 type TestDoltServer struct {
-	Port    int
-	cmd     *exec.Cmd
-	tmpDir  string
-	pidFile string
+	Port     int
+	cmd      *exec.Cmd
+	tmpDir   string
+	pidFile  string
+	crashed  chan struct{} // closed when server exits unexpectedly
+	exitErr  error        // set before crashed is closed
+	exitOnce sync.Once
 }
 
 // serverStartTimeout is the max time to wait for the test dolt server to accept connections.
@@ -153,7 +157,18 @@ func StartTestDoltServer(tmpDirPrefix string) (*TestDoltServer, func()) {
 		cmd:     serverCmd,
 		tmpDir:  tmpDir,
 		pidFile: pidFile,
+		crashed: make(chan struct{}),
 	}
+
+	// Monitor goroutine: detect unexpected server exits
+	go func() {
+		err := serverCmd.Wait()
+		srv.exitOnce.Do(func() {
+			srv.exitErr = err
+			close(srv.crashed)
+			fmt.Fprintf(os.Stderr, "WARN: test dolt server (port %d) exited: %v\n", port, err)
+		})
+	}()
 
 	// Install signal handler so cleanup runs even when defer doesn't
 	// (e.g. Ctrl+C during test run)
@@ -173,6 +188,33 @@ func StartTestDoltServer(tmpDirPrefix string) (*TestDoltServer, func()) {
 	return srv, cleanup
 }
 
+// IsCrashed returns true if the server process has exited unexpectedly.
+// Returns false for reused servers (BEADS_DOLT_PORT) where we don't own the process.
+func (s *TestDoltServer) IsCrashed() bool {
+	if s == nil || s.crashed == nil {
+		return false
+	}
+	select {
+	case <-s.crashed:
+		return true
+	default:
+		return false
+	}
+}
+
+// CrashError returns the server's exit error if it crashed, nil otherwise.
+func (s *TestDoltServer) CrashError() error {
+	if s == nil || s.crashed == nil {
+		return nil
+	}
+	select {
+	case <-s.crashed:
+		return s.exitErr
+	default:
+		return nil
+	}
+}
+
 // cleanup stops the server, removes temp dir and PID file.
 func (s *TestDoltServer) cleanup() {
 	if s == nil {
@@ -180,7 +222,12 @@ func (s *TestDoltServer) cleanup() {
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
-		_ = s.cmd.Wait()
+		if s.crashed != nil {
+			// Wait for monitor goroutine to finish (avoids double-Wait)
+			<-s.crashed
+		} else {
+			_ = s.cmd.Wait()
+		}
 	}
 	if s.tmpDir != "" {
 		_ = os.RemoveAll(s.tmpDir)

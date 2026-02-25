@@ -3,6 +3,8 @@
 package doctor
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -41,24 +44,87 @@ var (
 	testBDErr  error
 )
 
-// TestMain starts an isolated Dolt server and cleans up the temp directory
-// holding the built bd binary.
+// testServer holds the shared test Dolt server instance for crash detection.
+var testServer *testutil.TestDoltServer
+
+// testSharedDB is the name of the shared database for branch-per-test isolation.
+var testSharedDB string
+
+// testSharedConn is a raw *sql.DB for branch operations in the shared database.
+var testSharedConn *sql.DB
+
 func TestMain(m *testing.M) {
-	srv, cleanupServer := testutil.StartTestDoltServer("doctor-test-dolt-*")
+	os.Exit(testMainInner(m))
+}
+
+func testMainInner(m *testing.M) int {
+	srv, cleanup := testutil.StartTestDoltServer("doctor-test-dolt-*")
+	defer cleanup()
+
 	if srv != nil {
+		testServer = srv
 		os.Setenv("BEADS_DOLT_PORT", fmt.Sprintf("%d", srv.Port))
 		os.Setenv("BEADS_TEST_MODE", "1")
+
+		// Set up shared database for branch-per-test isolation
+		testSharedDB = "doctor_pkg_shared"
+		db, err := testutil.SetupSharedTestDB(srv.Port, testSharedDB)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: shared DB setup failed: %v\n", err)
+			return 1
+		}
+		testSharedConn = db
+		defer db.Close()
+
+		// Create schema + config on the shared DB and commit to main
+		if err := initDoctorSharedSchema(srv.Port); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: shared schema init failed: %v\n", err)
+			return 1
+		}
 	}
 
 	code := m.Run()
 
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
-	cleanupServer()
 	if testBDDir != "" {
 		os.RemoveAll(testBDDir)
 	}
-	os.Exit(code)
+	return code
+}
+
+func initDoctorSharedSchema(port int) error {
+	ctx := context.Background()
+	cfg := &dolt.Config{
+		Path:         "/tmp/doctor-shared-init",
+		ServerHost:   "127.0.0.1",
+		ServerPort:   port,
+		Database:     testSharedDB,
+		MaxOpenConns: 1,
+	}
+	store, err := dolt.New(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("New: %w", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		return fmt.Errorf("SetConfig(issue_prefix): %w", err)
+	}
+	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		return fmt.Errorf("SetConfig(types.custom): %w", err)
+	}
+
+	// Commit schema to main so branches get a clean snapshot
+	db := store.DB()
+	if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
+		return fmt.Errorf("DOLT_ADD: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('--allow-empty', '-m', 'test: init shared schema')"); err != nil {
+		return fmt.Errorf("DOLT_COMMIT: %w", err)
+	}
+
+	return nil
 }
 
 // buildTestBD compiles the bd binary from the current worktree. This ensures

@@ -4,9 +4,7 @@ package doctor
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +14,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -32,38 +31,52 @@ func doctorTestServerPort() int {
 }
 
 // newTestDoltStore creates a DoltStore for testing in the doctor package.
-// Each test gets an isolated database to prevent cross-test pollution.
+// Each test gets an isolated branch on the shared database for fast isolation.
 func newTestDoltStore(t *testing.T, prefix string) *dolt.DoltStore {
 	t.Helper()
 	ctx := context.Background()
 
+	if testServer.IsCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testServer.CrashError())
+	}
+
 	port := doctorTestServerPort()
+	if port == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
 
-	// Generate unique database name for test isolation
-	h := sha256.Sum256([]byte(t.Name() + fmt.Sprintf("%d", time.Now().UnixNano())))
-	dbName := "doctest_" + hex.EncodeToString(h[:6])
-
+	// Open store with MaxOpenConns=1 (required for DOLT_CHECKOUT session affinity)
 	store, err := dolt.New(ctx, &dolt.Config{
-		Path:       filepath.Join(t.TempDir(), "test.db"),
-		ServerHost: "127.0.0.1",
-		ServerPort: port,
-		Database:   dbName,
+		Path:         filepath.Join(t.TempDir(), "test.db"),
+		ServerHost:   "127.0.0.1",
+		ServerPort:   port,
+		Database:     testSharedDB,
+		MaxOpenConns: 1,
 	})
 	if err != nil {
 		t.Skipf("skipping: Dolt not available: %v", err)
 	}
+
+	// Create isolated branch for this test on the store's own connection
+	_, branchCleanup := testutil.StartTestBranch(t, store.DB(), testSharedDB)
+
+	// Create ignored tables on this branch
+	if err := dolt.CreateIgnoredTables(store.DB()); err != nil {
+		branchCleanup()
+		store.Close()
+		t.Fatalf("CreateIgnoredTables: %v", err)
+	}
+
+	// Set prefix for this test (overrides the shared schema's default)
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		branchCleanup()
 		store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
 	}
-	// Configure Gas Town custom types for compatibility
-	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
-		store.Close()
-		t.Fatalf("Failed to set types.custom: %v", err)
-	}
+
 	t.Cleanup(func() {
+		branchCleanup()
 		store.Close()
-		dropDoctorTestDatabase(dbName, port)
 	})
 	return store
 }

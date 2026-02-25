@@ -172,6 +172,9 @@ func newTestStore(t *testing.T, dbPath string) *dolt.DoltStore {
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available, skipping")
 	}
+	if testServer.IsCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testServer.CrashError())
+	}
 
 	cfg := &dolt.Config{
 		Path:       dbPath,
@@ -221,6 +224,9 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.Do
 
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available, skipping")
+	}
+	if testServer.IsCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testServer.CrashError())
 	}
 
 	cfg := &dolt.Config{
