@@ -31,6 +31,9 @@ pkg/
 .DS_Store
 Thumbs.db
 
+# Dolt database files
+.dolt/
+
 # Legacy SQLite database files
 *.db
 *.db-journal
