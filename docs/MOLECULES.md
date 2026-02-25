@@ -56,7 +56,7 @@ bd dep add <B-id> <A-id>   # B depends on A (B needs A)
 
 An agent works through a molecule by:
 1. Getting ready work (`bd ready`)
-2. Claiming it (`bd update <id> --status in_progress`)
+2. Claiming it (`bd update <id> --claim`)
 3. Doing the work
 4. Closing it (`bd close <id>`)
 5. Repeat until molecule is done
@@ -259,7 +259,7 @@ Issues (Dolt, version-controlled)          ← STORAGE
 ```bash
 bd ready                         # What's ready to work
 bd blocked                       # What's blocked
-bd update <id> --status in_progress
+bd update <id> --claim
 bd close <id>
 ```
 

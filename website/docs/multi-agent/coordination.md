@@ -51,7 +51,7 @@ bd pin bd-42 --for agent-b
 
 # Agent B picks up
 bd hook  # Sees bd-42
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 ```
 
 ### Parallel Work

@@ -67,7 +67,7 @@ claim_task() {
     local issue_id="$1"
 
     log_info "Claiming task: $issue_id"
-    bd update "$issue_id" --status in_progress --json > /dev/null
+    bd update "$issue_id" --claim --json > /dev/null
 
     log_success "Task claimed"
     return 0

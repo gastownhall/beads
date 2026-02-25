@@ -81,7 +81,7 @@ bd pour release --var version=1.0.0
 bd mol show release-1.0.0
 
 # Work through steps
-bd update release-1.0.0.1 --status in_progress
+bd update release-1.0.0.1 --claim
 bd close release-1.0.0.1
 # Next step becomes ready...
 ```

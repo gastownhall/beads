@@ -117,7 +117,7 @@ bd list --label implementation --type bug --priority 1
 
 ```bash
 # Claim a task
-bd update bd-impl1 --status in_progress
+bd update bd-impl1 --claim
 
 # During implementation, discover issues
 bd create "Need connection retry logic" -t bug -p 1 \
@@ -166,7 +166,7 @@ bd list --label review --priority 1
 
 ```bash
 # Claim review
-bd update bd-review1 --status in_progress
+bd update bd-review1 --claim
 
 # Found issues during review
 bd create "Add unit tests for retry logic" -t task -p 1 \
@@ -259,7 +259,7 @@ bd create "Research rate limiting algorithms" -p 1 \
   --deps discovered-from:bd-epic1
 bd label add bd-research1 architecture research
 
-bd update bd-research1 --status in_progress
+bd update bd-research1 --claim
 # ... research done ...
 bd close bd-research1 --reason "Chose token bucket algorithm"
 
@@ -290,7 +290,7 @@ bd create "Add rate limit middleware" -p 1 \
 bd label add bd-impl2 implementation
 
 # Claim and start
-bd update bd-impl1 --status in_progress
+bd update bd-impl1 --claim
 
 # Discover issues
 bd create "Need distributed rate limiting (Redis)" -t bug -p 1 \
@@ -340,7 +340,7 @@ bd label add bd-review1 review
 bd dep add bd-review1 bd-impl1 --type related
 bd dep add bd-review1 bd-impl3 --type related
 
-bd update bd-review1 --status in_progress
+bd update bd-review1 --claim
 
 # Found issues
 bd create "Add integration tests for Redis" -t task -p 1 \
@@ -360,10 +360,10 @@ bd dep add bd-review1 bd-bug2 --type blocks
 
 ```bash
 # Fix review findings
-bd update bd-bug2 --status in_progress
+bd update bd-bug2 --claim
 bd close bd-bug2 --reason "Added circuit breaker for Redis"
 
-bd update bd-test1 --status in_progress
+bd update bd-test1 --claim
 bd close bd-test1 --reason "Integration tests passing"
 ```
 
@@ -608,7 +608,7 @@ bd create "App crashes on large files" -t bug -p 1
 
 # Implementer investigates
 bd update bd-bug1 --label implementation
-bd update bd-bug1 --status in_progress
+bd update bd-bug1 --claim
 
 # Discovers architectural issue
 bd create "Need streaming uploads, not buffering" -t bug -p 0
@@ -620,7 +620,7 @@ bd update bd-arch1 --label architecture
 bd close bd-arch1 --reason "Designed streaming upload flow"
 
 # Implementer fixes
-bd update bd-bug1 --status in_progress
+bd update bd-bug1 --claim
 bd close bd-bug1 --reason "Implemented streaming uploads"
 ```
 

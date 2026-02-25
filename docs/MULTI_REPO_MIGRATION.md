@@ -136,7 +136,7 @@ bd ready
 bd list --json
 
 # Work on an issue
-bd update plan-42 --status in_progress
+bd update plan-42 --claim
 
 # Complete work
 bd close plan-42 --reason "Completed"

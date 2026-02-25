@@ -65,8 +65,8 @@ bd show bd-a1b2
 # List all issues
 bd list --json
 
-# Update status
-bd update bd-a1b2 --status in_progress
+# Start work
+bd update bd-a1b2 --claim
 
 # Add dependency
 bd dep add bd-f14c bd-a1b2

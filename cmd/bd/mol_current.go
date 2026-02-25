@@ -141,7 +141,7 @@ Use --limit or --range to view specific steps:
 				fmt.Println(".")
 				fmt.Println("\nTo start work on a molecule:")
 				fmt.Println("  bd mol wisp create <proto-id>  # Instantiate as ephemeral wisp")
-				fmt.Println("  bd update <step-id> --status in_progress  # Claim a step")
+				fmt.Println("  bd update <step-id> --claim  # Claim a step")
 				return
 			}
 		}
@@ -468,7 +468,7 @@ func printMoleculeProgress(mol *MoleculeProgress) {
 
 	if mol.NextStep != nil && mol.CurrentStep == nil {
 		fmt.Printf("\nNext ready: %s - %s\n", mol.NextStep.ID, mol.NextStep.Title)
-		fmt.Printf("  Start with: bd update %s --status in_progress\n", mol.NextStep.ID)
+		fmt.Printf("  Start with: bd update %s --claim\n", mol.NextStep.ID)
 	}
 
 	// Show hint about viewing step instructions
@@ -599,7 +599,7 @@ func PrintContinueResult(result *ContinueResult) {
 	if result.AutoAdvanced {
 		fmt.Printf("\n%s Marked in_progress (use --no-auto to skip)\n", ui.RenderWarn("→"))
 	} else {
-		fmt.Printf("\nStart with: bd update %s --status in_progress\n", result.NextStep.ID)
+		fmt.Printf("\nStart with: bd update %s --claim\n", result.NextStep.ID)
 	}
 }
 

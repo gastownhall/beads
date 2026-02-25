@@ -69,7 +69,7 @@ bd create "Found SQL injection" \
 bd ready --json
 
 # Start work
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 
 # Complete work
 bd close bd-42 --reason "Fixed in commit abc123" --json

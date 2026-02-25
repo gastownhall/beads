@@ -70,7 +70,7 @@ bd ready  # Only shows steps with completed dependencies
 
 ```bash
 # Start a step
-bd update bd-xyz.1 --status in_progress
+bd update bd-xyz.1 --claim
 
 # Complete a step
 bd close bd-xyz.1 --reason "Done"
@@ -150,7 +150,7 @@ bd pour feature-workflow --var name="dark-mode"
 bd dep tree bd-xyz
 
 # 3. Start first step
-bd update bd-xyz.1 --status in_progress
+bd update bd-xyz.1 --claim
 
 # 4. Complete and progress
 bd close bd-xyz.1

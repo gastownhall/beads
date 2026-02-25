@@ -162,7 +162,7 @@ bd q "Task" | xargs bd show                   # Pipe to other commands
 
 ```bash
 # Update one or more issues
-bd update <id> [<id>...] --status in_progress --json
+bd update <id> [<id>...] --claim --json
 bd update <id> [<id>...] --priority 1 --json
 
 # Update external reference (v0.9.2+)
@@ -630,7 +630,7 @@ bd ready
 bd ready --json
 
 # 2. Claim issue
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 
 # 3. Work on it...
 
@@ -672,7 +672,7 @@ bd ready --json  # Find work
 
 # During session
 bd create "..." -p 1 --json
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 # ... work ...
 
 # End of session (IMPORTANT!)

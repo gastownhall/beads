@@ -282,7 +282,7 @@ Regular synchronization:
 bd linear sync --pull
 
 # Do local work
-bd update bd-123 --status in_progress
+bd update bd-123 --claim
 # ... work ...
 bd close bd-123 --reason "Fixed"
 

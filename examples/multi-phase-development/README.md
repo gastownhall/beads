@@ -96,7 +96,7 @@ bd create "Build simple UI for testing" -p 2 \
   --deps discovered-from:bd-a1b2c3.2
 
 # Start implementing
-bd update bd-xyz --status in_progress
+bd update bd-xyz --claim
 ```
 
 ### Discovered Work During MVP
@@ -272,7 +272,7 @@ bd dep add bd-a1b2.4 bd-a1b2.3 --type blocks
 # Week 1: Phase 1 (Research)
 bd ready  # Shows Phase 1 tasks
 bd create "Compare Auth0 vs Firebase" -p 1 --deps discovered-from:bd-a1b2.1
-bd update bd-xyz --status in_progress
+bd update bd-xyz --claim
 # ... research complete ...
 bd close bd-a1b2.1 --reason "Chose Auth0"
 

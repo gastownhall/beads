@@ -684,7 +684,7 @@ Only bd-1 is ready because bd-2 and bd-3 are blocked!
 
 ```bash
 # Start working on bd-1
-bd update bd-1 --status in_progress
+bd update bd-1 --claim
 
 # Complete it
 bd close bd-1 --reason "Database setup complete"
@@ -1188,7 +1188,7 @@ bd dep tree bd-a3f8e9
 
 ```bash
 # Change status
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 
 # Change priority
 bd update bd-42 --priority 0
@@ -1197,7 +1197,7 @@ bd update bd-42 --priority 0
 bd update bd-42 --add-label urgent
 
 # Multiple changes
-bd update bd-42 --status in_progress --priority 1 --add-label "in-review"
+bd update bd-42 --claim --priority 1 --add-label "in-review"
 ```
 
 ## Closing Issues
@@ -2043,7 +2043,7 @@ bd update <id> [flags]
 
 **Examples:**
 ```bash
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 bd update bd-42 --priority 0 --add-label urgent
 bd update bd-42 --title "Updated title" --json
 ```
@@ -2267,7 +2267,7 @@ bd update <id> [flags]
 **Examples:**
 ```bash
 # Start work
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 
 # Escalate priority
 bd update bd-42 --priority 0 --add-label urgent
@@ -2276,7 +2276,7 @@ bd update bd-42 --priority 0 --add-label urgent
 bd update bd-42 --title "New title" --description="Updated description"
 
 # Multiple changes
-bd update bd-42 --status in_progress --priority 1 --add-label "in-review" --json
+bd update bd-42 --claim --priority 1 --add-label "in-review" --json
 ```
 
 ## bd close
@@ -2819,7 +2819,7 @@ bd pour release --var version=1.0.0
 bd mol show release-1.0.0
 
 # Work through steps
-bd update release-1.0.0.1 --status in_progress
+bd update release-1.0.0.1 --claim
 bd close release-1.0.0.1
 # Next step becomes ready...
 ```
@@ -3370,7 +3370,7 @@ bd ready  # Only shows steps with completed dependencies
 
 ```bash
 # Start a step
-bd update bd-xyz.1 --status in_progress
+bd update bd-xyz.1 --claim
 
 # Complete a step
 bd close bd-xyz.1 --reason "Done"
@@ -3450,7 +3450,7 @@ bd pour feature-workflow --var name="dark-mode"
 bd dep tree bd-xyz
 
 # 3. Start first step
-bd update bd-xyz.1 --status in_progress
+bd update bd-xyz.1 --claim
 
 # 4. Complete and progress
 bd close bd-xyz.1
@@ -3718,7 +3718,7 @@ bd pin bd-42 --for agent-b
 
 # Agent B picks up
 bd hook  # Sees bd-42
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 ```
 
 ### Parallel Work
@@ -3996,7 +3996,7 @@ Use bd commands alongside aider:
 ```bash
 # In another terminal or after exiting aider
 bd create "Found bug during work" --deps discovered-from:bd-42 --json
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 bd ready
 ```
 
@@ -4129,7 +4129,7 @@ bd create "Found SQL injection" \
 bd ready --json
 
 # Start work
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 
 # Complete work
 bd close bd-42 --reason "Fixed in commit abc123" --json
@@ -4489,7 +4489,7 @@ bd create "Found SQL injection" \
 bd ready --json
 
 # Start work
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 
 # Complete work
 bd close bd-42 --reason "Fixed in commit abc123" --json

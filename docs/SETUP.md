@@ -400,7 +400,7 @@ Aider: Let me check. Run:
 You: [runs the command]
 
 Aider: Great! To claim bd-42, run:
-/run bd update bd-42 --status in_progress
+/run bd update bd-42 --claim
 ```
 
 This respects Aider's philosophy of keeping humans in control while still leveraging beads for issue tracking.

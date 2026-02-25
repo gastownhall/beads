@@ -223,7 +223,7 @@ async function testBasicWorkflow(npmPrefix) {
 
     // Test bd update
     logInfo('Testing bd update...');
-    exec(`"${bdCmd}" update ${issue.id} --status in_progress`, { cwd: projectDir, env });
+    exec(`"${bdCmd}" update ${issue.id} --claim`, { cwd: projectDir, env });
     const updatedOutput = exec(`"${bdCmd}" show ${issue.id} --json`, { cwd: projectDir, env });
     const updatedResult = JSON.parse(updatedOutput);
     const updatedIssue = Array.isArray(updatedResult) ? updatedResult[0] : updatedResult;

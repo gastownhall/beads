@@ -134,7 +134,7 @@ bd dep tree bd-a3f8e9
 
 ```bash
 # Change status
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 
 # Change priority
 bd update bd-42 --priority 0
@@ -143,7 +143,7 @@ bd update bd-42 --priority 0
 bd update bd-42 --add-label urgent
 
 # Multiple changes
-bd update bd-42 --status in_progress --priority 1 --add-label "in-review"
+bd update bd-42 --claim --priority 1 --add-label "in-review"
 ```
 
 ## Closing Issues

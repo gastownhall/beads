@@ -226,7 +226,7 @@ bd list --label needs-triage
 ### Quality Gate Workflow
 ```bash
 # Start work
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 
 # Mark quality requirements
 bd label add bd-42 needs-tests
@@ -426,7 +426,7 @@ bd create "Extract validateToken function" -t chore -p 2 \
   --deps discovered-from:bd-10
 
 # Agent marks work for review
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 # ... agent does work ...
 bd label add bd-42 needs-review
 bd label add bd-42 ai-generated

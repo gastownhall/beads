@@ -52,7 +52,7 @@ Use bd commands alongside aider:
 ```bash
 # In another terminal or after exiting aider
 bd create "Found bug during work" --deps discovered-from:bd-42 --json
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 bd ready
 ```
 

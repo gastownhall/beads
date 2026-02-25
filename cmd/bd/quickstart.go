@@ -52,7 +52,7 @@ var quickstartCmd = &cobra.Command{
 		fmt.Printf("            Perfect for agents to claim next work!\n\n")
 
 		fmt.Printf("%s\n", ui.RenderBold("UPDATING ISSUES"))
-		fmt.Printf("  %s\n", ui.RenderAccent("bd update bd-1 --status in_progress"))
+		fmt.Printf("  %s\n", ui.RenderAccent("bd update bd-1 --claim"))
 		fmt.Printf("  %s\n", ui.RenderAccent("bd update bd-1 --priority 0"))
 		fmt.Printf("  %s\n\n", ui.RenderAccent("bd update bd-1 --assignee bob"))
 

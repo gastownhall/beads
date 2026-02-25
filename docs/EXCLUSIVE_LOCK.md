@@ -109,7 +109,7 @@ EOF
 
 # Do work...
 bd create "My issue" -p 1
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 
 # Release lock
 rm "$LOCK_FILE"

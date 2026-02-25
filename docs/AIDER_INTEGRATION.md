@@ -77,7 +77,7 @@ pipx install aider-chat
    You: Let's work on bd-42
 
    Aider: Great choice! To claim it, run:
-   /run bd update bd-42 --status in_progress
+   /run bd update bd-42 --claim
    ```
 
 ### During Development
@@ -155,7 +155,7 @@ You can customize this file to add project-specific instructions.
 /run bd ready
 
 # Claim an issue
-/run bd update bd-abc --status in_progress
+/run bd update bd-abc --claim
 ```
 
 ### Discovering Work
@@ -225,7 +225,7 @@ The AI knows the bd workflow and will suggest appropriate commands:
 ```
 You: I'm starting work on the login feature
 Aider: First, let's claim it. Run:
-/run bd update bd-xyz --status in_progress
+/run bd update bd-xyz --claim
 ```
 
 ### 3. Use bd prime for Context
@@ -312,14 +312,14 @@ You: Add the auth files to context and check for related issues
 Run multiple bd commands in sequence:
 ```bash
 # In your shell (not aider)
-bd ready && bd show bd-42 && bd update bd-42 --status in_progress
+bd ready && bd show bd-42 && bd update bd-42 --claim
 ```
 
 ### Integration with Git
 
 Aider handles git commits. bd tracks issues. They work together:
 
-1. Claim issue: `/run bd update bd-42 --status in_progress`
+1. Claim issue: `/run bd update bd-42 --claim`
 2. Make changes with aider
 3. Aider commits changes
 4. Complete issue: `/run bd close bd-42`
@@ -343,7 +343,7 @@ Aider: Let me check. Run:
 You: Let's work on bd-42
 
 Aider: Great! First claim it:
-/run bd update bd-42 --status in_progress
+/run bd update bd-42 --claim
 
 You: Can you show me the details?
 

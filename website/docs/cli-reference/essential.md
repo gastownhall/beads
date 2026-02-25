@@ -96,7 +96,7 @@ bd update <id> [flags]
 
 **Examples:**
 ```bash
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 bd update bd-42 --priority 0 --add-label urgent
 bd update bd-42 --title "Updated title" --json
 ```

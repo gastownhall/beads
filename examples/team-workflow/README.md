@@ -133,7 +133,7 @@ git pull
 bd list  # Sees Alice's issue
 
 # Bob claims it
-bd update bd-abc --status in_progress
+bd update bd-abc --claim
 
 # Auto-commits Bob's update
 # Alice pulls and sees Bob is working on it
@@ -197,7 +197,7 @@ bd dep add bd-def bd-abc --type blocks
 bd create "Refactor auth module" -p 1
 
 # Work on it
-bd update bd-abc --status in_progress
+bd update bd-abc --claim
 
 # Open PR with issue reference
 git push origin feature-branch

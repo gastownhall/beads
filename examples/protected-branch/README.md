@@ -43,7 +43,7 @@ bd link bd-XXXXX --blocks bd-YYYYY  # auth blocks login
 bd link bd-XXXXX --blocks bd-ZZZZZ  # auth blocks tests
 
 # Start work
-bd update bd-XXXXX --status in_progress
+bd update bd-XXXXX --claim
 ```
 
 **Note:** Replace `bd-XXXXX` etc. with actual issue IDs created above.

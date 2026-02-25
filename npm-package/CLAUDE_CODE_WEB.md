@@ -94,8 +94,8 @@ bd create "Fix authentication bug" -t bug -p 1
 # View ready work
 bd ready
 
-# Update status
-bd update bd-a1b2 --status in_progress
+# Start work
+bd update bd-a1b2 --claim
 
 # Add dependencies
 bd dep add bd-f14c bd-a1b2
@@ -115,7 +115,7 @@ Use the `bd` command for all issue tracking instead of markdown TODOs:
 
 - Create issues: `bd create "Task description" -p 1 --json`
 - Find work: `bd ready --json`
-- Update status: `bd update <id> --status in_progress --json`
+- Start work: `bd update <id> --claim --json`
 - View details: `bd show <id> --json`
 
 Use `--json` flags for programmatic parsing.
@@ -296,7 +296,7 @@ You are working on a project that uses bd (beads) for issue tracking.
 At the start of each session:
 1. Run `bd ready --json` to see available work
 2. Choose an issue to work on
-3. Update its status: `bd update <id> --status in_progress`
+3. Start work: `bd update <id> --claim`
 
 While working:
 - Create new issues for any bugs you discover

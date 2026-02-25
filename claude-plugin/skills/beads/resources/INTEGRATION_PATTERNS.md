@@ -93,7 +93,7 @@ See BOUNDARIES.md for bd vs TodoWrite decision.
 "
 
 # Mark in_progress
-bd update oauth-1 --status in_progress
+bd update oauth-1 --claim
 
 # Create TodoWrite for today's work
 TodoWrite:
@@ -270,7 +270,7 @@ TESTS: All 12 tests passing (auth, rotation, expiry, error handling)"
 1. Create bd issue for tracking:
    ```bash
    bd create "Q4 strategic planning document" -t task -p 0
-   bd update strat-1 --status in_progress
+   bd update strat-1 --claim
    ```
 
 2. Use developing-strategic-documents skill for research and writing

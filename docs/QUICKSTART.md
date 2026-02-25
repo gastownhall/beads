@@ -166,7 +166,7 @@ Only bd-1 is ready because bd-2 and bd-3 are blocked!
 
 ```bash
 # Start working on bd-1
-./bd update bd-1 --status in_progress
+./bd update bd-1 --claim
 
 # Complete it
 ./bd close bd-1 --reason "Database setup complete"

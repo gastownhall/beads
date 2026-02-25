@@ -195,7 +195,7 @@ AI agents work exactly the same way as before:
 bd create "Implement user authentication" -t feature -p 1
 
 # Update issues
-bd update bd-a1b2 --status in_progress
+bd update bd-a1b2 --claim
 
 # Close issues
 bd close bd-a1b2 "Completed authentication"

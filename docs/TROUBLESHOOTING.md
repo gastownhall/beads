@@ -718,7 +718,7 @@ When auto-detected, you'll see: `ℹ️  Sandbox detected, using direct mode`
 # Explicitly enable sandbox mode
 bd --sandbox ready
 bd --sandbox create "Fix bug" -p 1
-bd --sandbox update bd-42 --status in_progress
+bd --sandbox update bd-42 --claim
 ```
 
 **What sandbox mode does:**

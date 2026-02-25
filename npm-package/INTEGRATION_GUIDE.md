@@ -73,8 +73,8 @@ bd create "Bug description" -t bug -p 0 --json
 ### Working on Issues
 
 ```bash
-# Update status to in_progress
-bd update <issue-id> --status in_progress
+# Start work (atomic claim)
+bd update <issue-id> --claim
 
 # Add a comment
 bd comments add <issue-id> "Progress update"
@@ -146,7 +146,7 @@ System: bd-a1b2 [P1] Fix authentication bug
 System: bd-f14c [P1] Add user profile page
 System:
 Agent: I can see there are 2 ready tasks. Let me work on bd-a1b2 (Fix authentication bug).
-Agent: [runs] bd update bd-a1b2 --status in_progress
+Agent: [runs] bd update bd-a1b2 --claim
 ```
 
 ### Pattern 2: Discovering New Work
@@ -314,7 +314,7 @@ You have access to bd (beads) for issue tracking. It's automatically installed i
 WORKFLOW:
 1. Start each session: Check `bd ready --json` for available work
 2. Choose a task: Pick highest priority with no blockers
-3. Update status: `bd update <id> --status in_progress`
+3. Start work: `bd update <id> --claim`
 4. Work on it: Implement, test, document
 5. File new issues: Create issues for any work discovered
 6. Link issues: Use `bd dep add` to track relationships

@@ -107,7 +107,7 @@ If dependencies still don't persist after updating:
 ### Symptom
 ```bash
 # In embedded mode, updates may not reflect immediately
-bd update issue-1 --status in_progress
+bd update issue-1 --claim
 bd show issue-1
 # Shows: Status: open (not in_progress!)
 ```
@@ -129,14 +129,14 @@ This is **expected behavior** when using embedded mode. Understanding requires k
 **Option 1: Use server mode (recommended)**
 ```bash
 # With the Dolt server running, operations reflect immediately
-bd update issue-1 --status in_progress
+bd update issue-1 --claim
 bd show issue-1
 # Status reflects immediately
 ```
 
 **Option 2: Wait for sync (if using embedded mode)**
 ```bash
-bd update issue-1 --status in_progress
+bd update issue-1 --claim
 # Wait for server to sync
 sleep 5
 bd show issue-1
@@ -145,7 +145,7 @@ bd show issue-1
 
 **Option 3: Manual sync trigger**
 ```bash
-bd update issue-1 --status in_progress
+bd update issue-1 --claim
 # Trigger sync by exporting/importing
 bd export > /dev/null 2>&1  # Forces sync
 bd show issue-1

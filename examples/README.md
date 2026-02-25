@@ -46,7 +46,7 @@ cd git-hooks
 The basic agent workflow:
 
 1. **Find ready work**: `bd ready --json --limit 1`
-2. **Claim the task**: `bd update <id> --status in_progress --json`
+2. **Claim the task**: `bd update <id> --claim --json`
 3. **Do the work**: Execute the task
 4. **Discover new issues**: `bd create "Found bug" --json`
 5. **Link discoveries**: `bd dep add <new-id> <parent-id> --type discovered-from`

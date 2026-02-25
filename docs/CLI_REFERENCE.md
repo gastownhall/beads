@@ -96,7 +96,7 @@ bd create "Jira task" -t task -p 1 --external-ref "jira-PROJ-456" --json  # Cust
 
 ```bash
 # Update one or more issues
-bd update <id> [<id>...] --status in_progress --json
+bd update <id> [<id>...] --claim --json
 bd update <id> [<id>...] --priority 1 --json
 bd update <id> [<id>...] --spec-id "docs/specs/auth.md" --json
 
@@ -800,7 +800,7 @@ This makes blocking relationships visible without running `bd show` on each issu
 bd ready --json
 
 # 2. Claim issue
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 
 # 3. Work on it...
 
@@ -842,7 +842,7 @@ bd ready --json  # Find work
 
 # During session
 bd create "..." -p 1 --json
-bd update bd-42 --status in_progress --json
+bd update bd-42 --claim --json
 # ... work ...
 
 # End of session (IMPORTANT!)

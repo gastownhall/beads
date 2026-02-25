@@ -77,7 +77,7 @@ SUBCOMMANDS:
 		fmt.Printf("%s\n", ui.RenderAccent("Quick Examples:"))
 		fmt.Printf("  %s\n", ui.RenderMuted("# Create and track an issue"))
 		fmt.Printf("  bd create \"Fix login bug\" --priority 1\n")
-		fmt.Printf("  bd update bd-abc123 --status in_progress\n")
+		fmt.Printf("  bd update bd-abc123 --claim\n")
 		fmt.Printf("  bd close bd-abc123\n\n")
 
 		fmt.Printf("  %s\n", ui.RenderMuted("# See what needs doing"))

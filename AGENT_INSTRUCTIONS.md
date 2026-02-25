@@ -193,7 +193,7 @@ bd update <id> --acceptance "acceptance criteria"
 # Make changes (each write auto-commits to Dolt)
 bd create "Fix bug" -p 1
 bd create "Add tests" -p 1
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 bd close bd-40 --reason "Completed"
 
 # Push Dolt data to remote if configured

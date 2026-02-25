@@ -105,7 +105,7 @@ bd update <id> [flags]
 **Examples:**
 ```bash
 # Start work
-bd update bd-42 --status in_progress
+bd update bd-42 --claim
 
 # Escalate priority
 bd update bd-42 --priority 0 --add-label urgent
@@ -114,7 +114,7 @@ bd update bd-42 --priority 0 --add-label urgent
 bd update bd-42 --title "New title" --description="Updated description"
 
 # Multiple changes
-bd update bd-42 --status in_progress --priority 1 --add-label "in-review" --json
+bd update bd-42 --claim --priority 1 --add-label "in-review" --json
 ```
 
 ## bd close

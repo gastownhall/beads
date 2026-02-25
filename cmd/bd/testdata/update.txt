@@ -9,8 +9,8 @@ grep 'Created issue: test-' issue.txt
 # Extract ID using grep
 exec sh -c 'grep -oE "test-[a-z0-9]+" issue.txt > issue_id.txt'
 
-# Update the issue status
-exec sh -c 'bd update $(cat issue_id.txt) --status in_progress'
+# Claim the issue (sets status to in_progress)
+exec sh -c 'bd update $(cat issue_id.txt) --claim'
 stdout 'Updated issue:'
 
 # Verify the update

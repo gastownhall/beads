@@ -55,7 +55,7 @@ bd config set sync.branch beads-sync
 ```bash
 # Agents work normally - no changes needed!
 bd create "Fix authentication" -t bug -p 1
-bd update bd-a1b2 --status in_progress
+bd update bd-a1b2 --claim
 bd close bd-a1b2 "Fixed"
 ```
 

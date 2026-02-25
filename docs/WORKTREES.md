@@ -144,7 +144,7 @@ bd config set sync-branch beads-sync
 # Now server mode works safely in all worktrees
 cd feature-worktree
 bd create "Implement feature X" -t feature -p 1
-bd update bd-a1b2 --status in_progress
+bd update bd-a1b2 --claim
 bd ready  # Auto-syncs to beads-sync branch
 ```
 
