@@ -10,6 +10,7 @@ import pytest
 from beads_mcp.bd_client import BdClient, BdCommandError
 from beads_mcp.models import (
     AddDependencyParams,
+    ClaimIssueParams,
     CloseIssueParams,
     CreateIssueParams,
     ListIssuesParams,
@@ -145,16 +146,30 @@ async def test_update_issue(bd_client):
     # Update issue
     update_params = UpdateIssueParams(
         issue_id=created.id,
-        status="in_progress",
+        status="blocked",
         priority=0,
         title="Updated title",
     )
     updated = await bd_client.update(update_params)
 
     assert updated.id == created.id
-    assert updated.status == "in_progress"
+    assert updated.status == "blocked"
     assert updated.priority == 0
     assert updated.title == "Updated title"
+
+
+@pytest.mark.asyncio
+async def test_claim_issue(bd_client):
+    """Test atomic claim with real bd."""
+    created = await bd_client.create(
+        CreateIssueParams(title="Issue to claim", priority=2, issue_type="task")
+    )
+
+    claimed = await bd_client.claim(ClaimIssueParams(issue_id=created.id))
+
+    assert claimed.id == created.id
+    assert claimed.status == "in_progress"
+    assert claimed.assignee is not None
 
 
 @pytest.mark.asyncio

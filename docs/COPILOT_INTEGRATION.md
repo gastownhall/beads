@@ -132,10 +132,10 @@ There are 3 issues ready:
 2. [P2] bd-99: Add password reset flow
 3. [P3] bd-17: Update API documentation
 
-You: Let me work on bd-42. Mark it as in progress.
+You: Let me work on bd-42. Claim it.
 
-Copilot: [Calls beads_update]
-Updated bd-42 status to in_progress.
+Copilot: [Calls beads_claim]
+Claimed bd-42 and started work.
 
 You: [... work on the code ...]
 

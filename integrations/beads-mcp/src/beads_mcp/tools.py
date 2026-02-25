@@ -19,6 +19,7 @@ from .models import (
     AddDependencyParams,
     BlockedIssue,
     BlockedParams,
+    ClaimIssueParams,
     CloseIssueParams,
     CreateIssueParams,
     DependencyType,
@@ -487,8 +488,6 @@ async def beads_update_issue(
 ) -> Issue | list[Issue]:
     """Update an existing issue.
 
-    Claim work by setting status to 'in_progress'.
-    
     Note: Setting status to 'closed' or 'open' will automatically route to
     beads_close_issue() or beads_reopen_issue() respectively to ensure
     proper approval workflows are followed.
@@ -519,6 +518,19 @@ async def beads_update_issue(
         external_ref=external_ref,
     )
     return await client.update(params)
+
+
+async def beads_claim_issue(
+    issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+) -> Issue:
+    """Atomically claim an issue for work.
+
+    Uses `bd update <id> --claim` semantics: sets assignee + in_progress in one
+    compare-and-swap operation and fails if already claimed.
+    """
+    client = await _get_client()
+    params = ClaimIssueParams(issue_id=issue_id)
+    return await client.claim(params)
 
 
 async def beads_close_issue(

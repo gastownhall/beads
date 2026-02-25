@@ -8,6 +8,7 @@ import pytest
 from beads_mcp.bd_client import BdClient, BdCommandError, BdNotFoundError
 from beads_mcp.models import (
     AddDependencyParams,
+    ClaimIssueParams,
     CloseIssueParams,
     CreateIssueParams,
     ListIssuesParams,
@@ -396,6 +397,43 @@ async def test_update_invalid_response(bd_client, mock_process):
     ):
         params = UpdateIssueParams(issue_id="bd-1", status="in_progress")
         await bd_client.update(params)
+
+
+@pytest.mark.asyncio
+async def test_claim(bd_client, mock_process):
+    """Test claim method."""
+    issue_data = {
+        "id": "bd-1",
+        "title": "Claimed issue",
+        "status": "in_progress",
+        "priority": 1,
+        "issue_type": "bug",
+        "assignee": "tester",
+        "created_at": "2025-01-25T00:00:00Z",
+        "updated_at": "2025-01-25T00:00:00Z",
+    }
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(issue_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        params = ClaimIssueParams(issue_id="bd-1")
+        issue = await bd_client.claim(params)
+
+    assert issue.id == "bd-1"
+    assert issue.status == "in_progress"
+    assert issue.assignee == "tester"
+
+
+@pytest.mark.asyncio
+async def test_claim_invalid_response(bd_client, mock_process):
+    """Test claim method with invalid response type."""
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(["not a dict"]).encode(), b""))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_process),
+        pytest.raises(BdCommandError, match="Invalid response for claim"),
+    ):
+        params = ClaimIssueParams(issue_id="bd-1")
+        await bd_client.claim(params)
 
 
 @pytest.mark.asyncio

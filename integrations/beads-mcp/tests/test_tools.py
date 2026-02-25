@@ -9,6 +9,7 @@ from beads_mcp.models import BlockedIssue, Issue, Stats, StatsSummary
 from beads_mcp.tools import (
     beads_add_dependency,
     beads_blocked,
+    beads_claim_issue,
     beads_close_issue,
     beads_create_issue,
     beads_init,
@@ -142,18 +143,36 @@ async def test_beads_create_issue_with_labels(sample_issue):
 async def test_beads_update_issue(sample_issue):
     """Test beads_update_issue tool."""
     updated_issue = sample_issue.model_copy(
-        update={"status": "in_progress"}
+        update={"status": "blocked"}
     )
     mock_client = AsyncMock()
     mock_client.update = AsyncMock(return_value=updated_issue)
 
     with patch("beads_mcp.tools._get_client", return_value=mock_client):
-        result = await beads_update_issue(issue_id="bd-1", status="in_progress")
+        result = await beads_update_issue(issue_id="bd-1", status="blocked")
 
     # Result can be Issue or list[Issue] depending on routing
     assert isinstance(result, Issue)
-    assert result.status == "in_progress"
+    assert result.status == "blocked"
     mock_client.update.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_beads_claim_issue(sample_issue):
+    """Test beads_claim_issue tool."""
+    claimed_issue = sample_issue.model_copy(
+        update={"status": "in_progress", "assignee": "agent-a"}
+    )
+    mock_client = AsyncMock()
+    mock_client.claim = AsyncMock(return_value=claimed_issue)
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_claim_issue(issue_id="bd-1")
+
+    assert isinstance(result, Issue)
+    assert result.status == "in_progress"
+    assert result.assignee == "agent-a"
+    mock_client.claim.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -350,7 +369,7 @@ async def test_update_issue_multiple_fields(sample_issue):
     """Test beads_update_issue with multiple fields."""
     updated_issue = sample_issue.model_copy(
         update={
-            "status": "in_progress",
+            "status": "blocked",
             "priority": 0,
             "title": "Updated title",
         }
@@ -361,14 +380,14 @@ async def test_update_issue_multiple_fields(sample_issue):
     with patch("beads_mcp.tools._get_client", return_value=mock_client):
         result = await beads_update_issue(
             issue_id="bd-1",
-            status="in_progress",
+            status="blocked",
             priority=0,
             title="Updated title",
         )
 
     # Result can be Issue or list[Issue] depending on routing
     assert isinstance(result, Issue)
-    assert result.status == "in_progress"
+    assert result.status == "blocked"
     assert result.priority == 0
     assert result.title == "Updated title"
     mock_client.update.assert_called_once()

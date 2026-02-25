@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 IssueStatus = str
 IssueType = str
 DependencyType = Literal["blocks", "related", "parent-child", "discovered-from"]
-OperationAction = Literal["created", "updated", "closed", "reopened"]
+OperationAction = Literal["created", "updated", "claimed", "closed", "reopened"]
 
 
 # =============================================================================
@@ -184,6 +184,12 @@ class UpdateIssueParams(BaseModel):
     acceptance_criteria: str | None = None
     notes: str | None = None
     external_ref: str | None = None
+
+
+class ClaimIssueParams(BaseModel):
+    """Parameters for atomically claiming an issue."""
+
+    issue_id: str
 
 
 class CloseIssueParams(BaseModel):

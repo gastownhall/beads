@@ -41,6 +41,7 @@ from beads_mcp.models import (
 from beads_mcp.tools import (
     beads_add_dependency,
     beads_blocked,
+    beads_claim_issue,
     beads_close_issue,
     beads_create_issue,
     beads_detect_pollution,
@@ -314,6 +315,7 @@ _TOOL_CATALOG = {
     "list": "List issues with filters (status, priority, type)",
     "show": "Show full details for a specific issue",
     "create": "Create a new issue (bug, feature, task, epic)",
+    "claim": "Atomically claim an issue for work (assignee + in_progress)",
     "update": "Update issue status, priority, or assignee",
     "close": "Close/complete an issue",
     "reopen": "Reopen closed issues",
@@ -431,6 +433,17 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "returns": "OperationResult {id, action} or full Issue if brief=False",
             "example": "create(title='Fix auth bug', priority=1, issue_type='bug')"
         },
+        "claim": {
+            "name": "claim",
+            "description": "Atomically claim an issue for work",
+            "parameters": {
+                "issue_id": "str (required)",
+                "brief": "bool (default true) - Return OperationResult instead of full Issue",
+                "workspace_root": "str (optional)"
+            },
+            "returns": "OperationResult {id, action='claimed'} or full Issue if brief=False",
+            "example": "claim(issue_id='bd-a1b2')"
+        },
         "update": {
             "name": "update",
             "description": "Update an existing issue",
@@ -445,7 +458,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "workspace_root": "str (optional)"
             },
             "returns": "OperationResult {id, action} or full Issue if brief=False",
-            "example": "update(issue_id='bd-a1b2', status='in_progress')"
+            "example": "update(issue_id='bd-a1b2', status='blocked')"
         },
         "close": {
             "name": "close",
@@ -1009,9 +1022,33 @@ async def create_issue(
 
 
 @mcp.tool(
+    name="claim",
+    description="Atomically claim an issue for work (assignee + in_progress in one CAS-style operation).",
+)
+@with_workspace
+@require_context
+async def claim_issue(
+    issue_id: str,
+    workspace_root: str | None = None,
+    brief: bool = True,
+) -> Issue | OperationResult | None:
+    """Atomically claim an issue for work.
+
+    Args:
+        brief: If True (default), return minimal OperationResult; if False, return full Issue
+    """
+    issue = await beads_claim_issue(issue_id=issue_id)
+    if issue is None:
+        return None
+    if brief:
+        return OperationResult(id=issue.id, action="claimed")
+    return issue
+
+
+@mcp.tool(
     name="update",
     description="""Update an existing issue's status, priority, assignee, description, design notes,
-or acceptance criteria. Use this to claim work (set status=in_progress).""",
+or acceptance criteria. For atomic start-work semantics, prefer claim(issue_id).""",
 )
 @with_workspace
 @require_context

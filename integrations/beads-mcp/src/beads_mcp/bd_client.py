@@ -11,6 +11,7 @@ from typing import Any, List, Optional
 from .config import load_config
 from .models import (
     AddDependencyParams,
+    ClaimIssueParams,
     BlockedIssue,
     BlockedParams,
     CloseIssueParams,
@@ -120,6 +121,11 @@ class BdClientBase(ABC):
     @abstractmethod
     async def update(self, params: UpdateIssueParams) -> Issue:
         """Update an existing issue."""
+        pass
+
+    @abstractmethod
+    async def claim(self, params: ClaimIssueParams) -> Issue:
+        """Atomically claim an issue for work."""
         pass
 
     @abstractmethod
@@ -562,6 +568,27 @@ class BdCliClient(BdClientBase):
         
         if not isinstance(data, dict):
             raise BdCommandError(f"Invalid response for update {params.issue_id}")
+
+        return Issue.model_validate(data)
+
+    async def claim(self, params: ClaimIssueParams) -> Issue:
+        """Atomically claim an issue via bd update --claim.
+
+        Args:
+            params: Claim parameters
+
+        Returns:
+            Claimed issue
+        """
+        data = await self._run_command("update", params.issue_id, "--claim")
+        # bd update returns an array, extract first element
+        if isinstance(data, list):
+            if not data:
+                raise BdCommandError(f"Issue not found: {params.issue_id}")
+            data = data[0]
+
+        if not isinstance(data, dict):
+            raise BdCommandError(f"Invalid response for claim {params.issue_id}")
 
         return Issue.model_validate(data)
 

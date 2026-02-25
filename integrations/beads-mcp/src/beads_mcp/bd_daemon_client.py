@@ -12,6 +12,7 @@ from .models import (
     AddDependencyParams,
     BlockedIssue,
     BlockedParams,
+    ClaimIssueParams,
     CloseIssueParams,
     CreateIssueParams,
     InitParams,
@@ -325,6 +326,29 @@ class BdDaemonClient(BdClientBase):
 
         data = await self._send_request("update", args)
         return Issue(**(json.loads(data) if isinstance(data, str) else data))
+
+    async def claim(self, params: ClaimIssueParams) -> Issue:
+        """Atomically claim an issue.
+
+        Tries daemon RPC first. If daemon path does not support claim semantics,
+        falls back to CLI `bd update <id> --claim` to preserve atomic behavior.
+
+        Args:
+            params: Claim parameters
+
+        Returns:
+            Claimed issue
+        """
+        args: Dict[str, Any] = {"id": params.issue_id, "claim": True}
+        try:
+            data = await self._send_request("update", args)
+            return Issue(**(json.loads(data) if isinstance(data, str) else data))
+        except Exception:
+            # Fallback to CLI path to guarantee atomic claim semantics.
+            from .bd_client import BdCliClient
+
+            cli = BdCliClient(actor=self.actor, working_dir=self.working_dir)
+            return await cli.claim(params)
 
     async def close(self, params: CloseIssueParams) -> List[Issue]:
         """Close an issue.
