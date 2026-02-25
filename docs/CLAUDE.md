@@ -62,8 +62,10 @@ See `internal/types/types.go`:
 ## Common Development Commands
 
 ```bash
-# Build and test
-go build -o bd ./cmd/bd
+# Build and install bd to ~/.local/bin (canonical location)
+make install
+
+# Test
 go test ./...
 go test -coverprofile=coverage.out ./...
 
@@ -73,11 +75,14 @@ golangci-lint run ./...
 # Version management
 ./scripts/bump-version.sh 0.9.3 --commit
 
-# Local testing
-./bd init --prefix test
-./bd create "Test issue" -p 1
-./bd ready
+# Verify installed binary
+bd init --prefix test
+bd create "Test issue" -p 1
+bd ready
 ```
+
+> **Do NOT** use `go build -o bd` or `go install` directly — they create
+> stale binaries that shadow `~/.local/bin/bd`. Always use `make install`.
 
 ## Testing Philosophy
 
