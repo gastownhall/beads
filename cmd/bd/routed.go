@@ -15,6 +15,19 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+// isNotFoundErr returns true if the error indicates the issue was not found.
+// This covers both storage.ErrNotFound (from GetIssue) and the plain error
+// from ResolvePartialID which doesn't wrap the sentinel.
+func isNotFoundErr(err error) bool {
+	if errors.Is(err, storage.ErrNotFound) {
+		return true
+	}
+	if err != nil && strings.Contains(err.Error(), "no issue found matching") {
+		return true
+	}
+	return false
+}
+
 // beadsDirOverride returns true if BEADS_DIR is explicitly set in the environment.
 // When set, BEADS_DIR specifies the exact database to use and prefix-based routing
 // must be skipped. This matches bd list's behavior (which never routes) and the
@@ -43,11 +56,15 @@ func (r *RoutedResult) Close() {
 // using routes.jsonl for prefix-based routing if needed.
 // This enables cross-repo issue lookups (e.g., `bd show gt-xyz` from ~/gt).
 //
-// The resolution happens in the correct store based on the ID prefix.
+// The local store (typically the town database, hq) is checked first. This
+// ensures that beads created in hq — such as agent beads from gt doctor —
+// are resolved and modified in the canonical location, even when their prefix
+// would route to a rig-specific database. If not found locally, prefix-based
+// routing is tried as a fallback.
+//
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
 func resolveAndGetIssueWithRouting(ctx context.Context, localStore *dolt.DoltStore, id string) (*RoutedResult, error) {
-	// Step 1: Check if routing is needed based on ID prefix
 	if dbPath == "" {
 		// No routing without a database path - use local store
 		return resolveAndGetFromStore(ctx, localStore, id, false)
@@ -58,31 +75,37 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore *dolt.DoltSto
 		return resolveAndGetFromStore(ctx, localStore, id, false)
 	}
 
+	// Step 1: Try local store first.
+	// Agent beads may exist in the town database (hq) even when their prefix
+	// routes to a rig-specific database. Checking locally first ensures we
+	// operate on the canonical copy rather than a stale routed copy.
+	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
+	if err == nil {
+		return result, nil
+	}
+	if !isNotFoundErr(err) {
+		return nil, err
+	}
+
+	// Step 2: Not found locally — try prefix-based routing.
 	beadsDir := filepath.Dir(dbPath)
-	// Use dolt.NewFromConfig as the storage opener to respect backend configuration
 	routedStorage, err := routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, dolt.NewFromConfig)
 	if err != nil {
 		return nil, err
 	}
 
 	if routedStorage != nil {
-		// Step 2: Resolve and get from routed store
 		result, err := resolveAndGetFromStore(ctx, routedStorage.Storage, id, true)
 		if err != nil {
-			if !errors.Is(err, storage.ErrNotFound) {
-				_ = routedStorage.Close()
-				return nil, err
-			}
-			// Not found in routed store — fall through to local store
 			_ = routedStorage.Close()
-		} else {
-			result.closeFn = func() { _ = routedStorage.Close() }
-			return result, nil
+			return nil, err
 		}
+		result.closeFn = func() { _ = routedStorage.Close() }
+		return result, nil
 	}
 
-	// Step 3: Fall back to local store
-	return resolveAndGetFromStore(ctx, localStore, id, false)
+	// No routing matched — return not-found
+	return nil, storage.ErrNotFound
 }
 
 // resolveAndGetFromStore resolves a partial ID and gets the issue from a specific store.
