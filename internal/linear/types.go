@@ -169,16 +169,16 @@ type TeamResponse struct {
 
 // Project represents a project in Linear.
 type Project struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	SlugId      string `json:"slugId"`
-	URL         string `json:"url"`
-	State       string `json:"state"` // "planned", "started", "paused", "completed", "canceled"
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	SlugId      string  `json:"slugId"`
+	URL         string  `json:"url"`
+	State       string  `json:"state"` // "planned", "started", "paused", "completed", "canceled"
 	Progress    float64 `json:"progress"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
-	CompletedAt string `json:"completedAt,omitempty"`
+	CreatedAt   string  `json:"createdAt"`
+	UpdatedAt   string  `json:"updatedAt"`
+	CompletedAt string  `json:"completedAt,omitempty"`
 }
 
 // ProjectsResponse represents the response from projects query.

@@ -312,12 +312,8 @@ Also triggers Dolt push/pull if a remote is configured.`,
 			}
 		}
 
-		// Dolt push/pull if remote configured
-		if hasRemote, err := store.HasRemote(ctx, "origin"); err == nil && hasRemote {
-			if err := store.Push(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: dolt push failed: %v\n", err)
-			}
-		}
+		// Push is handled by daemon periodic task, not per-operation.
+		// Manual push available via: bd dolt push
 
 		if jsonOutput {
 			result := map[string]interface{}{

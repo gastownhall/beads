@@ -483,12 +483,12 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 		failures := 0
 		consecutiveTimeouts := 0
 		const (
-			batchSize           = 5  // Drop this many before pausing
-			batchPause          = 2 * time.Second
-			backoffPause        = 10 * time.Second
-			timeoutThreshold    = 3  // Consecutive timeouts before backoff
-			perDropTimeout      = 30 * time.Second
-			maxConsecFailures   = 10 // Stop after this many consecutive failures
+			batchSize         = 5 // Drop this many before pausing
+			batchPause        = 2 * time.Second
+			backoffPause      = 10 * time.Second
+			timeoutThreshold  = 3 // Consecutive timeouts before backoff
+			perDropTimeout    = 30 * time.Second
+			maxConsecFailures = 10 // Stop after this many consecutive failures
 		)
 
 		for i, name := range stale {

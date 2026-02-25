@@ -270,7 +270,7 @@ func cleanStalePIDFiles() {
 
 // cleanPIDFile handles a single PID file: removes if dead, kills if alive and is dolt.
 func cleanPIDFile(pidFile string) {
-	data, err := os.ReadFile(pidFile)
+	data, err := os.ReadFile(pidFile) //nolint:gosec // G304: path from test cleanup, not user input
 	if err != nil {
 		_ = os.Remove(pidFile)
 		return

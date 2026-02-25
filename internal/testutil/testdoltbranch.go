@@ -134,7 +134,7 @@ func SetupSharedTestDB(port int, dbName string) (*sql.DB, error) {
 		// Dolt may return error 1007 even with IF NOT EXISTS
 		errLower := strings.ToLower(err.Error())
 		if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("SetupSharedTestDB: create database: %w", err)
 		}
 	}

@@ -158,9 +158,9 @@ func FreshCloneImport(path string, bdVersion string) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	existing, err := store.SearchIssues(ctx, "", types.IssueFilter{})
-	if err == nil && len(existing) > 0 {
-		fmt.Printf("  → Database already has %d issues, skipping import\n", len(existing))
+	var issueCount int
+	if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&issueCount); err == nil && issueCount > 0 {
+		fmt.Printf("  → Database already has %d issues, skipping import\n", issueCount)
 		return nil
 	}
 
@@ -176,12 +176,13 @@ func FreshCloneImport(path string, bdVersion string) error {
 // importJSONLIntoStore reads a JSONL file and imports all issues into the Dolt store.
 // Used by both the Database fix (new store creation) and Fresh Clone fix (empty store).
 func importJSONLIntoStore(ctx context.Context, store *dolt.DoltStore, jsonlPath string) (int, error) {
-	data, err := os.ReadFile(jsonlPath) // #nosec G304 - workspace-controlled path
+	f, err := os.Open(jsonlPath) // #nosec G304 - workspace-controlled path
 	if err != nil {
-		return 0, fmt.Errorf("failed to read JSONL file: %w", err)
+		return 0, fmt.Errorf("failed to open JSONL file: %w", err)
 	}
+	defer f.Close()
 
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024) // 64MB max line
 	var issues []*types.Issue
 

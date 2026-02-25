@@ -2501,8 +2501,8 @@ func TestDiscovery_ReadyPriorityOutOfRange(t *testing.T) {
 		// or if it actually validated the range
 		ids := parseIDs(t, out)
 		if len(ids) == 0 {
-			t.Errorf("DISCOVERY: bd ready --priority 5 accepted without error, returned empty — "+
-				"should reject out-of-range priority (valid: 0-4). "+
+			t.Errorf("DISCOVERY: bd ready --priority 5 accepted without error, returned empty — " +
+				"should reject out-of-range priority (valid: 0-4). " +
 				"File: cmd/bd/ready.go:96-98 (no validation).")
 		}
 	}
@@ -2521,8 +2521,8 @@ func TestDiscovery_ChildrenNonexistentParentSilentEmpty(t *testing.T) {
 	// Bug: children of nonexistent parent returns empty with no error
 	_, err := w.tryRun("children", "nonexistent-parent-xyz", "--json")
 	if err == nil {
-		t.Errorf("DISCOVERY: bd children nonexistent-parent-xyz returned success — "+
-			"should error 'parent issue not found'. Compare: bd show nonexistent-parent-xyz errors. "+
+		t.Errorf("DISCOVERY: bd children nonexistent-parent-xyz returned success — " +
+			"should error 'parent issue not found'. Compare: bd show nonexistent-parent-xyz errors. " +
 			"File: cmd/bd/children.go (no parent existence validation).")
 	}
 }
@@ -2551,9 +2551,9 @@ func TestDiscovery_DuplicateCycleUndetected(t *testing.T) {
 		bData := parseJSON(t, w.run("show", b, "--json"))
 		bStatus, _ := bData[0]["status"].(string)
 		if bStatus == "closed" {
-			t.Errorf("DISCOVERY: bd duplicate created a cycle — A duplicate-of B, B duplicate-of A — "+
-				"no error detected. Both issues are duplicates of each other, which is semantically "+
-				"incoherent. File: cmd/bd/duplicate.go (no cycle check). "+
+			t.Errorf("DISCOVERY: bd duplicate created a cycle — A duplicate-of B, B duplicate-of A — " +
+				"no error detected. Both issues are duplicates of each other, which is semantically " +
+				"incoherent. File: cmd/bd/duplicate.go (no cycle check). " +
 				"Cycle detection at dependencies.go:54 only checks 'blocks' type.")
 		}
 	}
@@ -2642,8 +2642,8 @@ func TestDiscovery_SearchStatusCommaNotParsed(t *testing.T) {
 	if err == nil {
 		commaIDs := parseIDs(t, commaOut)
 		if len(commaIDs) == 0 {
-			t.Errorf("DISCOVERY: bd search --status 'open,closed' silently returns empty — "+
-				"same comma-status bug as list (BUG-44). 'open,closed' treated as single "+
+			t.Errorf("DISCOVERY: bd search --status 'open,closed' silently returns empty — " +
+				"same comma-status bug as list (BUG-44). 'open,closed' treated as single " +
 				"literal status value. File: cmd/bd/search.go:53 (GetString not GetStringSlice).")
 		}
 	}
@@ -2668,8 +2668,8 @@ func TestDiscovery_ListTypeNonexistentSilentEmpty(t *testing.T) {
 	if err == nil {
 		ids := parseIDs(t, out)
 		if len(ids) == 0 {
-			t.Errorf("DISCOVERY: bd list --type 'nonexistent_type_xyz' returned empty with no error — "+
-				"should reject unknown type. Compare: bd create --type nonexistent fails with validation. "+
+			t.Errorf("DISCOVERY: bd list --type 'nonexistent_type_xyz' returned empty with no error — " +
+				"should reject unknown type. Compare: bd create --type nonexistent fails with validation. " +
 				"File: cmd/bd/list.go (no type validation on filter).")
 		}
 	}
@@ -2736,8 +2736,8 @@ func TestDiscovery_BlockedNonexistentParentSilentEmpty(t *testing.T) {
 	// Bug: blocked --parent nonexistent returns empty with no error
 	_, err = w.tryRun("blocked", "--parent", "nonexistent-parent-xyz", "--json")
 	if err == nil {
-		t.Errorf("DISCOVERY: bd blocked --parent nonexistent-parent-xyz returned success — "+
-			"should error 'parent not found'. User can't tell if parent has no blocked children "+
+		t.Errorf("DISCOVERY: bd blocked --parent nonexistent-parent-xyz returned success — " +
+			"should error 'parent not found'. User can't tell if parent has no blocked children " +
 			"or if parent doesn't exist. File: cmd/bd/ready.go:218-245 (no parent validation).")
 	}
 }
