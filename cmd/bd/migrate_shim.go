@@ -52,6 +52,29 @@ func doShimMigrate(beadsDir string) {
 		return
 	}
 
+	// Guard: if the file is empty (0 bytes), it's not a real SQLite database.
+	// This happens when a process creates beads.db but crashes before writing.
+	// Remove the empty file to prevent repeated failed migration attempts.
+	if info, err := os.Stat(sqlitePath); err == nil && info.Size() == 0 {
+		debug.Logf("shim-migrate: removing empty %s (not a valid database)", base)
+		_ = os.Remove(sqlitePath)
+		return
+	}
+
+	// Guard: if metadata.json already indicates Dolt backend, the beads.db is stale
+	// leftover — not a database that needs migrating. This covers dolt-server mode
+	// where there is no local dolt/ directory (data is stored remotely on the Dolt
+	// SQL server), so the dolt/ directory check below would miss it.
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Backend == configfile.BackendDolt {
+		migratedPath := sqlitePath + ".migrated"
+		if _, err := os.Stat(migratedPath); err != nil {
+			if err := os.Rename(sqlitePath, migratedPath); err == nil {
+				debug.Logf("shim-migrate: renamed stale %s (backend already dolt)", base)
+			}
+		}
+		return
+	}
+
 	// Check if Dolt already exists — if so, SQLite is leftover from a prior migration
 	doltPath := filepath.Join(beadsDir, "dolt")
 	if _, err := os.Stat(doltPath); err == nil {

@@ -331,6 +331,120 @@ func TestAutoMigrate_Idempotent(t *testing.T) {
 	doAutoMigrateSQLiteToDolt(beadsDir)
 }
 
+func TestAutoMigrate_SkipsWhenBackendAlreadyDolt(t *testing.T) {
+	// When metadata.json already says backend=dolt (dolt-server mode, no local dolt/ dir),
+	// a stale beads.db should be cleaned up without attempting SQLite extraction.
+	// This is the exact scenario from the gastown rig: dolt-server mode stores data
+	// remotely, so there's no local dolt/ directory. The migration code was incorrectly
+	// trying to extract from the (empty) beads.db because it only checked for dolt/ dir,
+	// not the configured backend.
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write metadata.json indicating dolt backend with server mode (no local dolt/ dir)
+	cfg := &configfile.Config{
+		Backend:        configfile.BackendDolt,
+		Database:       "dolt",
+		DoltMode:       configfile.DoltModeServer,
+		DoltDatabase:   "gastown",
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3307,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+
+	// Create a stale beads.db with some content (non-zero, simulates a leftover
+	// SQLite file that's not empty but is not a valid database either)
+	sqlitePath := filepath.Join(beadsDir, "beads.db")
+	if err := os.WriteFile(sqlitePath, []byte("not-a-real-database"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run auto-migration — should NOT attempt SQLite extraction
+	doAutoMigrateSQLiteToDolt(beadsDir)
+
+	// beads.db should be renamed to .migrated (cleaned up)
+	if _, err := os.Stat(sqlitePath); !os.IsNotExist(err) {
+		t.Error("beads.db should have been renamed to .migrated when backend is already dolt")
+	}
+	if _, err := os.Stat(sqlitePath + ".migrated"); err != nil {
+		t.Errorf("beads.db.migrated should exist: %v", err)
+	}
+
+	// metadata.json should be UNCHANGED (not overwritten by migration)
+	updatedCfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("failed to reload config: %v", err)
+	}
+	if updatedCfg.DoltDatabase != "gastown" {
+		t.Errorf("dolt_database should still be 'gastown', got %q (migration overwrote config)", updatedCfg.DoltDatabase)
+	}
+	if updatedCfg.DoltMode != configfile.DoltModeServer {
+		t.Errorf("dolt_mode should still be 'server', got %q", updatedCfg.DoltMode)
+	}
+}
+
+func TestAutoMigrate_SkipsWhenBackendDoltEmbedded(t *testing.T) {
+	// Same as above but for embedded mode where dolt/ dir DOES exist.
+	// Even with a stale beads.db, if metadata says dolt, skip extraction.
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		Backend:  configfile.BackendDolt,
+		Database: "dolt",
+		DoltMode: configfile.DoltModeEmbedded,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+
+	sqlitePath := filepath.Join(beadsDir, "beads.db")
+	if err := os.WriteFile(sqlitePath, []byte("fake-sqlite-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	doAutoMigrateSQLiteToDolt(beadsDir)
+
+	// beads.db should be renamed (the existing dolt/ check handles this,
+	// but the metadata check should also catch it independently)
+	if _, err := os.Stat(sqlitePath); !os.IsNotExist(err) {
+		t.Error("beads.db should have been renamed")
+	}
+}
+
+func TestAutoMigrate_ZeroByteBeadsDB(t *testing.T) {
+	// A 0-byte beads.db is not a valid SQLite database. The migration should
+	// clean it up without attempting extraction (which would fail with
+	// "no such table: issues" and print a confusing warning).
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// No metadata.json, no dolt/ — just a bare 0-byte beads.db
+	sqlitePath := filepath.Join(beadsDir, "beads.db")
+	if err := os.WriteFile(sqlitePath, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	doAutoMigrateSQLiteToDolt(beadsDir)
+
+	// 0-byte file should be removed (not a real database)
+	if _, err := os.Stat(sqlitePath); !os.IsNotExist(err) {
+		t.Error("0-byte beads.db should have been removed")
+	}
+	// Should NOT create a dolt/ directory
+	if _, err := os.Stat(filepath.Join(beadsDir, "dolt")); !os.IsNotExist(err) {
+		t.Error("dolt/ should not be created for a 0-byte SQLite file")
+	}
+}
+
 // Verify the migrated metadata.json is valid JSON
 func TestAutoMigrate_MetadataJSONValid(t *testing.T) {
 	if testDoltServerPort == 0 {
