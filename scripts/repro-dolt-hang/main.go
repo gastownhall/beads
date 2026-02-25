@@ -155,7 +155,7 @@ func runMode(ctx context.Context, mode string, workers, opsPerWorker int) runSta
 	if err != nil {
 		log.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	if err := setupDoltDB(ctx, tmpDir); err != nil {
 		log.Fatalf("Failed to setup Dolt DB: %v", err)
@@ -243,7 +243,7 @@ func setupDoltDB(ctx context.Context, dir string) error {
 }
 
 func startDoltServer(dir string) (*exec.Cmd, error) {
-	logFile, err := os.Create(filepath.Join(dir, "server.log"))
+	logFile, err := os.Create(filepath.Join(dir, "server.log")) //nolint:gosec // G304: dir is a temp directory we just created
 	if err != nil {
 		return nil, err
 	}

@@ -1203,35 +1203,54 @@ func seedCounterFromExistingIssuesTx(ctx context.Context, tx *sql.Tx, prefix str
 	return nil
 }
 
-// nextCounterIDTx increments and returns the next sequential issue ID for the
-// given prefix within an existing transaction. Returns the full ID string
+// nextCounterIDTx atomically increments and returns the next sequential issue ID
+// for the given prefix within an existing transaction. Returns the full ID string
 // (e.g., "bd-1"). Used by both generateIssueID and generateIssueIDInTable.
 func nextCounterIDTx(ctx context.Context, tx *sql.Tx, prefix string) (string, error) {
-	var lastID int
-	err := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
-	if err == sql.ErrNoRows {
-		// No counter row yet - seed from existing issues before proceeding.
+	// Increment atomically at the DB level to avoid duplicate IDs under
+	// concurrent transactions (GH#2002). "last_id = last_id + 1" is evaluated
+	// by the DB engine atomically within Dolt's MVCC.
+
+	// Attempt atomic increment of an existing counter row.
+	res, err := tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?", prefix)
+	if err != nil {
+		return "", fmt.Errorf("failed to increment issue counter for prefix %q: %w", prefix, err)
+	}
+
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("failed to check rows affected for issue counter prefix %q: %w", prefix, err)
+	}
+
+	if rowsAffected == 0 {
+		// No counter row yet - seed from existing issues before proceeding to
+		// avoid collisions with manually-created sequential IDs (GH#2002).
 		if seedErr := seedCounterFromExistingIssuesTx(ctx, tx, prefix); seedErr != nil {
 			return "", fmt.Errorf("failed to seed issue counter for prefix %q: %w", prefix, seedErr)
 		}
-		// Re-read the (possibly just-seeded) counter value.
-		err = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&lastID)
-		if err != nil && err != sql.ErrNoRows {
-			return "", fmt.Errorf("failed to read issue counter after seeding for prefix %q: %w", prefix, err)
+		// Retry the atomic increment after seeding.
+		res, err = tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?", prefix)
+		if err != nil {
+			return "", fmt.Errorf("failed to increment issue counter after seeding for prefix %q: %w", prefix, err)
 		}
-		if err == sql.ErrNoRows {
-			lastID = 0
+		rowsAffected, err = res.RowsAffected()
+		if err != nil {
+			return "", fmt.Errorf("failed to check rows affected after seeding for prefix %q: %w", prefix, err)
 		}
-	} else if err != nil {
-		return "", fmt.Errorf("failed to read issue counter for prefix %q: %w", prefix, err)
+		if rowsAffected == 0 {
+			// Seeding found no existing numeric IDs -- insert the initial row.
+			_, err = tx.ExecContext(ctx, "INSERT INTO issue_counter (prefix, last_id) VALUES (?, 1)", prefix)
+			if err != nil {
+				return "", fmt.Errorf("failed to insert initial issue counter for prefix %q: %w", prefix, err)
+			}
+		}
 	}
-	nextID := lastID + 1
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE last_id = ?
-	`, prefix, nextID, nextID)
+
+	// Read back the value that was atomically set by the DB engine.
+	var nextID int
+	err = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&nextID)
 	if err != nil {
-		return "", fmt.Errorf("failed to update issue counter for prefix %q: %w", prefix, err)
+		return "", fmt.Errorf("failed to read issue counter after increment for prefix %q: %w", prefix, err)
 	}
 	return fmt.Sprintf("%s-%d", prefix, nextID), nil
 }
