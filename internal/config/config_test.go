@@ -1704,77 +1704,78 @@ sync:
 		t.Errorf("GetNamedRoles() = %v, want nil when not set", got)
 	}
 }
+
 // TestGetStringFromDir verifies that GetStringFromDir reads config.yaml from
 // the given beadsDir without using or modifying global viper state.
 func TestGetStringFromDir(t *testing.T) {
-        writeConfig := func(t *testing.T, dir, content string) {
-                t.Helper()
-                if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o600); err != nil {
-                        t.Fatalf("writeConfig: %v", err)
-                }
-        }
+	writeConfig := func(t *testing.T, dir, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o600); err != nil {
+			t.Fatalf("writeConfig: %v", err)
+		}
+	}
 
-        t.Run("simple string value", func(t *testing.T) {
-                dir := t.TempDir()
-                writeConfig(t, dir, "dolt:\n  auto-start: \"false\"\n")
-                if got := GetStringFromDir(dir, "dolt.auto-start"); got != "false" {
-                        t.Errorf("got %q, want %q", got, "false")
-                }
-        })
+	t.Run("simple string value", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt:\n  auto-start: \"false\"\n")
+		if got := GetStringFromDir(dir, "dolt.auto-start"); got != "false" {
+			t.Errorf("got %q, want %q", got, "false")
+		}
+	})
 
-        t.Run("nested key with multiple dots", func(t *testing.T) {
-                dir := t.TempDir()
-                writeConfig(t, dir, "a:\n  b:\n    c: value\n")
-                if got := GetStringFromDir(dir, "a.b.c"); got != "value" {
-                        t.Errorf("got %q, want %q", got, "value")
-                }
-        })
+	t.Run("nested key with multiple dots", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "a:\n  b:\n    c: value\n")
+		if got := GetStringFromDir(dir, "a.b.c"); got != "value" {
+			t.Errorf("got %q, want %q", got, "value")
+		}
+	})
 
-        t.Run("non-existent file returns empty string", func(t *testing.T) {
-                dir := t.TempDir()
-                if got := GetStringFromDir(dir, "dolt.auto-start"); got != "" {
-                        t.Errorf("got %q, want %q", got, "")
-                }
-        })
+	t.Run("non-existent file returns empty string", func(t *testing.T) {
+		dir := t.TempDir()
+		if got := GetStringFromDir(dir, "dolt.auto-start"); got != "" {
+			t.Errorf("got %q, want %q", got, "")
+		}
+	})
 
-        t.Run("non-existent key returns empty string", func(t *testing.T) {
-                dir := t.TempDir()
-                writeConfig(t, dir, "dolt:\n  idle-timeout: 30m\n")
-                if got := GetStringFromDir(dir, "dolt.auto-start"); got != "" {
-                        t.Errorf("got %q, want %q", got, "")
-                }
-        })
+	t.Run("non-existent key returns empty string", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt:\n  idle-timeout: 30m\n")
+		if got := GetStringFromDir(dir, "dolt.auto-start"); got != "" {
+			t.Errorf("got %q, want %q", got, "")
+		}
+	})
 
-        t.Run("YAML boolean coerced to string", func(t *testing.T) {
-                dir := t.TempDir()
-                writeConfig(t, dir, "dolt:\n  auto-start: false\n") // unquoted YAML bool
-                got := GetStringFromDir(dir, "dolt.auto-start")
-                if got != "false" {
-                        t.Errorf("got %q, want %q", got, "false")
-                }
-        })
+	t.Run("YAML boolean coerced to string", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt:\n  auto-start: false\n") // unquoted YAML bool
+		got := GetStringFromDir(dir, "dolt.auto-start")
+		if got != "false" {
+			t.Errorf("got %q, want %q", got, "false")
+		}
+	})
 
-        t.Run("YAML integer coerced to string", func(t *testing.T) {
-                dir := t.TempDir()
-                writeConfig(t, dir, "server:\n  port: 3307\n")
-                if got := GetStringFromDir(dir, "server.port"); got != "3307" {
-                        t.Errorf("got %q, want %q", got, "3307")
-                }
-        })
+	t.Run("YAML integer coerced to string", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "server:\n  port: 3307\n")
+		if got := GetStringFromDir(dir, "server.port"); got != "3307" {
+			t.Errorf("got %q, want %q", got, "3307")
+		}
+	})
 
-        t.Run("malformed YAML returns empty string", func(t *testing.T) {
-                dir := t.TempDir()
-                writeConfig(t, dir, "dolt: [\nbad yaml\n")
-                if got := GetStringFromDir(dir, "dolt.auto-start"); got != "" {
-                        t.Errorf("got %q, want %q", got, "")
-                }
-        })
+	t.Run("malformed YAML returns empty string", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt: [\nbad yaml\n")
+		if got := GetStringFromDir(dir, "dolt.auto-start"); got != "" {
+			t.Errorf("got %q, want %q", got, "")
+		}
+	})
 
-        t.Run("top-level key (no dot)", func(t *testing.T) {
-                dir := t.TempDir()
-                writeConfig(t, dir, "actor: alice\n")
-                if got := GetStringFromDir(dir, "actor"); got != "alice" {
-                        t.Errorf("got %q, want %q", got, "alice")
-                }
-        })
+	t.Run("top-level key (no dot)", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "actor: alice\n")
+		if got := GetStringFromDir(dir, "actor"); got != "alice" {
+			t.Errorf("got %q, want %q", got, "alice")
+		}
+	})
 }
