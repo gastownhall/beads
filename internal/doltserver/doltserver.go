@@ -413,7 +413,7 @@ func Start(beadsDir string) (*State, error) {
 	}
 
 	// Open log file
-	logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
 	if err != nil {
 		return nil, fmt.Errorf("opening log file: %w", err)
 	}

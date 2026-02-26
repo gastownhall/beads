@@ -33,7 +33,7 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 	// doesn't support prepared-statement parameters for SHOW commands.
 	// Table/column names come from internal constants, not user input.
 	// #nosec G202 -- table and column names come from internal constants, not user input.
-	rows, err := db.Query("SHOW COLUMNS FROM `" + table + "` LIKE '" + column + "'")
+	rows, err := db.Query("SHOW COLUMNS FROM `" + table + "` LIKE '" + column + "'") //nolint:gosec // G202: table/column are internal constants, not user input
 	if err != nil {
 		if isTableNotFoundError(err) {
 			return false, nil
@@ -54,7 +54,7 @@ func tableExists(db *sql.DB, table string) (bool, error) {
 	// doesn't support prepared-statement parameters for SHOW commands.
 	// Table names come from internal constants, not user input.
 	// #nosec G202 -- table names come from internal constants, not user input.
-	rows, err := db.Query("SHOW TABLES LIKE '" + table + "'")
+	rows, err := db.Query("SHOW TABLES LIKE '" + table + "'") //nolint:gosec // G202: table name is an internal constant, not user input
 	if err != nil {
 		return false, fmt.Errorf("failed to check table %s: %w", table, err)
 	}
