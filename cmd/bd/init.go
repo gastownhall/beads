@@ -36,8 +36,8 @@ has already created the database.
 
 With --stealth: configures per-repository git settings for invisible beads usage:
   • .git/info/exclude to prevent beads files from being committed
-  • Claude Code settings with bd onboard instruction
   Perfect for personal use without affecting repo collaborators.
+  To set up a specific AI tool, run: bd setup <claude|cursor|aider|...> --stealth
 
 Beads requires a running dolt sql-server for database operations. If a server is detected
 on port 3307 or 3306, it is used automatically. Set connection details with --server-host,
