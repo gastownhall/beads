@@ -62,6 +62,31 @@ func ResolveServerDir(beadsDir string) string {
 	return resolveServerDir(beadsDir)
 }
 
+// ResolveDoltDir returns the dolt data directory for the given beadsDir.
+// It checks the BEADS_DOLT_DATA_DIR env var and metadata.json for a custom
+// dolt_data_dir, falling back to the default .beads/dolt/ path.
+//
+// Note: we check for metadata.json existence before calling configfile.Load
+// to avoid triggering the config.json → metadata.json migration side effect,
+// which would create files in the .beads/ directory unexpectedly.
+func ResolveDoltDir(beadsDir string) string {
+	// Check env var first (highest priority)
+	if d := os.Getenv("BEADS_DOLT_DATA_DIR"); d != "" {
+		if filepath.IsAbs(d) {
+			return d
+		}
+		return filepath.Join(beadsDir, d)
+	}
+	// Only load config if metadata.json exists (avoids legacy migration side effect)
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	if _, err := os.Stat(metadataPath); err == nil {
+		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+			return cfg.DatabasePath(beadsDir)
+		}
+	}
+	return filepath.Join(beadsDir, "dolt")
+}
+
 // Config holds the server configuration.
 type Config struct {
 	BeadsDir string // Path to .beads/ directory
@@ -156,7 +181,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 	// Under Gas Town, check the daemon PID file first
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
 		daemonPidFile := filepath.Join(gtRoot, "daemon", "dolt.pid")
-		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil {
+		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path constructed from trusted GT_ROOT env
 			if daemonPID, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && daemonPID == pid {
 				return pid, nil // daemon-managed server — adopt it
 			}
@@ -165,7 +190,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 
 	// Check if the process is using our data directory (CWD matches our dolt dir).
 	// dolt sql-server is started with cmd.Dir = doltDir, so CWD is the data dir.
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := ResolveDoltDir(beadsDir)
 	if isProcessInDir(pid, doltDir) {
 		return pid, nil // our server — adopt it
 	}
@@ -256,7 +281,7 @@ func IsRunning(beadsDir string) (*State, error) {
 	// the server and writes its PID to a different location.
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
 		daemonPidFile := filepath.Join(gtRoot, "daemon", "dolt.pid")
-		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil {
+		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path constructed from trusted GT_ROOT env
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
 				if isProcessAlive(pid) && isDoltProcess(pid) {
 					port := readPortFile(beadsDir)
@@ -267,7 +292,7 @@ func IsRunning(beadsDir string) (*State, error) {
 						Running: true,
 						PID:     pid,
 						Port:    port,
-						DataDir: filepath.Join(beadsDir, "dolt"),
+						DataDir: ResolveDoltDir(beadsDir),
 					}, nil
 				}
 			}
@@ -314,7 +339,7 @@ func IsRunning(beadsDir string) (*State, error) {
 		Running: true,
 		PID:     pid,
 		Port:    port,
-		DataDir: filepath.Join(beadsDir, "dolt"),
+		DataDir: ResolveDoltDir(beadsDir),
 	}, nil
 }
 
@@ -353,7 +378,7 @@ func touchActivity(beadsDir string) {
 // Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := ResolveDoltDir(beadsDir)
 
 	// Acquire exclusive lock to prevent concurrent starts
 	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0600)
@@ -413,7 +438,7 @@ func Start(beadsDir string) (*State, error) {
 	}
 
 	// Open log file
-	logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
 	if err != nil {
 		return nil, fmt.Errorf("opening log file: %w", err)
 	}
@@ -423,12 +448,12 @@ func Start(beadsDir string) (*State, error) {
 	actualPort := cfg.Port
 	adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
 	if reclaimErr != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
 	}
 	if adoptPID > 0 {
 		// Existing server is ours (same data dir or daemon-managed) — adopt it
-		logFile.Close()
+		_ = logFile.Close()
 		_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
 		_ = writePortFile(beadsDir, actualPort)
 		touchActivity(beadsDir)
@@ -654,7 +679,7 @@ func FlushWorkingSet(host string, port int) error {
 		}
 		databases = append(databases, name)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	if len(databases) == 0 {
 		return nil
@@ -774,7 +799,7 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 	// Under Gas Town, also check the daemon-managed PID file
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
 		daemonPidFile := filepath.Join(gtRoot, "daemon", "dolt.pid")
-		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil {
+		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path constructed from trusted GT_ROOT env
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
 				canonicalPIDs[pid] = true
 			}

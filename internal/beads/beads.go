@@ -175,14 +175,14 @@ func findLocalBeadsDir() string {
 		return utils.CanonicalizePath(beadsDir)
 	}
 
-	// For worktrees, check worktree-local redirect first (per-worktree override)
+	// For worktrees, check worktree-local redirect first (per-worktree override).
+	// Returns the raw worktree .beads dir (not the resolved target) since
+	// findLocalBeadsDir doesn't follow redirects — callers use FollowRedirect.
 	if git.IsWorktree() {
-		worktreeRoot := git.GetRepoRoot()
-		if worktreeRoot != "" {
-			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
-			redirectFile := filepath.Join(worktreeBeadsDir, "redirect")
-			if _, err := os.Stat(redirectFile); err == nil {
-				return worktreeBeadsDir
+		if root := git.GetRepoRoot(); root != "" {
+			wt := filepath.Join(root, ".beads")
+			if _, err := os.Stat(filepath.Join(wt, "redirect")); err == nil {
+				return wt
 			}
 		}
 	}
@@ -360,21 +360,11 @@ func FindBeadsDir() string {
 	// 2. For worktrees, check worktree-local redirect first, then main repo
 	var mainRepoRoot string
 	if git.IsWorktree() {
-		// 2a. Per-worktree redirect override: if the worktree root has a
-		// .beads/redirect, follow it. This allows each worktree to
-		// independently point to a different beads directory (e.g., topics).
-		worktreeRoot := findGitRoot()
-		if worktreeRoot != "" {
-			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
-			redirectFile := filepath.Join(worktreeBeadsDir, "redirect")
-			if _, err := os.Stat(redirectFile); err == nil {
-				target := FollowRedirect(worktreeBeadsDir)
-				if target != worktreeBeadsDir {
-					if info, err := os.Stat(target); err == nil && info.IsDir() {
-						if hasBeadsProjectFiles(target) {
-							return target
-						}
-					}
+		// 2a. Per-worktree redirect override
+		if target := worktreeRedirectTarget(); target != "" {
+			if info, err := os.Stat(target); err == nil && info.IsDir() {
+				if hasBeadsProjectFiles(target) {
+					return target
 				}
 			}
 		}
@@ -464,6 +454,33 @@ func findGitRoot() string {
 	return git.GetRepoRoot()
 }
 
+// worktreeRedirectTarget returns the resolved redirect target for the current
+// worktree's .beads/redirect file, or empty string if not in a worktree or no
+// redirect exists. This centralizes the per-worktree redirect override logic
+// used by findLocalBeadsDir, FindBeadsDir, and findDatabaseInTree.
+func worktreeRedirectTarget() string {
+	if !git.IsWorktree() {
+		return ""
+	}
+	worktreeRoot := git.GetRepoRoot()
+	if worktreeRoot == "" {
+		return ""
+	}
+	worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
+	redirectFile := filepath.Join(worktreeBeadsDir, "redirect")
+	if _, err := os.Stat(redirectFile); err != nil {
+		return ""
+	}
+	target := FollowRedirect(worktreeBeadsDir)
+	if target == worktreeBeadsDir {
+		// Redirect file exists but FollowRedirect returned the original path
+		// (empty/invalid content). Return the raw .beads dir so callers that
+		// only need to know a redirect *exists* (findLocalBeadsDir) still work.
+		return worktreeBeadsDir
+	}
+	return target
+}
+
 // findDatabaseInTree walks up the directory tree looking for .beads/*.db
 // Stops at the git repository root to avoid finding unrelated databases.
 // For worktrees, searches the main repository root first, then falls back to worktree.
@@ -485,19 +502,10 @@ func findDatabaseInTree() string {
 	// Check if we're in a git worktree
 	var mainRepoRoot string
 	if git.IsWorktree() {
-		// Per-worktree redirect override: if the worktree root has a
-		// .beads/redirect, follow it before checking the main repo.
-		worktreeRoot := findGitRoot()
-		if worktreeRoot != "" {
-			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
-			redirectFile := filepath.Join(worktreeBeadsDir, "redirect")
-			if _, err := os.Stat(redirectFile); err == nil {
-				target := FollowRedirect(worktreeBeadsDir)
-				if target != worktreeBeadsDir {
-					if dbPath := findDatabaseInBeadsDir(target, true); dbPath != "" {
-						return dbPath
-					}
-				}
+		// Per-worktree redirect override
+		if target := worktreeRedirectTarget(); target != "" {
+			if dbPath := findDatabaseInBeadsDir(target, true); dbPath != "" {
+				return dbPath
 			}
 		}
 

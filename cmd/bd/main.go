@@ -84,6 +84,10 @@ var (
 	// This prevents a redundant auto-commit attempt in PersistentPostRun.
 	commandDidExplicitDoltCommit bool
 
+	// commandDidExplicitPush is set when a command already pushed to the remote
+	// (e.g., bd dolt push). This prevents a redundant auto-push in PersistentPostRun.
+	commandDidExplicitPush bool
+
 	// commandDidWriteTipMetadata is set when a command records a tip as "shown" by writing
 	// metadata (tip_*_last_shown). This will be used to create a separate Dolt commit for
 	// tip writes, even when the main command is read-only.
@@ -239,9 +243,10 @@ var rootCmd = &cobra.Command{
 		// Initialize CommandContext to hold runtime state (replaces scattered globals)
 		initCommandContext()
 
-		// Reset per-command write tracking (used by Dolt auto-commit).
+		// Reset per-command write tracking (used by Dolt auto-commit and auto-push).
 		commandDidWrite.Store(false)
 		commandDidExplicitDoltCommit = false
+		commandDidExplicitPush = false
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
 
@@ -378,10 +383,12 @@ var rootCmd = &cobra.Command{
 		cmdName := cmd.Name()
 		if cmd.Parent() != nil {
 			parentName := cmd.Parent().Name()
-			if parentName == "dolt" && slices.Contains(needsStoreDoltSubcommands, cmdName) {
-				// GH#2042: dolt push/pull/commit need the store — fall through to init
-			} else if slices.Contains(noDbCommands, parentName) {
-				return
+			if parentName == "dolt" {
+				if slices.Contains(needsStoreDoltSubcommands, cmdName) {
+					// GH#2042: dolt push/pull/commit need the store — fall through to init
+				} else if slices.Contains(noDbCommands, parentName) {
+					return
+				}
 			}
 		}
 		if slices.Contains(noDbCommands, cmdName) {
@@ -480,20 +487,24 @@ var rootCmd = &cobra.Command{
 		// the database (which breaks file watchers).
 		useReadOnly := isReadOnlyCommand(cmd.Name())
 
-		// Auto-migrate database on version bump
-		// Skip for read-only commands - they can't write anyway
-		if !useReadOnly {
-			autoMigrateOnVersionBump(filepath.Dir(dbPath))
-		}
+		// Auto-migrate database on version bump (bd-jgxi).
+		// Runs for ALL commands (including read-only ones) because the migration
+		// opens its own store connection, writes the version metadata, commits it,
+		// and closes BEFORE the main store is opened. This ensures bd doctor and
+		// read-only commands see the correct version after a CLI upgrade.
+		beadsDir := filepath.Dir(dbPath)
+
+		autoMigrateOnVersionBump(beadsDir)
 
 		// Initialize direct storage access
 		var err error
-		beadsDir := filepath.Dir(dbPath)
 
-		// Create Dolt storage config
-		doltPath := filepath.Join(beadsDir, "dolt")
+		// Create Dolt storage config — resolve dolt data dir which may be
+		// on a different filesystem (e.g., ext4 for performance on WSL).
+		doltPath := doltserver.ResolveDoltDir(beadsDir)
 		doltCfg := &dolt.Config{
 			ReadOnly: useReadOnly,
+			BeadsDir: beadsDir,
 		}
 
 		// Load config to get database name and server connection settings
@@ -623,6 +634,11 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// Auto-push: after any dolt commit (auto or explicit), push to remote if configured.
+		if commandDidWrite.Load() || commandDidExplicitDoltCommit {
+			maybeAutoPush(rootCtx)
+		}
+
 		// Signal that store is closing (prevents background flush from accessing closed store)
 		storeMutex.Lock()
 		storeActive = false
@@ -725,6 +741,7 @@ func flushBatchCommitOnShutdown() {
 		fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", commitErr)
 	} else if committed {
 		fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
+		maybeAutoPush(ctx)
 	}
 }
 

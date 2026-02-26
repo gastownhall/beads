@@ -228,6 +228,37 @@ func TestApplyConfigDefaults_TestModeWithPort(t *testing.T) {
 	}
 }
 
+// TestApplyConfigDefaults_TestModeBlocksProdPort verifies that BEADS_TEST_MODE=1
+// forces port 1 even when BEADS_DOLT_PORT is explicitly set to the production port.
+// This is the fix for Clown Show #14: Gas Town's beads module injects
+// BEADS_DOLT_PORT=3307 from metadata.json, bypassing the test mode guard.
+func TestApplyConfigDefaults_TestModeBlocksProdPort(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	os.Setenv("BEADS_TEST_MODE", "1")
+	os.Setenv("BEADS_DOLT_PORT", "3307") // Production port
+
+	cfg := &Config{}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 1 {
+		t.Errorf("BEADS_TEST_MODE=1 with BEADS_DOLT_PORT=3307 should force port 1, got %d", cfg.ServerPort)
+	}
+}
+
 // TestApplyConfigDefaults_EnvOverridesConfig verifies that BEADS_DOLT_PORT
 // overrides a port already set by metadata.json, even outside test mode.
 // This is the fix for hq-27t (test pollution): callers like Gas Town set

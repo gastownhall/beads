@@ -36,8 +36,8 @@ has already created the database.
 
 With --stealth: configures per-repository git settings for invisible beads usage:
   • .git/info/exclude to prevent beads files from being committed
-  • Claude Code settings with bd onboard instruction
   Perfect for personal use without affecting repo collaborators.
+  To set up a specific AI tool, run: bd setup <claude|cursor|aider|...> --stealth
 
 Beads requires a running dolt sql-server for database operations. If a server is detected
 on port 3307 or 3306, it is used automatically. Set connection details with --server-host,
@@ -148,8 +148,8 @@ environment variable.`,
 		// If there's a redirect file, use the redirect target (GH#bd-0qel)
 		initDBPath := dbPath
 		if initDBPath == "" {
-			// Dolt backend: use computed beadsDirForInit
-			initDBPath = filepath.Join(beadsDirForInit, "dolt")
+			// Dolt backend: respect dolt_data_dir config / BEADS_DOLT_DATA_DIR env
+			initDBPath = doltserver.ResolveDoltDir(beadsDirForInit)
 		}
 
 		// Determine if we should create .beads/ directory in CWD or main repo root
@@ -271,7 +271,7 @@ environment variable.`,
 		ctx := rootCtx
 
 		// Create Dolt storage backend
-		storagePath := filepath.Join(beadsDir, "dolt")
+		storagePath := doltserver.ResolveDoltDir(beadsDir)
 		// Respect existing config's database name to avoid creating phantom catalog
 		// entries when a user has renamed their database (GH#2051).
 		dbName := ""
@@ -292,6 +292,7 @@ environment variable.`,
 		// AutoStart is always enabled during init — we need a server to initialize the database.
 		doltCfg := &dolt.Config{
 			Path:      storagePath,
+			BeadsDir:  beadsDir,
 			Database:  dbName,
 			AutoStart: !doltserver.IsDaemonManaged() && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
 		}
@@ -391,7 +392,8 @@ environment variable.`,
 				if database != "" {
 					cfg.DoltDatabase = database
 				} else if cfg.DoltDatabase == "" && prefix != "" {
-					cfg.DoltDatabase = prefix
+					// Sanitize hyphens to underscores for SQL-idiomatic names (GH#2142).
+					cfg.DoltDatabase = strings.ReplaceAll(prefix, "-", "_")
 				}
 
 				// Always server mode
@@ -769,7 +771,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 		// In server mode the local dolt/ directory may be empty — the database
 		// lives on the Dolt sql-server. Checking only the directory would miss
 		// server-mode installations.
-		doltPath := filepath.Join(beadsDir, "dolt")
+		doltPath := doltserver.ResolveDoltDir(beadsDir)
 		doltDirExists := false
 		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
 			doltDirExists = true

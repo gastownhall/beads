@@ -13,6 +13,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // ServerHealthResult holds the results of all server health checks
@@ -83,7 +84,9 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 
 	// Server mode is configured - run health checks
 	host := cfg.GetDoltServerHost()
-	port := cfg.GetDoltServerPort()
+	// Use doltserver.DefaultConfig for port resolution (env > config > DerivePort).
+	// cfg.GetDoltServerPort() falls back to 3307 which is wrong for standalone mode.
+	port := doltserver.DefaultConfig(beadsDir).Port
 
 	// Check 1: Server reachability (TCP connect)
 	reachCheck := checkServerReachable(host, port)
@@ -95,7 +98,7 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 	}
 
 	// Check 2: Connect and verify it's Dolt (get version)
-	versionCheck, db := checkDoltVersion(cfg)
+	versionCheck, db := checkDoltVersion(cfg, beadsDir)
 	result.Checks = append(result.Checks, versionCheck)
 	if versionCheck.Status == StatusError {
 		result.OverallOK = false
@@ -265,9 +268,9 @@ func checkServerReachable(host string, port int) DoctorCheck {
 
 // checkDoltVersion connects to the server and checks if it's a Dolt server
 // Returns the DoctorCheck and an open database connection (caller must close)
-func checkDoltVersion(cfg *configfile.Config) (DoctorCheck, *sql.DB) {
+func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sql.DB) {
 	host := cfg.GetDoltServerHost()
-	port := cfg.GetDoltServerPort()
+	port := doltserver.DefaultConfig(beadsDir).Port
 	user := cfg.GetDoltServerUser()
 
 	// Get password from environment (more secure than config file)
@@ -355,14 +358,20 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Validate database name (alphanumeric and underscore only)
+	// Validate database name
 	if !isValidIdentifier(database) {
-		return DoctorCheck{
-			Name:     "Database Exists",
-			Status:   StatusError,
-			Message:  fmt.Sprintf("Invalid database name '%s'", database),
-			Detail:   "Database name must be alphanumeric with underscores only",
-			Category: CategoryFederation,
+		// Check if it's just hyphens (legacy names from before GH#2142 fix)
+		if strings.ContainsRune(database, '-') && isValidIdentifier(strings.ReplaceAll(database, "-", "_")) {
+			// Hyphenated name — functional but not recommended.
+			// Continue with the check but we'll add a warning after.
+		} else {
+			return DoctorCheck{
+				Name:     "Database Exists",
+				Status:   StatusError,
+				Message:  fmt.Sprintf("Invalid database name '%s'", database),
+				Detail:   "Database name must be alphanumeric with underscores only",
+				Category: CategoryFederation,
+			}
 		}
 	}
 
@@ -403,14 +412,26 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 	}
 
 	// Switch to the database
-	// Note: USE cannot use parameterized queries, but we validated the identifier above
-	_, err = db.ExecContext(ctx, "USE "+database) // #nosec G201 - database validated by isValidIdentifier
+	// Note: USE cannot use parameterized queries, but we validated the identifier above.
+	// Backtick-quote to support hyphenated legacy names (GH#2142).
+	_, err = db.ExecContext(ctx, "USE `"+database+"`") // #nosec G201 - database validated by isValidIdentifier
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Database Exists",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("Cannot access database '%s'", database),
 			Detail:   err.Error(),
+			Category: CategoryFederation,
+		}
+	}
+
+	// Warn about hyphenated names — functional but new projects use underscores
+	if strings.ContainsRune(database, '-') {
+		return DoctorCheck{
+			Name:     "Database Exists",
+			Status:   StatusWarning,
+			Message:  fmt.Sprintf("Database '%s' uses hyphens (legacy naming)", database),
+			Detail:   "New projects use underscores. To migrate: export data, run 'bd init --force', re-import.",
 			Category: CategoryFederation,
 		}
 	}

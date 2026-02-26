@@ -13,6 +13,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
@@ -25,14 +26,18 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	}
 
 	host := configfile.DefaultDoltServerHost
-	port := configfile.DefaultDoltServerPort
 	user := configfile.DefaultDoltServerUser
 	database := configfile.DefaultDoltDatabase
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
+	// Use doltserver.DefaultConfig for port resolution (env > config > Gas Town > DerivePort).
+	// cfg.GetDoltServerPort() is deprecated — it falls back to 3307 which is wrong
+	// for standalone mode where the port is hash-derived from the project path.
+	dsCfg := doltserver.DefaultConfig(beadsDir)
+	port := dsCfg.Port
+
 	if cfg != nil {
 		host = cfg.GetDoltServerHost()
-		port = cfg.GetDoltServerPort()
 		user = cfg.GetDoltServerUser()
 		database = cfg.GetDoltDatabase()
 	}
@@ -70,8 +75,9 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 // doltConn holds an open Dolt connection.
 // Used by doctor checks to coordinate database access.
 type doltConn struct {
-	db  *sql.DB
-	cfg *configfile.Config // config for server detail (host:port)
+	db   *sql.DB
+	cfg  *configfile.Config // config for server detail (host:port)
+	port int                // resolved port (from doltserver.DefaultConfig, not cfg fallback)
 }
 
 // Close releases the database connection.
@@ -86,7 +92,8 @@ func openDoltConn(beadsDir string) (*doltConn, error) {
 		return nil, err
 	}
 
-	return &doltConn{db: db, cfg: cfg}, nil
+	port := doltserver.DefaultConfig(beadsDir).Port
+	return &doltConn{db: db, cfg: cfg, port: port}, nil
 }
 
 // GetBackend returns the configured backend type from configuration.
@@ -171,7 +178,7 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 	storageDetail := "Storage: Dolt (server mode)"
 	if conn.cfg != nil {
 		storageDetail = fmt.Sprintf("Storage: Dolt (server %s:%d)",
-			conn.cfg.GetDoltServerHost(), conn.cfg.GetDoltServerPort())
+			conn.cfg.GetDoltServerHost(), conn.port)
 	}
 
 	return DoctorCheck{

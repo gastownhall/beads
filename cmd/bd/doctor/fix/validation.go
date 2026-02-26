@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // MergeArtifacts removes temporary git merge files from .beads directory.
@@ -270,7 +271,7 @@ func openDoltDB(beadsDir string) (*sql.DB, error) {
 	}
 
 	host := cfg.GetDoltServerHost()
-	port := cfg.GetDoltServerPort()
+	port := doltserver.DefaultConfig(beadsDir).Port
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
 

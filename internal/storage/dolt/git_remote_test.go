@@ -914,6 +914,82 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 	t.Log("Full round-trip sync verified: source -> git remote -> clone -> git remote -> source")
 }
 
+func TestAutoIncrementAfterPull(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// Create an issue via the store API (generates AUTO_INCREMENT event rows)
+	sourceIssue := &types.Issue{
+		ID:        "ai-src-001",
+		Title:     "Source issue before push",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, sourceIssue, "tester"); err != nil {
+		t.Fatalf("source CreateIssue failed: %v", err)
+	}
+	if err := store.Commit(ctx, "Add ai-src-001"); err != nil {
+		t.Fatalf("source Commit failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("source Push failed: %v", err)
+	}
+
+	// Simulate a second peer via CLI: clone, add data with AUTO_INCREMENT
+	// rows (issue + event), commit, and push back to the shared remote.
+	cloneDir := filepath.Join(setup.baseDir, "clone-ai")
+	doltClone(t, setup.remoteURL, cloneDir)
+	sourceInsertIssue(t, cloneDir, "ai-clone-001", "Clone issue generating events")
+	runDoltSQL(t, cloneDir,
+		`INSERT INTO events (issue_id, event_type, actor, created_at) `+
+			`VALUES ('ai-clone-001', 'created', 'clone-user', NOW())`)
+	sourceCommitAndPush(t, cloneDir, "Add ai-clone-001 with event")
+
+	// Pull into the source store — this is the code path under test.
+	// Without resetAutoIncrements, the next CreateIssue would fail with
+	// a duplicate key error because the events AUTO_INCREMENT counter
+	// was not updated to account for the rows merged in by DOLT_PULL.
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("Pull failed: %v", err)
+	}
+
+	postPullIssue := &types.Issue{
+		ID:        "ai-src-002",
+		Title:     "Source issue after pull",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, postPullIssue, "tester"); err != nil {
+		t.Fatalf("CreateIssue after pull failed (AUTO_INCREMENT not reset?): %v", err)
+	}
+
+	var eventCount int
+	err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&eventCount)
+	if err != nil {
+		t.Fatalf("failed to count events: %v", err)
+	}
+	// At least 3 events: source created (ai-src-001), clone created (ai-clone-001),
+	// post-pull created (ai-src-002)
+	if eventCount < 3 {
+		t.Errorf("expected at least 3 events, got %d", eventCount)
+	}
+
+	for _, id := range []string{"ai-src-001", "ai-clone-001", "ai-src-002"} {
+		issue, getErr := store.GetIssue(ctx, id)
+		if getErr != nil {
+			t.Errorf("GetIssue(%s) failed: %v", id, getErr)
+		}
+		if issue == nil {
+			t.Errorf("expected %s to exist", id)
+		}
+	}
+}
+
 // findClonedDBName discovers the database name inside a dolt directory
 // by looking for subdirectories containing .dolt.
 func findClonedDBName(t *testing.T, doltDir string) string {

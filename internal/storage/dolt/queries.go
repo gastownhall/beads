@@ -206,10 +206,12 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	}
 
 	// Parent filtering: filter children by parent issue
-	// Also includes dotted-ID children (e.g., "parent.1.2" is child of "parent")
+	// Also includes dotted-ID children (e.g., "parent.1.2" is child of "parent"),
+	// but only if they haven't been explicitly reparented via dependencies.
+	// An explicit parent-child dependency takes precedence over dotted-ID prefix.
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR id LIKE CONCAT(?, '.%'))")
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
 		args = append(args, parentID, parentID)
 	}
 
@@ -420,9 +422,10 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		}
 	}
 	// Parent filtering: filter to children of specified parent (GH#2009)
+	// Explicit parent-child dependency takes precedence over dotted-ID prefix.
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR id LIKE CONCAT(?, '.%'))")
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
 		args = append(args, parentID, parentID)
 	}
 
@@ -575,10 +578,10 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 		blockedSet[id] = true
 	}
 
-	// Step 3: Get blocking + waits-for deps to build BlockedBy lists
+	// Step 3: Get blocking + waits-for + conditional-blocks deps to build BlockedBy lists
 	depRows, err := s.queryContext(ctx, `
 		SELECT issue_id, depends_on_id FROM dependencies
-		WHERE type IN ('blocks', 'waits-for')
+		WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocking dependencies: %w", err)
@@ -917,10 +920,10 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	// Step 2: Get blocking deps and waits-for gates (single-table scan)
+	// Step 2: Get blocking deps, waits-for gates, and conditional-blocks (single-table scan)
 	depRows, err := s.queryContext(ctx, `
 		SELECT issue_id, depends_on_id, type, metadata FROM dependencies
-		WHERE type IN ('blocks', 'waits-for')
+		WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
 	`)
 	if err != nil {
 		return nil, err
@@ -945,7 +948,10 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 		}
 
 		switch depType {
-		case string(types.DepBlocks):
+		case string(types.DepBlocks), string(types.DepConditionalBlocks):
+			// Both blocks and conditional-blocks gate readiness while the
+			// blocker is active. For conditional-blocks ("B runs only if A
+			// fails"), B cannot be ready while A's outcome is still unknown.
 			if activeIDs[issueID] && activeIDs[dependsOnID] {
 				blockedSet[issueID] = true
 			}

@@ -41,21 +41,6 @@ Migration creates backups automatically. Your original SQLite database is preser
 
 ## Modes of Operation
 
-### Embedded Mode (Default)
-
-Single-process access to the Dolt database. Good for development and single-agent use.
-
-```yaml
-# .beads/config.yaml (or auto-detected)
-dolt:
-  mode: embedded
-```
-
-Characteristics:
-- No server process needed
-- Single writer at a time
-- Direct database access
-
 ### Server Mode (Multi-Writer)
 
 Connects to a running `dolt sql-server` for multi-client access.

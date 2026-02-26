@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // NewFromConfig creates a DoltStore based on the metadata.json configuration.
@@ -29,6 +30,9 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 		cfg = &Config{}
 	}
 	cfg.Path = fileCfg.DatabasePath(beadsDir)
+	if cfg.BeadsDir == "" {
+		cfg.BeadsDir = beadsDir
+	}
 
 	// Always apply database name from metadata.json (prefix-based naming, bd-u8rda).
 	if cfg.Database == "" {
@@ -41,7 +45,9 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 			cfg.ServerHost = fileCfg.GetDoltServerHost()
 		}
 		if cfg.ServerPort == 0 {
-			cfg.ServerPort = fileCfg.GetDoltServerPort()
+			// Use doltserver.DefaultConfig for port resolution (env > config > DerivePort).
+			// fileCfg.GetDoltServerPort() falls back to 3307 which is wrong for standalone mode.
+			cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 		}
 		if cfg.ServerUser == "" {
 			cfg.ServerUser = fileCfg.GetDoltServerUser()

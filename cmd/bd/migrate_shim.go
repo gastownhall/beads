@@ -226,8 +226,16 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 		}
 	}
 
+	issueCols := queryColumnSet(dbPath, "issues")
+	depCols := queryColumnSet(dbPath, "dependencies")
+
+	specIDExpr := sqliteOptionalTextExpr(issueCols, "spec_id", "''")
+	closedBySessionExpr := sqliteOptionalTextExpr(issueCols, "closed_by_session", "''")
+	wispTypeExpr := sqliteOptionalTextExpr(issueCols, "wisp_type", "''")
+	metadataExpr := sqliteOptionalTextExpr(issueCols, "metadata", "'{}'")
+
 	// Extract issues
-	issueRows, err := queryJSON(dbPath, `
+	issueQuery := fmt.Sprintf(`
 		SELECT id, COALESCE(content_hash,'') as content_hash,
 			COALESCE(title,'') as title, COALESCE(description,'') as description,
 			COALESCE(design,'') as design, COALESCE(acceptance_criteria,'') as acceptance_criteria,
@@ -237,17 +245,17 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 			COALESCE(assignee,'') as assignee, estimated_minutes,
 			COALESCE(created_at,'') as created_at, COALESCE(created_by,'') as created_by,
 			COALESCE(owner,'') as owner,
-			COALESCE(updated_at,'') as updated_at, closed_at, external_ref,
+			COALESCE(updated_at,'') as updated_at, closed_at, external_ref, %s as spec_id,
 			COALESCE(compaction_level,0) as compaction_level,
 			COALESCE(compacted_at,'') as compacted_at, compacted_at_commit,
 			COALESCE(original_size,0) as original_size,
-			COALESCE(sender,'') as sender, COALESCE(ephemeral,0) as ephemeral,
+			COALESCE(sender,'') as sender, COALESCE(ephemeral,0) as ephemeral, %s as wisp_type,
 			COALESCE(pinned,0) as pinned,
 			COALESCE(is_template,0) as is_template, COALESCE(crystallizes,0) as crystallizes,
 			COALESCE(mol_type,'') as mol_type, COALESCE(work_type,'') as work_type,
 			quality_score,
 			COALESCE(source_system,'') as source_system, COALESCE(source_repo,'') as source_repo,
-			COALESCE(close_reason,'') as close_reason,
+			COALESCE(close_reason,'') as close_reason, %s as closed_by_session,
 			COALESCE(event_kind,'') as event_kind, COALESCE(actor,'') as actor,
 			COALESCE(target,'') as target, COALESCE(payload,'') as payload,
 			COALESCE(await_type,'') as await_type, COALESCE(await_id,'') as await_id,
@@ -256,8 +264,12 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 			COALESCE(agent_state,'') as agent_state,
 			COALESCE(last_activity,'') as last_activity, COALESCE(role_type,'') as role_type,
 			COALESCE(rig,'') as rig,
-			COALESCE(due_at,'') as due_at, COALESCE(defer_until,'') as defer_until
-		FROM issues`)
+			COALESCE(due_at,'') as due_at, COALESCE(defer_until,'') as defer_until,
+			%s as metadata
+		FROM issues
+		ORDER BY created_at, id
+	`, specIDExpr, wispTypeExpr, closedBySessionExpr, metadataExpr)
+	issueRows, err := queryJSON(dbPath, issueQuery)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query issues: %w", err)
 	}
@@ -270,7 +282,7 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 
 	// Extract labels
 	labelsMap := make(map[string][]string)
-	labelRows, err := queryJSON(dbPath, "SELECT issue_id, label FROM labels")
+	labelRows, err := queryJSON(dbPath, "SELECT issue_id, label FROM labels ORDER BY issue_id, label")
 	if err == nil {
 		for _, row := range labelRows {
 			issueID, _ := row["issue_id"].(string)
@@ -283,7 +295,15 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 
 	// Extract dependencies
 	depsMap := make(map[string][]*types.Dependency)
-	depRows, err := queryJSON(dbPath, "SELECT issue_id, depends_on_id, COALESCE(type,'') as type, COALESCE(created_by,'') as created_by, COALESCE(created_at,'') as created_at FROM dependencies")
+	depMetadataExpr := sqliteOptionalTextExpr(depCols, "metadata", "'{}'")
+	depThreadExpr := sqliteOptionalTextExpr(depCols, "thread_id", "''")
+	depQuery := fmt.Sprintf(`
+		SELECT issue_id, depends_on_id, COALESCE(type,'') as type, COALESCE(created_by,'') as created_by, COALESCE(created_at,'') as created_at,
+			%s as metadata, %s as thread_id
+		FROM dependencies
+		ORDER BY created_at, issue_id, depends_on_id
+	`, depMetadataExpr, depThreadExpr)
+	depRows, err := queryJSON(dbPath, depQuery)
 	if err == nil {
 		for _, row := range depRows {
 			dep := &types.Dependency{
@@ -292,6 +312,11 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 				Type:        types.DependencyType(jsonStr(row, "type")),
 				CreatedBy:   jsonStr(row, "created_by"),
 				CreatedAt:   jsonTime(row, "created_at"),
+				Metadata:    strings.TrimSpace(jsonFlexibleText(row, "metadata")),
+				ThreadID:    jsonStr(row, "thread_id"),
+			}
+			if dep.Metadata == "" {
+				dep.Metadata = "{}"
 			}
 			if dep.IssueID != "" {
 				depsMap[dep.IssueID] = append(depsMap[dep.IssueID], dep)
@@ -301,7 +326,11 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 
 	// Extract events
 	eventsMap := make(map[string][]*types.Event)
-	eventRows, err := queryJSON(dbPath, "SELECT issue_id, COALESCE(event_type,'') as event_type, COALESCE(actor,'') as actor, old_value, new_value, comment, COALESCE(created_at,'') as created_at FROM events")
+	eventRows, err := queryJSON(dbPath, `
+		SELECT issue_id, COALESCE(event_type,'') as event_type, COALESCE(actor,'') as actor, old_value, new_value, comment, COALESCE(created_at,'') as created_at
+		FROM events
+		ORDER BY created_at, rowid
+	`)
 	if err == nil {
 		for _, row := range eventRows {
 			issueID := jsonStr(row, "issue_id")
@@ -325,6 +354,28 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 		}
 	}
 
+	// Extract comments (legacy table may be absent).
+	commentsMap := make(map[string][]*types.Comment)
+	commentRows, err := queryJSON(dbPath, `
+		SELECT issue_id, COALESCE(author,'') as author, COALESCE(text,'') as text, COALESCE(created_at,'') as created_at
+		FROM comments
+		ORDER BY created_at, rowid
+	`)
+	if err == nil {
+		for _, row := range commentRows {
+			issueID := jsonStr(row, "issue_id")
+			if issueID == "" {
+				continue
+			}
+			commentsMap[issueID] = append(commentsMap[issueID], &types.Comment{
+				IssueID:   issueID,
+				Author:    jsonStr(row, "author"),
+				Text:      jsonStr(row, "text"),
+				CreatedAt: jsonTime(row, "created_at"),
+			})
+		}
+	}
+
 	// Assign labels and dependencies to issues
 	for _, issue := range issues {
 		if labels, ok := labelsMap[issue.ID]; ok {
@@ -336,14 +387,30 @@ func extractViaSQLiteCLI(_ context.Context, dbPath string) (*migrationData, erro
 	}
 
 	return &migrationData{
-		issues:     issues,
-		labelsMap:  labelsMap,
-		depsMap:    depsMap,
-		eventsMap:  eventsMap,
-		config:     config,
-		prefix:     prefix,
-		issueCount: len(issues),
+		issues:      issues,
+		labelsMap:   labelsMap,
+		depsMap:     depsMap,
+		eventsMap:   eventsMap,
+		commentsMap: commentsMap,
+		config:      config,
+		prefix:      prefix,
+		issueCount:  len(issues),
 	}, nil
+}
+
+func queryColumnSet(dbPath, table string) map[string]bool {
+	rows, err := queryJSON(dbPath, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil
+	}
+	columns := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		name := jsonStr(row, "name")
+		if name != "" {
+			columns[name] = true
+		}
+	}
+	return columns
 }
 
 // queryJSON runs a SQL query against a SQLite database using the sqlite3 CLI
@@ -416,10 +483,12 @@ func parseIssueRow(row map[string]interface{}) *types.Issue {
 		CreatedBy:          jsonStr(row, "created_by"),
 		Owner:              jsonStr(row, "owner"),
 		UpdatedAt:          jsonTime(row, "updated_at"),
+		SpecID:             jsonStr(row, "spec_id"),
 		CompactionLevel:    jsonInt(row, "compaction_level"),
 		OriginalSize:       jsonInt(row, "original_size"),
 		Sender:             jsonStr(row, "sender"),
 		Ephemeral:          jsonBool(row, "ephemeral"),
+		WispType:           types.WispType(jsonStr(row, "wisp_type")),
 		Pinned:             jsonBool(row, "pinned"),
 		IsTemplate:         jsonBool(row, "is_template"),
 		Crystallizes:       jsonBool(row, "crystallizes"),
@@ -428,6 +497,7 @@ func parseIssueRow(row map[string]interface{}) *types.Issue {
 		SourceSystem:       jsonStr(row, "source_system"),
 		SourceRepo:         jsonStr(row, "source_repo"),
 		CloseReason:        jsonStr(row, "close_reason"),
+		ClosedBySession:    jsonStr(row, "closed_by_session"),
 		EventKind:          jsonStr(row, "event_kind"),
 		Actor:              jsonStr(row, "actor"),
 		Target:             jsonStr(row, "target"),
@@ -454,6 +524,7 @@ func parseIssueRow(row map[string]interface{}) *types.Issue {
 	if v := jsonNullableFloat32(row, "quality_score"); v != nil {
 		issue.QualityScore = v
 	}
+	issue.Metadata = normalizedJSONBytes(jsonFlexibleText(row, "metadata"))
 
 	// Time fields
 	issue.ClosedAt = parseNullTime(jsonStr(row, "closed_at"))
@@ -475,6 +546,25 @@ func parseIssueRow(row map[string]interface{}) *types.Issue {
 }
 
 // JSON row accessor helpers
+
+func jsonFlexibleText(row map[string]interface{}, key string) string {
+	v, ok := row[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case []byte:
+		return string(val)
+	default:
+		data, err := json.Marshal(val)
+		if err != nil {
+			return fmt.Sprintf("%v", v)
+		}
+		return string(data)
+	}
+}
 
 func jsonStr(row map[string]interface{}, key string) string {
 	v, ok := row[key]

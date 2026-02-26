@@ -126,6 +126,15 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 	mapper := t.FieldMapper()
 	updates := mapper.IssueToTracker(issue)
 
+	// Resolve and include state so status changes are pushed to Linear.
+	stateID, err := t.findStateID(ctx, issue.Status)
+	if err != nil {
+		return nil, fmt.Errorf("finding state for status %s: %w", issue.Status, err)
+	}
+	if stateID != "" {
+		updates["stateId"] = stateID
+	}
+
 	updated, err := t.client.UpdateIssue(ctx, externalID, updates)
 	if err != nil {
 		return nil, err

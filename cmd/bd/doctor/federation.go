@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -34,7 +35,7 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 	}
 	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
 		cfg.ServerHost = bcfg.GetDoltServerHost()
-		cfg.ServerPort = bcfg.GetDoltServerPort()
+		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 		cfg.ServerUser = bcfg.GetDoltServerUser()
 	}
 	return cfg
@@ -464,7 +465,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 	serverReachable := false
 	if cfg != nil {
 		host := cfg.GetDoltServerHost()
-		port := cfg.GetDoltServerPort()
+		port := doltserver.DefaultConfig(beadsDir).Port
 		addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 		if err == nil {

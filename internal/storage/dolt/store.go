@@ -29,8 +29,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	// Import MySQL driver for server mode connections
-	_ "github.com/go-sql-driver/mysql"
+	mysql "github.com/go-sql-driver/mysql"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -44,6 +43,29 @@ import (
 
 // DefaultSQLPort is the default port for dolt sql-server.
 const DefaultSQLPort = 3307
+
+// testDatabasePrefixes are name prefixes that indicate a test database.
+// Used by isTestDatabaseName to prevent test databases from being created
+// on the production Dolt server (Clown Shows #12-#18).
+var testDatabasePrefixes = []string{
+	"testdb_",
+	"beads_t",
+	"beads_pt",
+	"beads_vr",
+	"doctest_",
+	"doctortest_",
+}
+
+// isTestDatabaseName returns true if the database name matches known test patterns.
+// This is a pattern-based firewall — it does not rely on environment variables.
+func isTestDatabaseName(name string) bool {
+	for _, prefix := range testDatabasePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -80,6 +102,7 @@ type DoltStore struct {
 // Config holds Dolt database configuration
 type Config struct {
 	Path           string // Path to Dolt database directory
+	BeadsDir       string // Path to .beads directory (for server auto-start when Path is custom)
 	CommitterName  string // Git-style committer name
 	CommitterEmail string // Git-style committer email
 	Remote         string // Default remote name (e.g., "origin")
@@ -394,24 +417,36 @@ func applyConfigDefaults(cfg *Config) {
 
 	// Server connection defaults (always applied — server mode is the only mode)
 	if cfg.ServerHost == "" {
-		cfg.ServerHost = "127.0.0.1"
+		// Host resolution: BEADS_DOLT_SERVER_HOST env > default 127.0.0.1.
+		if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
+			cfg.ServerHost = h
+		} else {
+			cfg.ServerHost = "127.0.0.1"
+		}
 	}
-	// BEADS_DOLT_PORT always overrides cfg.ServerPort (env > config convention).
-	// Callers (standalone CI, Gas Town, etc.) set this to route bd to a specific
-	// Dolt server. Without this override, metadata.json's dolt_server_port wins,
-	// which causes test databases to leak onto production (port 3307).
-	if envPort := os.Getenv("BEADS_DOLT_PORT"); envPort != "" {
+	// Port resolution: BEADS_DOLT_SERVER_PORT env (or legacy BEADS_DOLT_PORT) >
+	// BEADS_TEST_MODE guard > metadata config > default.
+	// CRITICAL: BEADS_TEST_MODE=1 forces port 1 (immediate fail) if the resolved port
+	// is the production port (DefaultSQLPort). This prevents test databases from leaking
+	// onto production even when the port env var is set to 3307 by Gas Town's beads module.
+	// Only an explicit non-production port (e.g., 43211 for a test server)
+	// overrides test mode — that's a deliberate test server assignment.
+	envPort := os.Getenv("BEADS_DOLT_SERVER_PORT")
+	if envPort == "" {
+		envPort = os.Getenv("BEADS_DOLT_PORT") // legacy fallback
+	}
+	if envPort != "" {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			cfg.ServerPort = p
 		}
-	} else if os.Getenv("BEADS_TEST_MODE") == "1" {
-		// Test mode with no explicit port — use sentinel port 1 so connection
-		// fails immediately instead of silently hitting prod.
+	} else if cfg.ServerPort == 0 {
+		cfg.ServerPort = DefaultSQLPort
+	}
+	// Test mode guard: if we'd hit production, force port 1 instead.
+	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
 			cfg.ServerPort = 1
 		}
-	} else if cfg.ServerPort == 0 {
-		cfg.ServerPort = DefaultSQLPort
 	}
 	if cfg.ServerUser == "" {
 		cfg.ServerUser = "root"
@@ -441,11 +476,11 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Hard guard: tests must NEVER connect to the production Dolt server.
 	// If BEADS_TEST_MODE=1 and we're about to hit the default prod port,
-	// something upstream forgot to set BEADS_DOLT_PORT. Panic immediately
+	// something upstream forgot to set BEADS_DOLT_SERVER_PORT. Panic immediately
 	// so the test fails loudly instead of silently polluting prod.
 	if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.ServerPort == DefaultSQLPort {
 		panic(fmt.Sprintf(
-			"BEADS_TEST_MODE=1 but connecting to prod port %d — set BEADS_DOLT_PORT or use test helpers (database=%q, path=%q)",
+			"BEADS_TEST_MODE=1 but connecting to prod port %d — set BEADS_DOLT_SERVER_PORT or use test helpers (database=%q, path=%q)",
 			DefaultSQLPort, cfg.Database, cfg.Path,
 		))
 	}
@@ -464,7 +499,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if dialErr != nil {
 		// Auto-start: if enabled and connecting to localhost, start a server
 		if cfg.AutoStart && isLocalHost(cfg.ServerHost) && cfg.Path != "" {
-			beadsDir := filepath.Dir(cfg.Path) // cfg.Path is .beads/dolt → parent is .beads/
+			beadsDir := cfg.BeadsDir
+			if beadsDir == "" {
+				beadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
+			}
 			port, startErr := doltserver.EnsureRunning(beadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
@@ -589,7 +627,11 @@ func buildServerDSN(cfg *Config, database string) string {
 		dbPart = "/"
 	}
 
-	params := "parseTime=true"
+	// Timeouts prevent agents from blocking forever when Dolt server hangs.
+	// timeout=5s: TCP connect timeout
+	// readTimeout=10s: I/O read timeout (covers hung queries)
+	// writeTimeout=10s: I/O write timeout
+	params := "parseTime=true&timeout=5s&readTimeout=10s&writeTimeout=10s"
 	if cfg.ServerTLS {
 		params += "&tls=true"
 	}
@@ -631,6 +673,18 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 		_ = db.Close()
 		return nil, "", fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
 	}
+
+	// FIREWALL: Never create test databases on the production server.
+	// This is the last line of defense against test pollution (Clown Shows #12-#18).
+	// Pattern-based, not env-var-based — env vars can be misconfigured or missing.
+	if isTestDatabaseName(cfg.Database) && cfg.ServerPort == DefaultSQLPort {
+		_ = db.Close()
+		return nil, "", fmt.Errorf(
+			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
+				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
+			cfg.Database, cfg.ServerPort)
+	}
+
 	_, err = initDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cfg.Database)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above
 	if err != nil {
 		// Dolt may return error 1007 even with IF NOT EXISTS - ignore if database already exists
@@ -1098,11 +1152,43 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
 		}
+		if err := s.resetAutoIncrements(ctx); err != nil {
+			return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
+		}
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_PULL(?, ?)", s.remote, s.branch)
 	if err != nil {
 		return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
+	}
+	if err := s.resetAutoIncrements(ctx); err != nil {
+		return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
+	}
+	return nil
+}
+
+func (s *DoltStore) resetAutoIncrements(ctx context.Context) error {
+	tables := []string{"events", "comments", "issue_snapshots", "compaction_snapshots", "wisp_events", "wisp_comments"}
+	for _, table := range tables {
+		var maxID int64
+		//nolint:gosec // G201: table is a hardcoded constant
+		err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COALESCE(MAX(id), 0) FROM %s", table)).Scan(&maxID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			var mysqlErr *mysql.MySQLError
+			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1146 {
+				continue
+			}
+			return fmt.Errorf("failed to query max id for %s: %w", table, err)
+		}
+		if maxID > 0 {
+			//nolint:gosec // G201: table is a hardcoded constant
+			if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d", table, maxID+1)); err != nil {
+				return fmt.Errorf("failed to reset AUTO_INCREMENT for %s: %w", table, err)
+			}
+		}
 	}
 	return nil
 }

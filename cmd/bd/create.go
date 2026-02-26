@@ -721,14 +721,13 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// If issue was routed to a different repo, commit+push so other
-		// agents/rigs see the new issue immediately (dolt-native sync).
+		// If issue was routed to a different repo, commit pending changes.
+		// Push is NOT done here — the daemon handles periodic pushes to
+		// DoltHub remotes. Per-create pushes caused 22GB of git-remote-cache
+		// bloat with dozens of agents creating wisps constantly (hq-glw).
 		if repoPath != "." && targetStore != nil {
 			if _, err := targetStore.CommitPending(ctx, actor); err != nil {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
-			}
-			if err := targetStore.Push(ctx); err != nil {
-				debug.Logf("warning: failed to push routed repo: %v", err)
 			}
 		}
 
