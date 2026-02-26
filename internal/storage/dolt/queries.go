@@ -17,7 +17,7 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	// Route ephemeral-only queries to wisps table, falling through to
 	// issues table if wisps table doesn't exist (pre-migration databases).
 	if filter.Ephemeral != nil && *filter.Ephemeral {
-		if results, err := s.searchWisps(ctx, query, filter); err == nil {
+		if results, err := s.searchWisps(ctx, query, filter); err == nil && len(results) > 0 {
 			return results, nil
 		}
 		// Fall through: query issues table with ephemeral filter instead
