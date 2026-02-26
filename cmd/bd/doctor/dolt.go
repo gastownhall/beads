@@ -13,6 +13,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
@@ -25,14 +26,18 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	}
 
 	host := configfile.DefaultDoltServerHost
-	port := configfile.DefaultDoltServerPort
 	user := configfile.DefaultDoltServerUser
 	database := configfile.DefaultDoltDatabase
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
+	// Use doltserver.DefaultConfig for port resolution (env > config > Gas Town > DerivePort).
+	// cfg.GetDoltServerPort() is deprecated — it falls back to 3307 which is wrong
+	// for standalone mode where the port is hash-derived from the project path.
+	dsCfg := doltserver.DefaultConfig(beadsDir)
+	port := dsCfg.Port
+
 	if cfg != nil {
 		host = cfg.GetDoltServerHost()
-		port = cfg.GetDoltServerPort()
 		user = cfg.GetDoltServerUser()
 		database = cfg.GetDoltDatabase()
 	}

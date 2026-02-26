@@ -48,12 +48,22 @@ func StartTestDoltServer(tmpDirPrefix string) (*TestDoltServer, func()) {
 	// Reuse existing server if BEADS_DOLT_PORT is already set by an outer runner.
 	// This avoids spawning redundant dolt processes when running go test ./...
 	// with a pre-started shared server.
+	//
+	// CRITICAL: If BEADS_TEST_MODE=1 and BEADS_DOLT_PORT is the production port
+	// FIREWALL: Never reuse the production Dolt server (port 3307) for tests.
+	// This guard does NOT depend on BEADS_TEST_MODE — that env var may not be set yet
+	// when TestMain calls StartTestDoltServer (it's set AFTER this returns).
+	// Clown Shows #12-#18: every time this guard had a hole, production got polluted.
 	if port := os.Getenv("BEADS_DOLT_PORT"); port != "" {
 		p, err := strconv.Atoi(port)
-		if err == nil && WaitForServer(p, 2*time.Second) {
+		if err == nil && p == 3307 {
+			// Port 3307 is ALWAYS production. Never reuse it, regardless of BEADS_TEST_MODE.
+			fmt.Fprintf(os.Stderr, "WARN: BEADS_DOLT_PORT=%d is production — starting isolated test server\n", p)
+		} else if err == nil && WaitForServer(p, 2*time.Second) {
 			return &TestDoltServer{Port: p}, func() {}
+		} else {
+			fmt.Fprintf(os.Stderr, "WARN: BEADS_DOLT_PORT=%s set but server not reachable, starting new server\n", port)
 		}
-		fmt.Fprintf(os.Stderr, "WARN: BEADS_DOLT_PORT=%s set but server not reachable, starting new server\n", port)
 	}
 
 	CleanStaleTestServers()
@@ -270,7 +280,7 @@ func cleanStalePIDFiles() {
 
 // cleanPIDFile handles a single PID file: removes if dead, kills if alive and is dolt.
 func cleanPIDFile(pidFile string) {
-	data, err := os.ReadFile(pidFile) //nolint:gosec // G304: pidFile is constructed from testPidDir constant + known prefix
+	data, err := os.ReadFile(pidFile) //nolint:gosec // G304: path from test cleanup, not user input
 	if err != nil {
 		_ = os.Remove(pidFile)
 		return
@@ -365,6 +375,7 @@ func WaitForServer(port int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	for time.Now().Before(deadline) {
+		// #nosec G704 -- addr is always loopback (127.0.0.1) with a test-selected local port.
 		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()

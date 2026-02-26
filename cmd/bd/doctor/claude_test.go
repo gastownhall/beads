@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -790,4 +791,123 @@ func TestCheckHookEvents(t *testing.T) {
 			t.Error("Expected PreCompact=false")
 		}
 	})
+}
+
+// TestIsClaudePresent tests the isClaudePresent helper across different scenarios.
+// Tests that require claude to be absent from PATH are skipped when claude is
+// installed locally; they run in CI where claude is not available.
+func TestIsClaudePresent(t *testing.T) {
+	t.Run("claude_binary_in_path", func(t *testing.T) {
+		// Create a fake "claude" script in a temp bin dir so we can test
+		// the exec.LookPath success path without depending on a real installation.
+		tmpBin := t.TempDir()
+		claudePath := filepath.Join(tmpBin, "claude")
+		if err := os.WriteFile(claudePath, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", tmpBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("USERPROFILE", t.TempDir())
+
+		if !isClaudePresent() {
+			t.Error("Expected isClaudePresent() to return true when claude binary is in PATH")
+		}
+	})
+
+	t.Run("dot_claude_dir_exists", func(t *testing.T) {
+		// Only meaningful when claude binary is absent; skip otherwise so we actually
+		// exercise the ~/.claude stat path rather than returning early via LookPath.
+		if _, lookErr := exec.LookPath("claude"); lookErr == nil {
+			t.Skip("claude binary found in PATH; ~/.claude directory check is unreachable")
+		}
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("USERPROFILE", tmpDir)
+		if err := os.Mkdir(filepath.Join(tmpDir, ".claude"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if !isClaudePresent() {
+			t.Error("Expected isClaudePresent() to return true when ~/.claude directory exists")
+		}
+	})
+
+	t.Run("dot_claude_is_file_not_dir", func(t *testing.T) {
+		if _, lookErr := exec.LookPath("claude"); lookErr == nil {
+			t.Skip("claude binary found in PATH; IsDir() check is unreachable")
+		}
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("USERPROFILE", tmpDir)
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude"), []byte("not a dir"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// .claude exists but is a file, not a directory — should return false.
+		if isClaudePresent() {
+			t.Error("Expected isClaudePresent() to return false when ~/.claude is a file, not a directory")
+		}
+	})
+
+	t.Run("no_binary_no_dot_claude", func(t *testing.T) {
+		if _, lookErr := exec.LookPath("claude"); lookErr == nil {
+			t.Skip("claude binary found in PATH; skipping no-claude absence test")
+		}
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("USERPROFILE", tmpDir)
+		if isClaudePresent() {
+			t.Error("Expected isClaudePresent() to return false when claude not in PATH and ~/.claude absent")
+		}
+	})
+}
+
+// TestCheckClaudePlugin_ClaudeCodeWithoutClaude verifies that CheckClaudePlugin
+// returns StatusOK early when CLAUDECODE=1 but the claude CLI/dir is absent.
+func TestCheckClaudePlugin_ClaudeCodeWithoutClaude(t *testing.T) {
+	if _, lookErr := exec.LookPath("claude"); lookErr == nil {
+		t.Skip("claude binary found in PATH; cannot exercise !isClaudePresent() short-circuit")
+	}
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	t.Setenv("CLAUDECODE", "1")
+
+	check := CheckClaudePlugin()
+
+	if check.Name != "Claude Plugin" {
+		t.Errorf("Expected name %q, got %q", "Claude Plugin", check.Name)
+	}
+	if check.Status != StatusOK {
+		t.Errorf("Expected %s when CLAUDECODE=1 but claude absent, got %s: %s",
+			StatusOK, check.Status, check.Message)
+	}
+	if check.Message != "N/A (not running in Claude Code)" {
+		t.Errorf("Expected message %q, got %q", "N/A (not running in Claude Code)", check.Message)
+	}
+}
+
+// TestCheckClaude_ClaudeCodeWithoutClaude verifies that CheckClaude returns
+// "CLI-only mode" (ok) when CLAUDECODE=1 but the claude CLI/dir is absent.
+func TestCheckClaude_ClaudeCodeWithoutClaude(t *testing.T) {
+	if _, lookErr := exec.LookPath("claude"); lookErr == nil {
+		t.Skip("claude binary found in PATH; cannot exercise !isClaudePresent() short-circuit in CheckClaude")
+	}
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	t.Setenv("CLAUDECODE", "1")
+
+	check := CheckClaude()
+
+	if check.Name != "Claude Integration" {
+		t.Errorf("Expected name %q, got %q", "Claude Integration", check.Name)
+	}
+	if check.Status != "ok" {
+		t.Errorf("Expected %q status when CLAUDECODE=1 but claude absent, got %q: %s",
+			"ok", check.Status, check.Message)
+	}
+	if check.Message != "CLI-only mode" {
+		t.Errorf("Expected message %q, got %q", "CLI-only mode", check.Message)
+	}
 }

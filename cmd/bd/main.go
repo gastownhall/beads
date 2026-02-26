@@ -84,6 +84,10 @@ var (
 	// This prevents a redundant auto-commit attempt in PersistentPostRun.
 	commandDidExplicitDoltCommit bool
 
+	// commandDidExplicitPush is set when a command already pushed to the remote
+	// (e.g., bd dolt push). This prevents a redundant auto-push in PersistentPostRun.
+	commandDidExplicitPush bool
+
 	// commandDidWriteTipMetadata is set when a command records a tip as "shown" by writing
 	// metadata (tip_*_last_shown). This will be used to create a separate Dolt commit for
 	// tip writes, even when the main command is read-only.
@@ -239,9 +243,10 @@ var rootCmd = &cobra.Command{
 		// Initialize CommandContext to hold runtime state (replaces scattered globals)
 		initCommandContext()
 
-		// Reset per-command write tracking (used by Dolt auto-commit).
+		// Reset per-command write tracking (used by Dolt auto-commit and auto-push).
 		commandDidWrite.Store(false)
 		commandDidExplicitDoltCommit = false
+		commandDidExplicitPush = false
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
 
@@ -480,11 +485,12 @@ var rootCmd = &cobra.Command{
 		// the database (which breaks file watchers).
 		useReadOnly := isReadOnlyCommand(cmd.Name())
 
-		// Auto-migrate database on version bump
-		// Skip for read-only commands - they can't write anyway
-		if !useReadOnly {
-			autoMigrateOnVersionBump(filepath.Dir(dbPath))
-		}
+		// Auto-migrate database on version bump (bd-jgxi).
+		// Runs for ALL commands (including read-only ones) because the migration
+		// opens its own store connection, writes the version metadata, commits it,
+		// and closes BEFORE the main store is opened. This ensures bd doctor and
+		// read-only commands see the correct version after a CLI upgrade.
+		autoMigrateOnVersionBump(filepath.Dir(dbPath))
 
 		// Initialize direct storage access
 		var err error
@@ -623,6 +629,11 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// Auto-push: after any dolt commit (auto or explicit), push to remote if configured.
+		if commandDidWrite.Load() || commandDidExplicitDoltCommit {
+			maybeAutoPush(rootCtx)
+		}
+
 		// Signal that store is closing (prevents background flush from accessing closed store)
 		storeMutex.Lock()
 		storeActive = false
@@ -725,6 +736,7 @@ func flushBatchCommitOnShutdown() {
 		fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", commitErr)
 	} else if committed {
 		fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
+		maybeAutoPush(ctx)
 	}
 }
 

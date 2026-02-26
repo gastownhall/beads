@@ -268,6 +268,9 @@ var versionChanges = []VersionChange{
 			"FIX: Release CI zig cross-compilation cache race (--parallelism 1)",
 			"FIX: Android ARM64 build uses CGO_ENABLED=0 (server mode only)",
 			"NEW: Mux setup recipe with layered AGENTS and managed hooks",
+			"CHORE: Remove daemon references from doctor system for post-daemon architecture",
+			"CHORE: Remove ~5K lines of dead code from classic cleanup",
+			"FIX: Upgrade zig 0.13.0 to 0.14.0 to fix AccessDenied bug in cross-compilation",
 		},
 	},
 	{

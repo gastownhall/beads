@@ -12,8 +12,8 @@ func TestProtocol_CyclePreventionBlocks(t *testing.T) {
 	b := w.create("--title", "Chain-B", "--type", "task")
 	c := w.create("--title", "Chain-C", "--type", "task")
 
-	w.run("dep", "add", b, a)            // B depends on A
-	w.run("dep", "add", c, b)            // C depends on B
+	w.run("dep", "add", b, a) // B depends on A
+	w.run("dep", "add", c, b) // C depends on B
 
 	// Adding C→A would create A→B→C→A cycle — must be rejected
 	_, err := w.tryRun("dep", "add", a, c, "--type", "blocks")

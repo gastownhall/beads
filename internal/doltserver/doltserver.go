@@ -156,7 +156,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 	// Under Gas Town, check the daemon PID file first
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
 		daemonPidFile := filepath.Join(gtRoot, "daemon", "dolt.pid")
-		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path from GT_ROOT env var
+		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path constructed from trusted GT_ROOT env
 			if daemonPID, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && daemonPID == pid {
 				return pid, nil // daemon-managed server — adopt it
 			}
@@ -256,7 +256,7 @@ func IsRunning(beadsDir string) (*State, error) {
 	// the server and writes its PID to a different location.
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
 		daemonPidFile := filepath.Join(gtRoot, "daemon", "dolt.pid")
-		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path from GT_ROOT env var
+		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path constructed from trusted GT_ROOT env
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
 				if isProcessAlive(pid) && isDoltProcess(pid) {
 					port := readPortFile(beadsDir)
@@ -774,7 +774,7 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 	// Under Gas Town, also check the daemon-managed PID file
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
 		daemonPidFile := filepath.Join(gtRoot, "daemon", "dolt.pid")
-		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path from GT_ROOT env var
+		if data, readErr := os.ReadFile(daemonPidFile); readErr == nil { //nolint:gosec // G304: path constructed from trusted GT_ROOT env
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
 				canonicalPIDs[pid] = true
 			}

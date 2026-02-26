@@ -243,7 +243,7 @@ func setupDoltDB(ctx context.Context, dir string) error {
 }
 
 func startDoltServer(dir string) (*exec.Cmd, error) {
-	logFile, err := os.Create(filepath.Join(dir, "server.log")) //nolint:gosec // G304: dir is a temp directory we just created
+	logFile, err := os.Create(filepath.Join(dir, "server.log")) //nolint:gosec // G304: path from controlled temp dir
 	if err != nil {
 		return nil, err
 	}

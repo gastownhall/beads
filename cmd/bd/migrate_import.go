@@ -16,13 +16,14 @@ import (
 
 // migrationData holds all data extracted from the source database.
 type migrationData struct {
-	issues     []*types.Issue
-	labelsMap  map[string][]string
-	depsMap    map[string][]*types.Dependency
-	eventsMap  map[string][]*types.Event
-	config     map[string]string
-	prefix     string
-	issueCount int
+	issues      []*types.Issue
+	labelsMap   map[string][]string
+	depsMap     map[string][]*types.Dependency
+	eventsMap   map[string][]*types.Event
+	commentsMap map[string][]*types.Comment
+	config      map[string]string
+	prefix      string
+	issueCount  int
 }
 
 // findSQLiteDB looks for a SQLite .db file in the beads directory.
@@ -110,47 +111,106 @@ func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationDat
 				created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
 				compaction_level, compacted_at, compacted_at_commit, original_size,
 				sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
-				mol_type, work_type, quality_score, source_system, source_repo, close_reason,
+				mol_type, work_type, quality_score, source_system, source_repo, close_reason, closed_by_session,
 				event_kind, actor, target, payload,
 				await_type, await_id, timeout_ns, waiters,
 				hook_bead, role_bead, agent_state, last_activity, role_type, rig,
 				due_at, defer_until, metadata
-			) VALUES (
-				?, ?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?, ?,
-				?, ?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?,
-				?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?,
-				?, ?, ?, ?,
-				?, ?, ?, ?, ?, ?,
+				) VALUES (
+					?, ?, ?, ?, ?, ?, ?,
+					?, ?, ?, ?, ?,
+					?, ?, ?, ?, ?, ?, ?,
+					?, ?, ?, ?,
+					?, ?, ?, ?, ?, ?,
+					?, ?, ?, ?, ?, ?, ?,
+					?, ?, ?, ?,
+					?, ?, ?, ?,
+					?, ?, ?, ?, ?, ?,
 				?, ?, ?
 			)
+			ON DUPLICATE KEY UPDATE
+				content_hash = VALUES(content_hash),
+				title = VALUES(title),
+				description = VALUES(description),
+				design = VALUES(design),
+				acceptance_criteria = VALUES(acceptance_criteria),
+				notes = VALUES(notes),
+				status = VALUES(status),
+				priority = VALUES(priority),
+				issue_type = VALUES(issue_type),
+				assignee = VALUES(assignee),
+				estimated_minutes = VALUES(estimated_minutes),
+				created_at = VALUES(created_at),
+				created_by = VALUES(created_by),
+				owner = VALUES(owner),
+				updated_at = VALUES(updated_at),
+				closed_at = VALUES(closed_at),
+				external_ref = VALUES(external_ref),
+				spec_id = VALUES(spec_id),
+				compaction_level = VALUES(compaction_level),
+				compacted_at = VALUES(compacted_at),
+				compacted_at_commit = VALUES(compacted_at_commit),
+				original_size = VALUES(original_size),
+				sender = VALUES(sender),
+				ephemeral = VALUES(ephemeral),
+				wisp_type = VALUES(wisp_type),
+				pinned = VALUES(pinned),
+				is_template = VALUES(is_template),
+				crystallizes = VALUES(crystallizes),
+				mol_type = VALUES(mol_type),
+				work_type = VALUES(work_type),
+				quality_score = VALUES(quality_score),
+				source_system = VALUES(source_system),
+				source_repo = VALUES(source_repo),
+				close_reason = VALUES(close_reason),
+				closed_by_session = VALUES(closed_by_session),
+				event_kind = VALUES(event_kind),
+				actor = VALUES(actor),
+				target = VALUES(target),
+				payload = VALUES(payload),
+				await_type = VALUES(await_type),
+				await_id = VALUES(await_id),
+				timeout_ns = VALUES(timeout_ns),
+				waiters = VALUES(waiters),
+				hook_bead = VALUES(hook_bead),
+				role_bead = VALUES(role_bead),
+				agent_state = VALUES(agent_state),
+				last_activity = VALUES(last_activity),
+				role_type = VALUES(role_type),
+				rig = VALUES(rig),
+				due_at = VALUES(due_at),
+				defer_until = VALUES(defer_until),
+				metadata = VALUES(metadata)
 		`,
 			issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 			issue.Status, issue.Priority, issue.IssueType, nullableString(issue.Assignee), nullableIntPtr(issue.EstimatedMinutes),
 			issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, nullableStringPtr(issue.ExternalRef), issue.SpecID,
 			issue.CompactionLevel, issue.CompactedAt, nullableStringPtr(issue.CompactedAtCommit), nullableInt(issue.OriginalSize),
 			issue.Sender, issue.Ephemeral, issue.WispType, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
-			issue.MolType, issue.WorkType, nullableFloat32Ptr(issue.QualityScore), issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
+			issue.MolType, issue.WorkType, nullableFloat32Ptr(issue.QualityScore), issue.SourceSystem, issue.SourceRepo, issue.CloseReason, issue.ClosedBySession,
 			issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 			issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONArray(issue.Waiters),
 			issue.HookBead, issue.RoleBead, issue.AgentState, issue.LastActivity, issue.RoleType, issue.Rig,
 			issue.DueAt, issue.DeferUntil, metadataStr,
 		)
 		if err != nil {
-			if strings.Contains(err.Error(), "Duplicate entry") ||
-				strings.Contains(err.Error(), "UNIQUE constraint") {
-				skipped++
-				continue
-			}
 			return imported, skipped, fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
 		}
 
-		// Insert labels
+		// Reconcile labels for deterministic re-imports.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ?`, issue.ID); err != nil {
+			return imported, skipped, fmt.Errorf("failed to reset labels for issue %s: %w", issue.ID, err)
+		}
+
+		// Insert labels.
+		// Keep ON DUPLICATE as a defensive guard: if source labels contain duplicates
+		// or this flow is later changed to skip the pre-delete step, import remains idempotent.
 		for _, label := range issue.Labels {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO labels (issue_id, label) VALUES (?, ?)`, issue.ID, label); err != nil {
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO labels (issue_id, label)
+				VALUES (?, ?)
+				ON DUPLICATE KEY UPDATE label = VALUES(label)
+			`, issue.ID, label); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to insert label %q for issue %s: %v\n", label, issue.ID, err)
 			}
 		}
@@ -162,20 +222,38 @@ func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationDat
 		fmt.Printf("  Importing issues: %d/%d\n", total, total)
 	}
 
+	issueIDs := orderedIssueIDs(data)
+
+	// Reconcile relations for deterministic and idempotent re-imports.
+	// This is source-authoritative for migrated issue IDs: the target relation set
+	// is replaced with what is present in the source snapshot.
+	for _, issueID := range issueIDs {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ?`, issueID); err != nil {
+			return imported, skipped, fmt.Errorf("failed to reset dependencies for issue %s: %w", issueID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, issueID); err != nil {
+			return imported, skipped, fmt.Errorf("failed to reset events for issue %s: %w", issueID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, issueID); err != nil {
+			return imported, skipped, fmt.Errorf("failed to reset comments for issue %s: %w", issueID, err)
+		}
+	}
+
 	// Import dependencies
 	migratePrintProgress("Importing dependencies...")
 	for _, issue := range data.issues {
 		for _, dep := range issue.Dependencies {
-			var exists int
-			if err := tx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ?", dep.DependsOnID).Scan(&exists); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: skipping dependency %s -> %s: target issue not found\n", dep.IssueID, dep.DependsOnID)
-				continue
-			}
+			metadataStr := normalizeDependencyMetadata(dep.Metadata)
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO dependencies (issue_id, depends_on_id, type, created_by, created_at)
-				VALUES (?, ?, ?, ?, ?)
-				ON DUPLICATE KEY UPDATE type = type
-			`, dep.IssueID, dep.DependsOnID, dep.Type, dep.CreatedBy, dep.CreatedAt); err != nil {
+				INSERT INTO dependencies (issue_id, depends_on_id, type, created_by, created_at, metadata, thread_id)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
+				ON DUPLICATE KEY UPDATE
+					type = VALUES(type),
+					created_by = VALUES(created_by),
+					created_at = VALUES(created_at),
+					metadata = VALUES(metadata),
+					thread_id = VALUES(thread_id)
+			`, dep.IssueID, dep.DependsOnID, dep.Type, dep.CreatedBy, dep.CreatedAt, metadataStr, dep.ThreadID); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to insert dependency %s -> %s: %v\n", dep.IssueID, dep.DependsOnID, err)
 			}
 		}
@@ -184,7 +262,9 @@ func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationDat
 	// Import events (includes comments)
 	migratePrintProgress("Importing events...")
 	eventCount := 0
-	for issueID, events := range data.eventsMap {
+	eventSkipped := 0
+	for _, issueID := range issueIDs {
+		events := data.eventsMap[issueID]
 		for _, event := range events {
 			_, err := tx.ExecContext(ctx, `
 				INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at)
@@ -194,11 +274,45 @@ func importToDolt(ctx context.Context, store *dolt.DoltStore, data *migrationDat
 				nullableStringPtr(event.Comment), event.CreatedAt)
 			if err == nil {
 				eventCount++
+			} else {
+				eventSkipped++
+				fmt.Fprintf(os.Stderr, "Warning: failed to insert event for issue %s: %v\n", issueID, err)
 			}
 		}
 	}
 	if !jsonOutput {
-		fmt.Printf("  Imported %d events\n", eventCount)
+		if eventSkipped > 0 {
+			fmt.Printf("  Imported %d events (%d skipped)\n", eventCount, eventSkipped)
+		} else {
+			fmt.Printf("  Imported %d events\n", eventCount)
+		}
+	}
+
+	// Import comments from legacy comments table (if available).
+	migratePrintProgress("Importing comments...")
+	commentCount := 0
+	commentSkipped := 0
+	for _, issueID := range issueIDs {
+		comments := data.commentsMap[issueID]
+		for _, comment := range comments {
+			_, err := tx.ExecContext(ctx, `
+				INSERT INTO comments (issue_id, author, text, created_at)
+				VALUES (?, ?, ?, ?)
+			`, issueID, comment.Author, comment.Text, comment.CreatedAt)
+			if err == nil {
+				commentCount++
+			} else {
+				commentSkipped++
+				fmt.Fprintf(os.Stderr, "Warning: failed to insert comment for issue %s: %v\n", issueID, err)
+			}
+		}
+	}
+	if !jsonOutput {
+		if commentSkipped > 0 {
+			fmt.Printf("  Imported %d comments (%d skipped)\n", commentCount, commentSkipped)
+		} else {
+			fmt.Printf("  Imported %d comments\n", commentCount)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -263,6 +377,60 @@ func nullableFloat32Ptr(f *float32) interface{} {
 		return nil
 	}
 	return *f
+}
+
+func normalizeDependencyMetadata(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(trimmed)) {
+		return trimmed
+	}
+	encoded, err := json.Marshal(trimmed)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
+}
+
+func sqliteOptionalTextExpr(columns map[string]bool, column string, fallback string) string {
+	if columns != nil && columns[column] {
+		return fmt.Sprintf("COALESCE(%s, %s)", column, fallback)
+	}
+	return fallback
+}
+
+func normalizedJSONBytes(raw string) json.RawMessage {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	if json.Valid([]byte(trimmed)) {
+		return json.RawMessage(trimmed)
+	}
+	encoded, err := json.Marshal(trimmed)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func orderedIssueIDs(data *migrationData) []string {
+	seen := make(map[string]struct{}, len(data.issues))
+	ids := make([]string, 0, len(data.issues))
+
+	for _, issue := range data.issues {
+		if issue == nil || issue.ID == "" {
+			continue
+		}
+		if _, ok := seen[issue.ID]; ok {
+			continue
+		}
+		seen[issue.ID] = struct{}{}
+		ids = append(ids, issue.ID)
+	}
+	return ids
 }
 
 // formatJSONArray formats a string slice as JSON (matches Dolt schema expectation)

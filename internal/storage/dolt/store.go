@@ -45,6 +45,29 @@ import (
 // DefaultSQLPort is the default port for dolt sql-server.
 const DefaultSQLPort = 3307
 
+// testDatabasePrefixes are name prefixes that indicate a test database.
+// Used by isTestDatabaseName to prevent test databases from being created
+// on the production Dolt server (Clown Shows #12-#18).
+var testDatabasePrefixes = []string{
+	"testdb_",
+	"beads_t",
+	"beads_pt",
+	"beads_vr",
+	"doctest_",
+	"doctortest_",
+}
+
+// isTestDatabaseName returns true if the database name matches known test patterns.
+// This is a pattern-based firewall — it does not rely on environment variables.
+func isTestDatabaseName(name string) bool {
+	for _, prefix := range testDatabasePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
 	db       *sql.DB
@@ -396,22 +419,24 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.ServerHost == "" {
 		cfg.ServerHost = "127.0.0.1"
 	}
-	// BEADS_DOLT_PORT always overrides cfg.ServerPort (env > config convention).
-	// Callers (standalone CI, Gas Town, etc.) set this to route bd to a specific
-	// Dolt server. Without this override, metadata.json's dolt_server_port wins,
-	// which causes test databases to leak onto production (port 3307).
+	// Port resolution: BEADS_DOLT_PORT env > BEADS_TEST_MODE guard > metadata config > default.
+	// CRITICAL: BEADS_TEST_MODE=1 forces port 1 (immediate fail) if the resolved port
+	// is the production port (DefaultSQLPort). This prevents test databases from leaking
+	// onto production even when BEADS_DOLT_PORT is set to 3307 by Gas Town's beads module.
+	// Only an explicit non-production BEADS_DOLT_PORT (e.g., 43211 for a test server)
+	// overrides test mode — that's a deliberate test server assignment.
 	if envPort := os.Getenv("BEADS_DOLT_PORT"); envPort != "" {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			cfg.ServerPort = p
 		}
-	} else if os.Getenv("BEADS_TEST_MODE") == "1" {
-		// Test mode with no explicit port — use sentinel port 1 so connection
-		// fails immediately instead of silently hitting prod.
+	} else if cfg.ServerPort == 0 {
+		cfg.ServerPort = DefaultSQLPort
+	}
+	// Test mode guard: if we'd hit production, force port 1 instead.
+	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
 			cfg.ServerPort = 1
 		}
-	} else if cfg.ServerPort == 0 {
-		cfg.ServerPort = DefaultSQLPort
 	}
 	if cfg.ServerUser == "" {
 		cfg.ServerUser = "root"
@@ -589,7 +614,11 @@ func buildServerDSN(cfg *Config, database string) string {
 		dbPart = "/"
 	}
 
-	params := "parseTime=true"
+	// Timeouts prevent agents from blocking forever when Dolt server hangs.
+	// timeout=5s: TCP connect timeout
+	// readTimeout=10s: I/O read timeout (covers hung queries)
+	// writeTimeout=10s: I/O write timeout
+	params := "parseTime=true&timeout=5s&readTimeout=10s&writeTimeout=10s"
 	if cfg.ServerTLS {
 		params += "&tls=true"
 	}
@@ -631,6 +660,18 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 		_ = db.Close()
 		return nil, "", fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
 	}
+
+	// FIREWALL: Never create test databases on the production server.
+	// This is the last line of defense against test pollution (Clown Shows #12-#18).
+	// Pattern-based, not env-var-based — env vars can be misconfigured or missing.
+	if isTestDatabaseName(cfg.Database) && cfg.ServerPort == DefaultSQLPort {
+		_ = db.Close()
+		return nil, "", fmt.Errorf(
+			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
+				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
+			cfg.Database, cfg.ServerPort)
+	}
+
 	_, err = initDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cfg.Database)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above
 	if err != nil {
 		// Dolt may return error 1007 even with IF NOT EXISTS - ignore if database already exists

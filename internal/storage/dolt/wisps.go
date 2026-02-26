@@ -590,7 +590,7 @@ func (s *DoltStore) searchWisps(ctx context.Context, query string, filter types.
 
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM wisp_dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR id LIKE CONCAT(?, '.%'))")
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM wisp_dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM wisp_dependencies WHERE type = 'parent-child')))")
 		args = append(args, parentID, parentID)
 	}
 
@@ -895,10 +895,25 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Check for existing dependency to prevent silent type overwrites.
+	var existingType string
+	err = tx.QueryRowContext(ctx, `
+		SELECT type FROM wisp_dependencies WHERE issue_id = ? AND depends_on_id = ?
+	`, dep.IssueID, dep.DependsOnID).Scan(&existingType)
+	if err == nil {
+		if existingType == string(dep.Type) {
+			return tx.Commit()
+		}
+		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
+			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check existing wisp dependency: %w", err)
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO wisp_dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)
 		VALUES (?, ?, ?, NOW(), ?, ?, ?)
-		ON DUPLICATE KEY UPDATE type = VALUES(type), metadata = VALUES(metadata)
 	`, dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return fmt.Errorf("failed to add wisp dependency: %w", err)
 	}
