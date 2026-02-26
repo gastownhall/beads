@@ -67,6 +67,42 @@ func TestDoctorWithBeadsDir(t *testing.T) {
 	}
 }
 
+func TestDoctorWithBeadsDir_DoesNotPolluteCallerBeadsDir(t *testing.T) {
+	// Simulate a caller context that has its own valid .beads directory.
+	callerDir := t.TempDir()
+	callerBeadsDir := filepath.Join(callerDir, ".beads")
+	if err := os.Mkdir(callerBeadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(callerBeadsDir, "beads.db"), []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", callerBeadsDir)
+
+	// Doctor target path should be isolated from caller's BEADS_DIR.
+	targetDir := t.TempDir()
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	if err := os.Mkdir(targetBeadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = runDiagnostics(targetDir)
+
+	// Regression: runDiagnostics() must not create metadata in caller's .beads.
+	if _, err := os.Stat(filepath.Join(callerBeadsDir, "metadata.json")); err == nil {
+		t.Fatalf("runDiagnostics unexpectedly created %s", filepath.Join(callerBeadsDir, "metadata.json"))
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("failed to stat caller metadata.json: %v", err)
+	}
+
+	// It also must not write local version tracking in caller scope.
+	if _, err := os.Stat(filepath.Join(callerBeadsDir, localVersionFile)); err == nil {
+		t.Fatalf("runDiagnostics unexpectedly created %s", filepath.Join(callerBeadsDir, localVersionFile))
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("failed to stat caller %s: %v", localVersionFile, err)
+	}
+}
+
 func TestDoctorJSONOutput(t *testing.T) {
 	// Create temporary directory
 	tmpDir := t.TempDir()
