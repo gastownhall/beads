@@ -490,16 +490,24 @@ var rootCmd = &cobra.Command{
 		// opens its own store connection, writes the version metadata, commits it,
 		// and closes BEFORE the main store is opened. This ensures bd doctor and
 		// read-only commands see the correct version after a CLI upgrade.
-		autoMigrateOnVersionBump(filepath.Dir(dbPath))
+		// Resolve beadsDir from FindBeadsDir() rather than filepath.Dir(dbPath),
+		// because dbPath may point to a custom data dir (dolt_data_dir) that
+		// lives outside of .beads/ (e.g., on a faster filesystem).
+		beadsDir := beads.FindBeadsDir()
+		if beadsDir == "" {
+			beadsDir = filepath.Dir(dbPath)
+		}
+
+		autoMigrateOnVersionBump(beadsDir)
 
 		// Initialize direct storage access
 		var err error
-		beadsDir := filepath.Dir(dbPath)
 
 		// Create Dolt storage config
-		doltPath := filepath.Join(beadsDir, "dolt")
+		doltPath := doltserver.ResolveDoltDir(beadsDir)
 		doltCfg := &dolt.Config{
 			ReadOnly: useReadOnly,
+			BeadsDir: beadsDir,
 		}
 
 		// Load config to get database name and server connection settings

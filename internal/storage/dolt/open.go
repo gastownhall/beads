@@ -29,6 +29,9 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 		cfg = &Config{}
 	}
 	cfg.Path = fileCfg.DatabasePath(beadsDir)
+	if cfg.BeadsDir == "" {
+		cfg.BeadsDir = beadsDir
+	}
 
 	// Always apply database name from metadata.json (prefix-based naming, bd-u8rda).
 	if cfg.Database == "" {
