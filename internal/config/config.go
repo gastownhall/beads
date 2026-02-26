@@ -198,8 +198,8 @@ func Initialize() error {
 
 	// Output configuration (GH#1384)
 	// Controls title display in command feedback messages.
-	// -1 = full title, 0 = hide title, N > 0 = truncate to N chars with "…"
-	v.SetDefault("output.title-length", -1)
+	// 0 = hide title, N > 0 = truncate to N chars with "…"
+	v.SetDefault("output.title-length", 255)
 
 	// External projects for cross-project dependency resolution (bd-h807)
 	// Maps project names to paths for resolving external: blocked_by references

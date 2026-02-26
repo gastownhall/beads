@@ -45,6 +45,11 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 # Enable JSON output by default
 # json: false
 
+# Feedback title formatting for mutating commands (create/update/close/dep/edit)
+# 0 = hide titles, N > 0 = truncate to N characters
+# output:
+#   title-length: 255
+
 # Default actor for audit trails (overridden by BD_ACTOR or --actor)
 # actor: ""
 

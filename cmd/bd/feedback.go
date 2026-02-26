@@ -24,17 +24,15 @@ func formatFeedbackIDParen(id, title string) string {
 }
 
 // applyTitleConfig applies the output.title-length config to a title string.
-// Returns empty string when titles should be hidden.
+// Returns empty string when titles should be hidden (<= 0).
 func applyTitleConfig(title string) string {
 	if title == "" {
 		return ""
 	}
 	maxLen := config.GetInt("output.title-length")
 	switch {
-	case maxLen == 0:
+	case maxLen <= 0:
 		return "" // hide titles
-	case maxLen < 0:
-		return title // full title
 	default:
 		return truncateTitle(title, maxLen)
 	}

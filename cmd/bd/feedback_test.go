@@ -9,6 +9,8 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+const defaultTitleLength = 255
+
 func TestFormatFeedbackID(t *testing.T) {
 	// Ensure config is initialized with defaults
 	config.ResetForTesting()
@@ -34,7 +36,7 @@ func TestFormatFeedbackID(t *testing.T) {
 
 	t.Run("title-length=0 hides title", func(t *testing.T) {
 		config.Set("output.title-length", 0)
-		t.Cleanup(func() { config.Set("output.title-length", -1) })
+		t.Cleanup(func() { config.Set("output.title-length", defaultTitleLength) })
 
 		got := formatFeedbackID("bd-abc", "Add user authentication")
 		if got != "bd-abc" {
@@ -44,7 +46,7 @@ func TestFormatFeedbackID(t *testing.T) {
 
 	t.Run("title-length truncates with ellipsis", func(t *testing.T) {
 		config.Set("output.title-length", 10)
-		t.Cleanup(func() { config.Set("output.title-length", -1) })
+		t.Cleanup(func() { config.Set("output.title-length", defaultTitleLength) })
 
 		got := formatFeedbackID("bd-abc", "Add user authentication")
 		want := "bd-abc — Add user …"
@@ -55,7 +57,7 @@ func TestFormatFeedbackID(t *testing.T) {
 
 	t.Run("title within limit not truncated", func(t *testing.T) {
 		config.Set("output.title-length", 50)
-		t.Cleanup(func() { config.Set("output.title-length", -1) })
+		t.Cleanup(func() { config.Set("output.title-length", defaultTitleLength) })
 
 		got := formatFeedbackID("bd-abc", "Short title")
 		want := "bd-abc — Short title"
@@ -89,7 +91,7 @@ func TestFormatFeedbackIDParen(t *testing.T) {
 
 	t.Run("title-length=0 hides title", func(t *testing.T) {
 		config.Set("output.title-length", 0)
-		t.Cleanup(func() { config.Set("output.title-length", -1) })
+		t.Cleanup(func() { config.Set("output.title-length", defaultTitleLength) })
 
 		got := formatFeedbackIDParen("bd-abc", "Write tests")
 		if got != "bd-abc" {
@@ -124,13 +126,23 @@ func TestApplyTitleConfig(t *testing.T) {
 
 	t.Run("unicode truncation is rune-safe", func(t *testing.T) {
 		config.Set("output.title-length", 3)
-		t.Cleanup(func() { config.Set("output.title-length", -1) })
+		t.Cleanup(func() { config.Set("output.title-length", defaultTitleLength) })
 
 		// 4-rune title: truncated to 2 runes + ellipsis (maxLen-1 reserves space for …)
 		got := applyTitleConfig("日本語文")
 		want := "日本…"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("negative values hide title", func(t *testing.T) {
+		config.Set("output.title-length", -1)
+		t.Cleanup(func() { config.Set("output.title-length", defaultTitleLength) })
+
+		got := applyTitleConfig("Hidden title")
+		if got != "" {
+			t.Errorf("got %q, want empty", got)
 		}
 	})
 }

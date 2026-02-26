@@ -199,6 +199,11 @@ directory:
     packages/agency: agency
     packages/io: io
 
+# Feedback title formatting for mutating commands (GH#1384)
+# 0 = hide titles, N > 0 = truncate to N characters
+output:
+  title-length: 255
+
 # Cross-project dependency resolution (bd-h807)
 # Maps project names to paths for resolving external: blocked_by references
 # Paths can be relative (from cwd) or absolute
