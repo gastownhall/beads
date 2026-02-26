@@ -50,13 +50,15 @@ func StartTestDoltServer(tmpDirPrefix string) (*TestDoltServer, func()) {
 	// with a pre-started shared server.
 	//
 	// CRITICAL: If BEADS_TEST_MODE=1 and BEADS_DOLT_PORT is the production port
-	// (3307), we must NOT reuse it — that would point all tests at production.
-	// This is Clown Show #15: gastown's metadata.json injects BEADS_DOLT_PORT=3307
-	// into bd subprocesses, which leaks into test environments.
+	// FIREWALL: Never reuse the production Dolt server (port 3307) for tests.
+	// This guard does NOT depend on BEADS_TEST_MODE — that env var may not be set yet
+	// when TestMain calls StartTestDoltServer (it's set AFTER this returns).
+	// Clown Shows #12-#18: every time this guard had a hole, production got polluted.
 	if port := os.Getenv("BEADS_DOLT_PORT"); port != "" {
 		p, err := strconv.Atoi(port)
-		if err == nil && os.Getenv("BEADS_TEST_MODE") == "1" && p == 3307 {
-			fmt.Fprintf(os.Stderr, "WARN: BEADS_TEST_MODE=1 but BEADS_DOLT_PORT=%d is production — starting isolated server\n", p)
+		if err == nil && p == 3307 {
+			// Port 3307 is ALWAYS production. Never reuse it, regardless of BEADS_TEST_MODE.
+			fmt.Fprintf(os.Stderr, "WARN: BEADS_DOLT_PORT=%d is production — starting isolated test server\n", p)
 		} else if err == nil && WaitForServer(p, 2*time.Second) {
 			return &TestDoltServer{Port: p}, func() {}
 		} else {

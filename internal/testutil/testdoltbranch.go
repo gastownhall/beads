@@ -127,6 +127,12 @@ func SetupSharedTestDB(port int, dbName string) (*sql.DB, error) {
 		return nil, fmt.Errorf("SetupSharedTestDB: open connection: %w", err)
 	}
 
+	// FIREWALL: refuse to create databases on the production port.
+	if port == 3307 {
+		_ = db.Close()
+		return nil, fmt.Errorf("SetupSharedTestDB: REFUSED — port %d is production (Clown Shows #12-#18)", port)
+	}
+
 	// Create the shared database
 	//nolint:gosec // G201: dbName comes from test infrastructure
 	_, err = db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbName))
