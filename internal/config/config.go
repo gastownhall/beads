@@ -438,6 +438,50 @@ func GetString(key string) string {
 	return v.GetString(key)
 }
 
+// GetStringFromDir reads a single string configuration value directly from
+// <beadsDir>/config.yaml without using or modifying global viper state.
+// This is intended for library consumers that call NewFromConfigWithOptions
+// without first invoking config.Initialize().
+//
+// The key uses dotted notation (e.g. "dolt.auto-start"). YAML booleans and
+// numbers are coerced to their string representations ("true", "false", etc.).
+// Returns "" if the file is absent, the key is not found, or any error occurs.
+func GetStringFromDir(beadsDir, key string) string {
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	var root map[string]interface{}
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return ""
+	}
+	parts := strings.SplitN(key, ".", 2)
+	node := root
+	for len(parts) == 2 {
+		val, ok := node[parts[0]]
+		if !ok {
+			return ""
+		}
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		node = m
+		parts = strings.SplitN(parts[1], ".", 2)
+	}
+	val, ok := node[parts[0]]
+	if !ok {
+		return ""
+	}
+	switch s := val.(type) {
+	case string:
+		return s
+	default:
+		return fmt.Sprintf("%v", s)
+	}
+}
+
 // GetBool retrieves a boolean configuration value
 func GetBool(key string) bool {
 	if v == nil {

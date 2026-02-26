@@ -56,7 +56,15 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	// or in test mode (tests manage their own server lifecycle via testdoltserver).
 	// Note: cfg.ReadOnly refers to the store's read-only mode, not the server —
 	// the server must be running regardless of whether the store is read-only.
-	cfg.AutoStart = resolveAutoStart(cfg.AutoStart, config.GetString("dolt.auto-start"))
+	//
+	// Prefer the global viper config (populated when config.Initialize() has been
+	// called, i.e. all CLI paths). Fall back to a direct read of the project
+	// config.yaml for library consumers that never call config.Initialize().
+	autoStartCfg := config.GetString("dolt.auto-start")
+	if autoStartCfg == "" {
+		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
+	}
+	cfg.AutoStart = resolveAutoStart(cfg.AutoStart, autoStartCfg)
 
 	return New(ctx, cfg)
 }

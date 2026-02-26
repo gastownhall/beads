@@ -1,26 +1,30 @@
 package dolt
 
 import (
-	"os"
 	"testing"
 )
 
 // TestResolveAutoStart verifies all conditions that govern the AutoStart decision.
-// Unit tests run with BEADS_TEST_MODE=1, so each case explicitly manages that
-// env var to exercise the real logic paths.
+//
+// Each subtest uses t.Setenv for env-var isolation: t.Setenv records the
+// original value (including the unset state) and restores it after the test,
+// correctly handling cases where a variable was previously unset vs. set to "".
+// Each subtest also calls t.Chdir(t.TempDir()) so that doltserver.IsDaemonManaged()'s
+// filesystem heuristics — which inspect parent directories for Gas Town path
+// segments — cannot false-trigger in environments whose real CWD looks like a
+// Gas Town workspace.
 func TestResolveAutoStart(t *testing.T) {
 	tests := []struct {
 		name             string
-		testMode         string // BEADS_TEST_MODE value ("" means unset)
-		autoStartEnv     string // BEADS_DOLT_AUTO_START value ("" means unset)
-		gtRoot           string // GT_ROOT value ("" means unset; used to simulate IsDaemonManaged)
-		doltAutoStartCfg string // dolt.auto-start value from config.yaml
+		testMode         string // BEADS_TEST_MODE to set; "" leaves it unset/empty
+		autoStartEnv     string // BEADS_DOLT_AUTO_START to set; "" leaves it unset/empty
+		gtRoot           string // GT_ROOT to set; "" leaves it unset/empty
+		doltAutoStartCfg string // raw value of "dolt.auto-start" from config.yaml
 		currentValue     bool   // AutoStart value supplied by caller
 		wantAutoStart    bool
 	}{
 		{
 			name:          "defaults to true for standalone user",
-			testMode:      "",
 			wantAutoStart: true,
 		},
 		{
@@ -30,37 +34,31 @@ func TestResolveAutoStart(t *testing.T) {
 		},
 		{
 			name:          "disabled when IsDaemonManaged (GT_ROOT set)",
-			testMode:      "",
 			gtRoot:        "/fake/gt/root",
 			wantAutoStart: false,
 		},
 		{
 			name:          "disabled when BEADS_DOLT_AUTO_START=0",
-			testMode:      "",
 			autoStartEnv:  "0",
 			wantAutoStart: false,
 		},
 		{
 			name:          "enabled when BEADS_DOLT_AUTO_START=1",
-			testMode:      "",
 			autoStartEnv:  "1",
 			wantAutoStart: true,
 		},
 		{
 			name:             "disabled when dolt.auto-start=false in config",
-			testMode:         "",
 			doltAutoStartCfg: "false",
 			wantAutoStart:    false,
 		},
 		{
 			name:             "disabled when dolt.auto-start=0 in config",
-			testMode:         "",
 			doltAutoStartCfg: "0",
 			wantAutoStart:    false,
 		},
 		{
 			name:             "disabled when dolt.auto-start=off in config",
-			testMode:         "",
 			doltAutoStartCfg: "off",
 			wantAutoStart:    false,
 		},
@@ -72,7 +70,6 @@ func TestResolveAutoStart(t *testing.T) {
 		},
 		{
 			name:          "caller true preserved when no overrides",
-			testMode:      "",
 			currentValue:  true,
 			wantAutoStart: true,
 		},
@@ -84,21 +81,19 @@ func TestResolveAutoStart(t *testing.T) {
 		},
 	}
 
-	// Persist and restore env vars that the test harness may have set.
-	origTestMode := os.Getenv("BEADS_TEST_MODE")
-	origAutoStart := os.Getenv("BEADS_DOLT_AUTO_START")
-	origGTRoot := os.Getenv("GT_ROOT")
-	t.Cleanup(func() {
-		restoreEnv("BEADS_TEST_MODE", origTestMode)
-		restoreEnv("BEADS_DOLT_AUTO_START", origAutoStart)
-		restoreEnv("GT_ROOT", origGTRoot)
-	})
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			setOrUnsetEnv(t, "BEADS_TEST_MODE", tc.testMode)
-			setOrUnsetEnv(t, "BEADS_DOLT_AUTO_START", tc.autoStartEnv)
-			setOrUnsetEnv(t, "GT_ROOT", tc.gtRoot)
+			// Isolate CWD so filesystem heuristics in IsDaemonManaged never
+			// accidentally see Gas Town path segments in the working directory.
+			t.Chdir(t.TempDir())
+
+			// t.Setenv records and restores the original state (incl. whether
+			// the var was set at all) so subtests don't leak into each other.
+			// Our resolveAutoStart checks are exact-value ("== 1"), so setting
+			// a var to "" is equivalent to unsetting it for our purposes.
+			t.Setenv("BEADS_TEST_MODE", tc.testMode)
+			t.Setenv("GT_ROOT", tc.gtRoot)
+			t.Setenv("BEADS_DOLT_AUTO_START", tc.autoStartEnv)
 
 			got := resolveAutoStart(tc.currentValue, tc.doltAutoStartCfg)
 			if got != tc.wantAutoStart {
@@ -106,26 +101,5 @@ func TestResolveAutoStart(t *testing.T) {
 					tc.currentValue, tc.doltAutoStartCfg, got, tc.wantAutoStart)
 			}
 		})
-	}
-}
-
-func setOrUnsetEnv(t *testing.T, key, value string) {
-	t.Helper()
-	if value == "" {
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatalf("unsetenv %s: %v", key, err)
-		}
-	} else {
-		if err := os.Setenv(key, value); err != nil {
-			t.Fatalf("setenv %s: %v", key, err)
-		}
-	}
-}
-
-func restoreEnv(key, original string) {
-	if original == "" {
-		_ = os.Unsetenv(key)
-	} else {
-		_ = os.Setenv(key, original)
 	}
 }
