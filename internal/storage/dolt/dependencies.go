@@ -643,26 +643,16 @@ func (s *DoltStore) buildDependencyTree(ctx context.Context, issueID string, dep
 		return nil, err
 	}
 
-	var childIDs []string
-	var query string
+	// Use GetDependencies/GetDependents which handle wisp routing,
+	// instead of querying the dependencies table directly (GH#2145).
+	var related []*types.Issue
 	if reverse {
-		query = "SELECT issue_id FROM dependencies WHERE depends_on_id = ?"
+		related, err = s.GetDependents(ctx, issueID)
 	} else {
-		query = "SELECT depends_on_id FROM dependencies WHERE issue_id = ?"
+		related, err = s.GetDependencies(ctx, issueID)
 	}
-
-	rows, err := s.queryContext(ctx, query, issueID)
 	if err != nil {
 		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		childIDs = append(childIDs, id)
 	}
 
 	node := &types.TreeNode{
@@ -673,8 +663,8 @@ func (s *DoltStore) buildDependencyTree(ctx context.Context, issueID string, dep
 
 	// TreeNode doesn't have Children field - return flat list
 	nodes := []*types.TreeNode{node}
-	for _, childID := range childIDs {
-		children, err := s.buildDependencyTree(ctx, childID, depth+1, maxDepth, reverse, visited, issueID)
+	for _, rel := range related {
+		children, err := s.buildDependencyTree(ctx, rel.ID, depth+1, maxDepth, reverse, visited, issueID)
 		if err != nil {
 			return nil, err
 		}

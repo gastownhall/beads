@@ -194,8 +194,8 @@ func loadGraphSubgraph(ctx context.Context, s *dolt.DoltStore, issueID string) (
 		IssueMap: map[string]*types.Issue{root.ID: root},
 	}
 
-	// BFS to find all connected issues (via any dependency type)
-	// We traverse both directions: dependents and dependencies
+	// BFS to find all connected issues (via any dependency type).
+	// Traverse both directions: dependents AND dependencies (GH#2145).
 	queue := []string{root.ID}
 	visited := map[string]bool{root.ID: true}
 
@@ -217,11 +217,18 @@ func loadGraphSubgraph(ctx context.Context, s *dolt.DoltStore, issueID string) (
 			}
 		}
 
-		// Get issues this one depends on (dependencies) - but only for non-root
-		// to avoid pulling in unrelated upstream issues
-		if currentID == root.ID {
-			// For root, we might want to include direct dependencies too
-			// Skip for now to keep graph focused on "what this issue encompasses"
+		// Get issues this one depends on (dependencies)
+		dependencies, err := s.GetDependencies(ctx, currentID)
+		if err != nil {
+			continue
+		}
+		for _, dep := range dependencies {
+			if !visited[dep.ID] {
+				visited[dep.ID] = true
+				subgraph.Issues = append(subgraph.Issues, dep)
+				subgraph.IssueMap[dep.ID] = dep
+				queue = append(queue, dep.ID)
+			}
 		}
 	}
 
