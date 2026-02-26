@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,43 +207,27 @@ func CheckCompactionCandidates(path string) DoctorCheck {
 
 // CheckPersistentMolIssues detects mol- prefixed issues that should have been ephemeral.
 // When users run "bd mol pour" on formulas that should use "bd mol wisp", the resulting
-// issues get the "mol-" prefix but persist in JSONL. These should be cleaned up.
+// issues get the "mol-" prefix but persist in the issue store. These should be cleaned up.
 func CheckPersistentMolIssues(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:     "Persistent Mol Issues",
-			Status:   StatusOK,
-			Message:  "N/A (no JSONL file)",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	// Read JSONL and count mol- prefixed issues that are not ephemeral
-	file, err := os.Open(jsonlPath) // #nosec G304 - path constructed safely
+	issues, err := loadMaintenanceIssues(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Persistent Mol Issues",
 			Status:   StatusOK,
-			Message:  "N/A (unable to read JSONL)",
+			Message:  maintenanceIssuesUnavailableMessage,
 			Category: CategoryMaintenance,
 		}
 	}
-	defer file.Close()
 
 	var molCount int
 	var molIDs []string
-	decoder := json.NewDecoder(file)
 
-	for {
-		var issue types.Issue
-		if err := decoder.Decode(&issue); err != nil {
-			break
+	for _, issue := range issues {
+		if issue == nil {
+			continue
 		}
-		// Look for mol- prefix that shouldn't be in JSONL
-		// (ephemeral issues have Ephemeral=true and don't get exported)
+		// Look for mol- prefix that shouldn't persist in the issue store.
+		// Ephemeral issues have Ephemeral=true and should not persist.
 		if strings.HasPrefix(issue.ID, "mol-") && !issue.Ephemeral {
 			molCount++
 			if len(molIDs) < 3 {
@@ -268,7 +253,7 @@ func CheckPersistentMolIssues(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Persistent Mol Issues",
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d mol- issue(s) in JSONL should be ephemeral", molCount),
+		Message:  fmt.Sprintf("%d mol- issue(s) should be ephemeral", molCount),
 		Detail:   detail,
 		Fix:      "Run 'bd delete <id> --force' to remove, or use 'bd mol wisp' instead of 'bd mol pour'",
 		Category: CategoryMaintenance,
@@ -330,43 +315,25 @@ func FixStaleMQFiles(path string) error {
 
 // checkMisclassifiedWisps detects wisp-patterned issues that lack the ephemeral flag.
 // Issues with IDs containing "-wisp-" should always have Ephemeral=true.
-// If they're in JSONL without the ephemeral flag, they'll pollute bd ready.
+// If they're in the issue store without the ephemeral flag, they'll pollute bd ready.
 func checkMisclassifiedWisps(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:     "Misclassified Wisps",
-			Status:   StatusOK,
-			Message:  "N/A (no JSONL file)",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	// Read JSONL and find wisp-patterned issues without ephemeral flag
-	file, err := os.Open(jsonlPath) // #nosec G304 - path constructed safely
+	issues, err := loadMisclassifiedWispIssues(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Misclassified Wisps",
 			Status:   StatusOK,
-			Message:  "N/A (unable to read JSONL)",
+			Message:  maintenanceIssuesUnavailableMessage,
 			Category: CategoryMaintenance,
 		}
 	}
-	defer file.Close()
 
 	var wispCount int
 	var wispIDs []string
-	decoder := json.NewDecoder(file)
 
-	for {
-		var issue types.Issue
-		if err := decoder.Decode(&issue); err != nil {
-			break
+	for _, issue := range issues {
+		if issue == nil {
+			continue
 		}
-		// Look for wisp pattern without ephemeral flag
-		// These shouldn't be in JSONL at all (wisps are ephemeral)
 		if strings.Contains(issue.ID, "-wisp-") && !issue.Ephemeral {
 			wispCount++
 			if len(wispIDs) < 3 {
@@ -392,9 +359,9 @@ func checkMisclassifiedWisps(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Misclassified Wisps",
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d wisp issue(s) in JSONL missing ephemeral flag", wispCount),
+		Message:  fmt.Sprintf("%d wisp issue(s) missing ephemeral flag", wispCount),
 		Detail:   detail,
-		Fix:      "Remove from JSONL: grep -v '\"id\":\"<id>\"' issues.jsonl > tmp && mv tmp issues.jsonl",
+		Fix:      "Run 'bd delete <id> --force' for each misclassified wisp",
 		Category: CategoryMaintenance,
 	}
 }
@@ -403,6 +370,16 @@ func checkMisclassifiedWisps(path string) DoctorCheck {
 const (
 	PatrolDigestThreshold = 10 // Warn if patrol digests > 10
 	SessionBeadThreshold  = 50 // Warn if session beads > 50
+)
+
+const maintenanceIssuesUnavailableMessage = "N/A (unable to load issues from database or JSONL fallback)"
+
+type patrolIssueKind int
+
+const (
+	patrolIssueNone patrolIssueKind = iota
+	patrolIssueDigest
+	patrolIssueSessionEnded
 )
 
 // patrolPollutionResult contains counts of detected pollution beads
@@ -420,31 +397,17 @@ type patrolPollutionResult struct {
 // - Patrol digests: titles matching "Digest: mol-*-patrol"
 // - Session ended beads: titles matching "Session ended: *"
 func CheckPatrolPollution(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:     "Patrol Pollution",
-			Status:   StatusOK,
-			Message:  "N/A (no JSONL file)",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	// Read JSONL and count pollution beads
-	file, err := os.Open(jsonlPath) // #nosec G304 - path constructed safely
+	issues, err := loadMaintenanceIssues(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Patrol Pollution",
 			Status:   StatusOK,
-			Message:  "N/A (unable to read JSONL)",
+			Message:  maintenanceIssuesUnavailableMessage,
 			Category: CategoryMaintenance,
 		}
 	}
-	defer file.Close()
 
-	result := detectPatrolPollution(file)
+	result := detectPatrolPollution(issues)
 
 	// Check thresholds
 	hasPatrolPollution := result.PatrolDigestCount > PatrolDigestThreshold
@@ -487,30 +450,21 @@ func CheckPatrolPollution(path string) DoctorCheck {
 	}
 }
 
-// detectPatrolPollution scans a JSONL file for patrol pollution patterns
-func detectPatrolPollution(file *os.File) patrolPollutionResult {
+// detectPatrolPollution scans issues for patrol pollution patterns.
+func detectPatrolPollution(issues []*types.Issue) patrolPollutionResult {
 	var result patrolPollutionResult
-	decoder := json.NewDecoder(file)
 
-	for {
-		var issue types.Issue
-		if err := decoder.Decode(&issue); err != nil {
-			break
+	for _, issue := range issues {
+		if issue == nil {
+			continue
 		}
-
-		title := issue.Title
-
-		// Check for patrol digest pattern: "Digest: mol-*-patrol"
-		if strings.HasPrefix(title, "Digest: mol-") && strings.HasSuffix(title, "-patrol") {
+		switch classifyPatrolIssue(issue.Title) {
+		case patrolIssueDigest:
 			result.PatrolDigestCount++
 			if len(result.PatrolDigestIDs) < 3 {
 				result.PatrolDigestIDs = append(result.PatrolDigestIDs, issue.ID)
 			}
-			continue
-		}
-
-		// Check for session ended pattern: "Session ended: *"
-		if strings.HasPrefix(title, "Session ended:") {
+		case patrolIssueSessionEnded:
 			result.SessionBeadCount++
 			if len(result.SessionBeadIDs) < 3 {
 				result.SessionBeadIDs = append(result.SessionBeadIDs, issue.ID)
@@ -523,37 +477,152 @@ func detectPatrolPollution(file *os.File) patrolPollutionResult {
 
 // getPatrolPollutionIDs returns all IDs of patrol pollution beads for deletion
 func getPatrolPollutionIDs(path string) ([]string, error) {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-
-	file, err := os.Open(jsonlPath) // #nosec G304 - path constructed safely
+	issues, err := loadMaintenanceIssues(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open issues.jsonl: %w", err)
+		return nil, fmt.Errorf("failed to load issues: %w", err)
 	}
-	defer file.Close()
 
 	var ids []string
-	decoder := json.NewDecoder(file)
-
-	for {
-		var issue types.Issue
-		if err := decoder.Decode(&issue); err != nil {
-			break
-		}
-
-		title := issue.Title
-
-		// Check for patrol digest pattern
-		if strings.HasPrefix(title, "Digest: mol-") && strings.HasSuffix(title, "-patrol") {
-			ids = append(ids, issue.ID)
+	for _, issue := range issues {
+		if issue == nil {
 			continue
 		}
-
-		// Check for session ended pattern
-		if strings.HasPrefix(title, "Session ended:") {
+		switch classifyPatrolIssue(issue.Title) {
+		case patrolIssueDigest, patrolIssueSessionEnded:
 			ids = append(ids, issue.ID)
 		}
 	}
 
 	return ids, nil
+}
+
+// loadMaintenanceIssues loads issues for maintenance checks.
+// It prefers Dolt (source of truth) and falls back to JSONL for compatibility.
+func loadMaintenanceIssues(path string) ([]*types.Issue, error) {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	issues, err := loadMaintenanceIssuesFromDatabase(beadsDir)
+	if err == nil {
+		return issues, nil
+	}
+
+	issues, jsonlErr := loadMaintenanceIssuesFromJSONL(beadsDir)
+	if jsonlErr == nil {
+		return issues, nil
+	}
+
+	return nil, fmt.Errorf("database read failed: %w; JSONL fallback read failed: %v", err, jsonlErr)
+}
+
+func loadMaintenanceIssuesFromDatabase(beadsDir string) ([]*types.Issue, error) {
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = store.Close() }()
+
+	ephemeral := false
+	return store.SearchIssues(ctx, "", types.IssueFilter{Ephemeral: &ephemeral})
+}
+
+func loadMaintenanceIssuesFromJSONL(beadsDir string) ([]*types.Issue, error) {
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	file, err := os.Open(jsonlPath) // #nosec G304 - path constructed safely
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var issues []*types.Issue
+	decoder := json.NewDecoder(file)
+	for {
+		issue := &types.Issue{}
+		if err := decoder.Decode(issue); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+
+	return issues, nil
+}
+
+func loadMisclassifiedWispIssues(path string) ([]*types.Issue, error) {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	issues, err := loadMisclassifiedWispIssuesFromDatabase(beadsDir)
+	if err == nil {
+		return issues, nil
+	}
+
+	issues, jsonlErr := loadMisclassifiedWispIssuesFromJSONL(beadsDir)
+	if jsonlErr == nil {
+		return issues, nil
+	}
+
+	return nil, fmt.Errorf("database read failed: %w; JSONL fallback read failed: %v", err, jsonlErr)
+}
+
+func loadMisclassifiedWispIssuesFromDatabase(beadsDir string) ([]*types.Issue, error) {
+	db, store, err := openStoreDB(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = store.Close() }()
+
+	rows, err := db.Query(
+		"SELECT id FROM issues WHERE id LIKE ? AND (ephemeral = 0 OR ephemeral IS NULL)",
+		"%-wisp-%",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var issues []*types.Issue
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		issues = append(issues, &types.Issue{ID: id, Ephemeral: false})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return issues, nil
+}
+
+func loadMisclassifiedWispIssuesFromJSONL(beadsDir string) ([]*types.Issue, error) {
+	issues, err := loadMaintenanceIssuesFromJSONL(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var filtered []*types.Issue
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if strings.Contains(issue.ID, "-wisp-") && !issue.Ephemeral {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered, nil
+}
+
+func classifyPatrolIssue(title string) patrolIssueKind {
+	switch {
+	case strings.HasPrefix(title, "Digest: mol-") && strings.HasSuffix(title, "-patrol"):
+		return patrolIssueDigest
+	case strings.HasPrefix(title, "Session ended:"):
+		return patrolIssueSessionEnded
+	default:
+		return patrolIssueNone
+	}
 }
