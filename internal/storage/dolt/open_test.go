@@ -108,9 +108,9 @@ func TestResolveAutoStart(t *testing.T) {
 
 			// t.Setenv records and restores the original state (incl. whether
 			// the var was set at all) so subtests don't leak into each other.
-		// BEADS_TEST_MODE is checked for exact value "1" (to enable test mode);
-		// BEADS_DOLT_AUTO_START is checked for exact value "0" (to disable
-		// auto-start). Setting either to "" is effectively a no-op for both checks.
+			// BEADS_TEST_MODE is checked for exact value "1" (to enable test mode);
+			// BEADS_DOLT_AUTO_START is checked for exact value "0" (to disable
+			// auto-start). Setting either to "" is effectively a no-op for both checks.
 			t.Setenv("BEADS_TEST_MODE", tc.testMode)
 			t.Setenv("GT_ROOT", tc.gtRoot)
 			t.Setenv("BEADS_DOLT_AUTO_START", tc.autoStartEnv)
