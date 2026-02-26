@@ -741,8 +741,7 @@ var createCmd = &cobra.Command{
 		} else if silent {
 			fmt.Println(issue.ID)
 		} else {
-			fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), issue.ID)
-			fmt.Printf("  Title: %s\n", issue.Title)
+			fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
 			fmt.Printf("  Priority: P%d\n", issue.Priority)
 			fmt.Printf("  Status: %s\n", issue.Status)
 
@@ -960,8 +959,7 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 	} else if silent {
 		fmt.Println(issue.ID)
 	} else {
-		fmt.Printf("%s Created issue in rig %q: %s\n", ui.RenderPass("✓"), rigName, issue.ID)
-		fmt.Printf("  Title: %s\n", issue.Title)
+		fmt.Printf("%s Created issue in rig %q: %s\n", ui.RenderPass("✓"), rigName, formatFeedbackID(issue.ID, issue.Title))
 		fmt.Printf("  Priority: P%d\n", issue.Priority)
 		fmt.Printf("  Status: %s\n", issue.Status)
 	}

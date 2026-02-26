@@ -353,8 +353,7 @@ func runCreateForm(cmd *cobra.Command) {
 }
 
 func printCreatedIssue(issue *types.Issue) {
-	fmt.Printf("\n%s Created issue: %s\n", ui.RenderPass("✓"), issue.ID)
-	fmt.Printf("  Title:    %s\n", issue.Title)
+	fmt.Printf("\n%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
 	fmt.Printf("  Type:     %s\n", issue.IssueType)
 	fmt.Printf("  Priority: P%d\n", issue.Priority)
 	fmt.Printf("  Status:   %s\n", issue.Status)

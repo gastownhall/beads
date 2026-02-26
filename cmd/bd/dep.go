@@ -153,7 +153,7 @@ Examples:
 			}
 
 			fmt.Printf("%s Added dependency: %s blocks %s\n",
-				ui.RenderPass("✓"), toID, fromID)
+				ui.RenderPass("✓"), formatFeedbackIDParen(toID, lookupTitle(toID)), formatFeedbackIDParen(fromID, lookupTitle(fromID)))
 			return
 		}
 
@@ -292,7 +292,7 @@ Examples:
 		}
 
 		fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), fromID, toID, depType)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), depType)
 	},
 }
 
@@ -475,7 +475,7 @@ var depRemoveCmd = &cobra.Command{
 		}
 
 		fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
-			ui.RenderPass("✓"), fullFromID, fullToID)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fullFromID, lookupTitle(fullFromID)), formatFeedbackIDParen(fullToID, lookupTitle(fullToID)))
 	},
 }
 
