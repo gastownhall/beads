@@ -72,10 +72,32 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		}
 	}
 
+	// Check for existing dependency between the same pair with a different type.
+	// Previously this was an upsert (ON DUPLICATE KEY UPDATE type = VALUES(type))
+	// which silently changed e.g. "blocks" to "caused-by", removing the blocking
+	// relationship without warning.
+	var existingType string
+	err = tx.QueryRowContext(ctx, `
+		SELECT type FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
+	`, dep.IssueID, dep.DependsOnID).Scan(&existingType)
+	if err == nil {
+		// Row exists
+		if existingType == string(dep.Type) {
+			// Same type — idempotent, nothing to do
+			return tx.Commit()
+		}
+		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
+			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
+	}
+	// err is non-nil: either sql.ErrNoRows (no existing dep, proceed with insert)
+	// or a real database error. Only sql.ErrNoRows is acceptable here.
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check existing dependency: %w", err)
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)
 		VALUES (?, ?, ?, NOW(), ?, ?, ?)
-		ON DUPLICATE KEY UPDATE type = VALUES(type), metadata = VALUES(metadata)
 	`, dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return fmt.Errorf("failed to add dependency: %w", err)
 	}

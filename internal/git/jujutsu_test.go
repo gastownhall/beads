@@ -185,3 +185,54 @@ func TestGetJujutsuRoot(t *testing.T) {
 		}
 	})
 }
+
+// TestGetJujutsuRootStopsAtGitBoundary verifies that GetJujutsuRoot() stops
+// walking up the directory tree when it encounters a .git directory, even when
+// a .jj directory exists above the .git boundary.  This prevents a plain git
+// repo nested inside a JJ workspace from inheriting the parent JJ context.
+func TestGetJujutsuRootStopsAtGitBoundary(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current directory: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origDir)
+		ResetCaches()
+	}()
+
+	// Directory structure:
+	//   tmpDir/
+	//   +-- jj-parent/      <- has .jj/ (simulates a JJ workspace root)
+	//       +-- nested-git/ <- has .git/ (plain git repo; no .jj at this level)
+	//
+	// When CWD is nested-git/, GetJujutsuRoot() must stop at the .git boundary
+	// and NOT walk up into jj-parent/ where .jj/ lives.
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir) // resolve macOS /var -> /private/var
+
+	jjParent := filepath.Join(tmpDir, "jj-parent")
+	if err := os.MkdirAll(jjParent, 0750); err != nil {
+		t.Fatalf("Failed to create jj-parent: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(jjParent, ".jj"), 0750); err != nil {
+		t.Fatalf("Failed to create .jj: %v", err)
+	}
+
+	nestedGit := filepath.Join(jjParent, "nested-git")
+	if err := os.MkdirAll(nestedGit, 0750); err != nil {
+		t.Fatalf("Failed to create nested-git: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(nestedGit, ".git"), 0750); err != nil {
+		t.Fatalf("Failed to create .git: %v", err)
+	}
+
+	if err := os.Chdir(nestedGit); err != nil {
+		t.Fatalf("Failed to chdir to nested-git: %v", err)
+	}
+	ResetCaches()
+
+	root, err := GetJujutsuRoot()
+	if err == nil {
+		t.Errorf("Expected error: .git boundary should prevent walking to parent .jj, but got root: %q", root)
+	}
+}

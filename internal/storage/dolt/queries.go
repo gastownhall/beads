@@ -206,10 +206,12 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	}
 
 	// Parent filtering: filter children by parent issue
-	// Also includes dotted-ID children (e.g., "parent.1.2" is child of "parent")
+	// Also includes dotted-ID children (e.g., "parent.1.2" is child of "parent"),
+	// but only if they haven't been explicitly reparented via dependencies.
+	// An explicit parent-child dependency takes precedence over dotted-ID prefix.
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR id LIKE CONCAT(?, '.%'))")
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
 		args = append(args, parentID, parentID)
 	}
 
@@ -420,9 +422,10 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		}
 	}
 	// Parent filtering: filter to children of specified parent (GH#2009)
+	// Explicit parent-child dependency takes precedence over dotted-ID prefix.
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR id LIKE CONCAT(?, '.%'))")
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
 		args = append(args, parentID, parentID)
 	}
 

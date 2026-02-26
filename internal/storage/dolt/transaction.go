@@ -200,7 +200,7 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		if table == "wisps" {
 			depTable = "wisp_dependencies"
 		}
-		whereClauses = append(whereClauses, fmt.Sprintf("(id IN (SELECT issue_id FROM %s WHERE type = 'parent-child' AND depends_on_id = ?) OR id LIKE CONCAT(?, '.%%'))", depTable))
+		whereClauses = append(whereClauses, fmt.Sprintf("(id IN (SELECT issue_id FROM %s WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')))", depTable, depTable))
 		args = append(args, parentID, parentID)
 	}
 
@@ -331,18 +331,35 @@ func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
 	return err
 }
 
-// AddDependency adds a dependency within the transaction
+// AddDependency adds a dependency within the transaction.
+// Checks for existing pairs to prevent silent type overwrites.
 func (t *doltTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	table := "dependencies"
 	if t.isActiveWisp(ctx, dep.IssueID) {
 		table = "wisp_dependencies"
 	}
 
+	// Check for existing dependency to prevent silent type overwrites.
+	var existingType string
 	//nolint:gosec // G201: table is hardcoded
-	_, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
+	err := t.tx.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT type FROM %s WHERE issue_id = ? AND depends_on_id = ?
+	`, table), dep.IssueID, dep.DependsOnID).Scan(&existingType)
+	if err == nil {
+		if existingType == string(dep.Type) {
+			return nil // idempotent
+		}
+		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
+			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check existing dependency: %w", err)
+	}
+
+	//nolint:gosec // G201: table is hardcoded
+	_, err = t.tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (issue_id, depends_on_id, type, created_at, created_by, thread_id)
 		VALUES (?, ?, ?, NOW(), ?, ?)
-		ON DUPLICATE KEY UPDATE type = VALUES(type)
 	`, table), dep.IssueID, dep.DependsOnID, dep.Type, actor, dep.ThreadID)
 	return err
 }
