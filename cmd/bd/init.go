@@ -148,8 +148,8 @@ environment variable.`,
 		// If there's a redirect file, use the redirect target (GH#bd-0qel)
 		initDBPath := dbPath
 		if initDBPath == "" {
-			// Dolt backend: use computed beadsDirForInit
-			initDBPath = filepath.Join(beadsDirForInit, "dolt")
+			// Dolt backend: respect dolt_data_dir config / BEADS_DOLT_DATA_DIR env
+			initDBPath = doltserver.ResolveDoltDir(beadsDirForInit)
 		}
 
 		// Determine if we should create .beads/ directory in CWD or main repo root
@@ -271,7 +271,7 @@ environment variable.`,
 		ctx := rootCtx
 
 		// Create Dolt storage backend
-		storagePath := filepath.Join(beadsDir, "dolt")
+		storagePath := doltserver.ResolveDoltDir(beadsDir)
 		// Respect existing config's database name to avoid creating phantom catalog
 		// entries when a user has renamed their database (GH#2051).
 		dbName := ""
@@ -292,6 +292,7 @@ environment variable.`,
 		// AutoStart is always enabled during init — we need a server to initialize the database.
 		doltCfg := &dolt.Config{
 			Path:      storagePath,
+			BeadsDir:  beadsDir,
 			Database:  dbName,
 			AutoStart: !doltserver.IsDaemonManaged() && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
 		}
@@ -770,7 +771,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 		// In server mode the local dolt/ directory may be empty — the database
 		// lives on the Dolt sql-server. Checking only the directory would miss
 		// server-mode installations.
-		doltPath := filepath.Join(beadsDir, "dolt")
+		doltPath := doltserver.ResolveDoltDir(beadsDir)
 		doltDirExists := false
 		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
 			doltDirExists = true

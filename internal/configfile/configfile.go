@@ -27,6 +27,7 @@ type Config struct {
 	DoltServerUser string `json:"dolt_server_user,omitempty"` // MySQL user (default: root)
 	DoltDatabase   string `json:"dolt_database,omitempty"`    // SQL database name (default: beads)
 	DoltServerTLS  bool   `json:"dolt_server_tls,omitempty"`  // Enable TLS for server connections (required for Hosted Dolt)
+	DoltDataDir    string `json:"dolt_data_dir,omitempty"`    // Custom dolt data directory (absolute path; default: .beads/dolt)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
 	// Stale closed issues check configuration
@@ -109,7 +110,17 @@ func (c *Config) Save(beadsDir string) error {
 }
 
 func (c *Config) DatabasePath(beadsDir string) string {
-	// Always use "dolt" as the directory name.
+	// Check for custom dolt data directory (absolute path on a faster filesystem).
+	// This is useful on WSL where .beads/ lives on NTFS (slow 9P mount) but
+	// dolt data can be placed on native ext4 for 5-10x I/O speedup.
+	if customDir := c.GetDoltDataDir(); customDir != "" {
+		if filepath.IsAbs(customDir) {
+			return customDir
+		}
+		return filepath.Join(beadsDir, customDir)
+	}
+
+	// Default: always use "dolt" as the directory name.
 	// The Database field is irrelevant — data always lives at .beads/dolt/.
 	// Stale values like "town", "wyvern", "beads_rig" caused split-brain (see DOLT-HEALTH-P0.md).
 	if filepath.IsAbs(c.Database) {
@@ -292,4 +303,16 @@ func (c *Config) GetDoltServerTLS() bool {
 		return t == "1" || strings.ToLower(t) == "true"
 	}
 	return c.DoltServerTLS
+}
+
+// GetDoltDataDir returns the custom dolt data directory path.
+// When set, dolt stores its data in this directory instead of .beads/dolt/.
+// This is useful on WSL where the project lives on a slow NTFS mount (9P)
+// but dolt data can be placed on native ext4 for significantly better I/O.
+// Checks BEADS_DOLT_DATA_DIR env var first, then config.
+func (c *Config) GetDoltDataDir() string {
+	if d := os.Getenv("BEADS_DOLT_DATA_DIR"); d != "" {
+		return d
+	}
+	return c.DoltDataDir
 }

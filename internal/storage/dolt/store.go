@@ -102,6 +102,7 @@ type DoltStore struct {
 // Config holds Dolt database configuration
 type Config struct {
 	Path           string // Path to Dolt database directory
+	BeadsDir       string // Path to .beads directory (for server auto-start when Path is custom)
 	CommitterName  string // Git-style committer name
 	CommitterEmail string // Git-style committer email
 	Remote         string // Default remote name (e.g., "origin")
@@ -498,7 +499,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if dialErr != nil {
 		// Auto-start: if enabled and connecting to localhost, start a server
 		if cfg.AutoStart && isLocalHost(cfg.ServerHost) && cfg.Path != "" {
-			beadsDir := filepath.Dir(cfg.Path) // cfg.Path is .beads/dolt → parent is .beads/
+			beadsDir := cfg.BeadsDir
+			if beadsDir == "" {
+				beadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
+			}
 			port, startErr := doltserver.EnsureRunning(beadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+

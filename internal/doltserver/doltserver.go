@@ -62,6 +62,31 @@ func ResolveServerDir(beadsDir string) string {
 	return resolveServerDir(beadsDir)
 }
 
+// ResolveDoltDir returns the dolt data directory for the given beadsDir.
+// It checks the BEADS_DOLT_DATA_DIR env var and metadata.json for a custom
+// dolt_data_dir, falling back to the default .beads/dolt/ path.
+//
+// Note: we check for metadata.json existence before calling configfile.Load
+// to avoid triggering the config.json → metadata.json migration side effect,
+// which would create files in the .beads/ directory unexpectedly.
+func ResolveDoltDir(beadsDir string) string {
+	// Check env var first (highest priority)
+	if d := os.Getenv("BEADS_DOLT_DATA_DIR"); d != "" {
+		if filepath.IsAbs(d) {
+			return d
+		}
+		return filepath.Join(beadsDir, d)
+	}
+	// Only load config if metadata.json exists (avoids legacy migration side effect)
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	if _, err := os.Stat(metadataPath); err == nil {
+		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+			return cfg.DatabasePath(beadsDir)
+		}
+	}
+	return filepath.Join(beadsDir, "dolt")
+}
+
 // Config holds the server configuration.
 type Config struct {
 	BeadsDir string // Path to .beads/ directory
@@ -165,7 +190,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 
 	// Check if the process is using our data directory (CWD matches our dolt dir).
 	// dolt sql-server is started with cmd.Dir = doltDir, so CWD is the data dir.
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := ResolveDoltDir(beadsDir)
 	if isProcessInDir(pid, doltDir) {
 		return pid, nil // our server — adopt it
 	}
@@ -267,7 +292,7 @@ func IsRunning(beadsDir string) (*State, error) {
 						Running: true,
 						PID:     pid,
 						Port:    port,
-						DataDir: filepath.Join(beadsDir, "dolt"),
+						DataDir: ResolveDoltDir(beadsDir),
 					}, nil
 				}
 			}
@@ -314,7 +339,7 @@ func IsRunning(beadsDir string) (*State, error) {
 		Running: true,
 		PID:     pid,
 		Port:    port,
-		DataDir: filepath.Join(beadsDir, "dolt"),
+		DataDir: ResolveDoltDir(beadsDir),
 	}, nil
 }
 
@@ -353,7 +378,7 @@ func touchActivity(beadsDir string) {
 // Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := ResolveDoltDir(beadsDir)
 
 	// Acquire exclusive lock to prevent concurrent starts
 	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0600)

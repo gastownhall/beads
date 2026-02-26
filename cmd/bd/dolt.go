@@ -52,6 +52,7 @@ Configuration keys for 'bd dolt set':
   host      Server host (default: 127.0.0.1)
   port      Server port (auto-detected; override with bd dolt set port <N>)
   user      MySQL user (default: root)
+  data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
 
 Flags for 'bd dolt set':
   --update-config  Also write to config.yaml for team-wide defaults
@@ -59,6 +60,7 @@ Flags for 'bd dolt set':
 Examples:
   bd dolt set database myproject
   bd dolt set host 192.168.1.100 --update-config
+  bd dolt set data-dir /home/user/.beads-dolt/myproject
   bd dolt test`,
 }
 
@@ -80,13 +82,15 @@ Keys:
   host      Server host (default: 127.0.0.1)
   port      Server port (auto-detected; override with bd dolt set port <N>)
   user      MySQL user (default: root)
+  data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
 
 Use --update-config to also write to config.yaml for team-wide defaults.
 
 Examples:
   bd dolt set database myproject
   bd dolt set host 192.168.1.100
-  bd dolt set port 3307 --update-config`,
+  bd dolt set port 3307 --update-config
+  bd dolt set data-dir /home/user/.beads-dolt/myproject`,
 	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		key := args[0]
@@ -704,9 +708,22 @@ func setDoltConfig(key, value string, updateConfig bool) {
 		cfg.DoltServerUser = value
 		yamlKey = "dolt.user"
 
+	case "data-dir":
+		if value == "" {
+			// Allow clearing the custom data dir (revert to default .beads/dolt)
+			cfg.DoltDataDir = ""
+		} else {
+			if !filepath.IsAbs(value) {
+				fmt.Fprintf(os.Stderr, "Error: data-dir must be an absolute path\n")
+				os.Exit(1)
+			}
+			cfg.DoltDataDir = value
+		}
+		yamlKey = "dolt.data-dir"
+
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown key '%s'\n", key)
-		fmt.Fprintf(os.Stderr, "Valid keys: mode, database, host, port, user\n")
+		fmt.Fprintf(os.Stderr, "Valid keys: mode, database, host, port, user, data-dir\n")
 		os.Exit(1)
 	}
 
