@@ -396,22 +396,24 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.ServerHost == "" {
 		cfg.ServerHost = "127.0.0.1"
 	}
-	// BEADS_DOLT_PORT always overrides cfg.ServerPort (env > config convention).
-	// Callers (standalone CI, Gas Town, etc.) set this to route bd to a specific
-	// Dolt server. Without this override, metadata.json's dolt_server_port wins,
-	// which causes test databases to leak onto production (port 3307).
+	// Port resolution: BEADS_DOLT_PORT env > BEADS_TEST_MODE guard > metadata config > default.
+	// CRITICAL: BEADS_TEST_MODE=1 forces port 1 (immediate fail) if the resolved port
+	// is the production port (DefaultSQLPort). This prevents test databases from leaking
+	// onto production even when BEADS_DOLT_PORT is set to 3307 by Gas Town's beads module.
+	// Only an explicit non-production BEADS_DOLT_PORT (e.g., 43211 for a test server)
+	// overrides test mode — that's a deliberate test server assignment.
 	if envPort := os.Getenv("BEADS_DOLT_PORT"); envPort != "" {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			cfg.ServerPort = p
 		}
-	} else if os.Getenv("BEADS_TEST_MODE") == "1" {
-		// Test mode with no explicit port — use sentinel port 1 so connection
-		// fails immediately instead of silently hitting prod.
+	} else if cfg.ServerPort == 0 {
+		cfg.ServerPort = DefaultSQLPort
+	}
+	// Test mode guard: if we'd hit production, force port 1 instead.
+	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
 			cfg.ServerPort = 1
 		}
-	} else if cfg.ServerPort == 0 {
-		cfg.ServerPort = DefaultSQLPort
 	}
 	if cfg.ServerUser == "" {
 		cfg.ServerUser = "root"
