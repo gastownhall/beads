@@ -14,14 +14,23 @@ import (
 
 // SearchIssues finds issues matching query and filters
 func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	// Route ephemeral-only queries to wisps table
+	// Route ephemeral-only queries to wisps table, falling through to
+	// issues table if wisps table doesn't exist (pre-migration databases).
 	if filter.Ephemeral != nil && *filter.Ephemeral {
-		return s.searchWisps(ctx, query, filter)
+		if results, err := s.searchWisps(ctx, query, filter); err == nil {
+			return results, nil
+		}
+		// Fall through: query issues table with ephemeral filter instead
 	}
 
-	// If searching by IDs that are all ephemeral, route to wisps table
+	// If searching by IDs that are all ephemeral, try wisps table first,
+	// falling through to the issues table if not found (handles pre-migration
+	// databases where ephemeral rows live in issues with ephemeral=1).
 	if len(filter.IDs) > 0 && allEphemeral(filter.IDs) {
-		return s.searchWisps(ctx, query, filter)
+		if results, err := s.searchWisps(ctx, query, filter); err == nil && len(results) > 0 {
+			return results, nil
+		}
+		// Fall through: wisps table may not exist or IDs may be in issues table
 	}
 
 	s.mu.RLock()
