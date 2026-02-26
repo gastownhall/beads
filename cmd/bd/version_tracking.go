@@ -49,15 +49,6 @@ func trackBdVersion() {
 		_ = writeLocalVersion(localVersionPath, Version) // Best effort: version tracking is advisory
 	}
 
-	// Ensure metadata.json exists with proper defaults
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil {
-		return
-	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-		_ = cfg.Save(beadsDir) // Best effort
-	}
 }
 
 // readLocalVersion reads the last bd version from the local version file.

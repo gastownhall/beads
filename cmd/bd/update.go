@@ -419,12 +419,17 @@ create, update, show, or close operation).`,
 				hookRunner.Run(hooks.EventUpdate, updatedIssue)
 			}
 
+			updateTitle := ""
+			if updatedIssue != nil {
+				updateTitle = updatedIssue.Title
+			}
+
 			if jsonOutput {
 				if updatedIssue != nil {
 					updatedIssues = append(updatedIssues, updatedIssue)
 				}
 			} else {
-				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), result.ResolvedID)
+				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, updateTitle))
 			}
 
 			// Track first successful update for last-touched

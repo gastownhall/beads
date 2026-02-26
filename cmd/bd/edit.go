@@ -150,8 +150,13 @@ Examples:
 			FatalErrorRespectJSON("updating issue: %v", err)
 		}
 
+		displayTitle := issue.Title
+		if fieldToEdit == "title" {
+			displayTitle = newValue
+		}
+
 		fieldName := strings.ReplaceAll(fieldToEdit, "_", " ")
-		fmt.Printf("%s Updated %s for issue: %s\n", ui.RenderPass("✓"), fieldName, id)
+		fmt.Printf("%s Updated %s for issue: %s\n", ui.RenderPass("✓"), fieldName, formatFeedbackID(id, displayTitle))
 	},
 }
 

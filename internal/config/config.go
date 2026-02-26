@@ -196,6 +196,11 @@ func Initialize() error {
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
 
+	// Output configuration (GH#1384)
+	// Controls title display in command feedback messages.
+	// 0 = hide title, N > 0 = truncate to N chars with "…"
+	v.SetDefault("output.title-length", 255)
+
 	// External projects for cross-project dependency resolution (bd-h807)
 	// Maps project names to paths for resolving external: blocked_by references
 	v.SetDefault("external_projects", map[string]string{})

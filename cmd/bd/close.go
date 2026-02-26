@@ -137,7 +137,7 @@ create, update, show, or close operation).`,
 					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
-				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
+				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
 			}
 		}
 
@@ -205,7 +205,7 @@ create, update, show, or close operation).`,
 					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
-				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), result.ResolvedID, reason)
+				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, result.Issue.Title), reason)
 			}
 			result.Close()
 		}
@@ -223,7 +223,7 @@ create, update, show, or close operation).`,
 				}
 				fmt.Printf("\nNewly unblocked:\n")
 				for _, issue := range unblocked {
-					fmt.Printf("  • %s %q (P%d)\n", issue.ID, issue.Title, issue.Priority)
+					fmt.Printf("  • %s (P%d)\n", formatFeedbackID(issue.ID, issue.Title), issue.Priority)
 				}
 			}
 		}

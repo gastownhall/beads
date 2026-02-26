@@ -369,13 +369,24 @@ func runDiagnostics(path string) doctorResult {
 	// it detects those same-process locks as "held by another process" (false positive).
 	earlyLockCheck := doctor.CheckLockHealth(path)
 
+	beadsDir := filepath.Join(path, ".beads")
+	beadsDir = beads.FollowRedirect(beadsDir)
+
 	// bd-jgxi: Auto-migrate database version before checking it.
 	// Since doctor skips PersistentPreRun DB init (it's in noDbCommands),
 	// trackBdVersion() and autoMigrateOnVersionBump() haven't run yet.
-	// Call them here so the DB version is updated before we check it.
+	//
+	// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
+	// can accidentally touch the caller's current repo .beads state.
+	origBeadsDir, hadBeadsDir := os.LookupEnv("BEADS_DIR")
+	_ = os.Setenv("BEADS_DIR", beadsDir)
 	trackBdVersion()
-	beadsDir := filepath.Join(path, ".beads")
-	beadsDir = beads.FollowRedirect(beadsDir)
+	if hadBeadsDir {
+		_ = os.Setenv("BEADS_DIR", origBeadsDir)
+	} else {
+		_ = os.Unsetenv("BEADS_DIR")
+	}
+
 	autoMigrateOnVersionBump(beadsDir)
 
 	// Check 2: Database version
