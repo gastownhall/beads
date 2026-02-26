@@ -391,7 +391,8 @@ environment variable.`,
 				if database != "" {
 					cfg.DoltDatabase = database
 				} else if cfg.DoltDatabase == "" && prefix != "" {
-					cfg.DoltDatabase = prefix
+					// Sanitize hyphens to underscores for SQL-idiomatic names (GH#2142).
+					cfg.DoltDatabase = strings.ReplaceAll(prefix, "-", "_")
 				}
 
 				// Always server mode
