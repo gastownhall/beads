@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 )
@@ -55,7 +56,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	// or in test mode (tests manage their own server lifecycle via testdoltserver).
 	// Note: cfg.ReadOnly refers to the store's read-only mode, not the server —
 	// the server must be running regardless of whether the store is read-only.
-	cfg.AutoStart = resolveAutoStart(cfg.AutoStart)
+	cfg.AutoStart = resolveAutoStart(cfg.AutoStart, config.GetString("dolt.auto-start"))
 
 	return New(ctx, cfg)
 }
@@ -64,16 +65,21 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 // caller-provided value (current) while applying system-level overrides.
 //
 // Priority (highest to lowest):
-//  1. BEADS_TEST_MODE=1  → always false (tests own the server lifecycle)
-//  2. IsDaemonManaged()  → always false (Gas Town manages the server)
-//  3. BEADS_DOLT_AUTO_START=0 → always false (explicit env opt-out)
-//  4. current == true    → true (caller explicitly enabled auto-start)
-//  5. default            → true (standalone user; auto-start is the safe default)
+//  1. BEADS_TEST_MODE=1               → always false (tests own the server lifecycle)
+//  2. IsDaemonManaged()               → always false (Gas Town manages the server)
+//  3. BEADS_DOLT_AUTO_START=0         → always false (explicit env opt-out)
+//  4. doltAutoStartCfg == "false"/"0"/"off" → false (config.yaml opt-out)
+//  5. current == true                 → true (caller explicitly enabled auto-start)
+//  6. default                         → true (standalone user; auto-start is the safe default)
+//
+// doltAutoStartCfg is the raw value of the "dolt.auto-start" key from config.yaml
+// (pass config.GetString("dolt.auto-start") at the call site).
 //
 // Note: because AutoStart is a plain bool, a zero value (false) cannot be
 // distinguished from an explicit "opt-out" by the caller.  Callers that need
-// to suppress auto-start should use one of the environment variables above.
-func resolveAutoStart(current bool) bool {
+// to suppress auto-start should use one of the environment-variable or
+// config-file overrides above.
+func resolveAutoStart(current bool, doltAutoStartCfg string) bool {
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		return false
 	}
@@ -81,6 +87,9 @@ func resolveAutoStart(current bool) bool {
 		return false
 	}
 	if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
+		return false
+	}
+	if doltAutoStartCfg == "false" || doltAutoStartCfg == "0" || doltAutoStartCfg == "off" {
 		return false
 	}
 	if current {

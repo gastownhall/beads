@@ -10,12 +10,13 @@ import (
 // env var to exercise the real logic paths.
 func TestResolveAutoStart(t *testing.T) {
 	tests := []struct {
-		name          string
-		testMode      string // BEADS_TEST_MODE value ("" means unset)
-		autoStartEnv  string // BEADS_DOLT_AUTO_START value ("" means unset)
-		gtRoot        string // GT_ROOT value ("" means unset; used to simulate IsDaemonManaged)
-		currentValue  bool   // AutoStart value supplied by caller
-		wantAutoStart bool
+		name             string
+		testMode         string // BEADS_TEST_MODE value ("" means unset)
+		autoStartEnv     string // BEADS_DOLT_AUTO_START value ("" means unset)
+		gtRoot           string // GT_ROOT value ("" means unset; used to simulate IsDaemonManaged)
+		doltAutoStartCfg string // dolt.auto-start value from config.yaml
+		currentValue     bool   // AutoStart value supplied by caller
+		wantAutoStart    bool
 	}{
 		{
 			name:          "defaults to true for standalone user",
@@ -38,6 +39,30 @@ func TestResolveAutoStart(t *testing.T) {
 			testMode:      "",
 			autoStartEnv:  "0",
 			wantAutoStart: false,
+		},
+		{
+			name:          "enabled when BEADS_DOLT_AUTO_START=1",
+			testMode:      "",
+			autoStartEnv:  "1",
+			wantAutoStart: true,
+		},
+		{
+			name:             "disabled when dolt.auto-start=false in config",
+			testMode:         "",
+			doltAutoStartCfg: "false",
+			wantAutoStart:    false,
+		},
+		{
+			name:             "disabled when dolt.auto-start=0 in config",
+			testMode:         "",
+			doltAutoStartCfg: "0",
+			wantAutoStart:    false,
+		},
+		{
+			name:             "disabled when dolt.auto-start=off in config",
+			testMode:         "",
+			doltAutoStartCfg: "off",
+			wantAutoStart:    false,
 		},
 		{
 			name:          "test mode wins over BEADS_DOLT_AUTO_START=1",
@@ -75,9 +100,10 @@ func TestResolveAutoStart(t *testing.T) {
 			setOrUnsetEnv(t, "BEADS_DOLT_AUTO_START", tc.autoStartEnv)
 			setOrUnsetEnv(t, "GT_ROOT", tc.gtRoot)
 
-			got := resolveAutoStart(tc.currentValue)
+			got := resolveAutoStart(tc.currentValue, tc.doltAutoStartCfg)
 			if got != tc.wantAutoStart {
-				t.Errorf("resolveAutoStart(%v) = %v, want %v", tc.currentValue, got, tc.wantAutoStart)
+				t.Errorf("resolveAutoStart(current=%v, configVal=%q) = %v, want %v",
+					tc.currentValue, tc.doltAutoStartCfg, got, tc.wantAutoStart)
 			}
 		})
 	}
