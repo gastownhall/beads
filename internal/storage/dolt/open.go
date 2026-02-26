@@ -79,7 +79,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 //  2. IsDaemonManaged()                    → always false (Gas Town manages the server)
 //  3. BEADS_DOLT_AUTO_START=0              → always false (explicit env opt-out)
 //  4. current == true                      → true  (caller option wins over config file,
-//                                                   per NewFromConfigWithOptions contract)
+//     per NewFromConfigWithOptions contract)
 //  5. doltAutoStartCfg == "false"/"0"/"off" → false (config.yaml opt-out)
 //  6. default                              → true  (standalone user; safe default)
 //
