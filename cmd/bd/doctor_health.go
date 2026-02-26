@@ -39,7 +39,10 @@ func runCheckHealth(path string) {
 	}
 
 	// Open database once for all checks (single DB connection)
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	// Escape '#' in the path to prevent URI fragment truncation (GH#2115).
+	// In SQLite URI format, '#' starts a fragment that is silently discarded.
+	escapedPath := strings.ReplaceAll(dbPath, "#", "%23")
+	db, err := sql.Open("sqlite3", "file:"+escapedPath+"?mode=ro")
 	if err != nil {
 		// Can't open DB - only check hooks
 		if issue := doctor.CheckHooksQuick(Version); issue != "" {

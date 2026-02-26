@@ -212,7 +212,9 @@ func hooksNeedDoltUpdate(beadsDir string) bool {
 // This is the CGO path — it reads SQLite directly via the ncruces/go-sqlite3 driver.
 // For non-CGO builds, see migrate_shim.go which uses the sqlite3 CLI instead.
 func extractFromSQLite(ctx context.Context, dbPath string) (*migrationData, error) {
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	// Escape '#' in the path to prevent URI fragment truncation (GH#2115).
+	escapedPath := strings.ReplaceAll(dbPath, "#", "%23")
+	db, err := sql.Open("sqlite3", "file:"+escapedPath+"?mode=ro")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
