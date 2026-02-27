@@ -49,6 +49,8 @@ Tool-level settings you can configure:
 | `backup.enabled` | - | `BD_BACKUP_ENABLED` | `false` | Enable periodic JSONL backup to `.beads/backup/` |
 | `backup.interval` | - | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-exports |
 | `backup.git-push` | - | `BD_BACKUP_GIT_PUSH` | `false` | Auto git-add + commit + push after export |
+| `dolt.auto-push` | - | `BD_DOLT_AUTO_PUSH` | (auto) | Auto-push to Dolt remote after writes (auto-enabled when origin exists) |
+| `dolt.auto-push-interval` | - | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BD_ACTOR` | `git config user.name` | Actor name for audit trail (see below) |
 
@@ -103,6 +105,29 @@ backup:
 - `bd backup status` — show last backup time, commit hash, counts
 
 **Git push mode:** When `backup.git-push: true`, after each export `bd` runs `git add -f .beads/backup/`, commits with a timestamped message, and pushes. Push failures are warnings only (non-fatal).
+
+### Dolt Auto-Push
+
+When a Dolt remote named `origin` is configured, `bd` automatically pushes after write commands with a 5-minute debounce. This completes the Dolt replication story: add a remote once, and data flows automatically.
+
+```yaml
+dolt:
+  auto-push: true       # Auto-enable when origin remote exists (default)
+  auto-push-interval: 5m  # Minimum time between auto-pushes
+```
+
+**How it works:**
+- After each write command (in PersistentPostRun, after auto-commit and auto-backup), `bd` checks whether a push is due
+- Pushes are debounced: skipped if the last push was less than `dolt.auto-push-interval` ago
+- Change detection: skipped if the Dolt HEAD commit hasn't changed since last push
+- Push failures are warnings only (non-fatal)
+- Last push time and commit are tracked in the metadata table
+
+**Opt out:**
+```yaml
+dolt:
+  auto-push: false
+```
 
 ### Actor Identity Resolution
 
