@@ -23,7 +23,7 @@ type TestDoltServer struct {
 	tmpDir   string
 	pidFile  string
 	crashed  chan struct{} // closed when server exits unexpectedly
-	exitErr  error        // set before crashed is closed
+	exitErr  error         // set before crashed is closed
 	exitOnce sync.Once
 }
 

@@ -323,19 +323,19 @@ func parseElapsed(s string) time.Duration {
 
 	// Handle DD-HH:MM:SS format
 	if idx := strings.Index(s, "-"); idx >= 0 {
-		fmt.Sscanf(s[:idx], "%d", &days)
+		_, _ = fmt.Sscanf(s[:idx], "%d", &days)
 		s = s[idx+1:]
 	}
 
 	parts := strings.Split(s, ":")
 	switch len(parts) {
 	case 3:
-		fmt.Sscanf(parts[0], "%d", &hours)
-		fmt.Sscanf(parts[1], "%d", &mins)
-		fmt.Sscanf(parts[2], "%d", &secs)
+		_, _ = fmt.Sscanf(parts[0], "%d", &hours)
+		_, _ = fmt.Sscanf(parts[1], "%d", &mins)
+		_, _ = fmt.Sscanf(parts[2], "%d", &secs)
 	case 2:
-		fmt.Sscanf(parts[0], "%d", &mins)
-		fmt.Sscanf(parts[1], "%d", &secs)
+		_, _ = fmt.Sscanf(parts[0], "%d", &mins)
+		_, _ = fmt.Sscanf(parts[1], "%d", &secs)
 	}
 
 	return time.Duration(days)*24*time.Hour +
