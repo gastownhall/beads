@@ -251,5 +251,6 @@ bd admin cleanup --force
 - Filter ready work: `./bd ready --priority 1`
 - Search issues: `./bd list --status open`
 - Detect cycles: `./bd dep cycles`
+- Use gates for PR/CI sync: See [DEPENDENCIES.md](DEPENDENCIES.md)
 
 See [README.md](../README.md) for full documentation.

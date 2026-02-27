@@ -547,6 +547,39 @@ bd mol burn <ephemeral-id> --force --json
 
 **Note:** Mol commands use the standard Dolt database access path.
 
+## Gates
+
+Gates are async wait conditions that block dependent work until external conditions are met.
+See [DEPENDENCIES.md](DEPENDENCIES.md) for full documentation.
+
+```bash
+# List open gates
+bd gate list
+bd gate list --all                       # Including closed
+
+# Show gate details
+bd gate show <gate-id>
+
+# Evaluate gates and close resolved ones
+bd gate check                            # All gates
+bd gate check --type=gh:pr               # Only PR merge gates
+bd gate check --type=gh:run              # Only CI run gates
+bd gate check --type=timer               # Only timer gates
+bd gate check --type=bead               # Only cross-rig bead gates
+bd gate check --dry-run                  # Preview without changes
+bd gate check --escalate                 # Escalate failed gates
+
+# Manually resolve a gate
+bd gate resolve <gate-id> --reason "Approved"
+
+# Auto-discover CI run IDs for gh:run gates
+bd gate discover
+bd gate discover --dry-run --branch main
+
+# Add a waiter to a gate
+bd gate add-waiter <gate-id> <waiter>
+```
+
 ## Database Management
 
 ### Import/Export

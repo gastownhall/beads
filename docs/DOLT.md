@@ -340,5 +340,6 @@ rm .beads/*.backup-*.db
 ## See Also
 
 - [CONFIG.md](CONFIG.md) - Full configuration reference
+- [DEPENDENCIES.md](DEPENDENCIES.md) - Dependencies and gates
 - [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git worktrees and protected branches
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - General troubleshooting
