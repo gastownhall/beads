@@ -363,10 +363,10 @@ func TestCheckMergeDriver_PartiallyConfigured(t *testing.T) {
 
 func TestFixMergeDriver(t *testing.T) {
 	tests := []struct {
-		name          string
-		setup         func(t *testing.T, dir string)
-		expectFixed   bool
-		verifyConfig  string
+		name         string
+		setup        func(t *testing.T, dir string)
+		expectFixed  bool
+		verifyConfig string
 	}{
 		{
 			name: "fixes invalid %L/%R placeholders",
