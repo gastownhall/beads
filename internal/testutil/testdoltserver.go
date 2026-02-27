@@ -5,7 +5,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,19 +23,31 @@ type TestDoltServer struct {
 	tmpDir   string
 	pidFile  string
 	crashed  chan struct{} // closed when server exits unexpectedly
-	exitErr  error         // set before crashed is closed
+	exitErr  error        // set before crashed is closed
 	exitOnce sync.Once
 }
 
 // serverStartTimeout is the max time to wait for the test dolt server to accept connections.
 const serverStartTimeout = 30 * time.Second
 
-// maxPortRetries is how many times to retry port allocation + server start on port conflict.
-const maxPortRetries = 3
+// Module-level singleton state. sync.Once ensures at most one server per test binary.
+// Cross-process coordination uses file locks (see testdoltserver_unix.go).
+var (
+	doltServerOnce   sync.Once
+	doltServerErr    error
+	doltTestPort     string
+	doltSingletonSrv *TestDoltServer
+	// doltLockFile is held with LOCK_SH for the lifetime of the test binary (Unix only).
+	doltLockFile *os.File
+	// doltWeStarted tracks whether this process started the server (vs reusing).
+	doltWeStarted bool
+	// doltPortSetByUs tracks whether we set BEADS_DOLT_PORT (vs it being set externally).
+	doltPortSetByUs bool
+)
 
 // StartTestDoltServer starts a dedicated Dolt SQL server in a temp directory
-// on a dynamic port. Cleans up stale test servers first. Installs a signal
-// handler so cleanup runs even when tests are interrupted with Ctrl+C.
+// on a dynamic port. Uses file locks for cross-process port coordination to
+// prevent zombie server leaks from port allocation races.
 //
 // If BEADS_DOLT_PORT is already set in the environment (e.g. by an outer test
 // runner or scripts/test.sh with BEADS_TEST_SHARED_SERVER=1), the existing
@@ -49,7 +60,6 @@ func StartTestDoltServer(tmpDirPrefix string) (*TestDoltServer, func()) {
 	// This avoids spawning redundant dolt processes when running go test ./...
 	// with a pre-started shared server.
 	//
-	// CRITICAL: If BEADS_TEST_MODE=1 and BEADS_DOLT_PORT is the production port
 	// FIREWALL: Never reuse the production Dolt server (port 3307) for tests.
 	// This guard does NOT depend on BEADS_TEST_MODE — that env var may not be set yet
 	// when TestMain calls StartTestDoltServer (it's set AFTER this returns).
@@ -66,136 +76,30 @@ func StartTestDoltServer(tmpDirPrefix string) (*TestDoltServer, func()) {
 		}
 	}
 
-	CleanStaleTestServers()
+	// Singleton: start at most one server per test binary.
+	doltServerOnce.Do(func() {
+		CleanStaleTestServers()
 
-	if _, err := exec.LookPath("dolt"); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: dolt not found in PATH, skipping test server\n")
+		if _, err := exec.LookPath("dolt"); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN: dolt not found in PATH, skipping test server\n")
+			// Leave doltServerErr as nil so we return (nil, noop) rather than error
+			return
+		}
+
+		doltServerErr = startDoltServerInternal(tmpDirPrefix)
+	})
+
+	if doltServerErr != nil {
+		fmt.Fprintf(os.Stderr, "WARN: test dolt server failed to start: %v\n", doltServerErr)
+		return nil, func() {}
+	}
+	if doltSingletonSrv == nil {
 		return nil, func() {}
 	}
 
-	tmpDir, err := os.MkdirTemp("", tmpDirPrefix)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: failed to create test dolt dir: %v\n", err)
-		return nil, func() {}
+	return doltSingletonSrv, func() {
+		cleanupDoltServerInternal()
 	}
-
-	dbDir := filepath.Join(tmpDir, "data")
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: failed to create test dolt data dir: %v\n", err)
-		_ = os.RemoveAll(tmpDir)
-		return nil, func() {}
-	}
-
-	// Configure dolt user identity (required by dolt init).
-	doltEnv := append(os.Environ(), "DOLT_ROOT_PATH="+tmpDir)
-	for _, args := range [][]string{
-		{"dolt", "config", "--global", "--add", "user.name", "beads-test"},
-		{"dolt", "config", "--global", "--add", "user.email", "test@beads.local"},
-	} {
-		cfgCmd := exec.Command(args[0], args[1:]...)
-		cfgCmd.Env = doltEnv
-		if out, err := cfgCmd.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: %s failed: %v\n%s\n", args[1], err, out)
-			_ = os.RemoveAll(tmpDir)
-			return nil, func() {}
-		}
-	}
-
-	initCmd := exec.Command("dolt", "init")
-	initCmd.Dir = dbDir
-	initCmd.Env = doltEnv
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: dolt init failed for test server: %v\n%s\n", err, out)
-		_ = os.RemoveAll(tmpDir)
-		return nil, func() {}
-	}
-
-	// Retry loop: FindFreePort releases the socket before dolt binds it,
-	// creating a race window where another process can grab the port.
-	var serverCmd *exec.Cmd
-	var port int
-	var pidFile string
-	verbose := os.Getenv("BEADS_TEST_DOLT_VERBOSE") == "1"
-
-	for attempt := 0; attempt < maxPortRetries; attempt++ {
-		port, err = FindFreePort()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: failed to find free port (attempt %d/%d): %v\n", attempt+1, maxPortRetries, err)
-			continue
-		}
-
-		serverCmd = exec.Command("dolt", "sql-server",
-			"-H", "127.0.0.1",
-			"-P", fmt.Sprintf("%d", port),
-			"--no-auto-commit",
-		)
-		serverCmd.Dir = dbDir
-		serverCmd.Env = doltEnv
-		if !verbose {
-			serverCmd.Stderr = nil
-			serverCmd.Stdout = nil
-		}
-		if err = serverCmd.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: failed to start test dolt server on port %d (attempt %d/%d): %v\n", port, attempt+1, maxPortRetries, err)
-			continue
-		}
-
-		// Write PID file so stale cleanup can find orphans from interrupted runs
-		pidFile = filepath.Join(testPidDir, fmt.Sprintf("%s%d.pid", testPidPrefix, port))
-		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(serverCmd.Process.Pid)), 0600)
-
-		if WaitForServer(port, serverStartTimeout) {
-			break // Server is ready
-		}
-
-		// Server failed to become ready — clean up this attempt and retry
-		fmt.Fprintf(os.Stderr, "WARN: test dolt server did not become ready on port %d (attempt %d/%d)\n", port, attempt+1, maxPortRetries)
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
-		_ = os.Remove(pidFile)
-		serverCmd = nil
-	}
-
-	if serverCmd == nil {
-		fmt.Fprintf(os.Stderr, "WARN: test dolt server failed to start after %d attempts, tests requiring dolt will be skipped\n", maxPortRetries)
-		_ = os.RemoveAll(tmpDir)
-		return nil, func() {}
-	}
-
-	srv := &TestDoltServer{
-		Port:    port,
-		cmd:     serverCmd,
-		tmpDir:  tmpDir,
-		pidFile: pidFile,
-		crashed: make(chan struct{}),
-	}
-
-	// Monitor goroutine: detect unexpected server exits
-	go func() {
-		err := serverCmd.Wait()
-		srv.exitOnce.Do(func() {
-			srv.exitErr = err
-			close(srv.crashed)
-			fmt.Fprintf(os.Stderr, "WARN: test dolt server (port %d) exited: %v\n", port, err)
-		})
-	}()
-
-	// Install signal handler so cleanup runs even when defer doesn't
-	// (e.g. Ctrl+C during test run)
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		srv.cleanup()
-		os.Exit(1)
-	}()
-
-	cleanup := func() {
-		signal.Stop(sigCh)
-		srv.cleanup()
-	}
-
-	return srv, cleanup
 }
 
 // IsCrashed returns true if the server process has exited unexpectedly.
@@ -245,6 +149,46 @@ func (s *TestDoltServer) cleanup() {
 	if s.pidFile != "" {
 		_ = os.Remove(s.pidFile)
 	}
+}
+
+// prepareDoltDir creates a temp directory with dolt initialized and configured.
+// Returns (tmpDir, dbDir, doltEnv, error).
+func prepareDoltDir(tmpDirPrefix string) (string, string, []string, error) {
+	tmpDir, err := os.MkdirTemp("", tmpDirPrefix)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("creating temp dir: %w", err)
+	}
+
+	dbDir := filepath.Join(tmpDir, "data")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return "", "", nil, fmt.Errorf("creating data dir: %w", err)
+	}
+
+	doltEnv := append(os.Environ(), "DOLT_ROOT_PATH="+tmpDir)
+
+	// Configure dolt user identity (required by dolt init).
+	for _, args := range [][]string{
+		{"dolt", "config", "--global", "--add", "user.name", "beads-test"},
+		{"dolt", "config", "--global", "--add", "user.email", "test@beads.local"},
+	} {
+		cfgCmd := exec.Command(args[0], args[1:]...)
+		cfgCmd.Env = doltEnv
+		if out, err := cfgCmd.CombinedOutput(); err != nil {
+			_ = os.RemoveAll(tmpDir)
+			return "", "", nil, fmt.Errorf("%s failed: %v\n%s", args[1], err, out)
+		}
+	}
+
+	initCmd := exec.Command("dolt", "init")
+	initCmd.Dir = dbDir
+	initCmd.Env = doltEnv
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return "", "", nil, fmt.Errorf("dolt init failed: %v\n%s", err, out)
+	}
+
+	return tmpDir, dbDir, doltEnv, nil
 }
 
 // CleanStaleTestServers kills orphaned test dolt servers from previous
@@ -384,6 +328,17 @@ func WaitForServer(port int, timeout time.Duration) bool {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return false
+}
+
+// LockFilePathForPort returns the lock file path for a given port.
+// Port-specific paths prevent contention between test binaries using different ports.
+func LockFilePathForPort(port string) string {
+	return filepath.Join(testPidDir, fmt.Sprintf("%s%s.lock", testPidPrefix, port))
+}
+
+// PidFilePathForPort returns the PID file path for a given port.
+func PidFilePathForPort(port string) string {
+	return filepath.Join(testPidDir, fmt.Sprintf("%s%s.pid", testPidPrefix, port))
 }
 
 // isDoltTestProcess verifies that a PID belongs to a dolt sql-server process.
