@@ -162,13 +162,15 @@ environment variable.`,
 		// Check if we're in a git worktree
 		// Guard with isGitRepo() check first - on Windows, git commands may hang
 		// when run outside a git repository (GH#727)
+		hasExplicitBeadsDir := os.Getenv("BEADS_DIR") != ""
 		isWorktree := false
 		if isGitRepo() {
 			isWorktree = git.IsWorktree()
 		}
 
-		// Prevent initialization from within a worktree
-		if isWorktree {
+		// Prevent initialization from within a worktree (unless BEADS_DIR is
+		// explicitly set, which means the caller already knows where to init)
+		if isWorktree && !hasExplicitBeadsDir {
 			mainRepoRoot, err := git.GetMainRepoRoot()
 			if err != nil {
 				FatalError("failed to get main repository root: %v", err)
@@ -231,10 +233,18 @@ environment variable.`,
 			}
 
 			// Add .dolt/ and *.db to project-root .gitignore (GH#2034)
-			// Prevents users from accidentally committing Dolt database files
-			if err := doctor.EnsureProjectGitignore(); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update project .gitignore: %v\n", err)
-				// Non-fatal - continue anyway
+			// Prevents users from accidentally committing Dolt database files.
+			// Skip when BEADS_DIR points outside the current directory — the CWD
+			// may not be a repo we should mutate (e.g. running from a worktree
+			// with an external BEADS_DIR). When BEADS_DIR points to the same
+			// repo's .beads/, the gitignore update is still appropriate.
+			cwdAbs, _ := filepath.Abs(cwd)
+			beadsDirIsLocal := strings.HasPrefix(beadsDirAbs, filepath.Clean(cwdAbs)+string(filepath.Separator))
+			if beadsDirIsLocal {
+				if err := doctor.EnsureProjectGitignore(); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update project .gitignore: %v\n", err)
+					// Non-fatal - continue anyway
+				}
 			}
 
 			// Ensure interactions.jsonl exists (append-only agent audit log)
@@ -251,7 +261,9 @@ environment variable.`,
 		// Ensure git is initialized — bd requires git for role config, sync branches,
 		// hooks, worktrees, and fingerprint computation. git init is idempotent so
 		// safe to call even if already in a git repo.
-		if !isGitRepo() {
+		// Skip when BEADS_DIR is explicitly set — the caller may be creating a
+		// standalone .beads/ directory outside any git repo.
+		if !isGitRepo() && !hasExplicitBeadsDir {
 			gitInitCmd := exec.Command("git", "init")
 			if output, err := gitInitCmd.CombinedOutput(); err != nil {
 				FatalError("failed to initialize git repository: %v\n%s", err, output)

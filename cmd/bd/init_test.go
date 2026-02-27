@@ -1214,6 +1214,70 @@ func TestInitBEADS_DIR(t *testing.T) {
 		}
 	})
 
+	// Worktree bypass: BEADS_DIR skips the worktree guard and git init
+	t.Run("WorktreeBypassWhenBeadsDirSet", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Skipping worktree test on Windows")
+		}
+
+		resetBeadsDirState(t)
+
+		tmpDir := t.TempDir()
+
+		// Create a main git repo with an initial commit (required for worktrees)
+		mainRepo := filepath.Join(tmpDir, "main-repo")
+		if err := os.MkdirAll(mainRepo, 0755); err != nil {
+			t.Fatalf("Failed to create main repo dir: %v", err)
+		}
+		runGit := func(dir string, args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %v in %s failed: %v\n%s", args, dir, err, out)
+			}
+		}
+		runGit(mainRepo, "init")
+		runGit(mainRepo, "config", "user.email", "test@test.com")
+		runGit(mainRepo, "config", "user.name", "Test")
+		runGit(mainRepo, "commit", "--allow-empty", "-m", "initial")
+
+		// Create a worktree
+		worktreeDir := filepath.Join(tmpDir, "my-worktree")
+		runGit(mainRepo, "worktree", "add", worktreeDir, "-b", "test-wt")
+
+		// Set BEADS_DIR to a standalone location outside the repo
+		beadsDirPath := filepath.Join(tmpDir, "standalone", ".beads")
+		if err := os.MkdirAll(filepath.Dir(beadsDirPath), 0755); err != nil {
+			t.Fatalf("Failed to create standalone dir: %v", err)
+		}
+		os.Setenv("BEADS_DIR", beadsDirPath)
+		t.Cleanup(func() { os.Unsetenv("BEADS_DIR") })
+		beads.ResetCaches()
+		git.ResetCaches()
+
+		// cd into the worktree — without BEADS_DIR this would fail
+		t.Chdir(worktreeDir)
+
+		rootCmd.SetArgs([]string{"init", "--prefix", "wt-bypass", "--skip-hooks", "--quiet"})
+		err := rootCmd.Execute()
+		if err != nil {
+			t.Fatalf("Init with BEADS_DIR from worktree should succeed, got: %v", err)
+		}
+
+		// Verify database was created at BEADS_DIR, not in the worktree
+		expectedDBPath := filepath.Join(beadsDirPath, "dolt")
+		if _, statErr := os.Stat(expectedDBPath); os.IsNotExist(statErr) {
+			t.Errorf("Dolt database was not created at BEADS_DIR path: %s", expectedDBPath)
+		}
+
+		worktreeDBPath := filepath.Join(worktreeDir, ".beads", "dolt")
+		if _, statErr := os.Stat(worktreeDBPath); statErr == nil {
+			t.Errorf("Database should NOT have been created in worktree: %s", worktreeDBPath)
+		}
+	})
+
 	// Precedence: BEADS_DB > BEADS_DIR
 	t.Run("BEADS_DB_OverridesBeadsDir", func(t *testing.T) {
 		t.Skip("BEADS_DB env var does not control Dolt store location; Dolt always uses .beads/dolt/")
