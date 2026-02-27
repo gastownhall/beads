@@ -188,8 +188,8 @@ func CheckEmbeddedModeConcurrency(path string) DoctorCheck {
 	}
 
 	return DoctorCheck{
-		Name:   "Embedded Mode Concurrency",
-		Status: StatusWarning,
+		Name:    "Embedded Mode Concurrency",
+		Status:  StatusWarning,
 		Message: fmt.Sprintf("Embedded mode with %d lock indicator(s) — concurrent access may cause failures", len(issues)),
 		Detail: fmt.Sprintf("Detected: %s. Embedded mode is single-writer only. "+
 			"If you run multiple bd processes (e.g., multiple Claude Code windows), "+

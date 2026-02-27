@@ -483,11 +483,17 @@ func TestMigrateInfraToWisps_SchemaEvolution(t *testing.T) {
 
 	// 3. Create missing minimal tables for other relations so copyCommonColumns works
 	_, err = db.Exec(`CREATE TABLE labels (issue_id VARCHAR(255), label VARCHAR(255))`)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = db.Exec(`CREATE TABLE events (id BIGINT AUTO_INCREMENT PRIMARY KEY, issue_id VARCHAR(255), event_type VARCHAR(32))`)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = db.Exec(`CREATE TABLE comments (id BIGINT AUTO_INCREMENT PRIMARY KEY, issue_id VARCHAR(255), text TEXT)`)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// 4. Run migration 004 to create wisps table and 005 for auxiliary tables
 	if err := MigrateWispsTable(db); err != nil {
