@@ -1,10 +1,16 @@
 package jira
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -320,5 +326,312 @@ func TestTrackerFieldMapperDefaultVersion(t *testing.T) {
 	fields := tr.FieldMapper().IssueToTracker(issue)
 	if _, ok := fields["description"].(json.RawMessage); !ok {
 		t.Errorf("default tracker description type = %T, want json.RawMessage (ADF)", fields["description"])
+	}
+}
+
+// newTrackerWithServer creates a Tracker backed by a test HTTP server.
+func newTrackerWithServer(srvURL, version string) *Tracker {
+	return &Tracker{
+		client:     newTestClient(srvURL, version),
+		jiraURL:    srvURL,
+		apiVersion: version,
+	}
+}
+
+// issueResponse returns a Jira Issue JSON response with the given status name.
+func issueResponse(key, statusName string) Issue {
+	return Issue{
+		ID:  "10001",
+		Key: key,
+		Fields: IssueFields{
+			Status: &StatusField{Name: statusName},
+		},
+	}
+}
+
+func TestUpdateIssueAppliesTransitionWhenStatusChanges(t *testing.T) {
+	const key = "PROJ-1"
+	issuePath := "/rest/api/3/issue/" + key
+	transitionsPath := issuePath + "/transitions"
+
+	var transitionPostedID string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == issuePath:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == issuePath:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(issueResponse(key, "To Do"))
+		case r.Method == http.MethodGet && r.URL.Path == transitionsPath:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(TransitionsResult{
+				Transitions: []Transition{
+					{ID: "11", Name: "Start Progress", To: StatusField{Name: "In Progress"}},
+					{ID: "31", Name: "Resolve", To: StatusField{Name: "Done"}},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == transitionsPath:
+			body, _ := io.ReadAll(r.Body)
+			var payload struct {
+				Transition map[string]string `json:"transition"`
+			}
+			_ = json.Unmarshal(body, &payload)
+			transitionPostedID = payload.Transition["id"]
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	tr := newTrackerWithServer(srv.URL, "3")
+	_, err := tr.UpdateIssue(context.Background(), key, &types.Issue{
+		Title:  "Test",
+		Status: types.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssue error: %v", err)
+	}
+	if transitionPostedID != "11" {
+		t.Errorf("transition ID posted = %q, want %q", transitionPostedID, "11")
+	}
+}
+
+func TestUpdateIssueSkipsTransitionWhenStatusUnchanged(t *testing.T) {
+	const key = "PROJ-1"
+	issuePath := "/rest/api/3/issue/" + key
+
+	var transitionCalled bool
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == issuePath:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == issuePath:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(issueResponse(key, "In Progress"))
+		case strings.Contains(r.URL.Path, "/transitions"):
+			transitionCalled = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	tr := newTrackerWithServer(srv.URL, "3")
+	_, err := tr.UpdateIssue(context.Background(), key, &types.Issue{
+		Title:  "Updated title",
+		Status: types.StatusInProgress, // matches current Jira status
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssue error: %v", err)
+	}
+	if transitionCalled {
+		t.Error("transitions endpoint called unexpectedly when status was already correct")
+	}
+}
+
+func TestStatusToTrackerUsesCustomMap(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		statusMap: map[string]string{
+			"open":        "Backlog",
+			"in_progress": "Active Sprint",
+			"closed":      "Released",
+			"review":      "Code Review", // custom non-standard beads status
+		},
+	}
+
+	tests := []struct {
+		status types.Status
+		want   string
+	}{
+		{types.StatusOpen, "Backlog"},
+		{types.StatusInProgress, "Active Sprint"},
+		{types.StatusClosed, "Released"},
+		{types.Status("review"), "Code Review"},
+		{types.StatusBlocked, "Blocked"}, // not in custom map → falls back to default
+	}
+	for _, tt := range tests {
+		got, _ := mapper.StatusToTracker(tt.status).(string)
+		if got != tt.want {
+			t.Errorf("StatusToTracker(%q) = %q, want %q", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestStatusToBeadsUsesCustomMap(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		statusMap: map[string]string{
+			"open":        "Backlog",
+			"in_progress": "Active Sprint",
+			"closed":      "Released",
+			"review":      "Code Review", // custom non-standard beads status
+		},
+	}
+
+	tests := []struct {
+		jiraStatus string
+		want       types.Status
+	}{
+		{"Backlog", types.StatusOpen},
+		{"Active Sprint", types.StatusInProgress},
+		{"Released", types.StatusClosed},
+		{"Code Review", types.Status("review")},
+		{"Done", types.StatusClosed},            // not in custom map → falls back to default
+		{"To Do", types.StatusOpen},             // not in custom map → falls back to default
+		{"In Progress", types.StatusInProgress}, // not in custom map → falls back to default
+	}
+	for _, tt := range tests {
+		got := mapper.StatusToBeads(tt.jiraStatus)
+		if got != tt.want {
+			t.Errorf("StatusToBeads(%q) = %q, want %q", tt.jiraStatus, got, tt.want)
+		}
+	}
+}
+
+func TestStatusMapCaseInsensitiveMatch(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		statusMap: map[string]string{"in_progress": "Active Sprint"},
+	}
+
+	// Custom map match should be case-insensitive.
+	got := mapper.StatusToBeads("active sprint")
+	if got != types.StatusInProgress {
+		t.Errorf("StatusToBeads(\"active sprint\") = %q, want %q", got, types.StatusInProgress)
+	}
+}
+
+// configStore is a minimal storage.Storage stub for testing Init() config loading.
+// Only GetConfig and GetAllConfig are implemented; all other methods are no-ops.
+type configStore struct {
+	data map[string]string
+}
+
+func (s *configStore) GetConfig(_ context.Context, key string) (string, error) {
+	return s.data[key], nil
+}
+func (s *configStore) GetAllConfig(_ context.Context) (map[string]string, error) {
+	out := make(map[string]string, len(s.data))
+	for k, v := range s.data {
+		out[k] = v
+	}
+	return out, nil
+}
+
+// Storage interface stubs — not exercised by Init().
+func (s *configStore) SetConfig(_ context.Context, _, _ string) error { return nil }
+func (s *configStore) CreateIssue(_ context.Context, _ *types.Issue, _ string) error {
+	return nil
+}
+func (s *configStore) CreateIssues(_ context.Context, _ []*types.Issue, _ string) error {
+	return nil
+}
+func (s *configStore) GetIssue(_ context.Context, _ string) (*types.Issue, error) { return nil, nil }
+func (s *configStore) GetIssueByExternalRef(_ context.Context, _ string) (*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) GetIssuesByIDs(_ context.Context, _ []string) ([]*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) UpdateIssue(_ context.Context, _ string, _ map[string]interface{}, _ string) error {
+	return nil
+}
+func (s *configStore) CloseIssue(_ context.Context, _, _, _, _ string) error { return nil }
+func (s *configStore) DeleteIssue(_ context.Context, _ string) error         { return nil }
+func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
+	return nil
+}
+func (s *configStore) RemoveDependency(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) GetDependencies(_ context.Context, _ string) ([]*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) GetDependents(_ context.Context, _ string) ([]*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) GetDependenciesWithMetadata(_ context.Context, _ string) ([]*types.IssueWithDependencyMetadata, error) {
+	return nil, nil
+}
+func (s *configStore) GetDependentsWithMetadata(_ context.Context, _ string) ([]*types.IssueWithDependencyMetadata, error) {
+	return nil, nil
+}
+func (s *configStore) GetDependencyTree(_ context.Context, _ string, _ int, _, _ bool) ([]*types.TreeNode, error) {
+	return nil, nil
+}
+func (s *configStore) AddLabel(_ context.Context, _, _, _ string) error    { return nil }
+func (s *configStore) RemoveLabel(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) GetLabels(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+func (s *configStore) GetIssuesByLabel(_ context.Context, _ string) ([]*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) GetReadyWork(_ context.Context, _ types.WorkFilter) ([]*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) GetBlockedIssues(_ context.Context, _ types.WorkFilter) ([]*types.BlockedIssue, error) {
+	return nil, nil
+}
+func (s *configStore) GetEpicsEligibleForClosure(_ context.Context) ([]*types.EpicStatus, error) {
+	return nil, nil
+}
+func (s *configStore) AddIssueComment(_ context.Context, _, _, _ string) (*types.Comment, error) {
+	return nil, nil
+}
+func (s *configStore) GetIssueComments(_ context.Context, _ string) ([]*types.Comment, error) {
+	return nil, nil
+}
+func (s *configStore) GetEvents(_ context.Context, _ string, _ int) ([]*types.Event, error) {
+	return nil, nil
+}
+func (s *configStore) GetAllEventsSince(_ context.Context, _ int64) ([]*types.Event, error) {
+	return nil, nil
+}
+func (s *configStore) GetStatistics(_ context.Context) (*types.Statistics, error) { return nil, nil }
+func (s *configStore) RunInTransaction(_ context.Context, _ string, _ func(tx storage.Transaction) error) error {
+	return nil
+}
+func (s *configStore) Close() error { return nil }
+
+func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
+	store := &configStore{
+		data: map[string]string{
+			"jira.url":                    "https://example.atlassian.net",
+			"jira.project":                "PROJ",
+			"jira.api_token":              "token123",
+			"jira.status_map.open":        "Backlog",
+			"jira.status_map.in_progress": "Active Sprint",
+			"jira.status_map.review":      "Code Review", // custom non-standard beads status
+		},
+	}
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), store); err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	mapper := tr.FieldMapper()
+
+	tests := []struct {
+		status types.Status
+		want   string
+	}{
+		{types.StatusOpen, "Backlog"},
+		{types.StatusInProgress, "Active Sprint"},
+		{types.Status("review"), "Code Review"},
+		{types.StatusClosed, "Done"},     // not in store → falls back to default
+		{types.StatusBlocked, "Blocked"}, // not in store → falls back to default
+	}
+	for _, tt := range tests {
+		got, _ := mapper.StatusToTracker(tt.status).(string)
+		if got != tt.want {
+			t.Errorf("StatusToTracker(%q) = %q, want %q", tt.status, got, tt.want)
+		}
 	}
 }

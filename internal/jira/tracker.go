@@ -23,7 +23,8 @@ type Tracker struct {
 	store      storage.Storage
 	jiraURL    string
 	projectKey string
-	apiVersion string // "2" or "3" (default: "3")
+	apiVersion string            // "2" or "3" (default: "3")
+	statusMap  map[string]string // beads status → Jira status name (from jira.status_map.* config)
 }
 
 func (t *Tracker) Name() string         { return "jira" }
@@ -59,6 +60,21 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	}
 	t.apiVersion = apiVersion
 	t.client.APIVersion = apiVersion
+
+	// Load optional custom status map from all jira.status_map.* config keys.
+	// Using GetAllConfig supports arbitrary (including custom) beads status names.
+	if allConfig, err := t.store.GetAllConfig(ctx); err == nil {
+		const prefix = "jira.status_map."
+		statusMap := make(map[string]string)
+		for key, val := range allConfig {
+			if strings.HasPrefix(key, prefix) && val != "" {
+				statusMap[strings.TrimPrefix(key, prefix)] = val
+			}
+		}
+		if len(statusMap) > 0 {
+			t.statusMap = statusMap
+		}
+	}
 
 	return nil
 }
@@ -139,17 +155,60 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 		return nil, err
 	}
 
-	// Fetch the updated issue to return current state
-	updated, err := t.client.GetIssue(ctx, externalID)
+	// Fetch current state to check whether a status transition is actually needed.
+	current, err := t.client.GetIssue(ctx, externalID)
 	if err != nil {
 		return nil, err
 	}
-	ti := jiraToTrackerIssue(updated)
+
+	desiredName, _ := mapper.StatusToTracker(issue.Status).(string)
+	currentName := ""
+	if current.Fields.Status != nil {
+		currentName = current.Fields.Status.Name
+	}
+
+	if !strings.EqualFold(currentName, desiredName) {
+		// Status differs — apply the workflow transition.
+		if err := t.applyTransition(ctx, externalID, issue.Status); err != nil {
+			return nil, err
+		}
+		// Re-fetch to return the state after the transition.
+		current, err = t.client.GetIssue(ctx, externalID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	ti := jiraToTrackerIssue(current)
 	return &ti, nil
 }
 
+// applyTransition finds and applies the Jira workflow transition matching the given beads status.
+// If no matching transition is available (e.g., the issue is already in the target state or the
+// workflow doesn't permit the path), it silently succeeds.
+func (t *Tracker) applyTransition(ctx context.Context, key string, status types.Status) error {
+	mapper := t.FieldMapper()
+	desiredName, ok := mapper.StatusToTracker(status).(string)
+	if !ok || desiredName == "" {
+		return nil
+	}
+
+	transitions, err := t.client.GetIssueTransitions(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	for _, tr := range transitions {
+		if strings.EqualFold(tr.To.Name, desiredName) {
+			return t.client.TransitionIssue(ctx, key, tr.ID)
+		}
+	}
+
+	return nil
+}
+
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
-	return &jiraFieldMapper{apiVersion: t.apiVersion}
+	return &jiraFieldMapper{apiVersion: t.apiVersion, statusMap: t.statusMap}
 }
 
 func (t *Tracker) IsExternalRef(ref string) bool {

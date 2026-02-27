@@ -9,7 +9,8 @@ import (
 
 // jiraFieldMapper implements tracker.FieldMapper for Jira.
 type jiraFieldMapper struct {
-	apiVersion string // "2" or "3" (default: "3")
+	apiVersion string            // "2" or "3" (default: "3")
+	statusMap  map[string]string // beads status → Jira status name (from jira.status_map.* config)
 }
 
 func (m *jiraFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
@@ -49,6 +50,12 @@ func (m *jiraFieldMapper) PriorityToTracker(beadsPriority int) interface{} {
 
 func (m *jiraFieldMapper) StatusToBeads(trackerState interface{}) types.Status {
 	if state, ok := trackerState.(string); ok {
+		// Check custom map first (inverted: jira name → beads status).
+		for beadsStatus, jiraName := range m.statusMap {
+			if strings.EqualFold(state, jiraName) {
+				return types.Status(beadsStatus)
+			}
+		}
 		switch state {
 		case "To Do", "Open", "Backlog", "New":
 			return types.StatusOpen
@@ -64,6 +71,10 @@ func (m *jiraFieldMapper) StatusToBeads(trackerState interface{}) types.Status {
 }
 
 func (m *jiraFieldMapper) StatusToTracker(beadsStatus types.Status) interface{} {
+	// Check custom map first.
+	if name, ok := m.statusMap[string(beadsStatus)]; ok {
+		return name
+	}
 	switch beadsStatus {
 	case types.StatusOpen:
 		return "To Do"

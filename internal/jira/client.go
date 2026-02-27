@@ -75,6 +75,18 @@ type ResolutionField struct {
 	Name string `json:"name"`
 }
 
+// Transition represents a Jira workflow transition.
+type Transition struct {
+	ID   string      `json:"id"`
+	Name string      `json:"name"`
+	To   StatusField `json:"to"`
+}
+
+// TransitionsResult is the response from GET /issue/{key}/transitions.
+type TransitionsResult struct {
+	Transitions []Transition `json:"transitions"`
+}
+
 // SearchResult represents a Jira JQL search response.
 type SearchResult struct {
 	StartAt    int     `json:"startAt"`
@@ -247,6 +259,43 @@ func (c *Client) UpdateIssue(ctx context.Context, key string, fields map[string]
 	_, err = c.doRequest(ctx, "PUT", apiURL, data)
 	if err != nil {
 		return fmt.Errorf("update issue %s: %w", key, err)
+	}
+
+	return nil
+}
+
+// GetIssueTransitions fetches the available workflow transitions for a Jira issue.
+func (c *Client) GetIssueTransitions(ctx context.Context, key string) ([]Transition, error) {
+	apiURL := fmt.Sprintf("%s/issue/%s/transitions", c.apiBase(), url.PathEscape(key))
+
+	body, err := c.doRequest(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("get transitions for %s: %w", key, err)
+	}
+
+	var result TransitionsResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse transitions response: %w", err)
+	}
+
+	return result.Transitions, nil
+}
+
+// TransitionIssue moves a Jira issue to a new status using the given transition ID.
+func (c *Client) TransitionIssue(ctx context.Context, key, transitionID string) error {
+	payload := map[string]interface{}{
+		"transition": map[string]string{"id": transitionID},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal transition request: %w", err)
+	}
+
+	apiURL := fmt.Sprintf("%s/issue/%s/transitions", c.apiBase(), url.PathEscape(key))
+
+	_, err = c.doRequest(ctx, "POST", apiURL, data)
+	if err != nil {
+		return fmt.Errorf("transition issue %s: %w", key, err)
 	}
 
 	return nil

@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -200,6 +201,110 @@ func TestUpdateIssueURL(t *testing.T) {
 				t.Errorf("UpdateIssue path = %q, want %q", gotPath, tt.wantPath)
 			}
 		})
+	}
+}
+
+func TestGetIssueTransitionsURL(t *testing.T) {
+	for _, version := range []string{"2", "3"} {
+		t.Run("v"+version, func(t *testing.T) {
+			wantPath := "/rest/api/" + version + "/issue/PROJ-5/transitions"
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(TransitionsResult{})
+			}))
+			defer srv.Close()
+
+			c := newTestClient(srv.URL, version)
+			_, err := c.GetIssueTransitions(context.Background(), "PROJ-5")
+			if err != nil {
+				t.Fatalf("GetIssueTransitions error: %v", err)
+			}
+			if gotPath != wantPath {
+				t.Errorf("GetIssueTransitions path = %q, want %q", gotPath, wantPath)
+			}
+		})
+	}
+}
+
+func TestGetIssueTransitionsParsesResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(TransitionsResult{
+			Transitions: []Transition{
+				{ID: "11", Name: "Start Progress", To: StatusField{ID: "3", Name: "In Progress"}},
+				{ID: "21", Name: "Done", To: StatusField{ID: "10002", Name: "Done"}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "3")
+	transitions, err := c.GetIssueTransitions(context.Background(), "PROJ-1")
+	if err != nil {
+		t.Fatalf("GetIssueTransitions error: %v", err)
+	}
+	if len(transitions) != 2 {
+		t.Fatalf("transitions count = %d, want 2", len(transitions))
+	}
+	if transitions[0].ID != "11" {
+		t.Errorf("transitions[0].ID = %q, want %q", transitions[0].ID, "11")
+	}
+	if transitions[0].To.Name != "In Progress" {
+		t.Errorf("transitions[0].To.Name = %q, want %q", transitions[0].To.Name, "In Progress")
+	}
+}
+
+func TestTransitionIssueURL(t *testing.T) {
+	for _, version := range []string{"2", "3"} {
+		t.Run("v"+version, func(t *testing.T) {
+			wantPath := "/rest/api/" + version + "/issue/PROJ-5/transitions"
+			var gotPath, gotMethod string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotMethod = r.Method
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+
+			c := newTestClient(srv.URL, version)
+			err := c.TransitionIssue(context.Background(), "PROJ-5", "21")
+			if err != nil {
+				t.Fatalf("TransitionIssue error: %v", err)
+			}
+			if gotPath != wantPath {
+				t.Errorf("TransitionIssue path = %q, want %q", gotPath, wantPath)
+			}
+			if gotMethod != http.MethodPost {
+				t.Errorf("TransitionIssue method = %q, want POST", gotMethod)
+			}
+		})
+	}
+}
+
+func TestTransitionIssuePayload(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "3")
+	err := c.TransitionIssue(context.Background(), "PROJ-1", "42")
+	if err != nil {
+		t.Fatalf("TransitionIssue error: %v", err)
+	}
+
+	var payload struct {
+		Transition map[string]string `json:"transition"`
+	}
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	if payload.Transition["id"] != "42" {
+		t.Errorf("transition.id = %q, want %q", payload.Transition["id"], "42")
 	}
 }
 
