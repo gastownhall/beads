@@ -25,7 +25,7 @@ func TestMessagingSuite(t *testing.T) {
 	lifecycleMsg := &types.Issue{
 		ID: "msg-lifecycle", Title: "Build failed on main",
 		Description: "CI pipeline reports failure on commit abc123",
-		Status: types.StatusOpen, Priority: 1, IssueType: "message",
+		Status:      types.StatusOpen, Priority: 1, IssueType: "message",
 		Sender: "ci-bot", Assignee: "dev-team", Ephemeral: true,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -59,13 +59,13 @@ func TestMessagingSuite(t *testing.T) {
 	canonical := &types.Issue{
 		ID: "msg-canonical", Title: "Auth login fails with SSO",
 		Description: "Users can't login via SSO",
-		Status: types.StatusOpen, Priority: 1, IssueType: types.TypeBug,
+		Status:      types.StatusOpen, Priority: 1, IssueType: types.TypeBug,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	dup := &types.Issue{
 		ID: "msg-dup", Title: "SSO login broken",
 		Description: "Single sign-on authentication not working",
-		Status: types.StatusOpen, Priority: 1, IssueType: types.TypeBug,
+		Status:      types.StatusOpen, Priority: 1, IssueType: types.TypeBug,
 		CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute),
 	}
 
@@ -73,21 +73,21 @@ func TestMessagingSuite(t *testing.T) {
 	threadOrig := &types.Issue{
 		ID: "msg-thread-orig", Title: "Sprint planning discussion",
 		Description: "Let's plan the next sprint",
-		Status: types.StatusOpen, Priority: 2, IssueType: "message",
+		Status:      types.StatusOpen, Priority: 2, IssueType: "message",
 		Sender: "lead", Assignee: "team", Ephemeral: true,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	threadReply1 := &types.Issue{
 		ID: "msg-thread-r1", Title: "Re: Sprint planning",
 		Description: "I can take the auth refactor",
-		Status: types.StatusOpen, Priority: 2, IssueType: "message",
+		Status:      types.StatusOpen, Priority: 2, IssueType: "message",
 		Sender: "worker-1", Assignee: "lead", Ephemeral: true,
 		CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute),
 	}
 	threadReply2 := &types.Issue{
 		ID: "msg-thread-r2", Title: "Re: Sprint planning",
 		Description: "I'll handle the database migration",
-		Status: types.StatusOpen, Priority: 2, IssueType: "message",
+		Status:      types.StatusOpen, Priority: 2, IssueType: "message",
 		Sender: "worker-2", Assignee: "lead", Ephemeral: true,
 		CreatedAt: now.Add(2 * time.Minute), UpdatedAt: now.Add(2 * time.Minute),
 	}
