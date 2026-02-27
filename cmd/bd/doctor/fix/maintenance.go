@@ -3,7 +3,6 @@ package fix
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -118,12 +117,6 @@ func PatrolPollution(path string) error {
 	}
 
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-
-	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
-		fmt.Println("  No JSONL file found, nothing to clean up")
-		return nil
-	}
 
 	// Open database using factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 	ctx := context.Background()
@@ -134,7 +127,8 @@ func PatrolPollution(path string) error {
 	defer func() { _ = store.Close() }()
 
 	// Get all issues and identify pollution
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	ephemeral := false
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Ephemeral: &ephemeral})
 	if err != nil {
 		return fmt.Errorf("failed to query issues: %w", err)
 	}
