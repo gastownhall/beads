@@ -47,6 +47,11 @@ Version control:
   bd dolt push         Push commits to Dolt remote
   bd dolt pull         Pull commits from Dolt remote
 
+Remote management:
+  bd dolt remote add <name> <url>   Add a Dolt remote
+  bd dolt remote list                List configured remotes
+  bd dolt remote remove <name>       Remove a Dolt remote
+
 Configuration keys for 'bd dolt set':
   database  Database name (default: issue prefix or "beads")
   host      Server host (default: 127.0.0.1)
@@ -539,6 +544,114 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 	},
 }
 
+// --- Dolt remote management commands ---
+
+var doltRemoteCmd = &cobra.Command{
+	Use:   "remote",
+	Short: "Manage Dolt remotes",
+	Long: `Manage Dolt remotes for push/pull replication.
+
+Subcommands:
+  add <name> <url>   Add a new remote
+  list               List all configured remotes
+  remove <name>      Remove a remote`,
+}
+
+var doltRemoteAddCmd = &cobra.Command{
+	Use:   "add <name> <url>",
+	Short: "Add a Dolt remote",
+	Args:  cobra.ExactArgs(2),
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := context.Background()
+		st := getStore()
+		if st == nil {
+			fmt.Fprintf(os.Stderr, "Error: no store available\n")
+			os.Exit(1)
+		}
+		name, url := args[0], args[1]
+		if err := st.AddRemote(ctx, name, url); err != nil {
+			if jsonOutput {
+				outputJSONError(err, "remote_add_failed")
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
+			os.Exit(1)
+		}
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"name": name,
+				"url":  url,
+			})
+		} else {
+			fmt.Printf("Added remote %q → %s\n", name, url)
+		}
+	},
+}
+
+var doltRemoteListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List configured Dolt remotes",
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := context.Background()
+		st := getStore()
+		if st == nil {
+			fmt.Fprintf(os.Stderr, "Error: no store available\n")
+			os.Exit(1)
+		}
+		remotes, err := st.ListRemotes(ctx)
+		if err != nil {
+			if jsonOutput {
+				outputJSONError(err, "remote_list_failed")
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
+			os.Exit(1)
+		}
+		if jsonOutput {
+			outputJSON(remotes)
+			return
+		}
+		if len(remotes) == 0 {
+			fmt.Println("No remotes configured.")
+			return
+		}
+		for _, r := range remotes {
+			fmt.Printf("%-20s %s\n", r.Name, r.URL)
+		}
+	},
+}
+
+var doltRemoteRemoveCmd = &cobra.Command{
+	Use:   "remove <name>",
+	Short: "Remove a Dolt remote",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := context.Background()
+		st := getStore()
+		if st == nil {
+			fmt.Fprintf(os.Stderr, "Error: no store available\n")
+			os.Exit(1)
+		}
+		name := args[0]
+		if err := st.RemoveRemote(ctx, name); err != nil {
+			if jsonOutput {
+				outputJSONError(err, "remote_remove_failed")
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
+			os.Exit(1)
+		}
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"name":    name,
+				"removed": true,
+			})
+		} else {
+			fmt.Printf("Removed remote %q\n", name)
+		}
+	},
+}
+
 // isTimeoutError checks if an error is a context deadline exceeded or timeout.
 func isTimeoutError(err error) bool {
 	if err == nil {
@@ -563,6 +676,9 @@ func init() {
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltIdleMonitorCmd.Flags().String("beads-dir", "", "Path to .beads directory")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
+	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
+	doltRemoteCmd.AddCommand(doltRemoteListCmd)
+	doltRemoteCmd.AddCommand(doltRemoteRemoveCmd)
 	doltCmd.AddCommand(doltShowCmd)
 	doltCmd.AddCommand(doltSetCmd)
 	doltCmd.AddCommand(doltTestCmd)
@@ -575,6 +691,7 @@ func init() {
 	doltCmd.AddCommand(doltIdleMonitorCmd)
 	doltCmd.AddCommand(doltKillallCmd)
 	doltCmd.AddCommand(doltCleanDatabasesCmd)
+	doltCmd.AddCommand(doltRemoteCmd)
 	rootCmd.AddCommand(doltCmd)
 }
 
