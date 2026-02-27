@@ -106,7 +106,8 @@ func verifyServerTarget(expectedDBName string, port int) error {
 		// But timeouts or other errors = unknown state = warn and abort.
 		if opErr, ok := err.(*net.OpError); ok {
 			if sysErr, ok := opErr.Err.(*os.SyscallError); ok {
-				if sysErr.Syscall == "connect" {
+				// On POSIX the syscall is "connect"; on Windows it's "connectex".
+				if sysErr.Syscall == "connect" || sysErr.Syscall == "connectex" {
 					// ECONNREFUSED — no server, safe
 					return nil
 				}
