@@ -818,31 +818,97 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 	return true, blockers, nil
 }
 
-// GetNewlyUnblockedByClose finds issues that become unblocked when an issue is closed
+// GetNewlyUnblockedByClose finds issues that become unblocked when an issue is closed.
+//
+// Rewritten from a single query with nested JOIN + correlated NOT EXISTS to two
+// sequential queries to avoid Dolt query-planner issues with nested JOIN subqueries.
+// See bd-o23 / hq-g4nxe for the SQL audit that identified this pattern.
 func (s *DoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
-	// Find issues that were blocked only by the closed issue
-	rows, err := s.queryContext(ctx, `
-		SELECT DISTINCT d.issue_id
+	// Step 1: Find open/blocked issues that depend on the closed issue.
+	candidateRows, err := s.queryContext(ctx, `
+		SELECT d.issue_id
 		FROM dependencies d
 		JOIN issues i ON d.issue_id = i.id
 		WHERE d.depends_on_id = ?
 		  AND d.type = 'blocks'
 		  AND i.status IN ('open', 'blocked')
-		  AND NOT EXISTS (
-			SELECT 1 FROM dependencies d2
-			JOIN issues blocker ON d2.depends_on_id = blocker.id
-			WHERE d2.issue_id = d.issue_id
-			  AND d2.type = 'blocks'
-			  AND d2.depends_on_id != ?
-			  AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
-		  )
-	`, closedIssueID, closedIssueID)
+	`, closedIssueID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find newly unblocked: %w", err)
+		return nil, fmt.Errorf("failed to find blocked candidates: %w", err)
 	}
-	defer rows.Close()
 
-	return s.scanIssueIDs(ctx, rows)
+	var candidateIDs []string
+	for candidateRows.Next() {
+		var id string
+		if err := candidateRows.Scan(&id); err != nil {
+			_ = candidateRows.Close()
+			return nil, fmt.Errorf("failed to scan candidate: %w", err)
+		}
+		candidateIDs = append(candidateIDs, id)
+	}
+	_ = candidateRows.Close()
+	if err := candidateRows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(candidateIDs) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: Among candidates, find those that still have OTHER open blockers.
+	placeholders := make([]string, len(candidateIDs))
+	args := make([]interface{}, len(candidateIDs))
+	for i, id := range candidateIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+	// Append the closedIssueID to exclude it from "other blockers"
+	args = append(args, closedIssueID)
+
+	// nolint:gosec // G201: inClause contains only ? placeholders, actual values passed via args
+	stillBlockedQuery := fmt.Sprintf(`
+		SELECT DISTINCT d2.issue_id
+		FROM dependencies d2
+		JOIN issues blocker ON d2.depends_on_id = blocker.id
+		WHERE d2.issue_id IN (%s)
+		  AND d2.type = 'blocks'
+		  AND d2.depends_on_id != ?
+		  AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
+	`, inClause)
+
+	blockedRows, err := s.queryContext(ctx, stillBlockedQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check remaining blockers: %w", err)
+	}
+
+	stillBlocked := make(map[string]bool)
+	for blockedRows.Next() {
+		var id string
+		if err := blockedRows.Scan(&id); err != nil {
+			_ = blockedRows.Close()
+			return nil, fmt.Errorf("failed to scan still-blocked: %w", err)
+		}
+		stillBlocked[id] = true
+	}
+	_ = blockedRows.Close()
+	if err := blockedRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Filter to only candidates with no remaining open blockers
+	var unblockedIDs []string
+	for _, id := range candidateIDs {
+		if !stillBlocked[id] {
+			unblockedIDs = append(unblockedIDs, id)
+		}
+	}
+
+	if len(unblockedIDs) == 0 {
+		return nil, nil
+	}
+
+	return s.GetIssuesByIDs(ctx, unblockedIDs)
 }
 
 // Helper functions
