@@ -115,7 +115,7 @@ func verifyServerTarget(expectedDBName string, port int) error {
 		}
 		return fmt.Errorf("cannot verify server on port %d (unknown error, not safe to proceed): %w", port, err)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	// Server is listening. Query SHOW DATABASES to verify target.
 	dsn := fmt.Sprintf("root@tcp(%s)/", addr)

@@ -356,9 +356,9 @@ func TestIsDoltServerModeEnvVar(t *testing.T) {
 // Fixes GH#2016: v0.55.4 forces Dolt backend on existing SQLite databases.
 func TestGetBackendRespectsConfig(t *testing.T) {
 	tests := []struct {
-		name    string
-		cfg     *Config
-		want    string
+		name string
+		cfg  *Config
+		want string
 	}{
 		{
 			name: "explicit sqlite backend is respected",

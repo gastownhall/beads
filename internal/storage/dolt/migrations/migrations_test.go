@@ -436,3 +436,91 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 		t.Fatal("should return false for column in nonexistent table")
 	}
 }
+
+func TestMigrateInfraToWisps_SchemaEvolution(t *testing.T) {
+	db := openTestDolt(t)
+	defer db.Close()
+
+	// 1. Create older issues table WITH a column that wisps won't have (deleted_at)
+	// and WITHOUT a column that wisps will have (metadata)
+	db.Exec("DROP TABLE IF EXISTS issues")
+	_, err := db.Exec(`
+		CREATE TABLE issues (
+			id VARCHAR(255) PRIMARY KEY,
+			title VARCHAR(500) NOT NULL,
+			issue_type VARCHAR(32) NOT NULL DEFAULT 'task',
+			deleted_at DATETIME
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create issues table: %v", err)
+	}
+
+	// Insert an infra issue
+	_, err = db.Exec("INSERT INTO issues (id, title, issue_type) VALUES ('test-1', 'Agent Wisp', 'agent')")
+	if err != nil {
+		t.Fatalf("Failed to insert issue: %v", err)
+	}
+
+	// 2. Create older dependencies table missing a column (thread_id)
+	_, err = db.Exec(`
+		CREATE TABLE dependencies (
+			issue_id VARCHAR(255) NOT NULL,
+			depends_on_id VARCHAR(255) NOT NULL,
+			type VARCHAR(32) NOT NULL DEFAULT 'blocks',
+			PRIMARY KEY (issue_id, depends_on_id)
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create dependencies table: %v", err)
+	}
+
+	// Insert a dependency
+	_, err = db.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES ('test-1', 'test-2', 'blocks')")
+	if err != nil {
+		t.Fatalf("Failed to insert dependency: %v", err)
+	}
+
+	// 3. Create missing minimal tables for other relations so copyCommonColumns works
+	_, err = db.Exec(`CREATE TABLE labels (issue_id VARCHAR(255), label VARCHAR(255))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE events (id BIGINT AUTO_INCREMENT PRIMARY KEY, issue_id VARCHAR(255), event_type VARCHAR(32))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE comments (id BIGINT AUTO_INCREMENT PRIMARY KEY, issue_id VARCHAR(255), text TEXT)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Run migration 004 to create wisps table and 005 for auxiliary tables
+	if err := MigrateWispsTable(db); err != nil {
+		t.Fatalf("Failed to run migration 004: %v", err)
+	}
+	if err := MigrateWispAuxiliaryTables(db); err != nil {
+		t.Fatalf("Failed to run migration 005: %v", err)
+	}
+
+	// 5. Run migration 007 - it should gracefully map columns instead of crashing
+	if err := MigrateInfraToWisps(db); err != nil {
+		t.Fatalf("Migration 007 failed: %v", err)
+	}
+
+	// 6. Verify row was moved
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = 'test-1'").Scan(&count); err != nil {
+		t.Fatalf("Failed to query wisps: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Expected 1 wisp, got %d", count)
+	}
+
+	if err := db.QueryRow("SELECT COUNT(*) FROM issues WHERE id = 'test-1'").Scan(&count); err != nil {
+		t.Fatalf("Failed to query issues: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("Expected 0 issues, got %d", count)
+	}
+}

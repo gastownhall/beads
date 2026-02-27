@@ -51,16 +51,10 @@ func MigrateInfraToWisps(db *sql.DB) error {
 
 	log.Printf("migration 007: moving %d infra beads to wisps table", count)
 
-	// Copy infra issues to wisps table.
-	// The wisps table has identical schema to issues (both have ephemeral column).
-	// Use INSERT IGNORE to skip any that already exist in wisps (idempotent).
-	//nolint:gosec // G201: inClause built from ? placeholders
-	_, err = db.Exec(fmt.Sprintf(`
-		INSERT IGNORE INTO wisps
-		SELECT * FROM issues WHERE issue_type IN (%s)
-	`, inClause), args...)
-	if err != nil {
-		return fmt.Errorf("copying infra issues to wisps: %w", err)
+	// Copy data using only common columns to handle schema evolution (e.g. dropped/added columns)
+	// where the source table and destination table might have different column counts.
+	if err := copyCommonColumns(db, "wisps", "issues", "", fmt.Sprintf("src.issue_type IN (%s)", inClause), args); err != nil {
+		return err
 	}
 
 	// Mark as ephemeral in wisps table (issues table may have ephemeral=0)
@@ -73,51 +67,23 @@ func MigrateInfraToWisps(db *sql.DB) error {
 	}
 
 	// Copy labels
-	//nolint:gosec // G201: inClause built from ? placeholders
-	_, err = db.Exec(fmt.Sprintf(`
-		INSERT IGNORE INTO wisp_labels
-		SELECT l.* FROM labels l
-		INNER JOIN issues i ON l.issue_id = i.id
-		WHERE i.issue_type IN (%s)
-	`, inClause), args...)
-	if err != nil {
-		return fmt.Errorf("copying infra labels to wisp_labels: %w", err)
+	if err := copyCommonColumns(db, "wisp_labels", "labels", "INNER JOIN issues i ON src.issue_id = i.id", fmt.Sprintf("i.issue_type IN (%s)", inClause), args); err != nil {
+		return err
 	}
 
 	// Copy dependencies
-	//nolint:gosec // G201: inClause built from ? placeholders
-	_, err = db.Exec(fmt.Sprintf(`
-		INSERT IGNORE INTO wisp_dependencies
-		SELECT d.* FROM dependencies d
-		INNER JOIN issues i ON d.issue_id = i.id
-		WHERE i.issue_type IN (%s)
-	`, inClause), args...)
-	if err != nil {
-		return fmt.Errorf("copying infra dependencies to wisp_dependencies: %w", err)
+	if err := copyCommonColumns(db, "wisp_dependencies", "dependencies", "INNER JOIN issues i ON src.issue_id = i.id", fmt.Sprintf("i.issue_type IN (%s)", inClause), args); err != nil {
+		return err
 	}
 
 	// Copy events
-	//nolint:gosec // G201: inClause built from ? placeholders
-	_, err = db.Exec(fmt.Sprintf(`
-		INSERT IGNORE INTO wisp_events
-		SELECT e.* FROM events e
-		INNER JOIN issues i ON e.issue_id = i.id
-		WHERE i.issue_type IN (%s)
-	`, inClause), args...)
-	if err != nil {
-		return fmt.Errorf("copying infra events to wisp_events: %w", err)
+	if err := copyCommonColumns(db, "wisp_events", "events", "INNER JOIN issues i ON src.issue_id = i.id", fmt.Sprintf("i.issue_type IN (%s)", inClause), args); err != nil {
+		return err
 	}
 
 	// Copy comments
-	//nolint:gosec // G201: inClause built from ? placeholders
-	_, err = db.Exec(fmt.Sprintf(`
-		INSERT IGNORE INTO wisp_comments
-		SELECT c.* FROM comments c
-		INNER JOIN issues i ON c.issue_id = i.id
-		WHERE i.issue_type IN (%s)
-	`, inClause), args...)
-	if err != nil {
-		return fmt.Errorf("copying infra comments to wisp_comments: %w", err)
+	if err := copyCommonColumns(db, "wisp_comments", "comments", "INNER JOIN issues i ON src.issue_id = i.id", fmt.Sprintf("i.issue_type IN (%s)", inClause), args); err != nil {
+		return err
 	}
 
 	// Now delete originals from versioned tables (order: children first, then issues)
@@ -144,4 +110,83 @@ func MigrateInfraToWisps(db *sql.DB) error {
 
 	log.Printf("migration 007: migrated %d infra beads to wisps table", count)
 	return nil
+}
+
+// copyCommonColumns copies rows from srcTable to destTable, mapping only the columns that exist in both.
+// This prevents "number of values does not match number of columns" errors across schema evolutions.
+func copyCommonColumns(db *sql.DB, destTable, srcTable, joinClause, whereClause string, args []interface{}) error {
+	destCols, err := getTableColumns(db, destTable)
+	if err != nil {
+		return err
+	}
+	srcCols, err := getTableColumns(db, srcTable)
+	if err != nil {
+		return err
+	}
+
+	destMap := make(map[string]bool, len(destCols))
+	for _, c := range destCols {
+		destMap[c] = true
+	}
+
+	var commonCols []string
+	for _, c := range srcCols {
+		if destMap[c] {
+			commonCols = append(commonCols, "`"+c+"`")
+		}
+	}
+
+	if len(commonCols) == 0 {
+		return fmt.Errorf("no common columns between %s and %s", destTable, srcTable)
+	}
+
+	colStr := strings.Join(commonCols, ", ")
+
+	var srcColStr string
+	if joinClause != "" {
+		var srcAliased []string
+		for _, c := range commonCols {
+			srcAliased = append(srcAliased, "src.`"+strings.Trim(c, "`")+"`")
+		}
+		srcColStr = strings.Join(srcAliased, ", ")
+	} else {
+		srcColStr = colStr
+	}
+
+	//nolint:gosec // G201: table names and columns are internal strings, not user input
+	query := fmt.Sprintf(`
+		INSERT IGNORE INTO %s (%s)
+		SELECT %s FROM %s src
+		%s
+		WHERE %s
+	`, destTable, colStr, srcColStr, srcTable, joinClause, whereClause)
+
+	if _, err := db.Exec(query, args...); err != nil {
+		return fmt.Errorf("copying %s to %s: %w", srcTable, destTable, err)
+	}
+	return nil
+}
+
+// getTableColumns gets the list of columns for a table using SHOW COLUMNS.
+func getTableColumns(db *sql.DB, table string) ([]string, error) {
+	//nolint:gosec // G202: table is internal constant
+	rows, err := db.Query("SHOW COLUMNS FROM `" + table + "`")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get columns for %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var field, typ, null, key string
+		var def, extra sql.NullString
+		if err := rows.Scan(&field, &typ, &null, &key, &def, &extra); err != nil {
+			return nil, fmt.Errorf("failed to scan column info for %s: %w", table, err)
+		}
+		cols = append(cols, field)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating columns for %s: %w", table, err)
+	}
+	return cols, nil
 }
