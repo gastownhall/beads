@@ -227,7 +227,7 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		SELECT id FROM %s %s ORDER BY priority ASC, created_at DESC
 	`, table, whereSQL), args...)
 	if err != nil {
-		return nil, err
+		return nil, wrapQueryError("search issues in tx", err)
 	}
 
 	var ids []string
@@ -235,13 +235,13 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return nil, err
+			return nil, wrapScanError("search issues in tx", err)
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return nil, err
+		return nil, wrapQueryError("search issues in tx: rows iteration", err)
 	}
 	_ = rows.Close()
 
@@ -249,7 +249,7 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 	for _, id := range ids {
 		issue, err := t.GetIssue(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("search issues in tx: get issue %s: %w", id, err)
 		}
 		issues = append(issues, issue)
 	}
@@ -300,7 +300,7 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 	//nolint:gosec // G201: table is hardcoded, setClauses contains only column names
 	querySQL := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", table, strings.Join(setClauses, ", "))
 	_, err := t.tx.ExecContext(ctx, querySQL, args...)
-	return err
+	return wrapExecError("update issue in tx", err)
 }
 
 // CloseIssue closes an issue within the transaction
@@ -316,7 +316,7 @@ func (t *doltTransaction) CloseIssue(ctx context.Context, id string, reason stri
 		UPDATE %s SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by_session = ?
 		WHERE id = ?
 	`, table), types.StatusClosed, now, now, reason, session, id)
-	return err
+	return wrapExecError("close issue in tx", err)
 }
 
 // DeleteIssue deletes an issue within the transaction
@@ -328,7 +328,7 @@ func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
 
 	//nolint:gosec // G201: table is hardcoded
 	_, err := t.tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
-	return err
+	return wrapExecError("delete issue in tx", err)
 }
 
 // AddDependency adds a dependency within the transaction.
@@ -361,7 +361,7 @@ func (t *doltTransaction) AddDependency(ctx context.Context, dep *types.Dependen
 		INSERT INTO %s (issue_id, depends_on_id, type, created_at, created_by, thread_id)
 		VALUES (?, ?, ?, NOW(), ?, ?)
 	`, table), dep.IssueID, dep.DependsOnID, dep.Type, actor, dep.ThreadID)
-	return err
+	return wrapExecError("add dependency in tx", err)
 }
 
 func (t *doltTransaction) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
@@ -377,7 +377,7 @@ func (t *doltTransaction) GetDependencyRecords(ctx context.Context, issueID stri
 		WHERE issue_id = ?
 	`, table), issueID)
 	if err != nil {
-		return nil, err
+		return nil, wrapQueryError("get dependency records in tx", err)
 	}
 	defer rows.Close()
 
@@ -387,7 +387,7 @@ func (t *doltTransaction) GetDependencyRecords(ctx context.Context, issueID stri
 		var metadata sql.NullString
 		var threadID sql.NullString
 		if err := rows.Scan(&d.IssueID, &d.DependsOnID, &d.Type, &d.CreatedAt, &d.CreatedBy, &metadata, &threadID); err != nil {
-			return nil, err
+			return nil, wrapScanError("get dependency records in tx", err)
 		}
 		if metadata.Valid {
 			d.Metadata = metadata.String
@@ -411,7 +411,7 @@ func (t *doltTransaction) RemoveDependency(ctx context.Context, issueID, depends
 	_, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
 		DELETE FROM %s WHERE issue_id = ? AND depends_on_id = ?
 	`, table), issueID, dependsOnID)
-	return err
+	return wrapExecError("remove dependency in tx", err)
 }
 
 // AddLabel adds a label within the transaction
@@ -425,7 +425,7 @@ func (t *doltTransaction) AddLabel(ctx context.Context, issueID, label, actor st
 	_, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)
 	`, table), issueID, label)
-	return err
+	return wrapExecError("add label in tx", err)
 }
 
 func (t *doltTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {
@@ -437,14 +437,14 @@ func (t *doltTransaction) GetLabels(ctx context.Context, issueID string) ([]stri
 	//nolint:gosec // G201: table is hardcoded
 	rows, err := t.tx.QueryContext(ctx, fmt.Sprintf(`SELECT label FROM %s WHERE issue_id = ? ORDER BY label`, table), issueID)
 	if err != nil {
-		return nil, err
+		return nil, wrapQueryError("get labels in tx", err)
 	}
 	defer rows.Close()
 	var labels []string
 	for rows.Next() {
 		var l string
 		if err := rows.Scan(&l); err != nil {
-			return nil, err
+			return nil, wrapScanError("get labels in tx", err)
 		}
 		labels = append(labels, l)
 	}
@@ -462,7 +462,7 @@ func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor
 	_, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
 		DELETE FROM %s WHERE issue_id = ? AND label = ?
 	`, table), issueID, label)
-	return err
+	return wrapExecError("remove label in tx", err)
 }
 
 // SetConfig sets a config value within the transaction
@@ -471,7 +471,7 @@ func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) erro
 		INSERT INTO config (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
-	return err
+	return wrapExecError("set config in tx", err)
 }
 
 // GetConfig gets a config value within the transaction
@@ -481,7 +481,7 @@ func (t *doltTransaction) GetConfig(ctx context.Context, key string) (string, er
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
-	return value, err
+	return value, wrapQueryError("get config in tx", err)
 }
 
 // SetMetadata sets a metadata value within the transaction
@@ -490,7 +490,7 @@ func (t *doltTransaction) SetMetadata(ctx context.Context, key, value string) er
 		INSERT INTO metadata (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
-	return err
+	return wrapExecError("set metadata in tx", err)
 }
 
 // GetMetadata gets a metadata value within the transaction
@@ -500,7 +500,7 @@ func (t *doltTransaction) GetMetadata(ctx context.Context, key string) (string, 
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
-	return value, err
+	return value, wrapQueryError("get metadata in tx", err)
 }
 
 func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
@@ -545,14 +545,14 @@ func (t *doltTransaction) GetIssueComments(ctx context.Context, issueID string) 
 		ORDER BY created_at ASC
 	`, table), issueID)
 	if err != nil {
-		return nil, err
+		return nil, wrapQueryError("get comments in tx", err)
 	}
 	defer rows.Close()
 	var comments []*types.Comment
 	for rows.Next() {
 		var c types.Comment
 		if err := rows.Scan(&c.ID, &c.IssueID, &c.Author, &c.Text, &c.CreatedAt); err != nil {
-			return nil, err
+			return nil, wrapScanError("get comments in tx", err)
 		}
 		comments = append(comments, &c)
 	}
@@ -571,5 +571,5 @@ func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, commen
 		INSERT INTO %s (issue_id, event_type, actor, comment)
 		VALUES (?, ?, ?, ?)
 	`, table), issueID, types.EventCommented, actor, comment)
-	return err
+	return wrapExecError("add comment in tx", err)
 }

@@ -204,7 +204,7 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close() // Best effort cleanup on error path
-		return nil, err
+		return nil, wrapQueryError("get dependencies with metadata: rows", err)
 	}
 	_ = rows.Close() // Redundant close for safety (rows already iterated)
 
@@ -219,7 +219,7 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 	}
 	issues, err := s.GetIssuesByIDs(ctx, ids)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get dependencies with metadata: fetch issues: %w", err)
 	}
 	issueMap := make(map[string]*types.Issue, len(issues))
 	for _, iss := range issues {
@@ -274,7 +274,7 @@ func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID strin
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close() // Best effort cleanup on error path
-		return nil, err
+		return nil, wrapQueryError("get dependents with metadata: rows", err)
 	}
 	_ = rows.Close() // Redundant close for safety (rows already iterated)
 
@@ -289,7 +289,7 @@ func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID strin
 	}
 	issues, err := s.GetIssuesByIDs(ctx, ids)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get dependents with metadata: fetch issues: %w", err)
 	}
 	issueMap := make(map[string]*types.Issue, len(issues))
 	for _, iss := range issues {
@@ -345,7 +345,7 @@ func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*
 	for rows.Next() {
 		dep, err := scanDependencyRow(rows)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("get all dependency records: %w", err)
 		}
 		result[dep.IssueID] = append(result[dep.IssueID], dep)
 	}
@@ -365,7 +365,7 @@ func (s *DoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs 
 		for _, id := range ephIDs {
 			deps, err := s.getWispDependencyRecords(ctx, id)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("get dependency records: wisp %s: %w", id, err)
 			}
 			if len(deps) > 0 {
 				result[id] = deps
@@ -374,7 +374,7 @@ func (s *DoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs 
 		if len(doltIDs) > 0 {
 			doltResult, err := s.getDependencyRecordsForIssuesDolt(ctx, doltIDs)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("get dependency records: dolt: %w", err)
 			}
 			for k, v := range doltResult {
 				result[k] = v
@@ -413,7 +413,7 @@ func (s *DoltStore) getDependencyRecordsForIssuesDolt(ctx context.Context, issue
 	for rows.Next() {
 		dep, err := scanDependencyRow(rows)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("get dependency records for issues: %w", err)
 		}
 		result[dep.IssueID] = append(result[dep.IssueID], dep)
 	}
@@ -493,7 +493,7 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 		var issueID, blockerID, depType, blockerStatus string
 		if scanErr := rows.Scan(&issueID, &blockerID, &depType, &blockerStatus); scanErr != nil {
 			_ = rows.Close()
-			return nil, nil, nil, scanErr
+			return nil, nil, nil, wrapScanError("get blocking info: scan blocked-by", scanErr)
 		}
 		// Skip closed blockers — the dependency record is preserved, but a
 		// closed blocker no longer blocks work.
@@ -509,7 +509,7 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 	}
 	_ = rows.Close()
 	if rowErr := rows.Err(); rowErr != nil {
-		return nil, nil, nil, rowErr
+		return nil, nil, nil, wrapQueryError("get blocking info: blocked-by rows", rowErr)
 	}
 
 	// Query 2: Get "blocks" relationships — deps where depends_on_id is in our set
@@ -530,7 +530,7 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 		var blockerID, blockedID, depType, blockerStatus string
 		if scanErr := rows2.Scan(&blockerID, &blockedID, &depType, &blockerStatus); scanErr != nil {
 			_ = rows2.Close()
-			return nil, nil, nil, scanErr
+			return nil, nil, nil, wrapScanError("get blocking info: scan blocks", scanErr)
 		}
 		// Skip if the blocker (our displayed issue) is closed
 		if types.Status(blockerStatus) == types.StatusClosed {
@@ -544,7 +544,7 @@ func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []str
 	}
 	_ = rows2.Close()
 	if rowErr2 := rows2.Err(); rowErr2 != nil {
-		return nil, nil, nil, rowErr2
+		return nil, nil, nil, wrapQueryError("get blocking info: blocks rows", rowErr2)
 	}
 
 	return blockedByMap, blocksMap, parentMap, nil
@@ -787,13 +787,13 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return false, nil, err
+			return false, nil, wrapScanError("is blocked: scan blocker", err)
 		}
 		blockers = append(blockers, id)
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
-		return false, nil, err
+		return false, nil, wrapQueryError("is blocked: blocker rows", err)
 	}
 
 	// If blocked by non-'blocks' dependency (e.g., waits-for gate),
@@ -848,7 +848,7 @@ func (s *DoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID 
 	}
 	_ = candidateRows.Close()
 	if err := candidateRows.Err(); err != nil {
-		return nil, err
+		return nil, wrapQueryError("get newly unblocked: candidate rows", err)
 	}
 
 	if len(candidateIDs) == 0 {
@@ -893,7 +893,7 @@ func (s *DoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID 
 	}
 	_ = blockedRows.Close()
 	if err := blockedRows.Err(); err != nil {
-		return nil, err
+		return nil, wrapQueryError("get newly unblocked: blocked rows", err)
 	}
 
 	// Filter to only candidates with no remaining open blockers
@@ -924,7 +924,7 @@ func (s *DoltStore) scanIssueIDs(ctx context.Context, rows *sql.Rows) ([]*types.
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, wrapQueryError("scan issue IDs: rows", err)
 	}
 
 	// Close rows before the nested GetIssuesByIDs query.
@@ -941,7 +941,7 @@ func (s *DoltStore) scanIssueIDs(ctx context.Context, rows *sql.Rows) ([]*types.
 	// Fetch all issues in a single batch query
 	issues, err := s.GetIssuesByIDs(ctx, ids)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("scan issue IDs: batch fetch: %w", err)
 	}
 
 	// Restore the caller's ORDER BY: GetIssuesByIDs uses WHERE id IN (...)
@@ -979,7 +979,7 @@ func (s *DoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.
 		if len(doltIDs) > 0 {
 			doltIssues, err := s.getIssuesByIDsDolt(ctx, doltIDs)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("get issues by IDs: dolt: %w", err)
 			}
 			allIssues = append(allIssues, doltIssues...)
 		}
@@ -1015,7 +1015,7 @@ func (s *DoltStore) getIssuesByIDsDolt(ctx context.Context, ids []string) ([]*ty
 	for queryRows.Next() {
 		issue, err := scanIssueFrom(queryRows)
 		if err != nil {
-			return nil, err
+			return nil, wrapScanError("get issues by IDs: scan issue", err)
 		}
 		issues = append(issues, issue)
 	}
@@ -1028,7 +1028,7 @@ func scanDependencyRows(rows *sql.Rows) ([]*types.Dependency, error) {
 	for rows.Next() {
 		dep, err := scanDependencyRow(rows)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan dependency rows: %w", err)
 		}
 		deps = append(deps, dep)
 	}

@@ -567,13 +567,13 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 		var id string
 		if err := activeRows.Scan(&id); err != nil {
 			_ = activeRows.Close() // Best effort cleanup on error path
-			return nil, err
+			return nil, wrapScanError("get blocked issues: scan active ID", err)
 		}
 		activeIDs[id] = true
 	}
 	_ = activeRows.Close() // Redundant close for safety (rows already iterated)
 	if err := activeRows.Err(); err != nil {
-		return nil, err
+		return nil, wrapQueryError("get blocked issues: active rows", err)
 	}
 
 	// Step 2: Get canonical blocked set via computeBlockedIDs, which handles
@@ -602,7 +602,7 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 		var issueID, blockerID string
 		if err := depRows.Scan(&issueID, &blockerID); err != nil {
 			_ = depRows.Close() // Best effort cleanup on error path
-			return nil, err
+			return nil, wrapScanError("get blocked issues: scan dependency", err)
 		}
 		// Only include if computeBlockedIDs confirmed this issue is blocked
 		if blockedSet[issueID] && activeIDs[blockerID] {
@@ -611,7 +611,7 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 	}
 	_ = depRows.Close() // Redundant close for safety (rows already iterated)
 	if err := depRows.Err(); err != nil {
-		return nil, err
+		return nil, wrapQueryError("get blocked issues: dependency rows", err)
 	}
 
 	// Step 4: Batch-fetch all blocked issues and build results
@@ -696,7 +696,7 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 		var id string
 		if err := epicRows.Scan(&id); err != nil {
 			_ = epicRows.Close() // Best effort cleanup on error path
-			return nil, err
+			return nil, wrapScanError("get epics eligible for closure", err)
 		}
 		epicIDs = append(epicIDs, id)
 	}
@@ -724,7 +724,7 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 		var parentID, childID string
 		if err := depRows.Scan(&parentID, &childID); err != nil {
 			_ = depRows.Close() // Best effort cleanup on error path
-			return nil, err
+			return nil, wrapScanError("get epics: scan parent-child dep", err)
 		}
 		if epicSet[parentID] {
 			epicChildMap[parentID] = append(epicChildMap[parentID], childID)
@@ -755,7 +755,7 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 			var id, status string
 			if err := statusRows.Scan(&id, &status); err != nil {
 				_ = statusRows.Close()
-				return nil, err
+				return nil, wrapScanError("get epics: scan child status", err)
 			}
 			childStatusMap[id] = status
 		}
@@ -914,19 +914,19 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 		WHERE status IN ('open', 'in_progress', 'blocked', 'deferred', 'hooked')
 	`)
 	if err != nil {
-		return nil, err
+		return nil, wrapQueryError("compute blocked IDs: get active issues", err)
 	}
 	for activeRows.Next() {
 		var id string
 		if err := activeRows.Scan(&id); err != nil {
 			_ = activeRows.Close() // Best effort cleanup on error path
-			return nil, err
+			return nil, wrapScanError("compute blocked IDs: scan active issue", err)
 		}
 		activeIDs[id] = true
 	}
 	_ = activeRows.Close() // Redundant close for safety (rows already iterated)
 	if err := activeRows.Err(); err != nil {
-		return nil, err
+		return nil, wrapQueryError("compute blocked IDs: active rows", err)
 	}
 
 	// Step 2: Get blocking deps, waits-for gates, and conditional-blocks (single-table scan)
@@ -935,7 +935,7 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 		WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
 	`)
 	if err != nil {
-		return nil, err
+		return nil, wrapQueryError("compute blocked IDs: get dependencies", err)
 	}
 
 	type waitsForDep struct {
@@ -953,7 +953,7 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 		var metadata sql.NullString
 		if err := depRows.Scan(&issueID, &dependsOnID, &depType, &metadata); err != nil {
 			_ = depRows.Close() // Best effort cleanup on error path
-			return nil, err
+			return nil, wrapScanError("compute blocked IDs: scan dependency", err)
 		}
 
 		switch depType {
@@ -984,7 +984,7 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 	}
 	_ = depRows.Close() // Redundant close for safety (rows already iterated)
 	if err := depRows.Err(); err != nil {
-		return nil, err
+		return nil, wrapQueryError("compute blocked IDs: dependency rows", err)
 	}
 
 	if len(waitsForDeps) > 0 {
@@ -1008,7 +1008,7 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 		`, strings.Join(placeholders, ","))
 		childRows, err := s.queryContext(ctx, childQuery, args...)
 		if err != nil {
-			return nil, err
+			return nil, wrapQueryError("compute blocked IDs: get spawner children", err)
 		}
 
 		spawnerChildren := make(map[string][]string)
@@ -1017,14 +1017,14 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 			var childID, parentID string
 			if err := childRows.Scan(&childID, &parentID); err != nil {
 				_ = childRows.Close() // Best effort cleanup on error path
-				return nil, err
+				return nil, wrapScanError("compute blocked IDs: scan child", err)
 			}
 			spawnerChildren[parentID] = append(spawnerChildren[parentID], childID)
 			childIDs[childID] = struct{}{}
 		}
 		_ = childRows.Close()
 		if err := childRows.Err(); err != nil {
-			return nil, err
+			return nil, wrapQueryError("compute blocked IDs: child rows", err)
 		}
 
 		closedChildren := make(map[string]bool)
@@ -1043,19 +1043,19 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 			`, strings.Join(childPlaceholders, ","))
 			closedRows, err := s.queryContext(ctx, closedQuery, childArgs...)
 			if err != nil {
-				return nil, err
+				return nil, wrapQueryError("compute blocked IDs: get closed children", err)
 			}
 			for closedRows.Next() {
 				var childID string
 				if err := closedRows.Scan(&childID); err != nil {
 					_ = closedRows.Close() // Best effort cleanup on error path
-					return nil, err
+					return nil, wrapScanError("compute blocked IDs: scan closed child", err)
 				}
 				closedChildren[childID] = true
 			}
 			_ = closedRows.Close()
 			if err := closedRows.Err(); err != nil {
-				return nil, err
+				return nil, wrapQueryError("compute blocked IDs: closed child rows", err)
 			}
 		}
 
@@ -1137,7 +1137,7 @@ func (s *DoltStore) getChildrenOfIssues(ctx context.Context, parentIDs []string)
 	`, strings.Join(placeholders, ","))
 	rows, err := s.queryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, wrapQueryError("get children of issues", err)
 	}
 	defer rows.Close()
 
@@ -1145,7 +1145,7 @@ func (s *DoltStore) getChildrenOfIssues(ctx context.Context, parentIDs []string)
 	for rows.Next() {
 		var childID string
 		if err := rows.Scan(&childID); err != nil {
-			return nil, err
+			return nil, wrapScanError("get children of issues", err)
 		}
 		children = append(children, childID)
 	}
@@ -1181,7 +1181,7 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 		var id string
 		if err := depRows.Scan(&id); err != nil {
 			_ = depRows.Close() // Best effort cleanup on error path
-			return nil, err
+			return nil, wrapScanError("get molecule progress: scan child", err)
 		}
 		childIDs = append(childIDs, id)
 	}
@@ -1209,7 +1209,7 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 			var id, status string
 			if err := statusRows.Scan(&id, &status); err != nil {
 				_ = statusRows.Close()
-				return nil, err
+				return nil, wrapScanError("get molecule progress: scan status", err)
 			}
 			childMap[id] = childInfo{status: status}
 		}
@@ -1240,7 +1240,7 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return "", wrapTransactionError("get next child ID: begin", err)
 	}
 	defer tx.Rollback()
 
@@ -1250,7 +1250,7 @@ func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string
 	if err == sql.ErrNoRows {
 		lastChild = 0
 	} else if err != nil {
-		return "", err
+		return "", wrapQueryError("get next child ID: read counter", err)
 	}
 
 	nextChild := lastChild + 1
@@ -1260,11 +1260,11 @@ func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string
 		ON DUPLICATE KEY UPDATE last_child = ?
 	`, parentID, nextChild, nextChild)
 	if err != nil {
-		return "", err
+		return "", wrapExecError("get next child ID: update counter", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", err
+		return "", wrapTransactionError("get next child ID: commit", err)
 	}
 
 	return fmt.Sprintf("%s.%d", parentID, nextChild), nil
