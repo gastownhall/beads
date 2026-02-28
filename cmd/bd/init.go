@@ -290,7 +290,11 @@ environment variable.`,
 		if existingCfg, _ := configfile.Load(beadsDir); existingCfg != nil && existingCfg.DoltDatabase != "" {
 			dbName = existingCfg.DoltDatabase
 		} else if prefix != "" {
-			dbName = prefix
+			// Sanitize hyphens to underscores for SQL-idiomatic database names.
+			// Must match the sanitization applied to metadata.json DoltDatabase
+			// field (line below), otherwise init creates a database with one name
+			// but metadata.json records a different name, causing reopens to fail.
+			dbName = strings.ReplaceAll(prefix, "-", "_")
 		} else {
 			dbName = "beads"
 		}
