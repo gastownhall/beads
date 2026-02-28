@@ -605,6 +605,15 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// Staleness check: verify Dolt database is in sync with JSONL (bd-2q6d).
+		// Only check for read-only commands (write commands will update the DB).
+		// Skip if --allow-stale is set or if the command is exempt from checks.
+		if store != nil && !isAllowStale() && isReadOnlyCommand(cmd.Name()) {
+			if freshErr := checkDatabaseFreshness(rootCtx, store, filepath.Dir(dbPath)); freshErr != nil {
+				FatalError("%v", freshErr)
+			}
+		}
+
 		// Tips (including sync conflict proactive checks) are shown via maybeShowTip()
 		// after successful command execution, not in PreRun
 
