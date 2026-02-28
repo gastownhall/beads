@@ -15,7 +15,7 @@ import (
 // For one-side-only remotes, it adds the missing side.
 // Conflicts (different URLs) are skipped — they require manual resolution.
 func RemoteConsistency(repoPath string) error {
-	beadsDir := resolveBeadsDir(repoPath)
+	beadsDir := resolveBeadsDir(filepath.Join(repoPath, ".beads"))
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
 		return fmt.Errorf("failed to load config: %w", err)
