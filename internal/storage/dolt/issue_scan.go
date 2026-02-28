@@ -35,6 +35,7 @@ func scanIssueFrom(s issueScanner) (*types.Issue, error) {
 	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
 	var closedAt, compactedAt, lastActivity, dueAt, deferUntil sql.NullTime
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
+	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
 	var contentHash, sourceRepo, closeReason sql.NullString
 	var workType, sourceSystem sql.NullString
@@ -49,7 +50,7 @@ func scanIssueFrom(s issueScanner) (*types.Issue, error) {
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef, &specID,
+		&createdAtStr, &createdBy, &owner, &updatedAtStr, &closedAt, &externalRef, &specID,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&sender, &ephemeral, &wispType, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
@@ -82,6 +83,9 @@ func scanIssueFrom(s issueScanner) (*types.Issue, error) {
 	}
 	if assignee.Valid {
 		issue.Assignee = assignee.String
+	}
+	if createdBy.Valid {
+		issue.CreatedBy = createdBy.String
 	}
 	if owner.Valid {
 		issue.Owner = owner.String
