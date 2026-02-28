@@ -1058,7 +1058,7 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore *
 		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
 		if err == nil && sourcePrefix != "" {
 			// Open target store temporarily to set prefix
-			tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+			tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
 			if err != nil {
 				return fmt.Errorf("failed to initialize target database: %w", err)
 			}

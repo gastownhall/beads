@@ -39,10 +39,11 @@ func setupBenchStore(b *testing.B) (*DoltStore, func()) {
 	}
 
 	cfg := &Config{
-		Path:           tmpDir,
-		CommitterName:  "bench",
-		CommitterEmail: "bench@example.com",
-		Database:       "benchdb",
+		Path:            tmpDir,
+		CommitterName:   "bench",
+		CommitterEmail:  "bench@example.com",
+		Database:        "benchdb",
+		CreateIfMissing: true,
 	}
 
 	store, err := New(ctx, cfg)
@@ -90,10 +91,11 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 
 	// Create initial store to set up schema
 	cfg := &Config{
-		Path:           tmpDir,
-		CommitterName:  "bench",
-		CommitterEmail: "bench@example.com",
-		Database:       "benchdb",
+		Path:            tmpDir,
+		CommitterName:   "bench",
+		CommitterEmail:  "bench@example.com",
+		Database:        "benchdb",
+		CreateIfMissing: true,
 	}
 
 	initStore, err := New(ctx, cfg)
@@ -137,10 +139,11 @@ func BenchmarkColdStart(b *testing.B) {
 	store.Close()
 
 	cfg := &Config{
-		Path:           tmpDir,
-		CommitterName:  "bench",
-		CommitterEmail: "bench@example.com",
-		Database:       "benchdb",
+		Path:            tmpDir,
+		CommitterName:   "bench",
+		CommitterEmail:  "bench@example.com",
+		Database:        "benchdb",
+		CreateIfMissing: true,
 	}
 
 	b.ResetTimer()
@@ -220,10 +223,11 @@ func BenchmarkCLIWorkflow(b *testing.B) {
 	store.Close()
 
 	cfg := &Config{
-		Path:           tmpDir,
-		CommitterName:  "bench",
-		CommitterEmail: "bench@example.com",
-		Database:       "benchdb",
+		Path:            tmpDir,
+		CommitterName:   "bench",
+		CommitterEmail:  "bench@example.com",
+		Database:        "benchdb",
+		CreateIfMissing: true,
 	}
 
 	b.ResetTimer()

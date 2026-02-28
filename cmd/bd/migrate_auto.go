@@ -161,13 +161,14 @@ func doAutoMigrateSQLiteToDolt(beadsDir string) {
 		serverUser:     resolvedUser,
 		serverPassword: resolvedPassword,
 		doltCfg: &dolt.Config{
-			Path:           doltPath,
-			Database:       dbName,
-			ServerHost:     resolvedHost,
-			ServerPort:     resolvedPort,
-			ServerUser:     resolvedUser,
-			ServerPassword: resolvedPassword,
-			ServerTLS:      resolvedTLS,
+			Path:            doltPath,
+			Database:        dbName,
+			CreateIfMissing: true, // migration creates a new Dolt database
+			ServerHost:      resolvedHost,
+			ServerPort:      resolvedPort,
+			ServerUser:      resolvedUser,
+			ServerPassword:  resolvedPassword,
+			ServerTLS:       resolvedTLS,
 		},
 	}
 

@@ -423,10 +423,11 @@ func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string
 	t.Helper()
 
 	cfg := &Config{
-		Path:           path,
-		CommitterName:  "town-" + prefix,
-		CommitterEmail: prefix + "@federation.test",
-		Database:       "beads",
+		Path:            path,
+		CommitterName:   "town-" + prefix,
+		CommitterEmail:  prefix + "@federation.test",
+		Database:        "beads",
+		CreateIfMissing: true, // test creates fresh database
 	}
 
 	store, err := New(ctx, cfg)

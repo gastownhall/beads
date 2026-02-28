@@ -226,6 +226,57 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
 
 ## Database Issues
 
+### `bd` shows 0 issues but the database has data
+
+**Symptom:** All `bd` commands return empty results. `bd list` shows nothing.
+
+**Cause:** Your `bd` may be connecting to a different Dolt server or database than expected. Before this version, `bd` unconditionally ran `CREATE DATABASE IF NOT EXISTS` on every connection, which could create an empty shadow database on the wrong server.
+
+**Diagnosis:**
+
+```bash
+# Check what server bd is connecting to
+cat .beads/metadata.json | grep -E "dolt_mode|dolt_server"
+
+# Check if the database exists on the expected server
+dolt sql -q "SHOW DATABASES" --host 127.0.0.1 --port 3307
+
+# Query your data directly to confirm it exists
+cd /path/to/your/dolt/data/beads_myproject
+dolt sql -q "SELECT COUNT(*) FROM issues"
+
+# Run diagnostics
+bd doctor --server
+```
+
+**Fix:**
+
+1. Upgrade to bd this version+ (prevents shadow database creation)
+2. Ensure your Dolt server is running from the correct data directory
+3. Verify `metadata.json` points to the right server and port
+4. If a stale `.beads/dolt/` directory exists alongside server mode, remove it:
+   ```bash
+   rm -rf .beads/dolt/
+   ```
+
+### Configured server unreachable (auto-start disabled)
+
+**Symptom (this version+):** `bd` returns "database not found on Dolt server" when the configured server is down.
+
+**Cause:** When `metadata.json` has an explicit `dolt_server_port`, auto-start is intentionally disabled. Starting a different server would create a shadow database.
+
+**Fix:**
+
+```bash
+# Start your configured Dolt server
+bd dolt start
+
+# Or start manually with the correct data directory
+dolt sql-server --host 127.0.0.1 --port 3307 --data-dir /path/to/your/dolt/data
+```
+
+If you want auto-start behavior, remove `dolt_server_port` from `.beads/metadata.json`.
+
 ### `database is locked`
 
 Another bd process is accessing the database. Solutions:

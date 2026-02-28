@@ -134,10 +134,11 @@ func setupConcurrentTestStore(t *testing.T) (*DoltStore, func()) {
 	dbName := uniqueTestDBName(t)
 
 	cfg := &Config{
-		Path:           tmpDir,
-		CommitterName:  "test",
-		CommitterEmail: "test@example.com",
-		Database:       dbName,
+		Path:            tmpDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        dbName,
+		CreateIfMissing: true, // tests create fresh databases
 	}
 
 	store, err := New(ctx, cfg)
@@ -175,10 +176,11 @@ func TestNewDoltStore(t *testing.T) {
 
 	dbName := uniqueTestDBName(t)
 	cfg := &Config{
-		Path:           tmpDir,
-		CommitterName:  "test",
-		CommitterEmail: "test@example.com",
-		Database:       dbName,
+		Path:            tmpDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        dbName,
+		CreateIfMissing: true, // tests create fresh databases
 	}
 
 	store, err := New(ctx, cfg)

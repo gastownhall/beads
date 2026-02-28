@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Shadow database prevention**: `bd` no longer runs `CREATE DATABASE IF NOT EXISTS` unconditionally when connecting to a Dolt server. If the configured database does not exist, `bd` now errors with a clear diagnostic message instead of silently creating an empty shadow database. Only `bd init` creates new databases. This prevents the scenario where auto-start launches a server from a different data directory and creates a fresh empty database that hides the user's real data.
+- **Auto-start suppressed with explicit server port**: When `metadata.json` contains an explicit `dolt_server_port`, `bd` no longer auto-starts a local Dolt server if the configured server is unreachable. This prevents shadow database creation when the user's server is temporarily down.
 - Prevent phantom catalog entries by respecting existing `dolt_database` config in init and migrate paths ([#2051](https://github.com/steveyegge/beads/issues/2051))
 - Replace `information_schema` queries with `SHOW COLUMNS`/`SHOW TABLES` for phantom resilience
 - Add phantom catalog detection to `bd doctor`

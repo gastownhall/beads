@@ -41,6 +41,20 @@ func gitBackup(ctx context.Context) error {
 
 	gitDir := backupGitDir()
 
+	// When no dedicated backup.git-repo is configured, git commands must run
+	// from the repository that contains the backup directory. This matters when
+	// .beads/redirect points to a different project — the backup dir lives in
+	// that project's repo, not the CWD's repo.
+	if gitDir == "" {
+		// Find the git repo root for the backup directory
+		repoRoot, findErr := findGitRoot(dir)
+		if findErr != nil {
+			debug.Logf("backup: cannot find git repo for %s: %v\n", dir, findErr)
+			return fmt.Errorf("git add: backup directory %s is not inside a git repository", dir)
+		}
+		gitDir = repoRoot
+	}
+
 	// git add -f backup/ (force-add past .gitignore)
 	if err := gitExecInDir(ctx, gitDir, "add", "-f", dir); err != nil {
 		return fmt.Errorf("git add: %w", err)
@@ -75,6 +89,21 @@ func gitBackup(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// findGitRoot finds the git repository root containing the given path.
+func findGitRoot(path string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = path
+	// If path is a file, use its parent directory
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		cmd.Dir = filepath.Dir(path)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // gitExec runs a git command in the current directory and returns any error.
