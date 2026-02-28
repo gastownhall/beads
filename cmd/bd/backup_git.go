@@ -56,10 +56,20 @@ func gitBackup(ctx context.Context) error {
 	}
 
 	// Compute repo-relative path for git pathspecs — absolute paths can behave
-	// inconsistently across platforms and git versions.
-	relDir, relErr := filepath.Rel(gitDir, dir)
-	if relErr != nil {
-		relDir = dir // fall back to absolute if Rel fails
+	// inconsistently across platforms and git versions. Canonicalize paths to
+	// avoid symlink issues (e.g., macOS /var vs /private/var) that can produce
+	// a ../-prefixed relative path outside the repo.
+	canonGitDir := gitDir
+	if cg, err := filepath.EvalSymlinks(gitDir); err == nil {
+		canonGitDir = cg
+	}
+	canonDir := dir
+	if cd, err := filepath.EvalSymlinks(dir); err == nil {
+		canonDir = cd
+	}
+	relDir, relErr := filepath.Rel(canonGitDir, canonDir)
+	if relErr != nil || relDir == ".." || strings.HasPrefix(relDir, ".."+string(filepath.Separator)) {
+		relDir = dir // fall back to absolute if Rel fails or escapes repo
 	}
 
 	// git add -f backup/ (force-add past .gitignore)

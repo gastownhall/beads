@@ -128,9 +128,10 @@ type Config struct {
 	RemotePassword string // Hosted Dolt remote password (set via DOLT_REMOTE_PASSWORD env var)
 
 	// CreateIfMissing allows CREATE DATABASE when the target database does not
-	// exist on the server. Only bd init should set this to true. Normal open
-	// paths leave it false, which causes an error if the database is missing —
-	// preventing silent creation of shadow databases on the wrong server.
+	// exist on the server. Only explicit initialization, migration, or new-board
+	// creation paths should set this to true. Normal open paths leave it false,
+	// which causes an error if the database is missing — preventing silent
+	// creation of shadow databases on the wrong server.
 	CreateIfMissing bool
 
 	// AutoStart enables transparent server auto-start when connection fails.
@@ -759,13 +760,12 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// This prevents the shadow database bug: without CreateIfMissing, connecting
 	// to a server that lacks the expected database is an error (not silent creation).
 	//
-	// Escape underscores and percent signs in the LIKE pattern: MySQL LIKE treats
-	// _ as single-char wildcard and % as multi-char wildcard. Database names like
-	// "beads_vulcan-clean" would otherwise match "beads1vulcan-clean". The equality
-	// check on Scan provides defense-in-depth, but escaping is the correct fix.
-	escapedName := strings.NewReplacer("_", "\\_", "%", "\\%").Replace(cfg.Database)
+	// Note: LIKE treats _ and % as wildcards. Dolt does not support MySQL's
+	// backslash escaping (\_) in SHOW DATABASES LIKE, so we use unescaped names.
+	// The equality check (existingName == cfg.Database) below ensures we only
+	// match the exact database, not similar-named ones.
 	var dbExists bool
-	row := initDB.QueryRowContext(ctx, fmt.Sprintf("SHOW DATABASES LIKE '%s'", escapedName)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above (rejects quotes/backticks); LIKE wildcards escaped via escapedName
+	row := initDB.QueryRowContext(ctx, fmt.Sprintf("SHOW DATABASES LIKE '%s'", cfg.Database)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above (rejects quotes/backticks); exact match enforced by equality check below
 	var existingName string
 	scanErr := row.Scan(&existingName)
 	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {

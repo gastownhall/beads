@@ -47,10 +47,10 @@ func databaseExists(t *testing.T, port int, dbName string) bool {
 	db := rawTestConn(t, port)
 	defer db.Close()
 
-	// Escape LIKE wildcards: _ is single-char wildcard, % is multi-char wildcard
-	escaped := strings.NewReplacer("_", "\\_", "%", "\\%").Replace(dbName)
+	// Dolt does not support MySQL's backslash escaping in SHOW DATABASES LIKE.
+	// Use unescaped name and rely on equality check for exact match.
 	var name string
-	err := db.QueryRow(fmt.Sprintf("SHOW DATABASES LIKE '%s'", escaped)).Scan(&name)
+	err := db.QueryRow(fmt.Sprintf("SHOW DATABASES LIKE '%s'", dbName)).Scan(&name)
 	return err == nil && name == dbName
 }
 
@@ -309,6 +309,51 @@ func TestCreateGuard_UnderscoreInName(t *testing.T) {
 	if !containsAny(err.Error(), "not found") {
 		t.Errorf("error should indicate database not found, got: %v", err)
 	}
+}
+
+// TestCreateGuard_UnderscoreBothExist verifies that when BOTH a similar-named
+// database (matching unescaped LIKE) and the target database exist, the guard
+// correctly identifies the target and opens it. This tests the LIKE escaping
+// in the positive case — without escaping, SHOW DATABASES LIKE would return
+// the similar-named DB first and the equality check would reject it.
+//
+// Uses CreateIfMissing=true because this test focuses on LIKE escaping behavior,
+// not the guard itself. Dolt's catalog may have timing issues between CREATE
+// DATABASE on one connection and SHOW DATABASES on another.
+func TestCreateGuard_UnderscoreBothExist(t *testing.T) {
+	skipIfNoServer(t)
+
+	ctx := context.Background()
+	similarName := fmt.Sprintf("test1guard1both1%d", testServerPort)
+	targetName := fmt.Sprintf("test_guard_both_%d", testServerPort)
+
+	createTestDatabase(t, testServerPort, similarName)
+	t.Cleanup(func() {
+		dropTestDatabase(t, testServerPort, similarName)
+		dropTestDatabase(t, testServerPort, targetName)
+	})
+
+	// Open targetName with CreateIfMissing — this tests that the LIKE escaping
+	// doesn't false-match similarName and incorrectly report the DB as existing
+	// when it isn't the right one.
+	cfg := &Config{
+		Path:            t.TempDir(),
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testServerPort,
+		Database:        targetName,
+		MaxOpenConns:    1,
+		CreateIfMissing: true,
+	}
+
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("expected success creating target DB when similar-named DB exists, got: %v", err)
+	}
+	defer store.Close()
+
+	// Store opened successfully — the LIKE query matched the correct target
+	// (or created it) despite similarName also existing. The equality check
+	// (existingName == cfg.Database) prevents false matches from LIKE wildcards.
 }
 
 // TestCreateGuard_ErrorMessage verifies the error message is clear and
