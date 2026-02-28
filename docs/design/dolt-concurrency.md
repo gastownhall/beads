@@ -1,7 +1,7 @@
 # Dolt Concurrency Model: Transaction-Based Shared Main
 
-> **Status**: Design draft
-> **Date**: 2026-02-22
+> **Status**: Implemented — all-on-main is live, branch-per-worker retired
+> **Date**: 2026-02-22 (implemented 2026-02-24)
 > **Authors**: Steve Yegge, crew max
 > **Input**: Tim Sehn (Dolt co-founder), DoltHub blog 2026-02-18
 > **Scope**: Beads (primary), Gas Town (operational), Wasteland (federation)

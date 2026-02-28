@@ -306,13 +306,15 @@ gt dolt sql              # Open SQL shell
 
 Server runs on port 3307 (avoids MySQL conflict on 3306).
 
-### Data Location
+### Data Location (Gas Town)
 
 ```
-~/.dolt-data/
-├── beads/               # HQ database
-├── beads_rig/           # Beads rig database
-└── gastown/             # Gas Town database
+~/gt/.dolt-data/
+├── hq/                  # Town beads (hq-*)
+├── gastown/             # Gastown rig (gt-*)
+├── beads/               # Beads rig (bd-*)
+├── wyvern/              # Wyvern rig (wy-*)
+└── sky/                 # Sky rig (sky-*)
 ```
 
 ## Migration Cleanup
