@@ -144,6 +144,7 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	rootOnly, _ := cmd.Flags().GetBool("root-only")
 	varFlags, _ := cmd.Flags().GetStringArray("var")
 
 	// Parse variables
@@ -253,7 +254,13 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 
 	// Spawn as ephemeral in main database (Ephemeral=true, not synced via git)
 	// Use wisp prefix for distinct visual recognition (see types.IDPrefixWisp)
-	result, err := spawnMolecule(ctx, store, subgraph, vars, "", actor, true, types.IDPrefixWisp)
+	result, err := spawnMoleculeWithOptions(ctx, store, subgraph, CloneOptions{
+		Vars:      vars,
+		Actor:     actor,
+		Ephemeral: true,
+		Prefix:    types.IDPrefixWisp,
+		RootOnly:  rootOnly,
+	})
 	if err != nil {
 		FatalError("creating wisp: %v", err)
 	}
@@ -724,10 +731,12 @@ func init() {
 	// Wisp command flags (for direct create: bd mol wisp <proto>)
 	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
 	wispCmd.Flags().Bool("dry-run", false, "Preview what would be created")
+	wispCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 
 	// Wisp create command flags (kept for backwards compat: bd mol wisp create <proto>)
 	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
+	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 
 	wispListCmd.Flags().Bool("all", false, "Include closed wisps")
 

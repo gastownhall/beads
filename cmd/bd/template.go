@@ -55,6 +55,10 @@ type CloneOptions struct {
 	// AttachToID within the same transaction as the clone, preventing orphans.
 	AttachToID    string               // Molecule ID to attach spawned root to
 	AttachDepType types.DependencyType // Dependency type for the attachment
+
+	// RootOnly: if true, only create the root issue (no child step issues).
+	// Used by patrol wisps where steps are inlined at prime time, not tracked as beads.
+	RootOnly bool
 }
 
 // bondedIDPattern validates bonded IDs (alphanumeric, dash, underscore, dot)
@@ -723,6 +727,10 @@ func cloneSubgraph(ctx context.Context, s *dolt.DoltStore, subgraph *TemplateSub
 	err := transact(ctx, s, "bd: clone template subgraph", func(tx storage.Transaction) error {
 		// First pass: create all issues with new IDs
 		for _, oldIssue := range subgraph.Issues {
+			// RootOnly: skip child issues, only create the root
+			if opts.RootOnly && oldIssue.ID != subgraph.Root.ID {
+				continue
+			}
 			// Determine assignee: use override for root epic, otherwise keep template's
 			issueAssignee := oldIssue.Assignee
 			if oldIssue.ID == subgraph.Root.ID && opts.Assignee != "" {
