@@ -42,6 +42,10 @@
 {"issue_id":"bd-tpv","label":"from:overseer"}
 {"issue_id":"bd-tpv","label":"gt:message"}
 {"issue_id":"bd-tpv","label":"read"}
+{"issue_id":"bd-x1e","label":"plugin:rebuild-gt"}
+{"issue_id":"bd-x1e","label":"result:success"}
+{"issue_id":"bd-x1e","label":"rig:gastown"}
+{"issue_id":"bd-x1e","label":"type:plugin-run"}
 {"issue_id":"bd-xq2","label":"plugin:rebuild-gt"}
 {"issue_id":"bd-xq2","label":"result:success"}
 {"issue_id":"bd-xq2","label":"rig:gastown"}
