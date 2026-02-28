@@ -36,6 +36,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -444,7 +445,7 @@ func applyConfigDefaults(cfg *Config) {
 			_, _ = h.Write([]byte(cfg.Path)) // hash.Hash.Write never returns an error
 			cfg.Database = fmt.Sprintf("testdb_%x", h.Sum64())
 		} else {
-			cfg.Database = "beads"
+			cfg.Database = configfile.DefaultDoltDatabase
 		}
 	}
 	if cfg.CommitterName == "" {

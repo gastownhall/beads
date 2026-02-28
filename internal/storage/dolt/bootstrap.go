@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/lockfile"
 )
 
@@ -40,7 +41,7 @@ func BootstrapFromGitRemoteWithDB(ctx context.Context, doltDir, gitRemoteURL, da
 	}
 
 	if database == "" {
-		database = "beads"
+		database = configfile.DefaultDoltDatabase
 	}
 
 	// Verify dolt CLI is available
@@ -97,7 +98,7 @@ func doltExists(doltPath string) bool {
 // We avoid opening a connection here since the caller will do that.
 func schemaReady(_ context.Context, doltPath string, dbName string) bool {
 	if dbName == "" {
-		dbName = "beads"
+		dbName = configfile.DefaultDoltDatabase
 	}
 	// The embedded Dolt driver stores databases in subdirectories.
 	// Check for the expected database name's config.json which indicates
