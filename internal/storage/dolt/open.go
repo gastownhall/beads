@@ -71,7 +71,12 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if autoStartCfg == "" {
 		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
 	}
-	cfg.AutoStart = resolveAutoStart(cfg.AutoStart, autoStartCfg)
+	// When metadata.json specifies an explicit server port (raw field, not the
+	// getter which falls back to DefaultDoltServerPort), suppress auto-start.
+	// This prevents bd from launching a different server when the user's configured
+	// server is temporarily unreachable — the root cause of the shadow database bug.
+	explicitPort := fileCfg.DoltServerPort > 0
+	cfg.AutoStart = resolveAutoStart(cfg.AutoStart, autoStartCfg, explicitPort)
 
 	return New(ctx, cfg)
 }
@@ -83,10 +88,12 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 //  1. BEADS_TEST_MODE=1                    → always false (tests own the server lifecycle)
 //  2. IsDaemonManaged()                    → always false (Gas Town manages the server)
 //  3. BEADS_DOLT_AUTO_START=0              → always false (explicit env opt-out)
-//  4. current == true                      → true  (caller option wins over config file,
+//  4. explicitPort == true                 → always false (metadata.json has explicit port;
+//     auto-starting a different server would create shadow databases)
+//  5. current == true                      → true  (caller option wins over config file,
 //     per NewFromConfigWithOptions contract)
-//  5. doltAutoStartCfg == "false"/"0"/"off" → false (config.yaml opt-out)
-//  6. default                              → true  (standalone user; safe default)
+//  6. doltAutoStartCfg == "false"/"0"/"off" → false (config.yaml opt-out)
+//  7. default                              → true  (standalone user; safe default)
 //
 // doltAutoStartCfg is the raw value of the "dolt.auto-start" key from config.yaml
 // (pass config.GetString("dolt.auto-start") at the call site).
@@ -95,7 +102,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 // distinguished from an explicit "opt-out" by the caller.  Callers that need
 // to suppress auto-start should use one of the environment-variable or
 // config-file overrides above.
-func resolveAutoStart(current bool, doltAutoStartCfg string) bool {
+func resolveAutoStart(current bool, doltAutoStartCfg string, explicitPort bool) bool {
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		return false
 	}
@@ -103,6 +110,12 @@ func resolveAutoStart(current bool, doltAutoStartCfg string) bool {
 		return false
 	}
 	if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
+		return false
+	}
+	// When metadata.json specifies an explicit server port, never auto-start.
+	// The user has configured a specific server — if it's down, error out
+	// rather than silently starting a different server from .beads/dolt/.
+	if explicitPort {
 		return false
 	}
 	// Caller option wins over config.yaml (NewFromConfigWithOptions contract).

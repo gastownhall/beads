@@ -26,7 +26,7 @@ type Transaction = beads.Transaction
 // This always opens in embedded mode. Use OpenFromConfig to respect
 // server mode settings from metadata.json.
 func Open(ctx context.Context, dbPath string) (Storage, error) {
-	return dolt.New(ctx, &dolt.Config{Path: dbPath})
+	return dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
 }
 
 // OpenFromConfig opens a beads database using configuration from metadata.json.
@@ -34,7 +34,7 @@ func Open(ctx context.Context, dbPath string) (Storage, error) {
 // configuration, connecting to the Dolt SQL server when dolt_mode is "server".
 // beadsDir is the path to the .beads directory.
 func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
-	return dolt.NewFromConfig(ctx, beadsDir)
+	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 }
 
 // FindDatabasePath finds the beads database in the current directory tree

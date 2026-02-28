@@ -3,7 +3,6 @@ package utils
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -66,21 +65,48 @@ func CanonicalizePath(path string) string {
 }
 
 // resolveCanonicalCase resolves a path to its true filesystem case.
-// On macOS, uses realpath(1) to get the canonical case.
+// On macOS, walks each path component and matches against actual directory
+// entries to recover the correct case (HFS+/APFS are case-insensitive).
 // Returns empty string if resolution fails.
 func resolveCanonicalCase(path string) string {
-	if runtime.GOOS == "darwin" {
-		// Use realpath to get canonical path with correct case
-		// realpath on macOS returns the true filesystem case
-		cmd := exec.Command("realpath", path)
-		output, err := cmd.Output()
-		if err == nil {
-			return strings.TrimSpace(string(output))
+	if runtime.GOOS != "darwin" {
+		// Windows: filepath.EvalSymlinks already handles case
+		return ""
+	}
+
+	// Walk the path component-by-component, resolving each to its true case
+	// by listing the parent directory and matching case-insensitively.
+	parts := strings.Split(filepath.Clean(path), string(filepath.Separator))
+	if len(parts) == 0 {
+		return ""
+	}
+
+	// Start from root
+	resolved := string(filepath.Separator)
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		entries, err := os.ReadDir(resolved)
+		if err != nil {
+			return "" // can't read directory, fall back
+		}
+
+		found := false
+		for _, entry := range entries {
+			if strings.EqualFold(entry.Name(), part) {
+				resolved = filepath.Join(resolved, entry.Name())
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "" // component not found, fall back
 		}
 	}
-	// Windows: filepath.EvalSymlinks already handles case on Windows
-	// For other systems or if realpath fails, return empty to use fallback
-	return ""
+
+	return resolved
 }
 
 // NormalizePathForComparison returns a normalized path suitable for comparison.

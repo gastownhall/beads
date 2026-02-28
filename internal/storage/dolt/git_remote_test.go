@@ -648,10 +648,11 @@ func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) 
 
 	dbName := uniqueTestDBName(t)
 	store, err := New(ctx, &Config{
-		Path:           doltDir,
-		CommitterName:  "test",
-		CommitterEmail: "test@example.com",
-		Database:       dbName,
+		Path:            doltDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        dbName,
+		CreateIfMissing: true, // test creates a fresh database
 	})
 	if err != nil {
 		os.RemoveAll(baseDir)
@@ -827,10 +828,11 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 	}
 
 	cloneStore, err := New(ctx, &Config{
-		Path:           cloneDoltDir,
-		CommitterName:  "clone-user",
-		CommitterEmail: "clone@example.com",
-		Database:       cloneDBName,
+		Path:            cloneDoltDir,
+		CommitterName:   "clone-user",
+		CommitterEmail:  "clone@example.com",
+		Database:        cloneDBName,
+		CreateIfMissing: true, // clone creates a new database
 	})
 	if err != nil {
 		t.Fatalf("failed to open cloned store: %v", err)
@@ -876,10 +878,11 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 
 	// Step 4: Re-open source and pull — verify bidirectional sync
 	sourceStore2, err := New(ctx, &Config{
-		Path:           filepath.Join(setup.baseDir, "embedded-dolt"),
-		CommitterName:  "test",
-		CommitterEmail: "test@example.com",
-		Database:       findClonedDBName(t, filepath.Join(setup.baseDir, "embedded-dolt")),
+		Path:            filepath.Join(setup.baseDir, "embedded-dolt"),
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        findClonedDBName(t, filepath.Join(setup.baseDir, "embedded-dolt")),
+		CreateIfMissing: true, // re-open may use dynamically discovered DB name
 	})
 	if err != nil {
 		t.Fatalf("failed to re-open source store: %v", err)

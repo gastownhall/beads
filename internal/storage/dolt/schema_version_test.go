@@ -122,10 +122,11 @@ func TestSchemaVersionRunsInitWhenMissing(t *testing.T) {
 
 	dbName := uniqueTestDBName(t)
 	cfg := &Config{
-		Path:           tmpDir,
-		CommitterName:  "test",
-		CommitterEmail: "test@example.com",
-		Database:       dbName,
+		Path:            tmpDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        dbName,
+		CreateIfMissing: true, // test creates a fresh database
 	}
 
 	// First open — creates schema and sets version

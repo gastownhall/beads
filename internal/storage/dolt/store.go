@@ -127,6 +127,13 @@ type Config struct {
 	RemoteUser     string // Hosted Dolt remote user (set via DOLT_REMOTE_USER env var)
 	RemotePassword string // Hosted Dolt remote password (set via DOLT_REMOTE_PASSWORD env var)
 
+	// CreateIfMissing allows CREATE DATABASE when the target database does not
+	// exist on the server. Only explicit initialization, migration, or new-board
+	// creation paths should set this to true. Normal open paths leave it false,
+	// which causes an error if the database is missing — preventing silent
+	// creation of shadow databases on the wrong server.
+	CreateIfMissing bool
+
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
 	// automatically if one isn't running. Disabled under Gas Town (GT_ROOT set).
@@ -749,20 +756,49 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 			cfg.Database, cfg.ServerPort)
 	}
 
-	_, err = initDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cfg.Database)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above
-	if err != nil {
-		// Dolt may return error 1007 even with IF NOT EXISTS - ignore if database already exists
-		errLower := strings.ToLower(err.Error())
-		if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
+	// Check if the database already exists before deciding whether to create it.
+	// This prevents the shadow database bug: without CreateIfMissing, connecting
+	// to a server that lacks the expected database is an error (not silent creation).
+	//
+	// Uses SHOW DATABASES + iterate for exact match instead of SHOW DATABASES LIKE,
+	// because LIKE treats _ and % as wildcards and Dolt does not support backslash
+	// escaping. Database names like "beads_vulcan" contain underscores which would
+	// match unrelated databases with LIKE.
+	dbExists, checkErr := databaseExistsOnServer(ctx, initDB, cfg.Database)
+	if checkErr != nil {
+		_ = db.Close()
+		return nil, "", fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
+			cfg.Database, cfg.ServerHost, cfg.ServerPort, checkErr)
+	}
+
+	if !dbExists {
+		if !cfg.CreateIfMissing {
 			_ = db.Close()
-			// Check for connection refused - server likely not running
-			if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-				return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using Gas Town",
-					cfg.ServerHost, cfg.ServerPort, err)
-			}
-			return nil, "", fmt.Errorf("failed to create database: %w", err)
+			return nil, "", fmt.Errorf(
+				"database %q not found on Dolt server at %s:%d\n\n"+
+					"This can happen when:\n"+
+					"  - The server is serving a different data directory than expected\n"+
+					"  - The database has not been initialized yet\n\n"+
+					"To initialize a new board:  bd init\n"+
+					"To check server status:     bd doctor",
+				cfg.Database, cfg.ServerHost, cfg.ServerPort)
 		}
-		// Database already exists - that's fine, continue
+
+		_, err = initDB.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cfg.Database)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above
+		if err != nil {
+			// Dolt may return error 1007 even with IF NOT EXISTS - ignore if database already exists
+			errLower := strings.ToLower(err.Error())
+			if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
+				_ = db.Close()
+				// Check for connection refused - server likely not running
+				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
+					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using Gas Town",
+						cfg.ServerHost, cfg.ServerPort, err)
+				}
+				return nil, "", fmt.Errorf("failed to create database: %w", err)
+			}
+			// Database already exists - that's fine, continue
+		}
 	}
 
 	// Wait for the Dolt server's in-memory catalog to register the new database.
@@ -788,6 +824,28 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	}
 
 	return db, connStr, nil
+}
+
+// databaseExistsOnServer checks if a database with the exact given name exists
+// on the Dolt server. Uses SHOW DATABASES + iterate instead of SHOW DATABASES LIKE
+// to avoid LIKE wildcard issues with underscores in database names.
+func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var dbName string
+		if err := rows.Scan(&dbName); err != nil {
+			return false, err
+		}
+		if dbName == name {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // initSchema creates all tables if they don't exist

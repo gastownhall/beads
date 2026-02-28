@@ -100,9 +100,10 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 		dbName = "beads"
 	}
 	doltStore, err := dolt.New(ctx, &dolt.Config{
-		Path:      doltPath,
-		Database:  dbName,
-		AutoStart: os.Getenv("GT_ROOT") == "" && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
+		Path:            doltPath,
+		Database:        dbName,
+		CreateIfMissing: true, // migration creates a new Dolt database
+		AutoStart:       os.Getenv("GT_ROOT") == "" && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
 	})
 	if err != nil {
 		exitWithError("dolt_create_failed", err.Error(), "")

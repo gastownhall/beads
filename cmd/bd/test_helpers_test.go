@@ -177,10 +177,11 @@ func newTestStore(t *testing.T, dbPath string) *dolt.DoltStore {
 	}
 
 	cfg := &dolt.Config{
-		Path:       dbPath,
-		ServerHost: "127.0.0.1",
-		ServerPort: testDoltServerPort,
-		Database:   uniqueTestDBName(t),
+		Path:            dbPath,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        uniqueTestDBName(t),
+		CreateIfMissing: true, // tests create fresh databases
 	}
 	// Write metadata.json so NewFromConfig (used by routing) finds the correct DB
 	writeTestMetadata(t, dbPath, cfg.Database)
@@ -230,10 +231,11 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.Do
 	}
 
 	cfg := &dolt.Config{
-		Path:       dbPath,
-		ServerHost: "127.0.0.1",
-		ServerPort: testDoltServerPort,
-		Database:   uniqueTestDBName(t),
+		Path:            dbPath,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        uniqueTestDBName(t),
+		CreateIfMissing: true, // tests create fresh databases
 	}
 	writeTestMetadata(t, dbPath, cfg.Database)
 

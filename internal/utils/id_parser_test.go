@@ -25,9 +25,10 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 	ctx := context.Background()
 	dbName := uniqueTestDBName(t)
 	store, err := dolt.New(ctx, &dolt.Config{
-		Path:       t.TempDir(),
-		Database:   dbName,
-		ServerPort: testServerPort,
+		Path:            t.TempDir(),
+		Database:        dbName,
+		ServerPort:      testServerPort,
+		CreateIfMissing: true, // test creates fresh database
 	})
 	if err != nil {
 		t.Fatalf("Failed to create dolt store: %v", err)

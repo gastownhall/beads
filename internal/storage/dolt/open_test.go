@@ -115,7 +115,7 @@ func TestResolveAutoStart(t *testing.T) {
 			t.Setenv("GT_ROOT", tc.gtRoot)
 			t.Setenv("BEADS_DOLT_AUTO_START", tc.autoStartEnv)
 
-			got := resolveAutoStart(tc.currentValue, tc.doltAutoStartCfg)
+			got := resolveAutoStart(tc.currentValue, tc.doltAutoStartCfg, false)
 			if got != tc.wantAutoStart {
 				t.Errorf("resolveAutoStart(current=%v, configVal=%q) = %v, want %v",
 					tc.currentValue, tc.doltAutoStartCfg, got, tc.wantAutoStart)

@@ -327,10 +327,11 @@ environment variable.`,
 		// Build config. Beads always uses dolt sql-server.
 		// AutoStart is always enabled during init — we need a server to initialize the database.
 		doltCfg := &dolt.Config{
-			Path:      storagePath,
-			BeadsDir:  beadsDir,
-			Database:  dbName,
-			AutoStart: !doltserver.IsDaemonManaged() && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
+			Path:            storagePath,
+			BeadsDir:        beadsDir,
+			Database:        dbName,
+			CreateIfMissing: true, // bd init is the only path that should create databases
+			AutoStart:       !doltserver.IsDaemonManaged() && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
 		}
 		if serverHost != "" {
 			doltCfg.ServerHost = serverHost
