@@ -12,9 +12,27 @@ import (
 var backupForce bool
 
 var backupCmd = &cobra.Command{
-	Use:     "backup",
-	Short:   "Export JSONL backup of all tables to .beads/backup/",
-	Long:    "Exports all database tables to JSONL files in .beads/backup/ for off-machine recovery.\nEvents are exported incrementally using a high-water mark.",
+	Use:   "backup",
+	Short: "Back up your beads database",
+	Long: `Back up your beads database for off-machine recovery.
+
+Without a subcommand, exports all tables to JSONL files in .beads/backup/.
+Events are exported incrementally using a high-water mark.
+
+For Dolt-native backups (preserves full commit history, faster for large databases):
+  bd backup init <path>     Set up a backup destination (filesystem or DoltHub)
+  bd backup sync            Push to configured backup destination
+
+Other subcommands:
+  bd backup status          Show backup status (JSONL + Dolt)
+  bd backup restore [path]  Restore from JSONL backup files
+
+DoltHub is recommended for cloud backup:
+  bd backup init https://doltremoteapi.dolthub.com/<user>/<repo>
+  Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
+
+Note: Git-protocol remotes are NOT recommended for Dolt backups — push times
+exceed 20 minutes, cache grows unboundedly, and force-push is needed after recovery.`,
 	GroupID: "sync",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		state, err := runBackupExport(rootCtx, backupForce)
@@ -62,7 +80,14 @@ var backupStatusCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			data, err := json.MarshalIndent(state, "", "  ")
+			result := map[string]interface{}{
+				"jsonl": state,
+				"dolt":  showDoltBackupStatusJSON(),
+			}
+			if dbSize := showDBSizeJSON(); dbSize != nil {
+				result["database_size"] = dbSize
+			}
+			data, err := json.MarshalIndent(result, "", "  ")
 			if err != nil {
 				return err
 			}
@@ -70,20 +95,37 @@ var backupStatusCmd = &cobra.Command{
 			return nil
 		}
 
-		if state.LastDoltCommit == "" {
+		hasJSONL := state.LastDoltCommit != ""
+		hasDolt := false
+		if cfg, _ := loadDoltBackupConfig(); cfg != nil {
+			hasDolt = true
+		}
+
+		if !hasJSONL && !hasDolt {
 			fmt.Println("No backup has been performed yet.")
-			fmt.Println("Run 'bd backup' to create one, or set backup.enabled: true in config.yaml")
+			fmt.Println()
+			fmt.Println("JSONL backup (portable, git-friendly):")
+			fmt.Println("  bd backup                Run JSONL export now")
+			fmt.Println("  Set backup.enabled: true in config.yaml for auto-backup")
+			fmt.Println()
+			fmt.Println("Dolt backup (preserves history, faster for large databases):")
+			fmt.Println("  bd backup init <path>    Set up a backup destination")
+			fmt.Println("  bd backup sync           Push to backup destination")
+			showDBSize()
 			return nil
 		}
 
-		fmt.Printf("Last backup: %s (%s ago)\n",
-			state.Timestamp.Format(time.RFC3339),
-			time.Since(state.Timestamp).Round(time.Second))
-		fmt.Printf("Dolt commit: %s\n", state.LastDoltCommit)
-		fmt.Printf("Event high-water mark: %d\n", state.LastEventID)
-		fmt.Printf("Counts: %d issues, %d events, %d comments, %d deps, %d labels, %d config\n",
-			state.Counts.Issues, state.Counts.Events, state.Counts.Comments,
-			state.Counts.Dependencies, state.Counts.Labels, state.Counts.Config)
+		if hasJSONL {
+			fmt.Println("JSONL Backup:")
+			fmt.Printf("  Last backup: %s (%s ago)\n",
+				state.Timestamp.Format(time.RFC3339),
+				time.Since(state.Timestamp).Round(time.Second))
+			fmt.Printf("  Dolt commit: %s\n", state.LastDoltCommit)
+			fmt.Printf("  Event high-water mark: %d\n", state.LastEventID)
+			fmt.Printf("  Counts: %d issues, %d events, %d comments, %d deps, %d labels, %d config\n",
+				state.Counts.Issues, state.Counts.Events, state.Counts.Comments,
+				state.Counts.Dependencies, state.Counts.Labels, state.Counts.Config)
+		}
 
 		// Show config (effective values with source)
 		enabled := isBackupAutoEnabled()
@@ -110,6 +152,12 @@ var backupStatusCmd = &cobra.Command{
 		if gitRepo := config.GetString("backup.git-repo"); gitRepo != "" {
 			fmt.Printf("Git repo: %s\n", gitRepo)
 		}
+
+		// Show Dolt backup info
+		showDoltBackupStatus()
+
+		// Show database size
+		showDBSize()
 
 		return nil
 	},
