@@ -392,6 +392,13 @@ func (s *DoltStore) DB() *sql.DB {
 	return s.db
 }
 
+// QueryContext wraps s.db.QueryContext with retry for transient errors.
+// Exported so callers (e.g. backup) can run ad-hoc queries with retry
+// instead of going through the raw *sql.DB.
+func (s *DoltStore) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return s.queryContext(ctx, query, args...)
+}
+
 // queryContext wraps s.db.QueryContext with retry for transient errors.
 func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	if s.closed.Load() {

@@ -16,6 +16,13 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 )
 
+// dbQuerier abstracts query execution so callers can use a retry-wrapped
+// DoltStore.QueryContext instead of a raw *sql.DB.  Both *sql.DB and
+// *dolt.DoltStore satisfy this interface.
+type dbQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // backupState tracks watermarks for incremental backup.
 type backupState struct {
 	LastDoltCommit string    `json:"last_dolt_commit"`
@@ -143,19 +150,18 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 		}
 	}
 
-	db := store.DB()
-	hasWisps := tableExistsCheck(ctx, db, "wisps")
+	hasWisps := tableExistsCheck(ctx, store, "wisps")
 
 	// Export issues + wisps. We avoid UNION ALL with SELECT * because issues and
 	// wisps may have different column counts (schema evolution), and Dolt's
 	// go-mysql-server panics on UNION with mismatched columns (set_op.go index
 	// out of range). Instead, export each table separately into the same file.
-	n, err := exportTable(ctx, db, dir, "issues.jsonl", "SELECT * FROM issues ORDER BY id")
+	n, err := exportTable(ctx, store, dir, "issues.jsonl", "SELECT * FROM issues ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("backup issues: %w", err)
 	}
 	if hasWisps {
-		nw, err := exportTableAppend(ctx, db, dir, "issues.jsonl", "SELECT * FROM wisps ORDER BY id")
+		nw, err := exportTableAppend(ctx, store, dir, "issues.jsonl", "SELECT * FROM wisps ORDER BY id")
 		if err != nil {
 			return nil, fmt.Errorf("backup wisps: %w", err)
 		}
@@ -164,7 +170,7 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	state.Counts.Issues = n
 
 	// Events: incremental append
-	n, err = exportEventsIncremental(ctx, db, dir, state, hasWisps)
+	n, err = exportEventsIncremental(ctx, store, dir, state, hasWisps)
 	if err != nil {
 		return nil, fmt.Errorf("backup events: %w", err)
 	}
@@ -179,7 +185,7 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 			"SELECT id, issue_id, author, text, created_at FROM wisp_comments " +
 			"ORDER BY id"
 	}
-	n, err = exportTable(ctx, db, dir, "comments.jsonl", commentsQuery)
+	n, err = exportTable(ctx, store, dir, "comments.jsonl", commentsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("backup comments: %w", err)
 	}
@@ -192,7 +198,7 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 			"SELECT issue_id, depends_on_id, type, created_at, created_by FROM wisp_dependencies " +
 			"ORDER BY issue_id, depends_on_id"
 	}
-	n, err = exportTable(ctx, db, dir, "dependencies.jsonl", depsQuery)
+	n, err = exportTable(ctx, store, dir, "dependencies.jsonl", depsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("backup dependencies: %w", err)
 	}
@@ -205,13 +211,13 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 			"SELECT issue_id, label FROM wisp_labels " +
 			"ORDER BY issue_id, label"
 	}
-	n, err = exportTable(ctx, db, dir, "labels.jsonl", labelsQuery)
+	n, err = exportTable(ctx, store, dir, "labels.jsonl", labelsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("backup labels: %w", err)
 	}
 	state.Counts.Labels = n
 
-	n, err = exportTable(ctx, db, dir, "config.jsonl",
+	n, err = exportTable(ctx, store, dir, "config.jsonl",
 		"SELECT `key`, value FROM config ORDER BY `key`")
 	if err != nil {
 		return nil, fmt.Errorf("backup config: %w", err)
@@ -234,10 +240,13 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 }
 
 // tableExistsCheck returns true if the named table exists in the database.
-func tableExistsCheck(ctx context.Context, db *sql.DB, table string) bool {
-	var name string
-	err := db.QueryRowContext(ctx, "SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_NAME = ?", table).Scan(&name)
-	return err == nil
+func tableExistsCheck(ctx context.Context, q dbQuerier, table string) bool {
+	rows, err := q.QueryContext(ctx, "SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_NAME = ?", table)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	return rows.Next()
 }
 
 // truncateHash returns the first 8 characters of a hash, or the full string if shorter.
@@ -250,8 +259,8 @@ func truncateHash(h string) string {
 
 // exportTable streams query results to a JSONL file using atomic write (temp file + rename).
 // Uses bounded memory regardless of result set size.
-func exportTable(ctx context.Context, db *sql.DB, dir, filename, query string) (int, error) {
-	rows, err := db.QueryContext(ctx, query)
+func exportTable(ctx context.Context, q dbQuerier, dir, filename, query string) (int, error) {
+	rows, err := q.QueryContext(ctx, query)
 	if err != nil {
 		return 0, fmt.Errorf("query failed: %w", err)
 	}
@@ -297,8 +306,8 @@ func exportTable(ctx context.Context, db *sql.DB, dir, filename, query string) (
 }
 
 // exportTableAppend streams query results and appends to an existing JSONL file.
-func exportTableAppend(ctx context.Context, db *sql.DB, dir, filename, query string) (int, error) {
-	rows, err := db.QueryContext(ctx, query)
+func exportTableAppend(ctx context.Context, q dbQuerier, dir, filename, query string) (int, error) {
+	rows, err := q.QueryContext(ctx, query)
 	if err != nil {
 		return 0, fmt.Errorf("query failed: %w", err)
 	}
@@ -364,7 +373,7 @@ func writeRows(rows *sql.Rows, cols []string, w *bufio.Writer) (int, error) {
 
 // exportEventsIncremental appends new events since the last high-water mark.
 // On first export (lastEventID=0), dumps all events as a full snapshot.
-func exportEventsIncremental(ctx context.Context, db *sql.DB, dir string, state *backupState, hasWisps bool) (int, error) {
+func exportEventsIncremental(ctx context.Context, q dbQuerier, dir string, state *backupState, hasWisps bool) (int, error) {
 	query := "SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at " +
 		"FROM events WHERE id > ? ORDER BY id ASC"
 	args := []interface{}{state.LastEventID}
@@ -379,7 +388,7 @@ func exportEventsIncremental(ctx context.Context, db *sql.DB, dir string, state 
 		args = []interface{}{state.LastEventID, state.LastEventID}
 	}
 
-	rows, err := db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("query failed: %w", err)
 	}
