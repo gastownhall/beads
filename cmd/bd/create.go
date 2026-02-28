@@ -447,7 +447,8 @@ var createCmd = &cobra.Command{
 			FatalError("cannot specify both --id and --parent flags")
 		}
 
-		// If parent is specified, generate child ID
+		// If parent is specified, generate child ID and optionally inherit labels
+		var inheritedLabels []string
 		if parentID != "" {
 			ctx := rootCtx
 			// Validate parent exists before generating child ID
@@ -463,6 +464,12 @@ var createCmd = &cobra.Command{
 				FatalError("%v", err)
 			}
 			explicitID = childID // Set as explicit ID for the rest of the flow
+
+			// Inherit parent labels unless --no-inherit-labels is set (GH#2100)
+			noInheritLabels, _ := cmd.Flags().GetBool("no-inherit-labels")
+			if !noInheritLabels {
+				inheritedLabels, _ = store.GetLabels(ctx, parentID)
+			}
 		}
 
 		// Validate explicit ID format if provided
@@ -587,6 +594,19 @@ var createCmd = &cobra.Command{
 				WarnError("failed to add parent-child dependency %s -> %s: %v", issue.ID, parentID, err)
 			} else {
 				postCreateWrites = true
+			}
+		}
+
+		// Merge inherited parent labels with user-specified labels (GH#2100)
+		if len(inheritedLabels) > 0 {
+			seen := make(map[string]bool)
+			for _, l := range labels {
+				seen[l] = true
+			}
+			for _, l := range inheritedLabels {
+				if !seen[l] {
+					labels = append(labels, l)
+				}
 			}
 		}
 
@@ -774,6 +794,7 @@ func init() {
 	_ = createCmd.Flags().MarkHidden("label") // Only fails if flag missing (caught in tests)
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
+	createCmd.Flags().Bool("no-inherit-labels", false, "Don't inherit labels from parent issue")
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
 	createCmd.Flags().String("waits-for", "", "Spawner issue ID to wait for (creates waits-for dependency for fanout gate)")
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
