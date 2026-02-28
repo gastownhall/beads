@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -147,7 +148,7 @@ func doShimMigrate(beadsDir string) {
 	autoStart := os.Getenv("GT_ROOT") == "" && os.Getenv("BEADS_DOLT_AUTO_START") != "0"
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		resolvedHost = cfg.GetDoltServerHost()
-		resolvedPort = cfg.GetDoltServerPort()
+		resolvedPort = doltserver.DefaultConfig(beadsDir).Port
 		resolvedUser = cfg.GetDoltServerUser()
 		resolvedPassword = cfg.GetDoltServerPassword()
 		resolvedTLS = cfg.GetDoltServerTLS()
