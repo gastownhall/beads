@@ -59,6 +59,12 @@ var createCmd = &cobra.Command{
 			}
 			title = args[0] // They're the same, use either
 		} else if len(args) > 0 {
+			// Guard: reject positional args that look like flags (bd-2c0).
+			// When --help or other flags bypass Cobra's flag parsing (e.g.,
+			// programmatic invocation), they end up here as positional args.
+			if strings.HasPrefix(args[0], "-") {
+				FatalError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
+			}
 			title = args[0]
 		} else if titleFlag != "" {
 			title = titleFlag

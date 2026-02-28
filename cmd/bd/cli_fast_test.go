@@ -1272,3 +1272,59 @@ func TestCLI_CommentsAddShortID(t *testing.T) {
 		}
 	})
 }
+
+// TestCLI_CreateRejectsFlagLikeTitles verifies that positional arguments starting
+// with - or -- are rejected as likely misinterpreted flags (bd-2c0).
+func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+
+	tests := []struct {
+		name  string
+		title string
+	}{
+		{"DoubleDashHelp", "--help"},
+		{"DoubleDashVersion", "--version"},
+		{"SingleDashFlag", "-p"},
+		{"DoubleDashArbitrary", "--foo-bar"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := createTempDirWithCleanup(t)
+
+			// Initialize the database
+			initCmd := exec.Command(testBD, "init", "--prefix", "test", "--quiet")
+			initCmd.Dir = tmpDir
+			initCmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+			if out, err := initCmd.CombinedOutput(); err != nil {
+				t.Fatalf("init failed: %v\n%s", err, out)
+			}
+
+			// Attempt to create with a flag-like positional title
+			cmd := exec.Command(testBD, "create", tc.title)
+			cmd.Dir = tmpDir
+			cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+			out, err := cmd.CombinedOutput()
+
+			if err == nil {
+				t.Errorf("Expected error for flag-like title %q, but got none.\nOutput: %s", tc.title, out)
+			}
+
+			if !strings.Contains(string(out), "looks like a flag") {
+				t.Errorf("Expected 'looks like a flag' error for %q, got: %s", tc.title, out)
+			}
+		})
+	}
+
+	// Verify that --title flag with dash-prefixed value is still allowed
+	t.Run("TitleFlagAllowsDashes", func(t *testing.T) {
+		tmpDir := setupCLITestDB(t)
+
+		out := runBDInProcess(t, tmpDir, "create", "--title", "--unusual-title", "-p", "1", "--json")
+		if !strings.Contains(out, "--unusual-title") {
+			t.Errorf("Expected title '--unusual-title' in output, got: %s", out)
+		}
+	})
+}
