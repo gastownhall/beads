@@ -47,11 +47,27 @@ func databaseExists(t *testing.T, port int, dbName string) bool {
 	db := rawTestConn(t, port)
 	defer db.Close()
 
-	// Dolt does not support MySQL's backslash escaping in SHOW DATABASES LIKE.
-	// Use unescaped name and rely on equality check for exact match.
-	var name string
-	err := db.QueryRow(fmt.Sprintf("SHOW DATABASES LIKE '%s'", dbName)).Scan(&name)
-	return err == nil && name == dbName
+	// Use SHOW DATABASES + iterate for exact match (not LIKE, which treats
+	// underscores as wildcards and Dolt doesn't support backslash escaping).
+	rows, err := db.Query("SHOW DATABASES")
+	if err != nil {
+		t.Fatalf("failed to list databases: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("failed to scan database name: %v", err)
+		}
+		if name == dbName {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("error iterating databases: %v", err)
+	}
+	return false
 }
 
 func assertDatabaseExists(t *testing.T, port int, dbName string) {
@@ -276,9 +292,10 @@ func TestCreateGuard_ReadOnly_MissingDB(t *testing.T) {
 	assertDatabaseNotExists(t, testServerPort, dbName)
 }
 
-// TestCreateGuard_UnderscoreInName verifies that the LIKE wildcard escape works
-// correctly for database names containing underscores (common in beads naming:
-// "beads_vulcan-clean"). The underscore must not match arbitrary characters.
+// TestCreateGuard_UnderscoreInName verifies that the exact-match existence check
+// works correctly for database names containing underscores (common in beads
+// naming: "beads_vulcan-clean"). A similar-named database must not cause a
+// false positive.
 func TestCreateGuard_UnderscoreInName(t *testing.T) {
 	skipIfNoServer(t)
 
@@ -312,14 +329,9 @@ func TestCreateGuard_UnderscoreInName(t *testing.T) {
 }
 
 // TestCreateGuard_UnderscoreBothExist verifies that when BOTH a similar-named
-// database (matching unescaped LIKE) and the target database exist, the guard
-// correctly identifies the target and opens it. This tests the LIKE escaping
-// in the positive case — without escaping, SHOW DATABASES LIKE would return
-// the similar-named DB first and the equality check would reject it.
-//
-// Uses CreateIfMissing=true because this test focuses on LIKE escaping behavior,
-// not the guard itself. Dolt's catalog may have timing issues between CREATE
-// DATABASE on one connection and SHOW DATABASES on another.
+// database and the target database exist, the exact-match existence check
+// correctly identifies the target. Uses CreateIfMissing=true because this
+// test focuses on the existence check accuracy, not the guard itself.
 func TestCreateGuard_UnderscoreBothExist(t *testing.T) {
 	skipIfNoServer(t)
 

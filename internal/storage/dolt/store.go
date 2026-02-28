@@ -760,22 +760,15 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// This prevents the shadow database bug: without CreateIfMissing, connecting
 	// to a server that lacks the expected database is an error (not silent creation).
 	//
-	// Note: LIKE treats _ and % as wildcards. Dolt does not support MySQL's
-	// backslash escaping (\_) in SHOW DATABASES LIKE, so we use unescaped names.
-	// The equality check (existingName == cfg.Database) below ensures we only
-	// match the exact database, not similar-named ones.
-	var dbExists bool
-	row := initDB.QueryRowContext(ctx, fmt.Sprintf("SHOW DATABASES LIKE '%s'", cfg.Database)) //nolint:gosec // G201: cfg.Database validated by ValidateDatabaseName above (rejects quotes/backticks); exact match enforced by equality check below
-	var existingName string
-	scanErr := row.Scan(&existingName)
-	if scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
-		// Network error or server failure during the check — don't mask as "not found"
+	// Uses SHOW DATABASES + iterate for exact match instead of SHOW DATABASES LIKE,
+	// because LIKE treats _ and % as wildcards and Dolt does not support backslash
+	// escaping. Database names like "beads_vulcan" contain underscores which would
+	// match unrelated databases with LIKE.
+	dbExists, checkErr := databaseExistsOnServer(ctx, initDB, cfg.Database)
+	if checkErr != nil {
 		_ = db.Close()
 		return nil, "", fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
-			cfg.Database, cfg.ServerHost, cfg.ServerPort, scanErr)
-	}
-	if scanErr == nil && existingName == cfg.Database {
-		dbExists = true
+			cfg.Database, cfg.ServerHost, cfg.ServerPort, checkErr)
 	}
 
 	if !dbExists {
@@ -831,6 +824,28 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	}
 
 	return db, connStr, nil
+}
+
+// databaseExistsOnServer checks if a database with the exact given name exists
+// on the Dolt server. Uses SHOW DATABASES + iterate instead of SHOW DATABASES LIKE
+// to avoid LIKE wildcard issues with underscores in database names.
+func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var dbName string
+		if err := rows.Scan(&dbName); err != nil {
+			return false, err
+		}
+		if dbName == name {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // initSchema creates all tables if they don't exist
