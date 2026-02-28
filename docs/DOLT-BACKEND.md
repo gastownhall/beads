@@ -130,31 +130,42 @@ sync:
 
 ### Configure a Remote
 
+Use `bd dolt remote add` to configure remotes. This ensures the running Dolt SQL
+server sees the remote immediately. Remotes added via the `dolt` CLI directly
+are written to the filesystem but are not visible to the server until restart.
+
 ```bash
 # DoltHub (public or private)
-cd .beads/dolt
-dolt remote add origin https://doltremoteapi.dolthub.com/org/beads
+bd dolt remote add origin https://doltremoteapi.dolthub.com/org/beads
 
 # S3
-dolt remote add origin aws://[bucket]/path/to/repo
+bd dolt remote add origin aws://[bucket]/path/to/repo
 
 # GCS
-dolt remote add origin gs://[bucket]/path/to/repo
+bd dolt remote add origin gs://[bucket]/path/to/repo
+
+# Git SSH (GitHub, GitLab, etc.)
+bd dolt remote add origin git+ssh://git@github.com/org/repo.git
 
 # Local file system
-dolt remote add origin file:///path/to/remote
+bd dolt remote add origin file:///path/to/remote
 ```
 
 ### Push/Pull
 
 ```bash
-# Via bd sync
-bd sync
+bd dolt push
+bd dolt pull
+```
 
-# Direct dolt commands (if needed)
-cd .beads/dolt
-dolt push origin main
-dolt pull origin main
+For SSH remotes, `bd dolt push` and `bd dolt pull` automatically use the `dolt`
+CLI instead of the SQL server to avoid MySQL connection timeouts during transfer.
+
+### List/Remove Remotes
+
+```bash
+bd dolt remote list
+bd dolt remote remove origin
 ```
 
 ## Migration from SQLite (Legacy)

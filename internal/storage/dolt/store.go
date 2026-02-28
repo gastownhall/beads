@@ -1231,9 +1231,59 @@ func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) s
 	return msg
 }
 
+// isSSHRemote checks whether the configured remote URL uses SSH transport.
+// SSH remotes (git+ssh://, ssh://, git@host:path) require CLI-based push/pull
+// because CALL DOLT_PUSH through the SQL server times out — the MySQL connection
+// drops before the SSH transfer completes.
+func (s *DoltStore) isSSHRemote(ctx context.Context) bool {
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return false
+	}
+	for _, r := range remotes {
+		if r.Name == s.remote {
+			url := r.URL
+			return strings.HasPrefix(url, "git+ssh://") ||
+				strings.HasPrefix(url, "ssh://") ||
+				strings.Contains(url, "git@")
+		}
+	}
+	return false
+}
+
+// doltCLIPush shells out to `dolt push` from the database directory.
+// Used for SSH remotes where CALL DOLT_PUSH times out through the SQL connection.
+func (s *DoltStore) doltCLIPush(ctx context.Context, force bool) error {
+	args := []string{"push"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, s.remote, s.branch)
+	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/branch
+	cmd.Dir = s.dbPath
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("dolt push failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// doltCLIPull shells out to `dolt pull` from the database directory.
+// Used for SSH remotes where CALL DOLT_PULL times out through the SQL connection.
+func (s *DoltStore) doltCLIPull(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "dolt", "pull", s.remote, s.branch) // #nosec G204 -- fixed command
+	cmd.Dir = s.dbPath
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("dolt pull failed: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // Push pushes commits to the remote.
-// When remote credentials are configured (for Hosted Dolt), sets DOLT_REMOTE_PASSWORD
-// env var and passes --user flag to authenticate.
+// For SSH remotes, uses CLI `dolt push` to avoid MySQL connection timeouts.
+// For Hosted Dolt (remoteUser set), uses CALL DOLT_PUSH with --user authentication.
+// For other remotes (DoltHub, S3, GCS, file), uses CALL DOLT_PUSH via SQL.
 func (s *DoltStore) Push(ctx context.Context) (retErr error) {
 	ctx, span := doltTracer.Start(ctx, "dolt.push",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -1256,6 +1306,10 @@ func (s *DoltStore) Push(ctx context.Context) (retErr error) {
 		}
 		return nil
 	}
+	// SSH remotes: use CLI to avoid MySQL connection timeout during transfer.
+	if s.isSSHRemote(ctx) {
+		return s.doltCLIPush(ctx, false)
+	}
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", s.remote, s.branch)
 	if err != nil {
 		return fmt.Errorf("failed to push to %s/%s: %w", s.remote, s.branch, err)
@@ -1265,6 +1319,7 @@ func (s *DoltStore) Push(ctx context.Context) (retErr error) {
 
 // ForcePush force-pushes commits to the remote, overwriting remote changes.
 // Use when the remote has uncommitted changes in its working set.
+// For SSH remotes, uses CLI `dolt push --force` to avoid MySQL connection timeouts.
 func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 	ctx, span := doltTracer.Start(ctx, "dolt.force_push",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -1287,6 +1342,10 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 		}
 		return nil
 	}
+	// SSH remotes: use CLI to avoid MySQL connection timeout during transfer.
+	if s.isSSHRemote(ctx) {
+		return s.doltCLIPush(ctx, true)
+	}
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--force', ?, ?)", s.remote, s.branch)
 	if err != nil {
 		return fmt.Errorf("failed to force push to %s/%s: %w", s.remote, s.branch, err)
@@ -1296,8 +1355,8 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 
 // Pull pulls changes from the remote.
 // Passes branch explicitly to avoid "did not specify a branch" errors.
-// When remote credentials are configured (for Hosted Dolt), sets DOLT_REMOTE_PASSWORD
-// env var and passes --user flag to authenticate.
+// For SSH remotes, uses CLI `dolt pull` to avoid MySQL connection timeouts.
+// For Hosted Dolt (remoteUser set), uses CALL DOLT_PULL with --user authentication.
 func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 	ctx, span := doltTracer.Start(ctx, "dolt.pull",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -1317,6 +1376,16 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 		_, err := s.db.ExecContext(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
 		if err != nil {
 			return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
+		}
+		if err := s.resetAutoIncrements(ctx); err != nil {
+			return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
+		}
+		return nil
+	}
+	// SSH remotes: use CLI to avoid MySQL connection timeout during transfer.
+	if s.isSSHRemote(ctx) {
+		if err := s.doltCLIPull(ctx); err != nil {
+			return err
 		}
 		if err := s.resetAutoIncrements(ctx); err != nil {
 			return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
