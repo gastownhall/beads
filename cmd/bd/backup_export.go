@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -145,15 +146,20 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	db := store.DB()
 	hasWisps := tableExistsCheck(ctx, db, "wisps")
 
-	// Export each table. Use SELECT * so we capture all columns (schema has 50+
-	// fields and grows over time). The dynamic column scanner handles this automatically.
-	issuesQuery := "SELECT * FROM issues ORDER BY id"
-	if hasWisps {
-		issuesQuery = "SELECT * FROM issues UNION ALL SELECT * FROM wisps ORDER BY id"
-	}
-	n, err := exportTable(ctx, db, dir, "issues.jsonl", issuesQuery)
+	// Export issues + wisps. We avoid UNION ALL with SELECT * because issues and
+	// wisps may have different column counts (schema evolution), and Dolt's
+	// go-mysql-server panics on UNION with mismatched columns (set_op.go index
+	// out of range). Instead, export each table separately into the same file.
+	n, err := exportTable(ctx, db, dir, "issues.jsonl", "SELECT * FROM issues ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("backup issues: %w", err)
+	}
+	if hasWisps {
+		nw, err := exportTableAppend(ctx, db, dir, "issues.jsonl", "SELECT * FROM wisps ORDER BY id")
+		if err != nil {
+			return nil, fmt.Errorf("backup wisps: %w", err)
+		}
+		n += nw
 	}
 	state.Counts.Issues = n
 
@@ -164,6 +170,8 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	}
 	state.Counts.Events += n
 
+	// The remaining UNION queries use explicit column lists that match across
+	// both tables, so they are safe from the Dolt column-count mismatch panic.
 	commentsQuery := "SELECT id, issue_id, author, text, created_at FROM comments ORDER BY id"
 	if hasWisps {
 		commentsQuery = "SELECT id, issue_id, author, text, created_at FROM comments " +
@@ -240,8 +248,8 @@ func truncateHash(h string) string {
 	return h
 }
 
-// exportTable runs a query and writes each row as a JSON object to a JSONL file.
-// Returns the number of rows exported.
+// exportTable streams query results to a JSONL file using atomic write (temp file + rename).
+// Uses bounded memory regardless of result set size.
 func exportTable(ctx context.Context, db *sql.DB, dir, filename, query string) (int, error) {
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
@@ -254,21 +262,85 @@ func exportTable(ctx context.Context, db *sql.DB, dir, filename, query string) (
 		return 0, fmt.Errorf("failed to get columns: %w", err)
 	}
 
-	var lines []byte
-	count := 0
+	// Write to temp file, then rename atomically for crash safety.
+	tmp, err := os.CreateTemp(dir, ".backup-tmp-*")
+	if err != nil {
+		return 0, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }() // cleanup on error path
 
+	w := bufio.NewWriter(tmp)
+	count, err := writeRows(rows, cols, w)
+	if err != nil {
+		_ = tmp.Close()
+		return 0, err
+	}
+
+	if err := w.Flush(); err != nil {
+		_ = tmp.Close()
+		return 0, fmt.Errorf("flush failed: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return 0, fmt.Errorf("sync failed: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, fmt.Errorf("close failed: %w", err)
+	}
+
+	dest := filepath.Join(dir, filename)
+	if err := os.Rename(tmpPath, dest); err != nil {
+		return 0, fmt.Errorf("rename failed: %w", err)
+	}
+	return count, nil
+}
+
+// exportTableAppend streams query results and appends to an existing JSONL file.
+func exportTableAppend(ctx context.Context, db *sql.DB, dir, filename, query string) (int, error) {
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("query failed: %w", err)
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get columns: %w", err)
+	}
+
+	f, err := os.OpenFile(filepath.Join(dir, filename), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) //nolint:gosec // path is constructed internally
+	if err != nil {
+		return 0, fmt.Errorf("failed to open file for append: %w", err)
+	}
+	defer f.Close()
+
+	w := bufio.NewWriter(f)
+	count, err := writeRows(rows, cols, w)
+	if err != nil {
+		return 0, err
+	}
+	if err := w.Flush(); err != nil {
+		return 0, fmt.Errorf("flush failed: %w", err)
+	}
+	return count, nil
+}
+
+// writeRows scans rows and writes each as a JSON line to w.
+// Allocates scan buffers once and reuses them across all rows.
+func writeRows(rows *sql.Rows, cols []string, w *bufio.Writer) (int, error) {
+	values := make([]interface{}, len(cols))
+	ptrs := make([]interface{}, len(cols))
+	for i := range values {
+		ptrs[i] = &values[i]
+	}
+
+	count := 0
 	for rows.Next() {
-		// Scan into interface{} values
-		values := make([]interface{}, len(cols))
-		ptrs := make([]interface{}, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return 0, fmt.Errorf("scan failed: %w", err)
 		}
 
-		// Build a map for JSON serialization
 		row := make(map[string]interface{}, len(cols))
 		for i, col := range cols {
 			row[col] = normalizeValue(values[i])
@@ -278,15 +350,16 @@ func exportTable(ctx context.Context, db *sql.DB, dir, filename, query string) (
 		if err != nil {
 			return 0, fmt.Errorf("marshal failed: %w", err)
 		}
-		lines = append(lines, data...)
-		lines = append(lines, '\n')
+		data = append(data, '\n')
+		if _, err := w.Write(data); err != nil {
+			return 0, fmt.Errorf("write failed: %w", err)
+		}
 		count++
 	}
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("row iteration failed: %w", err)
 	}
-
-	return count, atomicWriteFile(filepath.Join(dir, filename), lines)
+	return count, nil
 }
 
 // exportEventsIncremental appends new events since the last high-water mark.
@@ -317,17 +390,28 @@ func exportEventsIncremental(ctx context.Context, db *sql.DB, dir string, state 
 		return 0, fmt.Errorf("failed to get columns: %w", err)
 	}
 
-	var newLines []byte
+	// Stream to temp file, then either rename (first export) or append (incremental).
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	tmp, err := os.CreateTemp(dir, ".backup-tmp-*")
+	if err != nil {
+		return 0, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	w := bufio.NewWriter(tmp)
+	values := make([]interface{}, len(cols))
+	ptrs := make([]interface{}, len(cols))
+	for i := range values {
+		ptrs[i] = &values[i]
+	}
+
 	count := 0
 	var maxID int64
 
 	for rows.Next() {
-		values := make([]interface{}, len(cols))
-		ptrs := make([]interface{}, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
 		if err := rows.Scan(ptrs...); err != nil {
+			_ = tmp.Close()
 			return 0, fmt.Errorf("scan failed: %w", err)
 		}
 
@@ -343,34 +427,54 @@ func exportEventsIncremental(ctx context.Context, db *sql.DB, dir string, state 
 
 		data, err := json.Marshal(row)
 		if err != nil {
+			_ = tmp.Close()
 			return 0, fmt.Errorf("marshal failed: %w", err)
 		}
-		newLines = append(newLines, data...)
-		newLines = append(newLines, '\n')
+		data = append(data, '\n')
+		if _, err := w.Write(data); err != nil {
+			_ = tmp.Close()
+			return 0, fmt.Errorf("write failed: %w", err)
+		}
 		count++
 	}
 	if err := rows.Err(); err != nil {
+		_ = tmp.Close()
 		return 0, fmt.Errorf("row iteration failed: %w", err)
 	}
 
 	if count == 0 {
+		_ = tmp.Close()
 		return 0, nil
 	}
 
-	// Append to existing events file (or create new)
-	eventsPath := filepath.Join(dir, "events.jsonl")
+	if err := w.Flush(); err != nil {
+		_ = tmp.Close()
+		return 0, fmt.Errorf("flush failed: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return 0, fmt.Errorf("sync failed: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, fmt.Errorf("close failed: %w", err)
+	}
+
 	if state.LastEventID == 0 {
-		// First export: full snapshot via atomic write
-		if err := atomicWriteFile(eventsPath, newLines); err != nil {
-			return 0, err
+		// First export: atomic rename
+		if err := os.Rename(tmpPath, eventsPath); err != nil {
+			return 0, fmt.Errorf("rename failed: %w", err)
 		}
 	} else {
-		// Incremental: append to existing file
+		// Incremental: append temp file contents to existing events file
+		tmpData, err := os.ReadFile(tmpPath) //nolint:gosec // path is constructed internally
+		if err != nil {
+			return 0, fmt.Errorf("failed to read temp events: %w", err)
+		}
 		f, err := os.OpenFile(eventsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) //nolint:gosec // path is constructed internally
 		if err != nil {
 			return 0, fmt.Errorf("failed to open events file: %w", err)
 		}
-		if _, err := f.Write(newLines); err != nil {
+		if _, err := f.Write(tmpData); err != nil {
 			_ = f.Close()
 			return 0, fmt.Errorf("failed to append events: %w", err)
 		}
