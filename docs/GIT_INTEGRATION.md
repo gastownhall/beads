@@ -84,6 +84,50 @@ See [PROTECTED_BRANCHES.md](PROTECTED_BRANCHES.md) for complete setup guide, tro
 
 ## Git Hooks
 
+### External Hook Manager Support
+
+bd detects and integrates with these external git hook managers:
+
+- **[lefthook](https://lefthook.dev/)** — YAML/TOML/JSON config
+- **[husky](https://typicode.github.io/husky/)** — `.husky/` directory scripts
+- **[pre-commit](https://pre-commit.com/)** — `.pre-commit-config.yaml`
+- **[prek](https://prek.j178.dev/)** — Rust-based pre-commit alternative (same config)
+- **[hk](https://hk.jdx.dev/)** — Fast hook manager using Pkl config
+- **[overcommit](https://github.com/sds/overcommit)** — Ruby-based (detection only)
+- **[simple-git-hooks](https://github.com/toplenboren/simple-git-hooks)** — Lightweight JS (detection only)
+
+When an external hook manager is detected, `bd hooks install` uses `--chain` to preserve existing hooks.
+
+#### hk Integration Example
+
+Add bd hooks to your `hk.pkl`:
+
+```pkl
+hooks {
+    ["pre-commit"] {
+        steps {
+            ["bd-pre-commit"] {
+                check = "bd hooks run pre-commit"
+            }
+        }
+    }
+    ["post-merge"] {
+        steps {
+            ["bd-post-merge"] {
+                check = "bd hooks run post-merge"
+            }
+        }
+    }
+    ["pre-push"] {
+        steps {
+            ["bd-pre-push"] {
+                check = "bd hooks run pre-push \"$@\""
+            }
+        }
+    }
+}
+```
+
 ### Installation
 
 ```bash

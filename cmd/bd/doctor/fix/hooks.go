@@ -44,6 +44,10 @@ var hookManagerConfigs = []hookManagerConfig{
 	{"pre-commit", []string{".pre-commit-config.yaml", ".pre-commit-config.yml"}},
 	{"overcommit", []string{".overcommit.yml"}},
 	{"yorkie", []string{".yorkie"}},
+	{"hk", []string{
+		"hk.pkl", ".config/hk.pkl",
+		"hk.local.pkl", ".config/hk.local.pkl",
+	}},
 	{"simple-git-hooks", []string{
 		".simple-git-hooks.cjs", ".simple-git-hooks.js",
 		"simple-git-hooks.cjs", "simple-git-hooks.js",
@@ -97,6 +101,7 @@ type hookManagerPattern struct {
 // hookManagerPatterns identifies which hook manager installed a git hook (in priority order).
 // Note: prek must come before pre-commit since prek hooks may also contain "pre-commit" in paths.
 var hookManagerPatterns = []hookManagerPattern{
+	{"hk", regexp.MustCompile(`(?i)\bhk\s+run\b`)},
 	{"lefthook", regexp.MustCompile(`(?i)lefthook`)},
 	{"husky", regexp.MustCompile(`(?i)(\.husky|husky\.sh)`)},
 	// prek (https://prek.j178.dev) - faster Rust-based pre-commit alternative
@@ -469,6 +474,62 @@ func CheckHuskyBdIntegration(path string) *HookIntegrationStatus {
 	return status
 }
 
+// hkConfigFiles lists hk config files (derived from hookManagerConfigs).
+var hkConfigFiles = []string{"hk.pkl", ".config/hk.pkl", "hk.local.pkl", ".config/hk.local.pkl"}
+
+// CheckHkBdIntegration checks hk Pkl config for bd integration.
+// hk uses Pkl configuration where hooks are nested under hooks { ["hook-name"] { steps { ... } } }.
+// See https://hk.jdx.dev/ for config format.
+func CheckHkBdIntegration(path string) *HookIntegrationStatus {
+	// Find first existing config file
+	var configPath string
+	for _, name := range hkConfigFiles {
+		p := filepath.Join(path, name)
+		if _, err := os.Stat(p); err == nil {
+			configPath = p
+			break
+		}
+	}
+	if configPath == "" {
+		return nil
+	}
+
+	content, err := os.ReadFile(configPath) // #nosec G304 - path is validated
+	if err != nil {
+		return nil
+	}
+
+	contentStr := string(content)
+
+	status := &HookIntegrationStatus{
+		Manager:    "hk",
+		Configured: false,
+	}
+
+	// For each recommended hook, check two things:
+	// 1. Is the hook section present? (e.g., ["pre-commit"] appears in config)
+	// 2. Does "bd hooks run <hookname>" appear in the config?
+	// Since bd hooks run commands include the hook name, we can match them directly.
+	for _, hookName := range recommendedBdHooks {
+		sectionPattern := regexp.MustCompile(`\[\s*"` + regexp.QuoteMeta(hookName) + `"\s*\]`)
+		hasBdRun := regexp.MustCompile(`\bbd\s+hooks\s+run\s+` + regexp.QuoteMeta(hookName) + `\b`)
+
+		sectionExists := sectionPattern.MatchString(contentStr)
+		bdRunExists := hasBdRun.MatchString(contentStr)
+
+		if bdRunExists {
+			status.HooksWithBd = append(status.HooksWithBd, hookName)
+			status.Configured = true
+		} else if sectionExists {
+			status.HooksWithoutBd = append(status.HooksWithoutBd, hookName)
+		} else {
+			status.HooksNotInConfig = append(status.HooksNotInConfig, hookName)
+		}
+	}
+
+	return status
+}
+
 // checkManagerBdIntegration checks a specific manager for bd integration.
 func checkManagerBdIntegration(name, path string) *HookIntegrationStatus {
 	switch name {
@@ -476,6 +537,8 @@ func checkManagerBdIntegration(name, path string) *HookIntegrationStatus {
 		return CheckLefthookBdIntegration(path)
 	case "husky":
 		return CheckHuskyBdIntegration(path)
+	case "hk":
+		return CheckHkBdIntegration(path)
 	case "pre-commit", "prek":
 		// prek uses the same config format as pre-commit
 		status := CheckPrecommitBdIntegration(path)

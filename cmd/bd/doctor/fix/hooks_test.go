@@ -81,6 +81,31 @@ func TestDetectExternalHookManagers(t *testing.T) {
 			expected: []string{"pre-commit"},
 		},
 		{
+			name: "hk.pkl",
+			setup: func(dir string) error {
+				return os.WriteFile(filepath.Join(dir, "hk.pkl"), []byte("hooks {\n}\n"), 0644)
+			},
+			expected: []string{"hk"},
+		},
+		{
+			name: ".config/hk.pkl",
+			setup: func(dir string) error {
+				configDir := filepath.Join(dir, ".config")
+				if err := os.MkdirAll(configDir, 0755); err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(configDir, "hk.pkl"), []byte("hooks {\n}\n"), 0644)
+			},
+			expected: []string{"hk"},
+		},
+		{
+			name: "hk.local.pkl",
+			setup: func(dir string) error {
+				return os.WriteFile(filepath.Join(dir, "hk.local.pkl"), []byte("hooks {\n}\n"), 0644)
+			},
+			expected: []string{"hk"},
+		},
+		{
 			name: ".overcommit.yml",
 			setup: func(dir string) error {
 				return os.WriteFile(filepath.Join(dir, ".overcommit.yml"), []byte("PreCommit:\n"), 0644)
@@ -274,6 +299,193 @@ pre-commit:
 
 			if status == nil {
 				t.Fatal("expected non-nil status")
+			}
+
+			if status.Configured != tt.expectConfigured {
+				t.Errorf("Configured: expected %v, got %v", tt.expectConfigured, status.Configured)
+			}
+
+			if !slicesEqual(status.HooksWithBd, tt.expectHooksWithBd) {
+				t.Errorf("HooksWithBd: expected %v, got %v", tt.expectHooksWithBd, status.HooksWithBd)
+			}
+
+			if !slicesEqual(status.HooksWithoutBd, tt.expectHooksWithoutBd) {
+				t.Errorf("HooksWithoutBd: expected %v, got %v", tt.expectHooksWithoutBd, status.HooksWithoutBd)
+			}
+
+			if !slicesEqual(status.HooksNotInConfig, tt.expectNotInConfig) {
+				t.Errorf("HooksNotInConfig: expected %v, got %v", tt.expectNotInConfig, status.HooksNotInConfig)
+			}
+		})
+	}
+}
+
+func TestCheckHkBdIntegration(t *testing.T) {
+	tests := []struct {
+		name                 string
+		configFile           string
+		configContent        string
+		expectNil            bool
+		expectConfigured     bool
+		expectHooksWithBd    []string
+		expectHooksWithoutBd []string
+		expectNotInConfig    []string
+	}{
+		{
+			name:      "no config",
+			expectNil: true,
+		},
+		{
+			name:       "all recommended hooks with bd",
+			configFile: "hk.pkl",
+			configContent: `amends "package://github.com/jdx/hk/releases/download/v1.36.0/hk@1.36.0#/Config.pkl"
+
+hooks {
+    ["pre-commit"] {
+        steps {
+            ["bd-pre-commit"] {
+                check = "bd hooks run pre-commit"
+            }
+        }
+    }
+    ["post-merge"] {
+        steps {
+            ["bd-post-merge"] {
+                check = "bd hooks run post-merge"
+            }
+        }
+    }
+    ["pre-push"] {
+        steps {
+            ["bd-pre-push"] {
+                check = "bd hooks run pre-push \"$@\""
+            }
+        }
+    }
+}
+`,
+			expectConfigured:  true,
+			expectHooksWithBd: []string{"pre-commit", "post-merge", "pre-push"},
+		},
+		{
+			name:       "partial bd integration",
+			configFile: "hk.pkl",
+			configContent: `hooks {
+    ["pre-commit"] {
+        steps {
+            ["bd-pre-commit"] {
+                check = "bd hooks run pre-commit"
+            }
+            ["lint"] {
+                glob = "*.go"
+                check = "golangci-lint run {{files}}"
+            }
+        }
+    }
+    ["post-merge"] {
+        steps {
+            ["notify"] {
+                check = "echo merged"
+            }
+        }
+    }
+}
+`,
+			expectConfigured:     true,
+			expectHooksWithBd:    []string{"pre-commit"},
+			expectHooksWithoutBd: []string{"post-merge"},
+			expectNotInConfig:    []string{"pre-push"},
+		},
+		{
+			name:       "no bd at all",
+			configFile: "hk.pkl",
+			configContent: `hooks {
+    ["pre-commit"] {
+        steps {
+            ["lint"] {
+                glob = "*.go"
+                check = "golangci-lint run {{files}}"
+            }
+        }
+    }
+}
+`,
+			expectConfigured:     false,
+			expectHooksWithoutBd: []string{"pre-commit"},
+			expectNotInConfig:    []string{"post-merge", "pre-push"},
+		},
+		{
+			name:       ".config/hk.pkl location",
+			configFile: ".config/hk.pkl",
+			configContent: `hooks {
+    ["pre-commit"] {
+        steps {
+            ["bd-sync"] {
+                check = "bd hooks run pre-commit"
+            }
+        }
+    }
+}
+`,
+			expectConfigured:  true,
+			expectHooksWithBd: []string{"pre-commit"},
+			expectNotInConfig: []string{"post-merge", "pre-push"},
+		},
+		{
+			name:       "hk.local.pkl only",
+			configFile: "hk.local.pkl",
+			configContent: `hooks {
+    ["pre-commit"] {
+        steps {
+            ["bd-sync"] {
+                check = "bd hooks run pre-commit"
+            }
+        }
+    }
+}
+`,
+			expectConfigured:  true,
+			expectHooksWithBd: []string{"pre-commit"},
+			expectNotInConfig: []string{"post-merge", "pre-push"},
+		},
+		{
+			name:              "empty config",
+			configFile:        "hk.pkl",
+			configContent:     ``,
+			expectConfigured:  false,
+			expectNotInConfig: []string{"pre-commit", "post-merge", "pre-push"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+
+			if tt.configFile != "" {
+				configPath := filepath.Join(dir, tt.configFile)
+				if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+					t.Fatalf("failed to create config dir: %v", err)
+				}
+				if err := os.WriteFile(configPath, []byte(tt.configContent), 0644); err != nil {
+					t.Fatalf("failed to write config: %v", err)
+				}
+			}
+
+			status := CheckHkBdIntegration(dir)
+
+			if tt.expectNil {
+				if status != nil {
+					t.Errorf("expected nil status, got %+v", status)
+				}
+				return
+			}
+
+			if status == nil {
+				t.Fatal("expected non-nil status")
+			}
+
+			if status.Manager != "hk" {
+				t.Errorf("Manager: expected 'hk', got %q", status.Manager)
 			}
 
 			if status.Configured != tt.expectConfigured {
@@ -571,6 +783,11 @@ func TestDetectActiveHookManager(t *testing.T) {
 		hookContent string
 		expected    string
 	}{
+		{
+			name:        "hk signature",
+			hookContent: "#!/bin/sh\ntest \"${HK:-1}\" = \"0\" || exec hk run pre-commit \"$@\"\n",
+			expected:    "hk",
+		},
 		{
 			name:        "lefthook signature",
 			hookContent: "#!/bin/sh\n# lefthook\nexec lefthook run pre-commit\n",
@@ -1027,6 +1244,16 @@ func TestCheckManagerBdIntegration(t *testing.T) {
 			},
 			expectNil:     false,
 			expectManager: "husky",
+		},
+		{
+			name:        "hk integration",
+			managerName: "hk",
+			setup: func(dir string) error {
+				config := "hooks {\n    [\"pre-commit\"] {\n        steps {\n            [\"bd\"] {\n                check = \"bd hooks run pre-commit\"\n            }\n        }\n    }\n}\n"
+				return os.WriteFile(filepath.Join(dir, "hk.pkl"), []byte(config), 0644)
+			},
+			expectNil:     false,
+			expectManager: "hk",
 		},
 	}
 
