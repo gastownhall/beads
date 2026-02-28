@@ -3,119 +3,55 @@ package migrations
 import (
 	"database/sql"
 	"fmt"
-	"net"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
-// openTestDolt starts a temporary dolt sql-server and returns a connection.
-func openTestDolt(t *testing.T) *sql.DB {
+// openTestDoltBranch returns a *sql.DB on an isolated branch of the shared test
+// database. Each test gets its own branch via COW snapshot, so schema and data
+// changes are fully isolated without the overhead of CREATE DATABASE per test.
+//
+// The branch starts empty (no tables). Tests create whatever old-schema tables
+// they need to exercise migrations against.
+func openTestDoltBranch(t *testing.T) *sql.DB {
 	t.Helper()
 
-	// Check that dolt binary is available
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("dolt binary not found, skipping migration test")
 	}
-
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "testdb")
-	if err := os.MkdirAll(dbPath, 0755); err != nil {
-		t.Fatalf("failed to create db dir: %v", err)
+	if testServerPort == 0 {
+		t.Skip("test Dolt server not running, skipping migration test")
 	}
 
-	// Filter DOLT_ROOT_PASSWORD to prevent auth interference in Doppler environments.
-	// When DOLT_ROOT_PASSWORD is set, Dolt enables authentication and requires
-	// credentials in the DSN, causing test failures with "root@tcp(...)" connections.
-	var filteredEnv []string
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "DOLT_ROOT_PASSWORD=") {
-			continue
-		}
-		filteredEnv = append(filteredEnv, e)
-	}
-	doltEnv := append(filteredEnv, "DOLT_ROOT_PATH="+tmpDir)
-	for _, cfg := range []struct{ key, val string }{
-		{"user.name", "Test User"},
-		{"user.email", "test@example.com"},
-	} {
-		cfgCmd := exec.Command("dolt", "config", "--global", "--add", cfg.key, cfg.val)
-		cfgCmd.Env = doltEnv
-		if out, err := cfgCmd.CombinedOutput(); err != nil {
-			t.Fatalf("dolt config %s failed: %v\n%s", cfg.key, err, out)
-		}
-	}
-
-	// Initialize dolt repo
-	initCmd := exec.Command("dolt", "init")
-	initCmd.Dir = dbPath
-	initCmd.Env = doltEnv
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt init failed: %v\n%s", err, out)
-	}
-
-	// Create beads database
-	sqlCmd := exec.Command("dolt", "sql", "-q", "CREATE DATABASE IF NOT EXISTS beads")
-	sqlCmd.Dir = dbPath
-	sqlCmd.Env = doltEnv
-	if out, err := sqlCmd.CombinedOutput(); err != nil {
-		t.Fatalf("create database failed: %v\n%s", err, out)
-	}
-
-	// Find a free port by binding and releasing
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true&timeout=10s",
+		testServerPort, testSharedDB)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		t.Fatalf("failed to find free port: %v", err)
+		t.Fatalf("failed to open connection: %v", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	db.SetMaxOpenConns(1) // Required for session-level DOLT_CHECKOUT
 
-	// Start dolt sql-server
-	serverCmd := exec.Command("dolt", "sql-server",
-		"--host", "127.0.0.1",
-		"--port", fmt.Sprintf("%d", port),
-	)
-	serverCmd.Dir = dbPath
-	serverCmd.Env = doltEnv
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start dolt sql-server: %v", err)
-	}
+	// Create an isolated branch for this test
+	_, branchCleanup := testutil.StartTestBranch(t, db, testSharedDB)
+
 	t.Cleanup(func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
+		branchCleanup()
+		db.Close()
 	})
 
-	// Wait for server to be ready
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/beads?allowCleartextPasswords=true&allowNativePasswords=true", port)
-	var db *sql.DB
-	var lastPingErr error
-	for i := 0; i < 50; i++ {
-		time.Sleep(200 * time.Millisecond)
-		db, err = sql.Open("mysql", dsn)
-		if err != nil {
-			continue
-		}
-		if pingErr := db.Ping(); pingErr == nil {
-			lastPingErr = nil
-			break
-		} else {
-			lastPingErr = pingErr
-		}
-		_ = db.Close()
-		db = nil
-	}
-	if db == nil {
-		t.Fatalf("dolt server not ready after retries: %v", lastPingErr)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
 
-	// Create minimal issues table without wisp_type (simulating old schema)
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS issues (
+// openTestDoltBranchWithIssues returns a *sql.DB on an isolated branch with a
+// minimal issues table pre-created (simulating old schema without wisp_type).
+func openTestDoltBranchWithIssues(t *testing.T) *sql.DB {
+	t.Helper()
+	db := openTestDoltBranch(t)
+
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS issues (
 		id VARCHAR(255) PRIMARY KEY,
 		title VARCHAR(500) NOT NULL,
 		status VARCHAR(32) NOT NULL DEFAULT 'open',
@@ -130,7 +66,7 @@ func openTestDolt(t *testing.T) *sql.DB {
 }
 
 func TestMigrateWispTypeColumn(t *testing.T) {
-	db := openTestDolt(t)
+	db := openTestDoltBranchWithIssues(t)
 
 	// Verify column doesn't exist yet
 	exists, err := columnExists(db, "issues", "wisp_type")
@@ -162,7 +98,7 @@ func TestMigrateWispTypeColumn(t *testing.T) {
 }
 
 func TestColumnExists(t *testing.T) {
-	db := openTestDolt(t)
+	db := openTestDoltBranchWithIssues(t)
 
 	exists, err := columnExists(db, "issues", "id")
 	if err != nil {
@@ -182,7 +118,7 @@ func TestColumnExists(t *testing.T) {
 }
 
 func TestTableExists(t *testing.T) {
-	db := openTestDolt(t)
+	db := openTestDoltBranchWithIssues(t)
 
 	exists, err := tableExists(db, "issues")
 	if err != nil {
@@ -202,7 +138,7 @@ func TestTableExists(t *testing.T) {
 }
 
 func TestDetectOrphanedChildren(t *testing.T) {
-	db := openTestDolt(t)
+	db := openTestDoltBranchWithIssues(t)
 
 	// No orphans in empty database
 	if err := DetectOrphanedChildren(db); err != nil {
@@ -251,7 +187,7 @@ func TestDetectOrphanedChildren(t *testing.T) {
 }
 
 func TestMigrateWispsTable(t *testing.T) {
-	db := openTestDolt(t)
+	db := openTestDoltBranchWithIssues(t)
 
 	// Verify wisps table doesn't exist yet
 	exists, err := tableExists(db, "wisps")
@@ -322,7 +258,7 @@ func TestMigrateWispsTable(t *testing.T) {
 }
 
 func TestMigrateIssueCounterTable(t *testing.T) {
-	db := openTestDolt(t)
+	db := openTestDoltBranchWithIssues(t)
 
 	// Verify issue_counter table does not exist yet
 	exists, err := tableExists(db, "issue_counter")
@@ -369,7 +305,7 @@ func TestMigrateIssueCounterTable(t *testing.T) {
 }
 
 func TestColumnExistsNoTable(t *testing.T) {
-	db := openTestDolt(t)
+	db := openTestDoltBranch(t)
 
 	// columnExists on a nonexistent table should return (false, nil),
 	// not propagate the Error 1146 from SHOW COLUMNS.
@@ -383,13 +319,18 @@ func TestColumnExistsNoTable(t *testing.T) {
 }
 
 func TestColumnExistsWithPhantom(t *testing.T) {
-	db := openTestDolt(t)
+	db := openTestDoltBranchWithIssues(t)
 
-	// Create a phantom-like database entry (simulates naming convention phantom)
-	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads_phantom")
+	// Create a phantom-like database entry (simulates naming convention phantom).
+	// This is a server-level operation; cleaned up after the test.
+	//nolint:gosec // G202: test-only database name, not user input
+	_, err := db.Exec("CREATE DATABASE IF NOT EXISTS beads_phantom_mig")
 	if err != nil {
 		t.Fatalf("failed to create phantom database: %v", err)
 	}
+	t.Cleanup(func() {
+		_, _ = db.Exec("DROP DATABASE IF EXISTS beads_phantom_mig")
+	})
 
 	// Positive: still finds columns in primary database
 	exists, err := columnExists(db, "issues", "id")
@@ -438,12 +379,10 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 }
 
 func TestMigrateInfraToWisps_SchemaEvolution(t *testing.T) {
-	db := openTestDolt(t)
-	defer db.Close()
+	db := openTestDoltBranch(t)
 
 	// 1. Create older issues table WITH a column that wisps won't have (deleted_at)
 	// and WITHOUT a column that wisps will have (metadata)
-	db.Exec("DROP TABLE IF EXISTS issues")
 	_, err := db.Exec(`
 		CREATE TABLE issues (
 			id VARCHAR(255) PRIMARY KEY,

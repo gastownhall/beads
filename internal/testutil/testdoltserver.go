@@ -267,6 +267,7 @@ func cleanOrphanedTempDirs() {
 		"dolt-pkg-test-",
 		"molecules-pkg-test-",
 		"doctor-test-dolt-",
+		"migrations-test-",
 		"fix-test-dolt-",
 		"protocol-test-dolt-",
 		// Test working dirs

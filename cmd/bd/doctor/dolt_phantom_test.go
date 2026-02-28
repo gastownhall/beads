@@ -1,126 +1,70 @@
+//go:build cgo
+
 package doctor
 
 import (
 	"database/sql"
 	"fmt"
-	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
-// openTestDoltForDoctor starts a temporary dolt sql-server and returns a
-// connection. Adapted from migrations_test.go openTestDolt, but creates only
-// a "beads" database (matching DefaultDoltDatabase) and uses a separate port
-// range to avoid collisions with concurrent migration tests.
-func openTestDoltForDoctor(t *testing.T) *sql.DB {
+// openSharedDoltForPhantom returns a *sql.DB connected to a "beads" database on
+// the shared test server. Phantom tests need server-level CREATE/DROP DATABASE,
+// so they use the shared server but operate at the database level rather than
+// using branch isolation.
+func openSharedDoltForPhantom(t *testing.T) *sql.DB {
 	t.Helper()
 
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt binary not found, skipping phantom test")
+	port := doctorTestServerPort()
+	if port == 0 {
+		t.Skip("Dolt test server not available, skipping phantom test")
+	}
+	if testServer.IsCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testServer.CrashError())
 	}
 
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "testdb")
-	if err := os.MkdirAll(dbPath, 0755); err != nil {
-		t.Fatalf("failed to create db dir: %v", err)
-	}
-
-	// Filter DOLT_ROOT_PASSWORD to prevent auth interference in Doppler environments.
-	var filteredEnv []string
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "DOLT_ROOT_PASSWORD=") {
-			continue
-		}
-		filteredEnv = append(filteredEnv, e)
-	}
-	doltEnv := append(filteredEnv, "DOLT_ROOT_PATH="+tmpDir)
-
-	for _, cfg := range []struct{ key, val string }{
-		{"user.name", "Test User"},
-		{"user.email", "test@example.com"},
-	} {
-		cfgCmd := exec.Command("dolt", "config", "--global", "--add", cfg.key, cfg.val)
-		cfgCmd.Env = doltEnv
-		if out, err := cfgCmd.CombinedOutput(); err != nil {
-			t.Fatalf("dolt config %s failed: %v\n%s", cfg.key, err, out)
-		}
-	}
-
-	// Initialize dolt repo
-	initCmd := exec.Command("dolt", "init")
-	initCmd.Dir = dbPath
-	initCmd.Env = doltEnv
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt init failed: %v\n%s", err, out)
-	}
-
-	// Create beads database (matching DefaultDoltDatabase)
-	sqlCmd := exec.Command("dolt", "sql", "-q", "CREATE DATABASE IF NOT EXISTS beads")
-	sqlCmd.Dir = dbPath
-	sqlCmd.Env = doltEnv
-	if out, err := sqlCmd.CombinedOutput(); err != nil {
-		t.Fatalf("create database failed: %v\n%s", err, out)
-	}
-
-	// Find a free port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// Ensure a "beads" database exists on the shared server for phantom tests.
+	// This matches configfile.DefaultDoltDatabase which checkPhantomDatabases uses.
+	rootDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/?parseTime=true&timeout=10s", port)
+	rootDB, err := sql.Open("mysql", rootDSN)
 	if err != nil {
-		t.Fatalf("failed to find free port: %v", err)
+		t.Fatalf("failed to open root connection: %v", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
-
-	// Start dolt sql-server
-	serverCmd := exec.Command("dolt", "sql-server",
-		"--host", "127.0.0.1",
-		"--port", fmt.Sprintf("%d", port),
-	)
-	serverCmd.Dir = dbPath
-	serverCmd.Env = doltEnv
-	if err := serverCmd.Start(); err != nil {
-		t.Fatalf("failed to start dolt sql-server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = serverCmd.Process.Kill()
-		_ = serverCmd.Wait()
-	})
-
-	// Wait for server to be ready
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/beads?allowCleartextPasswords=true&allowNativePasswords=true", port)
-	var db *sql.DB
-	var lastPingErr error
-	for i := 0; i < 50; i++ {
-		time.Sleep(200 * time.Millisecond)
-		db, err = sql.Open("mysql", dsn)
-		if err != nil {
-			continue
+	_, err = rootDB.Exec("CREATE DATABASE IF NOT EXISTS beads")
+	if err != nil {
+		errLower := strings.ToLower(err.Error())
+		if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
+			rootDB.Close()
+			t.Fatalf("failed to create beads database: %v", err)
 		}
-		if pingErr := db.Ping(); pingErr == nil {
-			lastPingErr = nil
-			break
-		} else {
-			lastPingErr = pingErr
-		}
-		_ = db.Close()
-		db = nil
 	}
-	if db == nil {
-		t.Fatalf("dolt server not ready after retries: %v", lastPingErr)
+	rootDB.Close()
+
+	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/beads?parseTime=true&timeout=10s", port)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("failed to open connection: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { db.Close() })
 
 	return db
 }
 
+// cleanupPhantomDB drops a test phantom database (best-effort cleanup).
+func cleanupPhantomDB(t *testing.T, db *sql.DB, dbName string) {
+	t.Helper()
+	t.Cleanup(func() {
+		//nolint:gosec // G202: test-only database name, not user input
+		_, _ = db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
+	})
+}
+
 func TestCheckPhantomDatabases_Warning(t *testing.T) {
-	db := openTestDoltForDoctor(t)
+	db := openSharedDoltForPhantom(t)
 
 	// Create a phantom database with beads_ prefix
 	//nolint:gosec // G202: test-only database name, not user input
@@ -128,6 +72,7 @@ func TestCheckPhantomDatabases_Warning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create phantom database: %v", err)
 	}
+	cleanupPhantomDB(t, db, "beads_phantom")
 
 	conn := &doltConn{db: db, cfg: nil}
 	check := checkPhantomDatabases(conn)
@@ -147,7 +92,7 @@ func TestCheckPhantomDatabases_Warning(t *testing.T) {
 }
 
 func TestCheckPhantomDatabases_OK(t *testing.T) {
-	db := openTestDoltForDoctor(t)
+	db := openSharedDoltForPhantom(t)
 
 	// No phantom databases — only system DBs and "beads" (the configured default)
 	conn := &doltConn{db: db, cfg: nil}
@@ -162,7 +107,7 @@ func TestCheckPhantomDatabases_OK(t *testing.T) {
 }
 
 func TestCheckPhantomDatabases_SuffixPattern(t *testing.T) {
-	db := openTestDoltForDoctor(t)
+	db := openSharedDoltForPhantom(t)
 
 	// Create a phantom database with _beads suffix
 	//nolint:gosec // G202: test-only database name, not user input
@@ -170,6 +115,7 @@ func TestCheckPhantomDatabases_SuffixPattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create phantom database: %v", err)
 	}
+	cleanupPhantomDB(t, db, "acf_beads")
 
 	conn := &doltConn{db: db, cfg: nil}
 	check := checkPhantomDatabases(conn)
@@ -183,7 +129,7 @@ func TestCheckPhantomDatabases_SuffixPattern(t *testing.T) {
 }
 
 func TestCheckPhantomDatabases_ConfiguredDBNotPhantom(t *testing.T) {
-	db := openTestDoltForDoctor(t)
+	db := openSharedDoltForPhantom(t)
 
 	// Create a database that matches beads_ prefix but IS the configured database
 	//nolint:gosec // G202: test-only database name, not user input
@@ -191,6 +137,7 @@ func TestCheckPhantomDatabases_ConfiguredDBNotPhantom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test database: %v", err)
 	}
+	cleanupPhantomDB(t, db, "beads_test")
 
 	// Configure the connection so beads_test IS the configured database
 	conn := &doltConn{
@@ -205,7 +152,7 @@ func TestCheckPhantomDatabases_ConfiguredDBNotPhantom(t *testing.T) {
 }
 
 func TestCheckPhantomDatabases_NilConfig(t *testing.T) {
-	db := openTestDoltForDoctor(t)
+	db := openSharedDoltForPhantom(t)
 
 	// With nil config, should use DefaultDoltDatabase ("beads") as the configured name.
 	// "beads" has no beads_ prefix or _beads suffix matching issues, so it's safe.

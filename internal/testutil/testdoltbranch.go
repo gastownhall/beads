@@ -82,6 +82,26 @@ func StartTestBranch(t *testing.T, db *sql.DB, database string) (branchName stri
 	return branchName, cleanup
 }
 
+// ResetTestBranch resets the current branch's working set back to HEAD,
+// discarding all uncommitted changes. Use this in table-driven tests to
+// restore seed data state between subtests, avoiding the overhead of
+// creating a new branch for each subtest.
+//
+// Usage pattern:
+//
+//	branch, cleanup := StartTestBranch(t, db, database)
+//	// ... seed data, then DOLT_COMMIT to set HEAD ...
+//	for _, tc := range testCases {
+//	    // ... run test case that modifies data ...
+//	    ResetTestBranch(t, db) // reset to seed state
+//	}
+func ResetTestBranch(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec("CALL DOLT_RESET('--hard')"); err != nil {
+		t.Fatalf("ResetTestBranch: DOLT_RESET('--hard') failed: %v", err)
+	}
+}
+
 // CleanTestBranches removes stale test branches left by crashed tests.
 // Call this in TestMain after creating the shared database.
 func CleanTestBranches(db *sql.DB, database string) {
