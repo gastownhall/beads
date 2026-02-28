@@ -111,7 +111,9 @@ func TestScanForArtifacts_CruftBeadsDir(t *testing.T) {
 }
 
 func TestScanForArtifacts_CruftBeadsDirNoRedirect(t *testing.T) {
-	// Cruft dir without redirect should be detected but NOT safe to delete
+	// Cruft dir without redirect should be detected AND safe to delete.
+	// The location being redirect-expected is sufficient — stale cruft files
+	// are what prevent the redirect from being created in the first place.
 	dir := t.TempDir()
 	polecatsDir := filepath.Join(dir, "polecats", "testpolecat")
 	beadsDir := filepath.Join(polecatsDir, ".beads")
@@ -126,12 +128,12 @@ func TestScanForArtifacts_CruftBeadsDirNoRedirect(t *testing.T) {
 
 	report := ScanForArtifacts(dir)
 
-	// Should be detected as cruft (it's in a polecat location) but NOT safe to delete
+	// Should be detected as cruft (it's in a polecat location) and safe to delete
 	if len(report.CruftBeadsDirs) != 1 {
 		t.Errorf("expected 1 cruft beads dir, got %d", len(report.CruftBeadsDirs))
 	}
-	if len(report.CruftBeadsDirs) > 0 && report.CruftBeadsDirs[0].SafeDelete {
-		t.Error("cruft beads dir without redirect should NOT be safe to delete")
+	if len(report.CruftBeadsDirs) > 0 && !report.CruftBeadsDirs[0].SafeDelete {
+		t.Error("cruft beads dir in redirect-expected location should be safe to delete")
 	}
 }
 

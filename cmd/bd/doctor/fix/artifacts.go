@@ -62,7 +62,6 @@ func ClassicArtifacts(path string) error {
 func cleanBeadsDirArtifacts(beadsDir string) (removed, skipped, errCount int) {
 	hasDolt := hasDoltDir(beadsDir)
 	isRedirectExpected := isRedirectExpectedLocation(beadsDir)
-	hasRedirect := hasRedirectFilePresent(beadsDir)
 
 	// 1. Clean JSONL artifacts in dolt-native directories
 	if hasDolt {
@@ -78,8 +77,11 @@ func cleanBeadsDirArtifacts(beadsDir string) (removed, skipped, errCount int) {
 	skipped += s
 	errCount += e
 
-	// 3. Clean cruft .beads directories (only if redirect is expected AND present)
-	if isRedirectExpected && hasRedirect {
+	// 3. Clean cruft .beads directories (if redirect is expected)
+	// Clean even when the redirect file is missing — stale cruft files
+	// (config.yaml, metadata.json, README.md, issues.jsonl, etc.) prevent
+	// the redirect from being created and should be removed regardless.
+	if isRedirectExpected {
 		r, e := cleanCruftBeadsDirFiles(beadsDir)
 		removed += r
 		errCount += e
@@ -130,12 +132,6 @@ func isRedirectExpectedLocation(beadsDir string) bool {
 	}
 
 	return false
-}
-
-// hasRedirectFilePresent returns true if the .beads directory has a redirect file.
-func hasRedirectFilePresent(beadsDir string) bool {
-	_, err := os.Stat(filepath.Join(beadsDir, "redirect"))
-	return err == nil
 }
 
 // cleanJSONLArtifacts removes stale JSONL files from a dolt-native .beads directory.

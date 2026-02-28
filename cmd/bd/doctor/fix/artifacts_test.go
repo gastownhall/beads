@@ -184,6 +184,41 @@ func TestClassicArtifacts_CleansCruftBeadsDir(t *testing.T) {
 	}
 }
 
+func TestClassicArtifacts_CleansCruftWithoutRedirectFile(t *testing.T) {
+	// Regression test: when a redirect-expected location has cruft files but
+	// NO redirect file, the fix should still clean up the cruft.
+	// Previously, the fix required both isRedirectExpected AND hasRedirect,
+	// leaving stale files (config.yaml, metadata.json, README.md, issues.jsonl)
+	// in .git/beads-worktrees/*/.beads/ directories.
+	dir := t.TempDir()
+
+	// Simulate .git/beads-worktrees/master/.beads/ (redirect-expected location)
+	worktreeBeads := filepath.Join(dir, ".git", "beads-worktrees", "master", ".beads")
+	if err := os.MkdirAll(worktreeBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add typical stale files (NO redirect file present)
+	cruftFiles := []string{"config.yaml", "metadata.json", "README.md", "issues.jsonl", ".gitignore", ".local_version"}
+	for _, name := range cruftFiles {
+		if err := os.WriteFile(filepath.Join(worktreeBeads, name), []byte("stale"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := ClassicArtifacts(dir)
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	// All cruft files should be removed
+	for _, name := range cruftFiles {
+		if _, err := os.Stat(filepath.Join(worktreeBeads, name)); !os.IsNotExist(err) {
+			t.Errorf("%s should have been removed (cruft in redirect-expected dir without redirect file)", name)
+		}
+	}
+}
+
 func TestIsRedirectExpectedLocation(t *testing.T) {
 	tests := []struct {
 		name     string

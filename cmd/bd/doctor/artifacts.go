@@ -298,7 +298,7 @@ func scanCruftBeadsDir(beadsDir string, hasRedirect bool, report *ArtifactReport
 		Path:        beadsDir,
 		Type:        "cruft-beads",
 		Description: desc,
-		SafeDelete:  hasRedirect, // Safe only if redirect is already in place
+		SafeDelete:  true, // Safe: location is redirect-expected, extra files are cruft
 	})
 }
 
