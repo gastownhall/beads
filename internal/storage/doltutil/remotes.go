@@ -13,7 +13,7 @@ import (
 func IsSSHURL(url string) bool {
 	return strings.HasPrefix(url, "git+ssh://") ||
 		strings.HasPrefix(url, "ssh://") ||
-		strings.Contains(url, "git@")
+		strings.HasPrefix(url, "git@")
 }
 
 // ListCLIRemotes parses `dolt remote -v` output from the given database directory.
@@ -24,15 +24,17 @@ func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dolt remote -v failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
+	seen := map[string]bool{}
 	var remotes []storage.RemoteInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		// dolt remote -v outputs: name <whitespace> url
+		// dolt remote -v outputs: name <whitespace> url [<whitespace> (fetch|push)]
 		parts := strings.Fields(line)
-		if len(parts) >= 2 {
+		if len(parts) >= 2 && !seen[parts[0]] {
+			seen[parts[0]] = true
 			remotes = append(remotes, storage.RemoteInfo{Name: parts[0], URL: parts[1]})
 		}
 	}
@@ -73,4 +75,14 @@ func FindCLIRemote(dbPath, name string) string {
 		}
 	}
 	return ""
+}
+
+// ToRemoteNameMap converts a RemoteInfo slice to a map keyed by name.
+// Useful for de-duplicating remotes (e.g., from `dolt remote -v` which may list fetch+push).
+func ToRemoteNameMap(remotes []storage.RemoteInfo) map[string]string {
+	m := make(map[string]string, len(remotes))
+	for _, r := range remotes {
+		m[r.Name] = r.URL
+	}
+	return m
 }

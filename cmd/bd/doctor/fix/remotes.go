@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -42,14 +43,8 @@ func RemoteConsistency(repoPath string) error {
 		return fmt.Errorf("failed to query CLI remotes: %w", err)
 	}
 
-	sqlMap := map[string]string{}
-	for _, r := range sqlRemotes {
-		sqlMap[r.Name] = r.URL
-	}
-	cliMap := map[string]string{}
-	for _, r := range cliRemotes {
-		cliMap[r.Name] = r.URL
-	}
+	sqlMap := doltutil.ToRemoteNameMap(sqlRemotes)
+	cliMap := doltutil.ToRemoteNameMap(cliRemotes)
 
 	fixed := 0
 
@@ -90,11 +85,6 @@ func RemoteConsistency(repoPath string) error {
 	return nil
 }
 
-type fixRemoteInfo struct {
-	Name string
-	URL  string
-}
-
 func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	host := cfg.GetDoltServerHost()
 	user := cfg.GetDoltServerUser()
@@ -113,16 +103,16 @@ func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	return sql.Open("mysql", connStr)
 }
 
-func queryFixRemotes(db *sql.DB) ([]fixRemoteInfo, error) {
+func queryFixRemotes(db *sql.DB) ([]storage.RemoteInfo, error) {
 	rows, err := db.Query("SELECT name, url FROM dolt_remotes")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var remotes []fixRemoteInfo
+	var remotes []storage.RemoteInfo
 	for rows.Next() {
-		var r fixRemoteInfo
+		var r storage.RemoteInfo
 		if err := rows.Scan(&r.Name, &r.URL); err != nil {
 			return nil, err
 		}

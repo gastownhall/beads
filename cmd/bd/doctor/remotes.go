@@ -63,15 +63,9 @@ func CheckRemoteConsistency(repoPath string) DoctorCheck {
 		}
 	}
 
-	// Compare
-	sqlMap := map[string]string{}
-	for _, r := range sqlRemotes {
-		sqlMap[r.Name] = r.URL
-	}
-	cliMap := map[string]string{}
-	for _, r := range cliRemotes {
-		cliMap[r.Name] = r.URL
-	}
+	// Compare (convert to maps for O(1) lookup)
+	sqlMap := doltutil.ToRemoteNameMap(sqlRemotes)
+	cliMap := doltutil.ToRemoteNameMap(cliRemotes)
 
 	var issues []string
 	hasConflict := false
