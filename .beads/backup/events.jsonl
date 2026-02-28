@@ -1336,3 +1336,26 @@
 {"actor":"dog","comment":"","created_at":"2026-02-27T21:30:58Z","event_type":"created","id":5149,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
 {"actor":"dog","comment":"","created_at":"2026-02-27T21:31:29Z","event_type":"created","id":5150,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
 {"actor":"dog","comment":"","created_at":"2026-02-27T21:31:59Z","event_type":"created","id":5151,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"dog","comment":"","created_at":"2026-02-27T21:32:29Z","event_type":"created","id":5152,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:33:01Z","event_type":"created","id":5153,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:33:32Z","event_type":"created","id":5154,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:34:02Z","event_type":"created","id":5155,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:34:38Z","event_type":"created","id":5156,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:35:06Z","event_type":"created","id":5157,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"beads/witness","comment":"","created_at":"2026-02-27T21:35:25Z","event_type":"closed","id":5158,"issue_id":"bd-wisp-nlcf7d","new_value":"patrol cycle complete: Clean patrol cycle 7: rig idle, all healthy.","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:35:36Z","event_type":"created","id":5159,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:36:06Z","event_type":"created","id":5160,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:36:36Z","event_type":"created","id":5161,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:37:06Z","event_type":"created","id":5162,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:37:36Z","event_type":"created","id":5163,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:38:06Z","event_type":"created","id":5164,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:38:36Z","event_type":"created","id":5165,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:39:06Z","event_type":"created","id":5166,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:39:36Z","event_type":"created","id":5167,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:40:06Z","event_type":"created","id":5168,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"beads/witness","comment":"","created_at":"2026-02-27T21:40:35Z","event_type":"closed","id":5169,"issue_id":"bd-wisp-9r7tly","new_value":"patrol cycle complete: Clean patrol cycle 8: rig idle, all healthy.","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:40:36Z","event_type":"created","id":5170,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:41:10Z","event_type":"created","id":5171,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:41:20Z","event_type":"created","id":5172,"issue_id":"bd-beads-polecat-obsidian","new_value":"","old_value":""}
+{"actor":"mayor","comment":"","created_at":"2026-02-27T21:43:26Z","event_type":"closed","id":5173,"issue_id":"bd-wisp-0huex","new_value":"bd-1lc already closed (commit adb8e763 on main). No re-dispatch needed.","old_value":""}
+{"actor":"beads/refinery","comment":"","created_at":"2026-02-27T21:46:34Z","event_type":"closed","id":5174,"issue_id":"bd-wisp-aebp88","new_value":"patrol cycle complete: Queue empty, no branches to merge. Inbox cleaned (archived 1 stale handoff). Session healthy.","old_value":""}
