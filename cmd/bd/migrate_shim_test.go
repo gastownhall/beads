@@ -160,10 +160,12 @@ func TestShimExtract_FullMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write metadata.json with server config so migration can connect
+	// Write metadata.json with server config so migration can connect.
+	// Backend is intentionally left empty (not "sqlite") because doShimMigrate
+	// treats explicit "sqlite" as "user opted to keep SQLite" and skips migration.
+	// Empty backend represents a legacy pre-Dolt config that needs migration.
 	cfg := &configfile.Config{
 		Database:       "beads.db",
-		Backend:        "sqlite",
 		DoltMode:       configfile.DoltModeServer,
 		DoltServerHost: "127.0.0.1",
 		DoltServerPort: testDoltServerPort,
