@@ -18,6 +18,13 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		return s.addWispDependency(ctx, dep, actor)
 	}
 
+	// Pre-transaction: check if target is a wisp (must be done before opening tx
+	// to avoid connection pool deadlock with embedded dolt — bd-w2w)
+	targetIsWisp := false
+	if !strings.HasPrefix(dep.DependsOnID, "external:") {
+		targetIsWisp = s.isActiveWisp(ctx, dep.DependsOnID)
+	}
+
 	metadata := dep.Metadata
 	if metadata == "" {
 		metadata = "{}"
@@ -39,9 +46,15 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 	}
 
 	// Validate that the target issue exists (skip for external cross-rig references)
+	// Check wisps table if target is an active wisp (bd-w2w)
 	if !strings.HasPrefix(dep.DependsOnID, "external:") {
 		var targetExists int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, dep.DependsOnID).Scan(&targetExists); err != nil {
+		targetTable := "issues"
+		if targetIsWisp {
+			targetTable = "wisps"
+		}
+		//nolint:gosec // G201: targetTable is hardcoded to "issues" or "wisps"
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, targetTable), dep.DependsOnID).Scan(&targetExists); err != nil {
 			return fmt.Errorf("failed to check target issue existence: %w", err)
 		}
 		if targetExists == 0 {

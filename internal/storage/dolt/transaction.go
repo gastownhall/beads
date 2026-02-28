@@ -184,6 +184,10 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		table = "wisps"
 	}
+	// If searching by IDs that are all ephemeral, use wisps table (bd-w2w)
+	if len(filter.IDs) > 0 && allEphemeral(filter.IDs) {
+		table = "wisps"
+	}
 
 	whereClauses := []string{}
 	args := []interface{}{}

@@ -554,26 +554,29 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Step 1: Get all open/active issue IDs into a set (single-table scan)
+	// Step 1: Get all open/active issue IDs into a set (scan both tables — bd-w2w)
 	activeIDs := make(map[string]bool)
-	activeRows, err := s.queryContext(ctx, `
-		SELECT id FROM issues
-		WHERE status NOT IN ('closed', 'pinned')
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get active issues: %w", err)
-	}
-	for activeRows.Next() {
-		var id string
-		if err := activeRows.Scan(&id); err != nil {
-			_ = activeRows.Close() // Best effort cleanup on error path
-			return nil, wrapScanError("get blocked issues: scan active ID", err)
+	for _, table := range []string{"issues", "wisps"} {
+		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
+		activeRows, err := s.queryContext(ctx, fmt.Sprintf(`
+			SELECT id FROM %s
+			WHERE status NOT IN ('closed', 'pinned')
+		`, table))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get active issues from %s: %w", table, err)
 		}
-		activeIDs[id] = true
-	}
-	_ = activeRows.Close() // Redundant close for safety (rows already iterated)
-	if err := activeRows.Err(); err != nil {
-		return nil, wrapQueryError("get blocked issues: active rows", err)
+		for activeRows.Next() {
+			var id string
+			if err := activeRows.Scan(&id); err != nil {
+				_ = activeRows.Close() // Best effort cleanup on error path
+				return nil, wrapScanError("get blocked issues: scan active ID", err)
+			}
+			activeIDs[id] = true
+		}
+		_ = activeRows.Close() // Redundant close for safety (rows already iterated)
+		if err := activeRows.Err(); err != nil {
+			return nil, wrapQueryError("get blocked issues: active rows", err)
+		}
 	}
 
 	// Step 2: Get canonical blocked set via computeBlockedIDs, which handles
@@ -588,30 +591,33 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 	}
 
 	// Step 3: Get blocking + waits-for + conditional-blocks deps to build BlockedBy lists
-	depRows, err := s.queryContext(ctx, `
-		SELECT issue_id, depends_on_id FROM dependencies
-		WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get blocking dependencies: %w", err)
-	}
-
-	// blockerMap: blocked_issue_id -> list of active blocker/spawner IDs
+	// Scan both dependencies and wisp_dependencies tables (bd-w2w)
 	blockerMap := make(map[string][]string)
-	for depRows.Next() {
-		var issueID, blockerID string
-		if err := depRows.Scan(&issueID, &blockerID); err != nil {
-			_ = depRows.Close() // Best effort cleanup on error path
-			return nil, wrapScanError("get blocked issues: scan dependency", err)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+		depRows, err := s.queryContext(ctx, fmt.Sprintf(`
+			SELECT issue_id, depends_on_id FROM %s
+			WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
+		`, depTable))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get blocking dependencies from %s: %w", depTable, err)
 		}
-		// Only include if computeBlockedIDs confirmed this issue is blocked
-		if blockedSet[issueID] && activeIDs[blockerID] {
-			blockerMap[issueID] = append(blockerMap[issueID], blockerID)
+
+		for depRows.Next() {
+			var issueID, blockerID string
+			if err := depRows.Scan(&issueID, &blockerID); err != nil {
+				_ = depRows.Close() // Best effort cleanup on error path
+				return nil, wrapScanError("get blocked issues: scan dependency", err)
+			}
+			// Only include if computeBlockedIDs confirmed this issue is blocked
+			if blockedSet[issueID] && activeIDs[blockerID] {
+				blockerMap[issueID] = append(blockerMap[issueID], blockerID)
+			}
 		}
-	}
-	_ = depRows.Close() // Redundant close for safety (rows already iterated)
-	if err := depRows.Err(); err != nil {
-		return nil, wrapQueryError("get blocked issues: dependency rows", err)
+		_ = depRows.Close() // Redundant close for safety (rows already iterated)
+		if err := depRows.Err(); err != nil {
+			return nil, wrapQueryError("get blocked issues: dependency rows", err)
+		}
 	}
 
 	// Step 4: Batch-fetch all blocked issues and build results
@@ -745,21 +751,24 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 			placeholders[i] = "?"
 			args[i] = id
 		}
-		// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
-		statusQuery := fmt.Sprintf("SELECT id, status FROM issues WHERE id IN (%s)", strings.Join(placeholders, ","))
-		statusRows, err := s.queryContext(ctx, statusQuery, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to batch-fetch child statuses: %w", err)
-		}
-		for statusRows.Next() {
-			var id, status string
-			if err := statusRows.Scan(&id, &status); err != nil {
-				_ = statusRows.Close()
-				return nil, wrapScanError("get epics: scan child status", err)
+		// Check both issues and wisps tables for child statuses (bd-w2w)
+		for _, table := range []string{"issues", "wisps"} {
+			// nolint:gosec // G201: table is hardcoded, placeholders contains only ? markers
+			statusQuery := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", table, strings.Join(placeholders, ","))
+			statusRows, err := s.queryContext(ctx, statusQuery, args...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to batch-fetch child statuses from %s: %w", table, err)
 			}
-			childStatusMap[id] = status
+			for statusRows.Next() {
+				var id, status string
+				if err := statusRows.Scan(&id, &status); err != nil {
+					_ = statusRows.Close()
+					return nil, wrapScanError("get epics: scan child status", err)
+				}
+				childStatusMap[id] = status
+			}
+			_ = statusRows.Close()
 		}
-		_ = statusRows.Close()
 	}
 
 	// Step 4: Batch-fetch all epic issues
@@ -907,35 +916,59 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 	}
 	s.cacheMu.Unlock()
 
-	// Step 1: Get all active issue IDs (single-table scan)
+	// Step 1: Get all active issue IDs (scan both tables — bd-w2w)
 	activeIDs := make(map[string]bool)
-	activeRows, err := s.queryContext(ctx, `
-		SELECT id FROM issues
-		WHERE status NOT IN ('closed', 'pinned')
-	`)
-	if err != nil {
-		return nil, wrapQueryError("compute blocked IDs: get active issues", err)
-	}
-	for activeRows.Next() {
-		var id string
-		if err := activeRows.Scan(&id); err != nil {
-			_ = activeRows.Close() // Best effort cleanup on error path
-			return nil, wrapScanError("compute blocked IDs: scan active issue", err)
+	for _, table := range []string{"issues", "wisps"} {
+		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
+		activeRows, err := s.queryContext(ctx, fmt.Sprintf(`
+			SELECT id FROM %s
+			WHERE status NOT IN ('closed', 'pinned')
+		`, table))
+		if err != nil {
+			return nil, wrapQueryError("compute blocked IDs: get active issues from "+table, err)
 		}
-		activeIDs[id] = true
-	}
-	_ = activeRows.Close() // Redundant close for safety (rows already iterated)
-	if err := activeRows.Err(); err != nil {
-		return nil, wrapQueryError("compute blocked IDs: active rows", err)
+		for activeRows.Next() {
+			var id string
+			if err := activeRows.Scan(&id); err != nil {
+				_ = activeRows.Close() // Best effort cleanup on error path
+				return nil, wrapScanError("compute blocked IDs: scan active issue", err)
+			}
+			activeIDs[id] = true
+		}
+		_ = activeRows.Close() // Redundant close for safety (rows already iterated)
+		if err := activeRows.Err(); err != nil {
+			return nil, wrapQueryError("compute blocked IDs: active rows", err)
+		}
 	}
 
-	// Step 2: Get blocking deps, waits-for gates, and conditional-blocks (single-table scan)
-	depRows, err := s.queryContext(ctx, `
-		SELECT issue_id, depends_on_id, type, metadata FROM dependencies
-		WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
-	`)
-	if err != nil {
-		return nil, wrapQueryError("compute blocked IDs: get dependencies", err)
+	// Step 2: Get blocking deps, waits-for gates, and conditional-blocks
+	// Scan both dependencies and wisp_dependencies tables (bd-w2w)
+	type depRecord struct {
+		issueID, dependsOnID, depType string
+		metadata                      sql.NullString
+	}
+	var allDeps []depRecord
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+		depRows, err := s.queryContext(ctx, fmt.Sprintf(`
+			SELECT issue_id, depends_on_id, type, metadata FROM %s
+			WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
+		`, depTable))
+		if err != nil {
+			return nil, wrapQueryError("compute blocked IDs: get dependencies from "+depTable, err)
+		}
+		for depRows.Next() {
+			var rec depRecord
+			if err := depRows.Scan(&rec.issueID, &rec.dependsOnID, &rec.depType, &rec.metadata); err != nil {
+				_ = depRows.Close()
+				return nil, wrapScanError("compute blocked IDs: scan dependency", err)
+			}
+			allDeps = append(allDeps, rec)
+		}
+		_ = depRows.Close()
+		if err := depRows.Err(); err != nil {
+			return nil, wrapQueryError("compute blocked IDs: dependency rows from "+depTable, err)
+		}
 	}
 
 	type waitsForDep struct {
@@ -948,47 +981,37 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 
 	// Step 3: Filter direct blockers in Go; collect waits-for edges
 	blockedSet := make(map[string]bool)
-	for depRows.Next() {
-		var issueID, dependsOnID, depType string
-		var metadata sql.NullString
-		if err := depRows.Scan(&issueID, &dependsOnID, &depType, &metadata); err != nil {
-			_ = depRows.Close() // Best effort cleanup on error path
-			return nil, wrapScanError("compute blocked IDs: scan dependency", err)
-		}
-
-		switch depType {
+	for _, rec := range allDeps {
+		switch rec.depType {
 		case string(types.DepBlocks), string(types.DepConditionalBlocks):
 			// Both blocks and conditional-blocks gate readiness while the
 			// blocker is active. For conditional-blocks ("B runs only if A
 			// fails"), B cannot be ready while A's outcome is still unknown.
-			if activeIDs[issueID] && activeIDs[dependsOnID] {
-				blockedSet[issueID] = true
+			if activeIDs[rec.issueID] && activeIDs[rec.dependsOnID] {
+				blockedSet[rec.issueID] = true
 			}
 		case string(types.DepWaitsFor):
 			// waits-for only matters for active gate issues
-			if !activeIDs[issueID] {
+			if !activeIDs[rec.issueID] {
 				continue
 			}
-			gate := types.ParseWaitsForGateMetadata(metadata.String)
+			gate := types.ParseWaitsForGateMetadata(rec.metadata.String)
 			if gate == types.WaitsForAnyChildren {
 				needsClosedChildren = true
 			}
 			waitsForDeps = append(waitsForDeps, waitsForDep{
-				issueID: issueID,
+				issueID: rec.issueID,
 				// depends_on_id is the canonical spawner ID for waits-for edges.
 				// metadata.spawner_id is parsed for compatibility but not required here.
-				spawnerID: dependsOnID,
+				spawnerID: rec.dependsOnID,
 				gate:      gate,
 			})
 		}
 	}
-	_ = depRows.Close() // Redundant close for safety (rows already iterated)
-	if err := depRows.Err(); err != nil {
-		return nil, wrapQueryError("compute blocked IDs: dependency rows", err)
-	}
 
 	if len(waitsForDeps) > 0 {
 		// Step 4: Load direct children for each waits-for spawner.
+		// Scan both dependencies and wisp_dependencies tables (bd-w2w)
 		spawnerIDs := make(map[string]struct{})
 		for _, dep := range waitsForDeps {
 			spawnerIDs[dep.spawnerID] = struct{}{}
@@ -1001,30 +1024,32 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 			args = append(args, spawnerID)
 		}
 
-		// nolint:gosec // G201: placeholders are generated values, data passed via args
-		childQuery := fmt.Sprintf(`
-			SELECT issue_id, depends_on_id FROM dependencies
-			WHERE type = 'parent-child' AND depends_on_id IN (%s)
-		`, strings.Join(placeholders, ","))
-		childRows, err := s.queryContext(ctx, childQuery, args...)
-		if err != nil {
-			return nil, wrapQueryError("compute blocked IDs: get spawner children", err)
-		}
-
 		spawnerChildren := make(map[string][]string)
 		childIDs := make(map[string]struct{})
-		for childRows.Next() {
-			var childID, parentID string
-			if err := childRows.Scan(&childID, &parentID); err != nil {
-				_ = childRows.Close() // Best effort cleanup on error path
-				return nil, wrapScanError("compute blocked IDs: scan child", err)
+		for _, depTbl := range []string{"dependencies", "wisp_dependencies"} {
+			// nolint:gosec // G201: depTbl is hardcoded, placeholders are generated values
+			childQuery := fmt.Sprintf(`
+				SELECT issue_id, depends_on_id FROM %s
+				WHERE type = 'parent-child' AND depends_on_id IN (%s)
+			`, depTbl, strings.Join(placeholders, ","))
+			childRows, err := s.queryContext(ctx, childQuery, args...)
+			if err != nil {
+				return nil, wrapQueryError("compute blocked IDs: get spawner children from "+depTbl, err)
 			}
-			spawnerChildren[parentID] = append(spawnerChildren[parentID], childID)
-			childIDs[childID] = struct{}{}
-		}
-		_ = childRows.Close()
-		if err := childRows.Err(); err != nil {
-			return nil, wrapQueryError("compute blocked IDs: child rows", err)
+
+			for childRows.Next() {
+				var childID, parentID string
+				if err := childRows.Scan(&childID, &parentID); err != nil {
+					_ = childRows.Close() // Best effort cleanup on error path
+					return nil, wrapScanError("compute blocked IDs: scan child", err)
+				}
+				spawnerChildren[parentID] = append(spawnerChildren[parentID], childID)
+				childIDs[childID] = struct{}{}
+			}
+			_ = childRows.Close()
+			if err := childRows.Err(); err != nil {
+				return nil, wrapQueryError("compute blocked IDs: child rows from "+depTbl, err)
+			}
 		}
 
 		closedChildren := make(map[string]bool)
@@ -1036,26 +1061,29 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 				childArgs = append(childArgs, childID)
 			}
 
-			// nolint:gosec // G201: placeholders are generated values, data passed via args
-			closedQuery := fmt.Sprintf(`
-				SELECT id FROM issues
-				WHERE status = 'closed' AND id IN (%s)
-			`, strings.Join(childPlaceholders, ","))
-			closedRows, err := s.queryContext(ctx, closedQuery, childArgs...)
-			if err != nil {
-				return nil, wrapQueryError("compute blocked IDs: get closed children", err)
-			}
-			for closedRows.Next() {
-				var childID string
-				if err := closedRows.Scan(&childID); err != nil {
-					_ = closedRows.Close() // Best effort cleanup on error path
-					return nil, wrapScanError("compute blocked IDs: scan closed child", err)
+			// Check closed status in both issues and wisps tables (bd-w2w)
+			for _, issueTbl := range []string{"issues", "wisps"} {
+				// nolint:gosec // G201: issueTbl is hardcoded, placeholders are generated values
+				closedQuery := fmt.Sprintf(`
+					SELECT id FROM %s
+					WHERE status = 'closed' AND id IN (%s)
+				`, issueTbl, strings.Join(childPlaceholders, ","))
+				closedRows, err := s.queryContext(ctx, closedQuery, childArgs...)
+				if err != nil {
+					return nil, wrapQueryError("compute blocked IDs: get closed children from "+issueTbl, err)
 				}
-				closedChildren[childID] = true
-			}
-			_ = closedRows.Close()
-			if err := closedRows.Err(); err != nil {
-				return nil, wrapQueryError("compute blocked IDs: closed child rows", err)
+				for closedRows.Next() {
+					var childID string
+					if err := closedRows.Scan(&childID); err != nil {
+						_ = closedRows.Close() // Best effort cleanup on error path
+						return nil, wrapScanError("compute blocked IDs: scan closed child", err)
+					}
+					closedChildren[childID] = true
+				}
+				_ = closedRows.Close()
+				if err := closedRows.Err(); err != nil {
+					return nil, wrapQueryError("compute blocked IDs: closed child rows from "+issueTbl, err)
+				}
 			}
 		}
 
@@ -1158,9 +1186,18 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 		MoleculeID: moleculeID,
 	}
 
+	// Route to correct table based on whether molecule is a wisp (bd-w2w)
+	issueTable := "issues"
+	depTable := "dependencies"
+	if s.isActiveWisp(ctx, moleculeID) {
+		issueTable = "wisps"
+		depTable = "wisp_dependencies"
+	}
+
 	// Get molecule title
 	var title sql.NullString
-	err := s.db.QueryRowContext(ctx, "SELECT title FROM issues WHERE id = ?", moleculeID).Scan(&title)
+	//nolint:gosec // G201: issueTable is hardcoded to "issues" or "wisps"
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT title FROM %s WHERE id = ?", issueTable), moleculeID).Scan(&title)
 	if err == nil && title.Valid {
 		stats.MoleculeTitle = title.String
 	}
@@ -1169,10 +1206,11 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 	// (join_iters.go:192) which triggers on JOIN between issues and dependencies.
 
 	// Step 1: Get child issue IDs from dependencies table (single-table scan)
-	depRows, err := s.queryContext(ctx, `
-		SELECT issue_id FROM dependencies
+	//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+	depRows, err := s.queryContext(ctx, fmt.Sprintf(`
+		SELECT issue_id FROM %s
 		WHERE depends_on_id = ? AND type = 'parent-child'
-	`, moleculeID)
+	`, depTable), moleculeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get molecule children: %w", err)
 	}
@@ -1188,6 +1226,7 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 	_ = depRows.Close() // Redundant close for safety (rows already iterated)
 
 	// Step 2: Batch-fetch status for all children (single batched query)
+	// Children of a wisp molecule are also wisps, so use the same table.
 	if len(childIDs) > 0 {
 		placeholders := make([]string, len(childIDs))
 		args := make([]interface{}, len(childIDs))
@@ -1195,8 +1234,8 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 			placeholders[i] = "?"
 			args[i] = id
 		}
-		// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
-		query := fmt.Sprintf("SELECT id, status FROM issues WHERE id IN (%s)", strings.Join(placeholders, ","))
+		// nolint:gosec // G201: issueTable is hardcoded, placeholders contains only ? markers
+		query := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", issueTable, strings.Join(placeholders, ","))
 		statusRows, err := s.queryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to batch-fetch child statuses: %w", err)
