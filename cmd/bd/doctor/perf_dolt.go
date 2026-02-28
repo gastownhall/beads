@@ -60,7 +60,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 	dsCfg := doltserver.DefaultConfig(beadsDir)
 
 	// Check server status
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := getDatabasePath(beadsDir)
 	serverRunning := isDoltServerRunning(dsCfg.Host, dsCfg.Port)
 	if serverRunning {
 		metrics.ServerStatus = "running"

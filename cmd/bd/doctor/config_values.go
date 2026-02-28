@@ -361,7 +361,7 @@ func checkDatabaseConfigValues(repoPath string) []string {
 	}
 
 	// Check if Dolt directory exists
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return issues // No database, nothing to check
 	}

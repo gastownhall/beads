@@ -18,7 +18,7 @@ import (
 // raw queries. The caller must close the returned store when done.
 func openStoreDB(beadsDir string) (*sql.DB, *dolt.DoltStore, error) {
 	ctx := context.Background()
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	cfg := doltServerConfig(beadsDir, doltPath)
 	store, err := dolt.New(ctx, cfg)
 	if err != nil {

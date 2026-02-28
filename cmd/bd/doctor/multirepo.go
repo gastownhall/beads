@@ -103,7 +103,7 @@ func readTypesFromDB(beadsDir string) ([]string, error) {
 		return nil, fmt.Errorf("not dolt backend")
 	}
 
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return nil, err
 	}
@@ -200,7 +200,7 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 		return nil
 	}
 
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return nil
 	}

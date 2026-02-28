@@ -57,7 +57,7 @@ func CheckPermissions(path string) DoctorCheck {
 	// Check Dolt database directory permissions
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
-		doltPath := filepath.Join(beadsDir, "dolt")
+		doltPath := getDatabasePath(beadsDir)
 		if info, err := os.Stat(doltPath); err == nil {
 			if !info.IsDir() {
 				return DoctorCheck{

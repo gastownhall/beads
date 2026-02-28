@@ -24,7 +24,7 @@ func CheckIDFormat(path string) DoctorCheck {
 		return sqliteBackendWarning("Issue IDs")
 	}
 
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Issue IDs",
@@ -98,7 +98,7 @@ func CheckDependencyCycles(path string) DoctorCheck {
 		return sqliteBackendWarning("Dependency Cycles")
 	}
 
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
@@ -282,7 +282,7 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 		return sqliteBackendWarning("Repo Fingerprint")
 	}
 
-	if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err != nil || !info.IsDir() {
+	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusOK,

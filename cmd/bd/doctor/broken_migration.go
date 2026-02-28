@@ -55,7 +55,7 @@ func CheckBrokenMigrationState(path string) DoctorCheck {
 	}
 
 	// Check if dolt/ directory exists (required for embedded mode)
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := getDatabasePath(beadsDir)
 	doltDirExists := false
 	if _, err := os.Stat(doltDir); err == nil {
 		doltDirExists = true
@@ -160,7 +160,7 @@ func CheckEmbeddedModeConcurrency(path string) DoctorCheck {
 	}
 
 	// Check for noms LOCK files in dolt database directories
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := getDatabasePath(beadsDir)
 	if entries, err := os.ReadDir(doltDir); err == nil {
 		for _, entry := range entries {
 			if entry.IsDir() {

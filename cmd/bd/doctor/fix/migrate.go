@@ -150,7 +150,7 @@ func FreshCloneImport(path string, bdVersion string) error {
 	}
 
 	// Check if Dolt store exists
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltDir); os.IsNotExist(err) {
 		// No Dolt store — delegate to Database fix which creates store + imports
 		return DatabaseVersionWithBdVersion(path, bdVersion)

@@ -13,6 +13,17 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 )
 
+// getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
+// When dolt_data_dir is configured (e.g. ext4 redirect for WSL), the database lives
+// outside .beads/dolt/ — this function resolves the correct location.
+func getDatabasePath(beadsDir string) string {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return filepath.Join(beadsDir, "dolt") // fallback to default
+	}
+	return cfg.DatabasePath(beadsDir)
+}
+
 // MergeArtifacts removes temporary git merge files from .beads directory.
 func MergeArtifacts(path string) error {
 	if err := validateBeadsWorkspace(path); err != nil {

@@ -461,7 +461,7 @@ func CheckLockHealth(path string) DoctorCheck {
 	// flock on close, but never deletes the file. We probe the flock to
 	// distinguish an actively held lock (real contention) from a stale
 	// file left by a previous process (harmless).
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := getDatabasePath(beadsDir)
 	if dbEntries, err := os.ReadDir(doltDir); err == nil {
 		for _, dbEntry := range dbEntries {
 			if !dbEntry.IsDir() {

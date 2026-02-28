@@ -67,7 +67,7 @@ func StaleLockFiles(path string) error {
 
 	// Remove stale Dolt noms LOCK files via shared helper.
 	// Same cleanup that runs pre-flight in PersistentPreRun.
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := getDatabasePath(beadsDir)
 	if n, errs := dolt.CleanStaleNomsLocks(doltDir); n > 0 {
 		removed = append(removed, fmt.Sprintf("%d noms LOCK file(s)", n))
 		for _, e := range errs {

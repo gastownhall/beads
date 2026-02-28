@@ -27,7 +27,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 		return sqliteBackendWarning("Database")
 	}
 
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Database",
@@ -97,7 +97,7 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 		return sqliteBackendWarning("Schema Compatibility")
 	}
 
-	if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err != nil || !info.IsDir() {
+	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{
 			Name:    "Schema Compatibility",
 			Status:  StatusOK,
@@ -144,7 +144,7 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 		return sqliteBackendWarning("Database Integrity")
 	}
 
-	if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err != nil || !info.IsDir() {
+	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusOK,
@@ -208,6 +208,17 @@ func sqliteBackendWarning(checkName string) DoctorCheck {
 	}
 }
 
+// getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
+// When dolt_data_dir is configured (e.g. ext4 redirect for WSL), the database lives
+// outside .beads/dolt/ — this function resolves the correct location.
+func getDatabasePath(beadsDir string) string {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return filepath.Join(beadsDir, "dolt") // fallback to default
+	}
+	return cfg.DatabasePath(beadsDir)
+}
+
 // isNoDbModeConfigured checks if no-db: true is set in config.yaml
 // Uses proper YAML parsing to avoid false matches in comments or nested keys
 func isNoDbModeConfigured(beadsDir string) bool {
@@ -242,7 +253,7 @@ func CheckDatabaseSize(path string) DoctorCheck {
 		return sqliteBackendWarning("Large Database")
 	}
 
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Large Database",

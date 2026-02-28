@@ -157,7 +157,7 @@ func scanBeadsDir(beadsDir string, report *ArtifactReport) {
 
 // isDoltNative returns true if the .beads directory contains a dolt/ subdirectory.
 func isDoltNative(beadsDir string) bool {
-	info, err := os.Stat(filepath.Join(beadsDir, "dolt"))
+	info, err := os.Stat(getDatabasePath(beadsDir))
 	return err == nil && info.IsDir()
 }
 

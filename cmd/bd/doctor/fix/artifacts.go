@@ -90,7 +90,7 @@ func cleanBeadsDirArtifacts(beadsDir string) (removed, skipped, errCount int) {
 
 // hasDoltDir returns true if the .beads directory contains a dolt/ subdirectory.
 func hasDoltDir(beadsDir string) bool {
-	info, err := os.Stat(filepath.Join(beadsDir, "dolt"))
+	info, err := os.Stat(getDatabasePath(beadsDir))
 	return err == nil && info.IsDir()
 }
 

@@ -57,7 +57,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	}
 
 	// Check if dolt directory exists
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
@@ -149,7 +149,7 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 	}
 
 	// Check if dolt directory exists
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:     "Peer Connectivity",
@@ -266,7 +266,7 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	}
 
 	// Check if dolt directory exists
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
@@ -359,7 +359,7 @@ func CheckFederationConflicts(path string) DoctorCheck {
 	}
 
 	// Check if dolt directory exists
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:     "Federation Conflicts",
@@ -450,7 +450,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 	}
 
 	// Check if dolt directory exists
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:     "Dolt Mode",

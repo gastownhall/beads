@@ -33,7 +33,7 @@ func BrokenMigrationState(path string) error {
 		return fmt.Errorf("backend is %q, not dolt — fix not applicable", cfg.GetBackend())
 	}
 
-	doltDir := filepath.Join(beadsDir, "dolt")
+	doltDir := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltDir); err == nil {
 		return fmt.Errorf("dolt/ directory exists — backend may be valid, not fixing")
 	}

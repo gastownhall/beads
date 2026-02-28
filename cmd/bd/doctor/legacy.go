@@ -294,7 +294,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 	switch backend {
 	case configfile.BackendDolt:
 		// Dolt is directory-backed: treat .beads/dolt as the DB existence signal.
-		if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err == nil && info.IsDir() {
+		if info, err := os.Stat(getDatabasePath(beadsDir)); err == nil && info.IsDir() {
 			return DoctorCheck{
 				Name:    "Fresh Clone",
 				Status:  "ok",

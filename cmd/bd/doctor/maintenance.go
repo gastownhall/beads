@@ -132,7 +132,7 @@ func CheckStaleMolecules(path string) DoctorCheck {
 
 	// Open database using Dolt
 	ctx := context.Background()
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true, Database: doltDatabaseName(beadsDir)})
 	if err != nil {
 		return DoctorCheck{

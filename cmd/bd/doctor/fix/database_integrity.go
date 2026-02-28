@@ -38,7 +38,7 @@ func DatabaseIntegrity(path string) error {
 
 // doltIntegrityRecovery backs up the corrupted Dolt database and reinitializes.
 func doltIntegrityRecovery(path, beadsDir string) error {
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 
 	// Check if dolt directory exists
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {

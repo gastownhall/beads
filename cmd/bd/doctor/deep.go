@@ -56,7 +56,7 @@ func RunDeepValidation(path string) DeepValidationResult {
 	}
 
 	// Check if Dolt directory exists
-	doltPath := filepath.Join(beadsDir, "dolt")
+	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		check := DoctorCheck{
 			Name:     "Deep Validation",
