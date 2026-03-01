@@ -265,35 +265,35 @@ func FormatHookWarnings(statuses []HookStatus) string {
 var hooksCmd = &cobra.Command{
 	Use:     "hooks",
 	GroupID: "setup",
-	Short:   "Manage git hooks for bd auto-sync",
-	Long: `Install, uninstall, or list git hooks that provide automatic Dolt commit/sync.
+	Short:   "Manage git hooks for beads integration",
+	Long: `Install, uninstall, or list git hooks for beads integration.
 
-The hooks ensure that:
-- pre-commit: Commits pending Dolt changes before git commit
-- post-merge: Syncs Dolt state after pull/merge
-- pre-push: Validates Dolt state before push
-- post-checkout: Syncs Dolt state after branch checkout
-- prepare-commit-msg: Adds agent identity trailers for forensics`,
+The hooks provide:
+- pre-commit: Run chained hooks before commit
+- post-merge: Run chained hooks after pull/merge
+- pre-push: Run chained hooks before push
+- post-checkout: Run chained hooks after branch checkout
+- prepare-commit-msg: Add agent identity trailers for forensics`,
 }
 
 var hooksInstallCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install bd git hooks",
-	Long: `Install git hooks for automatic bd sync.
+	Long: `Install git hooks for beads integration.
 
 By default, hooks are installed to .git/hooks/ in the current repository.
 Use --beads to install to .beads/hooks/ (recommended for Dolt backend).
 Use --shared to install to a versioned directory (.beads-hooks/) that can be
 committed to git and shared with team members.
 
-Use --chain to preserve existing hooks and run them before bd hooks. This is
-useful if you have pre-commit framework hooks or other custom hooks.
+Hooks use section markers to coexist with existing hooks — any user content
+outside the markers is preserved across installs and upgrades.
 
 Installed hooks:
-  - pre-commit: Sync changes before commit
-  - post-merge: Sync database after pull/merge
-  - pre-push: Validate database state before push
-  - post-checkout: Sync database after branch checkout
+  - pre-commit: Run chained hooks before commit
+  - post-merge: Run chained hooks after pull/merge
+  - pre-push: Run chained hooks before push
+  - post-checkout: Run chained hooks after branch checkout
   - prepare-commit-msg: Add agent identity trailers (for orchestrator agents)`,
 	Run: func(cmd *cobra.Command, args []string) {
 		force, _ := cmd.Flags().GetBool("force")
@@ -318,10 +318,6 @@ Installed hooks:
 		} else {
 			fmt.Println("✓ Git hooks installed successfully")
 			fmt.Println()
-			if chain {
-				fmt.Println("Mode: chained (existing hooks renamed to .old and will run first)")
-				fmt.Println()
-			}
 			if beadsHooks {
 				fmt.Println("Hooks installed to: .beads/hooks/")
 				fmt.Println("Git config set: core.hooksPath=.beads/hooks")
@@ -565,6 +561,38 @@ func uninstallHooks() error {
 			}
 		}
 		// Not a bd hook at all — leave it alone
+	}
+
+	// Reset core.hooksPath if it was set to a beads-managed directory
+	if err := resetHooksPathIfBeadsManaged(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to reset core.hooksPath: %v\n", err)
+	}
+
+	return nil
+}
+
+// resetHooksPathIfBeadsManaged unsets core.hooksPath if it points to a
+// beads-managed hooks directory (.beads/hooks or .beads-hooks).
+func resetHooksPathIfBeadsManaged() error {
+	repoRoot := git.GetRepoRoot()
+	if repoRoot == "" {
+		return nil // not in a git repo
+	}
+
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return nil // core.hooksPath not set — nothing to reset
+	}
+
+	hooksPath := strings.TrimSpace(string(out))
+	if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" {
+		cmd = exec.Command("git", "config", "--unset", "core.hooksPath")
+		cmd.Dir = repoRoot
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git config --unset core.hooksPath failed: %w (output: %s)", err, string(output))
+		}
 	}
 
 	return nil
