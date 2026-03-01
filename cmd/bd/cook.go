@@ -540,6 +540,7 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 		ID:             issueID,
 		Title:          step.Title, // Keep {{variables}} for substitution at pour time
 		Description:    step.Description,
+		Notes:          step.Notes,
 		Status:         types.StatusOpen,
 		Priority:       priority,
 		IssueType:      issueType,
@@ -1026,6 +1027,7 @@ func substituteStepVars(steps []*formula.Step, vars map[string]string) {
 	for _, step := range steps {
 		step.Title = substituteVariables(step.Title, vars)
 		step.Description = substituteVariables(step.Description, vars)
+		step.Notes = substituteVariables(step.Notes, vars)
 		if len(step.Children) > 0 {
 			substituteStepVars(step.Children, vars)
 		}

@@ -188,6 +188,9 @@ type Step struct {
 	// Description is the issue description (supports substitution).
 	Description string `json:"description,omitempty"`
 
+	// Notes are additional notes for the issue (supports substitution).
+	Notes string `json:"notes,omitempty"`
+
 	// Type is the issue type: task, bug, feature, epic, chore.
 	Type string `json:"type,omitempty"`
 
