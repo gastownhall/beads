@@ -232,11 +232,27 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			}
 		}
 
+		// Route ephemeral issues (wisps) to the wisps table, not issues.
+		// Without this, mixed batches (e.g., refinery merges) pollute the
+		// issues table with wisp-pattern rows (Clown Show #21 root cause).
+		isWisp := issue.Ephemeral || IsEphemeralID(issue.ID)
+		issueTable := "issues"
+		eventTable := "events"
+		labelTable := "labels"
+		commentTable := "comments"
+		if isWisp {
+			issueTable = "wisps"
+			eventTable = "wisp_events"
+			labelTable = "wisp_labels"
+			commentTable = "wisp_comments"
+		}
+
 		// Handle orphan checking for hierarchical IDs
 		if issue.ID != "" {
 			if parentID, _, ok := parseHierarchicalID(issue.ID); ok {
 				var parentCount int
-				err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, parentID).Scan(&parentCount)
+				//nolint:gosec // G201: table is determined by isWisp flag, not user input
+				err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, issueTable), parentID).Scan(&parentCount)
 				if err != nil {
 					return fmt.Errorf("failed to check parent existence: %w", err)
 				}
@@ -260,18 +276,19 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		// recording redundant "created" events on re-import.
 		var existingCount int
 		if issue.ID != "" {
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, issue.ID).Scan(&existingCount); err != nil {
+			//nolint:gosec // G201: table is determined by isWisp flag, not user input
+			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, issueTable), issue.ID).Scan(&existingCount); err != nil {
 				return fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
 			}
 		}
 
-		if err := insertIssue(ctx, tx, issue); err != nil {
-			return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
+		if err := insertIssueTxIntoTable(ctx, tx, issueTable, issue); err != nil {
+			return fmt.Errorf("failed to insert issue %s into %s: %w", issue.ID, issueTable, err)
 		}
 
 		// Only record "created" event for genuinely new issues (not upserts).
 		if existingCount == 0 {
-			if err := recordEvent(ctx, tx, issue.ID, types.EventCreated, actor, "", ""); err != nil {
+			if err := recordEventInTable(ctx, tx, eventTable, issue.ID, types.EventCreated, actor, "", ""); err != nil {
 				return fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
 			}
 		}
@@ -279,11 +296,12 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		// Persist labels from the issue struct into the labels table (GH#1844).
 		// Without this, labels from the issue struct are silently dropped on import.
 		for _, label := range issue.Labels {
-			_, err := tx.ExecContext(ctx, `
-				INSERT INTO labels (issue_id, label)
+			//nolint:gosec // G201: table is determined by isWisp flag, not user input
+			_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+				INSERT INTO %s (issue_id, label)
 				VALUES (?, ?)
 				ON DUPLICATE KEY UPDATE label = label
-			`, issue.ID, label)
+			`, labelTable), issue.ID, label)
 			if err != nil {
 				return fmt.Errorf("failed to insert label %q for %s: %w", label, issue.ID, err)
 			}
@@ -296,11 +314,12 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			if createdAt.IsZero() {
 				createdAt = time.Now().UTC()
 			}
-			_, err := tx.ExecContext(ctx, `
-				INSERT INTO comments (issue_id, author, text, created_at)
+			//nolint:gosec // G201: table is determined by isWisp flag, not user input
+			_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+				INSERT INTO %s (issue_id, author, text, created_at)
 				VALUES (?, ?, ?, ?)
 				ON DUPLICATE KEY UPDATE text = VALUES(text)
-			`, issue.ID, comment.Author, comment.Text, createdAt)
+			`, commentTable), issue.ID, comment.Author, comment.Text, createdAt)
 			if err != nil {
 				return fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
 			}
@@ -311,19 +330,28 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 	// Dependencies reference other issues, so they must be inserted after all
 	// issues are in the table to satisfy foreign-key-like existence checks.
 	for _, issue := range issues {
+		isWisp := issue.Ephemeral || IsEphemeralID(issue.ID)
+		depTable := "dependencies"
+		lookupTable := "issues"
+		if isWisp {
+			depTable = "wisp_dependencies"
+			lookupTable = "wisps"
+		}
 		for _, dep := range issue.Dependencies {
 			// Verify the target issue exists in this batch or already in the DB
 			var exists int
-			err := tx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ?", dep.DependsOnID).Scan(&exists)
+			//nolint:gosec // G201: table is determined by isWisp flag, not user input
+			err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE id = ?", lookupTable), dep.DependsOnID).Scan(&exists)
 			if err != nil {
 				continue // Target doesn't exist — skip silently
 			}
 
-			_, err = tx.ExecContext(ctx, `
-				INSERT INTO dependencies (issue_id, depends_on_id, type, created_by, created_at)
+			//nolint:gosec // G201: table is determined by isWisp flag, not user input
+			_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+				INSERT INTO %s (issue_id, depends_on_id, type, created_by, created_at)
 				VALUES (?, ?, ?, ?, ?)
 				ON DUPLICATE KEY UPDATE type = type
-			`, dep.IssueID, dep.DependsOnID, dep.Type, actor, dep.CreatedAt)
+			`, depTable), dep.IssueID, dep.DependsOnID, dep.Type, actor, dep.CreatedAt)
 			if err != nil {
 				return fmt.Errorf("failed to insert dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
