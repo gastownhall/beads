@@ -1,16 +1,16 @@
 ---
 sidebar_position: 5
 title: Sync Failures
-description: Recover from bd sync failures
+description: Recover from Dolt sync failures
 ---
 
 # Sync Failures Recovery
 
-This runbook helps you recover from `bd sync` failures.
+This runbook helps you recover from Dolt sync failures.
 
 ## Symptoms
 
-- `bd sync` hangs or times out
+- `bd dolt push` or `bd dolt pull` hangs or times out
 - Network-related error messages
 - "failed to push" or "failed to pull" errors
 - Dolt server not responding
@@ -20,9 +20,7 @@ This runbook helps you recover from `bd sync` failures.
 ```bash
 # Check Dolt server health
 bd doctor
-
-# Check sync state
-bd status
+bd dolt show
 
 # View Dolt server logs
 tail -50 .beads/dolt/sql-server.log
@@ -42,20 +40,26 @@ ls -la .beads/*.lock
 rm -f .beads/*.lock
 ```
 
-**Step 3:** Force a fresh sync
+**Step 3:** Back up and preview fixes
+```bash
+cp -r .beads .beads.backup
+bd doctor --dry-run
+```
+
+**Step 4:** Apply fixes if needed
 ```bash
 bd doctor --fix
 ```
 
-**Step 4:** Restart the Dolt server
+**Step 5:** Restart the Dolt server
 ```bash
-bd dolt start
+dolt sql-server
 ```
 
-**Step 5:** Verify sync works
+**Step 6:** Verify sync works
 ```bash
-bd sync
-bd status
+bd dolt push
+bd doctor
 ```
 
 ## Common Causes
@@ -64,8 +68,8 @@ bd status
 |-------|----------|
 | Network timeout | Retry with better connection |
 | Stale lock file | Remove lock after stopping Dolt server |
-| Corrupted state | Use `bd doctor --fix` |
-| Git conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
+| Corrupted state | Back up, then `bd doctor --fix` |
+| Merge conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
 
 ## Prevention
 

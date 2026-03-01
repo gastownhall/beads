@@ -153,22 +153,22 @@ bd dolt pull                 # Pull from Dolt remote
 bd dolt start                # Restart server
 ```
 
-:::danger Never Use `bd doctor --fix`
-Analysis of 54 GitHub issues revealed that `bd doctor --fix` frequently causes **more damage** than the original problem:
+:::warning Use `bd doctor --fix` With Care
+Always back up and preview before running `bd doctor --fix`:
 
-- Deletes "circular" dependencies that are actually valid parent-child relationships
-- False positive detection removes legitimate issue links
-- Recovery after `--fix` is harder than recovery from the original issue
+1. **Back up first:** `cp -r .beads .beads.backup`
+2. **Preview changes:** `bd doctor --dry-run` — shows what would be fixed without making changes
+3. **Review diagnostics:** `bd doctor` (no flags) — diagnostic only, no changes made
+4. **Then fix:** `bd doctor --fix` — or `bd doctor --fix -i` to confirm each fix individually
 
-**Safe alternatives:**
-- `bd doctor` -- Diagnostic only, no changes made
-- `bd blocked` -- Check which issues are blocked and why
-- `bd show <issue-id>` -- Inspect a specific issue's state
+**Why caution?** The `--fix` flag may remove dependencies it flags as circular, including valid parent-child relationships. Use `--fix-child-parent` only if you're certain the flagged deps are invalid.
 
-If `bd doctor` reports problems, investigate each one manually before taking any action.
+**Other diagnostic tools:**
+- `bd blocked` — check which issues are blocked and why
+- `bd show <issue-id>` — inspect a specific issue's state
 :::
 
-See [Recovery](/recovery) for specific procedures and [Database Corruption Recovery](/recovery/database-corruption) for `bd doctor --fix` recovery (Pattern D4).
+See [Recovery](/recovery) for specific procedures and [Database Corruption Recovery](/recovery/database-corruption) for Dolt recovery steps.
 
 ## Design Decisions
 

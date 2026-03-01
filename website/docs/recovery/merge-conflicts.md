@@ -10,7 +10,7 @@ This runbook helps you resolve merge conflicts that occur during Dolt sync opera
 
 ## Symptoms
 
-- `bd sync` fails with conflict errors
+- `bd dolt pull` fails with conflict errors
 - Different issue states between clones
 
 ## Diagnosis
@@ -19,35 +19,39 @@ This runbook helps you resolve merge conflicts that occur during Dolt sync opera
 # Check database health
 bd doctor
 
-# Check for Dolt conflicts
-bd doctor --fix
+# Preview what fixes would be applied
+bd doctor --dry-run
 ```
 
 ## Solution
 
-**Step 1:** Check for conflicts
+**Step 1:** Back up current state
+```bash
+cp -r .beads .beads.backup
+```
+
+**Step 2:** Check for conflicts
 ```bash
 bd doctor
 ```
 
-**Step 2:** Force rebuild to reconcile
+**Step 3:** Fix to reconcile
 ```bash
 bd doctor --fix
 ```
 
-**Step 3:** Verify state
+**Step 4:** Verify state
 ```bash
 bd list
 bd stats
 ```
 
-**Step 4:** Sync resolved state
+**Step 5:** Push resolved state
 ```bash
-bd sync
+bd dolt push
 ```
 
 ## Prevention
 
-- Sync before and after work sessions
-- Use `bd sync` regularly
+- Sync before and after work sessions using `bd dolt pull` / `bd dolt push`
 - Avoid concurrent modifications from multiple clones without the Dolt server running

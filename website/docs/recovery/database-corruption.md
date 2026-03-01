@@ -1,16 +1,16 @@
 ---
 sidebar_position: 2
 title: Database Corruption
-description: Recover from SQLite database corruption
+description: Recover from Dolt database corruption
 ---
 
 # Database Corruption Recovery
 
-This runbook helps you recover from SQLite database corruption in Beads.
+This runbook helps you recover from database corruption in Beads.
 
 ## Symptoms
 
-- SQLite error messages during `bd` commands
+- Error messages during `bd` commands
 - "database is locked" errors that persist
 - Missing issues that should exist
 - Inconsistent database state
@@ -19,19 +19,13 @@ This runbook helps you recover from SQLite database corruption in Beads.
 
 ```bash
 # Check database integrity
-bd status
+bd doctor
 
-# Look for corruption indicators
-ls -la .beads/beads.db*
+# Check Dolt server health
+bd dolt show
 ```
 
-If you see `-wal` or `-shm` files alongside `beads.db`, a transaction may have been interrupted.
-
 ## Solution
-
-:::warning
-Back up your `.beads/` directory before proceeding.
-:::
 
 **Step 1:** Stop the Dolt server
 ```bash
@@ -43,24 +37,29 @@ bd dolt stop
 cp -r .beads .beads.backup
 ```
 
-**Step 3:** Rebuild database
+**Step 3:** Preview what doctor would fix
+```bash
+bd doctor --dry-run
+```
+
+**Step 4:** Rebuild database
 ```bash
 bd doctor --fix
 ```
 
-**Step 4:** Verify recovery
+**Step 5:** Verify recovery
 ```bash
-bd status
+bd doctor
 bd list
 ```
 
-**Step 5:** Restart the Dolt server
+**Step 6:** Restart the Dolt server
 ```bash
-bd dolt start
+dolt sql-server
 ```
 
 ## Prevention
 
-- Avoid interrupting `bd sync` operations
 - Let the Dolt server handle synchronization
 - Use `bd dolt stop` before system shutdown
+- Run `bd doctor` periodically to catch issues early
