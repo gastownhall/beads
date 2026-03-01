@@ -519,6 +519,32 @@ func computeLayout(subgraph *TemplateSubgraph) *GraphLayout {
 		}
 	}
 
+	// Lift children to at least their parent's layer (GH#1748).
+	// Parent-child deps are not blocking deps, but children logically belong
+	// to their parent's scope. If a parent epic is blocked (higher layer),
+	// its children should appear in the same layer, not float in Layer 0.
+	parentOf := make(map[string]string) // childID -> parentID
+	for _, dep := range subgraph.Dependencies {
+		if dep.Type == types.DepParentChild {
+			parentOf[dep.IssueID] = dep.DependsOnID
+		}
+	}
+	if len(parentOf) > 0 {
+		// Iterate until stable — handles nested parent-child hierarchies
+		changed = true
+		for changed {
+			changed = false
+			for childID, parentID := range parentOf {
+				childNode := layout.Nodes[childID]
+				parentNode := layout.Nodes[parentID]
+				if childNode != nil && parentNode != nil && childNode.Layer < parentNode.Layer {
+					childNode.Layer = parentNode.Layer
+					changed = true
+				}
+			}
+		}
+	}
+
 	// Build layers array
 	for _, node := range layout.Nodes {
 		if node.Layer > layout.MaxLayer {
