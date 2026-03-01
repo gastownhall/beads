@@ -270,6 +270,30 @@ func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor s
 	return s.deleteWisp(ctx, id)
 }
 
+// getAllWispDependencyRecords returns all wisp dependency records, keyed by issue_id.
+// Used by DetectCycles to include wisp dependencies in cross-table cycle detection. (bd-xe27)
+func (s *DoltStore) getAllWispDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	rows, err := s.queryContext(ctx, `
+		SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
+		FROM wisp_dependencies
+		ORDER BY issue_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all wisp dependency records: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]*types.Dependency)
+	for rows.Next() {
+		dep, err := scanDependencyRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("get all wisp dependency records: %w", err)
+		}
+		result[dep.IssueID] = append(result[dep.IssueID], dep)
+	}
+	return result, rows.Err()
+}
+
 // getWispDependencyRecords returns raw dependency records for a wisp from wisp_dependencies.
 func (s *DoltStore) getWispDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
 	rows, err := s.queryContext(ctx, `

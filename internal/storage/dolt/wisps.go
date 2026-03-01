@@ -896,6 +896,33 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Cycle detection for blocking dependency types: check if adding this edge
+	// would create a cycle. UNIONs both tables to detect cross-table cycles
+	// (e.g., wisp A -> permanent B -> wisp A). (bd-xe27)
+	if dep.Type == types.DepBlocks {
+		var reachable int
+		if err := tx.QueryRowContext(ctx, `
+			WITH RECURSIVE reachable AS (
+				SELECT ? AS node, 0 AS depth
+				UNION ALL
+				SELECT d.depends_on_id, r.depth + 1
+				FROM reachable r
+				JOIN (
+					SELECT issue_id, depends_on_id FROM dependencies WHERE type = 'blocks'
+					UNION ALL
+					SELECT issue_id, depends_on_id FROM wisp_dependencies WHERE type = 'blocks'
+				) d ON d.issue_id = r.node
+				WHERE r.depth < 100
+			)
+			SELECT COUNT(*) FROM reachable WHERE node = ?
+		`, dep.DependsOnID, dep.IssueID).Scan(&reachable); err != nil {
+			return fmt.Errorf("failed to check for dependency cycle: %w", err)
+		}
+		if reachable > 0 {
+			return fmt.Errorf("adding dependency would create a cycle")
+		}
+	}
+
 	// Check for existing dependency to prevent silent type overwrites.
 	var existingType string
 	err = tx.QueryRowContext(ctx, `

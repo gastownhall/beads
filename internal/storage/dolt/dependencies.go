@@ -65,6 +65,8 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 
 	// Cycle detection for blocking dependency types: check if adding this edge
 	// would create a cycle by seeing if depends_on_id can already reach issue_id.
+	// UNIONs both dependencies and wisp_dependencies to detect cross-table cycles
+	// (e.g., permanent A -> wisp B -> permanent A). (bd-xe27)
 	if dep.Type == types.DepBlocks {
 		var reachable int
 		if err := tx.QueryRowContext(ctx, `
@@ -73,9 +75,12 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 				UNION ALL
 				SELECT d.depends_on_id, r.depth + 1
 				FROM reachable r
-				JOIN dependencies d ON d.issue_id = r.node
-				WHERE d.type = 'blocks'
-				  AND r.depth < 100
+				JOIN (
+					SELECT issue_id, depends_on_id FROM dependencies WHERE type = 'blocks'
+					UNION ALL
+					SELECT issue_id, depends_on_id FROM wisp_dependencies WHERE type = 'blocks'
+				) d ON d.issue_id = r.node
+				WHERE r.depth < 100
 			)
 			SELECT COUNT(*) FROM reachable WHERE node = ?
 		`, dep.DependsOnID, dep.IssueID).Scan(&reachable); err != nil {
@@ -714,17 +719,32 @@ func (s *DoltStore) buildDependencyTree(ctx context.Context, issueID string, dep
 	return nodes, nil
 }
 
-// DetectCycles finds circular dependencies
+// DetectCycles finds circular dependencies.
+// Queries both dependencies and wisp_dependencies tables to detect cross-table
+// cycles (e.g., permanent A -> wisp B -> permanent A). (bd-xe27)
 func (s *DoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {
-	// Get all dependencies
+	// Get all permanent dependencies
 	deps, err := s.GetAllDependencyRecords(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Build adjacency list
+	// Get all wisp dependencies
+	wispDeps, err := s.getAllWispDependencyRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build adjacency list from both tables
 	graph := make(map[string][]string)
 	for issueID, records := range deps {
+		for _, dep := range records {
+			if dep.Type == types.DepBlocks {
+				graph[issueID] = append(graph[issueID], dep.DependsOnID)
+			}
+		}
+	}
+	for issueID, records := range wispDeps {
 		for _, dep := range records {
 			if dep.Type == types.DepBlocks {
 				graph[issueID] = append(graph[issueID], dep.DependsOnID)
