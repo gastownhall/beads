@@ -218,6 +218,39 @@ func TestDefaultConfig(t *testing.T) {
 			t.Errorf("expected GasTownPort %d under GT_ROOT, got %d", GasTownPort, cfg.Port)
 		}
 	})
+
+	t.Run("no_config_uses_default_port_not_hash", func(t *testing.T) {
+		// BUG: configfile.DefaultDoltServerPort is 3307, but DefaultConfig
+		// falls through to DerivePort() (range 13307-14306) when no explicit
+		// port is configured. This means users with a shared Homebrew Dolt
+		// server on 3307 get a wrong hash-derived port.
+		//
+		// Expected: when no env var, no metadata port, and no GT_ROOT,
+		// DefaultConfig should use configfile.DefaultDoltServerPort (3307)
+		// as the fallback, NOT DerivePort().
+
+		orig := os.Getenv("GT_ROOT")
+		os.Unsetenv("GT_ROOT")
+		origPort := os.Getenv("BEADS_DOLT_SERVER_PORT")
+		os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+		defer func() {
+			if orig != "" {
+				os.Setenv("GT_ROOT", orig)
+			}
+			if origPort != "" {
+				os.Setenv("BEADS_DOLT_SERVER_PORT", origPort)
+			}
+		}()
+
+		freshDir := t.TempDir()
+		cfg := DefaultConfig(freshDir)
+
+		// The default port should match configfile.DefaultDoltServerPort (3307),
+		// not a hash-derived port in the 13307-14306 range.
+		if cfg.Port != 3307 {
+			t.Errorf("expected DefaultConfig to use configfile.DefaultDoltServerPort (3307), got %d", cfg.Port)
+		}
+	})
 }
 
 func TestStopNotRunning(t *testing.T) {
