@@ -842,6 +842,13 @@ func TestDetectActiveHookManager(t *testing.T) {
 			if err := copyGitDir(gitTemplateDir, dir); err != nil {
 				t.Fatalf("failed to copy git template: %v", err)
 			}
+			// Test isolation: force repo-local hooks path so global git config
+			// does not redirect detection to an unrelated directory.
+			setHooksPathCmd := exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+			setHooksPathCmd.Dir = dir
+			if err := setHooksPathCmd.Run(); err != nil {
+				t.Fatalf("failed to set core.hooksPath: %v", err)
+			}
 
 			// Write hook file
 			if tt.hookContent != "" {
@@ -870,6 +877,12 @@ func TestDetectActiveHookManager_CustomHooksPath(t *testing.T) {
 	}
 	if err := copyGitDir(gitTemplateDir, dir); err != nil {
 		t.Fatalf("failed to copy git template: %v", err)
+	}
+	// Start from repo-local hooks for test isolation; override below.
+	setHooksPathCmd := exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	setHooksPathCmd.Dir = dir
+	if err := setHooksPathCmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
 	}
 
 	// Create custom hooks directory outside .git

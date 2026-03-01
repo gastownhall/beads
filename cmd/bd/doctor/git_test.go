@@ -139,6 +139,14 @@ func setupGitRepoInDir(t *testing.T, dir string) {
 	if err := copyGitDir(gitTemplateDir, dir); err != nil {
 		t.Fatalf("failed to copy git template: %v", err)
 	}
+
+	// Force repo-local hooks path for test isolation. This prevents global
+	// core.hooksPath from affecting hook detection behavior in tests.
+	cmd := exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath for test repo: %v", err)
+	}
 }
 
 // Edge case tests for CheckGitHooks

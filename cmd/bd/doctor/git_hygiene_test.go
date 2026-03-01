@@ -44,6 +44,8 @@ func initRepo(t *testing.T, dir string, branch string) {
 	runGit(t, dir, "init", "-b", branch)
 	runGit(t, dir, "config", "user.email", "test@test.com")
 	runGit(t, dir, "config", "user.name", "Test User")
+	// Ensure test repos don't inherit global hooksPath and run external hooks.
+	runGit(t, dir, "config", "core.hooksPath", ".git/hooks")
 }
 
 func commitFile(t *testing.T, dir, name, content, msg string) {
