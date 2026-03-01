@@ -255,15 +255,58 @@ var configListCmd = &cobra.Command{
 
 		// Check for config.yaml overrides that take precedence (bd-20j)
 		// This helps diagnose when effective config differs from database config
-		showConfigYAMLOverrides()
+		showConfigYAMLOverrides(config)
 	},
 }
 
 // showConfigYAMLOverrides warns when config.yaml or env vars override database settings.
 // This addresses the confusion when `bd config list` shows one value but the effective
 // value used by commands is different due to higher-priority config sources.
-// TODO(bd-20j): implement override detection logic
-func showConfigYAMLOverrides() {
+func showConfigYAMLOverrides(dbConfig map[string]string) {
+	var warnings []string
+
+	// Check each DB config key for env var overrides
+	for key, dbValue := range dbConfig {
+		envKey := "BD_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
+		if envValue := os.Getenv(envKey); envValue != "" && envValue != dbValue {
+			warnings = append(warnings, fmt.Sprintf("  %s: DB has %q, but env %s=%q takes precedence", key, dbValue, envKey, envValue))
+		}
+	}
+
+	// Check for yaml-only keys set in config.yaml that aren't visible in DB output
+	yamlKeys := []string{
+		"no-db", "json", "actor", "identity",
+		"routing.mode", "routing.default", "routing.maintainer", "routing.contributor",
+		"sync.mode", "sync.git-remote", "no-push", "no-git-ops",
+		"git.author", "git.no-gpg-sign",
+		"create.require-description",
+		"validation.on-create", "validation.on-sync",
+		"hierarchy.max-depth",
+		"dolt.idle-timeout",
+	}
+
+	var yamlOverrides []string
+	for _, key := range yamlKeys {
+		val := config.GetYamlConfig(key)
+		if val != "" && config.GetValueSource(key) == config.SourceConfigFile {
+			yamlOverrides = append(yamlOverrides, fmt.Sprintf("  %s = %s", key, val))
+		}
+	}
+
+	if len(yamlOverrides) > 0 {
+		fmt.Println("\nAlso set in config.yaml (not shown above):")
+		for _, line := range yamlOverrides {
+			fmt.Println(line)
+		}
+	}
+
+	if len(warnings) > 0 {
+		sort.Strings(warnings)
+		fmt.Println("\n⚠ Environment variable overrides detected:")
+		for _, w := range warnings {
+			fmt.Println(w)
+		}
+	}
 }
 
 var configUnsetCmd = &cobra.Command{
