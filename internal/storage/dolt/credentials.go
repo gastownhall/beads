@@ -23,7 +23,7 @@ import (
 // Enables SQL user authentication when syncing with peer Gas Towns.
 
 // credentialKeyFile is the filename for the random encryption key stored alongside the database.
-const credentialKeyFile = ".beads-credential-key"
+const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: not a credential, just a filename
 
 // federationEnvMutex protects DOLT_REMOTE_USER/PASSWORD env vars from concurrent access.
 // Environment variables are process-global, so we need to serialize federation operations.
@@ -58,7 +58,7 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 	keyPath := filepath.Join(s.dbPath, credentialKeyFile)
 
 	// Try to load existing key file
-	key, err := os.ReadFile(keyPath)
+	key, err := os.ReadFile(keyPath) //nolint:gosec // G304: keyPath is derived from trusted dbPath, not user input
 	if err == nil && len(key) == 32 {
 		s.credentialKey = key
 		return nil
@@ -376,7 +376,7 @@ func (s *DoltStore) updatePeerLastSync(ctx context.Context, name string) error {
 // the SQL path via process env vars under mutex protection.
 type remoteCredentials struct {
 	Username string
-	Password string
+	Password string //nolint:gosec // G117: struct field for Dolt remote auth, not a hardcoded secret
 }
 
 // empty returns true if no credentials are set.

@@ -362,7 +362,7 @@ var doltIdleMonitorCmd = &cobra.Command{
 		// Write our PID and ensure cleanup on all exit paths
 		pidFile := filepath.Join(beadsDir, "dolt-monitor.pid")
 		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0600)
-		defer os.Remove(pidFile)
+		defer func() { _ = os.Remove(pidFile) }()
 
 		// Parse idle timeout from config
 		idleTimeout := doltserver.DefaultIdleTimeout
