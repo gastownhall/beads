@@ -6,14 +6,14 @@ import "fmt"
 // ZFC-compliant: Go observes and reports, the agent decides and acts.
 type AgentDiagnostic struct {
 	Name        string   `json:"name"`
-	Status      string   `json:"status"`                  // "error", "warning", "ok"
-	Severity    string   `json:"severity"`                 // "blocking", "degraded", "advisory"
+	Status      string   `json:"status"`   // "error", "warning", "ok"
+	Severity    string   `json:"severity"` // "blocking", "degraded", "advisory"
 	Category    string   `json:"category"`
-	Explanation string   `json:"explanation"`              // Full prose: what's wrong and why it matters
-	Observed    string   `json:"observed"`                 // What was actually found
-	Expected    string   `json:"expected"`                 // What should be the case
-	Commands    []string `json:"commands,omitempty"`        // Exact remediation commands in order
-	SourceFiles []string `json:"source_files,omitempty"`   // Relevant source paths for investigation
+	Explanation string   `json:"explanation"`            // Full prose: what's wrong and why it matters
+	Observed    string   `json:"observed"`               // What was actually found
+	Expected    string   `json:"expected"`               // What should be the case
+	Commands    []string `json:"commands,omitempty"`     // Exact remediation commands in order
+	SourceFiles []string `json:"source_files,omitempty"` // Relevant source paths for investigation
 }
 
 // agentEnrichment holds the extra context fields an enricher adds.
@@ -87,58 +87,58 @@ func buildGenericExplanation(dc DoctorCheck) string {
 
 // agentEnrichers maps check names to specialized enrichment functions.
 var agentEnrichers = map[string]enricher{
-	"Installation":              enrichInstallation,
-	"Permissions":               enrichPermissions,
-	"Database":                  enrichDatabase,
-	"Schema Compatibility":      enrichSchemaCompatibility,
-	"Database Integrity":        enrichDatabaseIntegrity,
-	"Large Database":            enrichLargeDatabase,
-	"ID Format":                 enrichIDFormat,
-	"CLI Version":               enrichCLIVersion,
-	"Git Hooks":                 enrichGitHooks,
+	"Installation":                 enrichInstallation,
+	"Permissions":                  enrichPermissions,
+	"Database":                     enrichDatabase,
+	"Schema Compatibility":         enrichSchemaCompatibility,
+	"Database Integrity":           enrichDatabaseIntegrity,
+	"Large Database":               enrichLargeDatabase,
+	"ID Format":                    enrichIDFormat,
+	"CLI Version":                  enrichCLIVersion,
+	"Git Hooks":                    enrichGitHooks,
 	"Git Hooks Dolt Compatibility": enrichGitHooksDolt,
-	"Gitignore":                 enrichGitignore,
-	"Project Gitignore":         enrichProjectGitignore,
-	"Git Working Tree":          enrichGitWorkingTree,
-	"Git Upstream":              enrichGitUpstream,
-	"Fresh Clone":               enrichFreshClone,
-	"Database Config":           enrichDatabaseConfig,
-	"Config Values":             enrichConfigValues,
-	"Role Configuration":        enrichBeadsRole,
-	"Lock Files":                enrichStaleLockFiles,
-	"Dolt Connection":           enrichDoltConnection,
-	"Dolt Schema":               enrichDoltSchema,
-	"Dolt Issue Count":          enrichDoltIssueCount,
-	"Dolt Status":               enrichDoltStatus,
-	"Dolt Locks":                enrichDoltLocks,
-	"Dolt Lock Health":          enrichLockHealth,
-	"Dependency Cycles":         enrichDependencyCycles,
-	"Duplicate Issues":          enrichDuplicateIssues,
-	"Test Pollution":            enrichTestPollution,
-	"Orphaned Dependencies":     enrichOrphanedDeps,
-	"Child-Parent Dependencies":  enrichChildParentDeps,
-	"Merge Artifacts":           enrichMergeArtifacts,
-	"Classic Artifacts":         enrichClassicArtifacts,
-	"Broken Migration State":    enrichBrokenMigration,
-	"SQLite Residue":            enrichSQLiteResidue,
-	"Embedded Mode Concurrency": enrichEmbeddedConcurrency,
-	"Pending Migrations":        enrichPendingMigrations,
-	"KV Sync Status":            enrichKVSync,
-	"Stale Closed Issues":       enrichStaleClosedIssues,
-	"Stale Molecules":           enrichStaleMolecules,
-	"Claude Integration":        enrichClaude,
-	"Claude Settings Health":    enrichClaudeSettings,
-	"Claude Hook Completeness":  enrichClaudeHooks,
-	"Claude Plugin":             enrichClaudePlugin,
-	"bd prime Output":           enrichBdPrimeOutput,
-	"CLI Availability":          enrichBdInPath,
-	"Repo Fingerprint":          enrichRepoFingerprint,
-	"Version Tracking":          enrichMetadataVersion,
-	"Orphaned Issues":           enrichOrphanedIssues,
-	"Redirect Target Valid":     enrichRedirectTarget,
-	"Redirect Tracking":         enrichRedirectTracking,
-	"Redirect Target Sync":      enrichRedirectTargetSync,
-	"Untracked Files":           enrichUntrackedFiles,
+	"Gitignore":                    enrichGitignore,
+	"Project Gitignore":            enrichProjectGitignore,
+	"Git Working Tree":             enrichGitWorkingTree,
+	"Git Upstream":                 enrichGitUpstream,
+	"Fresh Clone":                  enrichFreshClone,
+	"Database Config":              enrichDatabaseConfig,
+	"Config Values":                enrichConfigValues,
+	"Role Configuration":           enrichBeadsRole,
+	"Lock Files":                   enrichStaleLockFiles,
+	"Dolt Connection":              enrichDoltConnection,
+	"Dolt Schema":                  enrichDoltSchema,
+	"Dolt Issue Count":             enrichDoltIssueCount,
+	"Dolt Status":                  enrichDoltStatus,
+	"Dolt Locks":                   enrichDoltLocks,
+	"Dolt Lock Health":             enrichLockHealth,
+	"Dependency Cycles":            enrichDependencyCycles,
+	"Duplicate Issues":             enrichDuplicateIssues,
+	"Test Pollution":               enrichTestPollution,
+	"Orphaned Dependencies":        enrichOrphanedDeps,
+	"Child-Parent Dependencies":    enrichChildParentDeps,
+	"Merge Artifacts":              enrichMergeArtifacts,
+	"Classic Artifacts":            enrichClassicArtifacts,
+	"Broken Migration State":       enrichBrokenMigration,
+	"SQLite Residue":               enrichSQLiteResidue,
+	"Embedded Mode Concurrency":    enrichEmbeddedConcurrency,
+	"Pending Migrations":           enrichPendingMigrations,
+	"KV Sync Status":               enrichKVSync,
+	"Stale Closed Issues":          enrichStaleClosedIssues,
+	"Stale Molecules":              enrichStaleMolecules,
+	"Claude Integration":           enrichClaude,
+	"Claude Settings Health":       enrichClaudeSettings,
+	"Claude Hook Completeness":     enrichClaudeHooks,
+	"Claude Plugin":                enrichClaudePlugin,
+	"bd prime Output":              enrichBdPrimeOutput,
+	"CLI Availability":             enrichBdInPath,
+	"Repo Fingerprint":             enrichRepoFingerprint,
+	"Version Tracking":             enrichMetadataVersion,
+	"Orphaned Issues":              enrichOrphanedIssues,
+	"Redirect Target Valid":        enrichRedirectTarget,
+	"Redirect Tracking":            enrichRedirectTracking,
+	"Redirect Target Sync":         enrichRedirectTargetSync,
+	"Untracked Files":              enrichUntrackedFiles,
 }
 
 // --- Enrichment functions ---
@@ -156,7 +156,7 @@ func enrichInstallation(dc DoctorCheck) agentEnrichment {
 
 func enrichPermissions(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
-		severity: "blocking",
+		severity:    "blocking",
 		explanation: fmt.Sprintf("File permission issue in .beads/ directory: %s. The database or directory cannot be read/written, which prevents all beads operations.", dc.Message),
 		observed:    dc.Message,
 		expected:    ".beads/ directory and all contents are readable and writable by current user",

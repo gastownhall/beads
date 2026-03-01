@@ -9,12 +9,12 @@ import (
 
 // agentDoctorResult is the top-level output for --agent mode.
 type agentDoctorResult struct {
-	Path        string                    `json:"path"`
-	OverallOK   bool                      `json:"overall_ok"`
-	CLIVersion  string                    `json:"cli_version"`
-	Summary     string                    `json:"summary"`
-	Diagnostics []doctor.AgentDiagnostic  `json:"diagnostics"`
-	PassedCount int                       `json:"passed_count"`
+	Path        string                   `json:"path"`
+	OverallOK   bool                     `json:"overall_ok"`
+	CLIVersion  string                   `json:"cli_version"`
+	Summary     string                   `json:"summary"`
+	Diagnostics []doctor.AgentDiagnostic `json:"diagnostics"`
+	PassedCount int                      `json:"passed_count"`
 }
 
 // buildAgentResult converts a standard doctorResult to an agent-enriched result.
