@@ -44,14 +44,14 @@ func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
 	if len(filesWithLegacyCommands) == 0 {
 		return DoctorCheck{
 			Name:    "Legacy Commands",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "No legacy beads slash commands detected",
 		}
 	}
 
 	return DoctorCheck{
 		Name:    "Legacy Commands",
-		Status:  "warning",
+		Status:  StatusWarning,
 		Message: fmt.Sprintf("Old beads integration detected in %s", strings.Join(filesWithLegacyCommands, ", ")),
 		Detail: "Found: /beads:* slash command references (deprecated)\n" +
 			"  These commands are token-inefficient (~10.5k tokens per session)",
@@ -113,14 +113,14 @@ func CheckLegacyMCPToolReferences(repoPath string) DoctorCheck {
 	if len(filesWithMCPRefs) == 0 {
 		return DoctorCheck{
 			Name:    "MCP Tool References",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "No MCP tool references in documentation",
 		}
 	}
 
 	return DoctorCheck{
 		Name:    "MCP Tool References",
-		Status:  "warning",
+		Status:  StatusWarning,
 		Message: fmt.Sprintf("MCP tool references found in %s", strings.Join(filesWithMCPRefs, ", ")),
 		Detail: "Found: Direct MCP tool name references (e.g., mcp__beads_beads__list)\n" +
 			"  MCP tool calls consume ~10.5k tokens per session for tool scanning",
@@ -165,14 +165,14 @@ func CheckAgentDocumentation(repoPath string) DoctorCheck {
 	if len(foundDocs) > 0 {
 		return DoctorCheck{
 			Name:    "Agent Documentation",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: fmt.Sprintf("Documentation found: %s", strings.Join(foundDocs, ", ")),
 		}
 	}
 
 	return DoctorCheck{
 		Name:    "Agent Documentation",
-		Status:  "warning",
+		Status:  StatusWarning,
 		Message: "No agent documentation found",
 		Detail: "Missing: AGENTS.md or CLAUDE.md\n" +
 			"  Documenting workflow helps AI agents work more effectively",
@@ -201,7 +201,7 @@ func CheckDatabaseConfig(repoPath string) DoctorCheck {
 		// No config or error reading - use defaults
 		return DoctorCheck{
 			Name:    "Database Config",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "Using default configuration",
 		}
 	}
@@ -210,7 +210,7 @@ func CheckDatabaseConfig(repoPath string) DoctorCheck {
 	if cfg.GetBackend() == configfile.BackendDolt {
 		return DoctorCheck{
 			Name:    "Database Config",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "Dolt backend (data on server)",
 		}
 	}
@@ -239,14 +239,14 @@ func CheckDatabaseConfig(repoPath string) DoctorCheck {
 	if len(issues) == 0 {
 		return DoctorCheck{
 			Name:    "Database Config",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "Configuration matches existing files",
 		}
 	}
 
 	return DoctorCheck{
 		Name:    "Database Config",
-		Status:  "warning",
+		Status:  StatusWarning,
 		Message: "Configuration mismatch detected",
 		Detail:  strings.Join(issues, "\n  "),
 		Fix: "Run 'bd doctor --fix' to auto-detect and fix mismatches, or manually:\n" +
@@ -265,7 +265,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Fresh Clone",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "N/A (no .beads directory)",
 		}
 	}
@@ -286,7 +286,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 	if jsonlPath == "" {
 		return DoctorCheck{
 			Name:    "Fresh Clone",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "N/A (no JSONL file)",
 		}
 	}
@@ -298,7 +298,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 		if info, err := os.Stat(getDatabasePath(beadsDir)); err == nil && info.IsDir() {
 			return DoctorCheck{
 				Name:    "Fresh Clone",
-				Status:  "ok",
+				Status:  StatusOK,
 				Message: "Database exists",
 			}
 		}
@@ -314,7 +314,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 		if _, err := os.Stat(dbPath); err == nil {
 			return DoctorCheck{
 				Name:    "Fresh Clone",
-				Status:  "ok",
+				Status:  StatusOK,
 				Message: "Database exists",
 			}
 		}
@@ -325,7 +325,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 	if issueCount == 0 {
 		return DoctorCheck{
 			Name:    "Fresh Clone",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: fmt.Sprintf("JSONL exists but is empty (%s)", jsonlName),
 		}
 	}
@@ -338,7 +338,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 
 	return DoctorCheck{
 		Name:    "Fresh Clone",
-		Status:  "warning",
+		Status:  StatusWarning,
 		Message: fmt.Sprintf("Fresh clone detected (%d issues in %s, no database)", issueCount, jsonlName),
 		Detail: "This appears to be a freshly cloned repository.\n" +
 			"  The JSONL file contains issues but no local database exists.\n" +
