@@ -4,15 +4,9 @@ package testutil
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"testing"
-	"time"
 )
-
-// DoltDockerImage is the Docker image used for Dolt test containers.
-// Pinned to 1.43.0 — see testdoltserver.go for rationale.
-const DoltDockerImage = "dolthub/dolt-sql-server:1.43.0"
 
 // TestDoltServer represents a running test Dolt server instance.
 // On Windows CI, Docker Desktop is not reliably available, so all
@@ -60,28 +54,3 @@ func DoltContainerPort() string { return "" }
 // TerminateDoltContainer is a no-op on Windows.
 func TerminateDoltContainer() {}
 
-// FindFreePort finds an available TCP port by binding to :0.
-func FindFreePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return port, nil
-}
-
-// WaitForServer polls until the server accepts TCP connections on the given port.
-func WaitForServer(port int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return true
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return false
-}
