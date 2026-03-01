@@ -187,6 +187,16 @@ bd update <id> --notes "additional notes"
 bd update <id> --acceptance "acceptance criteria"
 ```
 
+**Use stdin for descriptions with special characters** (backticks, `!`, nested quotes):
+```bash
+# Pipe via stdin to avoid shell escaping issues
+echo 'Description with `backticks` and "quotes"' | bd create "Title" --description=-
+echo 'Updated description with $variables' | bd update <id> --description=-
+
+# Or use --body-file for longer content
+bd create "Title" --body-file=description.md
+```
+
 **Example agent session:**
 
 ```bash

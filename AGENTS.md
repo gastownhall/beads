@@ -31,6 +31,10 @@ bd update <id> --title "new title"
 bd update <id> --design "design notes"
 bd update <id> --notes "additional notes"
 bd update <id> --acceptance "acceptance criteria"
+
+# Use stdin for descriptions with special characters (backticks, !, nested quotes)
+echo 'Description with `backticks` and "quotes"' | bd create "Title" --description=-
+echo 'Updated text' | bd update <id> --description=-
 ```
 
 ## Testing Commands (No Ambiguity)
@@ -118,6 +122,9 @@ bd ready --json
 ```bash
 bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
 bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
+
+# Use stdin for descriptions with special characters (backticks, !, nested quotes)
+echo 'Description with `backticks` and "quotes"' | bd create "Title" --description=- --json
 ```
 
 **Claim and update:**
