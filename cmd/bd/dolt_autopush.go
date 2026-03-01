@@ -33,6 +33,10 @@ func isDoltAutoPushEnabled(ctx context.Context) bool {
 // maybeAutoPush pushes to the Dolt remote if enabled and the debounce interval has passed.
 // Called from PersistentPostRun after auto-commit and auto-backup.
 func maybeAutoPush(ctx context.Context) {
+	if isSandboxMode() {
+		debug.Logf("dolt auto-push: skipped (sandbox mode)\n")
+		return
+	}
 	if !isDoltAutoPushEnabled(ctx) {
 		return
 	}
