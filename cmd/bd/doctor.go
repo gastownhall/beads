@@ -58,6 +58,7 @@ var (
 	gastownDuplicatesThreshold int    // duplicate tolerance threshold for gastown mode
 	doctorServer               bool   // run server mode health checks
 	doctorMigration            string // migration validation mode: "pre" or "post"
+	doctorAgent                bool   // agent-facing diagnostic mode (ZFC-compliant)
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
@@ -132,10 +133,25 @@ Migration Validation Mode (--migration):
   - Dolt database has no locks or uncommitted changes
   Combine with --json for machine-parseable output for automation.
 
+Agent Mode (--agent):
+  Output diagnostics designed for AI agent consumption. Instead of terse
+  pass/fail messages, each issue includes:
+  - Observed state: what the system actually looks like
+  - Expected state: what it should look like
+  - Explanation: full prose context about the issue and why it matters
+  - Commands: exact remediation commands to run
+  - Source files: where in the codebase to investigate further
+  - Severity: blocking (prevents operation), degraded (partial function),
+    or advisory (informational only)
+  ZFC-compliant: Go observes and reports, the agent decides and acts.
+  Combine with --json for structured agent-facing output.
+
 Examples:
   bd doctor              # Check current directory
   bd doctor /path/to/repo # Check specific repository
   bd doctor --json       # Machine-readable output
+  bd doctor --agent      # Agent-facing diagnostic output
+  bd doctor --agent --json  # Structured agent diagnostics (JSON)
   bd doctor --fix        # Automatically fix issues (with confirmation)
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
   bd doctor --fix -i     # Confirm each fix individually
@@ -256,7 +272,14 @@ Examples:
 		}
 
 		// Output results
-		if jsonOutput {
+		if doctorAgent {
+			agentResult := buildAgentResult(result)
+			if jsonOutput {
+				outputJSON(agentResult)
+			} else {
+				printAgentDiagnostics(agentResult)
+			}
+		} else if jsonOutput {
 			outputJSON(result)
 		} else if doctorOutput == "" {
 			// Only print to console if not exporting (to avoid duplicate output)
@@ -281,6 +304,7 @@ func init() {
 	doctorCmd.Flags().IntVar(&gastownDuplicatesThreshold, "gastown-duplicates-threshold", 1000, "Duplicate tolerance threshold for gastown mode (wisps are ephemeral)")
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
 	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
+	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
 // releaseDiagnosticLocks removes stale noms LOCK files that the diagnostics
