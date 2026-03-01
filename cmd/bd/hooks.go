@@ -43,6 +43,97 @@ const shimVersionPrefix = "# bd-shim "
 // These hooks have the logic embedded directly rather than using shims
 const inlineHookMarker = "# bd (beads)"
 
+// Section markers for git hooks (GH#1380) — consistent with AGENTS.md pattern.
+// Only content between markers is managed by beads; user content outside is preserved.
+const hookSectionBeginPrefix = "# --- BEGIN BEADS INTEGRATION"
+const hookSectionEnd = "# --- END BEADS INTEGRATION ---"
+
+// hookSectionBeginLine returns the full begin marker line with the current version.
+func hookSectionBeginLine() string {
+	return fmt.Sprintf("%s v%s ---", hookSectionBeginPrefix, Version)
+}
+
+// generateHookSection returns the marked section content for a given hook name.
+// The section is self-contained: it checks for bd availability, runs the hook
+// via 'bd hooks run', and propagates exit codes — without preventing any user
+// content after the section from executing on success.
+func generateHookSection(hookName string) string {
+	return hookSectionBeginLine() + "\n" +
+		"# This section is managed by beads. Do not remove these markers.\n" +
+		"if command -v bd >/dev/null 2>&1; then\n" +
+		"  export BD_GIT_HOOK=1\n" +
+		"  bd hooks run " + hookName + " \"$@\"\n" +
+		"  _bd_exit=$?; if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\n" +
+		"fi\n" +
+		hookSectionEnd + "\n"
+}
+
+// injectHookSection merges the beads section into existing hook file content.
+// If section markers are found, only the content between them is replaced.
+// If no markers are found, the section is appended.
+func injectHookSection(existing, section string) string {
+	beginIdx := strings.Index(existing, hookSectionBeginPrefix)
+	endIdx := strings.Index(existing, hookSectionEnd)
+
+	if beginIdx != -1 && endIdx != -1 && beginIdx < endIdx {
+		// Find start of the begin-marker line
+		lineStart := strings.LastIndex(existing[:beginIdx], "\n")
+		if lineStart == -1 {
+			lineStart = 0
+		} else {
+			lineStart++ // skip the newline itself
+		}
+
+		// Find end of the end-marker line (including trailing newline)
+		endOfEndMarker := endIdx + len(hookSectionEnd)
+		if endOfEndMarker < len(existing) && existing[endOfEndMarker] == '\n' {
+			endOfEndMarker++
+		}
+
+		return existing[:lineStart] + section + existing[endOfEndMarker:]
+	}
+
+	// No markers found — append
+	result := existing
+	if !strings.HasSuffix(result, "\n") {
+		result += "\n"
+	}
+	result += "\n" + section
+	return result
+}
+
+// removeHookSection removes only the beads section from hook file content.
+// Returns the content with the section removed, and true if a section was found.
+func removeHookSection(content string) (string, bool) {
+	beginIdx := strings.Index(content, hookSectionBeginPrefix)
+	endIdx := strings.Index(content, hookSectionEnd)
+
+	if beginIdx == -1 || endIdx == -1 || beginIdx > endIdx {
+		return content, false
+	}
+
+	// Find start of the begin-marker line
+	lineStart := strings.LastIndex(content[:beginIdx], "\n")
+	if lineStart == -1 {
+		lineStart = 0
+	} else {
+		lineStart++ // skip the newline itself
+	}
+
+	// Find end of the end-marker line
+	endOfEndMarker := endIdx + len(hookSectionEnd)
+	if endOfEndMarker < len(content) && content[endOfEndMarker] == '\n' {
+		endOfEndMarker++
+	}
+
+	// Also consume a blank line before the section if present
+	if lineStart >= 2 && content[lineStart-1] == '\n' && content[lineStart-2] == '\n' {
+		lineStart--
+	}
+
+	return content[:lineStart] + content[endOfEndMarker:], true
+}
+
 // HookStatus represents the status of a single git hook
 type HookStatus struct {
 	Name      string
@@ -113,13 +204,22 @@ func getHookVersion(path string) (hookVersionInfo, error) {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-	// Read first few lines looking for version marker or bd hook marker
-	lineCount := 0
+	// Read the entire file to support section markers anywhere (GH#1380)
 	var content strings.Builder
-	for scanner.Scan() && lineCount < 15 {
+	for scanner.Scan() {
 		line := scanner.Text()
 		content.WriteString(line)
 		content.WriteString("\n")
+		// Check for section marker (GH#1380) — can appear anywhere in the file
+		if strings.HasPrefix(line, hookSectionBeginPrefix) {
+			// Extract version from "# --- BEGIN BEADS INTEGRATION v0.56.1 ---"
+			after := strings.TrimPrefix(line, hookSectionBeginPrefix)
+			after = strings.TrimSpace(after)
+			after = strings.TrimPrefix(after, "v")
+			after = strings.TrimSuffix(after, "---")
+			version := strings.TrimSpace(after)
+			return hookVersionInfo{Version: version, IsShim: true, IsBdHook: true}, nil
+		}
 		// Check for thin shim marker first
 		if strings.HasPrefix(line, shimVersionPrefix) {
 			version := strings.TrimSpace(strings.TrimPrefix(line, shimVersionPrefix))
@@ -130,7 +230,6 @@ func getHookVersion(path string) (hookVersionInfo, error) {
 			version := strings.TrimSpace(strings.TrimPrefix(line, hookVersionPrefix))
 			return hookVersionInfo{Version: version, IsShim: false, IsBdHook: true}, nil
 		}
-		lineCount++
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -348,47 +447,50 @@ func installHooksWithOptions(embeddedHooks map[string]string, force bool, shared
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
-	// Install each hook
-	for hookName, hookContent := range embeddedHooks {
+	// Install each hook using section markers (GH#1380).
+	// Only the content between markers is managed by beads; user content
+	// outside the markers is preserved across reinstalls and upgrades.
+	for hookName := range embeddedHooks {
 		hookPath := filepath.Join(hooksDir, hookName)
+		section := generateHookSection(hookName)
 
-		// Check if hook already exists
-		if _, err := os.Stat(hookPath); err == nil {
-			if chain {
-				// Chain mode - rename to .old so bd hooks run can call it
-				// But skip if existing hook is already a bd hook (shim or inline) - renaming it would
-				// cause infinite recursion or destroy user's original hook. See: GH#843, GH#1120
-				versionInfo, verr := getHookVersion(hookPath)
-				if verr != nil || !versionInfo.IsBdHook {
-					// Not a bd hook - safe to rename for chaining
-					oldPath := hookPath + ".old"
-					// Safety check: don't overwrite existing .old file (GH#1120)
-					// This prevents destroying user's original hook if bd hooks install --chain
-					// is run multiple times or after bd init already created .old
-					if _, oldErr := os.Stat(oldPath); oldErr == nil {
-						// .old already exists - the user's original hook is there
-						// Just overwrite the current hook without renaming
-						// (the existing .old will be chained by the new hook)
-					} else {
-						if err := os.Rename(hookPath, oldPath); err != nil {
-							return fmt.Errorf("failed to rename %s to .old for chaining: %w", hookName, err)
-						}
-					}
-				}
-				// If it IS a bd hook, just overwrite it (no rename needed)
-			} else if !force {
-				// Default mode - back it up
-				backupPath := hookPath + ".backup"
-				if err := os.Rename(hookPath, backupPath); err != nil {
-					return fmt.Errorf("failed to backup %s: %w", hookName, err)
+		// Read existing hook file (if any)
+		// #nosec G304 -- hook path constrained to hooks directory
+		existing, readErr := os.ReadFile(hookPath)
+
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return fmt.Errorf("failed to read %s: %w", hookName, readErr)
+		}
+
+		var newContent string
+		if os.IsNotExist(readErr) {
+			// No existing file — create with shebang + section
+			newContent = "#!/usr/bin/env sh\n" + section
+		} else {
+			existingStr := string(existing)
+			// Check if file already has section markers
+			if strings.Contains(existingStr, hookSectionBeginPrefix) {
+				// Update only the section between markers
+				newContent = injectHookSection(existingStr, section)
+			} else {
+				// Check if this is a legacy bd hook (shim or inline)
+				versionInfo, _ := getHookVersion(hookPath)
+				if versionInfo.IsBdHook {
+					// Legacy bd hook — replace entire file with section format
+					newContent = "#!/usr/bin/env sh\n" + section
+				} else {
+					// Non-bd hook — inject section (preserving existing content)
+					newContent = injectHookSection(existingStr, section)
 				}
 			}
-			// If force is set and not chaining, we just overwrite
 		}
+
+		// Normalize line endings to LF
+		newContent = strings.ReplaceAll(newContent, "\r\n", "\n")
 
 		// Write hook file
 		// #nosec G306 -- git hooks must be executable for Git to run them
-		if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
+		if err := os.WriteFile(hookPath, []byte(newContent), 0755); err != nil {
 			return fmt.Errorf("failed to write %s: %w", hookName, err)
 		}
 	}
@@ -447,24 +549,48 @@ func uninstallHooks() error {
 	for _, hookName := range hookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
 
-		// Check if hook exists
-		if _, err := os.Stat(hookPath); os.IsNotExist(err) {
+		// #nosec G304 -- hook path constrained to .git/hooks directory
+		content, err := os.ReadFile(hookPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("failed to read %s: %w", hookName, err)
+		}
+
+		// Try to remove only the beads section (GH#1380)
+		newContent, found := removeHookSection(string(content))
+		if found {
+			remaining := strings.TrimSpace(newContent)
+			if remaining == "" || remaining == "#!/usr/bin/env sh" || remaining == "#!/bin/sh" {
+				// Only shebang left — remove the file entirely
+				if err := os.Remove(hookPath); err != nil {
+					return fmt.Errorf("failed to remove %s: %w", hookName, err)
+				}
+			} else {
+				// #nosec G306 -- git hooks must be executable
+				if err := os.WriteFile(hookPath, []byte(newContent), 0755); err != nil {
+					return fmt.Errorf("failed to write %s: %w", hookName, err)
+				}
+			}
 			continue
 		}
 
-		// Remove hook
-		if err := os.Remove(hookPath); err != nil {
-			return fmt.Errorf("failed to remove %s: %w", hookName, err)
-		}
-
-		// Restore backup if exists
-		backupPath := hookPath + ".backup"
-		if _, err := os.Stat(backupPath); err == nil {
-			if err := os.Rename(backupPath, hookPath); err != nil {
-				// Non-fatal - just warn
-				fmt.Fprintf(os.Stderr, "Warning: failed to restore backup for %s: %v\n", hookName, err)
+		// No section markers — check if it's a legacy bd hook (remove entire file)
+		versionInfo, verr := getHookVersion(hookPath)
+		if verr == nil && versionInfo.IsBdHook {
+			if err := os.Remove(hookPath); err != nil {
+				return fmt.Errorf("failed to remove %s: %w", hookName, err)
+			}
+			// Restore backup if exists
+			backupPath := hookPath + ".backup"
+			if _, err := os.Stat(backupPath); err == nil {
+				if err := os.Rename(backupPath, hookPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to restore backup for %s: %v\n", hookName, err)
+				}
 			}
 		}
+		// Not a bd hook at all — leave it alone
 	}
 
 	return nil

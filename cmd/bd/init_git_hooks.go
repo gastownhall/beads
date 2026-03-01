@@ -33,16 +33,26 @@ func hooksInstalled() bool {
 		return false
 	}
 
-	// Verify they're bd hooks by checking for signature comment
+	// Verify they're bd hooks by checking for signature comment or section marker
 	// #nosec G304 - controlled path from git directory
 	preCommitContent, err := os.ReadFile(preCommit)
-	if err != nil || !strings.Contains(string(preCommitContent), "bd (beads) pre-commit hook") {
+	if err != nil {
+		return false
+	}
+	preCommitStr := string(preCommitContent)
+	if !strings.Contains(preCommitStr, "bd (beads) pre-commit hook") &&
+		!strings.Contains(preCommitStr, hookSectionBeginPrefix) {
 		return false
 	}
 
 	// #nosec G304 - controlled path from git directory
 	postMergeContent, err := os.ReadFile(postMerge)
-	if err != nil || !strings.Contains(string(postMergeContent), "bd (beads) post-merge hook") {
+	if err != nil {
+		return false
+	}
+	postMergeStr := string(postMergeContent)
+	if !strings.Contains(postMergeStr, "bd (beads) post-merge hook") &&
+		!strings.Contains(postMergeStr, hookSectionBeginPrefix) {
 		return false
 	}
 
@@ -105,7 +115,8 @@ func detectExistingHooks() []hookInfo {
 		if err == nil {
 			hooks[i].exists = true
 			hooks[i].content = string(content)
-			hooks[i].isBdHook = strings.Contains(hooks[i].content, "bd (beads)")
+			hooks[i].isBdHook = strings.Contains(hooks[i].content, "bd (beads)") ||
+				strings.Contains(hooks[i].content, hookSectionBeginPrefix)
 			// Only detect pre-commit/prek framework if not a bd hook
 			// Use regex for consistency with DetectActiveHookManager patterns
 			if !hooks[i].isBdHook {
@@ -191,10 +202,12 @@ func installGitHooks() error {
 	return nil
 }
 
-// buildPreCommitHook generates the pre-commit hook content
+// buildPreCommitHook generates the pre-commit hook content using section markers (GH#1380).
+// If chainHooks is true, chained hooks (.old) are called before the beads section.
 func buildPreCommitHook(chainHooks bool, existingHooks []hookInfo) string {
+	section := generateHookSection("pre-commit")
+
 	if chainHooks {
-		// Find existing pre-commit hook (already renamed to .old by caller)
 		var existingPreCommit string
 		for _, hook := range existingHooks {
 			if hook.name == "pre-commit" && hook.exists && !hook.isBdHook {
@@ -203,58 +216,26 @@ func buildPreCommitHook(chainHooks bool, existingHooks []hookInfo) string {
 			}
 		}
 
-		return `#!/bin/sh
-# bd-hooks-version: ` + Version + `
-#
-# bd (beads) pre-commit hook (chained)
-#
-# This hook chains bd functionality with your existing pre-commit hook.
-
-# Run existing hook first
-if [ -x "` + existingPreCommit + `" ]; then
-    "` + existingPreCommit + `" "$@"
-    EXIT_CODE=$?
-    if [ $EXIT_CODE -ne 0 ]; then
-        exit $EXIT_CODE
-    fi
-fi
-
-` + preCommitHookBody()
+		return "#!/bin/sh\n" +
+			"# Run existing hook first\n" +
+			"if [ -x \"" + existingPreCommit + "\" ]; then\n" +
+			"    \"" + existingPreCommit + "\" \"$@\"\n" +
+			"    EXIT_CODE=$?\n" +
+			"    if [ $EXIT_CODE -ne 0 ]; then\n" +
+			"        exit $EXIT_CODE\n" +
+			"    fi\n" +
+			"fi\n\n" +
+			section
 	}
 
-	return `#!/bin/sh
-# bd-hooks-version: ` + Version + `
-#
-# bd (beads) pre-commit hook
-#
-# This hook ensures that any pending bd issue changes are synced
-# before the commit is created.
-
-` + preCommitHookBody()
+	return "#!/bin/sh\n" + section
 }
 
-// preCommitHookBody returns the common pre-commit hook logic.
-// Delegates to 'bd hooks run pre-commit' which handles Dolt export
-// and sync-branch routing without lock deadlocks.
-func preCommitHookBody() string {
-	return `# Check if bd is available
-if ! command -v bd >/dev/null 2>&1; then
-    echo "Warning: bd command not found, skipping pre-commit flush" >&2
-    exit 0
-fi
-
-# Delegate to bd hooks run pre-commit.
-# The Go code handles Dolt export in-process (no lock deadlocks)
-# and sync-branch routing.
-exec bd hooks run pre-commit "$@"
-`
-}
-
-// buildPostMergeHook generates the post-merge hook content.
-// With the Dolt backend, post-merge only needs to run chained hooks.
+// buildPostMergeHook generates the post-merge hook content using section markers (GH#1380).
 func buildPostMergeHook(chainHooks bool, existingHooks []hookInfo) string {
+	section := generateHookSection("post-merge")
+
 	if chainHooks {
-		// Find existing post-merge hook (already renamed to .old by caller)
 		var existingPostMerge string
 		for _, hook := range existingHooks {
 			if hook.name == "post-merge" && hook.exists && !hook.isBdHook {
@@ -263,37 +244,19 @@ func buildPostMergeHook(chainHooks bool, existingHooks []hookInfo) string {
 			}
 		}
 
-		return `#!/bin/sh
-# bd-hooks-version: ` + Version + `
-#
-# bd (beads) post-merge hook (chained)
-#
-# This hook chains bd functionality with your existing post-merge hook.
-# Dolt backend handles sync internally.
-
-# Run existing hook first
-if [ -x "` + existingPostMerge + `" ]; then
-    "` + existingPostMerge + `" "$@"
-    EXIT_CODE=$?
-    if [ $EXIT_CODE -ne 0 ]; then
-        exit $EXIT_CODE
-    fi
-fi
-
-exit 0
-`
+		return "#!/bin/sh\n" +
+			"# Run existing hook first\n" +
+			"if [ -x \"" + existingPostMerge + "\" ]; then\n" +
+			"    \"" + existingPostMerge + "\" \"$@\"\n" +
+			"    EXIT_CODE=$?\n" +
+			"    if [ $EXIT_CODE -ne 0 ]; then\n" +
+			"        exit $EXIT_CODE\n" +
+			"    fi\n" +
+			"fi\n\n" +
+			section
 	}
 
-	return `#!/bin/sh
-# bd-hooks-version: ` + Version + `
-#
-# bd (beads) post-merge hook
-#
-# Dolt backend handles sync internally, so this hook is a no-op.
-# It exists to support chaining with user hooks.
-
-exit 0
-`
+	return "#!/bin/sh\n" + section
 }
 
 // installJJHooks installs simplified git hooks for colocated jujutsu+git repos.
@@ -366,11 +329,12 @@ func installJJHooks() error {
 	return nil
 }
 
-// buildJJPreCommitHook generates the pre-commit hook content for jujutsu repos.
-// jj's model is simpler: no staging needed, changes flow into the working copy automatically.
+// buildJJPreCommitHook generates the pre-commit hook for jujutsu repos using section markers (GH#1380).
 func buildJJPreCommitHook(chainHooks bool, existingHooks []hookInfo) string {
+	// jj uses the same shim as git — bd hooks run handles the differences internally
+	section := generateHookSection("pre-commit")
+
 	if chainHooks {
-		// Find existing pre-commit hook (already renamed to .old by caller)
 		var existingPreCommit string
 		for _, hook := range existingHooks {
 			if hook.name == "pre-commit" && hook.exists && !hook.isBdHook {
@@ -379,76 +343,19 @@ func buildJJPreCommitHook(chainHooks bool, existingHooks []hookInfo) string {
 			}
 		}
 
-		return `#!/bin/sh
-# bd-hooks-version: ` + Version + `
-#
-# bd (beads) pre-commit hook (chained, jujutsu mode)
-#
-# This hook chains bd functionality with your existing pre-commit hook.
-# Simplified for jujutsu: no staging needed, jj auto-commits working copy.
-
-# Run existing hook first
-if [ -x "` + existingPreCommit + `" ]; then
-    "` + existingPreCommit + `" "$@"
-    EXIT_CODE=$?
-    if [ $EXIT_CODE -ne 0 ]; then
-        exit $EXIT_CODE
-    fi
-fi
-
-` + jjPreCommitHookBody()
+		return "#!/bin/sh\n" +
+			"# Run existing hook first\n" +
+			"if [ -x \"" + existingPreCommit + "\" ]; then\n" +
+			"    \"" + existingPreCommit + "\" \"$@\"\n" +
+			"    EXIT_CODE=$?\n" +
+			"    if [ $EXIT_CODE -ne 0 ]; then\n" +
+			"        exit $EXIT_CODE\n" +
+			"    fi\n" +
+			"fi\n\n" +
+			section
 	}
 
-	return `#!/bin/sh
-# bd-hooks-version: ` + Version + `
-#
-# bd (beads) pre-commit hook (jujutsu mode)
-#
-# This hook ensures that any pending bd issue changes are flushed
-# before the commit.
-#
-# Simplified for jujutsu: no staging needed, jj auto-commits working copy changes.
-
-` + jjPreCommitHookBody()
-}
-
-// jjPreCommitHookBody returns the pre-commit hook logic for jujutsu repos.
-// Key difference from git: no git add needed, jj handles working copy automatically.
-// Still needs worktree handling since colocated jj+git repos can use git worktrees.
-func jjPreCommitHookBody() string {
-	return `# Check if bd is available
-if ! command -v bd >/dev/null 2>&1; then
-    echo "Warning: bd command not found, skipping pre-commit flush" >&2
-    exit 0
-fi
-
-# Check if we're in a bd workspace
-# For worktrees, .beads is in the main repository root, not the worktree
-BEADS_DIR=""
-if git rev-parse --git-dir >/dev/null 2>&1; then
-    # Check if we're in a worktree
-    if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
-        # Worktree: .beads is in main repo root
-        MAIN_REPO_ROOT="$(git rev-parse --git-common-dir)"
-        MAIN_REPO_ROOT="$(dirname "$MAIN_REPO_ROOT")"
-        if [ -d "$MAIN_REPO_ROOT/.beads" ]; then
-            BEADS_DIR="$MAIN_REPO_ROOT/.beads"
-        fi
-    else
-        # Regular repo: check current directory
-        if [ -d .beads ]; then
-            BEADS_DIR=".beads"
-        fi
-    fi
-fi
-
-if [ -z "$BEADS_DIR" ]; then
-    exit 0
-fi
-
-# Dolt handles persistence directly — no flush needed.
-exit 0
-`
+	return "#!/bin/sh\n" + section
 }
 
 // printJJAliasInstructions prints setup instructions for pure jujutsu repos.
