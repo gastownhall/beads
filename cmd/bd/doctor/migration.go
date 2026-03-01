@@ -28,6 +28,29 @@ func DetectPendingMigrations(path string) []PendingMigration {
 		return pending
 	}
 
+	hookPlan, err := PlanHookMigration(path)
+	if err == nil && hookPlan.IsGitRepo && hookPlan.NeedsMigrationCount > 0 {
+		description := fmt.Sprintf("Git hook migration needed for %d hook(s)", hookPlan.NeedsMigrationCount)
+		priority := 2
+		if hookPlan.BrokenMarkerCount > 0 {
+			description = fmt.Sprintf(
+				"%s (%d with broken markers)",
+				description,
+				hookPlan.BrokenMarkerCount,
+			)
+			// Phase 1 is planning-only. Keep this at warning level for now.
+			// TODO(gh-1380): raise to critical when apply mode is implemented.
+			priority = 2
+		}
+
+		pending = append(pending, PendingMigration{
+			Name:        "hooks",
+			Description: description,
+			Command:     "bd migrate hooks --dry-run",
+			Priority:    priority,
+		})
+	}
+
 	return pending
 }
 
