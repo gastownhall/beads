@@ -187,16 +187,21 @@ func classifyHookMigration(hook *HookMigrationHookPlan) {
 }
 
 func detectHookMarkerState(content string) string {
-	hasBegin := strings.Contains(content, hookMarkerBeginTag)
-	hasEnd := strings.Contains(content, hookMarkerEndTag)
+	beginCount := strings.Count(content, hookMarkerBeginTag)
+	endCount := strings.Count(content, hookMarkerEndTag)
 
 	switch {
-	case hasBegin && hasEnd:
-		return hookMarkerStateValid
-	case hasBegin || hasEnd:
+	case beginCount == 1 && endCount == 1:
+		beginIdx := strings.Index(content, hookMarkerBeginTag)
+		endIdx := strings.Index(content, hookMarkerEndTag)
+		if beginIdx < endIdx {
+			return hookMarkerStateValid
+		}
 		return hookMarkerStateBroken
-	default:
+	case beginCount == 0 && endCount == 0:
 		return hookMarkerStateNone
+	default:
+		return hookMarkerStateBroken
 	}
 }
 
