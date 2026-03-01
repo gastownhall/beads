@@ -141,6 +141,11 @@ func CheckOrphanedDependencies(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkOrphanedDependenciesDB(db)
+}
+
+// checkOrphanedDependenciesDB is the core logic for CheckOrphanedDependencies.
+func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for orphaned dependencies.
 	// Exclude external: refs — these are synthetic cross-rig tracking deps
 	// injected by the JSONL exporter and intentionally reference issues not
@@ -199,10 +204,6 @@ func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) D
 	// Follow redirect to resolve actual beads directory (bd-tvus fix)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
-	// Use SQL aggregation to find duplicates without loading all issues into memory.
-	// The old approach loaded every issue via SearchIssues which was O(n) in both
-	// time and memory — catastrophically slow on large databases (e.g., 23k+ issues
-	// took 66 seconds over MySQL wire protocol).
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
@@ -213,9 +214,17 @@ func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) D
 	}
 	defer func() { _ = store.Close() }()
 
-	// Count duplicate groups and total duplicates using SQL GROUP BY.
-	// This matches the original algorithm: group by title|description|design|acceptance_criteria|status,
-	// only for non-closed issues.
+	return checkDuplicateIssuesDB(db, gastownMode, gastownThreshold)
+}
+
+// checkDuplicateIssuesDB is the core logic for CheckDuplicateIssues, operating
+// on a *sql.DB directly. This enables fast testing with branch-per-test isolation
+// instead of per-test database creation.
+func checkDuplicateIssuesDB(db *sql.DB, gastownMode bool, gastownThreshold int) DoctorCheck {
+	// Use SQL aggregation to find duplicates without loading all issues into memory.
+	// The old approach loaded every issue via SearchIssues which was O(n) in both
+	// time and memory — catastrophically slow on large databases (e.g., 23k+ issues
+	// took 66 seconds over MySQL wire protocol).
 	query := `
 		SELECT COUNT(*) as group_count, SUM(cnt - 1) as dup_count
 		FROM (
@@ -407,6 +416,11 @@ func CheckChildParentDependencies(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkChildParentDependenciesDB(db)
+}
+
+// checkChildParentDependenciesDB is the core logic for CheckChildParentDependencies.
+func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.

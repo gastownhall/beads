@@ -4,6 +4,7 @@ package doctor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,10 +53,6 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 		thresholdDays = cfg.GetStaleClosedIssuesDays()
 	}
 
-	// Use SQL COUNT queries instead of loading all issues into memory.
-	// The old approach loaded every closed issue via SearchIssues which was
-	// catastrophically slow on large databases (57 seconds for ~23k issues
-	// over MySQL wire protocol).
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
@@ -67,6 +64,12 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkStaleClosedIssuesDB(db, thresholdDays)
+}
+
+// checkStaleClosedIssuesDB is the core logic for CheckStaleClosedIssues, operating
+// on a *sql.DB directly. This enables fast testing with branch-per-test isolation.
+func checkStaleClosedIssuesDB(db *sql.DB, thresholdDays int) DoctorCheck {
 	// If disabled (0), check for large closed issue count and warn if appropriate
 	if thresholdDays == 0 {
 		var closedCount int
@@ -93,7 +96,7 @@ func CheckStaleClosedIssues(path string) DoctorCheck {
 	// Find closed issues older than configured threshold, excluding pinned
 	cutoff := time.Now().AddDate(0, 0, -thresholdDays).Format(time.RFC3339)
 	var cleanable int
-	err = db.QueryRow(
+	err := db.QueryRow(
 		"SELECT COUNT(*) FROM issues WHERE status = 'closed' AND closed_at < ? AND (pinned = 0 OR pinned IS NULL)",
 		cutoff,
 	).Scan(&cleanable)
@@ -219,6 +222,12 @@ func CheckPersistentMolIssues(path string) DoctorCheck {
 		}
 	}
 
+	return checkPersistentMolIssuesForIssues(issues)
+}
+
+// checkPersistentMolIssuesForIssues is the core logic for CheckPersistentMolIssues,
+// operating on a slice of issues directly.
+func checkPersistentMolIssuesForIssues(issues []*types.Issue) DoctorCheck {
 	var molCount int
 	var molIDs []string
 
@@ -327,6 +336,12 @@ func checkMisclassifiedWisps(path string) DoctorCheck {
 		}
 	}
 
+	return checkMisclassifiedWispsForIssues(issues)
+}
+
+// checkMisclassifiedWispsForIssues is the core logic for checkMisclassifiedWisps,
+// operating on a slice of issues directly.
+func checkMisclassifiedWispsForIssues(issues []*types.Issue) DoctorCheck {
 	var wispCount int
 	var wispIDs []string
 
@@ -407,6 +422,12 @@ func CheckPatrolPollution(path string) DoctorCheck {
 		}
 	}
 
+	return checkPatrolPollutionForIssues(issues)
+}
+
+// checkPatrolPollutionForIssues is the core logic for CheckPatrolPollution,
+// operating on a slice of issues directly.
+func checkPatrolPollutionForIssues(issues []*types.Issue) DoctorCheck {
 	result := detectPatrolPollution(issues)
 
 	// Check thresholds

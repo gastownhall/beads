@@ -94,6 +94,29 @@ func TestCheckPhantomDatabases_Warning(t *testing.T) {
 func TestCheckPhantomDatabases_OK(t *testing.T) {
 	db := openSharedDoltForPhantom(t)
 
+	// Clean up any stray phantom databases from previous tests or test pollution.
+	// The shared test server may accumulate databases across test runs.
+	rows, err := db.Query("SHOW DATABASES")
+	if err == nil {
+		var dbNames []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err == nil {
+				dbNames = append(dbNames, name)
+			}
+		}
+		rows.Close()
+		for _, name := range dbNames {
+			if name == "beads" || name == "information_schema" || name == "mysql" || name == testSharedDB {
+				continue
+			}
+			if strings.HasPrefix(name, "beads_") || strings.HasSuffix(name, "_beads") {
+				//nolint:gosec // G202: test-only database cleanup
+				_, _ = db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", name))
+			}
+		}
+	}
+
 	// No phantom databases — only system DBs and "beads" (the configured default)
 	conn := &doltConn{db: db, cfg: nil}
 	check := checkPhantomDatabases(conn)

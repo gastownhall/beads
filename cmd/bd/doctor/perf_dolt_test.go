@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 func TestRunDoltPerformanceDiagnostics_RequiresServer(t *testing.T) {
@@ -17,7 +19,17 @@ func TestRunDoltPerformanceDiagnostics_RequiresServer(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	setupDoltTestDir(t, beadsDir)
+
+	// Write config pointing to a nonexistent database
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltServerPort = doctorTestServerPort()
+	cfg.DoltDatabase = "doctest_perf_nonexistent"
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Failed to save config: %v", err)
+	}
 
 	_, err := RunDoltPerformanceDiagnostics(tmpDir, false)
 	if err == nil {
