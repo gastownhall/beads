@@ -253,6 +253,10 @@ var listCmd = &cobra.Command{
 	Short:   "List issues",
 	Run: func(cmd *cobra.Command, args []string) {
 		status, _ := cmd.Flags().GetString("status")
+		// --state is alias for --status (desire path: bd-9h3w)
+		if status == "" {
+			status, _ = cmd.Flags().GetString("state")
+		}
 		assignee, _ := cmd.Flags().GetString("assignee")
 		issueType, _ := cmd.Flags().GetString("type")
 		issueType = utils.NormalizeIssueType(issueType) // Expand aliases (mr→merge-request, etc.)
@@ -852,6 +856,8 @@ var listCmd = &cobra.Command{
 
 func init() {
 	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
+	listCmd.Flags().String("state", "", "Alias for --status")
+	_ = listCmd.Flags().MarkHidden("state")
 	registerPriorityFlag(listCmd, "")
 	listCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	listCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
