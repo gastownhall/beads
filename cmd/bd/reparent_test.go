@@ -8,108 +8,122 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
-// TestCLI_ReparentExcludesOldParent tests that after reparenting a dotted-ID
-// child to a new parent, it no longer appears under the old parent in
-// `bd list --parent`.
+// TestCLI_ReparentDottedIDExcludesOldParent tests that after reparenting a
+// dotted-ID child to a new parent, it no longer appears under the old parent
+// in `bd list --parent`.
 //
-// This documents the decision: explicit parent-child dependencies take
-// precedence over dotted-ID prefix matching.
-func TestCLI_ReparentExcludesOldParent(t *testing.T) {
+// The bug: dotted-ID prefix matching (e.g., "parent.1" matches parent "parent")
+// continued to show the child under the old parent even after an explicit
+// parent-child dependency reparented it elsewhere.
+//
+// The fix: explicit parent-child dependencies take precedence over dotted-ID
+// prefix matching.
+func TestCLI_ReparentDottedIDExcludesOldParent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
 	tmpDir := initExecTestDB(t)
 
-	// Create parent A and child A.1 (dotted-ID convention)
+	// Create parentA — will get an auto-generated ID like "test-xxxxx"
 	parentA := createExecTestIssue(t, tmpDir, "Parent A")
 
-	// Create a second issue that looks like a dotted child of parentA
-	// We need to create it with a title, then we'll check parent filtering
-	childID := createExecTestIssue(t, tmpDir, "Child of A")
+	// Create a dotted-ID child: parentA + ".1" — this triggers prefix matching
+	dottedChildID := parentA + ".1"
+	child := createExecTestIssueWithID(t, tmpDir, "Dotted Child", dottedChildID)
+	if child != dottedChildID {
+		t.Fatalf("expected child ID %s, got %s", dottedChildID, child)
+	}
 
-	// Create parent B
+	// Create parentB
 	parentB := createExecTestIssue(t, tmpDir, "Parent B")
 
-	// Add parent-child dep: child -> parentA
-	depCmd := exec.Command(testBD, "dep", "add", childID, parentA, "--type", "parent-child")
-	depCmd.Dir = tmpDir
-	depCmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
-	if out, err := depCmd.CombinedOutput(); err != nil {
-		t.Fatalf("dep add to parentA failed: %v\n%s", err, out)
+	// Before any deps: dotted child should appear under parentA via prefix match
+	assertParentLists(t, tmpDir, parentA, dottedChildID, true,
+		"dotted child should appear under parentA via prefix match before reparenting")
+
+	// Reparent: add explicit parent-child dep to parentB
+	runBD(t, tmpDir, "dep", "add", dottedChildID, parentB, "--type", "parent-child")
+
+	// After reparenting: child should NOT appear under parentA
+	assertParentLists(t, tmpDir, parentA, dottedChildID, false,
+		"dotted child should NOT appear under old parent after reparenting to parentB")
+
+	// After reparenting: child SHOULD appear under parentB
+	assertParentLists(t, tmpDir, parentB, dottedChildID, true,
+		"dotted child should appear under new parent parentB after reparenting")
+}
+
+// createExecTestIssueWithID creates an issue with an explicit ID.
+func createExecTestIssueWithID(t *testing.T, tmpDir, title, id string) string {
+	t.Helper()
+	cmd := exec.Command(testBD, "create", title, "-p", "1", "--id", id, "--json")
+	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create with --id %s failed: %v\n%s", id, err, out)
+	}
+	jsonStart := strings.Index(string(out), "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal(out[jsonStart:], &issue); err != nil {
+		t.Fatalf("parse create JSON: %v\n%s", err, out)
+	}
+	return issue["id"].(string)
+}
+
+// runBD runs a bd command and fails the test on error.
+func runBD(t *testing.T, tmpDir string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command(testBD, args...)
+	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return out
+}
+
+// assertParentLists checks whether childID appears in `bd list --parent parentID`.
+func assertParentLists(t *testing.T, tmpDir, parentID, childID string, shouldAppear bool, msg string) {
+	t.Helper()
+	cmd := exec.Command(testBD, "list", "--parent", parentID, "--json")
+	cmd.Dir = tmpDir
+	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if shouldAppear {
+			t.Fatalf("list --parent %s failed: %v\n%s", parentID, err, out)
+		}
+		return // empty list may fail; that's fine if we expected absence
 	}
 
-	// Verify child appears under parentA
-	listCmd := exec.Command(testBD, "list", "--parent", parentA, "--json")
-	listCmd.Dir = tmpDir
-	listCmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
-	out, err := listCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("list --parent parentA failed: %v\n%s", err, out)
-	}
 	var issues []map[string]interface{}
-	json.Unmarshal(out, &issues)
+	if err := json.Unmarshal(out, &issues); err != nil {
+		// Might be empty output
+		if shouldAppear {
+			t.Fatalf("parse list JSON: %v\n%s", err, out)
+		}
+		return
+	}
+
 	found := false
 	for _, iss := range issues {
 		if iss["id"] == childID {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatalf("child %s should appear under parentA %s before reparenting", childID, parentA)
+	if shouldAppear && !found {
+		t.Errorf("%s (child=%s, parent=%s)", msg, childID, parentID)
 	}
-
-	// Reparent: remove old dep, add new dep to parentB
-	removeCmd := exec.Command(testBD, "dep", "remove", childID, parentA)
-	removeCmd.Dir = tmpDir
-	removeCmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
-	if out, err := removeCmd.CombinedOutput(); err != nil {
-		t.Fatalf("dep remove failed: %v\n%s", err, out)
-	}
-
-	addCmd := exec.Command(testBD, "dep", "add", childID, parentB, "--type", "parent-child")
-	addCmd.Dir = tmpDir
-	addCmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
-	if out, err := addCmd.CombinedOutput(); err != nil {
-		t.Fatalf("dep add to parentB failed: %v\n%s", err, out)
-	}
-
-	// Verify child NO LONGER appears under parentA
-	listCmd2 := exec.Command(testBD, "list", "--parent", parentA, "--json")
-	listCmd2.Dir = tmpDir
-	listCmd2.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
-	out2, err := listCmd2.CombinedOutput()
-	if err != nil {
-		// Empty list may exit 0 with empty JSON
-		t.Logf("list --parent parentA after reparent: %s", out2)
-	}
-	var issuesAfter []map[string]interface{}
-	json.Unmarshal(out2, &issuesAfter)
-	for _, iss := range issuesAfter {
-		if iss["id"] == childID {
-			t.Errorf("child %s should NOT appear under old parent %s after reparenting to %s", childID, parentA, parentB)
-		}
-	}
-
-	// Verify child DOES appear under parentB
-	listCmd3 := exec.Command(testBD, "list", "--parent", parentB, "--json")
-	listCmd3.Dir = tmpDir
-	listCmd3.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
-	out3, err := listCmd3.CombinedOutput()
-	if err != nil {
-		t.Fatalf("list --parent parentB failed: %v\n%s", err, out3)
-	}
-	var issuesB []map[string]interface{}
-	json.Unmarshal(out3, &issuesB)
-	foundB := false
-	for _, iss := range issuesB {
-		if iss["id"] == childID {
-			foundB = true
-		}
-	}
-	if !foundB {
-		t.Errorf("child %s should appear under new parent %s after reparenting", childID, parentB)
+	if !shouldAppear && found {
+		t.Errorf("%s (child=%s, parent=%s)", msg, childID, parentID)
 	}
 }
