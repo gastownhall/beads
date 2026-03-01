@@ -53,4 +53,3 @@ func DoltContainerPort() string { return "" }
 
 // TerminateDoltContainer is a no-op on Windows.
 func TerminateDoltContainer() {}
-

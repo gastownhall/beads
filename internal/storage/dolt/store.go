@@ -70,13 +70,13 @@ func isTestDatabaseName(name string) bool {
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
-	db       *sql.DB
-	dbPath   string       // Path to Dolt database directory
-	closed   atomic.Bool  // Tracks whether Close() has been called
-	connStr  string       // Connection string for reconnection
-	mu       sync.RWMutex // Protects concurrent access
-	readOnly      bool   // True if opened in read-only mode
-	credentialKey []byte // Random encryption key for federation credentials
+	db            *sql.DB
+	dbPath        string       // Path to Dolt database directory
+	closed        atomic.Bool  // Tracks whether Close() has been called
+	connStr       string       // Connection string for reconnection
+	mu            sync.RWMutex // Protects concurrent access
+	readOnly      bool         // True if opened in read-only mode
+	credentialKey []byte       // Random encryption key for federation credentials
 
 	// Per-invocation caches (lifetime = DoltStore lifetime)
 	customStatusCache  []string        // cached result of GetCustomStatuses

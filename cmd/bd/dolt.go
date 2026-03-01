@@ -649,7 +649,7 @@ var doltRemoteAddCmd = &cobra.Command{
 				// Non-fatal: SQL remote was added successfully
 				fmt.Fprintf(os.Stderr, "Warning: SQL remote added but CLI remote failed: %v\n", err)
 				fmt.Fprintf(os.Stderr, "Run: cd %s && dolt remote add %s %s\n",
-				doltutil.ShellQuote(dbPath), doltutil.ShellQuote(name), doltutil.ShellQuote(url))
+					doltutil.ShellQuote(dbPath), doltutil.ShellQuote(name), doltutil.ShellQuote(url))
 			}
 		}
 
@@ -831,7 +831,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 				cliRemoveFailed = true
 				fmt.Fprintf(os.Stderr, "Warning: SQL remote removed but CLI remote failed: %v\n", err)
 				fmt.Fprintf(os.Stderr, "Run: cd %s && dolt remote remove %s\n",
-				doltutil.ShellQuote(dbPath), doltutil.ShellQuote(name))
+					doltutil.ShellQuote(dbPath), doltutil.ShellQuote(name))
 			}
 		}
 

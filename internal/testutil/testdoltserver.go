@@ -258,4 +258,3 @@ func DoltContainerPort() string {
 func TerminateDoltContainer() {
 	terminateSharedContainer()
 }
-
