@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -103,7 +104,7 @@ func handleToDoltMigration(dryRun bool, autoYes bool) {
 		Path:            doltPath,
 		Database:        dbName,
 		CreateIfMissing: true, // migration creates a new Dolt database
-		AutoStart:       os.Getenv("GT_ROOT") == "" && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
+		AutoStart:       !doltserver.IsDaemonManaged() && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
 	})
 	if err != nil {
 		exitWithError("dolt_create_failed", err.Error(), "")
