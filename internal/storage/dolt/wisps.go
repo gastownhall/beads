@@ -324,22 +324,20 @@ func (s *DoltStore) createWisp(ctx context.Context, issue *types.Issue, actor st
 // getWisp retrieves an issue from the wisps table.
 func (s *DoltStore) getWisp(ctx context.Context, id string) (*types.Issue, error) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	issue, err := scanIssueFromTable(ctx, s.db, "wisps", id)
 	if err != nil {
-		s.mu.RUnlock()
 		return nil, err
 	}
-	if issue != nil {
-		labels, err := s.getWispLabels(ctx, id)
-		s.mu.RUnlock()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get wisp labels: %w", err)
-		}
-		issue.Labels = labels
-		return issue, nil
+	if issue == nil {
+		return nil, nil
 	}
-	s.mu.RUnlock()
-	return nil, nil
+	labels, err := s.getWispLabels(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get wisp labels: %w", err)
+	}
+	issue.Labels = labels
+	return issue, nil
 }
 
 // getWispLabels retrieves labels from the wisp_labels table.
