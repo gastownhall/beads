@@ -473,6 +473,14 @@ environment variable.`,
 				// Non-fatal - continue anyway
 			}
 
+			// In stealth mode, persist no-git-ops: true so bd prime
+			// automatically uses stealth session-close protocol (GH#2159)
+			if stealth {
+				if err := config.SaveConfigValue("no-git-ops", true, beadsDir); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to set no-git-ops in config: %v\n", err)
+				}
+			}
+
 			// Create README.md
 			if err := createReadme(beadsDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create README.md: %v\n", err)
