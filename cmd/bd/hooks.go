@@ -421,6 +421,7 @@ func installHooks(embeddedHooks map[string]string, force bool, shared bool, chai
 	return installHooksWithOptions(embeddedHooks, force, shared, chain, false)
 }
 
+//nolint:unparam // force and chain kept for CLI flag compatibility; section markers make them no-ops
 func installHooksWithOptions(embeddedHooks map[string]string, force bool, shared bool, chain bool, beadsHooks bool) error {
 	var hooksDir string
 	if beadsHooks {

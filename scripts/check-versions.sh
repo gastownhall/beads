@@ -56,7 +56,7 @@ check_version "npm-package/package.json" \
     "npm package.json"
 
 check_version "cmd/bd/templates/hooks/pre-commit" \
-    "$(grep '# bd-hooks-version:' cmd/bd/templates/hooks/pre-commit 2>/dev/null | sed 's/.*: //')" \
+    "$(grep '# --- BEGIN BEADS INTEGRATION' cmd/bd/templates/hooks/pre-commit 2>/dev/null | sed 's/.*INTEGRATION v\([^ ]*\) .*/\1/')" \
     "Hook templates"
 
 echo ""
