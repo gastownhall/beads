@@ -20,6 +20,7 @@ var showCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		showThread, _ := cmd.Flags().GetBool("thread")
 		shortMode, _ := cmd.Flags().GetBool("short")
+		longMode, _ := cmd.Flags().GetBool("long")
 		showRefs, _ := cmd.Flags().GetBool("refs")
 		showChildren, _ := cmd.Flags().GetBool("children")
 		asOfRef, _ := cmd.Flags().GetString("as-of")
@@ -313,6 +314,11 @@ var showCmd = &cobra.Command{
 				}
 			}
 
+			// Long mode: show all extended fields
+			if longMode {
+				fmt.Print(formatIssueLongExtras(issue, formatTime))
+			}
+
 			fmt.Println()
 			result.Close() // Close routed storage after each iteration
 		}
@@ -343,6 +349,7 @@ var showCmd = &cobra.Command{
 func init() {
 	showCmd.Flags().Bool("thread", false, "Show full conversation thread (for messages)")
 	showCmd.Flags().Bool("short", false, "Show compact one-line output per issue")
+	showCmd.Flags().Bool("long", false, "Show all available fields (extended metadata, agent identity, gate fields, etc.)")
 	showCmd.Flags().Bool("refs", false, "Show issues that reference this issue (reverse lookup)")
 	showCmd.Flags().Bool("children", false, "Show only the children of this issue")
 	showCmd.Flags().String("as-of", "", "Show issue as it existed at a specific commit hash or branch (requires Dolt)")

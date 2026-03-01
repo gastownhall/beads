@@ -204,6 +204,9 @@ bd dep tree <id>
 
 # Get issue details (supports multiple IDs)
 bd show <id> [<id>...] --json
+
+# Show all available fields (extended metadata, agent identity, gate fields, etc.)
+bd show <id> --long
 ```
 
 ### Comments
