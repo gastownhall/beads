@@ -410,9 +410,9 @@ var listCmd = &cobra.Command{
 			filter.Status = &s
 		}
 
-		// Default to non-closed issues unless --all or explicit --status (GH#788)
-		if status == "" && !allFlag && !readyFlag {
-			filter.ExcludeStatus = []types.Status{types.StatusClosed}
+		// Default to non-closed/non-pinned issues unless --all, --pinned, or explicit --status (GH#788, bd-uhcg)
+		if status == "" && !allFlag && !readyFlag && !pinnedFlag {
+			filter.ExcludeStatus = []types.Status{types.StatusClosed, types.StatusPinned}
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
@@ -560,7 +560,9 @@ var listCmd = &cobra.Command{
 		if pinnedFlag {
 			pinned := true
 			filter.Pinned = &pinned
-		} else if noPinnedFlag {
+		} else if noPinnedFlag || (status != "pinned" && !allFlag) {
+			// Exclude pinned beads by default — they are permanent references,
+			// not actionable work items. Use --pinned or --all to see them. (bd-uhcg)
 			pinned := false
 			filter.Pinned = &pinned
 		}

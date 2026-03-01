@@ -785,6 +785,59 @@ func TestSearchIssues_StatusFilter(t *testing.T) {
 	}
 }
 
+func TestSearchIssues_ExcludesPinnedByDefault(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	regular := &types.Issue{
+		ID:        "si-reg",
+		Title:     "Regular Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	pinned := &types.Issue{
+		ID:        "si-pinned",
+		Title:     "Pinned Reference",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Pinned:    true,
+	}
+
+	for _, iss := range []*types.Issue{regular, pinned} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	// Filter with pinned=false (as bd list now does by default) should exclude pinned beads
+	openStatus := types.StatusOpen
+	notPinned := false
+	results, err := store.SearchIssues(ctx, "", types.IssueFilter{Status: &openStatus, Pinned: &notPinned})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, r := range results {
+		if r.ID == pinned.ID {
+			t.Error("pinned issue should not appear when Pinned filter is false")
+		}
+	}
+	found := false
+	for _, r := range results {
+		if r.ID == regular.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("regular issue should appear when Pinned filter is false")
+	}
+}
+
 func TestSearchIssues_PriorityFilter(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
