@@ -86,7 +86,7 @@ func CheckIDFormat(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Issue IDs",
 		Status:  StatusOK,
-		Message: "hash-based ✓",
+		Message: "sequential (legacy)",
 	}
 }
 
@@ -344,7 +344,7 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 			Name:    "Repo Fingerprint",
 			Status:  StatusError,
 			Message: "Database belongs to different repository",
-			Detail:  fmt.Sprintf("stored: %s, current: %s", storedRepoID[:8], currentRepoID[:8]),
+			Detail:  fmt.Sprintf("stored: %s, current: %s", truncateID(storedRepoID), truncateID(currentRepoID)),
 			Fix:     "Run 'bd migrate --update-repo-id' if URL changed, or 'rm -rf .beads && bd init' if wrong database",
 		}
 	}
@@ -352,11 +352,19 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Repo Fingerprint",
 		Status:  StatusOK,
-		Message: fmt.Sprintf("Verified (%s)", currentRepoID[:8]),
+		Message: fmt.Sprintf("Verified (%s)", truncateID(currentRepoID)),
 	}
 }
 
 // Helper functions
+
+// truncateID safely truncates an ID to at most 8 characters for display.
+func truncateID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
 
 // DetectHashBasedIDs uses multiple heuristics to determine if the database uses hash-based IDs.
 // This is more robust than checking a single ID's format, since base36 hash IDs can be all-numeric.

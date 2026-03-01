@@ -399,3 +399,146 @@ func TestCheckDuplicateIssues_ZeroDuplicatesNullHandling(t *testing.T) {
 		t.Errorf("Message = %q, want 'No duplicate issues'", check.Message)
 	}
 }
+
+// TestCheckChildParentDependenciesDB_NoDeps verifies OK when no dependencies exist.
+func TestCheckChildParentDependenciesDB_NoDeps(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	// Create a parent issue and child issue with no dependencies
+	parent := &types.Issue{Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+
+	check := checkChildParentDependenciesDB(store.DB())
+
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if check.Message != "No child→parent dependencies" {
+		t.Errorf("Message = %q, want %q", check.Message, "No child→parent dependencies")
+	}
+}
+
+// TestCheckChildParentDependenciesDB_BlockingDetected verifies warning when
+// a child issue has a blocking dependency on its parent (deadlock pattern).
+func TestCheckChildParentDependenciesDB_BlockingDetected(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	// Create parent and child issues
+	parent := &types.Issue{Title: "Parent epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+
+	child := &types.Issue{Title: "Child task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child: %v", err)
+	}
+
+	// Set up child→parent blocking dependency via raw SQL.
+	// The child ID must start with parent ID + "." to trigger the check.
+	db := store.DB()
+	childID := parent.ID + ".1"
+
+	// Insert child issue with hierarchical ID
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
+		 VALUES (?, 'Hierarchical child', '', '', '', '', 'open', 2, 'task', NOW(), NOW())`,
+		childID)
+	if err != nil {
+		t.Fatalf("Failed to insert child: %v", err)
+	}
+
+	// Add blocking dependency: child depends on parent
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?, ?, 'blocks', NOW(), 'test')`,
+		childID, parent.ID)
+	if err != nil {
+		t.Fatalf("Failed to insert dependency: %v", err)
+	}
+
+	check := checkChildParentDependenciesDB(db)
+
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if check.Message == "" {
+		t.Error("Message should not be empty")
+	}
+}
+
+// TestCheckChildParentDependenciesDB_NonBlockingIgnored verifies that
+// parent-child type dependencies (structural hierarchy) are NOT flagged.
+func TestCheckChildParentDependenciesDB_NonBlockingIgnored(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+
+	db := store.DB()
+	childID := parent.ID + ".1"
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
+		 VALUES (?, 'Hierarchical child', '', '', '', '', 'open', 2, 'task', NOW(), NOW())`,
+		childID)
+	if err != nil {
+		t.Fatalf("Failed to insert child: %v", err)
+	}
+
+	// Add parent-child type dependency (NOT blocking — should be ignored)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?, ?, 'parent-child', NOW(), 'test')`,
+		childID, parent.ID)
+	if err != nil {
+		t.Fatalf("Failed to insert dependency: %v", err)
+	}
+
+	check := checkChildParentDependenciesDB(db)
+
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q (parent-child type should be ignored)", check.Status, StatusOK)
+	}
+}
+
+// TestCheckTestPollution_NoTestIssues verifies OK when no test issues exist.
+func TestCheckTestPollution_NoTestIssues(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckTestPollution(tmpDir)
+
+	// Without a database, should return N/A
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+}
+
+// TestCheckGitConflicts_DoltBackend verifies CheckGitConflicts returns N/A
+// for Dolt backend (Dolt handles conflicts natively).
+func TestCheckGitConflicts_DoltBackend(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default backend is Dolt when no config exists
+	check := CheckGitConflicts(tmpDir)
+
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if check.Message != "N/A (Dolt backend handles conflicts natively)" {
+		t.Errorf("Message = %q, want %q", check.Message, "N/A (Dolt backend handles conflicts natively)")
+	}
+}

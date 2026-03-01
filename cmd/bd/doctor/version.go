@@ -156,6 +156,16 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 		currentParts := ParseVersionParts(currentVersion)
 		lastParts := ParseVersionParts(lastVersion)
 
+		// Guard against short version strings (e.g., "5" → [5] has no [1])
+		if len(currentParts) < 2 || len(lastParts) < 2 {
+			// Can't compare minor versions — treat as normal upgrade
+			return DoctorCheck{
+				Name:    "Version Tracking",
+				Status:  StatusOK,
+				Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
+			}
+		}
+
 		// Simple heuristic: warn if minor version is 10+ behind or major version differs by 1+
 		majorDiff := currentParts[0] - lastParts[0]
 		minorDiff := currentParts[1] - lastParts[1]

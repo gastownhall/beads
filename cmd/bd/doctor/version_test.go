@@ -1,6 +1,9 @@
 package doctor
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -115,6 +118,193 @@ func TestParseVersionParts(t *testing.T) {
 				if result[i] != tt.expected[i] {
 					t.Errorf("ParseVersionParts(%q)[%d] = %d, want %d", tt.version, i, result[i], tt.expected[i])
 				}
+			}
+		})
+	}
+}
+
+// TestCheckMetadataVersionTracking_FileNotFound verifies graceful handling when
+// .local_version file doesn't exist.
+func TestCheckMetadataVersionTracking_FileNotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckMetadataVersionTracking(tmpDir, "1.0.0")
+
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if check.Message != "Version tracking not initialized" {
+		t.Errorf("Message = %q, want %q", check.Message, "Version tracking not initialized")
+	}
+}
+
+// TestCheckMetadataVersionTracking_EmptyFile verifies handling when
+// .local_version exists but is empty.
+func TestCheckMetadataVersionTracking_EmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckMetadataVersionTracking(tmpDir, "1.0.0")
+
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if check.Message != ".local_version file is empty" {
+		t.Errorf("Message = %q, want %q", check.Message, ".local_version file is empty")
+	}
+}
+
+// TestCheckMetadataVersionTracking_InvalidVersion verifies handling of
+// malformed version strings in .local_version.
+func TestCheckMetadataVersionTracking_InvalidVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("not-a-version"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckMetadataVersionTracking(tmpDir, "1.0.0")
+
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Message, "Invalid version format") {
+		t.Errorf("Message = %q, want it to contain 'Invalid version format'", check.Message)
+	}
+}
+
+// TestCheckMetadataVersionTracking_CurrentVersion verifies OK when
+// stored version matches current.
+func TestCheckMetadataVersionTracking_CurrentVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("1.2.3"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckMetadataVersionTracking(tmpDir, "1.2.3")
+
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+}
+
+// TestCheckMetadataVersionTracking_SlightlyBehind verifies OK when
+// stored version is behind current but not too old.
+func TestCheckMetadataVersionTracking_SlightlyBehind(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("0.50.0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckMetadataVersionTracking(tmpDir, "0.55.0")
+
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if !strings.Contains(check.Message, "Version tracking active") {
+		t.Errorf("Message = %q, want it to contain 'Version tracking active'", check.Message)
+	}
+}
+
+// TestCheckMetadataVersionTracking_VeryOldMinor verifies warning when
+// stored version is 10+ minor versions behind.
+func TestCheckMetadataVersionTracking_VeryOldMinor(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("0.20.0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckMetadataVersionTracking(tmpDir, "0.55.0")
+
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Message, "very old") {
+		t.Errorf("Message = %q, want it to contain 'very old'", check.Message)
+	}
+}
+
+// TestCheckMetadataVersionTracking_VeryOldMajor verifies warning when
+// stored version has a different major version.
+func TestCheckMetadataVersionTracking_VeryOldMajor(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("0.55.0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckMetadataVersionTracking(tmpDir, "1.0.0")
+
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Message, "very old") {
+		t.Errorf("Message = %q, want it to contain 'very old'", check.Message)
+	}
+}
+
+// TestCheckMetadataVersionTracking_SinglePartVersion exercises the index panic bug
+// where ParseVersionParts returns < 2 elements, causing currentParts[1] to panic.
+// Regression test for known index-out-of-bounds in version.go:160-161.
+func TestCheckMetadataVersionTracking_SinglePartVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name           string
+		storedVersion  string
+		currentVersion string
+	}{
+		{"single part stored, multi current", "5", "6.0.0"},
+		{"multi stored, single part current", "5.0.0", "6"},
+		{"both single part", "5", "6"},
+		{"two part stored, single part current", "5.0", "6"},
+		{"single part stored, two part current", "5", "6.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(tt.storedVersion), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			// This should NOT panic. Before the fix, it would index out of bounds.
+			check := CheckMetadataVersionTracking(tmpDir, tt.currentVersion)
+
+			// We don't assert specific status — just that it doesn't panic.
+			if check.Name != "Version Tracking" {
+				t.Errorf("Name = %q, want %q", check.Name, "Version Tracking")
 			}
 		})
 	}

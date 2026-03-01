@@ -2292,3 +2292,326 @@ func TestContainsGitignorePattern(t *testing.T) {
 		}
 	}
 }
+
+// TestParseRedirectTarget verifies redirect file parsing.
+func TestParseRedirectTarget(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     string
+		expected string
+	}{
+		{"simple path", "../main-repo/.beads", "../main-repo/.beads"},
+		{"absolute path", "/home/user/project/.beads", "/home/user/project/.beads"},
+		{"with whitespace", "  ../main-repo/.beads  \n", "../main-repo/.beads"},
+		{"with comment", "# redirect target\n../main-repo/.beads", "../main-repo/.beads"},
+		{"multiple comments", "# comment1\n# comment2\n../main/.beads", "../main/.beads"},
+		{"empty", "", ""},
+		{"only comments", "# comment\n# another", ""},
+		{"only whitespace", "   \n  \n", ""},
+		{"with BOM", "\ufeff../main-repo/.beads", "../main-repo/.beads"},
+		{"BOM in middle line", "# comment\n\ufeff../path", "../path"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseRedirectTarget([]byte(tt.data))
+			if result != tt.expected {
+				t.Errorf("parseRedirectTarget(%q) = %q, want %q", tt.data, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestResolveRedirectTarget verifies redirect target path resolution.
+func TestResolveRedirectTarget(t *testing.T) {
+	tests := []struct {
+		name     string
+		beadsDir string
+		target   string
+		wantAbs  bool
+	}{
+		{"empty target", "/project/.beads", "", false},
+		{"relative path", "/project/.beads", "../other-repo/.beads", true},
+		{"absolute path", "/project/.beads", "/absolute/path/.beads", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resolveRedirectTarget(tt.beadsDir, tt.target)
+			if tt.target == "" {
+				if result != "" {
+					t.Errorf("resolveRedirectTarget(%q, %q) = %q, want empty", tt.beadsDir, tt.target, result)
+				}
+				return
+			}
+			if tt.wantAbs && !filepath.IsAbs(result) {
+				t.Errorf("resolveRedirectTarget(%q, %q) = %q, want absolute path", tt.beadsDir, tt.target, result)
+			}
+		})
+	}
+}
+
+// TestCheckRedirectTargetValid_NoRedirect verifies handling when no redirect file exists.
+func TestCheckRedirectTargetValid_NoRedirect(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create .beads dir but no redirect file
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckRedirectTargetValid()
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if check.Message != "No redirect configured" {
+		t.Errorf("Message = %q, want %q", check.Message, "No redirect configured")
+	}
+}
+
+// TestCheckRedirectTargetValid_EmptyRedirect verifies handling when redirect file is empty.
+func TestCheckRedirectTargetValid_EmptyRedirect(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckRedirectTargetValid()
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Message, "empty") {
+		t.Errorf("Message = %q, want it to contain 'empty'", check.Message)
+	}
+}
+
+// TestCheckRedirectTargetValid_NonExistentTarget verifies error when redirect points to
+// a path that doesn't exist.
+func TestCheckRedirectTargetValid_NonExistentTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("/nonexistent/path/.beads"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckRedirectTargetValid()
+	if check.Status != StatusError {
+		t.Errorf("Status = %q, want %q", check.Status, StatusError)
+	}
+	if !strings.Contains(check.Message, "does not exist") {
+		t.Errorf("Message = %q, want it to contain 'does not exist'", check.Message)
+	}
+}
+
+// TestCheckRedirectTargetValid_TargetIsFile verifies error when redirect target is
+// a file instead of a directory.
+func TestCheckRedirectTargetValid_TargetIsFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Create a file (not a directory) as the target
+	targetFile := filepath.Join(tmpDir, "target-file")
+	if err := os.WriteFile(targetFile, []byte("not a dir"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte(targetFile), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckRedirectTargetValid()
+	if check.Status != StatusError {
+		t.Errorf("Status = %q, want %q", check.Status, StatusError)
+	}
+	if !strings.Contains(check.Message, "not a directory") {
+		t.Errorf("Message = %q, want it to contain 'not a directory'", check.Message)
+	}
+}
+
+// TestCheckRedirectTargetSyncWorktree_NoRedirect verifies handling when no redirect exists.
+func TestCheckRedirectTargetSyncWorktree_NoRedirect(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckRedirectTargetSyncWorktree()
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if check.Message != "No redirect configured" {
+		t.Errorf("Message = %q, want %q", check.Message, "No redirect configured")
+	}
+}
+
+// TestCheckNoVestigialSyncWorktrees_NoRedirect verifies the check is N/A
+// when no redirect file exists.
+func TestCheckNoVestigialSyncWorktrees_NoRedirect(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckNoVestigialSyncWorktrees()
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if !strings.Contains(check.Message, "N/A") {
+		t.Errorf("Message = %q, want it to contain 'N/A'", check.Message)
+	}
+}
+
+// TestCheckNoVestigialSyncWorktrees_WithRedirectNoWorktree verifies OK
+// when redirect exists but no vestigial .beads-sync worktree.
+func TestCheckNoVestigialSyncWorktrees_WithRedirectNoWorktree(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a git repo so the git root detection works
+	cmd := exec.Command("git", "init", tmpDir)
+	if err := cmd.Run(); err != nil {
+		t.Skipf("git init failed: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Create redirect file
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("../other/.beads"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckNoVestigialSyncWorktrees()
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if check.Message != "No vestigial sync worktrees found" {
+		t.Errorf("Message = %q, want %q", check.Message, "No vestigial sync worktrees found")
+	}
+}
+
+// TestCheckNoVestigialSyncWorktrees_VestigialDetected verifies warning
+// when redirect exists AND a .beads-sync worktree exists locally.
+func TestCheckNoVestigialSyncWorktrees_VestigialDetected(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a git repo
+	cmd := exec.Command("git", "init", tmpDir)
+	if err := cmd.Run(); err != nil {
+		t.Skipf("git init failed: %v", err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origDir) }()
+
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Create redirect file
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("../other/.beads"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Create vestigial .beads-sync directory
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads-sync"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckNoVestigialSyncWorktrees()
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Message, "Vestigial") {
+		t.Errorf("Message = %q, want it to contain 'Vestigial'", check.Message)
+	}
+}
