@@ -287,14 +287,15 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 		return fmt.Errorf("failed to get peer credentials: %w", err)
 	}
 
-	// If we have credentials, set env vars with mutex protection
+	// Always hold the mutex for federation operations. Even when this peer has
+	// no credentials, a concurrent goroutine may be setting DOLT_REMOTE_USER/PASSWORD
+	// for a different peer — without the mutex, this fn() could inherit those env vars.
+	federationEnvMutex.Lock()
+	defer federationEnvMutex.Unlock()
+
 	if peer != nil && (peer.Username != "" || peer.Password != "") {
-		federationEnvMutex.Lock()
 		cleanup := setFederationCredentials(peer.Username, peer.Password)
-		defer func() {
-			cleanup()
-			federationEnvMutex.Unlock()
-		}()
+		defer cleanup()
 	}
 
 	// Execute the function
