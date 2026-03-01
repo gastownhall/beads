@@ -42,7 +42,6 @@
 {"issue_id":"bd-tpv","label":"from:overseer"}
 {"issue_id":"bd-tpv","label":"gt:message"}
 {"issue_id":"bd-tpv","label":"read"}
-{"issue_id":"bd-wisp-xqzj","label":"gt:merge-request"}
 {"issue_id":"bd-x1e","label":"plugin:rebuild-gt"}
 {"issue_id":"bd-x1e","label":"result:success"}
 {"issue_id":"bd-x1e","label":"rig:gastown"}
