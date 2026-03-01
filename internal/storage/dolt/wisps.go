@@ -1119,23 +1119,45 @@ func (s *DoltStore) getWispDependentsWithMetadata(ctx context.Context, issueID s
 }
 
 // addWispLabel adds a label to a wisp in the wisp_labels table.
-func (s *DoltStore) addWispLabel(ctx context.Context, issueID, label, _ string) error {
-	_, err := s.execContext(ctx, `
+func (s *DoltStore) addWispLabel(ctx context.Context, issueID, label, actor string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT IGNORE INTO wisp_labels (issue_id, label) VALUES (?, ?)
 	`, issueID, label)
 	if err != nil {
 		return fmt.Errorf("failed to add wisp label: %w", err)
 	}
-	return nil
+
+	if err := recordEventInTable(ctx, tx, "wisp_events", issueID, types.EventLabelAdded, actor, "Added label: "+label); err != nil {
+		return fmt.Errorf("failed to record wisp label event: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // removeWispLabel removes a label from a wisp.
-func (s *DoltStore) removeWispLabel(ctx context.Context, issueID, label string) error {
-	_, err := s.execContext(ctx, `
+func (s *DoltStore) removeWispLabel(ctx context.Context, issueID, label, actor string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(ctx, `
 		DELETE FROM wisp_labels WHERE issue_id = ? AND label = ?
 	`, issueID, label)
 	if err != nil {
 		return fmt.Errorf("failed to remove wisp label: %w", err)
 	}
-	return nil
+
+	if err := recordEventInTable(ctx, tx, "wisp_events", issueID, types.EventLabelRemoved, actor, "Removed label: "+label); err != nil {
+		return fmt.Errorf("failed to record wisp label event: %w", err)
+	}
+
+	return tx.Commit()
 }

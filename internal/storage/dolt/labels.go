@@ -32,7 +32,7 @@ func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) 
 // RemoveLabel removes a label from an issue
 func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	if s.isActiveWisp(ctx, issueID) {
-		return s.removeWispLabel(ctx, issueID, label)
+		return s.removeWispLabel(ctx, issueID, label, actor)
 	}
 	_, err := s.execContext(ctx, `
 		DELETE FROM labels WHERE issue_id = ? AND label = ?
