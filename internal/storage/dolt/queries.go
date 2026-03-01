@@ -17,20 +17,28 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	// Route ephemeral-only queries to wisps table, falling through to
 	// issues table if wisps table doesn't exist (pre-migration databases).
 	if filter.Ephemeral != nil && *filter.Ephemeral {
-		if results, err := s.searchWisps(ctx, query, filter); err == nil && len(results) > 0 {
+		results, err := s.searchWisps(ctx, query, filter)
+		if err != nil && !isTableNotExistError(err) {
+			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
+		}
+		if len(results) > 0 {
 			return results, nil
 		}
-		// Fall through: query issues table with ephemeral filter instead
+		// Fall through: wisps table doesn't exist or returned no results
 	}
 
 	// If searching by IDs that are all ephemeral, try wisps table first,
 	// falling through to the issues table if not found (handles pre-migration
 	// databases where ephemeral rows live in issues with ephemeral=1).
 	if len(filter.IDs) > 0 && allEphemeral(filter.IDs) {
-		if results, err := s.searchWisps(ctx, query, filter); err == nil && len(results) > 0 {
+		results, err := s.searchWisps(ctx, query, filter)
+		if err != nil && !isTableNotExistError(err) {
+			return nil, fmt.Errorf("search wisps (ephemeral IDs): %w", err)
+		}
+		if len(results) > 0 {
 			return results, nil
 		}
-		// Fall through: wisps table may not exist or IDs may be in issues table
+		// Fall through: wisps table doesn't exist or IDs may be in issues table
 	}
 
 	s.mu.RLock()
@@ -74,7 +82,10 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	// table and merge results. This ensures ephemeral beads appear in queries.
 	if filter.Ephemeral == nil {
 		wispResults, wispErr := s.searchWisps(ctx, query, filter)
-		if wispErr == nil && len(wispResults) > 0 {
+		if wispErr != nil && !isTableNotExistError(wispErr) {
+			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
+		}
+		if len(wispResults) > 0 {
 			// Deduplicate by ID (prefer Dolt version if exists in both)
 			seen := make(map[string]bool, len(doltResults))
 			for _, issue := range doltResults {
@@ -278,9 +289,10 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 			wispFilter.Status = &s
 		}
 		wisps, wErr := s.searchWisps(ctx, "", wispFilter)
-		if wErr == nil {
-			issues = append(issues, wisps...)
+		if wErr != nil && !isTableNotExistError(wErr) {
+			return nil, fmt.Errorf("search wisps (ready work): %w", wErr)
 		}
+		issues = append(issues, wisps...)
 	}
 
 	return issues, nil

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	mysql "github.com/go-sql-driver/mysql"
+
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -24,6 +26,15 @@ var (
 	// ErrExec indicates a database exec (INSERT/UPDATE/DELETE) failure.
 	ErrExec = errors.New("exec error")
 )
+
+// isTableNotExistError returns true if the error indicates a MySQL/Dolt
+// "table doesn't exist" error (error 1146). Used to distinguish legitimate
+// fallthrough (pre-migration databases without wisps table) from real errors
+// (timeouts, connection failures, corrupt data).
+func isTableNotExistError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1146
+}
 
 // wrapDBError wraps a database error with operation context.
 // If err is sql.ErrNoRows, it is converted to storage.ErrNotFound.
