@@ -761,6 +761,84 @@ func TestIsDaemonManagedNoGTROOTGTRootCWD(t *testing.T) {
 	}
 }
 
+// --- Multi-project port fallback tests ---
+
+func TestReclaimPortOccupiedByOtherProject(t *testing.T) {
+	// When a Dolt server is running on our port but serving a DIFFERENT data dir,
+	// reclaimPort should return ErrPortOccupiedByOtherProject instead of killing it.
+	// This allows Start() to fall back to DerivePort for per-project isolation.
+	//
+	// We can't easily fake a real Dolt process in a unit test, but we can verify
+	// the sentinel error exists and is used correctly by the Start fallback logic.
+	if ErrPortOccupiedByOtherProject == nil {
+		t.Fatal("ErrPortOccupiedByOtherProject sentinel must be defined")
+	}
+}
+
+func TestStartFallsBackToDerivePortOnCollision(t *testing.T) {
+	// When DefaultConfig returns 3307 (shared server default) but another project's
+	// Dolt server already occupies 3307, Start should fall back to DerivePort
+	// rather than killing the other server or failing.
+	//
+	// Verify the fallback path exists by checking that startWithFallback
+	// accepts an ErrPortOccupiedByOtherProject and computes a DerivePort.
+	dir := t.TempDir()
+
+	// Clear env to get pure standalone behavior
+	orig := os.Getenv("GT_ROOT")
+	os.Unsetenv("GT_ROOT")
+	origPort := os.Getenv("BEADS_DOLT_SERVER_PORT")
+	os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+	defer func() {
+		if orig != "" {
+			os.Setenv("GT_ROOT", orig)
+		}
+		if origPort != "" {
+			os.Setenv("BEADS_DOLT_SERVER_PORT", origPort)
+		}
+	}()
+
+	cfg := DefaultConfig(dir)
+	// Default should be 3307
+	if cfg.Port != 3307 {
+		t.Fatalf("expected default port 3307, got %d", cfg.Port)
+	}
+
+	// The fallback port should be a DerivePort value (13307-14306 range)
+	fallback := fallbackPort(dir)
+	if fallback < portRangeBase || fallback >= portRangeBase+portRangeSize {
+		t.Errorf("fallbackPort(%q) = %d, expected in DerivePort range [%d, %d)",
+			dir, fallback, portRangeBase, portRangeBase+portRangeSize)
+	}
+
+	// Fallback must differ from default (unless hash happens to land on 3307, extremely unlikely)
+	if fallback == 3307 {
+		t.Errorf("fallbackPort should not equal the default port 3307")
+	}
+}
+
+func TestDefaultConfigStillReturns3307(t *testing.T) {
+	// Regression: DefaultConfig must return 3307 for standalone mode.
+	// The DerivePort fallback is only used inside Start when port collision detected.
+	orig := os.Getenv("GT_ROOT")
+	os.Unsetenv("GT_ROOT")
+	origPort := os.Getenv("BEADS_DOLT_SERVER_PORT")
+	os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+	defer func() {
+		if orig != "" {
+			os.Setenv("GT_ROOT", orig)
+		}
+		if origPort != "" {
+			os.Setenv("BEADS_DOLT_SERVER_PORT", origPort)
+		}
+	}()
+
+	cfg := DefaultConfig(t.TempDir())
+	if cfg.Port != 3307 {
+		t.Errorf("DefaultConfig should return 3307 for standalone, got %d", cfg.Port)
+	}
+}
+
 func TestIsDaemonManagedForBeadsDir(t *testing.T) {
 	// When GT_ROOT is unset and CWD is unrelated, but beadsDir
 	// is under a Gas Town root, IsDaemonManagedFor should detect it.

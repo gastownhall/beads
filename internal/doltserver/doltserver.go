@@ -5,7 +5,9 @@
 // Under Gas Town (GT_ROOT set, or detected via filesystem heuristic),
 // all worktrees share a single server on port 3307.
 // In standalone mode, the default port is 3307 (configfile.DefaultDoltServerPort),
-// matching shared Homebrew Dolt servers. Users with explicit port config in
+// matching shared Homebrew Dolt servers. If another project's Dolt server already
+// occupies port 3307, Start falls back to DerivePort for per-project isolation
+// (hash-derived, range 13307–14306). Users with explicit port config in
 // metadata.json or BEADS_DOLT_SERVER_PORT env var always use that port instead.
 //
 // Anti-proliferation: the server enforces one-server-one-port. If the canonical
@@ -18,6 +20,7 @@ package doltserver
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -121,6 +124,17 @@ func maxDoltServers() int {
 	return 3
 }
 
+// ErrPortOccupiedByOtherProject is returned by reclaimPort when the canonical
+// port is held by another beads project's Dolt server (different data dir).
+// Start uses this to fall back to DerivePort for per-project isolation.
+var ErrPortOccupiedByOtherProject = fmt.Errorf("port occupied by another project's dolt server")
+
+// fallbackPort returns the DerivePort value for a beadsDir, used when the
+// default port (3307) is occupied by another project's Dolt server.
+func fallbackPort(beadsDir string) int {
+	return DerivePort(beadsDir)
+}
+
 // DerivePort computes a stable port from the beadsDir path.
 // Maps to range 13307–14306 to avoid common service ports.
 // The port is deterministic: same path always yields the same port.
@@ -195,14 +209,9 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 		return pid, nil // our server — adopt it
 	}
 
-	// It's an orphan/stale dolt server on our port — kill it
-	fmt.Fprintf(os.Stderr, "Killing orphan dolt server (PID %d) on port %d\n", pid, port)
-	_ = gracefulStop(pid, 5*time.Second)
-
-	if isPortAvailable(host, port) {
-		return 0, nil
-	}
-	return 0, fmt.Errorf("failed to reclaim port %d from orphan dolt server (PID %d)", port, pid)
+	// Another beads project's Dolt server is on this port.
+	// Don't kill it — return a sentinel so Start can fall back to DerivePort.
+	return 0, ErrPortOccupiedByOtherProject
 }
 
 // countDoltProcesses returns the number of running dolt sql-server processes.
@@ -443,13 +452,24 @@ func Start(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("opening log file: %w", err)
 	}
 
-	// Reclaim the canonical port. Kill orphan dolt servers on it; fail if
-	// a non-dolt process holds it. Never silently fall back to another port.
+	// Reclaim the canonical port. If another project's Dolt holds it,
+	// fall back to a hash-derived port for per-project isolation.
 	actualPort := cfg.Port
 	adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
 	if reclaimErr != nil {
-		_ = logFile.Close()
-		return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
+		if errors.Is(reclaimErr, ErrPortOccupiedByOtherProject) {
+			// Another project's Dolt server is on the default port —
+			// use a hash-derived port for this project instead.
+			actualPort = fallbackPort(beadsDir)
+			adoptPID, reclaimErr = reclaimPort(cfg.Host, actualPort, beadsDir)
+			if reclaimErr != nil {
+				_ = logFile.Close()
+				return nil, fmt.Errorf("cannot start dolt server on fallback port %d: %w", actualPort, reclaimErr)
+			}
+		} else {
+			_ = logFile.Close()
+			return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
+		}
 	}
 	if adoptPID > 0 {
 		// Existing server is ours (same data dir or daemon-managed) — adopt it
