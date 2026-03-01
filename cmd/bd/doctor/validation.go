@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -335,9 +336,19 @@ func CheckTestPollution(path string) DoctorCheck {
 	}
 }
 
-// CheckGitConflicts detects unresolved git merge conflict markers in JSONL files.
+// CheckGitConflicts detects unresolved git merge conflict markers in legacy JSONL files.
+// This check only applies to non-Dolt backends; Dolt handles conflicts via its own merge system.
 func CheckGitConflicts(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	backend, beadsDir := getBackendAndBeadsDir(path)
+
+	// Dolt backends handle conflicts via Dolt's merge system, not JSONL files
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:    "Git Conflicts",
+			Status:  StatusOK,
+			Message: "N/A (Dolt backend handles conflicts natively)",
+		}
+	}
 
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return DoctorCheck{
@@ -347,7 +358,7 @@ func CheckGitConflicts(path string) DoctorCheck {
 		}
 	}
 
-	// Scan all JSONL files for conflict markers
+	// Legacy: scan JSONL files for conflict markers
 	matches, err := filepath.Glob(filepath.Join(beadsDir, "*.jsonl"))
 	if err != nil || len(matches) == 0 {
 		return DoctorCheck{

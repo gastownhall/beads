@@ -189,8 +189,9 @@ func CheckAgentDocumentation(repoPath string) DoctorCheck {
 	}
 }
 
-// CheckDatabaseConfig verifies that the configured database and JSONL paths
-// match what actually exists on disk.
+// CheckDatabaseConfig verifies that the configured database path matches what
+// actually exists on disk. For Dolt backends, data is on the server. For legacy
+// backends, this checks that .db files match the configuration.
 func CheckDatabaseConfig(repoPath string) DoctorCheck {
 	beadsDir := filepath.Join(repoPath, ".beads")
 
@@ -256,7 +257,7 @@ func CheckDatabaseConfig(repoPath string) DoctorCheck {
 }
 
 // CheckFreshClone detects if this is a fresh clone that needs 'bd init'.
-// A fresh clone has JSONL with issues but no database file.
+// A fresh clone has legacy JSONL with issues but no database (Dolt or SQLite).
 func CheckFreshClone(repoPath string) DoctorCheck {
 	backend, beadsDir := getBackendAndBeadsDir(repoPath)
 
@@ -346,7 +347,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 	}
 }
 
-// countJSONLIssuesAndPrefix counts issues in a JSONL file and detects the most common prefix.
+// countJSONLIssuesAndPrefix counts issues in a legacy JSONL file and detects the most common prefix.
 func countJSONLIssuesAndPrefix(jsonlPath string) (int, string) {
 	file, err := os.Open(jsonlPath) //nolint:gosec
 	if err != nil {
@@ -358,6 +359,7 @@ func countJSONLIssuesAndPrefix(jsonlPath string) (int, string) {
 	prefixCounts := make(map[string]int)
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024) // 2MB buffer for large lines
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

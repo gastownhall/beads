@@ -430,8 +430,8 @@ func TestFixMergeDriver(t *testing.T) {
 						t.Fatalf("failed to read merge.beads.name: %v", err)
 					}
 					nameGot := strings.TrimSpace(string(nameOutput))
-					if nameGot != "Beads JSONL merge driver" {
-						t.Errorf("merge.beads.name = %q, want %q", nameGot, "Beads JSONL merge driver")
+					if nameGot != "Beads merge driver" {
+						t.Errorf("merge.beads.name = %q, want %q", nameGot, "Beads merge driver")
 					}
 				}
 			})

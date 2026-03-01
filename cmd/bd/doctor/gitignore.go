@@ -371,16 +371,26 @@ func CheckRedirectTargetValid() DoctorCheck {
 		}
 	}
 
+	// Legacy: check for Dolt database directory or SQLite .db file
+	doltDir := filepath.Join(resolvedTarget, "dolt")
+	if info, statErr := os.Stat(doltDir); statErr == nil && info.IsDir() {
+		return DoctorCheck{
+			Name:    "Redirect Target Valid",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("Redirect target valid (dolt directory): %s", resolvedTarget),
+		}
+	}
+
 	dbPath := filepath.Join(resolvedTarget, "beads.db")
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// Also check for any .db file
+		// Also check for any .db file (legacy SQLite)
 		matches, _ := filepath.Glob(filepath.Join(resolvedTarget, "*.db"))
 		if len(matches) == 0 {
 			return DoctorCheck{
 				Name:    "Redirect Target Valid",
 				Status:  StatusWarning,
 				Message: "Redirect target has no beads database",
-				Detail:  fmt.Sprintf("Target: %s", resolvedTarget),
+				Detail:  fmt.Sprintf("Target: %s (no dolt directory or .db file found)", resolvedTarget),
 				Fix:     "Run 'bd init' in the target directory or check redirect path",
 			}
 		}
@@ -389,7 +399,7 @@ func CheckRedirectTargetValid() DoctorCheck {
 	return DoctorCheck{
 		Name:    "Redirect Target Valid",
 		Status:  StatusOK,
-		Message: fmt.Sprintf("Redirect target valid: %s", resolvedTarget),
+		Message: fmt.Sprintf("Redirect target valid (legacy): %s", resolvedTarget),
 	}
 }
 

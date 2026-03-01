@@ -28,7 +28,7 @@ func CheckBeadsRole(path string) DoctorCheck {
 	}
 
 	// Git config not set — check database config as fallback.
-	// Users may have set it via "bd config set role maintainer" (stored in SQLite)
+	// Users may have set it via "bd config set role maintainer" (stored in Dolt)
 	// or the git config may be unavailable (e.g., worktree without local config).
 	if role := getRoleFromDatabase(path); role != "" {
 		return validateRole(role)

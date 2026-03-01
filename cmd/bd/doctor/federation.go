@@ -51,7 +51,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (non-Dolt backend)",
 			Category: CategoryFederation,
 		}
 	}
@@ -143,7 +143,7 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Peer Connectivity",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (non-Dolt backend)",
 			Category: CategoryFederation,
 		}
 	}
@@ -260,7 +260,7 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (non-Dolt backend)",
 			Category: CategoryFederation,
 		}
 	}
@@ -353,7 +353,7 @@ func CheckFederationConflicts(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Federation Conflicts",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (non-Dolt backend)",
 			Category: CategoryFederation,
 		}
 	}
@@ -444,7 +444,7 @@ func CheckDoltServerModeMismatch(path string) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Dolt Mode",
 			Status:   StatusOK,
-			Message:  "N/A (SQLite backend)",
+			Message:  "N/A (non-Dolt backend)",
 			Category: CategoryFederation,
 		}
 	}

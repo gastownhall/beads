@@ -387,7 +387,7 @@ const (
 	SessionBeadThreshold  = 50 // Warn if session beads > 50
 )
 
-const maintenanceIssuesUnavailableMessage = "N/A (unable to load issues from database or JSONL fallback)"
+const maintenanceIssuesUnavailableMessage = "N/A (unable to load issues from database)"
 
 type patrolIssueKind int
 
@@ -518,7 +518,8 @@ func getPatrolPollutionIDs(path string) ([]string, error) {
 }
 
 // loadMaintenanceIssues loads issues for maintenance checks.
-// It prefers Dolt (source of truth) and falls back to JSONL for compatibility.
+// It prefers Dolt (source of truth) and falls back to legacy JSONL for
+// backwards compatibility with non-Dolt installations.
 func loadMaintenanceIssues(path string) ([]*types.Issue, error) {
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 

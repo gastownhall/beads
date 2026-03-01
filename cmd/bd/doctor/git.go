@@ -573,7 +573,7 @@ func FixMergeDriver() error {
 		return fmt.Errorf("failed to set merge.beads.driver: %w", err)
 	}
 	// Also ensure merge.beads.name is set
-	nameCmd := exec.Command("git", "config", "merge.beads.name", "Beads JSONL merge driver") // #nosec G204
+	nameCmd := exec.Command("git", "config", "merge.beads.name", "Beads merge driver") // #nosec G204
 	if err := nameCmd.Run(); err != nil {
 		return fmt.Errorf("failed to set merge.beads.name: %w", err)
 	}

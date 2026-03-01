@@ -91,9 +91,21 @@ func CheckPermissions(path string) DoctorCheck {
 }
 
 // CheckUntrackedBeadsFiles checks for untracked .beads/*.jsonl files that should be committed.
+// This check only applies to legacy (non-Dolt) backends where JSONL files are the data store.
 // In sync-branch mode, JSONL files are intentionally untracked in working branches
 // and only committed to the dedicated sync branch (GH#858).
 func CheckUntrackedBeadsFiles(path string) DoctorCheck {
+	backend, _ := getBackendAndBeadsDir(path)
+
+	// Dolt backends store data on the server, not in JSONL files
+	if backend == configfile.BackendDolt {
+		return DoctorCheck{
+			Name:    "Untracked Files",
+			Status:  StatusOK,
+			Message: "N/A (Dolt backend stores data on server)",
+		}
+	}
+
 	beadsDir := filepath.Join(path, ".beads")
 
 	// Skip if .beads doesn't exist
