@@ -81,6 +81,23 @@ func TestMaybeAutoPush_NilStore(t *testing.T) {
 	maybeAutoPush(context.Background())
 }
 
+func TestAutoPush_SkippedForReadOnlyCommands(t *testing.T) {
+	// Read-only commands should not trigger auto-push (GH#2191).
+	readOnly := []string{"list", "ready", "show", "stats", "blocked", "search", "graph"}
+	for _, cmd := range readOnly {
+		if !isReadOnlyCommand(cmd) {
+			t.Errorf("isReadOnlyCommand(%q) = false, want true", cmd)
+		}
+	}
+
+	writeCmds := []string{"create", "update", "close", "import"}
+	for _, cmd := range writeCmds {
+		if isReadOnlyCommand(cmd) {
+			t.Errorf("isReadOnlyCommand(%q) = true, want false", cmd)
+		}
+	}
+}
+
 func TestMaybeAutoPush_DisabledByConfig(t *testing.T) {
 	// When explicitly disabled, maybeAutoPush should be a no-op.
 	t.Setenv("BD_DOLT_AUTO_PUSH", "false")

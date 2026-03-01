@@ -660,8 +660,12 @@ var rootCmd = &cobra.Command{
 		// Auto-backup: export JSONL to .beads/backup/ if enabled and due
 		maybeAutoBackup(rootCtx)
 
-		// Auto-push: push to Dolt remote if enabled and due
-		maybeAutoPush(rootCtx)
+		// Auto-push: push to Dolt remote if enabled and due.
+		// Skip for read-only commands to avoid unnecessary network operations
+		// and metadata writes on commands like bd list/show/ready (GH#2191).
+		if !isReadOnlyCommand(cmd.Name()) {
+			maybeAutoPush(rootCtx)
+		}
 
 		// Signal that store is closing (prevents background flush from accessing closed store)
 		storeMutex.Lock()
