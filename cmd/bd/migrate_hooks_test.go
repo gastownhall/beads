@@ -52,7 +52,7 @@ func TestFormatHookMigrationPlan_NotGitRepo(t *testing.T) {
 	lines := formatHookMigrationPlan(doctor.HookMigrationPlan{
 		Path:      "/tmp/no-git",
 		IsGitRepo: false,
-	}, true)
+	})
 
 	rendered := strings.Join(lines, "\n")
 	if !strings.Contains(rendered, "not a git repository") {
@@ -77,7 +77,7 @@ func TestFormatHookMigrationPlan_WithMigrations(t *testing.T) {
 		},
 	}
 
-	lines := formatHookMigrationPlan(plan, true)
+	lines := formatHookMigrationPlan(plan)
 	rendered := strings.Join(lines, "\n")
 
 	if !strings.Contains(rendered, "Needs migration: 1/5") {
