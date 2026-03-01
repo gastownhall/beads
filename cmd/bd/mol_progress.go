@@ -115,11 +115,17 @@ func findInProgressMoleculeIDs(ctx context.Context, s *dolt.DoltStore, agent str
 		return nil
 	}
 
-	// For each in_progress issue, find its parent molecule
+	// Batch-find parent molecules for all in_progress issues (bd-hn4q)
+	issueIDs := make([]string, len(inProgressIssues))
+	for i, issue := range inProgressIssues {
+		issueIDs[i] = issue.ID
+	}
+	moleculeRoots := findParentMolecules(ctx, s, issueIDs)
+
 	seen := make(map[string]bool)
 	var moleculeIDs []string
 	for _, issue := range inProgressIssues {
-		moleculeID := findParentMolecule(ctx, s, issue.ID)
+		moleculeID := moleculeRoots[issue.ID]
 		if moleculeID != "" && !seen[moleculeID] {
 			seen[moleculeID] = true
 			moleculeIDs = append(moleculeIDs, moleculeID)

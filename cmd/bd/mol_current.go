@@ -259,12 +259,17 @@ func findInProgressMolecules(ctx context.Context, s *dolt.DoltStore, agent strin
 		return nil
 	}
 
-	// For each in_progress issue, find its parent molecule
+	// Batch-find parent molecules for all in_progress issues (bd-hn4q)
+	issueIDs := make([]string, len(inProgressIssues))
+	for i, issue := range inProgressIssues {
+		issueIDs[i] = issue.ID
+	}
+	moleculeRoots := findParentMolecules(ctx, s, issueIDs)
+
 	moleculeMap := make(map[string]*MoleculeProgress)
 	for _, issue := range inProgressIssues {
-		moleculeID := findParentMolecule(ctx, s, issue.ID)
+		moleculeID := moleculeRoots[issue.ID]
 		if moleculeID == "" {
-			// Not part of a molecule, skip
 			continue
 		}
 
@@ -372,52 +377,119 @@ func findHookedMolecules(ctx context.Context, s *dolt.DoltStore, agent string) [
 	return molecules
 }
 
-// findParentMolecule walks up parent-child chain to find the root molecule
-func findParentMolecule(ctx context.Context, s *dolt.DoltStore, issueID string) string {
-	visited := make(map[string]bool)
-	currentID := issueID
+// findParentMolecules batch-finds the root molecule for multiple issue IDs.
+// Returns a map of issueID → moleculeRootID for issues that belong to a molecule.
+// Issues not part of a molecule are omitted from the result.
+//
+// This replaces the previous N+1 pattern where findParentMolecule was called
+// in a loop, issuing GetDependencyRecords + GetIssue per level per issue.
+// Instead, this walks parent-child chains level-by-level using batch queries,
+// reducing O(N * depth) round-trips to O(depth). (bd-hn4q)
+func findParentMolecules(ctx context.Context, s *dolt.DoltStore, issueIDs []string) map[string]string {
+	if len(issueIDs) == 0 {
+		return nil
+	}
 
-	for !visited[currentID] {
-		visited[currentID] = true
+	// rootOf accumulates: startID -> rootID for chains that terminated
+	rootOf := make(map[string]string, len(issueIDs))
 
-		// Get dependencies for current issue
-		deps, err := s.GetDependencyRecords(ctx, currentID)
-		if err != nil {
-			return ""
+	// current tracks: startID -> currentAncestorID (still walking up)
+	current := make(map[string]string, len(issueIDs))
+	for _, id := range issueIDs {
+		current[id] = id
+	}
+
+	// Walk up parent-child chains in batch, level by level
+	for depth := 0; depth < 50 && len(current) > 0; depth++ {
+		// Collect unique IDs at current level
+		seen := make(map[string]bool, len(current))
+		toCheck := make([]string, 0, len(current))
+		for _, curID := range current {
+			if !seen[curID] {
+				seen[curID] = true
+				toCheck = append(toCheck, curID)
+			}
 		}
 
-		// Find parent-child dependency where current is the child
-		var parentID string
-		for _, dep := range deps {
-			if dep.Type == types.DepParentChild && dep.IssueID == currentID {
-				parentID = dep.DependsOnID
+		// Batch fetch parent-child deps for all current ancestors
+		allDeps, err := s.GetDependencyRecordsForIssues(ctx, toCheck)
+		if err != nil {
+			return nil
+		}
+
+		// Build parent lookup: childID -> parentID
+		parentOf := make(map[string]string, len(allDeps))
+		for childID, deps := range allDeps {
+			for _, dep := range deps {
+				if dep.Type == types.DepParentChild {
+					parentOf[childID] = dep.DependsOnID
+					break
+				}
+			}
+		}
+
+		// Advance chains that have parents, finalize those that don't
+		nextCurrent := make(map[string]string)
+		for startID, curID := range current {
+			if parent, ok := parentOf[curID]; ok {
+				nextCurrent[startID] = parent
+			} else {
+				rootOf[startID] = curID
+			}
+		}
+		current = nextCurrent
+	}
+
+	// Anything still walking after max depth — treat as root
+	for startID, curID := range current {
+		rootOf[startID] = curID
+	}
+
+	// Batch fetch root issues to check if they're molecules
+	uniqueRoots := make(map[string]bool, len(rootOf))
+	for _, rootID := range rootOf {
+		uniqueRoots[rootID] = true
+	}
+	rootIDs := make([]string, 0, len(uniqueRoots))
+	for id := range uniqueRoots {
+		rootIDs = append(rootIDs, id)
+	}
+
+	rootIssues, err := s.GetIssuesByIDs(ctx, rootIDs)
+	if err != nil {
+		return nil
+	}
+
+	isMolecule := make(map[string]bool, len(rootIssues))
+	for _, issue := range rootIssues {
+		if issue.IssueType == types.TypeEpic {
+			isMolecule[issue.ID] = true
+			continue
+		}
+		for _, label := range issue.Labels {
+			if label == BeadsTemplateLabel {
+				isMolecule[issue.ID] = true
 				break
 			}
 		}
-
-		if parentID == "" {
-			// No parent - check if current issue is a molecule root
-			issue, err := s.GetIssue(ctx, currentID)
-			if err != nil || issue == nil {
-				return ""
-			}
-			// Check if it has the template label (molecules are spawned from templates)
-			for _, label := range issue.Labels {
-				if label == BeadsTemplateLabel {
-					return currentID
-				}
-			}
-			// Also check if it's an epic with children (ad-hoc molecule)
-			if issue.IssueType == types.TypeEpic {
-				return currentID
-			}
-			return ""
-		}
-
-		currentID = parentID
 	}
 
-	return ""
+	// Filter to only molecule roots
+	result := make(map[string]string, len(rootOf))
+	for startID, rootID := range rootOf {
+		if isMolecule[rootID] {
+			result[startID] = rootID
+		}
+	}
+
+	return result
+}
+
+// findParentMolecule walks up the parent-child chain to find the root molecule
+// for a single issue. Returns "" if the issue is not part of a molecule.
+func findParentMolecule(ctx context.Context, s *dolt.DoltStore, issueID string) string {
+	roots := findParentMolecules(ctx, s, []string{issueID})
+	return roots[issueID]
 }
 
 // sortStepsByDependencyOrder sorts steps by their dependency order

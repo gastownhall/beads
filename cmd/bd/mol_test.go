@@ -1552,6 +1552,100 @@ func TestFindParentMolecule(t *testing.T) {
 	}
 }
 
+// TestFindParentMoleculesBatch tests batch-finding molecule roots (bd-hn4q)
+func TestFindParentMoleculesBatch(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule root (epic with template label)
+	root := &types.Issue{
+		Title:     "Molecule Root",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	// Create child step
+	child := &types.Issue{
+		Title:     "Child Step",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: root.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add parent-child: %v", err)
+	}
+
+	// Create grandchild
+	grandchild := &types.Issue{
+		Title:     "Grandchild Step",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, grandchild, "test"); err != nil {
+		t.Fatalf("Failed to create grandchild: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     grandchild.ID,
+		DependsOnID: child.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add grandchild parent-child: %v", err)
+	}
+
+	// Create orphan issue (not part of any molecule)
+	orphan := &types.Issue{
+		Title:     "Orphan Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := s.CreateIssue(ctx, orphan, "test"); err != nil {
+		t.Fatalf("Failed to create orphan: %v", err)
+	}
+
+	// Batch-find molecule roots for all issues at once
+	roots := findParentMolecules(ctx, s, []string{grandchild.ID, child.ID, root.ID, orphan.ID})
+
+	if got := roots[grandchild.ID]; got != root.ID {
+		t.Errorf("findParentMolecules[grandchild] = %q, want %q", got, root.ID)
+	}
+	if got := roots[child.ID]; got != root.ID {
+		t.Errorf("findParentMolecules[child] = %q, want %q", got, root.ID)
+	}
+	if got := roots[root.ID]; got != root.ID {
+		t.Errorf("findParentMolecules[root] = %q, want %q", got, root.ID)
+	}
+	if got := roots[orphan.ID]; got != "" {
+		t.Errorf("findParentMolecules[orphan] = %q, want empty", got)
+	}
+
+	// Empty input should return nil
+	if result := findParentMolecules(ctx, s, nil); result != nil {
+		t.Errorf("findParentMolecules(nil) = %v, want nil", result)
+	}
+}
+
 // TestFindHookedMolecules tests finding molecules bonded to hooked issues
 func TestFindHookedMolecules(t *testing.T) {
 	ctx := context.Background()
