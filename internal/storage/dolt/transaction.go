@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -178,7 +179,8 @@ func (t *doltTransaction) GetIssue(ctx context.Context, id string) (*types.Issue
 	return scanIssueTxFromTable(ctx, t.tx, table, id)
 }
 
-// SearchIssues searches for issues within the transaction
+// SearchIssues searches for issues within the transaction.
+// Supports the same filter fields as DoltStore.SearchIssues (bd-v6v8).
 func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	table := "issues"
 	if filter.Ephemeral != nil && *filter.Ephemeral {
@@ -189,36 +191,277 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		table = "wisps"
 	}
 
+	// Derive related table names from the main table
+	depTable := "dependencies"
+	labelTable := "labels"
+	if table == "wisps" {
+		depTable = "wisp_dependencies"
+		labelTable = "wisp_labels"
+	}
+
 	whereClauses := []string{}
 	args := []interface{}{}
 
+	// Text search
 	if query != "" {
 		whereClauses = append(whereClauses, "(title LIKE ? OR description LIKE ? OR id LIKE ?)")
 		pattern := "%" + query + "%"
 		args = append(args, pattern, pattern, pattern)
 	}
 
-	if filter.ParentID != nil {
-		parentID := *filter.ParentID
-		depTable := "dependencies"
-		if table == "wisps" {
-			depTable = "wisp_dependencies"
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("(id IN (SELECT issue_id FROM %s WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')))", depTable, depTable))
-		args = append(args, parentID, parentID)
+	if filter.TitleSearch != "" {
+		whereClauses = append(whereClauses, "title LIKE ?")
+		args = append(args, "%"+filter.TitleSearch+"%")
+	}
+	if filter.TitleContains != "" {
+		whereClauses = append(whereClauses, "title LIKE ?")
+		args = append(args, "%"+filter.TitleContains+"%")
+	}
+	if filter.DescriptionContains != "" {
+		whereClauses = append(whereClauses, "description LIKE ?")
+		args = append(args, "%"+filter.DescriptionContains+"%")
+	}
+	if filter.NotesContains != "" {
+		whereClauses = append(whereClauses, "notes LIKE ?")
+		args = append(args, "%"+filter.NotesContains+"%")
 	}
 
+	// Status
 	if filter.Status != nil {
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, *filter.Status)
+	}
+	if len(filter.ExcludeStatus) > 0 {
+		placeholders := make([]string, len(filter.ExcludeStatus))
+		for i, s := range filter.ExcludeStatus {
+			placeholders[i] = "?"
+			args = append(args, string(s))
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("status NOT IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	// Type filtering — use subquery to prevent Dolt mergeJoinIter panic
+	if len(filter.ExcludeTypes) > 0 {
+		placeholders := make([]string, len(filter.ExcludeTypes))
+		for i, tp := range filter.ExcludeTypes {
+			placeholders[i] = "?"
+			args = append(args, string(tp))
+		}
+		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM %s WHERE issue_type NOT IN (%s))", table, strings.Join(placeholders, ",")))
+	}
+
+	// Priority
+	if filter.Priority != nil {
+		whereClauses = append(whereClauses, "priority = ?")
+		args = append(args, *filter.Priority)
+	}
+	if filter.PriorityMin != nil {
+		whereClauses = append(whereClauses, "priority >= ?")
+		args = append(args, *filter.PriorityMin)
+	}
+	if filter.PriorityMax != nil {
+		whereClauses = append(whereClauses, "priority <= ?")
+		args = append(args, *filter.PriorityMax)
+	}
+
+	// Issue type — use subquery to prevent Dolt mergeJoinIter panic
+	if filter.IssueType != nil {
+		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM %s WHERE issue_type = ?)", table))
+		args = append(args, *filter.IssueType)
+	}
+
+	// Assignee
+	if filter.Assignee != nil {
+		whereClauses = append(whereClauses, "assignee = ?")
+		args = append(args, *filter.Assignee)
+	}
+
+	// Date ranges
+	if filter.CreatedAfter != nil {
+		whereClauses = append(whereClauses, "created_at > ?")
+		args = append(args, filter.CreatedAfter.Format(time.RFC3339))
+	}
+	if filter.CreatedBefore != nil {
+		whereClauses = append(whereClauses, "created_at < ?")
+		args = append(args, filter.CreatedBefore.Format(time.RFC3339))
+	}
+	if filter.UpdatedAfter != nil {
+		whereClauses = append(whereClauses, "updated_at > ?")
+		args = append(args, filter.UpdatedAfter.Format(time.RFC3339))
+	}
+	if filter.UpdatedBefore != nil {
+		whereClauses = append(whereClauses, "updated_at < ?")
+		args = append(args, filter.UpdatedBefore.Format(time.RFC3339))
+	}
+	if filter.ClosedAfter != nil {
+		whereClauses = append(whereClauses, "closed_at > ?")
+		args = append(args, filter.ClosedAfter.Format(time.RFC3339))
+	}
+	if filter.ClosedBefore != nil {
+		whereClauses = append(whereClauses, "closed_at < ?")
+		args = append(args, filter.ClosedBefore.Format(time.RFC3339))
+	}
+	if filter.DeferAfter != nil {
+		whereClauses = append(whereClauses, "defer_until > ?")
+		args = append(args, filter.DeferAfter.Format(time.RFC3339))
+	}
+	if filter.DeferBefore != nil {
+		whereClauses = append(whereClauses, "defer_until < ?")
+		args = append(args, filter.DeferBefore.Format(time.RFC3339))
+	}
+	if filter.DueAfter != nil {
+		whereClauses = append(whereClauses, "due_at > ?")
+		args = append(args, filter.DueAfter.Format(time.RFC3339))
+	}
+	if filter.DueBefore != nil {
+		whereClauses = append(whereClauses, "due_at < ?")
+		args = append(args, filter.DueBefore.Format(time.RFC3339))
+	}
+
+	// Empty/null checks
+	if filter.EmptyDescription {
+		whereClauses = append(whereClauses, "(description IS NULL OR description = '')")
+	}
+	if filter.NoAssignee {
+		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
+	}
+	if filter.NoLabels {
+		//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
+		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT DISTINCT issue_id FROM %s)", labelTable))
+	}
+
+	// Label filtering (AND)
+	if len(filter.Labels) > 0 {
+		for _, label := range filter.Labels {
+			//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
+			whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", labelTable))
+			args = append(args, label)
+		}
+	}
+
+	// Label filtering (OR)
+	if len(filter.LabelsAny) > 0 {
+		placeholders := make([]string, len(filter.LabelsAny))
+		for i, label := range filter.LabelsAny {
+			placeholders[i] = "?"
+			args = append(args, label)
+		}
+		//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", labelTable, strings.Join(placeholders, ", ")))
+	}
+
+	// ID filtering
+	if len(filter.IDs) > 0 {
+		placeholders := make([]string, len(filter.IDs))
+		for i, id := range filter.IDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
+	}
+
+	if filter.IDPrefix != "" {
+		whereClauses = append(whereClauses, "id LIKE ?")
+		args = append(args, filter.IDPrefix+"%")
 	}
 	if filter.SpecIDPrefix != "" {
 		whereClauses = append(whereClauses, "spec_id LIKE ?")
 		args = append(args, filter.SpecIDPrefix+"%")
 	}
+
+	// Source repo
 	if filter.SourceRepo != nil {
 		whereClauses = append(whereClauses, "source_repo = ?")
 		args = append(args, *filter.SourceRepo)
+	}
+
+	// Ephemeral filtering (when querying issues table with explicit ephemeral filter)
+	if filter.Ephemeral != nil {
+		if *filter.Ephemeral {
+			whereClauses = append(whereClauses, "ephemeral = 1")
+		} else {
+			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
+		}
+	}
+
+	// Pinned filtering
+	if filter.Pinned != nil {
+		if *filter.Pinned {
+			whereClauses = append(whereClauses, "pinned = 1")
+		} else {
+			whereClauses = append(whereClauses, "(pinned = 0 OR pinned IS NULL)")
+		}
+	}
+
+	// Template filtering
+	if filter.IsTemplate != nil {
+		if *filter.IsTemplate {
+			whereClauses = append(whereClauses, "is_template = 1")
+		} else {
+			whereClauses = append(whereClauses, "(is_template = 0 OR is_template IS NULL)")
+		}
+	}
+
+	// Parent filtering
+	if filter.ParentID != nil {
+		parentID := *filter.ParentID
+		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+		whereClauses = append(whereClauses, fmt.Sprintf("(id IN (SELECT issue_id FROM %s WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')))", depTable, depTable))
+		args = append(args, parentID, parentID)
+	}
+
+	// No-parent filtering
+	if filter.NoParent {
+		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')", depTable))
+	}
+
+	// Molecule type filtering
+	if filter.MolType != nil {
+		whereClauses = append(whereClauses, "mol_type = ?")
+		args = append(args, string(*filter.MolType))
+	}
+
+	// Wisp type filtering
+	if filter.WispType != nil {
+		whereClauses = append(whereClauses, "wisp_type = ?")
+		args = append(args, string(*filter.WispType))
+	}
+
+	// Time-based scheduling filters
+	if filter.Deferred {
+		whereClauses = append(whereClauses, "defer_until IS NOT NULL")
+	}
+	if filter.Overdue {
+		whereClauses = append(whereClauses, "due_at IS NOT NULL AND due_at < ? AND status != ?")
+		args = append(args, time.Now().UTC().Format(time.RFC3339), types.StatusClosed)
+	}
+
+	// Metadata existence check
+	if filter.HasMetadataKey != "" {
+		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
+			return nil, err
+		}
+		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
+		args = append(args, "$."+filter.HasMetadataKey)
+	}
+
+	// Metadata field equality filters
+	if len(filter.MetadataFields) > 0 {
+		metaKeys := make([]string, 0, len(filter.MetadataFields))
+		for k := range filter.MetadataFields {
+			metaKeys = append(metaKeys, k)
+		}
+		sort.Strings(metaKeys)
+		for _, k := range metaKeys {
+			if err := storage.ValidateMetadataKey(k); err != nil {
+				return nil, err
+			}
+			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
+			args = append(args, "$."+k, filter.MetadataFields[k])
+		}
 	}
 
 	whereSQL := ""
@@ -226,10 +469,15 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
+	limitSQL := ""
+	if filter.Limit > 0 {
+		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
+	}
+
 	//nolint:gosec // G201: table is hardcoded, whereSQL is parameterized
 	rows, err := t.tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id FROM %s %s ORDER BY priority ASC, created_at DESC
-	`, table, whereSQL), args...)
+		SELECT id FROM %s %s ORDER BY priority ASC, created_at DESC %s
+	`, table, whereSQL, limitSQL), args...)
 	if err != nil {
 		return nil, wrapQueryError("search issues in tx", err)
 	}
