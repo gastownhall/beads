@@ -369,6 +369,17 @@ var listCmd = &cobra.Command{
 			effectiveLimit = 20 // Agent mode default
 		}
 
+		// Validate --sort field (bd-ttno)
+		if sortBy != "" {
+			validSortFields := map[string]bool{
+				"priority": true, "created": true, "updated": true, "closed": true,
+				"status": true, "id": true, "title": true, "type": true, "assignee": true,
+			}
+			if !validSortFields[sortBy] {
+				FatalError("invalid sort field %q (valid: priority, created, updated, closed, status, id, title, type, assignee)", sortBy)
+			}
+		}
+
 		// When --sort is specified, don't pass Limit to SQL — the hardcoded
 		// ORDER BY would truncate before Go-side sorting (GH#1237).
 		// Instead, apply limit in Go after sortIssues().
@@ -387,6 +398,15 @@ var listCmd = &cobra.Command{
 			filter.Status = &s
 		} else if status != "" && status != "all" {
 			s := types.Status(status)
+			// Validate --status value (bd-ttno)
+			var customStatuses []string
+			if store != nil {
+				cs, _ := store.GetCustomStatuses(rootCtx)
+				customStatuses = cs
+			}
+			if !s.IsValidWithCustom(customStatuses) {
+				FatalError("invalid status %q (valid: open, in_progress, blocked, deferred, closed, pinned, hooked)", status)
+			}
 			filter.Status = &s
 		}
 
@@ -408,6 +428,22 @@ var listCmd = &cobra.Command{
 		}
 		if issueType != "" {
 			t := types.IssueType(issueType)
+			// Validate --type value (bd-ttno)
+			var customTypes []string
+			if store != nil {
+				ct, _ := store.GetCustomTypes(rootCtx)
+				customTypes = ct
+			}
+			if len(customTypes) == 0 {
+				customTypes = config.GetCustomTypesFromYAML()
+			}
+			if !t.IsValidWithCustom(customTypes) {
+				validTypes := "bug, feature, task, epic, chore, decision"
+				if len(customTypes) > 0 {
+					validTypes += ", " + joinStrings(customTypes, ", ")
+				}
+				FatalError("invalid issue type %q (valid: %s)", issueType, validTypes)
+			}
 			filter.IssueType = &t
 		}
 		if len(labels) > 0 {
