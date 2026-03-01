@@ -385,24 +385,25 @@ var createCmd = &cobra.Command{
 				debug.Logf("Warning: failed to detect user role: %v\n", err)
 			}
 
-			// Build routing config with backward compatibility for legacy contributor.* keys
-			routingMode := config.GetString("routing.mode")
-			contributorRepo := config.GetString("routing.contributor")
+			// Build routing config with backward compatibility for legacy contributor.* keys.
+			// Prefer config.yaml values, but fall back to DB config values set by bd init --contributor.
+			routingMode := getRoutingConfigValue(rootCtx, store, "routing.mode")
+			contributorRepo := getRoutingConfigValue(rootCtx, store, "routing.contributor")
 
 			// NFR-001: Backward compatibility - fall back to legacy contributor.* keys
 			if routingMode == "" {
-				if config.GetString("contributor.auto_route") == "true" {
+				if getRoutingConfigValue(rootCtx, store, "contributor.auto_route") == "true" {
 					routingMode = "auto"
 				}
 			}
 			if contributorRepo == "" {
-				contributorRepo = config.GetString("contributor.planning_repo")
+				contributorRepo = getRoutingConfigValue(rootCtx, store, "contributor.planning_repo")
 			}
 
 			routingConfig := &routing.RoutingConfig{
 				Mode:             routingMode,
-				DefaultRepo:      config.GetString("routing.default"),
-				MaintainerRepo:   config.GetString("routing.maintainer"),
+				DefaultRepo:      getRoutingConfigValue(rootCtx, store, "routing.default"),
+				MaintainerRepo:   getRoutingConfigValue(rootCtx, store, "routing.maintainer"),
 				ContributorRepo:  contributorRepo,
 				ExplicitOverride: repoOverride,
 			}
@@ -1070,4 +1071,20 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore *
 	}
 
 	return nil
+}
+
+// getRoutingConfigValue resolves routing config from YAML first, then DB config.
+// This keeps command behavior consistent when init stores routing values in the DB.
+func getRoutingConfigValue(ctx context.Context, store *dolt.DoltStore, key string) string {
+	value := strings.TrimSpace(config.GetString(key))
+	if value != "" || store == nil {
+		return value
+	}
+
+	dbValue, err := store.GetConfig(ctx, key)
+	if err != nil {
+		debug.Logf("DEBUG: failed to read config %q from store: %v\n", key, err)
+		return ""
+	}
+	return strings.TrimSpace(dbValue)
 }
