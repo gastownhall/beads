@@ -522,8 +522,9 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 
 			// Per-operation timeout: DROP DATABASE can be slow on Dolt
 			dropCtx, dropCancel := context.WithTimeout(context.Background(), perDropTimeout)
-			// name is from SHOW DATABASES — safe to use in backtick-quoted identifier
-			_, err := db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE `%s`", name)) //nolint:gosec // G201: name from SHOW DATABASES
+			// Escape backticks in database name to prevent SQL injection (` → ``)
+			safeName := strings.ReplaceAll(name, "`", "``")
+			_, err := db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE `%s`", safeName)) //nolint:gosec // G201: identifier-escaped
 			dropCancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  FAIL: %s: %v\n", name, err)
