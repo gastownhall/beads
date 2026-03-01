@@ -10,7 +10,6 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
@@ -275,19 +274,14 @@ func ChildParentDependencies(path string, verbose bool) error {
 }
 
 // openDoltDB opens a Dolt database connection via MySQL protocol.
+// Delegates to openFixDB for DSN construction (timeout + password support).
 func openDoltDB(beadsDir string) (*sql.DB, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
 		return nil, fmt.Errorf("no database configuration found")
 	}
 
-	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
-	user := cfg.GetDoltServerUser()
-	database := cfg.GetDoltDatabase()
-
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/%s", user, host, port, database)
-	db, err := sql.Open("mysql", dsn)
+	db, err := openFixDB(beadsDir, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("dolt server connection failed: %w", err)
 	}
@@ -295,7 +289,7 @@ func openDoltDB(beadsDir string) (*sql.DB, error) {
 	// Verify the connection actually works
 	if err := db.Ping(); err != nil {
 		_ = db.Close() // Best effort cleanup
-		return nil, fmt.Errorf("dolt server not reachable at %s:%d: %w", host, port, err)
+		return nil, fmt.Errorf("dolt server not reachable: %w", err)
 	}
 
 	return db, nil
