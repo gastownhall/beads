@@ -32,7 +32,16 @@ type ArtifactReport struct {
 // The scan is rooted at the given path and looks for .beads/ directories recursively,
 // checking each for artifacts that indicate incomplete migration cleanup.
 func CheckClassicArtifacts(path string) DoctorCheck {
-	report := ScanForArtifacts(path)
+	report, err := ScanForArtifacts(path)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Classic Artifacts",
+			Status:   StatusWarning,
+			Message:  "Artifact scan failed",
+			Detail:   err.Error(),
+			Category: CategoryMaintenance,
+		}
+	}
 
 	if report.TotalCount == 0 {
 		return DoctorCheck{
@@ -83,11 +92,13 @@ func CheckClassicArtifacts(path string) DoctorCheck {
 }
 
 // ScanForArtifacts performs a recursive scan of the given path for classic beads artifacts.
-func ScanForArtifacts(rootPath string) ArtifactReport {
+// Returns an error if the walk itself fails (e.g., root path doesn't exist or is inaccessible).
+// Individual unreadable subdirectories are skipped without error.
+func ScanForArtifacts(rootPath string) (ArtifactReport, error) {
 	var report ArtifactReport
 
 	// Walk the directory tree looking for .beads/ directories
-	_ = filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip directories we can't read
 		}
@@ -115,6 +126,9 @@ func ScanForArtifacts(rootPath string) ArtifactReport {
 		// Don't descend into .beads/ itself (we've scanned it)
 		return filepath.SkipDir
 	})
+	if walkErr != nil {
+		return report, fmt.Errorf("scanning artifacts at %s: %w", rootPath, walkErr)
+	}
 
 	report.TotalCount = len(report.SQLiteArtifacts) +
 		len(report.CruftBeadsDirs) + len(report.RedirectIssues)
@@ -130,7 +144,7 @@ func ScanForArtifacts(rootPath string) ArtifactReport {
 		}
 	}
 
-	return report
+	return report, nil
 }
 
 // scanBeadsDir checks a single .beads directory for artifacts.

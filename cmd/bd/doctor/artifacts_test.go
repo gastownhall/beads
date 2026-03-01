@@ -47,7 +47,10 @@ func TestScanForArtifacts_SQLiteFiles(t *testing.T) {
 		}
 	}
 
-	report := ScanForArtifacts(dir)
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(report.SQLiteArtifacts) != 4 {
 		t.Errorf("expected 4 SQLite artifacts, got %d", len(report.SQLiteArtifacts))
@@ -99,7 +102,10 @@ func TestScanForArtifacts_CruftBeadsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := ScanForArtifacts(dir)
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(report.CruftBeadsDirs) != 1 {
 		t.Errorf("expected 1 cruft beads dir, got %d", len(report.CruftBeadsDirs))
@@ -126,7 +132,10 @@ func TestScanForArtifacts_CruftBeadsDirNoRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := ScanForArtifacts(dir)
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Should be detected as cruft (it's in a polecat location) and safe to delete
 	if len(report.CruftBeadsDirs) != 1 {
@@ -153,7 +162,10 @@ func TestScanForArtifacts_CrewDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := ScanForArtifacts(dir)
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(report.CruftBeadsDirs) != 1 {
 		t.Errorf("expected 1 cruft beads dir for crew, got %d", len(report.CruftBeadsDirs))
@@ -172,7 +184,10 @@ func TestScanForArtifacts_RedirectValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := ScanForArtifacts(dir)
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(report.RedirectIssues) != 1 {
 		t.Errorf("expected 1 redirect issue, got %d", len(report.RedirectIssues))
@@ -191,7 +206,10 @@ func TestScanForArtifacts_EmptyRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := ScanForArtifacts(dir)
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(report.RedirectIssues) != 1 {
 		t.Errorf("expected 1 redirect issue (empty), got %d", len(report.RedirectIssues))
@@ -215,7 +233,10 @@ func TestScanForArtifacts_ValidRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := ScanForArtifacts(dir)
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(report.RedirectIssues) != 0 {
 		t.Errorf("expected 0 redirect issues for valid target, got %d", len(report.RedirectIssues))
@@ -262,7 +283,10 @@ func TestScanForArtifacts_SkipsGitkeep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report := ScanForArtifacts(dir)
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(report.CruftBeadsDirs) != 0 {
 		t.Errorf("expected 0 cruft dirs (redirect + .gitkeep only), got %d", len(report.CruftBeadsDirs))

@@ -12,7 +12,10 @@ import (
 // runArtifactsCheck runs detailed classic artifact detection.
 // With --clean, removes safe-to-delete artifacts after confirmation.
 func runArtifactsCheck(path string, clean bool, yes bool) {
-	report := doctor.ScanForArtifacts(path)
+	report, err := doctor.ScanForArtifacts(path)
+	if err != nil {
+		FatalError("scanning artifacts: %v", err)
+	}
 
 	if report.TotalCount == 0 {
 		if !jsonOutput {

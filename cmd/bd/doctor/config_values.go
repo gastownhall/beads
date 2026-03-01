@@ -370,7 +370,8 @@ func checkDatabaseConfigValues(repoPath string) []string {
 	ctx := context.Background()
 	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
-		return issues // Can't open database, skip
+		issues = append(issues, fmt.Sprintf("database: failed to open Dolt store: %v", err))
+		return issues
 	}
 	defer func() { _ = store.Close() }()
 
