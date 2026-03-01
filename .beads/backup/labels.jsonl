@@ -14,11 +14,17 @@
 {"issue_id":"bd-beads-polecat-amber","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-garnet","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-jasper","label":"gt:agent"}
+{"issue_id":"bd-beads-polecat-jasper","label":"gt:agent"}
+{"issue_id":"bd-beads-polecat-obsidian","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-obsidian","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-onyx","label":"gt:agent"}
+{"issue_id":"bd-beads-polecat-onyx","label":"gt:agent"}
+{"issue_id":"bd-beads-polecat-opal","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-opal","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-quartz","label":"gt:agent"}
+{"issue_id":"bd-beads-polecat-quartz","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-ruby","label":"gt:agent"}
+{"issue_id":"bd-beads-polecat-topaz","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-topaz","label":"gt:agent"}
 {"issue_id":"bd-fhh","label":"dolt"}
 {"issue_id":"bd-fhh","label":"solo-ux"}
@@ -43,6 +49,7 @@
 {"issue_id":"bd-tpv","label":"from:overseer"}
 {"issue_id":"bd-tpv","label":"gt:message"}
 {"issue_id":"bd-tpv","label":"read"}
+{"issue_id":"bd-wisp-y3e4","label":"gt:merge-request"}
 {"issue_id":"bd-x1e","label":"plugin:rebuild-gt"}
 {"issue_id":"bd-x1e","label":"result:success"}
 {"issue_id":"bd-x1e","label":"rig:gastown"}
