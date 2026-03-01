@@ -63,7 +63,7 @@ if err := createConfigYaml(beadsDir, false); err != nil {
 - `cmd/bd/init.go` (lines 155-157, 161-163, 167-169, 188-190, 236-238, 272-274, etc.)
 - `cmd/bd/sync.go` (lines 156, 257, 281, 329, 335, 720-722, 740, 743, 752, 762)
 - `cmd/bd/create.go` (lines 333-334, 340-341)
-- `cmd/bd/daemon_sync.go` (lines 51) *(handles Dolt server sync operations)*
+- `cmd/bd/sync.go` *(handles Dolt sync operations)*
 
 ---
 
@@ -89,7 +89,7 @@ _ = os.Remove(tempPath)
 **Files using this pattern:**
 - `cmd/bd/init.go` (line 209, 326-327)
 - `cmd/bd/sync.go` (lines 696-698)
-- `cmd/bd/daemon_sync.go` (lines 102-105) *(server sync cleanup)*
+- `cmd/bd/sync.go` *(sync cleanup)*
 - Dozens of other locations throughout the codebase
 
 ---
@@ -369,4 +369,4 @@ func WarnError(format string, args ...interface{}) {
 - `cmd/bd/create.go` - Examples of Pattern A for user input validation
 - `cmd/bd/init.go` - Examples of all three patterns
 - `cmd/bd/sync.go` - Examples of Pattern B for metadata operations
-- `cmd/bd/daemon_sync.go` - Examples of Pattern C for cleanup operations (server sync)
+- `cmd/bd/sync.go` - Examples of Pattern C for cleanup operations

@@ -63,14 +63,14 @@ bd close bd-a1b2 "Fixed"
 
 ```bash
 # Check what's changed
-bd sync --status
+bd dolt show
 
 # Option 1: Create pull request
 git push origin beads-sync
 # Then create PR on GitHub/GitLab
 
 # Option 2: Direct merge (if allowed)
-bd sync --merge
+git merge beads-sync
 ```
 
 ### Benefits

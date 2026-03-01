@@ -76,16 +76,8 @@ These tests only interact with the database and can safely share a single DB set
 These have a mix - some can share DB, some need isolation:
 
 #### Server/RPC Tests (Already have integration tags):
-- **daemon_test.go** (15 tests) - Mix of DB and server lifecycle
-  - Propose: Separate suites for DB-only vs server lifecycle tests
 
-- **daemon_autoimport_test.go** (2 tests)
-- **daemon_crash_test.go** (2 tests)
-- **daemon_lock_test.go** (6 tests)
-- **daemon_parent_test.go** (1 test)
-- **daemon_sync_test.go** (6 tests)
-- **daemon_sync_branch_test.go** (11 tests)
-- **daemon_watcher_test.go** (7 tests)
+*Note: Legacy daemon test files (`daemon_test.go`, `daemon_autoimport_test.go`, etc.) have been removed as part of the daemon-to-Dolt migration.*
 
 **Recommendation**: Keep server/RPC tests isolated (they already have `//go:build integration` tags)
 

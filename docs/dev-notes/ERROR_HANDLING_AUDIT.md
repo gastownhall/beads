@@ -505,7 +505,6 @@ if err := TouchDatabaseFile(dbPath, jsonlPath); err != nil {
 ## Files Not Yet Audited
 
 The following files in cmd/bd/ still need review:
-- daemon_sync.go
 - update.go
 - list.go
 - show.go
@@ -560,18 +559,18 @@ The codebase demonstrates strong adherence to error handling patterns with a few
 ## Phase 2 Audit: Additional cmd/bd Files (bd-3gc)
 
 **Date:** 2025-11-28
-**Files Audited:** daemon_sync.go, list.go, show.go, dep.go, label.go, comments.go, delete.go, compact.go, config.go, validate.go
+**Files Audited:** list.go, show.go, dep.go, label.go, comments.go, delete.go, compact.go, config.go, validate.go
 **Notes:** update.go, close.go, reopen.go do not exist as separate files - functionality is in show.go
 
 ---
 
-### daemon_sync.go ✅ MOSTLY CONSISTENT
+### sync.go ✅ MOSTLY CONSISTENT
 
-*Note: This file handles Dolt server sync operations.*
+*Note: This file handles Dolt sync operations (daemon_sync.go was removed during Dolt migration).*
 
 **Pattern A (Exit):** Used for critical failures but returns early to channel instead of os.Exit
 ```go
-// daemon_sync.go - Returns error to channel, caller decides
+// sync.go - Returns error to channel, caller decides
 if err != nil {
     log.log("server sync error: %v", err)
     return // Logs and returns, server continues

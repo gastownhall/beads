@@ -65,7 +65,7 @@ Check what's been committed:
 git log beads-metadata --oneline | head -5
 
 # View diff between main and sync branch
-bd sync --status
+git log main..beads-metadata --oneline
 ```
 
 ### 4. Manual Sync (Without Server)
@@ -107,16 +107,13 @@ Option 2: Direct merge (if you have push access):
 
 ```bash
 # Preview merge
-bd sync --merge --dry-run
+git log main..beads-metadata --oneline
 
 # Perform merge
-bd sync --merge
-
-# This will:
-# - Merge beads-metadata into main
-# - Create merge commit
-# - Push to origin
-# - Import merged changes
+git checkout main
+git merge beads-metadata --no-ff
+git push
+bd import  # Import merged changes to database
 ```
 
 ### 6. Multi-Clone Sync
@@ -198,7 +195,7 @@ my-project/
 
 ### For Humans
 
-- **Review before merging:** Use `bd sync --status` to see what changed
+- **Review before merging:** Use `git log main..beads-metadata --oneline` to see what changed
 - **Batch merges:** Don't need to merge after every issue - merge when convenient
 - **PR descriptions:** Link to specific issues in PR body for context
 

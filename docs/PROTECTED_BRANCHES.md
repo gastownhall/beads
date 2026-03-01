@@ -67,7 +67,7 @@ The sync branch (beads-sync) will contain:
 **2. Start the Dolt server:**
 
 ```bash
-bd dolt start
+dolt sql-server
 ```
 
 With git hooks installed (`bd hooks install`), issue changes are automatically committed to the `beads-sync` branch.
@@ -76,10 +76,10 @@ With git hooks installed (`bd hooks install`), issue changes are automatically c
 
 ```bash
 # Check what's changed
-bd sync --status
+bd dolt show
 
-# Merge to main (creates a pull request or direct merge)
-bd sync --merge
+# Merge to main
+git merge beads-sync
 ```
 
 That's it! The complete workflow is described below.
@@ -209,15 +209,15 @@ All changes are automatically committed to the `beads-sync` branch via git hooks
 
 ```bash
 # See what's changed on the sync branch
-bd sync --status
+bd dolt show
 ```
 
-This shows the diff between `beads-sync` and `main` (or your current branch).
+This shows the current Dolt configuration and connection status.
 
 **Manual commit:**
 
 ```bash
-bd sync --flush-only  # Commit pending changes to sync branch
+bd dolt commit  # Commit pending changes
 ```
 
 **Pull changes from remote:**
@@ -255,16 +255,13 @@ If you have push access to `main`:
 
 ```bash
 # Check what will be merged
-bd sync --merge --dry-run
+git log main..beads-sync --oneline
 
 # Merge sync branch to main
-bd sync --merge
-
-# This will:
-# - Switch to main branch
-# - Merge beads-sync with --no-ff (creates merge commit)
-# - Push to remote
-# - Import merged changes to database
+git checkout main
+git merge beads-sync --no-ff
+git push
+bd import  # Import merged changes to database
 ```
 
 **Safety checks:**
@@ -278,9 +275,9 @@ bd sync --merge
 If you encounter conflicts during merge:
 
 ```bash
-# bd sync --merge will detect conflicts and show:
-Error: Merge conflicts detected
-Conflicting files detected.
+# git merge may detect conflicts and show:
+Auto-merging .beads/...
+CONFLICT (content): Merge conflict in .beads/...
 
 To resolve:
 1. Use bd vc conflicts to view conflicts
@@ -308,7 +305,7 @@ This happens if you created the sync branch independently. Merge with `--allow-u
 git merge beads-sync --allow-unrelated-histories --no-ff
 ```
 
-Or use `bd sync --merge` which handles this automatically.
+Or merge manually with `git merge beads-sync --allow-unrelated-histories --no-ff`.
 
 ### "worktree already exists"
 
@@ -438,11 +435,11 @@ There's no "right" answer - choose what fits your team.
 
 ### Can I review changes before merging?
 
-Yes! Use `bd sync --status` to see what's changed:
+Yes! Use `bd dolt show` to check current status, or use git to compare branches:
 
 ```bash
-bd sync --status
-# Shows diff between beads-sync and main
+git log main..beads-sync --oneline
+# Shows commits on beads-sync not yet in main
 ```
 
 Or create a pull request and review on GitHub/GitLab.
@@ -473,9 +470,8 @@ bd config set sync.branch ""
 
 Yes! `bd sync` works normally and includes special commands for the merge workflow:
 
-- `bd sync --status` - Show diff between branches
-- `bd sync --merge` - Merge sync branch to main
-- `bd sync --merge --dry-run` - Preview merge
+- `bd dolt show` - Show current Dolt configuration and connection status
+- `git merge beads-sync` - Merge sync branch to main
 
 ### Can AI agents merge automatically?
 
@@ -485,7 +481,7 @@ However, if you want fully automated sync:
 
 ```bash
 # WARNING: This bypasses branch protection!
-bd sync --merge  # Run periodically (e.g., via cron)
+git merge beads-sync  # Run periodically (e.g., via cron)
 ```
 
 ### What if I forget to merge for a long time?
@@ -493,7 +489,9 @@ bd sync --merge  # Run periodically (e.g., via cron)
 No problem! The sync branch accumulates all changes. When you eventually merge:
 
 ```bash
-bd sync --merge
+git checkout main
+git merge beads-sync --no-ff
+git push
 ```
 
 All accumulated changes will be merged at once. Git history will show the full timeline.
@@ -529,8 +527,8 @@ jobs:
 
       - name: Merge to main (if changes)
         run: |
-          if bd sync --status | grep -q 'ahead'; then
-            bd sync --merge
+          if git log main..beads-sync --oneline | grep -q '.'; then
+            git merge beads-sync --no-ff -m "Merge beads-sync metadata"
             git push origin main
           fi
 ```
