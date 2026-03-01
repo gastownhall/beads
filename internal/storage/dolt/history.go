@@ -73,6 +73,9 @@ type issueHistory struct {
 
 // getIssueHistory returns the complete history of an issue
 func (s *DoltStore) getIssueHistory(ctx context.Context, issueID string) ([]*issueHistory, error) {
+	// Wrap in a subquery to avoid Dolt's max1Row optimization on PK lookup.
+	// dolt_history_* tables return multiple rows per PK (one per commit),
+	// but the query planner incorrectly assumes WHERE id=? returns one row.
 	rows, err := s.queryContext(ctx, `
 		SELECT
 			id, title, description, design, acceptance_criteria, notes,
@@ -80,9 +83,11 @@ func (s *DoltStore) getIssueHistory(ctx context.Context, issueID string) ([]*iss
 			estimated_minutes, created_at, updated_at, closed_at, close_reason,
 			pinned, mol_type,
 			commit_hash, committer, commit_date
-		FROM dolt_history_issues
-		WHERE id = ?
-		ORDER BY commit_date DESC
+		FROM (
+			SELECT * FROM dolt_history_issues
+		) h
+		WHERE h.id = ?
+		ORDER BY h.commit_date DESC
 	`, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue history: %w", err)
