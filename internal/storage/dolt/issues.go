@@ -743,7 +743,11 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 		return fmt.Errorf("dolt commit: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateBlockedIDsCache()
+	return nil
 }
 
 // DeleteIssues deletes multiple issues in a single transaction.
@@ -996,6 +1000,7 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	s.invalidateBlockedIDsCache()
 	return result, nil
 }
 
@@ -1567,6 +1572,7 @@ func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo str
 		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	s.invalidateBlockedIDsCache()
 	return int(rowsAffected), nil
 }
 
