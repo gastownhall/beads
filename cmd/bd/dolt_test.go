@@ -784,3 +784,36 @@ func containsAny(s string, substrs ...string) bool {
 	}
 	return false
 }
+
+func TestHTTPURLToTCPAddr(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		// Standard HTTPS
+		{"https://example.com/path", "example.com:443"},
+		// Standard HTTP
+		{"http://example.com/path", "example.com:80"},
+		// Explicit port
+		{"https://example.com:8443/path", "example.com:8443"},
+		{"http://example.com:9090/path", "example.com:9090"},
+		// IPv6 with port
+		{"https://[::1]:8080/path", "[::1]:8080"},
+		// IPv6 without port — should get default 443
+		{"https://[::1]/path", "[::1]:443"},
+		// IPv6 HTTP without port
+		{"http://[::1]/path", "[::1]:80"},
+		// No path
+		{"https://example.com", "example.com:443"},
+		// IPv6 no path with port
+		{"https://[fe80::1]:3000", "[fe80::1]:3000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got := httpURLToTCPAddr(tt.url)
+			if got != tt.want {
+				t.Errorf("httpURLToTCPAddr(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}

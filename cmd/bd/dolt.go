@@ -1239,27 +1239,34 @@ func testSSHConnectivity(host string) bool {
 	return true
 }
 
-// testHTTPConnectivity tests if an HTTP(S) URL is reachable via TCP.
-func testHTTPConnectivity(url string) bool {
-	// Extract host from URL
+// httpURLToTCPAddr extracts a TCP dial address (host:port) from an HTTP(S) URL.
+// Handles IPv6 addresses correctly (e.g., https://[::1]:8080/path).
+func httpURLToTCPAddr(url string) string {
 	host := url
 	host = strings.TrimPrefix(host, "https://")
 	host = strings.TrimPrefix(host, "http://")
 	if idx := strings.Index(host, "/"); idx >= 0 {
 		host = host[:idx]
 	}
-	port := "443"
+	defaultPort := "443"
 	if strings.HasPrefix(url, "http://") {
-		port = "80"
+		defaultPort = "80"
 	}
-	if strings.Contains(host, ":") {
-		// Host already has port
-		port = ""
+	// Use net.SplitHostPort to correctly handle IPv6 addresses (which
+	// contain colons that would otherwise be confused with host:port).
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		return net.JoinHostPort(h, p)
 	}
-	addr := host
-	if port != "" {
-		addr = net.JoinHostPort(host, port)
-	}
+	// No port in host string. Strip IPv6 brackets if present so
+	// JoinHostPort can re-add them correctly.
+	h := strings.TrimPrefix(host, "[")
+	h = strings.TrimSuffix(h, "]")
+	return net.JoinHostPort(h, defaultPort)
+}
+
+// testHTTPConnectivity tests if an HTTP(S) URL is reachable via TCP.
+func testHTTPConnectivity(url string) bool {
+	addr := httpURLToTCPAddr(url)
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return false
