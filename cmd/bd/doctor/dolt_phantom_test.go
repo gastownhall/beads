@@ -54,6 +54,36 @@ func openSharedDoltForPhantom(t *testing.T) *sql.DB {
 	return db
 }
 
+// cleanupAllPhantomDBs removes any pre-existing phantom databases that might
+// have been left by other tests sharing the same Dolt server.
+func cleanupAllPhantomDBs(t *testing.T, db *sql.DB) {
+	t.Helper()
+	rows, err := db.Query("SHOW DATABASES")
+	if err != nil {
+		t.Fatalf("failed to list databases for cleanup: %v", err)
+	}
+	defer rows.Close()
+
+	var phantoms []string
+	for rows.Next() {
+		var dbName string
+		if err := rows.Scan(&dbName); err != nil {
+			continue
+		}
+		if dbName == "information_schema" || dbName == "mysql" || dbName == "beads" {
+			continue
+		}
+		if strings.HasPrefix(dbName, "beads_") || strings.HasSuffix(dbName, "_beads") {
+			phantoms = append(phantoms, dbName)
+		}
+	}
+
+	for _, name := range phantoms {
+		//nolint:gosec // G202: test-only database name from SHOW DATABASES, not user input
+		_, _ = db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", name))
+	}
+}
+
 // cleanupPhantomDB drops a test phantom database (best-effort cleanup).
 func cleanupPhantomDB(t *testing.T, db *sql.DB, dbName string) {
 	t.Helper()
@@ -93,6 +123,9 @@ func TestCheckPhantomDatabases_Warning(t *testing.T) {
 
 func TestCheckPhantomDatabases_OK(t *testing.T) {
 	db := openSharedDoltForPhantom(t)
+
+	// Clean up any pre-existing phantom databases from other tests
+	cleanupAllPhantomDBs(t, db)
 
 	// No phantom databases — only system DBs and "beads" (the configured default)
 	conn := &doltConn{db: db, cfg: nil}
@@ -153,6 +186,9 @@ func TestCheckPhantomDatabases_ConfiguredDBNotPhantom(t *testing.T) {
 
 func TestCheckPhantomDatabases_NilConfig(t *testing.T) {
 	db := openSharedDoltForPhantom(t)
+
+	// Clean up any pre-existing phantom databases from other tests
+	cleanupAllPhantomDBs(t, db)
 
 	// With nil config, should use DefaultDoltDatabase ("beads") as the configured name.
 	// "beads" has no beads_ prefix or _beads suffix matching issues, so it's safe.
