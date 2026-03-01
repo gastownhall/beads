@@ -113,7 +113,7 @@ func CheckRemoteConsistency(repoPath string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Remote Consistency",
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d discrepanc(ies) found", len(issues)),
+		Message:  fmt.Sprintf("%d discrepancies found", len(issues)),
 		Detail:   strings.Join(issues, "\n"),
 		Fix:      fix,
 		Category: CategoryData,

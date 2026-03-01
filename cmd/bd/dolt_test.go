@@ -753,6 +753,29 @@ func TestDoltConfigSubcommandsSkipStore(t *testing.T) {
 	}
 }
 
+func TestExtractSSHHost(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"git+ssh://git@github.com/org/repo.git", "github.com"},
+		{"ssh://git@github.com/org/repo.git", "github.com"},
+		{"git@github.com:org/repo.git", "github.com"},
+		{"git+ssh://github.com/org/repo", "github.com"},
+		{"ssh://user@host.example.com:2222/path", "host.example.com"},
+		{"git@bitbucket.org:team/repo.git", "bitbucket.org"},
+		{"git+ssh://git@192.168.1.100/db", "192.168.1.100"},
+		{"git@10.0.0.1:repo.git", "10.0.0.1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			if got := extractSSHHost(tt.url); got != tt.want {
+				t.Errorf("extractSSHHost(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
 func containsAny(s string, substrs ...string) bool {
 	for _, sub := range substrs {
 		if strings.Contains(s, sub) {
