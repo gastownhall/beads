@@ -159,6 +159,59 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
+	t.Run("child counter reconciled after JSONL import prevents overwrites", func(t *testing.T) {
+		// Regression test for GH#2166: bd create --parent after bd init --from-jsonl
+		// must not overwrite existing child issues. The child_counters table
+		// must be reconciled from imported hierarchical IDs.
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		// Import an epic with two existing children via JSONL
+		jsonlContent := `{"id":"test-epic1","title":"Epic","type":"epic","status":"open","priority":1,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-epic1.1","title":"Child 1","type":"task","status":"open","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-epic1.2","title":"Child 2","type":"task","status":"open","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed: %v", err)
+		}
+		if count != 3 {
+			t.Errorf("Expected 3 issues imported, got %d", count)
+		}
+
+		// Now request the next child ID for the epic — this MUST be .3, not .1
+		nextID, err := store.GetNextChildID(ctx, "test-epic1")
+		if err != nil {
+			t.Fatalf("GetNextChildID failed: %v", err)
+		}
+		if nextID != "test-epic1.3" {
+			t.Errorf("Expected next child ID 'test-epic1.3', got %q (would overwrite existing child!)", nextID)
+		}
+
+		// Verify original children are still intact
+		child1, err := store.GetIssue(ctx, "test-epic1.1")
+		if err != nil {
+			t.Fatalf("Failed to get child 1: %v", err)
+		}
+		if child1.Title != "Child 1" {
+			t.Errorf("Child 1 title changed unexpectedly: got %q", child1.Title)
+		}
+		child2, err := store.GetIssue(ctx, "test-epic1.2")
+		if err != nil {
+			t.Fatalf("Failed to get child 2: %v", err)
+		}
+		if child2.Title != "Child 2" {
+			t.Errorf("Child 2 title changed unexpectedly: got %q", child2.Title)
+		}
+	})
+
 	t.Run("sets prefix from first issue when not configured", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "dolt")

@@ -358,6 +358,34 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		}
 	}
 
+	// Reconcile child_counters for imported hierarchical IDs (GH#2166).
+	// This ensures that subsequent bd create --parent doesn't overwrite
+	// existing children after a JSONL restore.
+	childMaxMap := make(map[string]int)
+	for _, issue := range issues {
+		if parentID, childNum, ok := parseHierarchicalID(issue.ID); ok {
+			if childNum > childMaxMap[parentID] {
+				childMaxMap[parentID] = childNum
+			}
+		}
+	}
+	for parentID, maxChild := range childMaxMap {
+		// FK guard: only upsert counter if parent exists in issues table.
+		// Orphan children (parent not imported) would violate the foreign key
+		// constraint on child_counters.parent_id → issues.id.
+		var parentExists int
+		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ?", parentID).Scan(&parentExists); err != nil {
+			continue // parent not in issues table — skip counter
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, ?)
+		`, parentID, maxChild, maxChild)
+		if err != nil {
+			return fmt.Errorf("failed to reconcile child counter for %s: %w", parentID, err)
+		}
+	}
+
 	// DOLT_COMMIT inside transaction — atomic with the writes
 	commitMsg := fmt.Sprintf("bd: create %d issue(s)", len(issues))
 	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)",
