@@ -333,6 +333,80 @@ func TestInstallHooksWithSectionMarkers(t *testing.T) {
 	})
 }
 
+func TestInstallHooksWithOptions_MockHookWithoutCurrentHook(t *testing.T) {
+	tmpDir := newGitRepo(t)
+	runInDir(t, tmpDir, func() {
+		gitDirPath, err := git.GetGitDir()
+		if err != nil {
+			t.Fatalf("git.GetGitDir() failed: %v", err)
+		}
+		hooksDir := filepath.Join(gitDirPath, "hooks")
+		mockHookName := "pre-commit-mock"
+		mockHookPath := filepath.Join(hooksDir, mockHookName)
+
+		if err := installHooksWithOptions([]string{mockHookName}, false, false, false, false); err != nil {
+			t.Fatalf("installHooksWithOptions() failed: %v", err)
+		}
+
+		content, err := os.ReadFile(mockHookPath)
+		if err != nil {
+			t.Fatalf("failed to read mock hook: %v", err)
+		}
+
+		contentStr := string(content)
+		if !strings.HasPrefix(contentStr, "#!/usr/bin/env sh\n") {
+			t.Errorf("mock hook should start with shebang, got:\n%s", contentStr)
+		}
+		if !strings.Contains(contentStr, hookSectionBeginPrefix) {
+			t.Errorf("mock hook should include managed section begin marker, got:\n%s", contentStr)
+		}
+		if !strings.Contains(contentStr, "bd hooks run "+mockHookName) {
+			t.Errorf("mock hook should invoke bd hooks run %s, got:\n%s", mockHookName, contentStr)
+		}
+	})
+}
+
+func TestInstallHooksWithOptions_MockHookWithCurrentHook(t *testing.T) {
+	tmpDir := newGitRepo(t)
+	runInDir(t, tmpDir, func() {
+		gitDirPath, err := git.GetGitDir()
+		if err != nil {
+			t.Fatalf("git.GetGitDir() failed: %v", err)
+		}
+		hooksDir := filepath.Join(gitDirPath, "hooks")
+		if err := os.MkdirAll(hooksDir, 0750); err != nil {
+			t.Fatalf("failed to create hooks dir: %v", err)
+		}
+
+		mockHookName := "pre-commit-mock"
+		mockHookPath := filepath.Join(hooksDir, mockHookName)
+		existing := "#!/bin/sh\necho current-hook\n"
+		if err := os.WriteFile(mockHookPath, []byte(existing), 0700); err != nil {
+			t.Fatalf("failed to seed mock hook: %v", err)
+		}
+
+		if err := installHooksWithOptions([]string{mockHookName}, false, false, false, false); err != nil {
+			t.Fatalf("installHooksWithOptions() failed: %v", err)
+		}
+
+		content, err := os.ReadFile(mockHookPath)
+		if err != nil {
+			t.Fatalf("failed to read mock hook: %v", err)
+		}
+
+		contentStr := string(content)
+		if !strings.Contains(contentStr, "echo current-hook") {
+			t.Errorf("existing hook content should be preserved, got:\n%s", contentStr)
+		}
+		if !strings.Contains(contentStr, hookSectionBeginPrefix) {
+			t.Errorf("mock hook should include managed section begin marker, got:\n%s", contentStr)
+		}
+		if !strings.Contains(contentStr, "bd hooks run "+mockHookName) {
+			t.Errorf("mock hook should invoke bd hooks run %s, got:\n%s", mockHookName, contentStr)
+		}
+	})
+}
+
 func TestInstallJJHooks_PreservesContentWithoutOldSidecars(t *testing.T) {
 	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
