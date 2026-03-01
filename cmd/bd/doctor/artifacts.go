@@ -146,7 +146,7 @@ func scanBeadsDir(beadsDir string, report *ArtifactReport) {
 
 	// 2. Check for cruft .beads directories (should be redirect-only)
 	if isRedirectExpected {
-		scanCruftBeadsDir(beadsDir, hasRedirect, report)
+		scanCruftBeadsDir(beadsDir, report)
 	}
 
 	// 3. Validate redirect files
@@ -264,7 +264,7 @@ func scanSQLiteArtifacts(beadsDir string, report *ArtifactReport) {
 
 // scanCruftBeadsDir checks if a .beads directory that should be redirect-only
 // contains extra files beyond the redirect file.
-func scanCruftBeadsDir(beadsDir string, hasRedirect bool, report *ArtifactReport) {
+func scanCruftBeadsDir(beadsDir string, report *ArtifactReport) {
 	entries, err := os.ReadDir(beadsDir)
 	if err != nil {
 		return
