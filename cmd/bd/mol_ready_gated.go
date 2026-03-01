@@ -110,7 +110,6 @@ func findGateReadyMolecules(ctx context.Context, s *dolt.DoltStore) ([]*GatedMol
 	gateFilter := types.IssueFilter{
 		IssueType: &gateType,
 		Status:    &closedStatus,
-		Limit:     100,
 	}
 
 	closedGates, err := s.SearchIssues(ctx, "", gateFilter)
@@ -124,7 +123,7 @@ func findGateReadyMolecules(ctx context.Context, s *dolt.DoltStore) ([]*GatedMol
 
 	// Step 2: Get ready work to check which steps are ready
 	// IncludeMolSteps: true because we specifically need to see molecule steps here
-	readyIssues, err := s.GetReadyWork(ctx, types.WorkFilter{Limit: 500, IncludeMolSteps: true})
+	readyIssues, err := s.GetReadyWork(ctx, types.WorkFilter{IncludeMolSteps: true})
 	if err != nil {
 		return nil, fmt.Errorf("getting ready work: %w", err)
 	}
@@ -137,7 +136,6 @@ func findGateReadyMolecules(ctx context.Context, s *dolt.DoltStore) ([]*GatedMol
 	hookedStatus := types.StatusHooked
 	hookedFilter := types.IssueFilter{
 		Status: &hookedStatus,
-		Limit:  100,
 	}
 	hookedIssues, err := s.SearchIssues(ctx, "", hookedFilter)
 	if err != nil {
