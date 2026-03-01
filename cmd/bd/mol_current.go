@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -508,9 +509,12 @@ type ContinueResult struct {
 	MoleculeID   string       `json:"molecule_id,omitempty"`
 }
 
-// AdvanceToNextStep finds the next ready step in a molecule after closing a step
-// If autoClaim is true, it marks the next step as in_progress
-// Returns nil if the issue is not part of a molecule
+// AdvanceToNextStep finds the next ready step in a molecule after closing a step.
+// If autoClaim is true, it marks the next step as in_progress using optimistic
+// concurrency control: the step's status is re-verified inside a transaction to
+// guard against TOCTOU races where multiple agents identify and try to claim the
+// same step concurrently.
+// Returns nil if the issue is not part of a molecule.
 func AdvanceToNextStep(ctx context.Context, s *dolt.DoltStore, closedStepID string, autoClaim bool, actorName string) (*ContinueResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
@@ -546,31 +550,52 @@ func AdvanceToNextStep(ctx context.Context, s *dolt.DoltStore, closedStepID stri
 		return result, nil
 	}
 
-	// Find next ready step
-	var nextStep *types.Issue
+	// Collect all ready steps (not just the first) so we can fall back
+	// if a concurrent agent claims one before us.
+	var readySteps []*types.Issue
 	for _, step := range progress.Steps {
 		if step.Status == "ready" {
-			nextStep = step.Issue
-			break
+			readySteps = append(readySteps, step.Issue)
 		}
 	}
 
-	if nextStep == nil {
+	if len(readySteps) == 0 {
 		// No ready steps - might be blocked
 		return result, nil
 	}
 
-	result.NextStep = nextStep
+	result.NextStep = readySteps[0]
 
-	// Auto-claim if requested
+	// Auto-claim if requested, using optimistic concurrency control.
+	// Re-read the step inside a transaction to verify it hasn't been claimed
+	// by another agent between our read and write (TOCTOU guard).
 	if autoClaim {
-		updates := map[string]interface{}{
-			"status": types.StatusInProgress,
+		for _, candidate := range readySteps {
+			err := s.RunInTransaction(ctx, fmt.Sprintf("bd: advance to step %s", candidate.ID), func(tx storage.Transaction) error {
+				// Re-read inside transaction to check current status
+				current, txErr := tx.GetIssue(ctx, candidate.ID)
+				if txErr != nil {
+					return txErr
+				}
+				if current == nil {
+					return fmt.Errorf("step %s not found", candidate.ID)
+				}
+				// Only claim if still in open status (not already claimed)
+				if current.Status != types.StatusOpen {
+					return fmt.Errorf("step %s already claimed (status: %s)", candidate.ID, current.Status)
+				}
+				updates := map[string]interface{}{
+					"status": types.StatusInProgress,
+				}
+				return tx.UpdateIssue(ctx, candidate.ID, updates, actorName)
+			})
+			if err == nil {
+				result.NextStep = candidate
+				result.AutoAdvanced = true
+				break
+			}
+			// This candidate was already claimed; try the next ready step
 		}
-		if err := s.UpdateIssue(ctx, nextStep.ID, updates, actorName); err != nil {
-			return result, fmt.Errorf("could not claim next step: %w", err)
-		}
-		result.AutoAdvanced = true
 	}
 
 	return result, nil

@@ -1829,6 +1829,192 @@ func TestAdvanceToNextStepOrphanIssue(t *testing.T) {
 	}
 }
 
+// TestAdvanceToNextStepConcurrentClaim tests optimistic concurrency: when the
+// first ready step has already been claimed by another agent, AdvanceToNextStep
+// falls back to the next available ready step.
+func TestAdvanceToNextStepConcurrentClaim(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule: root -> step1 (closed), step2 (open), step3 (open)
+	// step2 and step3 both depend on step1, so both become ready when step1 closes.
+	root := &types.Issue{
+		Title:     "Concurrent Claim Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	step1 := &types.Issue{
+		Title:     "Step 1 (closed)",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		Title:     "Step 2 (will be pre-claimed)",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step3 := &types.Issue{
+		Title:     "Step 3 (fallback target)",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, step := range []*types.Issue{step1, step2, step3} {
+		if err := s.CreateIssue(ctx, step, "test"); err != nil {
+			t.Fatalf("Failed to create step: %v", err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: root.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add parent dependency: %v", err)
+		}
+	}
+
+	// step2 and step3 both depend on step1
+	for _, step := range []*types.Issue{step2, step3} {
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: step1.ID,
+			Type:        types.DepBlocks,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add blocking dependency: %v", err)
+		}
+	}
+
+	// Simulate another agent claiming step2 (TOCTOU race scenario)
+	if err := s.UpdateIssue(ctx, step2.ID, map[string]interface{}{
+		"status": types.StatusInProgress,
+	}, "other-agent"); err != nil {
+		t.Fatalf("Failed to pre-claim step2: %v", err)
+	}
+
+	// Now our agent tries to advance with autoClaim — step2 was identified as
+	// ready during the read phase, but it's already in_progress. The function
+	// should fall back to step3.
+	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "our-agent")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result should not be nil")
+	}
+	if !result.AutoAdvanced {
+		t.Error("AutoAdvanced should be true (should have claimed step3)")
+	}
+	if result.NextStep == nil {
+		t.Fatal("NextStep should not be nil")
+	}
+	if result.NextStep.ID != step3.ID {
+		t.Errorf("NextStep.ID = %q, want %q (should fall back to step3)", result.NextStep.ID, step3.ID)
+	}
+
+	// Verify step3 is now in_progress
+	step3Updated, _ := s.GetIssue(ctx, step3.ID)
+	if step3Updated.Status != types.StatusInProgress {
+		t.Errorf("Step3 status = %v, want in_progress", step3Updated.Status)
+	}
+}
+
+// TestAdvanceToNextStepAllClaimed tests that when all ready steps are already
+// claimed by other agents, AdvanceToNextStep reports no auto-advance.
+func TestAdvanceToNextStepAllClaimed(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Create molecule: root -> step1 (closed), step2 (open, will be pre-claimed)
+	root := &types.Issue{
+		Title:     "All Claimed Test Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Labels:    []string{BeadsTemplateLabel},
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	step1 := &types.Issue{
+		Title:     "Step 1 (closed)",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		Title:     "Step 2 (only ready, will be pre-claimed)",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, step := range []*types.Issue{step1, step2} {
+		if err := s.CreateIssue(ctx, step, "test"); err != nil {
+			t.Fatalf("Failed to create step: %v", err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: root.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add parent dependency: %v", err)
+		}
+	}
+
+	// step2 depends on step1
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step2.ID,
+		DependsOnID: step1.ID,
+		Type:        types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add blocking dependency: %v", err)
+	}
+
+	// Pre-claim the only ready step
+	if err := s.UpdateIssue(ctx, step2.ID, map[string]interface{}{
+		"status": types.StatusInProgress,
+	}, "other-agent"); err != nil {
+		t.Fatalf("Failed to pre-claim step2: %v", err)
+	}
+
+	// Advance with autoClaim — should fail gracefully (no steps to claim)
+	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "our-agent")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result should not be nil")
+	}
+	if result.AutoAdvanced {
+		t.Error("AutoAdvanced should be false when all ready steps are claimed")
+	}
+}
+
 // =============================================================================
 // Dynamic Bonding Tests (bd-xo1o.1)
 // =============================================================================
