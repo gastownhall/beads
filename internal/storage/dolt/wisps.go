@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -902,12 +903,17 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	`, dep.IssueID, dep.DependsOnID).Scan(&existingType)
 	if err == nil {
 		if existingType == string(dep.Type) {
+			// Same type — idempotent; update metadata in case it changed
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE wisp_dependencies SET metadata = ? WHERE issue_id = ? AND depends_on_id = ?
+			`, metadata, dep.IssueID, dep.DependsOnID); err != nil {
+				return fmt.Errorf("failed to update wisp dependency metadata: %w", err)
+			}
 			return wrapTransactionError("commit add wisp dependency", tx.Commit())
 		}
 		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
 			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
-	}
-	if err != nil && err != sql.ErrNoRows {
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("failed to check existing wisp dependency: %w", err)
 	}
 

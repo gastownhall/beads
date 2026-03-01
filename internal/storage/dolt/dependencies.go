@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -96,15 +97,17 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 	if err == nil {
 		// Row exists
 		if existingType == string(dep.Type) {
-			// Same type — idempotent, nothing to do
+			// Same type — idempotent; update metadata in case it changed
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE dependencies SET metadata = ? WHERE issue_id = ? AND depends_on_id = ?
+			`, metadata, dep.IssueID, dep.DependsOnID); err != nil {
+				return fmt.Errorf("failed to update dependency metadata: %w", err)
+			}
 			return tx.Commit()
 		}
 		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
 			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
-	}
-	// err is non-nil: either sql.ErrNoRows (no existing dep, proceed with insert)
-	// or a real database error. Only sql.ErrNoRows is acceptable here.
-	if err != nil && err != sql.ErrNoRows {
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("failed to check existing dependency: %w", err)
 	}
 
