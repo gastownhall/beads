@@ -50,7 +50,7 @@ Examples:
 			return
 		}
 
-		fmt.Println(strings.Join(formatHookMigrationPlan(plan, requestedDryRun), "\n"))
+		fmt.Println(strings.Join(formatHookMigrationPlan(plan), "\n"))
 	},
 }
 
@@ -75,7 +75,7 @@ func buildHookMigrationJSON(plan doctor.HookMigrationPlan, requestedDryRun bool)
 	}
 }
 
-func formatHookMigrationPlan(plan doctor.HookMigrationPlan, requestedDryRun bool) []string {
+func formatHookMigrationPlan(plan doctor.HookMigrationPlan) []string {
 	lines := []string{
 		"Hook migration plan (planning only)",
 	}
