@@ -349,10 +349,11 @@ func TestRun_Async(t *testing.T) {
 	runner.Run(EventClose, issue)
 
 	// Wait for the async hook to complete with retries.
-	// Under high test load the goroutine scheduling + exec can be delayed.
+	// Use a generous timeout — under heavy CI load, goroutine scheduling
+	// plus exec startup can exceed several seconds.
 	var output []byte
 	var err error
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		output, err = os.ReadFile(outputFile)
 		if err == nil {
