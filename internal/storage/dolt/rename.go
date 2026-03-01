@@ -24,6 +24,9 @@ func (s *DoltStore) UpdateIssueID(ctx context.Context, oldID, newID string, issu
 	if err != nil {
 		return fmt.Errorf("failed to disable foreign key checks: %w", err)
 	}
+	// SET is session-level, not rolled back by tx.Rollback(). Ensure FK checks
+	// are re-enabled on the connection even if we return early on error.
+	defer func() { _, _ = tx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 1`) }()
 
 	// Update the issue itself
 	result, err := tx.ExecContext(ctx, `
