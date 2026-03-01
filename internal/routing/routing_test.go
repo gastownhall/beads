@@ -231,6 +231,7 @@ func TestDetectUserRole_PushURLMaintainer(t *testing.T) {
 	stub := &gitStub{t: t, responses: []gitResponse{
 		{expect: gitCall{"/repo", []string{"config", "--get", "beads.role"}}, output: "unknown"},
 		{expect: gitCall{"/repo", []string{"remote", "get-url", "--push", "origin"}}, output: "git@github.com:owner/repo.git"},
+		{expect: gitCall{"/repo", []string{"remote", "get-url", "upstream"}}, err: errors.New("no upstream")},
 	}}
 	gitCommandRunner = stub.run
 	t.Cleanup(func() {
@@ -252,6 +253,7 @@ func TestDetectUserRole_HTTPSCredentialsMaintainer(t *testing.T) {
 	stub := &gitStub{t: t, responses: []gitResponse{
 		{expect: gitCall{"/repo", []string{"config", "--get", "beads.role"}}, output: ""},
 		{expect: gitCall{"/repo", []string{"remote", "get-url", "--push", "origin"}}, output: "https://token@github.com/owner/repo.git"},
+		{expect: gitCall{"/repo", []string{"remote", "get-url", "upstream"}}, err: errors.New("no upstream")},
 	}}
 	gitCommandRunner = stub.run
 	t.Cleanup(func() {
@@ -274,6 +276,7 @@ func TestDetectUserRole_HTTPSNoCredentialsContributor(t *testing.T) {
 		{expect: gitCall{"", []string{"config", "--get", "beads.role"}}, err: errors.New("missing")},
 		{expect: gitCall{"", []string{"remote", "get-url", "--push", "origin"}}, err: errors.New("no push")},
 		{expect: gitCall{"", []string{"remote", "get-url", "origin"}}, output: "https://github.com/owner/repo.git"},
+		{expect: gitCall{"", []string{"remote", "get-url", "upstream"}}, err: errors.New("no upstream")},
 	}}
 	gitCommandRunner = stub.run
 	t.Cleanup(func() {
@@ -310,6 +313,50 @@ func TestDetectUserRole_NoRemoteMaintainer(t *testing.T) {
 	}
 	if role != Maintainer {
 		t.Fatalf("expected %s for local project with no remote, got %s", Maintainer, role)
+	}
+}
+
+func TestDetectUserRole_ForkWorkflowDefaultsToContributor(t *testing.T) {
+	orig := gitCommandRunner
+	stub := &gitStub{t: t, responses: []gitResponse{
+		{expect: gitCall{"/repo", []string{"config", "--get", "beads.role"}}, err: errors.New("missing")},
+		{expect: gitCall{"/repo", []string{"remote", "get-url", "--push", "origin"}}, output: "git@github.com:osamu2001/zmx.git"},
+		{expect: gitCall{"/repo", []string{"remote", "get-url", "upstream"}}, output: "git@github.com:neurosnap/zmx.git"},
+	}}
+	gitCommandRunner = stub.run
+	t.Cleanup(func() {
+		gitCommandRunner = orig
+		stub.verify()
+	})
+
+	role, err := DetectUserRole("/repo")
+	if err != nil {
+		t.Fatalf("DetectUserRole error = %v", err)
+	}
+	if role != Contributor {
+		t.Fatalf("expected %s, got %s", Contributor, role)
+	}
+}
+
+func TestDetectUserRole_UpstreamSameRepoStillMaintainer(t *testing.T) {
+	orig := gitCommandRunner
+	stub := &gitStub{t: t, responses: []gitResponse{
+		{expect: gitCall{"/repo", []string{"config", "--get", "beads.role"}}, output: ""},
+		{expect: gitCall{"/repo", []string{"remote", "get-url", "--push", "origin"}}, output: "git@github.com:owner/repo.git"},
+		{expect: gitCall{"/repo", []string{"remote", "get-url", "upstream"}}, output: "https://github.com/owner/repo.git"},
+	}}
+	gitCommandRunner = stub.run
+	t.Cleanup(func() {
+		gitCommandRunner = orig
+		stub.verify()
+	})
+
+	role, err := DetectUserRole("/repo")
+	if err != nil {
+		t.Fatalf("DetectUserRole error = %v", err)
+	}
+	if role != Maintainer {
+		t.Fatalf("expected %s, got %s", Maintainer, role)
 	}
 }
 
