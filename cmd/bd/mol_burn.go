@@ -64,6 +64,9 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	force, _ := cmd.Flags().GetBool("force")
+	if yes, _ := cmd.Flags().GetBool("yes"); yes {
+		force = true
+	}
 
 	// Single ID: use original logic for backward compatibility
 	if len(args) == 1 {
@@ -402,6 +405,8 @@ func burnWisps(ctx context.Context, s *dolt.DoltStore, ids []string) (*BurnResul
 func init() {
 	molBurnCmd.Flags().Bool("dry-run", false, "Preview what would be deleted")
 	molBurnCmd.Flags().Bool("force", false, "Skip confirmation prompt")
+	molBurnCmd.Flags().BoolP("yes", "y", false, "Alias for --force (skip confirmation)")
+	_ = molBurnCmd.Flags().MarkHidden("yes")
 
 	molCmd.AddCommand(molBurnCmd)
 }
