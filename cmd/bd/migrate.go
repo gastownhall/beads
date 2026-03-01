@@ -26,6 +26,7 @@ Backend migration flags:
   --to-dolt     Migrate from SQLite to Dolt backend
 
 Subcommands:
+  hooks       Plan git hook migration to marker-managed format
   issues      Move issues between repositories
   sync        Set up sync.branch workflow for multi-clone setups
 `,
@@ -769,6 +770,10 @@ func init() {
 	migrateSyncCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateSyncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	migrateCmd.AddCommand(migrateSyncCmd)
+
+	migrateHooksCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateHooksCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	migrateCmd.AddCommand(migrateHooksCmd)
 
 	rootCmd.AddCommand(migrateCmd)
 }
