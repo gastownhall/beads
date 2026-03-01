@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -370,48 +371,94 @@ func (s *DoltStore) updatePeerLastSync(ctx context.Context, name string) error {
 	return wrapExecError("update peer last sync", err)
 }
 
+// remoteCredentials holds authentication credentials for a Dolt remote.
+// Used to pass credentials to CLI subprocesses via cmd.Env (isolated) or to
+// the SQL path via process env vars under mutex protection.
+type remoteCredentials struct {
+	Username string
+	Password string
+}
+
+// empty returns true if no credentials are set.
+func (c *remoteCredentials) empty() bool {
+	return c == nil || (c.Username == "" && c.Password == "")
+}
+
+// applyToCmd sets DOLT_REMOTE_USER/PASSWORD on the subprocess environment,
+// isolating credentials to this specific exec.Cmd. This avoids setting
+// process-wide env vars that could leak to concurrent goroutines.
+func (c *remoteCredentials) applyToCmd(cmd *exec.Cmd) {
+	if c.empty() {
+		return
+	}
+	// Start with current process env, filtering out any existing credential vars
+	// to prevent stale values from leaking into the subprocess.
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "DOLT_REMOTE_USER=") && !strings.HasPrefix(e, "DOLT_REMOTE_PASSWORD=") {
+			env = append(env, e)
+		}
+	}
+	if c.Username != "" {
+		env = append(env, "DOLT_REMOTE_USER="+c.Username)
+	}
+	if c.Password != "" {
+		env = append(env, "DOLT_REMOTE_PASSWORD="+c.Password)
+	}
+	cmd.Env = env
+}
+
 // setFederationCredentials sets DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD env vars.
 // Returns a cleanup function that must be called (typically via defer) to unset them.
 // The caller must hold federationEnvMutex.
+// Only used for SQL-path operations where the in-process Dolt server reads from
+// the process environment. CLI operations should use remoteCredentials.applyToCmd instead.
 func setFederationCredentials(username, password string) func() {
 	if username != "" {
-		// Best-effort: failures here should not crash the caller.
 		_ = os.Setenv("DOLT_REMOTE_USER", username) // Best effort: Setenv failure is extremely rare in practice
 	}
 	if password != "" {
-		// Best-effort: failures here should not crash the caller.
 		_ = os.Setenv("DOLT_REMOTE_PASSWORD", password) // Best effort: Setenv failure is extremely rare in practice
 	}
 	return func() {
-		// Best-effort cleanup.
 		_ = os.Unsetenv("DOLT_REMOTE_USER")     // Best effort cleanup of auth env vars
 		_ = os.Unsetenv("DOLT_REMOTE_PASSWORD") // Best effort cleanup of auth env vars
 	}
 }
 
-// withPeerCredentials executes a function with peer credentials set in environment.
-// If the peer has stored credentials, they are set as DOLT_REMOTE_USER/PASSWORD
-// for the duration of the function call.
-func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn func() error) error {
-	// Look up credentials for this peer
+// withEnvCredentials executes fn with credentials set as process-wide env vars,
+// protected by federationEnvMutex. This is required for SQL-path operations
+// (CALL DOLT_PUSH/PULL) where the in-process Dolt server reads credentials
+// from the process environment. CLI operations should NOT use this — use
+// remoteCredentials.applyToCmd instead for race-free subprocess isolation.
+func withEnvCredentials(creds *remoteCredentials, fn func() error) error {
+	if creds.empty() {
+		return fn()
+	}
+	federationEnvMutex.Lock()
+	defer federationEnvMutex.Unlock()
+	cleanup := setFederationCredentials(creds.Username, creds.Password)
+	defer cleanup()
+	return fn()
+}
+
+// withPeerCredentials looks up credentials for a federation peer and passes
+// them to fn. The callback receives the credentials and is responsible for
+// applying them appropriately: CLI operations use creds.applyToCmd for
+// subprocess isolation; SQL operations use withEnvCredentials for mutex-protected
+// process env access.
+func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn func(creds *remoteCredentials) error) error {
 	peer, err := s.GetFederationPeer(ctx, peerName)
 	if err != nil {
 		return fmt.Errorf("failed to get peer credentials: %w", err)
 	}
 
-	// Always hold the mutex for federation operations. Even when this peer has
-	// no credentials, a concurrent goroutine may be setting DOLT_REMOTE_USER/PASSWORD
-	// for a different peer — without the mutex, this fn() could inherit those env vars.
-	federationEnvMutex.Lock()
-	defer federationEnvMutex.Unlock()
-
+	var creds *remoteCredentials
 	if peer != nil && (peer.Username != "" || peer.Password != "") {
-		cleanup := setFederationCredentials(peer.Username, peer.Password)
-		defer cleanup()
+		creds = &remoteCredentials{Username: peer.Username, Password: peer.Password}
 	}
 
-	// Execute the function
-	err = fn()
+	err = fn(creds)
 
 	// Update last sync time on success
 	if err == nil && peer != nil {

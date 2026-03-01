@@ -19,16 +19,18 @@ import (
 // For SSH remotes, uses CLI `dolt push` to avoid MySQL connection timeouts.
 func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 	if s.isPeerSSHRemote(ctx, peer) {
-		return s.withPeerCredentials(ctx, peer, func() error {
-			return s.doltCLIPushToPeer(ctx, peer)
+		return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+			return s.doltCLIPushToPeer(ctx, peer, creds)
 		})
 	}
-	return s.withPeerCredentials(ctx, peer, func() error {
-		_, err := s.execContext(ctx, "CALL DOLT_PUSH(?, ?)", peer, s.branch)
-		if err != nil {
-			return fmt.Errorf("failed to push to peer %s: %w", peer, err)
-		}
-		return nil
+	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		return withEnvCredentials(creds, func() error {
+			_, err := s.execContext(ctx, "CALL DOLT_PUSH(?, ?)", peer, s.branch)
+			if err != nil {
+				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
+			}
+			return nil
+		})
 	})
 }
 
@@ -39,8 +41,8 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	var conflicts []storage.Conflict
 	if s.isPeerSSHRemote(ctx, peer) {
-		err := s.withPeerCredentials(ctx, peer, func() error {
-			if pullErr := s.doltCLIPullFromPeer(ctx, peer); pullErr != nil {
+		err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+			if pullErr := s.doltCLIPullFromPeer(ctx, peer, creds); pullErr != nil {
 				c, conflictErr := s.GetConflicts(ctx)
 				if conflictErr == nil && len(c) > 0 {
 					conflicts = c
@@ -52,17 +54,19 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 		})
 		return conflicts, err
 	}
-	err := s.withPeerCredentials(ctx, peer, func() error {
-		_, pullErr := s.execContext(ctx, "CALL DOLT_PULL(?)", peer)
-		if pullErr != nil {
-			c, conflictErr := s.GetConflicts(ctx)
-			if conflictErr == nil && len(c) > 0 {
-				conflicts = c
-				return nil
+	err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		return withEnvCredentials(creds, func() error {
+			_, pullErr := s.execContext(ctx, "CALL DOLT_PULL(?)", peer)
+			if pullErr != nil {
+				c, conflictErr := s.GetConflicts(ctx)
+				if conflictErr == nil && len(c) > 0 {
+					conflicts = c
+					return nil
+				}
+				return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
 			}
-			return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
-		}
-		return nil
+			return nil
+		})
 	})
 	return conflicts, err
 }
@@ -72,16 +76,18 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 // For SSH remotes, uses CLI `dolt fetch` to avoid MySQL connection timeouts.
 func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 	if s.isPeerSSHRemote(ctx, peer) {
-		return s.withPeerCredentials(ctx, peer, func() error {
-			return s.doltCLIFetchFromPeer(ctx, peer)
+		return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+			return s.doltCLIFetchFromPeer(ctx, peer, creds)
 		})
 	}
-	return s.withPeerCredentials(ctx, peer, func() error {
-		_, err := s.execContext(ctx, "CALL DOLT_FETCH(?)", peer)
-		if err != nil {
-			return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
-		}
-		return nil
+	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		return withEnvCredentials(creds, func() error {
+			_, err := s.execContext(ctx, "CALL DOLT_FETCH(?)", peer)
+			if err != nil {
+				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
+			}
+			return nil
+		})
 	})
 }
 
@@ -275,9 +281,11 @@ func (s *DoltStore) isPeerSSHRemote(ctx context.Context, peer string) bool {
 
 // doltCLIPushToPeer shells out to `dolt push` for a specific peer remote.
 // Used for SSH remotes where CALL DOLT_PUSH times out through the SQL connection.
-func (s *DoltStore) doltCLIPushToPeer(ctx context.Context, peer string) error {
+// Credentials are set on the subprocess environment only via cmd.Env.
+func (s *DoltStore) doltCLIPushToPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
 	cmd := exec.CommandContext(ctx, "dolt", "push", peer, s.branch) // #nosec G204 -- fixed command with validated peer/branch
 	cmd.Dir = s.dbPath
+	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to push to peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
@@ -287,9 +295,11 @@ func (s *DoltStore) doltCLIPushToPeer(ctx context.Context, peer string) error {
 
 // doltCLIPullFromPeer shells out to `dolt pull` for a specific peer remote.
 // Used for SSH remotes where CALL DOLT_PULL times out through the SQL connection.
-func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string) error {
+// Credentials are set on the subprocess environment only via cmd.Env.
+func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
 	cmd := exec.CommandContext(ctx, "dolt", "pull", peer, s.branch) // #nosec G204 -- fixed command with validated peer/branch
 	cmd.Dir = s.dbPath
+	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to pull from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
@@ -299,9 +309,11 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string) error 
 
 // doltCLIFetchFromPeer shells out to `dolt fetch` for a specific peer remote.
 // Used for SSH remotes where CALL DOLT_FETCH times out through the SQL connection.
-func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string) error {
+// Credentials are set on the subprocess environment only via cmd.Env.
+func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
 	cmd := exec.CommandContext(ctx, "dolt", "fetch", peer) // #nosec G204 -- fixed command with validated peer
 	cmd.Dir = s.dbPath
+	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to fetch from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)

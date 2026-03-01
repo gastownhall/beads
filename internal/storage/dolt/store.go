@@ -1268,9 +1268,19 @@ func (s *DoltStore) isSSHRemote(ctx context.Context) bool {
 	return false
 }
 
+// mainRemoteCredentials returns credentials for the main remote, or nil if none.
+func (s *DoltStore) mainRemoteCredentials() *remoteCredentials {
+	if s.remoteUser == "" && s.remotePassword == "" {
+		return nil
+	}
+	return &remoteCredentials{Username: s.remoteUser, Password: s.remotePassword}
+}
+
 // doltCLIPush shells out to `dolt push` from the database directory.
 // Used for SSH remotes where CALL DOLT_PUSH times out through the SQL connection.
-func (s *DoltStore) doltCLIPush(ctx context.Context, force bool) error {
+// If creds is non-nil, credentials are set on the subprocess environment only,
+// avoiding process-wide env var races with concurrent goroutines.
+func (s *DoltStore) doltCLIPush(ctx context.Context, force bool, creds *remoteCredentials) error {
 	ctx, cancel := context.WithTimeout(ctx, cliExecTimeout)
 	defer cancel()
 	args := []string{"push"}
@@ -1280,6 +1290,7 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, force bool) error {
 	args = append(args, s.remote, s.branch)
 	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/branch
 	cmd.Dir = s.dbPath
+	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("dolt push failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -1289,11 +1300,13 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, force bool) error {
 
 // doltCLIPull shells out to `dolt pull` from the database directory.
 // Used for SSH remotes where CALL DOLT_PULL times out through the SQL connection.
-func (s *DoltStore) doltCLIPull(ctx context.Context) error {
+// If creds is non-nil, credentials are set on the subprocess environment only.
+func (s *DoltStore) doltCLIPull(ctx context.Context, creds *remoteCredentials) error {
 	ctx, cancel := context.WithTimeout(ctx, cliExecTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", "pull", s.remote, s.branch) // #nosec G204 -- fixed command
 	cmd.Dir = s.dbPath
+	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("dolt pull failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -1314,32 +1327,23 @@ func (s *DoltStore) Push(ctx context.Context) (retErr error) {
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
+	creds := s.mainRemoteCredentials()
 	// SSH remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
+	// Credentials are passed directly to the subprocess via cmd.Env, avoiding
+	// process-wide env var races with concurrent goroutines.
 	if s.isSSHRemote(ctx) {
-		if s.remoteUser != "" {
-			federationEnvMutex.Lock()
-			cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
-			defer func() {
-				cleanup()
-				federationEnvMutex.Unlock()
-			}()
-		}
-		return s.doltCLIPush(ctx, false)
+		return s.doltCLIPush(ctx, false, creds)
 	}
 	if s.remoteUser != "" {
-		federationEnvMutex.Lock()
-		cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
-		defer func() {
-			cleanup()
-			federationEnvMutex.Unlock()
-		}()
-		_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
-		if err != nil {
-			return fmt.Errorf("failed to push to %s/%s: %w", s.remote, s.branch, err)
-		}
-		return nil
+		return withEnvCredentials(creds, func() error {
+			_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
+			if err != nil {
+				return fmt.Errorf("failed to push to %s/%s: %w", s.remote, s.branch, err)
+			}
+			return nil
+		})
 	}
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", s.remote, s.branch)
 	if err != nil {
@@ -1360,32 +1364,22 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
+	creds := s.mainRemoteCredentials()
 	// SSH remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
+	// Credentials are passed directly to the subprocess via cmd.Env.
 	if s.isSSHRemote(ctx) {
-		if s.remoteUser != "" {
-			federationEnvMutex.Lock()
-			cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
-			defer func() {
-				cleanup()
-				federationEnvMutex.Unlock()
-			}()
-		}
-		return s.doltCLIPush(ctx, true)
+		return s.doltCLIPush(ctx, true, creds)
 	}
 	if s.remoteUser != "" {
-		federationEnvMutex.Lock()
-		cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
-		defer func() {
-			cleanup()
-			federationEnvMutex.Unlock()
-		}()
-		_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
-		if err != nil {
-			return fmt.Errorf("failed to force push to %s/%s: %w", s.remote, s.branch, err)
-		}
-		return nil
+		return withEnvCredentials(creds, func() error {
+			_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
+			if err != nil {
+				return fmt.Errorf("failed to force push to %s/%s: %w", s.remote, s.branch, err)
+			}
+			return nil
+		})
 	}
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--force', ?, ?)", s.remote, s.branch)
 	if err != nil {
@@ -1407,19 +1401,13 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
+	creds := s.mainRemoteCredentials()
 	// SSH remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
+	// Credentials are passed directly to the subprocess via cmd.Env.
 	if s.isSSHRemote(ctx) {
-		if s.remoteUser != "" {
-			federationEnvMutex.Lock()
-			cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
-			defer func() {
-				cleanup()
-				federationEnvMutex.Unlock()
-			}()
-		}
-		if err := s.doltCLIPull(ctx); err != nil {
+		if err := s.doltCLIPull(ctx, creds); err != nil {
 			return err
 		}
 		if err := s.resetAutoIncrements(ctx); err != nil {
@@ -1428,20 +1416,16 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 		return nil
 	}
 	if s.remoteUser != "" {
-		federationEnvMutex.Lock()
-		cleanup := setFederationCredentials(s.remoteUser, s.remotePassword)
-		defer func() {
-			cleanup()
-			federationEnvMutex.Unlock()
-		}()
-		_, err := s.db.ExecContext(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
-		if err != nil {
-			return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
-		}
-		if err := s.resetAutoIncrements(ctx); err != nil {
-			return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
-		}
-		return nil
+		return withEnvCredentials(creds, func() error {
+			_, err := s.db.ExecContext(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
+			if err != nil {
+				return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
+			}
+			if err := s.resetAutoIncrements(ctx); err != nil {
+				return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
+			}
+			return nil
+		})
 	}
 	_, err := s.db.ExecContext(ctx, "CALL DOLT_PULL(?, ?)", s.remote, s.branch)
 	if err != nil {
