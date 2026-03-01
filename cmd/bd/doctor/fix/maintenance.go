@@ -12,12 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// cleanupResult contains the results of a cleanup operation
-type cleanupResult struct {
-	DeletedCount  int
-	SkippedPinned int
-}
-
 // StaleClosedIssues deletes stale closed issues.
 // This is the fix handler for the "Stale Closed Issues" doctor check.
 //

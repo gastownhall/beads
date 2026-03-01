@@ -169,12 +169,6 @@ func scanBeadsDir(beadsDir string, report *ArtifactReport) {
 	}
 }
 
-// isDoltNative returns true if the .beads directory contains a dolt/ subdirectory.
-func isDoltNative(beadsDir string) bool {
-	info, err := os.Stat(getDatabasePath(beadsDir))
-	return err == nil && info.IsDir()
-}
-
 // isRedirectExpectedDir returns true if this .beads directory should contain
 // only a redirect file (i.e., it's in a worktree, polecat, crew, or refinery subdirectory).
 func isRedirectExpectedDir(beadsDir string) bool {

@@ -770,14 +770,6 @@ func FindOrphanedIssues(gitPath string, provider types.IssueProvider) ([]OrphanI
 	return orphanedIssues, nil
 }
 
-// findOrphanedIssuesFromPath is a convenience function for callers that don't have a provider.
-// Note: Cross-repo orphan detection via local database provider has been removed
-// along with the SQLite backend. This function now returns an error; callers
-// should use FindOrphanedIssues with an explicit IssueProvider instead.
-func findOrphanedIssuesFromPath(path string) ([]OrphanIssue, error) {
-	return nil, fmt.Errorf("cross-repo orphan detection requires an explicit IssueProvider (local database provider removed)")
-}
-
 // CheckOrphanedIssues detects issues referenced in git commits but still open.
 // This catches cases where someone implemented a fix with "(bd-xxx)" in the commit
 // message but forgot to run "bd close".

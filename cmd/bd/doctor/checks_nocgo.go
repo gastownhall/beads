@@ -49,10 +49,6 @@ func CheckPatrolPollution(_ string) DoctorCheck {
 	return DoctorCheck{Name: "Patrol Pollution", Status: StatusOK, Message: "Requires CGO"}
 }
 
-func CheckCompactionCandidates(_ string) DoctorCheck {
-	return DoctorCheck{Name: "Compaction Candidates", Status: StatusOK, Message: "Requires CGO"}
-}
-
 func FixStaleMQFiles(_ string) error {
 	return nil
 }

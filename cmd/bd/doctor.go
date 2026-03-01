@@ -700,11 +700,6 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, patrolPollutionCheck)
 	// Don't fail overall check for patrol pollution, just warn
 
-	// Check 28: Compaction candidates (maintenance)
-	compactionCheck := convertDoctorCheck(doctor.CheckCompactionCandidates(path))
-	result.Checks = append(result.Checks, compactionCheck)
-	// Info only, not a warning - compaction requires human review
-
 	// Check 29: Database size (pruning suggestion)
 	// Note: This check has no auto-fix - pruning is destructive and user-controlled
 	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSize(path))

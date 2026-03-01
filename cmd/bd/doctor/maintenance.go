@@ -194,20 +194,6 @@ func CheckStaleMolecules(path string) DoctorCheck {
 	}
 }
 
-// CheckCompactionCandidates detects issues eligible for compaction.
-// Note: Compaction is a SQLite-specific optimization. Dolt backends don't need compaction
-// as Dolt handles data management differently.
-func CheckCompactionCandidates(path string) DoctorCheck {
-	// Compaction was a SQLite-specific optimization. Dolt (the only backend)
-	// handles data management differently and doesn't need compaction.
-	return DoctorCheck{
-		Name:     "Compaction Candidates",
-		Status:   StatusOK,
-		Message:  "N/A (compaction only applies to SQLite backend)",
-		Category: CategoryMaintenance,
-	}
-}
-
 // CheckPersistentMolIssues detects mol- prefixed issues that should have been ephemeral.
 // When users run "bd mol pour" on formulas that should use "bd mol wisp", the resulting
 // issues get the "mol-" prefix but persist in the issue store. These should be cleaned up.

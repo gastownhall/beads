@@ -508,14 +508,6 @@ func checkMoleculeIntegrity(db *sql.DB) DoctorCheck {
 	return check
 }
 
-// min returns the smaller of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // PrintDeepValidationResult prints the deep validation results
 func PrintDeepValidationResult(result DeepValidationResult) {
 	fmt.Printf("\nDeep Validation Results\n")

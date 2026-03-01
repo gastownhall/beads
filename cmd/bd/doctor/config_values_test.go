@@ -6,46 +6,6 @@ import (
 	"testing"
 )
 
-func TestIsValidBranchName(t *testing.T) {
-	tests := []struct {
-		name     string
-		branch   string
-		expected bool
-	}{
-		{"valid simple", "main", true},
-		{"valid with slash", "feature/test", true},
-		{"valid with dash", "my-branch", true},
-		{"valid with underscore", "my_branch", true},
-		{"valid with dot", "v1.0", true},
-		{"valid complex", "feature/bd-123-add-thing", true},
-
-		{"empty", "", false},
-		{"starts with dash", "-branch", false},
-		{"ends with dot", "branch.", false},
-		{"ends with slash", "branch/", false},
-		{"contains space", "my branch", false},
-		{"contains tilde", "branch~1", false},
-		{"contains caret", "branch^2", false},
-		{"contains colon", "branch:name", false},
-		{"contains backslash", "branch\\name", false},
-		{"contains question", "branch?", false},
-		{"contains asterisk", "branch*", false},
-		{"contains bracket", "branch[0]", false},
-		{"contains double dot", "branch..name", false},
-		{"ends with .lock", "branch.lock", false},
-		{"contains @{", "branch@{1}", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isValidBranchName(tt.branch)
-			if got != tt.expected {
-				t.Errorf("isValidBranchName(%q) = %v, want %v", tt.branch, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestCheckConfigValues(t *testing.T) {
 	// Create a temporary directory for testing
 	tmpDir := t.TempDir()
