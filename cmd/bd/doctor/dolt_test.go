@@ -15,7 +15,8 @@ import (
 
 func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
 	// Server-only mode: without a running dolt sql-server, the connection
-	// check should return StatusError.
+	// check should return StatusError and all 6 checks should be present
+	// (consistent return shape regardless of connection success/failure).
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -32,8 +33,8 @@ func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "59998")
 
 	checks := RunDoltHealthChecks(tmpDir)
-	if len(checks) < 1 {
-		t.Fatalf("expected at least 1 check, got %d", len(checks))
+	if len(checks) != 6 {
+		t.Fatalf("expected exactly 6 checks (consistent shape), got %d", len(checks))
 	}
 
 	if checks[0].Name != "Dolt Connection" {
@@ -41,6 +42,24 @@ func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
 	}
 	if checks[0].Status != StatusError {
 		t.Errorf("expected StatusError (no server running), got %s: %s", checks[0].Status, checks[0].Message)
+	}
+
+	// Verify placeholder checks for dimensions that require a connection
+	expectedNames := []string{"Dolt Connection", "Dolt Schema", "Dolt Issue Count", "Dolt Status", "Dolt Lock Health", "Phantom Databases"}
+	for i, name := range expectedNames {
+		if checks[i].Name != name {
+			t.Errorf("checks[%d].Name = %q, want %q", i, checks[i].Name, name)
+		}
+	}
+
+	// Schema, Issue Count, Status, and Phantom Databases should be StatusError with skip message
+	for _, idx := range []int{1, 2, 3, 5} {
+		if checks[idx].Status != StatusError {
+			t.Errorf("checks[%d] (%s): expected StatusError, got %s", idx, checks[idx].Name, checks[idx].Status)
+		}
+		if !strings.Contains(checks[idx].Message, "Skipped (no connection)") {
+			t.Errorf("checks[%d] (%s): expected skip message, got %q", idx, checks[idx].Name, checks[idx].Message)
+		}
 	}
 }
 
@@ -84,8 +103,8 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "59999")
 
 	checks := RunDoltHealthChecks(tmpDir)
-	if len(checks) < 1 {
-		t.Fatalf("expected at least 1 check (connection error + lock health), got %d", len(checks))
+	if len(checks) != 6 {
+		t.Fatalf("expected exactly 6 checks (consistent shape), got %d", len(checks))
 	}
 
 	check := checks[0]

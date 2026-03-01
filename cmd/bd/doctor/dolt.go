@@ -139,15 +139,15 @@ func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorChe
 
 	conn, err := openDoltConn(beadsDir)
 	if err != nil {
-		errCheck := DoctorCheck{
-			Name:     "Dolt Connection",
-			Status:   StatusError,
-			Message:  "Failed to connect to Dolt server",
-			Detail:   err.Error(),
-			Fix:      "Ensure dolt sql-server is running, or check server host/port configuration",
-			Category: CategoryCore,
+		connErr := err.Error()
+		return []DoctorCheck{
+			{Name: "Dolt Connection", Status: StatusError, Message: "Failed to connect to Dolt server", Detail: connErr, Fix: "Ensure dolt sql-server is running, or check server host/port configuration", Category: CategoryCore},
+			{Name: "Dolt Schema", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryCore},
+			{Name: "Dolt Issue Count", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryData},
+			{Name: "Dolt Status", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryData},
+			lockCheck,
+			{Name: "Phantom Databases", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryData},
 		}
-		return []DoctorCheck{errCheck, lockCheck}
 	}
 	defer conn.Close()
 
