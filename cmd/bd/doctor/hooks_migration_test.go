@@ -153,6 +153,46 @@ func TestPlanHookMigration_MissingHookWithBackupSidecar(t *testing.T) {
 	}
 }
 
+func TestDetectHookMarkerState_DuplicateBeginTags(t *testing.T) {
+	content := "#!/bin/sh\n# --- BEGIN BEADS INTEGRATION v0.57.0 ---\n# --- BEGIN BEADS INTEGRATION v0.57.0 ---\nbd hook pre-commit \"$@\"\n# --- END BEADS INTEGRATION v0.57.0 ---\n"
+	got := detectHookMarkerState(content)
+	if got != hookMarkerStateBroken {
+		t.Fatalf("expected broken for duplicate BEGIN tags, got %q", got)
+	}
+}
+
+func TestDetectHookMarkerState_DuplicateMarkerBlocks(t *testing.T) {
+	content := "#!/bin/sh\n# --- BEGIN BEADS INTEGRATION v0.57.0 ---\nbd hook pre-commit \"$@\"\n# --- END BEADS INTEGRATION v0.57.0 ---\n# --- BEGIN BEADS INTEGRATION v0.57.0 ---\nbd hook pre-push \"$@\"\n# --- END BEADS INTEGRATION v0.57.0 ---\n"
+	got := detectHookMarkerState(content)
+	if got != hookMarkerStateBroken {
+		t.Fatalf("expected broken for duplicate marker blocks, got %q", got)
+	}
+}
+
+func TestDetectHookMarkerState_ReversedOrder(t *testing.T) {
+	content := "#!/bin/sh\n# --- END BEADS INTEGRATION v0.57.0 ---\nbd hook pre-commit \"$@\"\n# --- BEGIN BEADS INTEGRATION v0.57.0 ---\n"
+	got := detectHookMarkerState(content)
+	if got != hookMarkerStateBroken {
+		t.Fatalf("expected broken for reversed marker order, got %q", got)
+	}
+}
+
+func TestDetectHookMarkerState_ValidSingle(t *testing.T) {
+	content := "#!/bin/sh\n# --- BEGIN BEADS INTEGRATION v0.57.0 ---\nbd hook pre-commit \"$@\"\n# --- END BEADS INTEGRATION v0.57.0 ---\n"
+	got := detectHookMarkerState(content)
+	if got != hookMarkerStateValid {
+		t.Fatalf("expected valid for correct single marker block, got %q", got)
+	}
+}
+
+func TestDetectHookMarkerState_None(t *testing.T) {
+	content := "#!/bin/sh\necho hello\n"
+	got := detectHookMarkerState(content)
+	if got != hookMarkerStateNone {
+		t.Fatalf("expected none for no markers, got %q", got)
+	}
+}
+
 func writeHookFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
