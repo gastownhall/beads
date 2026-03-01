@@ -162,21 +162,21 @@ func TestVerifyServerTarget_NoServerRunning(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close() // Close immediately — port is now free but known
 
-	err = verifyServerTarget("beads", port)
+	err = verifyServerTarget("beads", port, "root", "")
 	if err != nil {
 		t.Fatalf("expected nil for no server on free port %d, got: %v", port, err)
 	}
 }
 
 func TestVerifyServerTarget_PortZero(t *testing.T) {
-	err := verifyServerTarget("beads", 0)
+	err := verifyServerTarget("beads", 0, "root", "")
 	if err != nil {
 		t.Fatalf("expected nil for port 0, got: %v", err)
 	}
 }
 
 func TestVerifyServerTarget_EmptyDBName(t *testing.T) {
-	err := verifyServerTarget("", 3307)
+	err := verifyServerTarget("", 3307, "root", "")
 	if err == nil {
 		t.Fatal("expected error for empty database name, got nil")
 	}
@@ -206,7 +206,7 @@ func TestVerifyServerTarget_NonMySQLServer(t *testing.T) {
 	}()
 
 	// verifyServerTarget should return an error (can't query non-MySQL server)
-	err = verifyServerTarget("beads", port)
+	err = verifyServerTarget("beads", port, "root", "")
 	if err == nil {
 		t.Error("expected error when connecting to non-MySQL server, got nil")
 	}

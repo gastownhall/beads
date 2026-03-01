@@ -87,7 +87,7 @@ var doltSystemDatabases = map[string]bool{
 // Returns error if:
 //   - Server is unreachable (timeout) or unqueryable (not a Dolt server)
 //   - Port is non-zero but expectedDBName is empty
-func verifyServerTarget(expectedDBName string, port int) error {
+func verifyServerTarget(expectedDBName string, port int, user string, password string) error {
 	if port == 0 {
 		return nil
 	}
@@ -118,7 +118,10 @@ func verifyServerTarget(expectedDBName string, port int) error {
 	_ = conn.Close()
 
 	// Server is listening. Query SHOW DATABASES to verify target.
-	dsn := fmt.Sprintf("root@tcp(%s)/", addr)
+	if user == "" {
+		user = "root"
+	}
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/", user, password, addr)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return fmt.Errorf("connecting to server on port %d: %w", port, err)
@@ -309,7 +312,7 @@ func runMigrationPhases(ctx context.Context, params *migrationParams) (imported 
 	dbName := params.dbName
 
 	// Verify server target — don't write to the wrong Dolt server
-	if err := verifyServerTarget(dbName, params.serverPort); err != nil {
+	if err := verifyServerTarget(dbName, params.serverPort, params.serverUser, params.serverPassword); err != nil {
 		return 0, 0, fmt.Errorf("server check failed: %w\n\nTo fix:\n"+
 			"  1. Stop the other project's Dolt server\n"+
 			"  2. Or set BEADS_DOLT_SERVER_PORT to a unique port for this project\n"+
