@@ -41,6 +41,9 @@ ephemeral.sqlite3-shm
 dolt-server.pid
 dolt-server.log
 dolt-server.lock
+dolt-server.port
+dolt-server.activity
+dolt-monitor.pid
 
 # Legacy files (from pre-Dolt versions)
 *.db
@@ -84,6 +87,9 @@ var requiredPatterns = []string{
 	"dolt-server.pid",
 	"dolt-server.log",
 	"dolt-server.lock",
+	"dolt-server.port",
+	"dolt-server.activity",
+	"dolt-monitor.pid",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
