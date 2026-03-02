@@ -113,6 +113,14 @@ func sqliteIntegrityRecovery(path, beadsDir string) error {
 	// Reinitialize via bd init
 	bdBinary, err := getBdBinary()
 	if err != nil {
+		// Restore backup on failure (database has already been moved)
+		_ = moveFile(backupDB, dbPath)
+		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+			sidecar := backupDB + suffix
+			if _, err := os.Stat(sidecar); err == nil {
+				_ = moveFile(sidecar, dbPath+suffix)
+			}
+		}
 		return err
 	}
 
