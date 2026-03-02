@@ -343,6 +343,20 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 		blockedSet[id] = true
 	}
 
+	// Step 2b: Include children of blocked parents (GH#1495).
+	// Mirrors GetReadyWork() exclusion: if a parent is blocked, its children
+	// are excluded from ready work and should appear in blocked output.
+	childToParent, childErr := s.getChildrenWithParents(ctx, blockedIDList)
+	if childErr == nil {
+		for childID := range childToParent {
+			// Only include active children not already directly blocked
+			if activeIDs[childID] && !blockedSet[childID] {
+				blockedSet[childID] = true
+				blockedIDList = append(blockedIDList, childID)
+			}
+		}
+	}
+
 	// Step 3: Get blocking + waits-for + conditional-blocks deps to build BlockedBy lists
 	// Scan both dependencies and wisp_dependencies tables (bd-w2w)
 	blockerMap := make(map[string][]string)
@@ -370,6 +384,18 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 		_ = depRows.Close() // Redundant close for safety (rows already iterated)
 		if err := depRows.Err(); err != nil {
 			return nil, wrapQueryError("get blocked issues: dependency rows", err)
+		}
+	}
+
+	// Step 3b: Add transitively blocked children to blockerMap (GH#1495).
+	// Children of blocked parents have their parent as the "blocker".
+	if childErr == nil {
+		for childID, parentID := range childToParent {
+			if activeIDs[childID] && blockedSet[childID] {
+				if _, hasDirectBlocker := blockerMap[childID]; !hasDirectBlocker {
+					blockerMap[childID] = []string{parentID}
+				}
+			}
 		}
 	}
 
@@ -931,6 +957,41 @@ func (s *DoltStore) getChildrenOfIssues(ctx context.Context, parentIDs []string)
 		children = append(children, childID)
 	}
 	return children, rows.Err()
+}
+
+// getChildrenWithParents returns a map of childID -> parentID for direct children
+// (parent-child deps) of the given parent IDs. Used by GetBlockedIssues to show
+// transitively blocked children with their parent as the reason (GH#1495).
+func (s *DoltStore) getChildrenWithParents(ctx context.Context, parentIDs []string) (map[string]string, error) {
+	if len(parentIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(parentIDs))
+	args := make([]interface{}, len(parentIDs))
+	for i, id := range parentIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	// nolint:gosec // G201: placeholders are generated values, data passed via args
+	query := fmt.Sprintf(`
+		SELECT issue_id, depends_on_id FROM dependencies
+		WHERE type = 'parent-child' AND depends_on_id IN (%s)
+	`, strings.Join(placeholders, ","))
+	rows, err := s.queryContext(ctx, query, args...)
+	if err != nil {
+		return nil, wrapQueryError("get children with parents", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var childID, parentID string
+		if err := rows.Scan(&childID, &parentID); err != nil {
+			return nil, wrapScanError("get children with parents", err)
+		}
+		result[childID] = parentID
+	}
+	return result, rows.Err()
 }
 
 // GetMoleculeProgress returns progress stats for a molecule

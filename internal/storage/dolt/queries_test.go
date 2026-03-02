@@ -603,6 +603,98 @@ func TestGetBlockedIssues_MultipleBlockers(t *testing.T) {
 	}
 }
 
+func TestGetBlockedIssues_IncludesChildrenOfBlockedParents(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	blocker := &types.Issue{
+		ID:        "bi-preblocker",
+		Title:     "Prerequisite",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	epic := &types.Issue{
+		ID:        "bi-epic",
+		Title:     "Gated Epic",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	child := &types.Issue{
+		ID:        "bi-epic.1",
+		Title:     "Child Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, iss := range []*types.Issue{blocker, epic, child} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", iss.ID, err)
+		}
+	}
+
+	// Block the epic
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     epic.ID,
+		DependsOnID: blocker.ID,
+		Type:        types.DepBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("failed to add blocking dep: %v", err)
+	}
+
+	// Make child a child of the epic
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: epic.ID,
+		Type:        types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("failed to add parent-child dep: %v", err)
+	}
+
+	// Child should NOT be in ready work (parent is blocked)
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, iss := range ready {
+		if iss.ID == child.ID {
+			t.Error("child of blocked parent should NOT be in ready work")
+		}
+	}
+
+	// Child SHOULD appear in blocked issues (GH#1495)
+	blocked, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+
+	epicFound := false
+	childFound := false
+	for _, bi := range blocked {
+		if bi.Issue.ID == epic.ID {
+			epicFound = true
+		}
+		if bi.Issue.ID == child.ID {
+			childFound = true
+			// Child should show parent as the blocker
+			if bi.BlockedByCount != 1 || len(bi.BlockedBy) == 0 || bi.BlockedBy[0] != epic.ID {
+				t.Errorf("child blocked-by should be [%s], got %v", epic.ID, bi.BlockedBy)
+			}
+		}
+	}
+	if !epicFound {
+		t.Error("epic should be in blocked list")
+	}
+	if !childFound {
+		t.Error("child of blocked parent should appear in blocked list (GH#1495)")
+	}
+}
+
 // =============================================================================
 // SearchIssues tests
 // =============================================================================
