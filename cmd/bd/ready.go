@@ -152,6 +152,16 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			defer func() { _ = rigStore.Close() }()
 			activeStore = rigStore
 		} else {
+			// Keep ready/read behavior aligned with bd create routing decisions.
+			// Contributor auto-routing should read from the same target repo.
+			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+			if err != nil {
+				FatalError("%v", err)
+			}
+			if routed {
+				defer func() { _ = routedStore.Close() }()
+				activeStore = routedStore
+			}
 		}
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)

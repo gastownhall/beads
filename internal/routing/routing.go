@@ -2,6 +2,7 @@ package routing
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,30 +56,84 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 // This heuristic is deprecated - SSH URLs don't reliably indicate write access
 // (e.g., fork contributors often use SSH).
 func detectFromURL(repoPath string) UserRole {
-	// Check push access by examining remote URL
-	output, err := gitCommandRunner(repoPath, "remote", "get-url", "--push", "origin")
-	if err != nil {
-		// Fallback to standard fetch URL if push URL fails (some git versions/configs)
-		output, err = gitCommandRunner(repoPath, "remote", "get-url", "origin")
-		if err != nil {
-			// No remote means local project - default to maintainer
-			return Maintainer
-		}
+	originURL, hasOrigin := getOriginURL(repoPath)
+	if !hasOrigin {
+		// No remote means local project - default to maintainer
+		return Maintainer
 	}
 
-	pushURL := strings.TrimSpace(string(output))
+	// Fork heuristic: if both origin and upstream are configured and point to
+	// different repos, user is almost certainly contributing via fork workflow.
+	if upstreamOutput, err := gitCommandRunner(repoPath, "remote", "get-url", "upstream"); err == nil {
+		upstreamURL := strings.TrimSpace(string(upstreamOutput))
+		if upstreamURL != "" && !sameRemoteRepository(originURL, upstreamURL) {
+			return Contributor
+		}
+	}
 
 	// Check if URL indicates write access
 	// SSH URLs (git@github.com:user/repo.git) typically indicate write access
 	// HTTPS with token/password also indicates write access
-	if strings.HasPrefix(pushURL, "git@") ||
-		strings.HasPrefix(pushURL, "ssh://") ||
-		strings.Contains(pushURL, "@") {
+	if strings.HasPrefix(originURL, "git@") ||
+		strings.HasPrefix(originURL, "ssh://") ||
+		strings.Contains(originURL, "@") {
 		return Maintainer
 	}
 
 	// HTTPS without credentials likely means read-only contributor
 	return Contributor
+}
+
+func getOriginURL(repoPath string) (string, bool) {
+	output, err := gitCommandRunner(repoPath, "remote", "get-url", "--push", "origin")
+	if err != nil {
+		// Fallback to standard fetch URL if push URL fails (some git versions/configs)
+		output, err = gitCommandRunner(repoPath, "remote", "get-url", "origin")
+		if err != nil {
+			return "", false
+		}
+	}
+	return strings.TrimSpace(string(output)), true
+}
+
+func sameRemoteRepository(a, b string) bool {
+	slugA, okA := remoteRepositorySlug(a)
+	slugB, okB := remoteRepositorySlug(b)
+	if okA && okB {
+		return slugA == slugB
+	}
+	return strings.TrimSpace(a) == strings.TrimSpace(b)
+}
+
+func remoteRepositorySlug(remote string) (string, bool) {
+	remote = strings.TrimSpace(strings.TrimSuffix(remote, "/"))
+	if remote == "" {
+		return "", false
+	}
+
+	// SCP-like URL: git@github.com:owner/repo.git
+	if strings.Contains(remote, "@") && strings.Contains(remote, ":") && !strings.Contains(remote, "://") {
+		parts := strings.SplitN(remote, ":", 2)
+		if len(parts) != 2 {
+			return "", false
+		}
+		return normalizeRemotePath(parts[1])
+	}
+
+	u, err := url.Parse(remote)
+	if err != nil {
+		return "", false
+	}
+	return normalizeRemotePath(u.Path)
+}
+
+func normalizeRemotePath(path string) (string, bool) {
+	path = strings.TrimSpace(strings.Trim(path, "/"))
+	path = strings.TrimSuffix(path, ".git")
+	if path == "" {
+		return "", false
+	}
+	return path, true
 }
 
 // RoutingConfig defines routing rules for issues

@@ -881,6 +881,71 @@ func TestInitPromptExistingRole(t *testing.T) {
 	})
 }
 
+func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
+	skipIfNoDolt(t)
+
+	origDBPath := dbPath
+	defer func() { dbPath = origDBPath }()
+	dbPath = ""
+
+	beads.ResetCaches()
+	git.ResetCaches()
+	defer func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	}()
+
+	initCmd.Flags().Set("contributor", "false")
+	initCmd.Flags().Set("team", "false")
+	initCmd.Flags().Set("force", "false")
+
+	tmpDir := newGitRepo(t)
+	t.Chdir(tmpDir)
+
+	// Keep test isolated from the real home/planning repo.
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+
+	// Configure remotes so contributor wizard doesn't ask the "continue anyway" prompt.
+	cmd := exec.Command("git", "remote", "add", "origin", "git@github.com:osamu2001/zmx.git")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to add origin remote: %v", err)
+	}
+	cmd = exec.Command("git", "remote", "add", "upstream", "git@github.com:neurosnap/zmx.git")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to add upstream remote: %v", err)
+	}
+
+	// Wizard answers:
+	// 1) "Do you want to use a separate planning repo anyway? [Y/n]" -> Enter (default yes)
+	// 2) "Planning repo path [press Enter for default]" -> Enter (default ~/.beads-planning)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdin pipe: %v", err)
+	}
+	oldStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = oldStdin })
+	t.Cleanup(func() { _ = r.Close() })
+	_, _ = w.WriteString("\n\n")
+	_ = w.Close()
+
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--contributor", "--quiet"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("init --contributor failed: %v", err)
+	}
+
+	role, hasRole := getBeadsRole()
+	if !hasRole {
+		t.Fatal("expected beads.role to be configured")
+	}
+	if role != "contributor" {
+		t.Fatalf("beads.role = %q, want %q", role, "contributor")
+	}
+}
+
 // TestInitWithRedirect verifies that bd init creates the database in the redirect target,
 // not in the local .beads directory. (GH#bd-0qel)
 // TestInitRedirect groups redirect-related init tests.

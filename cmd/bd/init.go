@@ -534,7 +534,7 @@ environment variable.`,
 			} else if promptedContributor {
 				contributor = true // Triggers contributor wizard below
 			}
-		} else if isGitRepo() {
+		} else if isGitRepo() && !contributor && !team {
 			// If prompt was skipped (non-interactive or CI environment),
 			// ensure beads.role is set to avoid "not configured" warning
 			// during diagnostics. Only set if not already configured.
@@ -558,6 +558,14 @@ environment variable.`,
 					exitCanceled()
 				}
 				FatalError("running contributor wizard: %v", err)
+			}
+
+			// Contributor setup must also pin role detection to contributor.
+			// Without this, SSH remotes can be inferred as maintainer and bypass routing.
+			if isGitRepo() {
+				if err := setBeadsRole("contributor"); err != nil && !quiet {
+					fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role=contributor: %v\n", err)
+				}
 			}
 		}
 
@@ -668,7 +676,13 @@ environment variable.`,
 		// Skip in stealth mode (user wants invisible setup) and quiet mode (suppress all output)
 		if !stealth {
 			agentsTemplate, _ := cmd.Flags().GetString("agents-template")
-			addAgentsInstructions(!quiet, agentsTemplate)
+			if isBareGitRepo() {
+				if !quiet {
+					fmt.Printf("  Skipping AGENTS.md generation in bare repository\n")
+				}
+			} else {
+				addAgentsInstructions(!quiet, agentsTemplate)
+			}
 		}
 
 		// Auto-stage and commit beads files so bd doctor doesn't warn about
