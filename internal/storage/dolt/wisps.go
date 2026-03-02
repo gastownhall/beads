@@ -18,7 +18,6 @@ import (
 // wisp_events, wisp_comments) to avoid Dolt history bloat. All operations use the
 // same Dolt SQL connection — no separate store or transaction routing needed.
 
-
 // insertIssueIntoTable inserts an issue into the specified table,
 // using ON DUPLICATE KEY UPDATE to handle pre-existing records gracefully (GH#2061).
 // The table must be either "issues" or "wisps" (same schema).

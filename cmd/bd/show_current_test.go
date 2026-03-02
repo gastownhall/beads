@@ -17,11 +17,11 @@ func TestResolveCurrentIssueID_InProgress(t *testing.T) {
 
 	// Create an in-progress issue assigned to "tester"
 	issue := &types.Issue{
-		Title:    "In-progress task",
-		Status:   types.StatusInProgress,
-		Priority: 2,
+		Title:     "In-progress task",
+		Status:    types.StatusInProgress,
+		Priority:  2,
 		IssueType: types.TypeTask,
-		Assignee: "tester",
+		Assignee:  "tester",
 	}
 	if err := st.CreateIssue(ctx, issue, "tester"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
