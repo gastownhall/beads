@@ -829,13 +829,15 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 	}
 
 	// Issue is blocked — gather blocker IDs for display.
-	// Check direct 'blocks' dependencies first.
+	// Query all blocking dependency types to stay consistent with
+	// computeBlockedIDs which considers blocks, waits-for, and
+	// conditional-blocks (GH-1524).
 	rows, err := s.queryContext(ctx, `
-		SELECT d.depends_on_id
+		SELECT d.depends_on_id, d.type
 		FROM dependencies d
 		JOIN issues i ON d.depends_on_id = i.id
 		WHERE d.issue_id = ?
-		  AND d.type = 'blocks'
+		  AND d.type IN ('blocks', 'waits-for', 'conditional-blocks')
 		  AND i.status NOT IN ('closed', 'pinned')
 	`, issueID)
 	if err != nil {
@@ -844,35 +846,20 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 
 	var blockers []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, depType string
+		if err := rows.Scan(&id, &depType); err != nil {
 			_ = rows.Close()
 			return false, nil, wrapScanError("is blocked: scan blocker", err)
 		}
-		blockers = append(blockers, id)
+		if depType != "blocks" {
+			blockers = append(blockers, id+" ("+depType+")")
+		} else {
+			blockers = append(blockers, id)
+		}
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return false, nil, wrapQueryError("is blocked: blocker rows", err)
-	}
-
-	// If blocked by non-'blocks' dependency (e.g., waits-for gate),
-	// include the waits-for spawner IDs so callers get a non-empty list.
-	if len(blockers) == 0 {
-		wfRows, err := s.queryContext(ctx, `
-			SELECT depends_on_id FROM dependencies
-			WHERE issue_id = ? AND type = 'waits-for'
-		`, issueID)
-		if err == nil {
-			for wfRows.Next() {
-				var id string
-				if err := wfRows.Scan(&id); err != nil {
-					break
-				}
-				blockers = append(blockers, id+" (waits-for)")
-			}
-			_ = wfRows.Close()
-		}
 	}
 
 	return true, blockers, nil
