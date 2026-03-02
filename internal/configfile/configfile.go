@@ -27,7 +27,8 @@ type Config struct {
 	DoltServerUser string `json:"dolt_server_user,omitempty"` // MySQL user (default: root)
 	DoltDatabase   string `json:"dolt_database,omitempty"`    // SQL database name (default: beads)
 	DoltServerTLS  bool   `json:"dolt_server_tls,omitempty"`  // Enable TLS for server connections (required for Hosted Dolt)
-	DoltDataDir    string `json:"dolt_data_dir,omitempty"`    // Custom dolt data directory (absolute path; default: .beads/dolt)
+	DoltDataDir        string `json:"dolt_data_dir,omitempty"`        // Custom dolt data directory (absolute path; default: .beads/dolt)
+	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
 	// Stale closed issues check configuration
@@ -241,10 +242,11 @@ const (
 
 // Default Dolt server settings
 const (
-	DefaultDoltServerHost = "127.0.0.1"
-	DefaultDoltServerPort = 3307 // Use 3307 to avoid conflict with MySQL on 3306
-	DefaultDoltServerUser = "root"
-	DefaultDoltDatabase   = "beads"
+	DefaultDoltServerHost     = "127.0.0.1"
+	DefaultDoltServerPort     = 3307 // Use 3307 to avoid conflict with MySQL on 3306
+	DefaultDoltServerUser     = "root"
+	DefaultDoltDatabase       = "beads"
+	DefaultDoltRemotesAPIPort = 8080 // Default dolt remotesapi port for federation
 )
 
 // IsDoltServerMode returns true if Dolt should connect via sql-server.
@@ -347,4 +349,18 @@ func (c *Config) GetDoltDataDir() string {
 		return d
 	}
 	return c.DoltDataDir
+}
+
+// GetDoltRemotesAPIPort returns the Dolt remotesapi port used for federation.
+// Checks BEADS_DOLT_REMOTESAPI_PORT env var first, then config, then default (8080).
+func (c *Config) GetDoltRemotesAPIPort() int {
+	if p := os.Getenv("BEADS_DOLT_REMOTESAPI_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil {
+			return port
+		}
+	}
+	if c.DoltRemotesAPIPort > 0 {
+		return c.DoltRemotesAPIPort
+	}
+	return DefaultDoltRemotesAPIPort
 }

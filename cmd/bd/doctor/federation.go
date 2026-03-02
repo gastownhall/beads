@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -67,10 +66,11 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Check if server PID file exists (indicates server mode might be running)
-	pidFile := filepath.Join(doltPath, "dolt-server.pid")
-	_, pidFileErr := os.Stat(pidFile)
-	serverRunning := pidFileErr == nil
+	// Check if dolt server is running using doltserver.IsRunning which
+	// correctly resolves PID file paths (in beadsDir, not doltPath)
+	// and handles Gas Town daemon PID files.
+	serverState, _ := doltserver.IsRunning(beadsDir)
+	serverRunning := serverState != nil && serverState.Running
 
 	if !serverRunning {
 		// No server running - check if we have remotes configured
@@ -107,9 +107,12 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Server is running - check if remotesapi port is accessible
-	// Default remotesapi port is 8080
-	remotesAPIPort := 8080 // default dolt remotesapi port
+	// Server is running - check if remotesapi port is accessible.
+	// Read port from config instead of hardcoding 8080.
+	remotesAPIPort := configfile.DefaultDoltRemotesAPIPort
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		remotesAPIPort = cfg.GetDoltRemotesAPIPort()
+	}
 	host := "127.0.0.1"
 
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", remotesAPIPort))
@@ -119,7 +122,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 			Name:     "Federation remotesapi",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
-			Detail:   fmt.Sprintf("PID file %s exists but port unreachable: %v", pidFile, err),
+			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", serverState.PID, err),
 			Fix:      "Check if dolt sql-server is running with --remotesapi-port flag",
 			Category: CategoryFederation,
 		}
