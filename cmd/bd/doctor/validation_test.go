@@ -507,8 +507,18 @@ func TestCheckChildParentDependenciesDB_NonBlockingIgnored(t *testing.T) {
 	}
 }
 
-// TestCheckTestPollution_NoTestIssues verifies OK when no test issues exist.
-func TestCheckTestPollution_NoTestIssues(t *testing.T) {
+// TestCheckTestPollution_NoTestIssues_NoServer verifies StatusOK when no Dolt
+// server is reachable. This isolates BEADS_DOLT_PORT set by TestMain (which
+// starts a Docker-based Dolt container on Ubuntu but not macOS) so the test
+// exercises the "no database" code path deterministically on all platforms.
+func TestCheckTestPollution_NoTestIssues_NoServer(t *testing.T) {
+	for _, key := range []string{"BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {
+		if orig, ok := os.LookupEnv(key); ok {
+			t.Cleanup(func() { os.Setenv(key, orig) })
+			os.Unsetenv(key)
+		}
+	}
+
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -517,9 +527,35 @@ func TestCheckTestPollution_NoTestIssues(t *testing.T) {
 
 	check := CheckTestPollution(tmpDir)
 
-	// Without a database, query fails → StatusWarning (not OK)
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if check.Message != "N/A (no database)" {
+		t.Errorf("Message = %q, want %q", check.Message, "N/A (no database)")
+	}
+}
+
+// TestCheckTestPollution_NoTestIssues_EmptyDB verifies StatusWarning when a
+// Dolt server is running but the target database has no issues table (the
+// "query failed" code path). Only runs when TestMain started a Dolt container.
+func TestCheckTestPollution_NoTestIssues_EmptyDB(t *testing.T) {
+	if doctorTestServerPort() == 0 {
+		t.Skip("Dolt test server not available")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckTestPollution(tmpDir)
+
 	if check.Status != StatusWarning {
 		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if check.Message != "N/A (query failed)" {
+		t.Errorf("Message = %q, want %q", check.Message, "N/A (query failed)")
 	}
 }
 
