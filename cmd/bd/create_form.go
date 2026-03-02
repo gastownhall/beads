@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -43,6 +45,7 @@ type createFormValues struct {
 	AcceptanceCriteria string
 	ExternalRef        string
 	Dependencies       []string
+	ParentID           string // Parent issue ID for hierarchical child creation
 }
 
 // parseCreateFormInput parses raw form input into a createFormValues struct.
@@ -92,8 +95,26 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 
 // CreateIssueFromFormValues creates an issue from the given form values.
 // It returns the created issue and any error that occurred.
-// This function handles labels, dependencies, and source_repo inheritance.
+// This function handles parent-child relationships, labels, dependencies,
+// and source_repo inheritance.
 func CreateIssueFromFormValues(ctx context.Context, s *dolt.DoltStore, fv *createFormValues, actor string) (*types.Issue, error) {
+	// If parent is specified, validate it exists and generate child ID
+	var explicitID string
+	if fv.ParentID != "" {
+		_, err := s.GetIssue(ctx, fv.ParentID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return nil, fmt.Errorf("parent issue %s not found", fv.ParentID)
+			}
+			return nil, fmt.Errorf("failed to check parent issue: %w", err)
+		}
+		childID, err := s.GetNextChildID(ctx, fv.ParentID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate child ID: %w", err)
+		}
+		explicitID = childID
+	}
+
 	var externalRefPtr *string
 	if fv.ExternalRef != "" {
 		externalRefPtr = &fv.ExternalRef
@@ -110,6 +131,10 @@ func CreateIssueFromFormValues(ctx context.Context, s *dolt.DoltStore, fv *creat
 		Assignee:           fv.Assignee,
 		ExternalRef:        externalRefPtr,
 		CreatedBy:          getActorWithGit(), // GH#748: track who created the issue
+	}
+
+	if explicitID != "" {
+		issue.ID = explicitID
 	}
 
 	// Check if any dependencies are discovered-from type
@@ -145,6 +170,18 @@ func CreateIssueFromFormValues(ctx context.Context, s *dolt.DoltStore, fv *creat
 
 	if err := s.CreateIssue(ctx, issue, actor); err != nil {
 		return nil, fmt.Errorf("failed to create issue: %w", err)
+	}
+
+	// If parent was specified, add parent-child dependency (GH#1983)
+	if fv.ParentID != "" {
+		dep := &types.Dependency{
+			IssueID:     issue.ID,
+			DependsOnID: fv.ParentID,
+			Type:        types.DepParentChild,
+		}
+		if err := s.AddDependency(ctx, dep, actor); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to add parent-child dependency %s -> %s: %v\n", issue.ID, fv.ParentID, err)
+		}
 	}
 
 	// Add labels if specified
@@ -205,6 +242,9 @@ var createFormCmd = &cobra.Command{
 This command provides a user-friendly form interface for creating issues,
 with fields for title, description, type, priority, labels, and more.
 
+Use --parent to create a sub-issue under an existing parent issue.
+The child will get an auto-generated hierarchical ID (e.g., parent-id.1).
+
 The form uses keyboard navigation:
   - Tab/Shift+Tab: Move between fields
   - Enter: Submit the form (on the last field or submit button)
@@ -217,7 +257,8 @@ The form uses keyboard navigation:
 }
 
 func runCreateForm(cmd *cobra.Command) {
-	_ = cmd // cmd parameter required by cobra.Command.Run signature
+	parentID, _ := cmd.Flags().GetString("parent")
+
 	// Raw form input - will be populated by the form
 	raw := &createFormRawInput{}
 
@@ -338,6 +379,7 @@ func runCreateForm(cmd *cobra.Command) {
 
 	// Parse the form input
 	fv := parseCreateFormInput(raw)
+	fv.ParentID = parentID
 
 	// Direct mode - use the extracted creation function
 	issue, err := CreateIssueFromFormValues(rootCtx, store, fv, actor)
@@ -371,5 +413,6 @@ func printCreatedIssue(issue *types.Issue) {
 
 func init() {
 	// Note: --json flag is defined as a persistent flag in main.go
+	createFormCmd.Flags().String("parent", "", "Parent issue ID for creating a hierarchical child (e.g., 'bd-a3f8e9')")
 	rootCmd.AddCommand(createFormCmd)
 }
