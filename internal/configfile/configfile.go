@@ -21,12 +21,12 @@ type Config struct {
 	// Dolt connection mode configuration (bd-dolt.2.2)
 	// Default is "embedded" (in-process). Server mode ("server") connects to an
 	// external dolt sql-server and should only be used for high-concurrency scenarios.
-	DoltMode       string `json:"dolt_mode,omitempty"`        // "embedded" (default) or "server"
-	DoltServerHost string `json:"dolt_server_host,omitempty"` // Server host (default: 127.0.0.1)
-	DoltServerPort int    `json:"dolt_server_port,omitempty"` // Server port (default: 3307)
-	DoltServerUser string `json:"dolt_server_user,omitempty"` // MySQL user (default: root)
-	DoltDatabase   string `json:"dolt_database,omitempty"`    // SQL database name (default: beads)
-	DoltServerTLS  bool   `json:"dolt_server_tls,omitempty"`  // Enable TLS for server connections (required for Hosted Dolt)
+	DoltMode           string `json:"dolt_mode,omitempty"`            // "embedded" (default) or "server"
+	DoltServerHost     string `json:"dolt_server_host,omitempty"`     // Server host (default: 127.0.0.1)
+	DoltServerPort     int    `json:"dolt_server_port,omitempty"`     // Server port (default: 3307)
+	DoltServerUser     string `json:"dolt_server_user,omitempty"`     // MySQL user (default: root)
+	DoltDatabase       string `json:"dolt_database,omitempty"`        // SQL database name (default: beads)
+	DoltServerTLS      bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
 	DoltDataDir        string `json:"dolt_data_dir,omitempty"`        // Custom dolt data directory (absolute path; default: .beads/dolt)
 	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
@@ -103,7 +103,7 @@ func (c *Config) Save(beadsDir string) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 
