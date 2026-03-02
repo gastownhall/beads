@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -529,6 +530,125 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 			if issue.Priority != priority {
 				t.Errorf("expected priority %d, got %d", priority, issue.Priority)
 			}
+		}
+	})
+}
+
+func TestCreateIssueFromFormValues_WithParent(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	t.Run("ParentChildCreation", func(t *testing.T) {
+		// Create parent (epic) first
+		parentFv := &createFormValues{
+			Title:     "Epic parent issue",
+			Priority:  1,
+			IssueType: "epic",
+		}
+		parent, err := CreateIssueFromFormValues(ctx, s, parentFv, "test")
+		if err != nil {
+			t.Fatalf("failed to create parent: %v", err)
+		}
+
+		// Create child via --parent
+		childFv := &createFormValues{
+			Title:     "Child bug under epic",
+			Priority:  2,
+			IssueType: "bug",
+			ParentID:  parent.ID,
+		}
+		child, err := CreateIssueFromFormValues(ctx, s, childFv, "test")
+		if err != nil {
+			t.Fatalf("failed to create child: %v", err)
+		}
+
+		// Child ID should be hierarchical (parent.1)
+		if !strings.HasPrefix(child.ID, parent.ID+".") {
+			t.Errorf("child ID %q should start with parent ID %q + '.'", child.ID, parent.ID)
+		}
+
+		// Verify parent-child dependency was created
+		deps, err := s.GetDependencies(ctx, child.ID)
+		if err != nil {
+			t.Fatalf("failed to get dependencies: %v", err)
+		}
+
+		found := false
+		for _, d := range deps {
+			if d.ID == parent.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected parent-child dependency on %s, not found", parent.ID)
+		}
+	})
+
+	t.Run("ParentNotFound", func(t *testing.T) {
+		fv := &createFormValues{
+			Title:     "Orphan child",
+			Priority:  2,
+			IssueType: "task",
+			ParentID:  "nonexistent-id",
+		}
+		_, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+		if err == nil {
+			t.Fatal("expected error for nonexistent parent, got nil")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("expected 'not found' in error, got: %v", err)
+		}
+	})
+
+	t.Run("MultipleChildrenUnderSameParent", func(t *testing.T) {
+		// Create parent
+		parentFv := &createFormValues{
+			Title:     "Multi-child parent",
+			Priority:  1,
+			IssueType: "epic",
+		}
+		parent, err := CreateIssueFromFormValues(ctx, s, parentFv, "test")
+		if err != nil {
+			t.Fatalf("failed to create parent: %v", err)
+		}
+
+		// Create two children
+		child1Fv := &createFormValues{
+			Title:     "First child",
+			Priority:  2,
+			IssueType: "task",
+			ParentID:  parent.ID,
+		}
+		child1, err := CreateIssueFromFormValues(ctx, s, child1Fv, "test")
+		if err != nil {
+			t.Fatalf("failed to create child1: %v", err)
+		}
+
+		child2Fv := &createFormValues{
+			Title:     "Second child",
+			Priority:  2,
+			IssueType: "task",
+			ParentID:  parent.ID,
+		}
+		child2, err := CreateIssueFromFormValues(ctx, s, child2Fv, "test")
+		if err != nil {
+			t.Fatalf("failed to create child2: %v", err)
+		}
+
+		// Children should have distinct IDs
+		if child1.ID == child2.ID {
+			t.Errorf("children should have distinct IDs, both got %q", child1.ID)
+		}
+
+		// Both should be under the parent
+		if !strings.HasPrefix(child1.ID, parent.ID+".") {
+			t.Errorf("child1 ID %q should start with %q", child1.ID, parent.ID+".")
+		}
+		if !strings.HasPrefix(child2.ID, parent.ID+".") {
+			t.Errorf("child2 ID %q should start with %q", child2.ID, parent.ID+".")
 		}
 	})
 }
