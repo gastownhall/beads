@@ -44,6 +44,21 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 	return rows.Next(), nil
 }
 
+// indexExists checks if an index exists on a table using SHOW INDEX.
+// Returns false if the table doesn't exist or the index is not found.
+func indexExists(db *sql.DB, table, indexName string) bool {
+	// Use SHOW INDEX FROM ... WHERE Key_name = '...' to check.
+	// Dolt doesn't support prepared-statement parameters for SHOW commands.
+	// Table/index names come from internal constants, not user input.
+	// #nosec G202 -- table and index names come from internal constants, not user input.
+	rows, err := db.Query("SHOW INDEX FROM `" + table + "` WHERE Key_name = '" + indexName + "'") //nolint:gosec // G202
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	return rows.Next()
+}
+
 // tableExists checks if a table exists using SHOW TABLES.
 // Uses SHOW TABLES LIKE instead of information_schema to avoid crashes
 // when the Dolt server catalog contains stale database entries from
