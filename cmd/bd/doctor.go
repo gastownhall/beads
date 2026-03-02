@@ -739,19 +739,6 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, classicArtifactsCheck)
 	// Don't fail overall check for classic artifacts, just warn
 
-	// Check 34: Broken migration state (metadata says dolt but no dolt dir)
-	// Fixes GH#2016
-	brokenMigrationCheck := convertWithCategory(doctor.CheckBrokenMigrationState(path), doctor.CategoryMaintenance)
-	result.Checks = append(result.Checks, brokenMigrationCheck)
-	if brokenMigrationCheck.Status == statusError {
-		result.OverallOK = false
-	}
-
-	// Check 35: SQLite residue after migration
-	sqliteResidueCheck := convertWithCategory(doctor.CheckSQLiteResidue(path), doctor.CategoryMaintenance)
-	result.Checks = append(result.Checks, sqliteResidueCheck)
-	// Don't fail overall check for residue, just warn
-
 	// Check 36: Embedded mode concurrency issues (GH#2086)
 	concurrencyCheck := convertWithCategory(doctor.CheckEmbeddedModeConcurrency(path), doctor.CategoryRuntime)
 	result.Checks = append(result.Checks, concurrencyCheck)

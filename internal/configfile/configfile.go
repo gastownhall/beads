@@ -13,7 +13,7 @@ const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // "dolt" (default) or "sqlite"
+	Backend  string `json:"backend,omitempty"` // Deprecated: always "dolt". Kept for JSON compat.
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -114,28 +114,17 @@ func (c *Config) DatabasePath(beadsDir string) string {
 	// Check for custom dolt data directory (absolute path on a faster filesystem).
 	// This is useful on WSL where .beads/ lives on NTFS (slow 9P mount) but
 	// dolt data can be placed on native ext4 for 5-10x I/O speedup.
-	if c.GetBackend() != BackendSQLite {
-		if customDir := c.GetDoltDataDir(); customDir != "" {
-			if filepath.IsAbs(customDir) {
-				return customDir
-			}
-			return filepath.Join(beadsDir, customDir)
+	if customDir := c.GetDoltDataDir(); customDir != "" {
+		if filepath.IsAbs(customDir) {
+			return customDir
 		}
+		return filepath.Join(beadsDir, customDir)
 	}
 
 	if filepath.IsAbs(c.Database) {
 		return c.Database
 	}
-	// For SQLite backend, return the SQLite database path.
-	// Fixes GH#2016: SQLite users must not be forced to Dolt.
-	if c.GetBackend() == BackendSQLite {
-		db := c.Database
-		if db == "" {
-			db = "beads.db"
-		}
-		return filepath.Join(beadsDir, db)
-	}
-	// For Dolt backend, always use "dolt" as the directory name.
+	// Always use "dolt" as the directory name.
 	// Stale values like "town", "wyvern", "beads_rig" caused split-brain (see DOLT-HEALTH-P0.md).
 	return filepath.Join(beadsDir, "dolt")
 }
@@ -162,8 +151,7 @@ func (c *Config) GetStaleClosedIssuesDays() int {
 
 // Backend constants
 const (
-	BackendDolt   = "dolt"
-	BackendSQLite = "sqlite"
+	BackendDolt = "dolt"
 )
 
 // BackendCapabilities describes behavioral constraints for a storage backend.
@@ -181,21 +169,10 @@ type BackendCapabilities struct {
 }
 
 // CapabilitiesForBackend returns capabilities for a backend string.
-// Unknown backends are treated conservatively as single-process-only.
-//
-// Note: For Dolt, this returns SingleProcessOnly=true by default.
-// Use Config.GetCapabilities() when you have the full config to properly
-// handle server mode (which supports multi-process access).
-func CapabilitiesForBackend(backend string) BackendCapabilities {
-	switch strings.TrimSpace(strings.ToLower(backend)) {
-	case BackendSQLite:
-		return BackendCapabilities{SingleProcessOnly: true}
-	case "", BackendDolt:
-		// Default to single-process-only; server mode overrides via Config.GetCapabilities().
-		return BackendCapabilities{SingleProcessOnly: true}
-	default:
-		return BackendCapabilities{SingleProcessOnly: true}
-	}
+// Dolt is the only supported backend. Returns SingleProcessOnly=true by default;
+// use Config.GetCapabilities() to properly handle server mode.
+func CapabilitiesForBackend(_ string) BackendCapabilities {
+	return BackendCapabilities{SingleProcessOnly: true}
 }
 
 // GetCapabilities returns the backend capabilities for this config.
@@ -210,28 +187,9 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 	return CapabilitiesForBackend(backend)
 }
 
-// GetBackend returns the configured backend type.
-// Priority: BEADS_BACKEND env var > Backend field in metadata.json > default (dolt).
-// Fixes GH#2016: existing SQLite databases must be respected.
+// GetBackend returns the backend type. Always returns "dolt".
 func (c *Config) GetBackend() string {
-	// Env var override — escape hatch for corrupted configs
-	if env := os.Getenv("BEADS_BACKEND"); env != "" {
-		switch strings.ToLower(env) {
-		case BackendSQLite:
-			return BackendSQLite
-		case BackendDolt:
-			return BackendDolt
-		default:
-			fmt.Fprintf(os.Stderr, "Warning: BEADS_BACKEND=%q is not a recognized backend (use 'sqlite' or 'dolt'), ignoring\n", env)
-		}
-	}
-	// Normalize config field (handles hand-edited metadata.json with "SQLite", "SQLITE", etc.)
-	switch strings.ToLower(c.Backend) {
-	case BackendSQLite:
-		return BackendSQLite
-	default:
-		return BackendDolt
-	}
+	return BackendDolt
 }
 
 // Dolt mode constants

@@ -119,8 +119,6 @@ var agentEnrichers = map[string]enricher{
 	"Child-Parent Dependencies":    enrichChildParentDeps,
 	"Merge Artifacts":              enrichMergeArtifacts,
 	"Classic Artifacts":            enrichClassicArtifacts,
-	"Broken Migration State":       enrichBrokenMigration,
-	"SQLite Residue":               enrichSQLiteResidue,
 	"Embedded Mode Concurrency":    enrichEmbeddedConcurrency,
 	"Pending Migrations":           enrichPendingMigrations,
 	"KV Sync Status":               enrichKVSync,
@@ -502,28 +500,6 @@ func enrichClassicArtifacts(dc DoctorCheck) agentEnrichment {
 		expected:    "No classic artifacts present (JSONL files, SQLite database, cruft directories)",
 		commands:    []string{"bd doctor --check=artifacts", "bd doctor --check=artifacts --clean"},
 		sourceFiles: []string{"cmd/bd/doctor/artifacts.go:CheckClassicArtifacts"},
-	}
-}
-
-func enrichBrokenMigration(dc DoctorCheck) agentEnrichment {
-	return agentEnrichment{
-		severity:    "blocking",
-		explanation: fmt.Sprintf("Broken migration state: %s. The metadata says the backend is Dolt, but the Dolt database directory is missing or empty. This can happen if a migration was interrupted.", dc.Message),
-		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "If metadata says Dolt, then .beads/dolt/ exists and is a valid Dolt database",
-		commands:    []string{"bd doctor --fix", "rm -rf .beads/dolt && bd init"},
-		sourceFiles: []string{"cmd/bd/doctor/broken_migration.go:CheckBrokenMigrationState"},
-	}
-}
-
-func enrichSQLiteResidue(dc DoctorCheck) agentEnrichment {
-	return agentEnrichment{
-		severity:    "advisory",
-		explanation: fmt.Sprintf("SQLite residue after migration: %s. The old SQLite database file still exists after migrating to Dolt. It's safe to remove once you've verified the Dolt database works.", dc.Message),
-		observed:    dc.Message,
-		expected:    "No SQLite database files after Dolt migration",
-		commands:    []string{"bd doctor --fix"},
-		sourceFiles: []string{"cmd/bd/doctor/broken_migration.go:CheckSQLiteResidue"},
 	}
 }
 

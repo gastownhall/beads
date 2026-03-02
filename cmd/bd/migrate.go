@@ -22,9 +22,6 @@ var migrateCmd = &cobra.Command{
 
 Without subcommand, checks and updates database metadata to current version.
 
-Backend migration flags:
-  --to-dolt     Migrate from SQLite to Dolt backend
-
 Subcommands:
   hooks       Plan git hook migration to marker-managed format
   issues      Move issues between repositories
@@ -50,13 +47,6 @@ Subcommands:
 		// Handle --inspect flag (show migration plan for AI agents)
 		if inspect {
 			handleInspect()
-			return
-		}
-
-		// Handle --to-dolt flag (SQLite to Dolt migration)
-		toDolt, _ := cmd.Flags().GetBool("to-dolt")
-		if toDolt {
-			handleToDoltMigration(dryRun, autoYes)
 			return
 		}
 
@@ -724,15 +714,9 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 	}
 }
 
-// copyFile copies a file from src to dst
-func copyFile(src, dst string) error {
-	// nolint:gosec // G304: src is validated migration backup path
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	// nolint:gosec // G306: backup file needs to be readable by other tools
-	return os.WriteFile(dst, data, 0644)
+// listMigrations returns registered Dolt schema migrations.
+func listMigrations() []string {
+	return dolt.ListMigrations()
 }
 
 // migrateSyncCmd is the "bd migrate sync <branch>" subcommand that
@@ -762,7 +746,6 @@ Example:
 func init() {
 	migrateCmd.Flags().Bool("yes", false, "Auto-confirm prompts")
 	migrateCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
-	migrateCmd.Flags().Bool("to-dolt", false, "Migrate from SQLite to Dolt backend")
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
 	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")

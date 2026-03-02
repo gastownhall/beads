@@ -351,226 +351,47 @@ func TestIsDoltServerModeEnvVar(t *testing.T) {
 	})
 }
 
-// TestGetBackendRespectsConfig tests that GetBackend returns the configured
-// backend from metadata.json instead of always returning "dolt".
-// Fixes GH#2016: v0.55.4 forces Dolt backend on existing SQLite databases.
-func TestGetBackendRespectsConfig(t *testing.T) {
+// TestGetBackendAlwaysDolt tests that GetBackend always returns "dolt".
+func TestGetBackendAlwaysDolt(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  *Config
-		want string
 	}{
-		{
-			name: "explicit sqlite backend is respected",
-			cfg:  &Config{Backend: BackendSQLite},
-			want: BackendSQLite,
-		},
-		{
-			name: "explicit dolt backend is respected",
-			cfg:  &Config{Backend: BackendDolt},
-			want: BackendDolt,
-		},
-		{
-			name: "empty backend defaults to dolt for new installs",
-			cfg:  &Config{Backend: ""},
-			want: BackendDolt,
-		},
-		{
-			name: "legacy config with no backend field defaults to dolt",
-			cfg:  &Config{},
-			want: BackendDolt,
-		},
-		{
-			name: "uppercase SQLite is normalized",
-			cfg:  &Config{Backend: "SQLite"},
-			want: BackendSQLite,
-		},
-		{
-			name: "mixed case SQLITE is normalized",
-			cfg:  &Config{Backend: "SQLITE"},
-			want: BackendSQLite,
-		},
-		{
-			name: "uppercase DOLT is normalized",
-			cfg:  &Config{Backend: "DOLT"},
-			want: BackendDolt,
-		},
-		{
-			name: "unknown backend defaults to dolt",
-			cfg:  &Config{Backend: "postgres"},
-			want: BackendDolt,
-		},
+		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}},
+		{name: "empty backend", cfg: &Config{Backend: ""}},
+		{name: "legacy config", cfg: &Config{}},
+		{name: "stale sqlite value", cfg: &Config{Backend: "sqlite"}},
+		{name: "unknown backend", cfg: &Config{Backend: "postgres"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.cfg.GetBackend()
-			if got != tt.want {
-				t.Errorf("GetBackend() = %q, want %q", got, tt.want)
+			if got := tt.cfg.GetBackend(); got != BackendDolt {
+				t.Errorf("GetBackend() = %q, want %q", got, BackendDolt)
 			}
 		})
 	}
 }
 
-// TestDatabasePathRespectsBackend tests that DatabasePath returns the SQLite
-// path when backend is "sqlite" and the Dolt path when backend is "dolt".
-// Fixes GH#2016.
-func TestDatabasePathRespectsBackend(t *testing.T) {
+// TestDatabasePathAlwaysDolt tests that DatabasePath always returns the dolt path.
+func TestDatabasePathAlwaysDolt(t *testing.T) {
 	beadsDir := "/home/user/project/.beads"
 
-	t.Run("sqlite backend returns sqlite path", func(t *testing.T) {
-		cfg := &Config{Database: "beads.db", Backend: BackendSQLite}
-		got := cfg.DatabasePath(beadsDir)
-		want := filepath.Join(beadsDir, "beads.db")
-		if got != want {
-			t.Errorf("DatabasePath() = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("dolt backend returns dolt path", func(t *testing.T) {
-		cfg := &Config{Database: "beads.db", Backend: BackendDolt}
-		got := cfg.DatabasePath(beadsDir)
-		want := filepath.Join(beadsDir, "dolt")
-		if got != want {
-			t.Errorf("DatabasePath() = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("sqlite backend with empty database uses default beads.db", func(t *testing.T) {
-		cfg := &Config{Database: "", Backend: BackendSQLite}
-		got := cfg.DatabasePath(beadsDir)
-		want := filepath.Join(beadsDir, "beads.db")
-		if got != want {
-			t.Errorf("DatabasePath() = %q, want %q", got, want)
-		}
-	})
-}
-
-// TestIsDoltServerModeWithSQLiteBackend verifies that SQLite backend configs
-// never report as Dolt server mode, even with env var override.
-// Fixes GH#2016.
-func TestIsDoltServerModeWithSQLiteBackend(t *testing.T) {
-	t.Run("sqlite backend is never server mode", func(t *testing.T) {
-		cfg := &Config{Backend: BackendSQLite, DoltMode: DoltModeServer}
-		if cfg.IsDoltServerMode() {
-			t.Error("IsDoltServerMode() = true for sqlite backend, want false")
-		}
-	})
-
-	t.Run("sqlite backend ignores BEADS_DOLT_SERVER_MODE env var", func(t *testing.T) {
-		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
-		cfg := &Config{Backend: BackendSQLite}
-		if cfg.IsDoltServerMode() {
-			t.Error("IsDoltServerMode() = true for sqlite backend with env var, want false")
-		}
-	})
-}
-
-// TestGetBackendRoundtrip tests that backend field survives save/load.
-// Fixes GH#2016.
-func TestGetBackendRoundtrip(t *testing.T) {
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0750); err != nil {
-		t.Fatalf("failed to create .beads directory: %v", err)
-	}
-
-	cfg := &Config{
-		Database: "beads.db",
-		Backend:  BackendSQLite,
-	}
-
-	if err := cfg.Save(beadsDir); err != nil {
-		t.Fatalf("Save() failed: %v", err)
-	}
-
-	loaded, err := Load(beadsDir)
-	if err != nil {
-		t.Fatalf("Load() failed: %v", err)
-	}
-
-	if loaded.GetBackend() != BackendSQLite {
-		t.Errorf("GetBackend() after roundtrip = %q, want %q", loaded.GetBackend(), BackendSQLite)
+	cfg := &Config{Database: "beads.db", Backend: BackendDolt}
+	got := cfg.DatabasePath(beadsDir)
+	want := filepath.Join(beadsDir, "dolt")
+	if got != want {
+		t.Errorf("DatabasePath() = %q, want %q", got, want)
 	}
 }
 
-// TestCapabilitiesForBackendSQLite tests that CapabilitiesForBackend handles
-// the "sqlite" backend string. Fixes GH#2016.
-func TestCapabilitiesForBackendSQLite(t *testing.T) {
-	caps := CapabilitiesForBackend(BackendSQLite)
+// TestCapabilitiesForBackend tests that CapabilitiesForBackend returns
+// single-process-only by default.
+func TestCapabilitiesForBackend(t *testing.T) {
+	caps := CapabilitiesForBackend("anything")
 	if !caps.SingleProcessOnly {
-		t.Error("CapabilitiesForBackend(sqlite).SingleProcessOnly = false, want true")
+		t.Error("CapabilitiesForBackend().SingleProcessOnly = false, want true")
 	}
-}
-
-// TestGetBackendEnvVarOverride tests that BEADS_BACKEND env var overrides
-// metadata.json, providing an escape hatch for corrupted configs.
-// Fixes GH#2016.
-func TestGetBackendEnvVarOverride(t *testing.T) {
-	t.Run("env var forces sqlite", func(t *testing.T) {
-		t.Setenv("BEADS_BACKEND", "sqlite")
-		cfg := &Config{Backend: BackendDolt}
-		if got := cfg.GetBackend(); got != BackendSQLite {
-			t.Errorf("GetBackend() = %q with BEADS_BACKEND=sqlite, want %q", got, BackendSQLite)
-		}
-	})
-
-	t.Run("env var forces dolt", func(t *testing.T) {
-		t.Setenv("BEADS_BACKEND", "dolt")
-		cfg := &Config{Backend: BackendSQLite}
-		if got := cfg.GetBackend(); got != BackendDolt {
-			t.Errorf("GetBackend() = %q with BEADS_BACKEND=dolt, want %q", got, BackendDolt)
-		}
-	})
-
-	t.Run("empty env var uses config", func(t *testing.T) {
-		cfg := &Config{Backend: BackendSQLite}
-		if got := cfg.GetBackend(); got != BackendSQLite {
-			t.Errorf("GetBackend() = %q without env var, want %q", got, BackendSQLite)
-		}
-	})
-
-	t.Run("uppercase SQLITE env var is normalized", func(t *testing.T) {
-		t.Setenv("BEADS_BACKEND", "SQLITE")
-		cfg := &Config{Backend: BackendDolt}
-		if got := cfg.GetBackend(); got != BackendSQLite {
-			t.Errorf("GetBackend() = %q with BEADS_BACKEND=SQLITE, want %q", got, BackendSQLite)
-		}
-	})
-
-	t.Run("unknown env var value falls through to config", func(t *testing.T) {
-		t.Setenv("BEADS_BACKEND", "postgres")
-		cfg := &Config{Backend: BackendSQLite}
-		if got := cfg.GetBackend(); got != BackendSQLite {
-			t.Errorf("GetBackend() = %q with unknown env var, want %q (from config)", got, BackendSQLite)
-		}
-	})
-}
-
-// TestDatabasePathEnvVarOverride tests that DatabasePath respects the
-// BEADS_BACKEND env var, since DatabasePath calls GetBackend() internally.
-func TestDatabasePathEnvVarOverride(t *testing.T) {
-	beadsDir := "/home/user/project/.beads"
-
-	t.Run("env var sqlite overrides dolt config for database path", func(t *testing.T) {
-		t.Setenv("BEADS_BACKEND", "sqlite")
-		cfg := &Config{Database: "beads.db", Backend: BackendDolt}
-		got := cfg.DatabasePath(beadsDir)
-		want := filepath.Join(beadsDir, "beads.db")
-		if got != want {
-			t.Errorf("DatabasePath() = %q with BEADS_BACKEND=sqlite, want %q", got, want)
-		}
-	})
-
-	t.Run("env var dolt overrides sqlite config for database path", func(t *testing.T) {
-		t.Setenv("BEADS_BACKEND", "dolt")
-		cfg := &Config{Database: "beads.db", Backend: BackendSQLite}
-		got := cfg.DatabasePath(beadsDir)
-		want := filepath.Join(beadsDir, "dolt")
-		if got != want {
-			t.Errorf("DatabasePath() = %q with BEADS_BACKEND=dolt, want %q", got, want)
-		}
-	})
 }
 
 // TestGetCapabilities tests that GetCapabilities properly handles server mode
@@ -594,11 +415,6 @@ func TestGetCapabilities(t *testing.T) {
 			name:           "dolt server mode is multi-process",
 			cfg:            &Config{Backend: BackendDolt, DoltMode: DoltModeServer},
 			wantSingleProc: false,
-		},
-		{
-			name:           "sqlite is single-process",
-			cfg:            &Config{Backend: BackendSQLite},
-			wantSingleProc: true,
 		},
 	}
 

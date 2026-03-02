@@ -19,7 +19,7 @@ func TestCheckFederationRemotesAPI_NonDoltBackend(t *testing.T) {
 
 	// Write a config with sqlite backend
 	cfg := &configfile.Config{
-		Backend: configfile.BackendSQLite,
+		Backend: "sqlite",
 	}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0600); err != nil {
@@ -31,8 +31,8 @@ func TestCheckFederationRemotesAPI_NonDoltBackend(t *testing.T) {
 	if check.Status != StatusOK {
 		t.Errorf("expected StatusOK for non-Dolt backend, got %s", check.Status)
 	}
-	if !strings.Contains(check.Message, "non-Dolt") {
-		t.Errorf("expected message about non-Dolt backend, got %q", check.Message)
+	if !strings.Contains(check.Message, "N/A") {
+		t.Errorf("expected N/A message, got %q", check.Message)
 	}
 	if check.Category != CategoryFederation {
 		t.Errorf("expected CategoryFederation, got %q", check.Category)
@@ -141,7 +141,7 @@ func TestCheckFederationPeerConnectivity_NonDoltBackend(t *testing.T) {
 	}
 
 	cfg := &configfile.Config{
-		Backend: configfile.BackendSQLite,
+		Backend: "sqlite",
 	}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0600); err != nil {
@@ -153,8 +153,8 @@ func TestCheckFederationPeerConnectivity_NonDoltBackend(t *testing.T) {
 	if check.Status != StatusOK {
 		t.Errorf("expected StatusOK for non-Dolt backend, got %s", check.Status)
 	}
-	if !strings.Contains(check.Message, "non-Dolt") {
-		t.Errorf("expected message about non-Dolt backend, got %q", check.Message)
+	if !strings.Contains(check.Message, "N/A") {
+		t.Errorf("expected N/A message, got %q", check.Message)
 	}
 }
 
@@ -191,7 +191,7 @@ func TestCheckFederationSyncStaleness_NonDoltBackend(t *testing.T) {
 	}
 
 	cfg := &configfile.Config{
-		Backend: configfile.BackendSQLite,
+		Backend: "sqlite",
 	}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0600); err != nil {
@@ -213,7 +213,7 @@ func TestCheckFederationConflicts_NonDoltBackend(t *testing.T) {
 	}
 
 	cfg := &configfile.Config{
-		Backend: configfile.BackendSQLite,
+		Backend: "sqlite",
 	}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0600); err != nil {
@@ -257,7 +257,7 @@ func TestCheckDoltServerModeMismatch_NonDoltBackend(t *testing.T) {
 	}
 
 	cfg := &configfile.Config{
-		Backend: configfile.BackendSQLite,
+		Backend: "sqlite",
 	}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0600); err != nil {
@@ -338,7 +338,7 @@ func TestCheckFederationChecks_CategoryIsFederation(t *testing.T) {
 
 	// Write a sqlite config so all checks return quickly with N/A
 	cfg := &configfile.Config{
-		Backend: configfile.BackendSQLite,
+		Backend: "sqlite",
 	}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0600); err != nil {
@@ -449,7 +449,7 @@ func TestCheckFederationRemotesAPI_AllCheckNames(t *testing.T) {
 	}
 
 	cfg := &configfile.Config{
-		Backend: configfile.BackendSQLite,
+		Backend: "sqlite",
 	}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0600); err != nil {

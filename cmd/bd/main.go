@@ -415,11 +415,6 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Auto-migrate SQLite to Dolt if a legacy beads.db is detected (bd-3dx).
-		// This must run BEFORE database path resolution because FindDatabasePath()
-		// only looks for Dolt databases — a SQLite-only .beads/ would be invisible.
-		autoMigrateSQLiteToDolt()
-
 		// Initialize database path
 		if dbPath == "" {
 			// Use public API to find database (same logic as extensions)
@@ -499,19 +494,6 @@ var rootCmd = &cobra.Command{
 		// Load config to get database name and server connection settings
 		cfg, cfgErr := configfile.Load(beadsDir)
 		if cfgErr == nil && cfg != nil {
-			// Guard: if backend is explicitly SQLite, the auto-migration was
-			// skipped (user opted to stay on SQLite). There is no SQLite store
-			// in the current codebase, so give a clear error with options.
-			// Fixes GH#2016.
-			if cfg.GetBackend() == configfile.BackendSQLite {
-				fmt.Fprintf(os.Stderr, "This beads database uses the SQLite backend.\n")
-				fmt.Fprintf(os.Stderr, "bd v0.50+ requires Dolt. To migrate, run:\n\n")
-				fmt.Fprintf(os.Stderr, "  bd migrate --to-dolt\n\n")
-				fmt.Fprintf(os.Stderr, "To stay on SQLite, use bd v0.49.6.\n")
-				fmt.Fprintf(os.Stderr, "To override (if already migrated): export BEADS_BACKEND=dolt\n")
-				os.Exit(1)
-			}
-
 			// Always set database name (needed for bootstrap to find
 			// prefix-based databases like "beads_hq"; see #1669)
 			doltCfg.Database = cfg.GetDoltDatabase()
