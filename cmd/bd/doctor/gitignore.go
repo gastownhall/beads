@@ -86,12 +86,13 @@ var requiredPatterns = []string{
 	"dolt-server.lock",
 }
 
-// CheckGitignore checks if .beads/.gitignore is up to date
-func CheckGitignore() DoctorCheck {
-	gitignorePath := filepath.Join(".beads", ".gitignore")
+// CheckGitignore checks if .beads/.gitignore is up to date.
+// repoPath is the project root directory.
+func CheckGitignore(repoPath string) DoctorCheck {
+	gitignorePath := filepath.Join(repoPath, ".beads", ".gitignore")
 
 	// If a redirect exists, check the gitignore at the redirect target instead
-	redirectPath := filepath.Join(".beads", "redirect")
+	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
 	// #nosec G304 -- redirect path is fixed to .beads/redirect
 	if data, err := os.ReadFile(redirectPath); err == nil {
 		target := parseRedirectTarget(data)
@@ -141,11 +142,12 @@ func CheckGitignore() DoctorCheck {
 
 // FixGitignore updates .beads/.gitignore to the current template.
 // If a redirect exists, it writes to the redirect target's .gitignore instead.
-func FixGitignore() error {
-	gitignorePath := filepath.Join(".beads", ".gitignore")
+// repoPath is the project root directory.
+func FixGitignore(repoPath string) error {
+	gitignorePath := filepath.Join(repoPath, ".beads", ".gitignore")
 
 	// If a redirect exists, fix the gitignore at the redirect target instead
-	redirectPath := filepath.Join(".beads", "redirect")
+	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
 	// #nosec G304 -- redirect path is fixed to .beads/redirect
 	if data, err := os.ReadFile(redirectPath); err == nil {
 		target := parseRedirectTarget(data)
@@ -181,8 +183,9 @@ func FixGitignore() error {
 // CheckRedirectNotTracked verifies that .beads/redirect is NOT tracked by git.
 // Redirect files contain relative paths that only work in the original worktree.
 // If committed, they cause warnings in other clones where the path is invalid.
-func CheckRedirectNotTracked() DoctorCheck {
-	redirectPath := filepath.Join(".beads", "redirect")
+// repoPath is the project root directory.
+func CheckRedirectNotTracked(repoPath string) DoctorCheck {
+	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
 
 	// First check if the file exists
 	if _, err := os.Stat(redirectPath); os.IsNotExist(err) {
@@ -227,9 +230,10 @@ func CheckRedirectNotTracked() DoctorCheck {
 	}
 }
 
-// FixRedirectTracking untracks the .beads/redirect file from git
-func FixRedirectTracking() error {
-	redirectPath := filepath.Join(".beads", "redirect")
+// FixRedirectTracking untracks the .beads/redirect file from git.
+// repoPath is the project root directory.
+func FixRedirectTracking(repoPath string) error {
+	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
 
 	// Check if file is actually tracked first
 	cmd := exec.Command("git", "ls-files", redirectPath) // #nosec G204 - args are hardcoded paths
@@ -295,8 +299,9 @@ func resolveRedirectTarget(beadsDir string, target string) string {
 
 // CheckRedirectTargetValid verifies that the redirect target exists and has a valid beads database.
 // This catches cases where the redirect points to a non-existent directory or one without a database.
-func CheckRedirectTargetValid() DoctorCheck {
-	redirectPath := filepath.Join(".beads", "redirect")
+// repoPath is the project root directory.
+func CheckRedirectTargetValid(repoPath string) DoctorCheck {
+	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
 
 	// Check if redirect file exists
 	data, err := os.ReadFile(redirectPath) // #nosec G304 - path is hardcoded
@@ -405,8 +410,9 @@ func CheckRedirectTargetValid() DoctorCheck {
 
 // CheckRedirectTargetSyncWorktree verifies that the redirect target has a working beads-sync worktree.
 // This is important for repos using sync-branch mode with redirects.
-func CheckRedirectTargetSyncWorktree() DoctorCheck {
-	redirectPath := filepath.Join(".beads", "redirect")
+// repoPath is the project root directory.
+func CheckRedirectTargetSyncWorktree(repoPath string) DoctorCheck {
+	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
 
 	// Check if redirect file exists
 	data, err := os.ReadFile(redirectPath) // #nosec G304 - path is hardcoded
@@ -485,8 +491,9 @@ func CheckRedirectTargetSyncWorktree() DoctorCheck {
 // CheckNoVestigialSyncWorktrees detects beads-sync worktrees in redirected repos that are unused.
 // When a repo uses .beads/redirect, it doesn't need its own beads-sync worktree since
 // sync operations happen in the redirect target. These vestigial worktrees waste space.
-func CheckNoVestigialSyncWorktrees() DoctorCheck {
-	redirectPath := filepath.Join(".beads", "redirect")
+// repoPath is the project root directory.
+func CheckNoVestigialSyncWorktrees(repoPath string) DoctorCheck {
+	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
 
 	// Check if redirect file exists
 	if _, err := os.Stat(redirectPath); os.IsNotExist(err) {
@@ -498,18 +505,8 @@ func CheckNoVestigialSyncWorktrees() DoctorCheck {
 		}
 	}
 
-	// Check for local .beads-sync worktree
-	cwd, err := os.Getwd()
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Vestigial Sync Worktrees",
-			Status:  StatusOK,
-			Message: "N/A (cannot determine cwd)",
-		}
-	}
-
-	// Walk up to find git root
-	gitRoot := cwd
+	// Use repoPath to find git root instead of walking up from cwd
+	gitRoot := repoPath
 	for {
 		if _, err := os.Stat(filepath.Join(gitRoot, ".git")); err == nil {
 			break
@@ -550,8 +547,9 @@ func CheckNoVestigialSyncWorktrees() DoctorCheck {
 // CheckLastTouchedNotTracked verifies that .beads/last-touched is NOT tracked by git.
 // The last-touched file is local runtime state that should never be committed.
 // If committed, it causes spurious diffs in other clones.
-func CheckLastTouchedNotTracked() DoctorCheck {
-	lastTouchedPath := filepath.Join(".beads", "last-touched")
+// repoPath is the project root directory.
+func CheckLastTouchedNotTracked(repoPath string) DoctorCheck {
+	lastTouchedPath := filepath.Join(repoPath, ".beads", "last-touched")
 
 	// First check if the file exists
 	if _, err := os.Stat(lastTouchedPath); os.IsNotExist(err) {
@@ -596,9 +594,10 @@ func CheckLastTouchedNotTracked() DoctorCheck {
 	}
 }
 
-// FixLastTouchedTracking untracks the .beads/last-touched file from git
-func FixLastTouchedTracking() error {
-	lastTouchedPath := filepath.Join(".beads", "last-touched")
+// FixLastTouchedTracking untracks the .beads/last-touched file from git.
+// repoPath is the project root directory.
+func FixLastTouchedTracking(repoPath string) error {
+	lastTouchedPath := filepath.Join(repoPath, ".beads", "last-touched")
 
 	// Check if file is actually tracked first
 	cmd := exec.Command("git", "ls-files", lastTouchedPath) // #nosec G204 - args are hardcoded paths
@@ -623,8 +622,9 @@ func FixLastTouchedTracking() error {
 
 // CheckProjectGitignore checks if the project-root .gitignore contains patterns
 // to prevent accidentally committing Dolt database files (.dolt/ and *.db).
-func CheckProjectGitignore() DoctorCheck {
-	gitignorePath := ".gitignore"
+// repoPath is the project root directory.
+func CheckProjectGitignore(repoPath string) DoctorCheck {
+	gitignorePath := filepath.Join(repoPath, ".gitignore")
 
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- path is hardcoded
 	if err != nil {
@@ -671,8 +671,9 @@ func CheckProjectGitignore() DoctorCheck {
 // EnsureProjectGitignore adds .dolt/ and *.db patterns to the project-root
 // .gitignore if they are not already present. Creates the file if it doesn't exist.
 // This prevents users from accidentally committing Dolt database files.
-func EnsureProjectGitignore() error {
-	gitignorePath := ".gitignore"
+// repoPath is the project root directory.
+func EnsureProjectGitignore(repoPath string) error {
+	gitignorePath := filepath.Join(repoPath, ".gitignore")
 
 	var existingContent string
 	// #nosec G304 -- path is hardcoded
@@ -712,8 +713,9 @@ func EnsureProjectGitignore() error {
 }
 
 // FixProjectGitignore is an alias for EnsureProjectGitignore, used by bd doctor --fix.
-func FixProjectGitignore() error {
-	return EnsureProjectGitignore()
+// repoPath is the project root directory.
+func FixProjectGitignore(repoPath string) error {
+	return EnsureProjectGitignore(repoPath)
 }
 
 // containsGitignorePattern checks if a gitignore file content contains the given pattern.

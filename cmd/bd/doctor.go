@@ -539,24 +539,24 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check 11: Claude integration
-	claudeCheck := convertWithCategory(doctor.CheckClaude(), doctor.CategoryIntegration)
+	claudeCheck := convertWithCategory(doctor.CheckClaude(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeCheck)
 	// Don't fail overall check for missing Claude integration, just warn
 
 	// Check 11a: Claude settings file health (malformed JSON detection)
-	claudeSettingsCheck := convertWithCategory(doctor.CheckClaudeSettingsHealth(), doctor.CategoryIntegration)
+	claudeSettingsCheck := convertWithCategory(doctor.CheckClaudeSettingsHealth(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeSettingsCheck)
 	if claudeSettingsCheck.Status == statusError {
 		result.OverallOK = false // Malformed settings is a real problem
 	}
 
 	// Check 11b: Claude hook completeness (both SessionStart and PreCompact)
-	claudeHookCheck := convertWithCategory(doctor.CheckClaudeHookCompleteness(), doctor.CategoryIntegration)
+	claudeHookCheck := convertWithCategory(doctor.CheckClaudeHookCompleteness(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeHookCheck)
 	// Don't fail overall check for incomplete hooks, just warn
 
 	// Check 11c: bd prime output verification
-	bdPrimeOutputCheck := convertWithCategory(doctor.VerifyPrimeOutput(), doctor.CategoryIntegration)
+	bdPrimeOutputCheck := convertWithCategory(doctor.VerifyPrimeOutput(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeOutputCheck)
 	// Don't fail overall check for prime output issues, just warn
 
@@ -586,37 +586,37 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for MCP tool refs, just warn
 
 	// Check 14: Gitignore up to date
-	gitignoreCheck := convertWithCategory(doctor.CheckGitignore(), doctor.CategoryGit)
+	gitignoreCheck := convertWithCategory(doctor.CheckGitignore(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, gitignoreCheck)
 	// Don't fail overall check for gitignore, just warn
 
 	// Check 14a: Project-root .gitignore has Dolt exclusion patterns (GH#2034)
-	projectGitignoreCheck := convertWithCategory(doctor.CheckProjectGitignore(), doctor.CategoryGit)
+	projectGitignoreCheck := convertWithCategory(doctor.CheckProjectGitignore(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, projectGitignoreCheck)
 	// Don't fail overall check for project gitignore, just warn
 
 	// Check 14b: redirect file tracking (worktree redirect files shouldn't be committed)
-	redirectTrackingCheck := convertWithCategory(doctor.CheckRedirectNotTracked(), doctor.CategoryGit)
+	redirectTrackingCheck := convertWithCategory(doctor.CheckRedirectNotTracked(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, redirectTrackingCheck)
 	// Don't fail overall check for redirect tracking, just warn
 
 	// Check 14c: redirect target validity (target exists and has valid db)
-	redirectTargetCheck := convertWithCategory(doctor.CheckRedirectTargetValid(), doctor.CategoryGit)
+	redirectTargetCheck := convertWithCategory(doctor.CheckRedirectTargetValid(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, redirectTargetCheck)
 	// Don't fail overall check for redirect target, just warn
 
 	// Check 14d: redirect target sync worktree (target has beads-sync if needed)
-	redirectTargetSyncCheck := convertWithCategory(doctor.CheckRedirectTargetSyncWorktree(), doctor.CategoryGit)
+	redirectTargetSyncCheck := convertWithCategory(doctor.CheckRedirectTargetSyncWorktree(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, redirectTargetSyncCheck)
 	// Don't fail overall check for redirect target sync, just warn
 
 	// Check 14e: vestigial sync worktrees (unused worktrees in redirected repos)
-	vestigialWorktreesCheck := convertWithCategory(doctor.CheckNoVestigialSyncWorktrees(), doctor.CategoryGit)
+	vestigialWorktreesCheck := convertWithCategory(doctor.CheckNoVestigialSyncWorktrees(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, vestigialWorktreesCheck)
 	// Don't fail overall check for vestigial worktrees, just warn
 
 	// Check 14g: last-touched file tracking (runtime state shouldn't be committed)
-	lastTouchedTrackingCheck := convertWithCategory(doctor.CheckLastTouchedNotTracked(), doctor.CategoryGit)
+	lastTouchedTrackingCheck := convertWithCategory(doctor.CheckLastTouchedNotTracked(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, lastTouchedTrackingCheck)
 	// Don't fail overall check for last-touched tracking, just warn
 

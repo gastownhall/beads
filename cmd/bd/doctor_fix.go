@@ -245,13 +245,13 @@ func applyFixList(path string, fixes []doctorCheck) {
 		var err error
 		switch check.Name {
 		case "Gitignore":
-			err = doctor.FixGitignore()
+			err = doctor.FixGitignore(path)
 		case "Project Gitignore":
-			err = doctor.FixProjectGitignore()
+			err = doctor.FixProjectGitignore(path)
 		case "Redirect Tracking":
-			err = doctor.FixRedirectTracking()
+			err = doctor.FixRedirectTracking(path)
 		case "Last-Touched Tracking":
-			err = doctor.FixLastTouchedTracking()
+			err = doctor.FixLastTouchedTracking(path)
 		case "Git Hooks":
 			err = fix.GitHooks(path)
 		case "Sync Divergence":

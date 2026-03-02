@@ -97,7 +97,7 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 			tt.setupFunc(t, tmpDir)
 
 			// Run FixGitignore
-			err = FixGitignore()
+			err = FixGitignore(tmpDir)
 
 			// Check error expectation
 			if tt.expectError {
@@ -169,7 +169,7 @@ func TestFixGitignore_FileOwnership(t *testing.T) {
 	}
 
 	// Run FixGitignore
-	if err := FixGitignore(); err != nil {
+	if err := FixGitignore(tmpDir); err != nil {
 		t.Fatalf("FixGitignore failed: %v", err)
 	}
 
@@ -242,7 +242,7 @@ func TestFixGitignore_DoesNotLoosenPermissions(t *testing.T) {
 	beforePerms := beforeInfo.Mode().Perm()
 
 	// Run FixGitignore
-	if err := FixGitignore(); err != nil {
+	if err := FixGitignore(tmpDir); err != nil {
 		t.Fatalf("FixGitignore failed: %v", err)
 	}
 
@@ -340,7 +340,7 @@ daemon.log
 
 			tt.setupFunc(t, tmpDir)
 
-			check := CheckGitignore()
+			check := CheckGitignore(tmpDir)
 
 			if check.Status != tt.expectedStatus {
 				t.Errorf("Expected status %s, got %s", tt.expectedStatus, check.Status)
@@ -484,7 +484,7 @@ custom-pattern.txt
 				t.Fatal(err)
 			}
 
-			err = FixGitignore()
+			err = FixGitignore(tmpDir)
 			if err != nil {
 				t.Fatalf("FixGitignore failed: %v", err)
 			}
@@ -557,7 +557,7 @@ beads.right.meta.json
 		t.Fatal(err)
 	}
 
-	err = FixGitignore()
+	err = FixGitignore(tmpDir)
 	if err != nil {
 		t.Fatalf("FixGitignore failed: %v", err)
 	}
@@ -623,7 +623,7 @@ func TestFixGitignore_Symlink(t *testing.T) {
 
 	// Run FixGitignore - it should write through the symlink
 	// (os.WriteFile follows symlinks, it doesn't replace them)
-	err = FixGitignore()
+	err = FixGitignore(tmpDir)
 	if err != nil {
 		t.Fatalf("FixGitignore failed: %v", err)
 	}
@@ -742,7 +742,7 @@ beads.right.meta.json
 				t.Fatal(err)
 			}
 
-			err = FixGitignore()
+			err = FixGitignore(tmpDir)
 			if err != nil {
 				t.Fatalf("FixGitignore failed: %v", err)
 			}
@@ -842,7 +842,7 @@ func TestFixGitignore_VeryLongLines(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err = FixGitignore()
+			err = FixGitignore(tmpDir)
 
 			if tt.expectSuccess {
 				if err != nil {
@@ -1031,7 +1031,7 @@ daemon.log
 
 			tt.setupFunc(t, tmpDir)
 
-			check := CheckGitignore()
+			check := CheckGitignore(tmpDir)
 
 			if check.Status != tt.expectedStatus {
 				t.Errorf("Expected status %s, got %s", tt.expectedStatus, check.Status)
@@ -1099,7 +1099,7 @@ func TestFixGitignore_SubdirectoryGitignore(t *testing.T) {
 	}
 
 	// Run FixGitignore
-	err = FixGitignore()
+	err = FixGitignore(tmpDir)
 	if err != nil {
 		t.Fatalf("FixGitignore failed: %v", err)
 	}
@@ -1154,7 +1154,7 @@ func TestCheckRedirectNotTracked_NoFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := CheckRedirectNotTracked()
+	check := CheckRedirectNotTracked(tmpDir)
 
 	if check.Status != StatusOK {
 		t.Errorf("Expected status %s, got %s", StatusOK, check.Status)
@@ -1204,7 +1204,7 @@ func TestCheckRedirectNotTracked_FileExistsNotTracked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := CheckRedirectNotTracked()
+	check := CheckRedirectNotTracked(tmpDir)
 
 	if check.Status != StatusOK {
 		t.Errorf("Expected status %s, got %s", StatusOK, check.Status)
@@ -1260,7 +1260,7 @@ func TestCheckRedirectNotTracked_FileTracked(t *testing.T) {
 		t.Skipf("git add failed: %v", err)
 	}
 
-	check := CheckRedirectNotTracked()
+	check := CheckRedirectNotTracked(tmpDir)
 
 	if check.Status != StatusWarning {
 		t.Errorf("Expected status %s, got %s", StatusWarning, check.Status)
@@ -1327,7 +1327,7 @@ func TestFixRedirectTracking(t *testing.T) {
 	}
 
 	// Run the fix
-	if err := FixRedirectTracking(); err != nil {
+	if err := FixRedirectTracking(tmpDir); err != nil {
 		t.Fatalf("FixRedirectTracking failed: %v", err)
 	}
 
@@ -1380,7 +1380,7 @@ func TestCheckRedirectTargetValid_AbsolutePath(t *testing.T) {
 		}
 	}()
 
-	check := CheckRedirectTargetValid()
+	check := CheckRedirectTargetValid(workRoot)
 	if check.Status != StatusOK {
 		t.Fatalf("expected status %s, got %s (detail: %s)", StatusOK, check.Status, check.Detail)
 	}
@@ -1480,7 +1480,7 @@ func TestCheckLastTouchedNotTracked_NoFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := CheckLastTouchedNotTracked()
+	check := CheckLastTouchedNotTracked(tmpDir)
 
 	if check.Status != StatusOK {
 		t.Errorf("Expected status %s, got %s", StatusOK, check.Status)
@@ -1530,7 +1530,7 @@ func TestCheckLastTouchedNotTracked_FileExistsNotTracked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := CheckLastTouchedNotTracked()
+	check := CheckLastTouchedNotTracked(tmpDir)
 
 	if check.Status != StatusOK {
 		t.Errorf("Expected status %s, got %s", StatusOK, check.Status)
@@ -1586,7 +1586,7 @@ func TestCheckLastTouchedNotTracked_FileTracked(t *testing.T) {
 		t.Skipf("git add failed: %v", err)
 	}
 
-	check := CheckLastTouchedNotTracked()
+	check := CheckLastTouchedNotTracked(tmpDir)
 
 	if check.Status != StatusWarning {
 		t.Errorf("Expected status %s, got %s", StatusWarning, check.Status)

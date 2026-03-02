@@ -162,7 +162,7 @@ func TestIsMCPServerInstalled(t *testing.T) {
 
 	// The function should return false if settings don't exist or are invalid
 	// This is a basic sanity check
-	result := isMCPServerInstalled()
+	result := isMCPServerInstalled(".")
 
 	// Just verify it returns a boolean without panicking
 	if result != true && result != false {
@@ -177,16 +177,15 @@ func TestIsMCPServerInstalledProjectLevel(t *testing.T) {
 	for _, filename := range []string{"settings.json", "settings.local.json"} {
 		t.Run(filename, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			t.Chdir(tmpDir)
 
-			if err := os.MkdirAll(".claude", 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(".claude", filename), []byte(mcpContent), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(tmpDir, ".claude", filename), []byte(mcpContent), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
-			if !isMCPServerInstalled() {
+			if !isMCPServerInstalled(tmpDir) {
 				t.Errorf("expected to detect MCP server in .claude/%s", filename)
 			}
 		})
@@ -195,34 +194,32 @@ func TestIsMCPServerInstalledProjectLevel(t *testing.T) {
 	// Test negative cases
 	t.Run("no mcpServers section", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 
-		if err := os.MkdirAll(".claude", 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		content := `{"hooks":{}}`
-		if err := os.WriteFile(filepath.Join(".claude", "settings.json"), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		if isMCPServerInstalled() {
+		if isMCPServerInstalled(tmpDir) {
 			t.Error("expected NOT to detect MCP server when mcpServers section missing")
 		}
 	})
 
 	t.Run("mcpServers but not beads", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 
-		if err := os.MkdirAll(".claude", 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		content := `{"mcpServers":{"other-server":{"command":"other"}}}`
-		if err := os.WriteFile(filepath.Join(".claude", "settings.json"), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		if isMCPServerInstalled() {
+		if isMCPServerInstalled(tmpDir) {
 			t.Error("expected NOT to detect MCP server when beads not present")
 		}
 	})
@@ -230,7 +227,7 @@ func TestIsMCPServerInstalledProjectLevel(t *testing.T) {
 
 func TestIsBeadsPluginInstalled(t *testing.T) {
 	// Similar sanity check for plugin detection
-	result := isBeadsPluginInstalled()
+	result := isBeadsPluginInstalled(".")
 
 	// Just verify it returns a boolean without panicking
 	if result != true && result != false {
@@ -243,17 +240,16 @@ func TestIsBeadsPluginInstalledProjectLevel(t *testing.T) {
 	for _, filename := range []string{"settings.json", "settings.local.json"} {
 		t.Run(filename, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			t.Chdir(tmpDir)
 
-			if err := os.MkdirAll(".claude", 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			content := `{"enabledPlugins":{"beads@beads-marketplace":true}}`
-			if err := os.WriteFile(filepath.Join(".claude", filename), []byte(content), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(tmpDir, ".claude", filename), []byte(content), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
-			if !isBeadsPluginInstalled() {
+			if !isBeadsPluginInstalled(tmpDir) {
 				t.Errorf("expected to detect plugin in .claude/%s", filename)
 			}
 		})
@@ -262,40 +258,38 @@ func TestIsBeadsPluginInstalledProjectLevel(t *testing.T) {
 	// Test negative cases - plugin should NOT be detected
 	t.Run("plugin disabled", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 		// Set temp home to avoid detecting plugin from real ~/.claude/settings.json
 		t.Setenv("HOME", tmpDir)
 		t.Setenv("USERPROFILE", tmpDir)
 
-		if err := os.MkdirAll(".claude", 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		content := `{"enabledPlugins":{"beads@beads-marketplace":false}}`
-		if err := os.WriteFile(filepath.Join(".claude", "settings.json"), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		if isBeadsPluginInstalled() {
+		if isBeadsPluginInstalled(tmpDir) {
 			t.Error("expected NOT to detect plugin when explicitly disabled")
 		}
 	})
 
 	t.Run("no plugin section", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 		// Set temp home to avoid detecting plugin from real ~/.claude/settings.json
 		t.Setenv("HOME", tmpDir)
 		t.Setenv("USERPROFILE", tmpDir)
 
-		if err := os.MkdirAll(".claude", 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		content := `{"hooks":{}}`
-		if err := os.WriteFile(filepath.Join(".claude", "settings.json"), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		if isBeadsPluginInstalled() {
+		if isBeadsPluginInstalled(tmpDir) {
 			t.Error("expected NOT to detect plugin when enabledPlugins section missing")
 		}
 	})
@@ -303,7 +297,7 @@ func TestIsBeadsPluginInstalledProjectLevel(t *testing.T) {
 
 func TestHasClaudeHooks(t *testing.T) {
 	// Sanity check for hooks detection
-	result := hasClaudeHooks()
+	result := hasClaudeHooks(".")
 
 	// Just verify it returns a boolean without panicking
 	if result != true && result != false {
@@ -330,17 +324,16 @@ func TestHasClaudeHooksProjectLevel(t *testing.T) {
 	for _, filename := range []string{"settings.json", "settings.local.json"} {
 		t.Run(filename, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			t.Chdir(tmpDir)
 			setTempHome(t, t.TempDir())
 
-			if err := os.MkdirAll(".claude", 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(".claude", filename), []byte(hooksContent), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(tmpDir, ".claude", filename), []byte(hooksContent), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
-			if !hasClaudeHooks() {
+			if !hasClaudeHooks(tmpDir) {
 				t.Errorf("expected to detect hooks in .claude/%s", filename)
 			}
 		})
@@ -349,28 +342,26 @@ func TestHasClaudeHooksProjectLevel(t *testing.T) {
 	// Test negative cases
 	t.Run("no hooks section", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 		setTempHome(t, t.TempDir())
 
-		if err := os.MkdirAll(".claude", 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		content := `{"enabledPlugins":{}}`
-		if err := os.WriteFile(filepath.Join(".claude", "settings.json"), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		if hasClaudeHooks() {
+		if hasClaudeHooks(tmpDir) {
 			t.Error("expected NOT to detect hooks when hooks section missing")
 		}
 	})
 
 	t.Run("hooks but not bd prime", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 		setTempHome(t, t.TempDir())
 
-		if err := os.MkdirAll(".claude", 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		content := `{
@@ -380,11 +371,11 @@ func TestHasClaudeHooksProjectLevel(t *testing.T) {
 				]
 			}
 		}`
-		if err := os.WriteFile(filepath.Join(".claude", "settings.json"), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.json"), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		if hasClaudeHooks() {
+		if hasClaudeHooks(tmpDir) {
 			t.Error("expected NOT to detect hooks when bd prime not present")
 		}
 	})
@@ -392,7 +383,7 @@ func TestHasClaudeHooksProjectLevel(t *testing.T) {
 
 func TestCheckClaude(t *testing.T) {
 	// Verify CheckClaude returns a valid DoctorCheck
-	check := CheckClaude()
+	check := CheckClaude(".")
 
 	if check.Name != "Claude Integration" {
 		t.Errorf("Expected check name 'Claude Integration', got %s", check.Name)
@@ -554,7 +545,7 @@ func TestCheckClaudeSettingsHealth(t *testing.T) {
 		t.Chdir(tmpDir)
 		setTempHome(t, tmpDir)
 
-		check := CheckClaudeSettingsHealth()
+		check := CheckClaudeSettingsHealth(tmpDir)
 		if check.Status != StatusOK {
 			t.Errorf("Expected OK for no settings files, got %s", check.Status)
 		}
@@ -575,7 +566,7 @@ func TestCheckClaudeSettingsHealth(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		check := CheckClaudeSettingsHealth()
+		check := CheckClaudeSettingsHealth(tmpDir)
 		if check.Status != StatusOK {
 			t.Errorf("Expected OK for valid settings, got %s: %s", check.Status, check.Message)
 		}
@@ -593,7 +584,7 @@ func TestCheckClaudeSettingsHealth(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		check := CheckClaudeSettingsHealth()
+		check := CheckClaudeSettingsHealth(tmpDir)
 		if check.Status != StatusError {
 			t.Errorf("Expected error for malformed settings, got %s", check.Status)
 		}
@@ -604,17 +595,16 @@ func TestCheckClaudeSettingsHealth(t *testing.T) {
 
 	t.Run("project-level malformed settings", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		t.Chdir(tmpDir)
 		setTempHome(t, tmpDir)
 
-		if err := os.MkdirAll(".claude", 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(".claude", "settings.local.json"), []byte(`not json`), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmpDir, ".claude", "settings.local.json"), []byte(`not json`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		check := CheckClaudeSettingsHealth()
+		check := CheckClaudeSettingsHealth(tmpDir)
 		if check.Status != StatusError {
 			t.Errorf("Expected error for malformed project settings, got %s", check.Status)
 		}
@@ -633,7 +623,7 @@ func TestCheckClaudeHookCompleteness(t *testing.T) {
 		t.Chdir(tmpDir)
 		setTempHome(t, tmpDir)
 
-		check := CheckClaudeHookCompleteness()
+		check := CheckClaudeHookCompleteness(tmpDir)
 		if check.Status != StatusOK {
 			t.Errorf("Expected OK for no hooks, got %s", check.Status)
 		}
@@ -657,7 +647,7 @@ func TestCheckClaudeHookCompleteness(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		check := CheckClaudeHookCompleteness()
+		check := CheckClaudeHookCompleteness(tmpDir)
 		if check.Status != StatusOK {
 			t.Errorf("Expected OK for both hooks, got %s: %s", check.Status, check.Message)
 		}
@@ -680,7 +670,7 @@ func TestCheckClaudeHookCompleteness(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		check := CheckClaudeHookCompleteness()
+		check := CheckClaudeHookCompleteness(tmpDir)
 		if check.Status != StatusWarning {
 			t.Errorf("Expected warning for missing PreCompact, got %s", check.Status)
 		}
@@ -703,7 +693,7 @@ func TestCheckClaudeHookCompleteness(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		check := CheckClaudeHookCompleteness()
+		check := CheckClaudeHookCompleteness(tmpDir)
 		if check.Status != StatusWarning {
 			t.Errorf("Expected warning for missing SessionStart, got %s", check.Status)
 		}
@@ -727,7 +717,7 @@ func TestCheckClaudeHookCompleteness(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		check := CheckClaudeHookCompleteness()
+		check := CheckClaudeHookCompleteness(tmpDir)
 		if check.Status != StatusOK {
 			t.Errorf("Expected OK for stealth mode hooks, got %s: %s", check.Status, check.Message)
 		}
@@ -898,7 +888,7 @@ func TestCheckClaude_ClaudeCodeWithoutClaude(t *testing.T) {
 	t.Setenv("USERPROFILE", tmpDir)
 	t.Setenv("CLAUDECODE", "1")
 
-	check := CheckClaude()
+	check := CheckClaude(tmpDir)
 
 	if check.Name != "Claude Integration" {
 		t.Errorf("Expected name %q, got %q", "Claude Integration", check.Name)

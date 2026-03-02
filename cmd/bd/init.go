@@ -224,7 +224,7 @@ environment variable.`,
 
 			// Create/update .gitignore in .beads directory (only if missing or outdated)
 			gitignorePath := filepath.Join(beadsDir, ".gitignore")
-			check := doctor.CheckGitignore()
+			check := doctor.CheckGitignore(cwd)
 			if check.Status != "ok" {
 				if err := os.WriteFile(gitignorePath, []byte(doctor.GitignoreTemplate), 0600); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to create/update .gitignore: %v\n", err)
@@ -241,7 +241,7 @@ environment variable.`,
 			cwdAbs, _ := filepath.Abs(cwd)
 			beadsDirIsLocal := strings.HasPrefix(beadsDirAbs, filepath.Clean(cwdAbs)+string(filepath.Separator))
 			if beadsDirIsLocal {
-				if err := doctor.EnsureProjectGitignore(); err != nil {
+				if err := doctor.EnsureProjectGitignore(cwd); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to update project .gitignore: %v\n", err)
 					// Non-fatal - continue anyway
 				}
