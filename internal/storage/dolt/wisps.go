@@ -18,35 +18,12 @@ import (
 // wisp_events, wisp_comments) to avoid Dolt history bloat. All operations use the
 // same Dolt SQL connection — no separate store or transaction routing needed.
 
-// wispIssueTable returns the table name for issue storage based on ID.
-func wispIssueTable(id string) string {
-	if IsEphemeralID(id) {
-		return "wisps"
-	}
-	return "issues"
-}
-
-// wispEventTable returns the event table name based on issue ID.
-func wispEventTable(issueID string) string {
-	if IsEphemeralID(issueID) {
-		return "wisp_events"
-	}
-	return "events"
-}
-
-// wispCommentTable returns the comment table name based on issue ID.
-func wispCommentTable(issueID string) string {
-	if IsEphemeralID(issueID) {
-		return "wisp_comments"
-	}
-	return "comments"
-}
 
 // insertIssueIntoTable inserts an issue into the specified table,
 // using ON DUPLICATE KEY UPDATE to handle pre-existing records gracefully (GH#2061).
 // The table must be either "issues" or "wisps" (same schema).
 //
-//nolint:gosec // G201: table is a hardcoded constant from wispIssueTable
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
@@ -107,7 +84,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 
 // scanIssueFromTable scans a single issue from the specified table.
 //
-//nolint:gosec // G201: table is a hardcoded constant from wispIssueTable
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func scanIssueFromTable(ctx context.Context, db *sql.DB, table, id string) (*types.Issue, error) {
 	row := db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT %s
@@ -127,7 +104,7 @@ func scanIssueFromTable(ctx context.Context, db *sql.DB, table, id string) (*typ
 
 // recordEventInTable records an event in the specified events table.
 //
-//nolint:gosec // G201: table is a hardcoded constant from wispEventTable
+//nolint:gosec // G201: table is a hardcoded constant ("events" or "wisp_events")
 func recordEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, eventType types.EventType, actor, newValue string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (issue_id, event_type, actor, old_value, new_value)
@@ -209,7 +186,7 @@ func insertIssueTxIntoTable(ctx context.Context, tx *sql.Tx, table string, issue
 // scanIssueTxFromTable scans a full issue from a named table within a transaction.
 // Delegates to the unified scanIssueFrom to ensure all columns are hydrated.
 //
-//nolint:gosec // G201: table is a hardcoded constant from wispIssueTable
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func scanIssueTxFromTable(ctx context.Context, tx *sql.Tx, table, id string) (*types.Issue, error) {
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT %s FROM %s WHERE id = ?
