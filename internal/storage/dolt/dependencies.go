@@ -815,7 +815,7 @@ func (s *DoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue, error) 
 func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	// Use computeBlockedIDs as the single source of truth for blocked status.
 	// This ensures the close guard is consistent with ready work calculation.
-	_, err := s.computeBlockedIDs(ctx)
+	_, err := s.computeBlockedIDs(ctx, true)
 	if err != nil {
 		return false, nil, fmt.Errorf("failed to compute blocked IDs: %w", err)
 	}

@@ -164,17 +164,18 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= NOW())")
 	}
 	// Exclude children of future-deferred parents (GH#1190)
+	// Pre-compute excluded IDs using separate single-table queries to avoid
+	// correlated cross-table JOIN subquery that triggers Dolt joinIter hangs.
 	if !filter.IncludeDeferred {
-		whereClauses = append(whereClauses, `
-			NOT EXISTS (
-				SELECT 1 FROM dependencies d_parent
-				JOIN issues parent ON parent.id = d_parent.depends_on_id
-				WHERE d_parent.issue_id = issues.id
-				  AND d_parent.type = 'parent-child'
-				  AND parent.defer_until IS NOT NULL
-				  AND parent.defer_until > NOW()
-			)
-		`)
+		deferredChildIDs, dcErr := s.getChildrenOfDeferredParents(ctx)
+		if dcErr == nil && len(deferredChildIDs) > 0 {
+			dcPlaceholders := make([]string, len(deferredChildIDs))
+			for i, id := range deferredChildIDs {
+				dcPlaceholders[i] = "?"
+				args = append(args, id)
+			}
+			whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", strings.Join(dcPlaceholders, ", ")))
+		}
 	}
 	if len(filter.Labels) > 0 {
 		for _, label := range filter.Labels {
@@ -218,7 +219,9 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	// Exclude blocked issues: pre-compute blocked set using separate single-table
 	// queries to avoid Dolt's joinIter panic (join_iters.go:192).
 	// Correlated EXISTS/NOT EXISTS subqueries across tables trigger the same panic.
-	blockedIDs, err := s.computeBlockedIDs(ctx)
+	// Skip wisp table scanning when ephemeral items aren't requested — no cross-table
+	// blocking deps exist, and skipping 16K+ wisps avoids query timeouts.
+	blockedIDs, err := s.computeBlockedIDs(ctx, filter.IncludeEphemeral)
 	if err == nil && len(blockedIDs) > 0 {
 		// Also exclude children of blocked parents (GH#1495):
 		// If a parent/epic is blocked, its children should not appear as ready work.
@@ -334,7 +337,7 @@ func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilte
 
 	// Step 2: Get canonical blocked set via computeBlockedIDs, which handles
 	// both 'blocks' and 'waits-for' dependencies with full gate evaluation.
-	blockedIDList, err := s.computeBlockedIDs(ctx)
+	blockedIDList, err := s.computeBlockedIDs(ctx, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute blocked IDs: %w", err)
 	}
@@ -663,7 +666,7 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 	// Blocked count: reuse computeBlockedIDs which caches the result across
 	// GetReadyWork and GetStatistics calls within the same CLI invocation.
 	var blockedCount int
-	blockedIDs, err := s.computeBlockedIDs(ctx)
+	blockedIDs, err := s.computeBlockedIDs(ctx, true)
 	if err == nil {
 		blockedCount = len(blockedIDs)
 	}
@@ -685,19 +688,35 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 // joinIter panic (slice bounds out of range at join_iters.go:192).
 // Results are cached per DoltStore lifetime and invalidated when dependencies
 // change (AddDependency, RemoveDependency).
+//
+// When includeWisps is false, only the issues/dependencies tables are scanned,
+// skipping the wisps/wisp_dependencies tables. This is safe when the caller only
+// needs blocked status for non-ephemeral issues (no cross-table blocking deps exist).
+// A cached result from includeWisps=true satisfies includeWisps=false requests.
+//
 // Caller must hold s.mu (at least RLock).
-func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
+func (s *DoltStore) computeBlockedIDs(ctx context.Context, includeWisps bool) ([]string, error) {
 	s.cacheMu.Lock()
-	if s.blockedIDsCached {
+	// Cache hit: return if cached result covers the requested scope.
+	// A full (wisps-included) cache satisfies both modes.
+	if s.blockedIDsCached && (s.blockedIDsCacheIncludesWisps || !includeWisps) {
 		result := s.blockedIDsCache
 		s.cacheMu.Unlock()
 		return result, nil
 	}
 	s.cacheMu.Unlock()
 
-	// Step 1: Get all active issue IDs (scan both tables — bd-w2w)
+	// Build table lists based on includeWisps flag.
+	issueTables := []string{"issues"}
+	depTables := []string{"dependencies"}
+	if includeWisps {
+		issueTables = append(issueTables, "wisps")
+		depTables = append(depTables, "wisp_dependencies")
+	}
+
+	// Step 1: Get all active issue IDs
 	activeIDs := make(map[string]bool)
-	for _, table := range []string{"issues", "wisps"} {
+	for _, table := range issueTables {
 		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
 		activeRows, err := s.queryContext(ctx, fmt.Sprintf(`
 			SELECT id FROM %s
@@ -721,13 +740,12 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 	}
 
 	// Step 2: Get blocking deps, waits-for gates, and conditional-blocks
-	// Scan both dependencies and wisp_dependencies tables (bd-w2w)
 	type depRecord struct {
 		issueID, dependsOnID, depType string
 		metadata                      sql.NullString
 	}
 	var allDeps []depRecord
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+	for _, depTable := range depTables {
 		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
 		depRows, err := s.queryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id, depends_on_id, type, metadata FROM %s
@@ -790,7 +808,6 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 
 	if len(waitsForDeps) > 0 {
 		// Step 4: Load direct children for each waits-for spawner.
-		// Scan both dependencies and wisp_dependencies tables (bd-w2w)
 		spawnerIDs := make(map[string]struct{})
 		for _, dep := range waitsForDeps {
 			spawnerIDs[dep.spawnerID] = struct{}{}
@@ -805,7 +822,7 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 
 		spawnerChildren := make(map[string][]string)
 		childIDs := make(map[string]struct{})
-		for _, depTbl := range []string{"dependencies", "wisp_dependencies"} {
+		for _, depTbl := range depTables {
 			// nolint:gosec // G201: depTbl is hardcoded, placeholders are generated values
 			childQuery := fmt.Sprintf(`
 				SELECT issue_id, depends_on_id FROM %s
@@ -840,8 +857,8 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 				childArgs = append(childArgs, childID)
 			}
 
-			// Check closed status in both issues and wisps tables (bd-w2w)
-			for _, issueTbl := range []string{"issues", "wisps"} {
+			// Check closed status in issue/wisp tables
+			for _, issueTbl := range issueTables {
 				// nolint:gosec // G201: issueTbl is hardcoded, placeholders are generated values
 				closedQuery := fmt.Sprintf(`
 					SELECT id FROM %s
@@ -910,6 +927,7 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context) ([]string, error) {
 	s.blockedIDsCache = result
 	s.blockedIDsCacheMap = blockedSet
 	s.blockedIDsCached = true
+	s.blockedIDsCacheIncludesWisps = includeWisps
 	s.cacheMu.Unlock()
 
 	return result, nil
@@ -922,7 +940,42 @@ func (s *DoltStore) invalidateBlockedIDsCache() {
 	s.blockedIDsCached = false
 	s.blockedIDsCache = nil
 	s.blockedIDsCacheMap = nil
+	s.blockedIDsCacheIncludesWisps = false
 	s.cacheMu.Unlock()
+}
+
+// getChildrenOfDeferredParents returns IDs of issues whose parent has a future
+// defer_until date. Uses separate single-table queries to avoid correlated
+// cross-table JOIN subqueries that trigger Dolt joinIter hangs (GH#1190).
+// Caller must hold s.mu (at least RLock).
+func (s *DoltStore) getChildrenOfDeferredParents(ctx context.Context) ([]string, error) {
+	// Step 1: Get IDs of issues with future defer_until
+	deferredRows, err := s.queryContext(ctx, `
+		SELECT id FROM issues
+		WHERE defer_until IS NOT NULL AND defer_until > NOW()
+	`)
+	if err != nil {
+		return nil, wrapQueryError("deferred parents: get deferred issues", err)
+	}
+	var deferredIDs []string
+	for deferredRows.Next() {
+		var id string
+		if err := deferredRows.Scan(&id); err != nil {
+			_ = deferredRows.Close()
+			return nil, wrapScanError("deferred parents: scan deferred issue", err)
+		}
+		deferredIDs = append(deferredIDs, id)
+	}
+	_ = deferredRows.Close()
+	if err := deferredRows.Err(); err != nil {
+		return nil, wrapQueryError("deferred parents: deferred rows", err)
+	}
+	if len(deferredIDs) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: Get children of those deferred parents
+	return s.getChildrenOfIssues(ctx, deferredIDs)
 }
 
 // getChildrenOfIssues returns IDs of direct children (parent-child deps) of the given issue IDs.

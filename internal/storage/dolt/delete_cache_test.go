@@ -30,7 +30,7 @@ func TestDeleteIssue_InvalidatesBlockedCache(t *testing.T) {
 	}
 
 	// Prime the cache by computing blocked IDs
-	if _, err := store.computeBlockedIDs(ctx); err != nil {
+	if _, err := store.computeBlockedIDs(ctx, true); err != nil {
 		t.Fatalf("computeBlockedIDs: %v", err)
 	}
 	if !store.blockedIDsCached {
@@ -61,7 +61,7 @@ func TestDeleteIssues_InvalidatesBlockedCache(t *testing.T) {
 	}
 
 	// Prime the cache
-	if _, err := store.computeBlockedIDs(ctx); err != nil {
+	if _, err := store.computeBlockedIDs(ctx, true); err != nil {
 		t.Fatalf("computeBlockedIDs: %v", err)
 	}
 	if !store.blockedIDsCached {

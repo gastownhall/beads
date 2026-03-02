@@ -88,6 +88,7 @@ type DoltStore struct {
 	blockedIDsCache    []string        // cached result of computeBlockedIDs
 	blockedIDsCacheMap map[string]bool
 	blockedIDsCached   bool // true once blockedIDsCache has been populated
+	blockedIDsCacheIncludesWisps bool // true if cache was computed with wisps
 	cacheMu            sync.Mutex
 
 	// OTel span attribute cache (avoids per-call allocation)
