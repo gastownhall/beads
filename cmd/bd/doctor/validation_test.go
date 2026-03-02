@@ -154,7 +154,7 @@ func TestCheckDuplicateIssues_DeletedExcluded(t *testing.T) {
 func TestCheckDuplicateIssues_NoDatabase(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.Mkdir(beadsDir, 0755); err != nil {
+	if err := os.Mkdir(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -511,15 +511,15 @@ func TestCheckChildParentDependenciesDB_NonBlockingIgnored(t *testing.T) {
 func TestCheckTestPollution_NoTestIssues(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	check := CheckTestPollution(tmpDir)
 
-	// Without a database, should return N/A
-	if check.Status != StatusOK {
-		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	// Without a database, query fails → StatusWarning (not OK)
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
 	}
 }
 
@@ -528,7 +528,7 @@ func TestCheckTestPollution_NoTestIssues(t *testing.T) {
 func TestCheckGitConflicts_DoltBackend(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
