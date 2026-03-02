@@ -30,11 +30,32 @@ func buildIssueFilterClauses(query string, filter types.IssueFilter, tables filt
 	var whereClauses []string
 	var args []interface{}
 
-	// Free-text search
+	// Free-text search — optimized to avoid full-table scans (hq-319).
+	//
+	// The old approach used (title LIKE %q% OR description LIKE %q% OR id LIKE %q%)
+	// which forces Dolt to scan every row in the prolly tree for all three columns.
+	// With 12K+ issues and concurrent agents, this caused CPU spikes of 200-400%.
+	//
+	// Optimization: detect ID-like queries and use exact/prefix match on the indexed
+	// id column. For text queries, search title and id only (description is large and
+	// rarely matches short queries — use --desc-contains for explicit description search).
 	if query != "" {
-		whereClauses = append(whereClauses, "(title LIKE ? OR description LIKE ? OR id LIKE ?)")
-		pattern := "%" + query + "%"
-		args = append(args, pattern, pattern, pattern)
+		lowerQuery := strings.ToLower(query)
+		if looksLikeIssueID(query) {
+			// ID-like query: use exact match + prefix match on indexed id column,
+			// plus title LIKE as fallback for cases where the query appears in titles.
+			// IDs are always lowercase, so no LOWER() needed for id columns.
+			whereClauses = append(whereClauses, "(id = ? OR id LIKE ? OR LOWER(title) LIKE ?)")
+			args = append(args, lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%")
+		} else {
+			// Text query: search title and id (skip description — it's large and
+			// LIKE %% on TEXT columns causes the worst prolly-tree scan behavior).
+			// Users can use --desc-contains for explicit description search.
+			// LOWER() ensures case-insensitive matching (Dolt uses binary collation by default).
+			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR id LIKE ?)")
+			pattern := "%" + lowerQuery + "%"
+			args = append(args, pattern, pattern)
+		}
 	}
 
 	if filter.TitleSearch != "" {
@@ -275,4 +296,28 @@ func buildIssueFilterClauses(query string, filter types.IssueFilter, tables filt
 	}
 
 	return whereClauses, args, nil
+}
+
+// looksLikeIssueID returns true if the query string looks like a beads issue ID
+// (e.g., "bd-123", "hq-319", "bd-wisp-abc"). Issue IDs have the pattern:
+// prefix-suffix where prefix is 1+ alphanumeric/hyphen segments and suffix is
+// alphanumeric (hash or numeric). This is used to optimize search by routing
+// ID-like queries to exact/prefix match instead of LIKE %%.
+func looksLikeIssueID(query string) bool {
+	// Must contain at least one hyphen
+	idx := strings.Index(query, "-")
+	if idx <= 0 || idx >= len(query)-1 {
+		return false
+	}
+	// Must not contain spaces (IDs never have spaces)
+	if strings.Contains(query, " ") {
+		return false
+	}
+	// All characters must be alphanumeric, hyphen, or dot (for child IDs like "bd-123.1")
+	for _, c := range query {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
 }

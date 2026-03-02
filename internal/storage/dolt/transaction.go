@@ -202,11 +202,17 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 	whereClauses := []string{}
 	args := []interface{}{}
 
-	// Text search
+	// Text search — optimized to avoid full-table scans (hq-319).
 	if query != "" {
-		whereClauses = append(whereClauses, "(title LIKE ? OR description LIKE ? OR id LIKE ?)")
-		pattern := "%" + query + "%"
-		args = append(args, pattern, pattern, pattern)
+		lowerQuery := strings.ToLower(query)
+		if looksLikeIssueID(query) {
+			whereClauses = append(whereClauses, "(id = ? OR id LIKE ? OR LOWER(title) LIKE ?)")
+			args = append(args, lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%")
+		} else {
+			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR id LIKE ?)")
+			pattern := "%" + lowerQuery + "%"
+			args = append(args, pattern, pattern)
+		}
 	}
 
 	if filter.TitleSearch != "" {

@@ -16,17 +16,21 @@ var searchCmd = &cobra.Command{
 	Use:     "search [query]",
 	GroupID: "issues",
 	Short:   "Search issues by text query",
-	Long: `Search issues across title, description, and ID.
+	Long: `Search issues across title and ID (excludes closed issues by default).
+
+ID-like queries (e.g., "bd-123", "hq-319") use fast exact/prefix matching.
+Text queries search titles. Use --desc-contains for description search.
+Use --status all to include closed issues.
 
 Examples:
   bd search "authentication bug"
   bd search "login" --status open
   bd search "database" --label backend --limit 10
   bd search --query "performance" --assignee alice
-  bd search "bd-5q" # Search by partial ID
+  bd search "bd-5q" # Search by partial ID (fast prefix match)
   bd search "security" --priority-min 0 --priority-max 2
   bd search "bug" --created-after 2025-01-01
-  bd search "refactor" --updated-after 2025-01-01 --priority-min 1
+  bd search "refactor" --status all  # Include closed issues
   bd search "bug" --sort priority
   bd search "task" --sort created --reverse
   bd search "api" --desc-contains "endpoint"
@@ -93,6 +97,12 @@ Examples:
 		if status != "" && status != "all" {
 			s := types.Status(status)
 			filter.Status = &s
+		} else if status != "all" {
+			// Default: exclude closed issues to reduce scan scope (hq-319).
+			// With 12K+ issues, ~60-70% are closed — excluding them lets the
+			// query use the status index to skip the majority of rows.
+			// Use --status all to search everything including closed.
+			filter.ExcludeStatus = []types.Status{types.StatusClosed}
 		}
 
 		if assignee != "" {
@@ -330,7 +340,7 @@ func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
 
 func init() {
 	searchCmd.Flags().String("query", "", "Search query (alternative to positional argument)")
-	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
+	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed, all). Default excludes closed; use 'all' to include closed. Note: dependency-blocked issues use 'bd blocked'")
 	searchCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	searchCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
 	searchCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
