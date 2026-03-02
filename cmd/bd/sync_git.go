@@ -18,6 +18,17 @@ func isGitRepo() bool {
 	return cmd.Run() == nil
 }
 
+// isBareGitRepo checks if the current git repository is bare.
+// Returns false when not in a git repository.
+func isBareGitRepo() bool {
+	cmd := exec.Command("git", "rev-parse", "--is-bare-repository")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(output)) == "true"
+}
+
 // gitHasUpstream checks if the current branch has an upstream configured in the beads repository.
 // Uses RepoContext to ensure git commands run in the correct repository.
 // Uses git config directly for compatibility with Git for Windows.

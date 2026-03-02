@@ -676,7 +676,13 @@ environment variable.`,
 		// Skip in stealth mode (user wants invisible setup) and quiet mode (suppress all output)
 		if !stealth {
 			agentsTemplate, _ := cmd.Flags().GetString("agents-template")
-			addAgentsInstructions(!quiet, agentsTemplate)
+			if isBareGitRepo() {
+				if !quiet {
+					fmt.Printf("  Skipping AGENTS.md generation in bare repository\n")
+				}
+			} else {
+				addAgentsInstructions(!quiet, agentsTemplate)
+			}
 		}
 
 		// Auto-stage and commit beads files so bd doctor doesn't warn about
