@@ -49,7 +49,6 @@
 {"issue_id":"bd-beads-polecat-quartz","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-ruby","label":"gt:agent"}
 {"issue_id":"bd-beads-polecat-topaz","label":"gt:agent"}
-{"issue_id":"bd-beads-polecat-topaz","label":"gt:agent"}
 {"issue_id":"bd-c1g8","label":"dolt-migration-review"}
 {"issue_id":"bd-c7v1","label":"dolt-migration-review"}
 {"issue_id":"bd-cg90","label":"dolt-migration-review"}
@@ -129,16 +128,6 @@
 {"issue_id":"bd-v6v8","label":"dolt-migration-review"}
 {"issue_id":"bd-w59l","label":"dolt-migration-review"}
 {"issue_id":"bd-wif2","label":"dolt-migration-review"}
-{"issue_id":"bd-wisp-0fp6b","label":"gt:merge-request"}
-{"issue_id":"bd-wisp-9bdgs","label":"gt:merge-request"}
-{"issue_id":"bd-wisp-9yl1u","label":"gt:merge-request"}
-{"issue_id":"bd-wisp-flksg","label":"gt:merge-request"}
-{"issue_id":"bd-wisp-h03tl","label":"cleanup"}
-{"issue_id":"bd-wisp-h03tl","label":"polecat:opal"}
-{"issue_id":"bd-wisp-h6fc1","label":"gt:merge-request"}
-{"issue_id":"bd-wisp-i87qq","label":"gt:merge-request"}
-{"issue_id":"bd-wisp-jkw62","label":"gt:merge-request"}
-{"issue_id":"bd-wisp-wpmyb","label":"gt:merge-request"}
 {"issue_id":"bd-wn3n","label":"dolt-migration-review"}
 {"issue_id":"bd-wvxf","label":"dolt-migration-review"}
 {"issue_id":"bd-x1e","label":"plugin:rebuild-gt"}
