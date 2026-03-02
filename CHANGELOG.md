@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Persistent memory** — `bd remember`, `bd memories`, `bd recall`, `bd forget` for agent knowledge that survives sessions and account rotations. Backed by the k/v store. Memories auto-inject at `bd prime` time.
+
 ## [0.57.0] - 2026-03-01
 
 ### Added
