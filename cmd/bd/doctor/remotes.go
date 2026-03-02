@@ -107,7 +107,7 @@ func CheckRemoteConsistency(repoPath string) DoctorCheck {
 
 	fix := ""
 	if !hasConflict {
-		fix = "Remote Consistency"
+		fix = "Run 'bd doctor --fix' to sync remotes"
 	}
 
 	return DoctorCheck{
