@@ -58,11 +58,7 @@ func CheckDoltFormat(path string) DoctorCheck {
 
 // CheckDatabaseVersion checks the database version and migration status
 func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
-	backend, beadsDir := getBackendAndBeadsDir(path)
-
-	if backend != configfile.BackendDolt {
-		return sqliteBackendWarning("Database")
-	}
+	_, beadsDir := getBackendAndBeadsDir(path)
 
 	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
@@ -128,11 +124,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 
 // CheckSchemaCompatibility checks if all required tables and columns are present
 func CheckSchemaCompatibility(path string) DoctorCheck {
-	backend, beadsDir := getBackendAndBeadsDir(path)
-
-	if backend != configfile.BackendDolt {
-		return sqliteBackendWarning("Schema Compatibility")
-	}
+	_, beadsDir := getBackendAndBeadsDir(path)
 
 	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{
@@ -175,11 +167,7 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 
 // CheckDatabaseIntegrity runs a basic integrity check on the database
 func CheckDatabaseIntegrity(path string) DoctorCheck {
-	backend, beadsDir := getBackendAndBeadsDir(path)
-
-	if backend != configfile.BackendDolt {
-		return sqliteBackendWarning("Database Integrity")
-	}
+	_, beadsDir := getBackendAndBeadsDir(path)
 
 	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{
@@ -235,16 +223,6 @@ func FixDatabaseConfig(path string) error {
 	return fix.DatabaseConfig(path)
 }
 
-// sqliteBackendWarning returns a standard warning for legacy SQLite backends
-func sqliteBackendWarning(checkName string) DoctorCheck {
-	return DoctorCheck{
-		Name:    checkName,
-		Status:  StatusWarning,
-		Message: "SQLite backend detected",
-		Fix:     "Run 'bd migrate --to-dolt' to upgrade to Dolt backend",
-	}
-}
-
 // getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
 // When dolt_data_dir is configured (e.g. ext4 redirect for WSL), the database lives
 // outside .beads/dolt/ — this function resolves the correct location.
@@ -284,11 +262,7 @@ func isNoDbModeConfigured(beadsDir string) bool {
 // irreversible. The user must make an explicit decision to delete their
 // closed issue history. We only provide guidance, never action.
 func CheckDatabaseSize(path string) DoctorCheck {
-	backend, beadsDir := getBackendAndBeadsDir(path)
-
-	if backend != configfile.BackendDolt {
-		return sqliteBackendWarning("Large Database")
-	}
+	_, beadsDir := getBackendAndBeadsDir(path)
 
 	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {

@@ -148,34 +148,17 @@ Examples:
 	},
 }
 
-// commentCmd is a hidden top-level alias for commentsAddCmd (backwards compat)
-var commentCmd = &cobra.Command{
-	Use:        "comment [issue-id] [text]",
-	Short:      "Add a comment to an issue (alias for 'comments add')",
-	Long:       `Add a comment to an issue. This is an alias for 'bd comments add'.`,
-	Args:       cobra.MinimumNArgs(1),
-	Run:        commentsAddCmd.Run,
-	Hidden:     true,
-	Deprecated: "use 'bd comments add' instead (will be removed in v1.0.0)",
-}
-
 func init() {
 	commentsCmd.AddCommand(commentsAddCmd)
 	commentsCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC")
 	commentsAddCmd.Flags().StringP("file", "f", "", "Read comment text from file")
 	commentsAddCmd.Flags().StringP("author", "a", "", "Add author to comment")
 
-	// Add the same flags to the alias
-	commentCmd.Flags().StringP("file", "f", "", "Read comment text from file")
-	commentCmd.Flags().StringP("author", "a", "", "Add author to comment")
-
 	// Issue ID completions
 	commentsCmd.ValidArgsFunction = issueIDCompletion
 	commentsAddCmd.ValidArgsFunction = issueIDCompletion
-	commentCmd.ValidArgsFunction = issueIDCompletion
 
 	rootCmd.AddCommand(commentsCmd)
-	rootCmd.AddCommand(commentCmd)
 }
 
 func isUnknownOperationError(err error) bool {

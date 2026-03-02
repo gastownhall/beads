@@ -47,17 +47,6 @@ func init() {
 	// Add as subcommands of dep
 	depCmd.AddCommand(relateCmd)
 	depCmd.AddCommand(unrelateCmd)
-
-	// Backwards compatibility aliases at root level (hidden)
-	relateAliasCmd := *relateCmd
-	relateAliasCmd.Hidden = true
-	relateAliasCmd.Deprecated = "use 'bd dep relate' instead (will be removed in v1.0.0)"
-	rootCmd.AddCommand(&relateAliasCmd)
-
-	unrelateAliasCmd := *unrelateCmd
-	unrelateAliasCmd.Hidden = true
-	unrelateAliasCmd.Deprecated = "use 'bd dep unrelate' instead (will be removed in v1.0.0)"
-	rootCmd.AddCommand(&unrelateAliasCmd)
 }
 
 func runRelate(cmd *cobra.Command, args []string) error {

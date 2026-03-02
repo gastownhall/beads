@@ -11,18 +11,13 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // CheckIDFormat checks whether issues use hash-based or sequential IDs
 func CheckIDFormat(path string) DoctorCheck {
-	backend, beadsDir := getBackendAndBeadsDir(path)
-
-	if backend != configfile.BackendDolt {
-		return sqliteBackendWarning("Issue IDs")
-	}
+	_, beadsDir := getBackendAndBeadsDir(path)
 
 	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
@@ -100,11 +95,7 @@ func CheckIDFormat(path string) DoctorCheck {
 
 // CheckDependencyCycles checks for circular dependencies in the issue graph
 func CheckDependencyCycles(path string) DoctorCheck {
-	backend, beadsDir := getBackendAndBeadsDir(path)
-
-	if backend != configfile.BackendDolt {
-		return sqliteBackendWarning("Dependency Cycles")
-	}
+	_, beadsDir := getBackendAndBeadsDir(path)
 
 	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
@@ -292,11 +283,7 @@ func CheckDeletionsManifest(path string) DoctorCheck {
 // This detects when a .beads directory was copied from another repo or when
 // the git remote URL changed. A mismatch can cause data loss during sync.
 func CheckRepoFingerprint(path string) DoctorCheck {
-	backend, beadsDir := getBackendAndBeadsDir(path)
-
-	if backend != configfile.BackendDolt {
-		return sqliteBackendWarning("Repo Fingerprint")
-	}
+	_, beadsDir := getBackendAndBeadsDir(path)
 
 	if info, err := os.Stat(getDatabasePath(beadsDir)); err != nil || !info.IsDir() {
 		return DoctorCheck{

@@ -120,20 +120,3 @@ func TestCheckSchemaCompatibility(t *testing.T) {
 		})
 	}
 }
-
-func TestCheckDatabaseIntegrity_EdgeCases(t *testing.T) {
-	t.Skip("SQLite-specific edge cases (locked DB, read-only file); Dolt backend uses server connections")
-}
-
-func TestSqliteBackendWarning(t *testing.T) {
-	check := sqliteBackendWarning("Database")
-	if check.Status != StatusWarning {
-		t.Errorf("expected status %q, got %q", StatusWarning, check.Status)
-	}
-	if check.Message != "SQLite backend detected" {
-		t.Errorf("expected message %q, got %q", "SQLite backend detected", check.Message)
-	}
-	if check.Fix == "" {
-		t.Error("expected non-empty Fix field")
-	}
-}

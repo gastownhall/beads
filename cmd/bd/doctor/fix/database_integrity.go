@@ -5,16 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // DatabaseIntegrity attempts to recover from database corruption by:
 //  1. Backing up the corrupt database
 //  2. Re-initializing via bd init (which will clone from remote if configured)
-//
-// For Dolt backends: backs up .beads/dolt and reinitializes via bd init --force.
-// For SQLite backends: backs up the .db file and reinitializes via bd init.
 func DatabaseIntegrity(path string) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
@@ -26,14 +21,7 @@ func DatabaseIntegrity(path string) error {
 	}
 
 	beadsDir := filepath.Join(absPath, ".beads")
-
-	// Dolt backend: backup and reinitialize
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
-		return doltIntegrityRecovery(absPath, beadsDir)
-	}
-
-	// SQLite backend: backup and reinitialize
-	return sqliteIntegrityRecovery(absPath, beadsDir)
+	return doltIntegrityRecovery(absPath, beadsDir)
 }
 
 // doltIntegrityRecovery backs up the corrupted Dolt database and reinitializes.
@@ -79,62 +67,5 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 
 	fmt.Printf("  Recovered Dolt database\n")
 	fmt.Printf("  Corrupted database preserved at: %s\n", filepath.Base(backupPath))
-	return nil
-}
-
-// sqliteIntegrityRecovery backs up the corrupted SQLite database and reinitializes.
-func sqliteIntegrityRecovery(path, beadsDir string) error {
-	// Resolve database path
-	var dbPath string
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
-		dbPath = cfg.DatabasePath(beadsDir)
-	} else {
-		dbPath = filepath.Join(beadsDir, "beads.db")
-	}
-
-	// Check if database exists
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return fmt.Errorf("no database to recover at %s", dbPath)
-	}
-
-	// Back up corrupt DB and its sidecar files.
-	ts := time.Now().UTC().Format("20060102T150405Z")
-	backupDB := dbPath + "." + ts + ".corrupt.backup.db"
-	if err := moveFile(dbPath, backupDB); err != nil {
-		return fmt.Errorf("failed to back up database: %w", err)
-	}
-	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-		sidecar := dbPath + suffix
-		if _, err := os.Stat(sidecar); err == nil {
-			_ = moveFile(sidecar, backupDB+suffix)
-		}
-	}
-
-	// Reinitialize via bd init
-	bdBinary, err := getBdBinary()
-	if err != nil {
-		// Restore backup on failure (database has already been moved)
-		_ = moveFile(backupDB, dbPath)
-		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-			sidecar := backupDB + suffix
-			if _, err := os.Stat(sidecar); err == nil {
-				_ = moveFile(sidecar, dbPath+suffix)
-			}
-		}
-		return err
-	}
-
-	fmt.Printf("  Reinitializing database\n")
-	initCmd := newBdCmd(bdBinary, "init", "--force", "-q", "--skip-hooks")
-	initCmd.Dir = path
-	initCmd.Stdout = os.Stdout
-	initCmd.Stderr = os.Stderr
-
-	if err := initCmd.Run(); err != nil {
-		// Best-effort rollback
-		_ = copyFile(backupDB, dbPath)
-		return fmt.Errorf("failed to reinitialize database: %w (backup: %s)", err, backupDB)
-	}
-
 	return nil
 }
