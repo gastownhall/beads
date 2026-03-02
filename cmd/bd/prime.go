@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -195,6 +196,60 @@ func outputPrimeContext(w io.Writer, mcpMode bool, stealthMode bool) error {
 	return outputCLIContext(w, stealthMode)
 }
 
+// formatMemoriesForPrime queries memories from the k/v store and formats them for injection.
+// Returns empty string if no memories or if store is unavailable.
+func formatMemoriesForPrime(compact bool) string {
+	// Try to initialize store if not already active (prime may run before other commands)
+	if store == nil {
+		if err := ensureDirectMode("memory injection"); err != nil {
+			return "" // Silently skip — store unavailable
+		}
+	}
+	if store == nil {
+		return ""
+	}
+	ctx := context.Background()
+	allConfig, err := store.GetAllConfig(ctx)
+	if err != nil {
+		return ""
+	}
+
+	fullPrefix := kvPrefix + memoryPrefix
+	var keys []string
+	memories := make(map[string]string)
+	for k, v := range allConfig {
+		if strings.HasPrefix(k, fullPrefix) {
+			userKey := strings.TrimPrefix(k, fullPrefix)
+			memories[userKey] = v
+			keys = append(keys, userKey)
+		}
+	}
+	if len(memories) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+
+	var sb strings.Builder
+	if compact {
+		sb.WriteString("\n## Memories\n")
+		for _, k := range keys {
+			// Compact: one line per memory
+			v := strings.ReplaceAll(memories[k], "\n", " ")
+			if len(v) > 150 {
+				v = v[:147] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", k, v))
+		}
+	} else {
+		sb.WriteString(fmt.Sprintf("\n## Persistent Memories (%d)\n\n", len(memories)))
+		sb.WriteString("Stored via `bd remember`. Search with `bd memories <keyword>`. Remove with `bd forget <key>`.\n\n")
+		for _, k := range keys {
+			sb.WriteString(fmt.Sprintf("### %s\n%s\n\n", k, memories[k]))
+		}
+	}
+	return sb.String()
+}
+
 // outputMCPContext outputs minimal context for MCP users
 func outputMCPContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
@@ -230,6 +285,12 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 Start: Check ` + "`ready`" + ` tool for available work.
 `
 	_, _ = fmt.Fprint(w, context)
+
+	// Inject memories (compact for MCP)
+	if mem := formatMemoriesForPrime(true); mem != "" {
+		_, _ = fmt.Fprint(w, mem)
+	}
+
 	return nil
 }
 
@@ -391,5 +452,11 @@ bd dep add beads-yyy beads-xxx  # Tests depend on Feature (Feature blocks tests)
 ` + "```" + `
 `
 	_, _ = fmt.Fprint(w, context)
+
+	// Inject memories (full format for CLI)
+	if mem := formatMemoriesForPrime(false); mem != "" {
+		_, _ = fmt.Fprint(w, mem)
+	}
+
 	return nil
 }
