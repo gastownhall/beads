@@ -441,18 +441,41 @@ func validateJSONLForMigration(jsonlPath string) (int, int, map[string]bool, err
 // compareDoltWithJSONL compares Dolt database with JSONL IDs.
 // Returns IDs in JSONL but not in Dolt (sample first 100).
 func compareDoltWithJSONL(ctx context.Context, store *dolt.DoltStore, jsonlIDs map[string]bool) []string {
-	var missing []string
-
+	ids := make([]string, 0, len(jsonlIDs))
 	for id := range jsonlIDs {
-		_, err := store.GetIssue(ctx, id)
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// Batch fetch all issues from Dolt in chunks
+	foundIDs := make(map[string]bool, len(ids))
+	const batchSize = 500
+	for i := 0; i < len(ids); i += batchSize {
+		end := i + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		issues, err := store.GetIssuesByIDs(ctx, ids[i:end])
 		if err != nil {
+			continue
+		}
+		for _, issue := range issues {
+			foundIDs[issue.ID] = true
+		}
+	}
+
+	// Set difference: IDs in JSONL but not in Dolt (sample first 100)
+	var missing []string
+	for _, id := range ids {
+		if !foundIDs[id] {
 			missing = append(missing, id)
 			if len(missing) >= 100 {
 				break
 			}
 		}
 	}
-
 	return missing
 }
 
