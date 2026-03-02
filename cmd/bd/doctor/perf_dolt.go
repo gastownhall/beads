@@ -90,7 +90,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 		return metrics, fmt.Errorf("dolt sql-server is not running on %s:%d; start it with 'bd dolt start'", dsCfg.Host, dsCfg.Port)
 	}
 
-	if err := runDoltServerDiagnostics(metrics, dsCfg.Host, dsCfg.Port, dbName); err != nil {
+	if err := runDoltServerDiagnostics(metrics, dsCfg.Host, dsCfg.Port, dbName, beadsDir); err != nil {
 		return metrics, fmt.Errorf("server diagnostics failed: %w", err)
 	}
 
@@ -101,11 +101,25 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 }
 
 // runDoltServerDiagnostics runs diagnostics via dolt sql-server
-func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int, dbName string) error {
+func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int, dbName string, beadsDir string) error {
 	metrics.Backend = "dolt-server"
 	metrics.ServerMode = true
 
-	dsn := fmt.Sprintf("root:@tcp(%s:%d)/%s?parseTime=true", host, port, dbName)
+	// Resolve credentials from config and environment, matching openDoltDB behavior.
+	user := configfile.DefaultDoltServerUser
+	password := os.Getenv("BEADS_DOLT_PASSWORD")
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		user = cfg.GetDoltServerUser()
+	}
+
+	var dsn string
+	if password != "" {
+		dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
+			user, password, host, port, dbName)
+	} else {
+		dsn = fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
+			user, host, port, dbName)
+	}
 
 	// Measure connection time
 	start := time.Now()
@@ -119,7 +133,8 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int, d
 	db.SetMaxOpenConns(5)
 	db.SetMaxIdleConns(2)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to ping server: %w", err)
 	}
