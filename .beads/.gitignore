@@ -31,7 +31,7 @@ dolt-server.pid
 dolt-server.log
 dolt-server.lock
 
-# Legacy files (from pre-Dolt versions)
+# Legacy artifacts (safety net — prevents accidental commits of old files)
 *.db
 *.db?*
 *.db-journal

@@ -18,7 +18,7 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 
 	noDbLine := "# no-db: false"
 	if noDbMode {
-		noDbLine = "no-db: true  # JSONL-only mode, no SQLite database"
+		noDbLine = "no-db: true  # JSONL-only mode, no database"
 	}
 
 	// In no-db mode, we need to persist the prefix in config.yaml
@@ -37,9 +37,8 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 # Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
 %s
 
-# Use no-db mode: load from JSONL, write back after each command
+# Use no-db mode: JSONL-only, no Dolt database
 # When true, bd will use .beads/issues.jsonl as the source of truth
-# instead of the Dolt database
 %s
 
 # Enable JSON output by default
@@ -59,7 +58,7 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 # events-export: false
 
 # Multi-repo configuration (experimental - bd-307)
-# Allows hydrating from multiple repositories and routing writes to the correct JSONL
+# Allows hydrating from multiple repositories and routing writes to the correct database
 # repos:
 #   primary: "."  # Primary repo (where this database lives)
 #   additional:   # Additional repos to hydrate from (read-only)
@@ -135,7 +134,7 @@ bd dolt push
 ### Working with Issues
 
 Issues in Beads are:
-- **Git-native**: Stored in ` + "`.beads/issues.jsonl`" + ` and synced like code
+- **Git-native**: Stored in Dolt database with version control and branching
 - **AI-friendly**: CLI-first design works perfectly with AI coding agents
 - **Branch-aware**: Issues can follow your branch workflow
 - **Always in sync**: Auto-syncs with your commits
@@ -155,7 +154,7 @@ Issues in Beads are:
 🔧 **Git Integration**
 - Automatic sync with git commits
 - Branch-aware issue tracking
-- Intelligent JSONL merge resolution
+- Dolt-native three-way merge resolution
 
 ## Get Started with Beads
 
