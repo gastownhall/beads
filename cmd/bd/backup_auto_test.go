@@ -80,6 +80,7 @@ func TestIsBackupGitPushEnabled(t *testing.T) {
 		name       string
 		envVal     string // "" = not set (use default), "true"/"false" = explicit
 		hasRemote  bool
+		noGitOps   bool // simulate stealth mode
 		wantResult bool
 	}{
 		{
@@ -106,6 +107,20 @@ func TestIsBackupGitPushEnabled(t *testing.T) {
 			hasRemote:  true,
 			wantResult: false,
 		},
+		{
+			name:       "stealth mode overrides default + remote",
+			envVal:     "",
+			hasRemote:  true,
+			noGitOps:   true,
+			wantResult: false,
+		},
+		{
+			name:       "stealth mode overrides explicit true",
+			envVal:     "true",
+			hasRemote:  true,
+			noGitOps:   true,
+			wantResult: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -124,6 +139,13 @@ func TestIsBackupGitPushEnabled(t *testing.T) {
 			}
 			// Also clear the backup.enabled env to not interfere
 			os.Unsetenv("BD_BACKUP_ENABLED")
+
+			// Stealth mode
+			if tt.noGitOps {
+				t.Setenv("BD_NO_GIT_OPS", "true")
+			} else {
+				os.Unsetenv("BD_NO_GIT_OPS")
+			}
 
 			config.ResetForTesting()
 			t.Cleanup(func() { config.ResetForTesting() })
