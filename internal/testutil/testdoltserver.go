@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,38 +39,102 @@ var (
 	doltTerminateOnce sync.Once
 	dockerOnce        sync.Once
 	dockerAvail       bool
+	doltCheckOnce     sync.Once
+	doltCached        doltReadiness
 )
 
-// isDockerAvailable returns true if the Docker daemon is reachable and
-// the Dolt image is cached locally. If the daemon is up but the image
-// is not cached, it returns false so tests skip gracefully instead of
-// pulling from Docker Hub (which triggers network alarms, fails offline,
-// and adds latency). See GH#2277.
-//
-// Set BEADS_SKIP_DOCKER=1 to force-skip all Docker-based tests.
+// doltReadiness describes why Dolt integration tests can or cannot run.
+type doltReadiness int
+
+// doltDockerRepo is the repository portion of DoltDockerImage (without the tag).
+var doltDockerRepo, _, _ = strings.Cut(DoltDockerImage, ":")
+
+const (
+	doltNoDocker     doltReadiness = iota // Docker daemon not reachable
+	doltNoImage                           // no Dolt image at all
+	doltWrongVersion                      // image exists but wrong tag
+	doltSkipped                           // explicit opt-out via BEADS_TEST_SKIP
+	doltReady                             // ready to start containers
+)
+
+func (d doltReadiness) String() string {
+	switch d {
+	case doltNoDocker:
+		return "Docker not available"
+	case doltNoImage:
+		return fmt.Sprintf("Docker image %s not cached locally (run 'docker pull %s')", DoltDockerImage, DoltDockerImage)
+	case doltWrongVersion:
+		return fmt.Sprintf("Docker image %s cached but wrong version (run 'docker pull %s')", doltDockerRepo, DoltDockerImage)
+	case doltSkipped:
+		return "Dolt tests skipped (BEADS_TEST_SKIP=dolt)"
+	case doltReady:
+		return "Dolt ready"
+	default:
+		return fmt.Sprintf("unknown dolt readiness state: %d", int(d))
+	}
+}
+
+// isDockerAvailable returns true if the Docker daemon is reachable.
 // The result is cached after the first call.
 func isDockerAvailable() bool {
 	dockerOnce.Do(func() {
-		if os.Getenv("BEADS_SKIP_DOCKER") == "1" {
-			fmt.Fprintf(os.Stderr, "WARN: BEADS_SKIP_DOCKER=1 set, skipping Docker-based tests\n")
-			return
-		}
-		if exec.Command("docker", "info").Run() != nil {
-			return
-		}
-		if exec.Command("docker", "image", "inspect", DoltDockerImage).Run() != nil {
-			fmt.Fprintf(os.Stderr, "WARN: Docker image %s not cached locally, skipping Docker-based tests. Run 'docker pull %s' to enable them.\n", DoltDockerImage, DoltDockerImage)
-			return
-		}
-		dockerAvail = true
+		dockerAvail = exec.Command("docker", "info").Run() == nil
 	})
 	return dockerAvail
 }
 
-// isDoltImageCached returns true if the Dolt Docker image is already
-// available locally, avoiding unnecessary network calls to Docker Hub.
+// hasTestSkip returns true if the given service appears in the BEADS_TEST_SKIP
+// env var (comma-separated list). Example: BEADS_TEST_SKIP=dolt,slow
+func hasTestSkip(service string) bool {
+	val := os.Getenv("BEADS_TEST_SKIP")
+	if val == "" {
+		return false
+	}
+	for _, s := range strings.Split(val, ",") {
+		if strings.TrimSpace(s) == service {
+			return true
+		}
+	}
+	return false
+}
+
+// checkDolt returns the readiness state for Dolt integration tests.
+// It composes hasTestSkip, isDockerAvailable, isDoltImageCached, and
+// isDoltRepoImageCached, caching the result.
+func checkDolt() doltReadiness {
+	doltCheckOnce.Do(func() {
+		// Explicit skip checked first to avoid ~1s docker info cost.
+		if hasTestSkip("dolt") {
+			doltCached = doltSkipped
+			return
+		}
+		if !isDockerAvailable() {
+			return // doltCached zero value is doltNoDocker
+		}
+		if isDoltImageCached() {
+			doltCached = doltReady
+			return
+		}
+		if isDoltRepoImageCached() {
+			doltCached = doltWrongVersion
+			return
+		}
+		doltCached = doltNoImage
+	})
+	return doltCached
+}
+
+// isDoltImageCached returns true if the exact Dolt Docker image (repo:tag)
+// is available locally, avoiding unnecessary network calls to Docker Hub.
 func isDoltImageCached() bool {
 	return exec.Command("docker", "image", "inspect", DoltDockerImage).Run() == nil
+}
+
+// isDoltRepoImageCached returns true if ANY version of the Dolt image repo
+// exists locally (e.g. dolthub/dolt-sql-server with a different tag).
+func isDoltRepoImageCached() bool {
+	out, err := exec.Command("docker", "images", doltDockerRepo, "-q").Output()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
 }
 
 // StartTestDoltServer starts a Dolt SQL server in a Docker container on a
@@ -101,16 +166,12 @@ func StartTestDoltServer(tmpDirPrefix string) (*TestDoltServer, func()) {
 
 	// Singleton: start at most one container per test binary.
 	doltServerOnce.Do(func() {
-		if !isDockerAvailable() {
-			fmt.Fprintf(os.Stderr, "WARN: Docker not available, skipping test server\n")
+		if state := checkDolt(); state != doltReady {
+			if state != doltSkipped {
+				fmt.Fprintf(os.Stderr, "WARN: %s, skipping test server\n", state)
+			}
 			return
 		}
-		if !isDoltImageCached() {
-			fmt.Fprintf(os.Stderr, "WARN: Docker image %s not cached locally, skipping test server\n", DoltDockerImage)
-			fmt.Fprintf(os.Stderr, "  Run 'docker pull %s' to enable Dolt integration tests\n", DoltDockerImage)
-			return
-		}
-
 		doltServerErr = startDoltContainer()
 	})
 
@@ -205,11 +266,8 @@ func (s *TestDoltServer) CrashError() error {
 // mapped host port. The container is terminated automatically when the test finishes.
 func StartIsolatedDoltContainer(t *testing.T) string {
 	t.Helper()
-	if !isDockerAvailable() {
-		t.Skip("Docker not available, skipping test")
-	}
-	if !isDoltImageCached() {
-		t.Skipf("Docker image %s not cached locally, skipping test (run 'docker pull %s')", DoltDockerImage, DoltDockerImage)
+	if state := checkDolt(); state != doltReady {
+		t.Skipf("skipping test: %s", state)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
@@ -252,11 +310,8 @@ func ensureSharedContainer() {
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
 // Sets BEADS_DOLT_PORT process-wide.
 func EnsureDoltContainerForTestMain() error {
-	if !isDockerAvailable() {
-		return fmt.Errorf("Docker not available")
-	}
-	if !isDoltImageCached() {
-		return fmt.Errorf("Docker image %s not cached locally (run 'docker pull %s')", DoltDockerImage, DoltDockerImage)
+	if state := checkDolt(); state != doltReady {
+		return fmt.Errorf("%s", state)
 	}
 
 	ensureSharedContainer()
@@ -267,11 +322,8 @@ func EnsureDoltContainerForTestMain() error {
 // test if Docker is not available.
 func RequireDoltContainer(t *testing.T) {
 	t.Helper()
-	if !isDockerAvailable() {
-		t.Skip("Docker not available, skipping test")
-	}
-	if !isDoltImageCached() {
-		t.Skipf("Docker image %s not cached locally, skipping test (run 'docker pull %s')", DoltDockerImage, DoltDockerImage)
+	if state := checkDolt(); state != doltReady {
+		t.Skipf("skipping test: %s", state)
 	}
 
 	ensureSharedContainer()
