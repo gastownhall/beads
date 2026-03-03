@@ -1022,38 +1022,44 @@ func (s *DoltStore) getChildrenOfDeferredParents(ctx context.Context) ([]string,
 // getChildrenOfIssues returns IDs of direct children (parent-child deps) of the given issue IDs.
 // Used to propagate blocked status from parents to children (GH#1495).
 // Batches queries to avoid oversized IN clauses (GH#2179).
+// Scans both dependencies and wisp_dependencies tables (bd-8qc5).
 func (s *DoltStore) getChildrenOfIssues(ctx context.Context, parentIDs []string) ([]string, error) {
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}
 	var children []string
-	for start := 0; start < len(parentIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(parentIDs) {
-			end = len(parentIDs)
-		}
-		placeholders, args := doltBuildSQLInClause(parentIDs[start:end])
-
-		// nolint:gosec // G201: placeholders are generated values, data passed via args
-		query := fmt.Sprintf(`
-			SELECT issue_id FROM dependencies
-			WHERE type = 'parent-child' AND depends_on_id IN (%s)
-		`, placeholders)
-		rows, err := s.queryContext(ctx, query, args...)
-		if err != nil {
-			return nil, wrapQueryError("get children of issues", err)
-		}
-		for rows.Next() {
-			var childID string
-			if err := rows.Scan(&childID); err != nil {
-				_ = rows.Close()
-				return nil, wrapScanError("get children of issues", err)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		for start := 0; start < len(parentIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(parentIDs) {
+				end = len(parentIDs)
 			}
-			children = append(children, childID)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, wrapQueryError("get children of issues: rows", err)
+			placeholders, args := doltBuildSQLInClause(parentIDs[start:end])
+
+			//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+			query := fmt.Sprintf(`
+				SELECT issue_id FROM %s
+				WHERE type = 'parent-child' AND depends_on_id IN (%s)
+			`, depTable, placeholders)
+			rows, err := s.queryContext(ctx, query, args...)
+			if err != nil {
+				if isTableNotExistError(err) {
+					break // wisp_dependencies table may not exist on pre-migration databases (GH#2271)
+				}
+				return nil, wrapQueryError("get children of issues from "+depTable, err)
+			}
+			for rows.Next() {
+				var childID string
+				if err := rows.Scan(&childID); err != nil {
+					_ = rows.Close()
+					return nil, wrapScanError("get children of issues", err)
+				}
+				children = append(children, childID)
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, wrapQueryError("get children of issues: rows from "+depTable, err)
+			}
 		}
 	}
 	return children, nil
@@ -1063,38 +1069,44 @@ func (s *DoltStore) getChildrenOfIssues(ctx context.Context, parentIDs []string)
 // (parent-child deps) of the given parent IDs. Used by GetBlockedIssues to show
 // transitively blocked children with their parent as the reason (GH#1495).
 // Batches queries to avoid oversized IN clauses (GH#2179).
+// Scans both dependencies and wisp_dependencies tables (bd-8qc5).
 func (s *DoltStore) getChildrenWithParents(ctx context.Context, parentIDs []string) (map[string]string, error) {
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}
 	result := make(map[string]string)
-	for start := 0; start < len(parentIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(parentIDs) {
-			end = len(parentIDs)
-		}
-		placeholders, args := doltBuildSQLInClause(parentIDs[start:end])
-
-		// nolint:gosec // G201: placeholders are generated values, data passed via args
-		query := fmt.Sprintf(`
-			SELECT issue_id, depends_on_id FROM dependencies
-			WHERE type = 'parent-child' AND depends_on_id IN (%s)
-		`, placeholders)
-		rows, err := s.queryContext(ctx, query, args...)
-		if err != nil {
-			return nil, wrapQueryError("get children with parents", err)
-		}
-		for rows.Next() {
-			var childID, parentID string
-			if err := rows.Scan(&childID, &parentID); err != nil {
-				_ = rows.Close()
-				return nil, wrapScanError("get children with parents", err)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		for start := 0; start < len(parentIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(parentIDs) {
+				end = len(parentIDs)
 			}
-			result[childID] = parentID
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, wrapQueryError("get children with parents: rows", err)
+			placeholders, args := doltBuildSQLInClause(parentIDs[start:end])
+
+			//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+			query := fmt.Sprintf(`
+				SELECT issue_id, depends_on_id FROM %s
+				WHERE type = 'parent-child' AND depends_on_id IN (%s)
+			`, depTable, placeholders)
+			rows, err := s.queryContext(ctx, query, args...)
+			if err != nil {
+				if isTableNotExistError(err) {
+					break // wisp_dependencies table may not exist on pre-migration databases (GH#2271)
+				}
+				return nil, wrapQueryError("get children with parents from "+depTable, err)
+			}
+			for rows.Next() {
+				var childID, parentID string
+				if err := rows.Scan(&childID, &parentID); err != nil {
+					_ = rows.Close()
+					return nil, wrapScanError("get children with parents", err)
+				}
+				result[childID] = parentID
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, wrapQueryError("get children with parents: rows from "+depTable, err)
+			}
 		}
 	}
 	return result, nil
