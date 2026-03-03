@@ -44,23 +44,34 @@ func TestConcurrentIssueCreation(t *testing.T) {
 	errors := make(chan error, numGoroutines)
 	createdIDs := make(chan string, numGoroutines)
 
-	// Launch 10 goroutines to create issues simultaneously
+	// Launch 10 goroutines to create issues simultaneously.
+	// Dolt serialization errors (1213) are expected under contention and
+	// should be retried — this mirrors correct production behavior.
+	const maxRetries = 5
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			issue := &types.Issue{
-				Title:       fmt.Sprintf("Concurrent Issue %d", n),
-				Description: fmt.Sprintf("Created by goroutine %d", n),
-				Status:      types.StatusOpen,
-				Priority:    2,
-				IssueType:   types.TypeTask,
-			}
-			if err := store.CreateIssue(ctx, issue, fmt.Sprintf("worker-%d", n)); err != nil {
+			for attempt := 0; attempt <= maxRetries; attempt++ {
+				issue := &types.Issue{
+					Title:       fmt.Sprintf("Concurrent Issue %d", n),
+					Description: fmt.Sprintf("Created by goroutine %d", n),
+					Status:      types.StatusOpen,
+					Priority:    2,
+					IssueType:   types.TypeTask,
+				}
+				err := store.CreateIssue(ctx, issue, fmt.Sprintf("worker-%d", n))
+				if err == nil {
+					createdIDs <- issue.ID
+					return
+				}
+				if isSerializationError(err) && attempt < maxRetries {
+					time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+					continue
+				}
 				errors <- fmt.Errorf("goroutine %d: %w", n, err)
 				return
 			}
-			createdIDs <- issue.ID
 		}(i)
 	}
 

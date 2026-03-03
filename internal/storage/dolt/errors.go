@@ -36,6 +36,14 @@ func isTableNotExistError(err error) bool {
 	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1146
 }
 
+// isSerializationError returns true if the error is a Dolt/MySQL serialization
+// failure (Error 1213). This occurs when concurrent transactions conflict at
+// commit time; the caller should retry the transaction.
+func isSerializationError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1213
+}
+
 // wrapDBError wraps a database error with operation context.
 // If err is sql.ErrNoRows, it is converted to storage.ErrNotFound.
 // If err is nil, nil is returned.
