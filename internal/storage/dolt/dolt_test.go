@@ -822,16 +822,16 @@ func TestDoltStoreSearch(t *testing.T) {
 	issues := []*types.Issue{
 		{
 			ID:          "test-search-1",
-			Title:       "First Issue",
-			Description: "Search test one",
+			Title:       "Search test one",
+			Description: "First issue description",
 			Status:      types.StatusOpen,
 			Priority:    1,
 			IssueType:   types.TypeTask,
 		},
 		{
 			ID:          "test-search-2",
-			Title:       "Second Issue",
-			Description: "Search test two",
+			Title:       "Search test two",
+			Description: "Second issue description",
 			Status:      types.StatusOpen,
 			Priority:    2,
 			IssueType:   types.TypeBug,
