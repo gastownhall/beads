@@ -50,7 +50,7 @@ const DefaultSQLPort = 3307
 // on the production Dolt server (Clown Shows #12-#18).
 var testDatabasePrefixes = []string{
 	"testdb_",
-	"beads_t",
+	"beads_test",
 	"beads_pt",
 	"beads_vr",
 	"doctest_",
