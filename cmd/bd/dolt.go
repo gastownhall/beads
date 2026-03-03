@@ -123,6 +123,18 @@ Use this before switching to server mode to ensure the server is running.`,
 	},
 }
 
+// isRemoteNotFoundErr checks whether the error is a Dolt "remote not found"
+// error. This typically happens when the remote was added via `dolt remote add`
+// (filesystem config) but not via `bd dolt remote add` (which also registers it
+// in the SQL server's dolt_remotes table).
+func isRemoteNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "remote") && strings.Contains(msg, "not found")
+}
+
 var doltPushCmd = &cobra.Command{
 	Use:   "push",
 	Short: "Push commits to Dolt remote",
@@ -146,11 +158,17 @@ uncommitted changes in its working set).`,
 		if force {
 			if err := st.ForcePush(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				if isRemoteNotFoundErr(err) {
+					fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+				}
 				os.Exit(1)
 			}
 		} else {
 			if err := st.Push(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				if isRemoteNotFoundErr(err) {
+					fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+				}
 				os.Exit(1)
 			}
 		}
@@ -176,6 +194,9 @@ variables for authentication.`,
 		fmt.Println("Pulling from Dolt remote...")
 		if err := st.Pull(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if isRemoteNotFoundErr(err) {
+				fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+			}
 			os.Exit(1)
 		}
 		fmt.Println("Pull complete.")
