@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1012,4 +1015,104 @@ func findClonedDBName(t *testing.T, doltDir string) string {
 	}
 	t.Fatalf("no dolt database found in %s", doltDir)
 	return ""
+}
+
+// TestGitRemoteExternalServerRouting verifies that isGitProtocolRemote returns
+// false when the SQL server reports a git-protocol remote but the CLI directory
+// (dbPath) lacks that remote.
+func TestGitRemoteExternalServerRouting(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping test")
+	}
+	skipIfNoGit(t)
+
+	baseDir, err := os.MkdirTemp("", "external-server-routing-*")
+	if err != nil {
+		t.Fatalf("failed to create base dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(baseDir) })
+
+	// Server root: dolt init so sql-server can start
+	serverDataDir := filepath.Join(baseDir, "server-data")
+	if err := os.MkdirAll(serverDataDir, 0o755); err != nil {
+		t.Fatalf("failed to create server data dir: %v", err)
+	}
+	runCmd(t, serverDataDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
+
+	// Sub-database with a git-protocol remote
+	testdbDir := filepath.Join(serverDataDir, "testdb")
+	if err := os.MkdirAll(testdbDir, 0o755); err != nil {
+		t.Fatalf("failed to create testdb dir: %v", err)
+	}
+	runCmd(t, testdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
+	runCmd(t, testdbDir, "dolt", "remote", "add", "origin", "git+https://example.com/test.git")
+
+	initSchemaSQL := fmt.Sprintf(`%s
+%s
+%s
+%s
+CALL DOLT_ADD('.');
+CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, readyIssuesView, blockedIssuesView)
+	runDoltSQL(t, testdbDir, initSchemaSQL)
+
+	// Start sql-server from the server root
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("failed to find free port: %v", err)
+	}
+	serverCmd := exec.Command("dolt", "sql-server",
+		"-H", "127.0.0.1",
+		"-P", fmt.Sprintf("%d", port),
+	)
+	serverCmd.Dir = serverDataDir
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start dolt sql-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = serverCmd.Process.Kill()
+		_ = serverCmd.Wait()
+	})
+
+	if !testutil.WaitForServer(port, 15*time.Second) {
+		t.Fatal("dolt sql-server did not become ready within timeout")
+	}
+
+	// Client directory: separate dolt init with NO remotes (simulates .beads/dolt/)
+	clientDataDir := filepath.Join(baseDir, "client-data")
+	if err := os.MkdirAll(clientDataDir, 0o755); err != nil {
+		t.Fatalf("failed to create client data dir: %v", err)
+	}
+	runCmd(t, clientDataDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for _, env := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_TEST_MODE"} {
+		if prev, ok := os.LookupEnv(env); ok {
+			t.Cleanup(func() { os.Setenv(env, prev) })
+		} else {
+			t.Cleanup(func() { os.Unsetenv(env) })
+		}
+		os.Unsetenv(env)
+	}
+
+	store, err := New(ctx, &Config{
+		Path:            clientDataDir,
+		Database:        "testdb",
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		ServerUser:      "root",
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		AutoStart:       false,
+		CreateIfMissing: false,
+	})
+	if err != nil {
+		t.Fatalf("failed to create DoltStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// SQL sees git+https:// remote in testdb; CLI directory (clientDataDir) has none.
+	// isGitProtocolRemote should return false to route through SQL.
+	require.False(t, store.isGitProtocolRemote(ctx))
 }

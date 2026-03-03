@@ -25,8 +25,7 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 		return withEnvCredentials(creds, func() error {
-			_, err := s.execContext(ctx, "CALL DOLT_PUSH(?, ?)", peer, s.branch)
-			if err != nil {
+			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, s.branch); err != nil {
 				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
 			}
 			return nil
@@ -56,8 +55,7 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 	}
 	err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 		return withEnvCredentials(creds, func() error {
-			_, pullErr := s.execContext(ctx, "CALL DOLT_PULL(?)", peer)
-			if pullErr != nil {
+			if pullErr := s.execWithLongTimeout(ctx, "CALL DOLT_PULL(?)", peer); pullErr != nil {
 				c, conflictErr := s.GetConflicts(ctx)
 				if conflictErr == nil && len(c) > 0 {
 					conflicts = c
@@ -82,8 +80,7 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 		return withEnvCredentials(creds, func() error {
-			_, err := s.execContext(ctx, "CALL DOLT_FETCH(?)", peer)
-			if err != nil {
+			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
 				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
 			}
 			return nil
@@ -258,16 +255,20 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	return result, nil
 }
 
-// isPeerGitProtocolRemote checks whether a specific peer remote URL uses the git wire protocol.
-// Git-protocol remotes (SSH, git+https://, git://) require CLI-based push/pull/fetch
-// because CALL DOLT_PUSH/PULL/FETCH through the SQL server times out — the MySQL
-// connection's readTimeout is too short for network I/O to external git hosts.
+// isPeerGitProtocolRemote checks whether a specific peer remote URL uses the git wire
+// protocol and is available for CLI-based push/pull/fetch. Git-protocol remotes (SSH,
+// git+https://, git://) are routed to CLI operations because the SQL server may lack
+// the git credentials or SSH keys needed for network I/O to external git hosts.
+// Returns false when the remote exists only on an externally-managed server's filesystem.
 func (s *DoltStore) isPeerGitProtocolRemote(ctx context.Context, peer string) bool {
 	remotes, err := s.ListRemotes(ctx)
 	if err == nil {
 		for _, r := range remotes {
 			if r.Name == peer {
-				return doltutil.IsGitProtocolURL(r.URL)
+				if !doltutil.IsGitProtocolURL(r.URL) {
+					return false
+				}
+				return s.dbPath != "" && doltutil.FindCLIRemote(s.dbPath, peer) != ""
 			}
 		}
 	}

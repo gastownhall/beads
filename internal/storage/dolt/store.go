@@ -733,6 +733,25 @@ func buildServerDSN(cfg *Config, database string) string {
 		userPart, cfg.ServerHost, cfg.ServerPort, dbPart, params)
 }
 
+// execWithLongTimeout opens a one-shot database connection with readTimeout=5m
+// and executes the given query. Push/pull operations can exceed the default
+// readTimeout when the server performs network I/O to git remotes.
+func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args ...any) error {
+	cfg, err := mysql.ParseDSN(s.connStr)
+	if err != nil {
+		return fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
+	}
+	cfg.ReadTimeout = 5 * time.Minute
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return fmt.Errorf("failed to open long-timeout connection: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, err = db.ExecContext(ctx, query, args...)
+	return err
+}
+
 // openServerConnection opens a connection to a dolt sql-server via MySQL protocol
 func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
@@ -1248,18 +1267,25 @@ func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) s
 	return msg
 }
 
-// isGitProtocolRemote checks whether the configured remote uses the git wire protocol.
-// Git-protocol remotes (git+ssh://, ssh://, git@host:path, git+https://, git://)
-// require CLI-based push/pull because CALL DOLT_PUSH through the SQL server times
-// out — the MySQL connection's readTimeout (10s) is too short for network I/O to
-// external git hosts (HTTPS handshake + credential helper + git ls-remote).
+// isGitProtocolRemote checks whether the configured remote uses the git wire protocol
+// and is available for CLI-based push/pull. Git-protocol remotes (git+ssh://, ssh://,
+// git@host:path, git+https://, git://) are routed to CLI operations because the SQL
+// server may lack the git credentials, SSH keys, or credential helpers needed for
+// network I/O to external git hosts. Returns false when the remote exists only on
+// an externally-managed server's filesystem and not in the local dbPath.
 func (s *DoltStore) isGitProtocolRemote(ctx context.Context) bool {
 	// Check SQL remotes first
 	remotes, err := s.ListRemotes(ctx)
 	if err == nil {
 		for _, r := range remotes {
 			if r.Name == s.remote {
-				return doltutil.IsGitProtocolURL(r.URL)
+				if !doltutil.IsGitProtocolURL(r.URL) {
+					return false
+				}
+				// Verify remote exists in CLI directory before routing to CLI push/pull.
+				// When the dolt sql-server is externally managed, remotes may exist only
+				// on the server's filesystem, not in the local dbPath.
+				return s.dbPath != "" && doltutil.FindCLIRemote(s.dbPath, s.remote) != ""
 			}
 		}
 	}
@@ -1342,15 +1368,13 @@ func (s *DoltStore) Push(ctx context.Context) (retErr error) {
 	}
 	if s.remoteUser != "" {
 		return withEnvCredentials(creds, func() error {
-			_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
-			if err != nil {
+			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
 				return fmt.Errorf("failed to push to %s/%s: %w", s.remote, s.branch, err)
 			}
 			return nil
 		})
 	}
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH(?, ?)", s.remote, s.branch)
-	if err != nil {
+	if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", s.remote, s.branch); err != nil {
 		return fmt.Errorf("failed to push to %s/%s: %w", s.remote, s.branch, err)
 	}
 	return nil
@@ -1378,15 +1402,13 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 	}
 	if s.remoteUser != "" {
 		return withEnvCredentials(creds, func() error {
-			_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
-			if err != nil {
+			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
 				return fmt.Errorf("failed to force push to %s/%s: %w", s.remote, s.branch, err)
 			}
 			return nil
 		})
 	}
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_PUSH('--force', ?, ?)", s.remote, s.branch)
-	if err != nil {
+	if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--force', ?, ?)", s.remote, s.branch); err != nil {
 		return fmt.Errorf("failed to force push to %s/%s: %w", s.remote, s.branch, err)
 	}
 	return nil
@@ -1421,8 +1443,7 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 	}
 	if s.remoteUser != "" {
 		return withEnvCredentials(creds, func() error {
-			_, err := s.db.ExecContext(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch)
-			if err != nil {
+			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
 				return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
 			}
 			if err := s.resetAutoIncrements(ctx); err != nil {
@@ -1431,8 +1452,7 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 			return nil
 		})
 	}
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_PULL(?, ?)", s.remote, s.branch)
-	if err != nil {
+	if err := s.execWithLongTimeout(ctx, "CALL DOLT_PULL(?, ?)", s.remote, s.branch); err != nil {
 		return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
 	}
 	if err := s.resetAutoIncrements(ctx); err != nil {
