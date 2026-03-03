@@ -137,8 +137,15 @@ func fallbackPort(beadsDir string) int {
 }
 
 // DerivePort computes a stable port from the beadsDir path.
-// Maps to range 13307–14306 to avoid common service ports.
+// Maps to range 13307–14306 (1000 ports) to avoid common service ports.
 // The port is deterministic: same path always yields the same port.
+//
+// The 1000-port hash space means collisions become likely around 9+
+// concurrent projects (~3.9% probability via the birthday paradox with
+// fnv32a % 1000). This is acceptable because reclaimPort() in Start()
+// detects when another project's server already occupies the derived
+// port and falls back gracefully — hash collisions cause a retry, not
+// a failure.
 func DerivePort(beadsDir string) int {
 	abs, err := filepath.Abs(beadsDir)
 	if err != nil {
