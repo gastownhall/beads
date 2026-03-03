@@ -169,12 +169,16 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	if !filter.IncludeDeferred {
 		deferredChildIDs, dcErr := s.getChildrenOfDeferredParents(ctx)
 		if dcErr == nil && len(deferredChildIDs) > 0 {
-			dcPlaceholders := make([]string, len(deferredChildIDs))
-			for i, id := range deferredChildIDs {
-				dcPlaceholders[i] = "?"
-				args = append(args, id)
+			// Batch the NOT IN clause to avoid oversized queries (GH#2179).
+			for start := 0; start < len(deferredChildIDs); start += queryBatchSize {
+				end := start + queryBatchSize
+				if end > len(deferredChildIDs) {
+					end = len(deferredChildIDs)
+				}
+				placeholders, batchArgs := doltBuildSQLInClause(deferredChildIDs[start:end])
+				args = append(args, batchArgs...)
+				whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
 			}
-			whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", strings.Join(dcPlaceholders, ", ")))
 		}
 	}
 	if len(filter.Labels) > 0 {
@@ -232,12 +236,17 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 			}
 		}
 
-		placeholders := make([]string, len(blockedIDs))
-		for i, id := range blockedIDs {
-			placeholders[i] = "?"
-			args = append(args, id)
+		// Batch the NOT IN clause to avoid oversized queries (GH#2179).
+		for start := 0; start < len(blockedIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(blockedIDs) {
+				end = len(blockedIDs)
+			}
+			batch := blockedIDs[start:end]
+			placeholders, batchArgs := doltBuildSQLInClause(batch)
+			args = append(args, batchArgs...)
+			whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
 		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", strings.Join(placeholders, ", ")))
 	}
 
 	whereSQL := "WHERE " + strings.Join(whereClauses, " AND ")
@@ -825,78 +834,92 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context, includeWisps bool) ([
 			spawnerIDs[dep.spawnerID] = struct{}{}
 		}
 
-		placeholders := make([]string, 0, len(spawnerIDs))
-		args := make([]interface{}, 0, len(spawnerIDs))
+		allSpawnerIDs := make([]string, 0, len(spawnerIDs))
 		for spawnerID := range spawnerIDs {
-			placeholders = append(placeholders, "?")
-			args = append(args, spawnerID)
+			allSpawnerIDs = append(allSpawnerIDs, spawnerID)
 		}
 
 		spawnerChildren := make(map[string][]string)
 		childIDs := make(map[string]struct{})
 		for _, depTbl := range depTables {
-			// nolint:gosec // G201: depTbl is hardcoded, placeholders are generated values
-			childQuery := fmt.Sprintf(`
-				SELECT issue_id, depends_on_id FROM %s
-				WHERE type = 'parent-child' AND depends_on_id IN (%s)
-			`, depTbl, strings.Join(placeholders, ","))
-			childRows, err := s.queryContext(ctx, childQuery, args...)
-			if err != nil {
-				if isTableNotExistError(err) {
-					continue // wisp_dependencies table may not exist on pre-migration databases (GH#2271)
+			// Batch spawner ID queries to avoid oversized IN clauses (GH#2179).
+			for start := 0; start < len(allSpawnerIDs); start += queryBatchSize {
+				end := start + queryBatchSize
+				if end > len(allSpawnerIDs) {
+					end = len(allSpawnerIDs)
 				}
-				return nil, wrapQueryError("compute blocked IDs: get spawner children from "+depTbl, err)
-			}
+				placeholders, args := doltBuildSQLInClause(allSpawnerIDs[start:end])
 
-			for childRows.Next() {
-				var childID, parentID string
-				if err := childRows.Scan(&childID, &parentID); err != nil {
-					_ = childRows.Close() // Best effort cleanup on error path
-					return nil, wrapScanError("compute blocked IDs: scan child", err)
+				// nolint:gosec // G201: depTbl is hardcoded, placeholders are generated values
+				childQuery := fmt.Sprintf(`
+					SELECT issue_id, depends_on_id FROM %s
+					WHERE type = 'parent-child' AND depends_on_id IN (%s)
+				`, depTbl, placeholders)
+				childRows, err := s.queryContext(ctx, childQuery, args...)
+				if err != nil {
+					if isTableNotExistError(err) {
+						continue // wisp_dependencies table may not exist on pre-migration databases (GH#2271)
+					}
+					return nil, wrapQueryError("compute blocked IDs: get spawner children from "+depTbl, err)
 				}
-				spawnerChildren[parentID] = append(spawnerChildren[parentID], childID)
-				childIDs[childID] = struct{}{}
-			}
-			_ = childRows.Close()
-			if err := childRows.Err(); err != nil {
-				return nil, wrapQueryError("compute blocked IDs: child rows from "+depTbl, err)
+
+				for childRows.Next() {
+					var childID, parentID string
+					if err := childRows.Scan(&childID, &parentID); err != nil {
+						_ = childRows.Close() // Best effort cleanup on error path
+						return nil, wrapScanError("compute blocked IDs: scan child", err)
+					}
+					spawnerChildren[parentID] = append(spawnerChildren[parentID], childID)
+					childIDs[childID] = struct{}{}
+				}
+				_ = childRows.Close()
+				if err := childRows.Err(); err != nil {
+					return nil, wrapQueryError("compute blocked IDs: child rows from "+depTbl, err)
+				}
 			}
 		}
 
 		closedChildren := make(map[string]bool)
 		if needsClosedChildren && len(childIDs) > 0 {
-			childPlaceholders := make([]string, 0, len(childIDs))
-			childArgs := make([]interface{}, 0, len(childIDs))
+			allChildIDs := make([]string, 0, len(childIDs))
 			for childID := range childIDs {
-				childPlaceholders = append(childPlaceholders, "?")
-				childArgs = append(childArgs, childID)
+				allChildIDs = append(allChildIDs, childID)
 			}
 
-			// Check closed status in issue/wisp tables
+			// Check closed status in issue/wisp tables.
+			// Batch queries to avoid oversized IN clauses (GH#2179).
 			for _, issueTbl := range issueTables {
-				// nolint:gosec // G201: issueTbl is hardcoded, placeholders are generated values
-				closedQuery := fmt.Sprintf(`
-					SELECT id FROM %s
-					WHERE status = 'closed' AND id IN (%s)
-				`, issueTbl, strings.Join(childPlaceholders, ","))
-				closedRows, err := s.queryContext(ctx, closedQuery, childArgs...)
-				if err != nil {
-					if isTableNotExistError(err) {
-						continue // wisps table may not exist on pre-migration databases (GH#2271)
+				for start := 0; start < len(allChildIDs); start += queryBatchSize {
+					end := start + queryBatchSize
+					if end > len(allChildIDs) {
+						end = len(allChildIDs)
 					}
-					return nil, wrapQueryError("compute blocked IDs: get closed children from "+issueTbl, err)
-				}
-				for closedRows.Next() {
-					var childID string
-					if err := closedRows.Scan(&childID); err != nil {
-						_ = closedRows.Close() // Best effort cleanup on error path
-						return nil, wrapScanError("compute blocked IDs: scan closed child", err)
+					placeholders, args := doltBuildSQLInClause(allChildIDs[start:end])
+
+					// nolint:gosec // G201: issueTbl is hardcoded, placeholders are generated values
+					closedQuery := fmt.Sprintf(`
+						SELECT id FROM %s
+						WHERE status = 'closed' AND id IN (%s)
+					`, issueTbl, placeholders)
+					closedRows, err := s.queryContext(ctx, closedQuery, args...)
+					if err != nil {
+						if isTableNotExistError(err) {
+							continue // wisps table may not exist on pre-migration databases (GH#2271)
+						}
+						return nil, wrapQueryError("compute blocked IDs: get closed children from "+issueTbl, err)
 					}
-					closedChildren[childID] = true
-				}
-				_ = closedRows.Close()
-				if err := closedRows.Err(); err != nil {
-					return nil, wrapQueryError("compute blocked IDs: closed child rows from "+issueTbl, err)
+					for closedRows.Next() {
+						var childID string
+						if err := closedRows.Scan(&childID); err != nil {
+							_ = closedRows.Close() // Best effort cleanup on error path
+							return nil, wrapScanError("compute blocked IDs: scan closed child", err)
+						}
+						closedChildren[childID] = true
+					}
+					_ = closedRows.Close()
+					if err := closedRows.Err(); err != nil {
+						return nil, wrapQueryError("compute blocked IDs: closed child rows from "+issueTbl, err)
+					}
 				}
 			}
 		}
@@ -998,71 +1021,83 @@ func (s *DoltStore) getChildrenOfDeferredParents(ctx context.Context) ([]string,
 
 // getChildrenOfIssues returns IDs of direct children (parent-child deps) of the given issue IDs.
 // Used to propagate blocked status from parents to children (GH#1495).
+// Batches queries to avoid oversized IN clauses (GH#2179).
 func (s *DoltStore) getChildrenOfIssues(ctx context.Context, parentIDs []string) ([]string, error) {
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}
-	placeholders := make([]string, len(parentIDs))
-	args := make([]interface{}, len(parentIDs))
-	for i, id := range parentIDs {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	// nolint:gosec // G201: placeholders are generated values, data passed via args
-	query := fmt.Sprintf(`
-		SELECT issue_id FROM dependencies
-		WHERE type = 'parent-child' AND depends_on_id IN (%s)
-	`, strings.Join(placeholders, ","))
-	rows, err := s.queryContext(ctx, query, args...)
-	if err != nil {
-		return nil, wrapQueryError("get children of issues", err)
-	}
-	defer rows.Close()
-
 	var children []string
-	for rows.Next() {
-		var childID string
-		if err := rows.Scan(&childID); err != nil {
-			return nil, wrapScanError("get children of issues", err)
+	for start := 0; start < len(parentIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(parentIDs) {
+			end = len(parentIDs)
 		}
-		children = append(children, childID)
+		placeholders, args := doltBuildSQLInClause(parentIDs[start:end])
+
+		// nolint:gosec // G201: placeholders are generated values, data passed via args
+		query := fmt.Sprintf(`
+			SELECT issue_id FROM dependencies
+			WHERE type = 'parent-child' AND depends_on_id IN (%s)
+		`, placeholders)
+		rows, err := s.queryContext(ctx, query, args...)
+		if err != nil {
+			return nil, wrapQueryError("get children of issues", err)
+		}
+		for rows.Next() {
+			var childID string
+			if err := rows.Scan(&childID); err != nil {
+				_ = rows.Close()
+				return nil, wrapScanError("get children of issues", err)
+			}
+			children = append(children, childID)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, wrapQueryError("get children of issues: rows", err)
+		}
 	}
-	return children, rows.Err()
+	return children, nil
 }
 
 // getChildrenWithParents returns a map of childID -> parentID for direct children
 // (parent-child deps) of the given parent IDs. Used by GetBlockedIssues to show
 // transitively blocked children with their parent as the reason (GH#1495).
+// Batches queries to avoid oversized IN clauses (GH#2179).
 func (s *DoltStore) getChildrenWithParents(ctx context.Context, parentIDs []string) (map[string]string, error) {
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}
-	placeholders := make([]string, len(parentIDs))
-	args := make([]interface{}, len(parentIDs))
-	for i, id := range parentIDs {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	// nolint:gosec // G201: placeholders are generated values, data passed via args
-	query := fmt.Sprintf(`
-		SELECT issue_id, depends_on_id FROM dependencies
-		WHERE type = 'parent-child' AND depends_on_id IN (%s)
-	`, strings.Join(placeholders, ","))
-	rows, err := s.queryContext(ctx, query, args...)
-	if err != nil {
-		return nil, wrapQueryError("get children with parents", err)
-	}
-	defer rows.Close()
-
 	result := make(map[string]string)
-	for rows.Next() {
-		var childID, parentID string
-		if err := rows.Scan(&childID, &parentID); err != nil {
-			return nil, wrapScanError("get children with parents", err)
+	for start := 0; start < len(parentIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(parentIDs) {
+			end = len(parentIDs)
 		}
-		result[childID] = parentID
+		placeholders, args := doltBuildSQLInClause(parentIDs[start:end])
+
+		// nolint:gosec // G201: placeholders are generated values, data passed via args
+		query := fmt.Sprintf(`
+			SELECT issue_id, depends_on_id FROM dependencies
+			WHERE type = 'parent-child' AND depends_on_id IN (%s)
+		`, placeholders)
+		rows, err := s.queryContext(ctx, query, args...)
+		if err != nil {
+			return nil, wrapQueryError("get children with parents", err)
+		}
+		for rows.Next() {
+			var childID, parentID string
+			if err := rows.Scan(&childID, &parentID); err != nil {
+				_ = rows.Close()
+				return nil, wrapScanError("get children with parents", err)
+			}
+			result[childID] = parentID
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, wrapQueryError("get children with parents: rows", err)
+		}
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 // GetMoleculeProgress returns progress stats for a molecule
