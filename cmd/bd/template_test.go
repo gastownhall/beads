@@ -510,9 +510,9 @@ func TestTemplateSuite(t *testing.T) {
 		h.addParentChild(child1.ID, epic.ID)
 		h.addParentChild(child2.ID, epic.ID)
 
-		// child3 and child4 have "blocks" dependency (wrong type)
+		// child3 and child4 have "related" dependency (wrong type — not parent-child)
 		for _, childID := range []string{child3.ID, child4.ID} {
-			blocksDep := &types.Dependency{IssueID: childID, DependsOnID: epic.ID, Type: types.DepBlocks}
+			blocksDep := &types.Dependency{IssueID: childID, DependsOnID: epic.ID, Type: types.DepRelated}
 			if err := s.AddDependency(ctx, blocksDep, "test-user"); err != nil {
 				t.Fatalf("Failed to add blocks dependency: %v", err)
 			}
@@ -540,11 +540,11 @@ func TestTemplateSuite(t *testing.T) {
 		// child3 has NO dependency at all (broken data)
 		_ = h.createIssueWithID("test-pcat.3", "self-review", "", types.TypeTask, 2)
 
-		// child8 has wrong dependency type
+		// child8 has wrong dependency type (related, not parent-child)
 		child8 := h.createIssueWithID("test-pcat.8", "request-shutdown", "", types.TypeTask, 2)
-		blocksDep := &types.Dependency{IssueID: child8.ID, DependsOnID: epic.ID, Type: types.DepBlocks}
-		if err := s.AddDependency(ctx, blocksDep, "test-user"); err != nil {
-			t.Fatalf("Failed to add blocks dependency: %v", err)
+		relatedDep := &types.Dependency{IssueID: child8.ID, DependsOnID: epic.ID, Type: types.DepRelated}
+		if err := s.AddDependency(ctx, relatedDep, "test-user"); err != nil {
+			t.Fatalf("Failed to add related dependency: %v", err)
 		}
 
 		subgraph, err := loadTemplateSubgraph(ctx, s, epic.ID)

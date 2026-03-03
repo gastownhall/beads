@@ -24,8 +24,8 @@ func TestProtocol_ImportPreservesRelationalData(t *testing.T) {
 
 	w.run("dep", "add", id1, id2) // feature depends on dep-target
 
-	w.run("comment", id1, "Design notes for the feature")
-	w.run("comment", id1, "Review feedback from team")
+	w.run("comments", "add", id1, "Design notes for the feature")
+	w.run("comments", "add", id1, "Review feedback from team")
 
 	// Verify via bd show --json
 	featShow := w.showJSON(id1)

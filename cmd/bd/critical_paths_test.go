@@ -399,7 +399,7 @@ func TestFindStaleMolecules(t *testing.T) {
 			Title:     "Blocked by stale",
 			Status:    types.StatusOpen,
 			Priority:  2,
-			IssueType: types.TypeTask,
+			IssueType: types.TypeEpic,
 			CreatedAt: time.Now(),
 		}
 		if err := s.CreateIssue(ctx, blockedIssue, "test"); err != nil {

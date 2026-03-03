@@ -44,8 +44,8 @@ func TestProtocol_CommentsPreservedAcrossUpdate(t *testing.T) {
 	t.Parallel()
 	w := newWorkspace(t)
 	id := w.create("--title", "Commented issue", "--type", "task")
-	w.run("comment", id, "Important design note")
-	w.run("comment", id, "Follow-up from review")
+	w.run("comments", "add", id, "Important design note")
+	w.run("comments", "add", id, "Follow-up from review")
 
 	// Update an unrelated field
 	w.run("update", id, "--title", "Commented issue (renamed)")
@@ -77,8 +77,8 @@ func TestProtocol_ScalarUpdatePreservesRelationalData(t *testing.T) {
 	w.run("label", "add", id1, "v2")
 	w.run("label", "add", id1, "frontend")
 	w.run("dep", "add", id1, id2)
-	w.run("comment", id1, "Design review notes")
-	w.run("comment", id1, "Implementation started")
+	w.run("comments", "add", id1, "Design review notes")
+	w.run("comments", "add", id1, "Implementation started")
 
 	// Rapid-fire scalar updates — each must preserve relational data
 	w.run("update", id1, "--title", "Data-rich issue v2")
@@ -118,7 +118,7 @@ func TestProtocol_StatusTransitionsPreserveLabels(t *testing.T) {
 	w := newWorkspace(t)
 	a := w.create("--title", "Status cycle", "--type", "task", "--priority", "2")
 	w.run("label", "add", a, "test-label")
-	w.run("comment", a, "Important note")
+	w.run("comments", "add", a, "Important note")
 
 	// open → in_progress → open → closed → reopen
 	w.run("update", a, "--status", "in_progress")
