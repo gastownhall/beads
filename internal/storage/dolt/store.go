@@ -877,7 +877,9 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	var version int
 	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version)
 	if err == nil && version >= currentSchemaVersion {
-		return nil
+		// Wisps tables are dolt_ignore'd (not persisted in commit history),
+		// so they must be recreated on every server session. (GH#2271)
+		return createIgnoredTables(db)
 	}
 
 	// Execute schema creation - split into individual statements

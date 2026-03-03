@@ -49,7 +49,7 @@ func RunDeepValidation(path string) DeepValidationResult {
 			Status:   StatusWarning,
 			Message:  "SQLite backend detected",
 			Category: CategoryMaintenance,
-			Fix:      "Run 'bd migrate --to-dolt' to upgrade to Dolt backend",
+			Fix:      "Run 'bd init' to set up Dolt backend",
 		}
 		result.AllChecks = append(result.AllChecks, check)
 		return result

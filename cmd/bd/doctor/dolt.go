@@ -263,6 +263,29 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 		}
 	}
 
+	// Check dolt_ignore'd tables (wisps) — these only exist in the working
+	// set and must be recreated each server session. (GH#2271)
+	wispTables := []string{"wisps", "wisp_labels", "wisp_dependencies", "wisp_events", "wisp_comments"}
+	var missingWispTables []string
+	for _, table := range wispTables {
+		var count int
+		err := conn.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s LIMIT 1", table)).Scan(&count)
+		if err != nil {
+			missingWispTables = append(missingWispTables, table)
+		}
+	}
+
+	if len(missingWispTables) > 0 {
+		return DoctorCheck{
+			Name:     "Dolt Schema",
+			Status:   StatusWarning,
+			Message:  fmt.Sprintf("Missing ephemeral tables: %v (will be recreated on next bd command)", missingWispTables),
+			Detail:   "Wisps tables are dolt_ignore'd and must be recreated each server session (GH#2271)",
+			Fix:      "Run any bd command to trigger automatic recreation, or restart the Dolt server",
+			Category: CategoryCore,
+		}
+	}
+
 	return DoctorCheck{
 		Name:     "Dolt Schema",
 		Status:   StatusOK,
