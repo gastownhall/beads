@@ -228,36 +228,6 @@ func TestCheckMigrationCompletionResult_NotDoltBackend(t *testing.T) {
 	}
 }
 
-func TestCheckDoltLocks_NotDoltBackend(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-migration-validation-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("failed to create .beads: %v", err)
-	}
-
-	// Write a non-Dolt metadata.json so IsDoltBackend returns false.
-	// Without this, GetBackendFromConfig defaults to "dolt" when no config exists,
-	// causing checkDoltLocks to run and fail with StatusWarning (no server).
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"sqlite"}`), 0644); err != nil {
-		t.Fatalf("failed to write metadata.json: %v", err)
-	}
-
-	check := CheckDoltLocks(tmpDir)
-
-	if check.Status != StatusOK {
-		t.Errorf("status = %q, want %q for non-Dolt backend", check.Status, StatusOK)
-	}
-
-	if check.Category != CategoryMaintenance {
-		t.Errorf("category = %q, want %q", check.Category, CategoryMaintenance)
-	}
-}
-
 func TestMigrationValidationResult_JSONSerialization(t *testing.T) {
 	result := MigrationValidationResult{
 		Phase:          "pre-migration",

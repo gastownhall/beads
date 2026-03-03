@@ -251,4 +251,3 @@ func printThanksWrappedList(label string, names []string, maxWidth int) {
 	}
 	fmt.Println()
 }
-
