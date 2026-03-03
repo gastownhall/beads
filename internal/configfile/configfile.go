@@ -98,7 +98,16 @@ func Load(beadsDir string) (*Config, error) {
 func (c *Config) Save(beadsDir string) error {
 	configPath := ConfigPath(beadsDir)
 
-	data, err := json.MarshalIndent(c, "", "  ")
+	// Strip absolute dolt_data_dir before saving — metadata.json is committed
+	// to git and propagates to other clones, but absolute paths are
+	// machine-specific and cause data-loss on other machines (GH#2251).
+	// Users should set absolute paths via BEADS_DOLT_DATA_DIR env var instead.
+	saved := *c
+	if filepath.IsAbs(saved.DoltDataDir) {
+		saved.DoltDataDir = ""
+	}
+
+	data, err := json.MarshalIndent(&saved, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}

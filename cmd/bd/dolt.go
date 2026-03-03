@@ -1083,6 +1083,12 @@ func setDoltConfig(key, value string, updateConfig bool) {
 				os.Exit(1)
 			}
 			cfg.DoltDataDir = value
+			// Absolute paths are machine-specific and won't be persisted to
+			// metadata.json (which is committed to git). Use the env var for
+			// persistence across sessions. (GH#2251)
+			fmt.Fprintf(os.Stderr, "Note: absolute paths are not saved to metadata.json (it propagates via git).\n")
+			fmt.Fprintf(os.Stderr, "For persistence, add to your shell profile:\n")
+			fmt.Fprintf(os.Stderr, "  export BEADS_DOLT_DATA_DIR=%s\n", value)
 		}
 		yamlKey = "dolt.data-dir"
 
