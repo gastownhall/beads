@@ -41,6 +41,11 @@ func hookSectionBeginLine() string {
 	return fmt.Sprintf("%s v%s ---", hookSectionBeginPrefix, Version)
 }
 
+// hookSectionEndLine returns the full end marker line with the current version.
+func hookSectionEndLine() string {
+	return fmt.Sprintf("%s v%s ---", hookSectionEndPrefix, Version)
+}
+
 // generateHookSection returns the marked section content for a given hook name.
 // The section is self-contained: it checks for bd availability, runs the hook
 // via 'bd hooks run', and propagates exit codes — without preventing any user
@@ -53,7 +58,7 @@ func generateHookSection(hookName string) string {
 		"  bd hooks run " + hookName + " \"$@\"\n" +
 		"  _bd_exit=$?; if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\n" +
 		"fi\n" +
-		hookSectionEnd + "\n"
+		hookSectionEndLine() + "\n"
 }
 
 // injectHookSection merges the beads section into existing hook file content.

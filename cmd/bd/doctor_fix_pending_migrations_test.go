@@ -29,7 +29,7 @@ func TestFixPendingMigrations_AppliesHookMigration(t *testing.T) {
 	}
 
 	rendered := mustReadHookMigrationFile(t, preCommitPath)
-	if !strings.Contains(rendered, hookSectionBeginPrefix) || !strings.Contains(rendered, hookSectionEnd) {
+	if !strings.Contains(rendered, hookSectionBeginPrefix) || !strings.Contains(rendered, hookSectionEndPrefix) {
 		t.Fatalf("expected migrated hook to contain marker section, got:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "echo old-custom") {

@@ -39,7 +39,7 @@ func TestApplyHookMigrationExecution_LegacyWithOldSidecar(t *testing.T) {
 	if !strings.Contains(rendered, "echo old-custom") {
 		t.Fatalf("expected migrated hook to preserve .old body, got:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, hookSectionBeginPrefix) || !strings.Contains(rendered, hookSectionEnd) {
+	if !strings.Contains(rendered, hookSectionBeginPrefix) || !strings.Contains(rendered, hookSectionEndPrefix) {
 		t.Fatalf("expected migrated hook to contain marker section, got:\n%s", rendered)
 	}
 
@@ -101,7 +101,7 @@ func TestApplyHookMigrationExecution_CustomWithSidecarsPreservesHookBody(t *test
 	if !strings.Contains(rendered, "echo custom-body") {
 		t.Fatalf("expected migrated hook to preserve custom body, got:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, hookSectionBeginPrefix) || !strings.Contains(rendered, hookSectionEnd) {
+	if !strings.Contains(rendered, hookSectionBeginPrefix) || !strings.Contains(rendered, hookSectionEndPrefix) {
 		t.Fatalf("expected migrated hook to contain marker section, got:\n%s", rendered)
 	}
 
