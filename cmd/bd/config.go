@@ -27,11 +27,12 @@ var configCmd = &cobra.Command{
 Configuration is stored per-project in the beads database and is version-control-friendly.
 
 Common namespaces:
-  - jira.*       Jira integration settings
-  - linear.*     Linear integration settings
-  - github.*     GitHub integration settings
-  - custom.*     Custom integration settings
-  - status.*     Issue status configuration
+  - jira.*            Jira integration settings
+  - linear.*          Linear integration settings
+  - github.*          GitHub integration settings
+  - custom.*          Custom integration settings
+  - status.*          Issue status configuration
+  - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
 
 Custom Status States:
   You can define custom status states for multi-step pipelines using the
@@ -43,10 +44,19 @@ Custom Status States:
   This enables issues to use statuses like 'awaiting_review' in addition to
   the built-in statuses (open, in_progress, blocked, deferred, closed).
 
+Suppressing Doctor Warnings:
+  Suppress specific bd doctor warnings by check name slug:
+    bd config set doctor.suppress.pending-migrations true
+    bd config set doctor.suppress.git-hooks true
+  Check names are converted to slugs: "Git Hooks" → "git-hooks".
+  Only warnings are suppressed (errors and passing checks always show).
+  To unsuppress: bd config unset doctor.suppress.<slug>
+
 Examples:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
+  bd config set doctor.suppress.pending-migrations true
   bd config get jira.url
   bd config list
   bd config unset jira.url`,

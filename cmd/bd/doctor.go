@@ -33,12 +33,13 @@ type doctorCheck struct {
 }
 
 type doctorResult struct {
-	Path       string            `json:"path"`
-	Checks     []doctorCheck     `json:"checks"`
-	OverallOK  bool              `json:"overall_ok"`
-	CLIVersion string            `json:"cli_version"`
-	Timestamp  string            `json:"timestamp,omitempty"` // ISO8601 timestamp for historical tracking
-	Platform   map[string]string `json:"platform,omitempty"`  // platform info for debugging
+	Path            string            `json:"path"`
+	Checks          []doctorCheck     `json:"checks"`
+	OverallOK       bool              `json:"overall_ok"`
+	CLIVersion      string            `json:"cli_version"`
+	Timestamp       string            `json:"timestamp,omitempty"`        // ISO8601 timestamp for historical tracking
+	Platform        map[string]string `json:"platform,omitempty"`         // platform info for debugging
+	SuppressedCount int               `json:"suppressed_count,omitempty"` // GH#1095: number of suppressed warnings
 }
 
 var (
@@ -145,6 +146,14 @@ Agent Mode (--agent):
     or advisory (informational only)
   ZFC-compliant: Go observes and reports, the agent decides and acts.
   Combine with --json for structured agent-facing output.
+
+Suppressing Warnings:
+  Suppress specific warnings by setting doctor.suppress.<check-slug> config:
+    bd config set doctor.suppress.pending-migrations true
+    bd config set doctor.suppress.git-hooks true
+  Check names are converted to slugs: "Git Hooks" → "git-hooks".
+  Only warnings are suppressed; errors and passing checks always show.
+  To unsuppress: bd config unset doctor.suppress.<slug>
 
 Examples:
   bd doctor              # Check current directory
@@ -744,6 +753,39 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, concurrencyCheck)
 	// Don't fail overall — this is a recommendation, not a broken state
 
+	// GH#1095: Filter out suppressed checks (doctor.suppress.<slug> = true)
+	suppressed := doctor.GetSuppressedChecks(path)
+	if len(suppressed) > 0 {
+		var suppressedCount int
+		var filtered []doctorCheck
+		for _, check := range result.Checks {
+			slug := doctor.CheckNameToSlug(check.Name)
+			if suppressed[slug] && check.Status == statusWarning {
+				suppressedCount++
+				continue
+			}
+			filtered = append(filtered, check)
+		}
+		if suppressedCount > 0 {
+			result.Checks = filtered
+			// Recompute OverallOK after filtering
+			result.OverallOK = true
+			for _, check := range result.Checks {
+				if check.Status == statusError {
+					result.OverallOK = false
+					break
+				}
+				if check.Status == statusWarning {
+					// Some warnings are informational (don't fail), but
+					// replicate the per-check logic from above is complex.
+					// Conservative: don't change OverallOK for warnings here.
+				}
+			}
+			// Store suppressed count for display
+			result.SuppressedCount = suppressedCount
+		}
+	}
+
 	return result
 }
 
@@ -986,6 +1028,15 @@ func printDiagnostics(result doctorResult) {
 		if !doctorVerbose {
 			fmt.Printf("%s\n", ui.RenderMuted("Run with --verbose to see all checks"))
 		}
+	}
+
+	// GH#1095: Notify user about suppressed checks
+	if result.SuppressedCount > 0 {
+		noun := "warning"
+		if result.SuppressedCount > 1 {
+			noun = "warnings"
+		}
+		fmt.Printf("%s\n", ui.RenderMuted(fmt.Sprintf("(%d %s suppressed via doctor.suppress config)", result.SuppressedCount, noun)))
 	}
 }
 
