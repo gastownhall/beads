@@ -963,6 +963,136 @@ func TestEnsureDoltInit_WritesMarker(t *testing.T) {
 	}
 }
 
+// --- stopServerProcess tests ---
+
+func TestStopServerProcessPreservesMonitorAndActivity(t *testing.T) {
+	// stopServerProcess must leave the monitor PID file and activity file
+	// intact. This is the core fix for GH#2324: the idle monitor calls
+	// stopServerProcess (not Stop) to avoid killing itself via
+	// cleanupStateFiles → stopIdleMonitor.
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+
+	// Write activity and monitor PID files
+	touchActivity(dir)
+	monitorPID := os.Getpid()
+	_ = os.WriteFile(monitorPidPath(dir), []byte(strconv.Itoa(monitorPID)), 0600)
+
+	// No server PID file → stopServerProcess returns immediately (already stopped)
+	if err := stopServerProcess(dir); err != nil {
+		t.Fatalf("stopServerProcess: %v", err)
+	}
+
+	// Activity file must be preserved
+	if _, err := os.Stat(activityPath(dir)); os.IsNotExist(err) {
+		t.Error("stopServerProcess must preserve activity file")
+	}
+	// Monitor PID file must be preserved
+	if _, err := os.Stat(monitorPidPath(dir)); os.IsNotExist(err) {
+		t.Error("stopServerProcess must preserve monitor PID file")
+	}
+	// Monitor PID should still contain our PID (not corrupted)
+	data, err := os.ReadFile(monitorPidPath(dir))
+	if err != nil {
+		t.Fatalf("reading monitor PID file: %v", err)
+	}
+	if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid != monitorPID {
+		t.Errorf("monitor PID file changed: want %d, got %d", monitorPID, pid)
+	}
+}
+
+func TestStopServerProcessRemovesPidAndPort(t *testing.T) {
+	// When the server is running (simulated with a stale PID that IsRunning
+	// will clean up), stopServerProcess should remove PID and port files
+	// but leave activity and monitor files intact.
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+
+	// Write all state files
+	_ = os.WriteFile(pidPath(dir), []byte("99999999"), 0600) // dead PID
+	_ = writePortFile(dir, 13500)
+	touchActivity(dir)
+	_ = os.WriteFile(monitorPidPath(dir), []byte(strconv.Itoa(os.Getpid())), 0600)
+
+	// stopServerProcess: IsRunning sees dead PID → returns Running=false →
+	// stopServerProcess returns nil (already stopped).
+	_ = stopServerProcess(dir)
+
+	// PID file was cleaned up by IsRunning (stale PID detection)
+	if _, err := os.Stat(pidPath(dir)); !os.IsNotExist(err) {
+		t.Error("expected server PID file to be removed")
+	}
+
+	// Activity and monitor PID files must survive
+	if _, err := os.Stat(activityPath(dir)); os.IsNotExist(err) {
+		t.Error("stopServerProcess must preserve activity file")
+	}
+	if _, err := os.Stat(monitorPidPath(dir)); os.IsNotExist(err) {
+		t.Error("stopServerProcess must preserve monitor PID file")
+	}
+}
+
+func TestRunIdleMonitorExitsOnStaleActivityNoServer(t *testing.T) {
+	// When there's no server running and activity is stale beyond the
+	// idle timeout, the monitor should exit (existing behavior preserved).
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+
+	// Write a stale activity timestamp (2x the timeout ago)
+	staleTime := time.Now().Add(-2 * time.Hour)
+	_ = os.WriteFile(activityPath(dir),
+		[]byte(strconv.FormatInt(staleTime.Unix(), 10)), 0600)
+	// Write a monitor PID file
+	_ = os.WriteFile(monitorPidPath(dir),
+		[]byte(strconv.Itoa(os.Getpid())), 0600)
+
+	done := make(chan struct{})
+	go func() {
+		RunIdleMonitor(dir, 1*time.Hour) // timeout=1h, activity=2h ago
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// good — exited because stale activity + no server
+	case <-time.After(MonitorCheckInterval + 5*time.Second):
+		t.Fatal("monitor should exit when no server and stale activity")
+	}
+
+	// Monitor should have cleaned up its PID file
+	if _, err := os.Stat(monitorPidPath(dir)); !os.IsNotExist(err) {
+		t.Error("monitor should clean up its PID file on exit")
+	}
+}
+
+func TestRunIdleMonitorGasTownExitsImmediately(t *testing.T) {
+	// Under Gas Town, the monitor should exit immediately regardless
+	// of activity state.
+	dir := t.TempDir()
+
+	// Create a fake GT root with required markers
+	gtRoot := t.TempDir()
+	for _, marker := range []string{"daemon", "deacon", "warrants", "mayor"} {
+		if err := os.MkdirAll(filepath.Join(gtRoot, marker), 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GT_ROOT", gtRoot)
+
+	done := make(chan struct{})
+	go func() {
+		RunIdleMonitor(dir, 30*time.Minute)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// good — exited immediately under Gas Town
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunIdleMonitor should exit immediately under Gas Town")
+	}
+}
+
 func TestIsDaemonManagedForBeadsDir(t *testing.T) {
 	// When GT_ROOT is unset and CWD is unrelated, but beadsDir
 	// is under a Gas Town root, IsDaemonManagedFor should detect it.

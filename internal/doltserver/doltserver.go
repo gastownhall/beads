@@ -1008,6 +1008,37 @@ const DefaultIdleTimeout = 30 * time.Minute
 // MonitorCheckInterval is how often the idle monitor checks activity.
 const MonitorCheckInterval = 60 * time.Second
 
+// stopServerProcess stops the Dolt server process without touching the idle
+// monitor's own state. This is used by the idle monitor to avoid killing itself
+// when shutting down an idle server. It flushes the working set, gracefully
+// stops the server, and removes server state files (PID, port) but leaves the
+// monitor PID file and activity file intact so the monitor can continue running
+// as a watchdog.
+func stopServerProcess(beadsDir string) error {
+	state, err := IsRunning(beadsDir)
+	if err != nil {
+		return err
+	}
+	if !state.Running {
+		return nil // already stopped
+	}
+
+	// Flush uncommitted working set changes before stopping.
+	cfg := DefaultConfig(beadsDir)
+	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
+	}
+
+	if err := gracefulStop(state.PID, 5*time.Second); err != nil {
+		_ = os.Remove(pidPath(beadsDir))
+		_ = os.Remove(portPath(beadsDir))
+		return err
+	}
+	_ = os.Remove(pidPath(beadsDir))
+	_ = os.Remove(portPath(beadsDir))
+	return nil
+}
+
 // forkIdleMonitor starts the idle monitor as a detached process.
 // It runs `bd dolt idle-monitor --beads-dir=<dir>` in the background.
 // Under Gas Town, the idle monitor is not forked — the daemon handles lifecycle.
@@ -1090,8 +1121,14 @@ func ReadActivityTime(beadsDir string) time.Time {
 
 // RunIdleMonitor is the main loop for the idle monitor sidecar process.
 // It checks the activity file periodically and stops the server if idle
-// for longer than the configured timeout. If the server crashed but
-// activity is recent, it restarts it (watchdog behavior).
+// for longer than the configured timeout. After stopping an idle server,
+// the monitor continues running as a watchdog: if new activity appears
+// (e.g. a bd command calls EnsureRunning and touches the activity file),
+// the monitor restarts the server. The monitor only exits after an
+// additional full idle timeout passes with no new activity.
+//
+// If the server crashed but activity is recent, the monitor restarts it
+// (watchdog behavior).
 //
 // idleTimeout of 0 means monitoring is disabled (exits immediately).
 // Under Gas Town, exits immediately — the daemon handles server lifecycle.
@@ -1103,6 +1140,10 @@ func RunIdleMonitor(beadsDir string, idleTimeout time.Duration) {
 	if IsDaemonManagedFor(beadsDir) {
 		return
 	}
+
+	// Tracks when we stopped the server for idle timeout. Zero means we
+	// haven't performed an idle shutdown (or the server was restarted since).
+	var idleShutdownAt time.Time
 
 	for {
 		time.Sleep(MonitorCheckInterval)
@@ -1116,14 +1157,37 @@ func RunIdleMonitor(beadsDir string, idleTimeout time.Duration) {
 		idleDuration := time.Since(lastActivity)
 
 		if state.Running {
+			idleShutdownAt = time.Time{} // server is up, clear idle-shutdown tracking
+
 			// Server is running — check if idle
 			if !lastActivity.IsZero() && idleDuration > idleTimeout {
-				// Idle too long — stop the server and exit
-				_ = Stop(beadsDir)
-				return
+				// Idle too long — stop the server but keep monitoring.
+				// Use stopServerProcess (not Stop) to avoid killing ourselves.
+				_ = stopServerProcess(beadsDir)
+				idleShutdownAt = time.Now()
 			}
 		} else {
-			// Server is NOT running — watchdog behavior
+			// Server is NOT running
+			if !idleShutdownAt.IsZero() {
+				// We stopped it for idle timeout. Check for new activity
+				// (e.g. EnsureRunning touched the activity file).
+				if !lastActivity.IsZero() && lastActivity.After(idleShutdownAt) {
+					// New activity since we stopped — restart
+					_, _ = Start(beadsDir)
+					idleShutdownAt = time.Time{}
+					continue
+				}
+				// No new activity yet. If we've been waiting longer than
+				// another full idle timeout since shutdown, give up and exit.
+				if time.Since(idleShutdownAt) > idleTimeout {
+					_ = os.Remove(monitorPidPath(beadsDir))
+					return
+				}
+				// Keep waiting for new activity
+				continue
+			}
+
+			// Server is down but we didn't stop it (crash or external stop)
 			if lastActivity.IsZero() || idleDuration > idleTimeout {
 				// No recent activity — just exit
 				_ = os.Remove(monitorPidPath(beadsDir))
