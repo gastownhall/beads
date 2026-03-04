@@ -490,7 +490,7 @@ func (s *DoltStore) deleteWispBatch(ctx context.Context, ids []string) (int, err
 }
 
 // deleteWispBatchTx deletes one batch of wisps inside its own transaction.
-// Keeping each transaction to ≤200 wisps (5 DELETE statements) ensures it
+// Keeping each transaction to ≤200 wisps (6 DELETE statements) ensures it
 // completes well within Dolt's 10 s write timeout.
 func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -501,13 +501,23 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 
 	inClause, args := doltBuildSQLInClause(ids)
 
-	// Delete from auxiliary tables.
-	// wisp_dependencies needs both issue_id and depends_on_id checked.
+	// Delete from wisp_dependencies using two separate queries rather than a
+	// single OR condition. An OR across issue_id and depends_on_id forces Dolt
+	// to union two index scans in one statement, which is slow enough to trigger
+	// the driver's write timeout on large batches (ff-tqm). Two targeted queries
+	// each use their own index: PRIMARY KEY for issue_id and
+	// idx_wisp_dep_depends for depends_on_id.
 	//nolint:gosec // G201: inClause contains only ? markers
 	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)", inClause, inClause),
-		append(args, args...)...); err != nil {
-		return 0, fmt.Errorf("failed to batch delete from wisp_dependencies: %w", err)
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE issue_id IN (%s)", inClause),
+		args...); err != nil {
+		return 0, fmt.Errorf("failed to batch delete from wisp_dependencies (issue_id): %w", err)
+	}
+	//nolint:gosec // G201: inClause contains only ? markers
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_id IN (%s)", inClause),
+		args...); err != nil {
+		return 0, fmt.Errorf("failed to batch delete from wisp_dependencies (depends_on_id): %w", err)
 	}
 
 	for _, table := range []string{"wisp_events", "wisp_comments", "wisp_labels"} {
