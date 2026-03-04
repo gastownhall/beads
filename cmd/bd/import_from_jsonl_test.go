@@ -212,6 +212,48 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
+	t.Run("skips tombstone entries during import", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		// JSONL with a mix of valid issues and tombstone entries (deleted agents from older versions)
+		jsonlContent := `{"id":"test-valid1","title":"Valid issue","type":"task","status":"open","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-tombstone1","title":"Deleted agent","type":"agent","status":"tombstone","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-valid2","title":"Another valid issue","type":"bug","status":"open","priority":1,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-tombstone2","title":"Another deleted agent","type":"agent","status":"tombstone","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed (tombstones should be skipped, not cause errors): %v", err)
+		}
+
+		if count != 2 {
+			t.Errorf("Expected 2 issues imported (tombstones skipped), got %d", count)
+		}
+
+		// Verify valid issues were imported
+		issue1, err := store.GetIssue(ctx, "test-valid1")
+		if err != nil {
+			t.Fatalf("Failed to get valid issue 1: %v", err)
+		}
+		if issue1.Title != "Valid issue" {
+			t.Errorf("Expected title 'Valid issue', got %q", issue1.Title)
+		}
+
+		// Verify tombstone entries were NOT imported
+		_, err = store.GetIssue(ctx, "test-tombstone1")
+		if err == nil {
+			t.Error("Expected tombstone issue to be skipped, but it was imported")
+		}
+	})
+
 	t.Run("sets prefix from first issue when not configured", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "dolt")

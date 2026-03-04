@@ -87,6 +87,12 @@ func importFromLocalJSONL(ctx context.Context, store *dolt.DoltStore, localPath 
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
 			return 0, fmt.Errorf("failed to parse issue from JSONL: %w", err)
 		}
+		// Skip tombstone entries: these are deleted issues exported by older
+		// versions (pre-v0.50) with status "tombstone" and deleted_at set.
+		// They are not valid for re-import since "tombstone" is not a real status.
+		if issue.Status == "tombstone" {
+			continue
+		}
 		issue.SetDefaults()
 		issues = append(issues, &issue)
 	}
