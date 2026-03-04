@@ -84,15 +84,6 @@ git config --get beads.role
 
 **Note:** Issue IDs are hash-based (e.g., `bd-a1b2`, `bd-f14c`) to prevent collisions when multiple agents/branches work concurrently.
 
-**Dependency visibility:** When issues have blocking dependencies, `bd list` shows them inline:
-```
-○ bd-a1b2 [P1] [task] - Set up database
-○ bd-f14c [P2] [feature] - Create API (blocked by: bd-a1b2)
-○ bd-g25d [P2] [feature] - Add authentication (blocked by: bd-f14c)
-```
-
-This makes dependencies unmissable when reviewing epic subtasks.
-
 ## Hierarchical Issues (Epics)
 
 For large features, use hierarchical IDs to organize work:
@@ -103,9 +94,9 @@ For large features, use hierarchical IDs to organize work:
 # Returns: bd-a3f8e9
 
 # Create child tasks (automatically get .1, .2, .3 suffixes)
-./bd create "Design login UI" -p 1       # bd-a3f8e9.1
-./bd create "Backend validation" -p 1    # bd-a3f8e9.2
-./bd create "Integration tests" -p 1     # bd-a3f8e9.3
+./bd create "Design login UI" -p 1 --parent bd-a3f8e9       # bd-a3f8e9.1
+./bd create "Backend validation" -p 1 --parent bd-a3f8e9    # bd-a3f8e9.2
+./bd create "Integration tests" -p 1 --parent bd-a3f8e9     # bd-a3f8e9.3
 
 # View hierarchy
 ./bd dep tree bd-a3f8e9
@@ -141,6 +132,13 @@ Output:
 → bd-3: Add authentication [P2] (open)
   → bd-2: Create API [P2] (open)
     → bd-1: Set up database [P1] (open)
+```
+
+**Dependency visibility:** `bd list` shows blocking dependencies inline:
+```
+○ bd-a1b2 [P1] [task] - Set up database
+○ bd-f14c [P2] [feature] - Create API (blocked by: bd-a1b2)
+○ bd-g25d [P2] [feature] - Add authentication (blocked by: bd-f14c)
 ```
 
 ## Find Ready Work
