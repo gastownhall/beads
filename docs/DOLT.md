@@ -27,16 +27,14 @@ bd init --server        # Initialize with server mode
 
 If upgrading from an older version that used SQLite:
 
-```bash
-# Preview the migration
-bd migrate --to-dolt --dry-run
-
-# Run the migration
-bd migrate --to-dolt
-
-# Optionally clean up SQLite files
-bd migrate --to-dolt --cleanup
-```
+> **Note:** The `bd migrate --to-dolt` command was removed in v0.58.0.
+> For pre-0.50 installations with JSONL data, use the migration script:
+>
+> ```bash
+> scripts/migrate-jsonl-to-dolt.sh
+> ```
+>
+> See [Troubleshooting](TROUBLESHOOTING.md#circuit-breaker-server-appears-down-failing-fast) if you encounter connection errors after migration.
 
 Migration creates backups automatically. Your original SQLite database is preserved as `beads.backup-pre-dolt-*.db`.
 

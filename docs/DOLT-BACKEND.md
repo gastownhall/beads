@@ -38,8 +38,7 @@ dolt version
 # New project (Dolt is the default backend)
 bd init
 
-# Or convert existing SQLite database (legacy installations)
-bd migrate --to-dolt
+# For legacy SQLite installations, see Migration from SQLite below
 ```
 
 ### 3. Configure Sync Mode
@@ -187,18 +186,16 @@ Use `bd doctor --fix` to resolve any discrepancies between SQL and CLI remote co
 
 If upgrading from an older version that used SQLite:
 
-### Option 1: In-Place Migration (Recommended)
+### Option 1: Migration Script
 
-```bash
-# Preview the migration
-bd migrate --to-dolt --dry-run
-
-# Run the migration
-bd migrate --to-dolt
-
-# Optionally clean up SQLite files
-bd migrate --to-dolt --cleanup
-```
+> **Note:** The `bd migrate --to-dolt` command was removed in v0.58.0.
+> For pre-0.50 installations with JSONL data, use the migration script:
+>
+> ```bash
+> scripts/migrate-jsonl-to-dolt.sh
+> ```
+>
+> See [Troubleshooting](TROUBLESHOOTING.md#circuit-breaker-server-appears-down-failing-fast) if you encounter connection errors after migration.
 
 ### Option 2: Fresh Start
 
