@@ -316,7 +316,7 @@ func enrichFreshClone(dc DoctorCheck) agentEnrichment {
 	// When the message mentions sync.git-remote, include it in the suggested commands.
 	if strings.Contains(dc.Message, "sync.git-remote") {
 		explanation = fmt.Sprintf("Fresh clone detected: %s. The .beads/ directory exists (committed to git) but the database is not found on the configured server. Consider setting sync.git-remote in .beads/config.yaml to bootstrap from a Dolt remote, then run bd init.", dc.Message)
-		commands = []string{"bd init", "Set sync.git-remote in .beads/config.yaml"}
+		commands = []string{"Set sync.git-remote in .beads/config.yaml", "bd init"}
 	}
 
 	return agentEnrichment{
