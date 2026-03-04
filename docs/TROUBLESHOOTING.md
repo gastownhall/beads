@@ -8,6 +8,8 @@ Common issues and solutions for bd users.
 - [Installation Issues](#installation-issues)
 - [Antivirus False Positives](#antivirus-false-positives)
 - [Database Issues](#database-issues)
+  - [Circuit breaker: "server appears down, failing fast"](#circuit-breaker-server-appears-down-failing-fast)
+  - [Connection failures after upgrading from pre-Dolt versions](#connection-failures-after-upgrading-from-pre-dolt-versions)
 - [Git and Sync Issues](#git-and-sync-issues)
 - [Ready Work and Dependencies](#ready-work-and-dependencies)
 - [Performance Issues](#performance-issues)
@@ -494,6 +496,60 @@ This means bd found multiple `.beads` directories in your directory hierarchy. T
    ```
 
 **Note**: The warning only appears when bd detects multiple databases. If you see this consistently and want to suppress it, you're using the correct database (marked with `▶`).
+
+### Circuit breaker: "server appears down, failing fast"
+
+**Symptom:** Every `bd` command fails with `dolt circuit breaker is open: server appears down, failing fast (cooldown 30s)`. This persists across repeated invocations.
+
+**Cause:** The circuit breaker tripped after repeated connection failures. Its state is stored in a file at `/tmp/beads-dolt-circuit-<port>.json` and shared across all `bd` processes. Once tripped, all commands are rejected until a successful probe resets it.
+
+**Note:** `bd dolt status` checks the server's PID file, not whether the server is actually accepting connections. A "running" status does not guarantee the server is reachable on the expected port.
+
+**Diagnosis:**
+
+```bash
+# Check circuit breaker state
+cat /tmp/beads-dolt-circuit-*.json
+
+# Check if the Dolt server is actually listening
+lsof -i :<port>
+
+# Compare configured port with what's actually running
+cat .beads/metadata.json | grep port
+```
+
+**Fix:**
+
+```bash
+rm /tmp/beads-dolt-circuit-*.json
+bd dolt stop
+bd dolt start
+bd list
+```
+
+**Note (macOS):** On macOS, `/tmp` is a symlink to `/private/tmp`. The circuit breaker state file may persist across reboots since `/private/tmp` is not always cleared on restart.
+
+### Connection failures after upgrading from pre-Dolt versions
+
+**Symptom:** After upgrading from v0.49 or earlier to v0.58+, `bd` commands fail with connection errors or the circuit breaker trips on first run.
+
+**Cause:** Pre-Dolt versions used SQLite for storage. The Dolt backend requires a running Dolt server. On first run after upgrading, the server may not be configured or started yet.
+
+**Fix:**
+
+1. If you have existing JSONL data from before v0.50, migrate it using the provided script:
+   ```bash
+   scripts/migrate-jsonl-to-dolt.sh
+   ```
+2. Start the Dolt server:
+   ```bash
+   bd dolt start
+   ```
+3. If the circuit breaker tripped during failed connection attempts, clear the state file (see [Circuit breaker: "server appears down, failing fast"](#circuit-breaker-server-appears-down-failing-fast) above).
+4. Verify everything is working:
+   ```bash
+   bd list
+   ```
 
 ## Git and Sync Issues
 
