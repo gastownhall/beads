@@ -508,6 +508,7 @@ var rootCmd = &cobra.Command{
 			doltCfg.ServerPassword = cfg.GetDoltServerPassword()
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 		}
+		doltCfg.SyncGitRemote = config.GetString("sync.git-remote")
 
 		// Auto-start: enabled by default.
 		// Can be disabled by explicit config or env var.
