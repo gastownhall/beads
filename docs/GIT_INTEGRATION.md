@@ -245,6 +245,39 @@ See [MULTI_REPO_MIGRATION.md](MULTI_REPO_MIGRATION.md) for complete guide.
 
 The Dolt database directory (`.beads/dolt/`) should be gitignored, not tracked via LFS or regular git.
 
+## Custom Merge Driver
+
+bd includes a built-in merge driver for resolving conflicts in `.beads/issues.jsonl` files. This replaces the standalone `beads-merge` binary that was previously maintained in a separate repository.
+
+### Alternative: Standalone beads-merge Binary (Deprecated)
+
+> **⚠️ Deprecated:** The standalone `beads-merge` binary (previously hosted at `github.com/neongreen/mono`) is no longer maintained and may be incompatible with current versions of bd. Use `bd merge` instead.
+
+The built-in `bd merge` command provides the same functionality:
+
+```bash
+bd merge <output> <base> <left> <right>
+```
+
+### Jujutsu Integration
+
+**For [Jujutsu](https://martinvonz.github.io/jj/) users**, add to `~/.config/jj/config.toml`:
+
+```toml
+[merge-tools.beads-merge]
+program = "bd"
+merge-args = ["merge", "$output", "$base", "$left", "$right"]
+merge-conflict-exit-codes = [1]
+```
+
+Then resolve conflicts with:
+
+```bash
+jj resolve --tool=beads-merge .beads/issues.jsonl
+```
+
+This configures Jujutsu to invoke `bd merge` as its merge tool, restricted to `.beads/issues.jsonl` (since it only handles beads data conflicts, not general file conflicts).
+
 ## See Also
 
 - [AGENTS.md](../AGENTS.md) - Main agent workflow guide
