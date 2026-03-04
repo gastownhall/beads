@@ -35,7 +35,6 @@ Tool-level settings you can configure:
 | `sync.mode` | - | `BD_SYNC_MODE` | `git-portable` | Sync mode (see below) |
 | `sync.export_on` | - | `BD_SYNC_EXPORT_ON` | `push` | When to export: `push`, `change` |
 | `sync.import_on` | - | `BD_SYNC_IMPORT_ON` | `pull` | When to import: `pull`, `change` |
-| `conflict.strategy` | - | `BD_CONFLICT_STRATEGY` | `newest` | Conflict resolution: `newest`, `ours`, `theirs`, `manual` |
 | `federation.remote` | - | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL for federation |
 | `federation.sovereignty` | - | `BD_FEDERATION_SOVEREIGNTY` | (none) | Data sovereignty tier: `T1`, `T2`, `T3`, `T4` |
 | `dolt.auto-commit` | `--dolt-auto-commit` | `BD_DOLT_AUTO_COMMIT` | `on` | (Dolt backend) Automatically create a Dolt commit after successful write commands |
@@ -162,17 +161,6 @@ Control when sync operations occur:
 - `sync.export_on`: `push` (default) or `change`
 - `sync.import_on`: `pull` (default) or `change`
 
-#### Conflict Resolution Strategies
-
-When merging conflicting changes:
-
-| Strategy | Description |
-|----------|-------------|
-| `newest` | (default) Keep the version with the newer `updated_at` timestamp |
-| `ours` | Always keep the local version |
-| `theirs` | Always keep the remote version |
-| `manual` | Require interactive resolution for each conflict |
-
 #### Federation Configuration
 
 - `federation.remote`: Dolt remote URL (e.g., `dolthub://org/beads`, `gs://bucket/beads`, `s3://bucket/beads`)
@@ -189,9 +177,6 @@ When merging conflicting changes:
 sync:
   export_on: push       # push | change
   import_on: pull       # pull | change
-
-conflict:
-  strategy: newest      # newest | ours | theirs | manual
 
 # Optional: Dolt federation
 federation:

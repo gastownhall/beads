@@ -157,9 +157,6 @@ func Initialize() error {
 	v.SetDefault("sync.export_on", SyncTriggerPush) // push | change
 	v.SetDefault("sync.import_on", SyncTriggerPull) // pull | change
 
-	// Conflict resolution configuration
-	v.SetDefault("conflict.strategy", ConflictStrategyNewest) // newest | ours | theirs | manual
-
 	// Federation configuration (optional Dolt remote)
 	v.SetDefault("federation.remote", "")      // e.g., dolthub://org/beads, gs://bucket/beads, s3://bucket/beads
 	v.SetDefault("federation.sovereignty", "") // T1 | T2 | T3 | T4 (empty = no restriction)
@@ -737,69 +734,6 @@ func GetSyncConfig() SyncConfig {
 		ExportOn: GetString("sync.export_on"),
 		ImportOn: GetString("sync.import_on"),
 	}
-}
-
-// ConflictConfig holds the conflict resolution configuration.
-type ConflictConfig struct {
-	Strategy ConflictStrategy         // newest, ours, theirs, manual (default for all fields)
-	Fields   map[string]FieldStrategy // Per-field strategy overrides
-}
-
-// GetConflictConfig returns the current conflict resolution configuration.
-func GetConflictConfig() ConflictConfig {
-	return ConflictConfig{
-		Strategy: GetConflictStrategy(),
-		Fields:   GetFieldStrategies(),
-	}
-}
-
-// GetFieldStrategies retrieves per-field conflict resolution strategies from config.
-// Returns a map of field name to strategy (e.g., {"labels": "union", "compaction_level": "max"}).
-// Invalid strategies are logged and skipped.
-//
-// Config key: conflict.fields
-// Example:
-//
-//	conflict:
-//	  strategy: newest
-//	  fields:
-//	    compaction_level: max
-//	    labels: union
-//	    waiters: union
-//	    estimated_minutes: manual
-func GetFieldStrategies() map[string]FieldStrategy {
-	result := make(map[string]FieldStrategy)
-	if v == nil {
-		return result
-	}
-
-	// Get the raw map from config
-	fieldsMap := v.GetStringMapString("conflict.fields")
-	if fieldsMap == nil {
-		return result
-	}
-
-	for field, strategyStr := range fieldsMap {
-		strategy := FieldStrategy(strings.ToLower(strings.TrimSpace(strategyStr)))
-		if !validFieldStrategies[strategy] {
-			logConfigWarning("Warning: invalid conflict.fields.%s strategy %q (valid: %s), skipping\n",
-				field, strategyStr, strings.Join(ValidFieldStrategies(), ", "))
-			continue
-		}
-		result[field] = strategy
-	}
-
-	return result
-}
-
-// GetFieldStrategy returns the merge strategy for a specific field.
-// Returns the per-field strategy if configured, otherwise returns "newest" (default).
-func GetFieldStrategy(field string) FieldStrategy {
-	fields := GetFieldStrategies()
-	if strategy, ok := fields[field]; ok {
-		return strategy
-	}
-	return FieldStrategyNewest // Default
 }
 
 // FederationConfig holds the federation (Dolt remote) configuration.

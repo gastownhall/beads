@@ -1134,21 +1134,6 @@ func TestSyncTriggerConstants(t *testing.T) {
 	}
 }
 
-func TestConflictStrategyConstants(t *testing.T) {
-	if ConflictStrategyNewest != "newest" {
-		t.Errorf("ConflictStrategyNewest = %q, want \"newest\"", ConflictStrategyNewest)
-	}
-	if ConflictStrategyOurs != "ours" {
-		t.Errorf("ConflictStrategyOurs = %q, want \"ours\"", ConflictStrategyOurs)
-	}
-	if ConflictStrategyTheirs != "theirs" {
-		t.Errorf("ConflictStrategyTheirs = %q, want \"theirs\"", ConflictStrategyTheirs)
-	}
-	if ConflictStrategyManual != "manual" {
-		t.Errorf("ConflictStrategyManual = %q, want \"manual\"", ConflictStrategyManual)
-	}
-}
-
 func TestSovereigntyConstants(t *testing.T) {
 	if SovereigntyT1 != "T1" {
 		t.Errorf("SovereigntyT1 = %q, want \"T1\"", SovereigntyT1)
@@ -1192,28 +1177,6 @@ func TestSyncConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestConflictConfigDefaults(t *testing.T) {
-	// Isolate from environment variables
-	restore := envSnapshot(t)
-	defer restore()
-
-	// Initialize config
-	if err := Initialize(); err != nil {
-		t.Fatalf("Initialize() returned error: %v", err)
-	}
-
-	// Test conflict strategy default
-	if got := GetConflictStrategy(); got != ConflictStrategyNewest {
-		t.Errorf("GetConflictStrategy() = %q, want %q", got, ConflictStrategyNewest)
-	}
-
-	// Test conflict config
-	cfg := GetConflictConfig()
-	if cfg.Strategy != ConflictStrategyNewest {
-		t.Errorf("GetConflictConfig().Strategy = %q, want %q", cfg.Strategy, ConflictStrategyNewest)
-	}
-}
-
 func TestFederationConfigDefaults(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)
@@ -1245,9 +1208,6 @@ sync:
   mode: dolt-native
   export_on: change
   import_on: change
-
-conflict:
-  strategy: ours
 
 federation:
   remote: dolthub://myorg/beads
@@ -1283,12 +1243,6 @@ federation:
 		t.Errorf("GetSyncConfig().ImportOn = %q, want %q", syncCfg.ImportOn, SyncTriggerChange)
 	}
 
-	// Test conflict config
-	conflictCfg := GetConflictConfig()
-	if conflictCfg.Strategy != ConflictStrategyOurs {
-		t.Errorf("GetConflictConfig().Strategy = %q, want %q", conflictCfg.Strategy, ConflictStrategyOurs)
-	}
-
 	// Test federation config
 	fedCfg := GetFederationConfig()
 	if fedCfg.Remote != "dolthub://myorg/beads" {
@@ -1313,23 +1267,6 @@ func TestGetSyncModeInvalid(t *testing.T) {
 	Set("sync.mode", "invalid-mode")
 	if got := GetSyncMode(); got != SyncModeDoltNative {
 		t.Errorf("GetSyncMode() with invalid mode = %q, want %q", got, SyncModeDoltNative)
-	}
-}
-
-func TestGetConflictStrategyInvalid(t *testing.T) {
-	// Isolate from environment variables
-	restore := envSnapshot(t)
-	defer restore()
-
-	// Initialize config
-	if err := Initialize(); err != nil {
-		t.Fatalf("Initialize() returned error: %v", err)
-	}
-
-	// Set invalid strategy - should fall back to newest
-	Set("conflict.strategy", "invalid-strategy")
-	if got := GetConflictStrategy(); got != ConflictStrategyNewest {
-		t.Errorf("GetConflictStrategy() with invalid strategy = %q, want %q (fallback)", got, ConflictStrategyNewest)
 	}
 }
 
@@ -1448,144 +1385,6 @@ func TestGetCustomTypesFromYAML_NilViper(t *testing.T) {
 	got := GetCustomTypesFromYAML()
 	if got != nil {
 		t.Errorf("GetCustomTypesFromYAML() with nil viper = %v, want nil", got)
-	}
-}
-
-func TestGetFieldStrategies(t *testing.T) {
-	// Isolate from environment variables
-	restore := envSnapshot(t)
-	defer restore()
-
-	// Initialize config
-	ResetForTesting()
-	if err := Initialize(); err != nil {
-		t.Fatalf("Initialize() returned error: %v", err)
-	}
-
-	t.Run("empty_by_default", func(t *testing.T) {
-		result := GetFieldStrategies()
-		if len(result) != 0 {
-			t.Errorf("GetFieldStrategies() with no config = %v, want empty map", result)
-		}
-	})
-
-	t.Run("valid_strategies", func(t *testing.T) {
-		ResetForTesting()
-		if err := Initialize(); err != nil {
-			t.Fatalf("Initialize() returned error: %v", err)
-		}
-
-		// Set per-field strategies
-		Set("conflict.fields", map[string]string{
-			"compaction_level":  "max",
-			"labels":            "union",
-			"estimated_minutes": "manual",
-			"status":            "newest",
-		})
-
-		result := GetFieldStrategies()
-
-		if result["compaction_level"] != FieldStrategyMax {
-			t.Errorf("Expected compaction_level=max, got %s", result["compaction_level"])
-		}
-		if result["labels"] != FieldStrategyUnion {
-			t.Errorf("Expected labels=union, got %s", result["labels"])
-		}
-		if result["estimated_minutes"] != FieldStrategyManual {
-			t.Errorf("Expected estimated_minutes=manual, got %s", result["estimated_minutes"])
-		}
-		if result["status"] != FieldStrategyNewest {
-			t.Errorf("Expected status=newest, got %s", result["status"])
-		}
-	})
-
-	t.Run("invalid_strategy_skipped", func(t *testing.T) {
-		ResetForTesting()
-		if err := Initialize(); err != nil {
-			t.Fatalf("Initialize() returned error: %v", err)
-		}
-
-		// Set a mix of valid and invalid strategies
-		Set("conflict.fields", map[string]string{
-			"compaction_level": "max",
-			"invalid_field":    "invalid-strategy",
-		})
-
-		result := GetFieldStrategies()
-
-		// Valid one should be present
-		if result["compaction_level"] != FieldStrategyMax {
-			t.Errorf("Expected compaction_level=max, got %s", result["compaction_level"])
-		}
-		// Invalid one should be skipped
-		if _, exists := result["invalid_field"]; exists {
-			t.Errorf("Expected invalid_field to be skipped, but it was included: %s", result["invalid_field"])
-		}
-	})
-}
-
-func TestGetFieldStrategy(t *testing.T) {
-	// Isolate from environment variables
-	restore := envSnapshot(t)
-	defer restore()
-
-	// Initialize config
-	ResetForTesting()
-	if err := Initialize(); err != nil {
-		t.Fatalf("Initialize() returned error: %v", err)
-	}
-
-	t.Run("returns_default_for_unconfigured_field", func(t *testing.T) {
-		result := GetFieldStrategy("unconfigured_field")
-		if result != FieldStrategyNewest {
-			t.Errorf("GetFieldStrategy(unconfigured_field) = %s, want newest (default)", result)
-		}
-	})
-
-	t.Run("returns_configured_strategy", func(t *testing.T) {
-		ResetForTesting()
-		if err := Initialize(); err != nil {
-			t.Fatalf("Initialize() returned error: %v", err)
-		}
-
-		Set("conflict.fields", map[string]string{
-			"compaction_level": "max",
-		})
-
-		result := GetFieldStrategy("compaction_level")
-		if result != FieldStrategyMax {
-			t.Errorf("GetFieldStrategy(compaction_level) = %s, want max", result)
-		}
-	})
-}
-
-func TestGetConflictConfigWithFields(t *testing.T) {
-	// Isolate from environment variables
-	restore := envSnapshot(t)
-	defer restore()
-
-	// Initialize config
-	ResetForTesting()
-	if err := Initialize(); err != nil {
-		t.Fatalf("Initialize() returned error: %v", err)
-	}
-
-	Set("conflict.strategy", "ours")
-	Set("conflict.fields", map[string]string{
-		"compaction_level": "max",
-		"labels":           "union",
-	})
-
-	result := GetConflictConfig()
-
-	if result.Strategy != ConflictStrategyOurs {
-		t.Errorf("GetConflictConfig().Strategy = %s, want ours", result.Strategy)
-	}
-	if result.Fields["compaction_level"] != FieldStrategyMax {
-		t.Errorf("GetConflictConfig().Fields[compaction_level] = %s, want max", result.Fields["compaction_level"])
-	}
-	if result.Fields["labels"] != FieldStrategyUnion {
-		t.Errorf("GetConflictConfig().Fields[labels] = %s, want union", result.Fields["labels"])
 	}
 }
 

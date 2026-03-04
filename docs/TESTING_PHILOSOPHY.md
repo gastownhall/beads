@@ -234,7 +234,7 @@ TestPriority(5)  // boundary - first invalid
 |------|---------------------|
 | Sync/Export/Import | Data integrity critical - comprehensive edge cases |
 | SQLite transactions | Rollback safety, atomicity guarantees |
-| Merge operations | 3-way merge with conflict resolution |
+| Merge operations | Dolt-native cell-level merge |
 | Database locking | Prevents corruption from multiple instances |
 
 ### Needs Attention

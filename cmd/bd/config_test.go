@@ -354,27 +354,6 @@ sync:
 		}
 	})
 
-	t.Run("invalid conflict.strategy", func(t *testing.T) {
-		configContent := `prefix: test
-conflict:
-  strategy: "invalid-strategy"
-`
-		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configContent), 0644); err != nil {
-			t.Fatalf("Failed to write config.yaml: %v", err)
-		}
-
-		issues := validateSyncConfig(tmpDir)
-		found := false
-		for _, issue := range issues {
-			if strings.Contains(issue, "conflict.strategy") {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("Expected issue about conflict.strategy, got: %v", issues)
-		}
-	})
 
 	t.Run("invalid federation.sovereignty", func(t *testing.T) {
 		configContent := `prefix: test

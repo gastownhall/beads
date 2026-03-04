@@ -355,7 +355,6 @@ var configValidateCmd = &cobra.Command{
 
 Checks:
   - sync.mode is a valid value (dolt-native)
-  - conflict.strategy is valid (newest, ours, theirs, manual)
   - federation.sovereignty is valid (T1, T2, T3, T4, or empty)
   - federation.remote is set when sync.mode requires it
   - Remote URL format is valid (dolthub://, gs://, s3://, file://)
@@ -436,18 +435,12 @@ func validateSyncConfig(repoPath string) []string {
 
 	// Get config from yaml
 	syncMode := v.GetString("sync.mode")
-	conflictStrategy := v.GetString("conflict.strategy")
 	federationSov := v.GetString("federation.sovereignty")
 	federationRemote := v.GetString("federation.remote")
 
 	// Validate sync.mode
 	if syncMode != "" && !config.IsValidSyncMode(syncMode) {
 		issues = append(issues, fmt.Sprintf("sync.mode: %q is invalid (valid values: %s)", syncMode, strings.Join(config.ValidSyncModes(), ", ")))
-	}
-
-	// Validate conflict.strategy
-	if conflictStrategy != "" && !config.IsValidConflictStrategy(conflictStrategy) {
-		issues = append(issues, fmt.Sprintf("conflict.strategy: %q is invalid (valid values: %s)", conflictStrategy, strings.Join(config.ValidConflictStrategies(), ", ")))
 	}
 
 	// Validate federation.sovereignty
