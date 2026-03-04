@@ -180,36 +180,44 @@ func (s *DoltStore) GetCommentsForIssues(ctx context.Context, issueIDs []string)
 }
 
 // getCommentsForIDsInto queries comments from the specified table and merges into result.
+// Uses batched IN clauses (queryBatchSize) to avoid full table scans on Dolt with large ID sets.
 func (s *DoltStore) getCommentsForIDsInto(ctx context.Context, table string, ids []string, result map[string][]*types.Comment) error {
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-
-	//nolint:gosec // G201: table is hardcoded, placeholders contains only ? markers
-	query := fmt.Sprintf(`
-		SELECT id, issue_id, author, text, created_at
-		FROM %s
-		WHERE issue_id IN (%s)
-		ORDER BY issue_id, created_at ASC
-	`, table, joinStrings(placeholders, ","))
-
-	rows, err := s.queryContext(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to get comments from %s: %w", table, err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var c types.Comment
-		if err := rows.Scan(&c.ID, &c.IssueID, &c.Author, &c.Text, &c.CreatedAt); err != nil {
-			return fmt.Errorf("failed to scan comment: %w", err)
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(ids) {
+			end = len(ids)
 		}
-		result[c.IssueID] = append(result[c.IssueID], &c)
+		batch := ids[start:end]
+		placeholders, args := doltBuildSQLInClause(batch)
+
+		//nolint:gosec // G201: table is hardcoded, placeholders contains only ? markers
+		query := fmt.Sprintf(`
+			SELECT id, issue_id, author, text, created_at
+			FROM %s
+			WHERE issue_id IN (%s)
+			ORDER BY issue_id, created_at ASC
+		`, table, placeholders)
+
+		rows, err := s.queryContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("failed to get comments from %s: %w", table, err)
+		}
+
+		for rows.Next() {
+			var c types.Comment
+			if err := rows.Scan(&c.ID, &c.IssueID, &c.Author, &c.Text, &c.CreatedAt); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("failed to scan comment: %w", err)
+			}
+			result[c.IssueID] = append(result[c.IssueID], &c)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
 	}
-	return rows.Err()
+	return nil
 }
 
 // GetCommentCounts returns the number of comments for each issue in a single batch query.
@@ -239,37 +247,45 @@ func (s *DoltStore) GetCommentCounts(ctx context.Context, issueIDs []string) (ma
 }
 
 // getCommentCountsInto queries comment counts from the specified table and merges into result.
+// Uses batched IN clauses (queryBatchSize) to avoid full table scans on Dolt with large ID sets.
 func (s *DoltStore) getCommentCountsInto(ctx context.Context, table string, ids []string, result map[string]int) error {
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-
-	//nolint:gosec // G201: table is hardcoded, placeholders contains only ? markers
-	query := fmt.Sprintf(`
-		SELECT issue_id, COUNT(*) as comment_count
-		FROM %s
-		WHERE issue_id IN (%s)
-		GROUP BY issue_id
-	`, table, joinStrings(placeholders, ","))
-
-	rows, err := s.queryContext(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to get comment counts from %s: %w", table, err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var issueID string
-		var count int
-		if err := rows.Scan(&issueID, &count); err != nil {
-			return fmt.Errorf("failed to scan comment count: %w", err)
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(ids) {
+			end = len(ids)
 		}
-		result[issueID] = count
+		batch := ids[start:end]
+		placeholders, args := doltBuildSQLInClause(batch)
+
+		//nolint:gosec // G201: table is hardcoded, placeholders contains only ? markers
+		query := fmt.Sprintf(`
+			SELECT issue_id, COUNT(*) as comment_count
+			FROM %s
+			WHERE issue_id IN (%s)
+			GROUP BY issue_id
+		`, table, placeholders)
+
+		rows, err := s.queryContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("failed to get comment counts from %s: %w", table, err)
+		}
+
+		for rows.Next() {
+			var issueID string
+			var count int
+			if err := rows.Scan(&issueID, &count); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("failed to scan comment count: %w", err)
+			}
+			result[issueID] = count
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
 	}
-	return rows.Err()
+	return nil
 }
 
 // scanEvents scans event rows into a slice.

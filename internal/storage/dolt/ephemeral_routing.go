@@ -154,6 +154,7 @@ func (s *DoltStore) partitionByWispStatus(ctx context.Context, ids []string) (wi
 
 // batchWispExists returns the set of IDs that exist in the wisps table.
 // Used by partitionByWispStatus to detect explicit-ID ephemerals in a single query.
+// Uses batched IN clauses (queryBatchSize) to avoid full table scans on Dolt with large ID sets.
 func (s *DoltStore) batchWispExists(ctx context.Context, ids []string) map[string]bool {
 	if len(ids) == 0 {
 		return nil
@@ -162,28 +163,30 @@ func (s *DoltStore) batchWispExists(ctx context.Context, ids []string) map[strin
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-
-	//nolint:gosec // G201: placeholders contains only ? markers
-	rows, err := s.db.QueryContext(ctx,
-		fmt.Sprintf("SELECT id FROM wisps WHERE id IN (%s)", strings.Join(placeholders, ",")),
-		args...)
-	if err != nil {
-		return nil // On error, assume no wisps (safe fallback)
-	}
-	defer rows.Close()
-
 	result := make(map[string]bool)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			result[id] = true
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(ids) {
+			end = len(ids)
 		}
+		batch := ids[start:end]
+		placeholders, args := doltBuildSQLInClause(batch)
+
+		//nolint:gosec // G201: placeholders contains only ? markers
+		rows, err := s.db.QueryContext(ctx,
+			fmt.Sprintf("SELECT id FROM wisps WHERE id IN (%s)", placeholders),
+			args...)
+		if err != nil {
+			return nil // On error, assume no wisps (safe fallback)
+		}
+
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err == nil {
+				result[id] = true
+			}
+		}
+		_ = rows.Close()
 	}
 	return result
 }
