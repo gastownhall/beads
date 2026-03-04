@@ -1,6 +1,9 @@
 package doctor
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // AgentDiagnostic represents a single check result enriched for agent consumption.
 // ZFC-compliant: Go observes and reports, the agent decides and acts.
@@ -307,12 +310,21 @@ func enrichGitUpstream(dc DoctorCheck) agentEnrichment {
 }
 
 func enrichFreshClone(dc DoctorCheck) agentEnrichment {
+	commands := []string{"bd init"}
+	explanation := fmt.Sprintf("Fresh clone detected: %s. The .beads/ directory exists (committed to git) but the local database hasn't been initialized. Run bd init to bootstrap from the tracked config.", dc.Message)
+
+	// When the message mentions sync.git-remote, include it in the suggested commands.
+	if strings.Contains(dc.Message, "sync.git-remote") {
+		explanation = fmt.Sprintf("Fresh clone detected: %s. The .beads/ directory exists (committed to git) but the database is not found on the configured server. Consider setting sync.git-remote in .beads/config.yaml to bootstrap from a Dolt remote, then run bd init.", dc.Message)
+		commands = []string{"bd init", "Set sync.git-remote in .beads/config.yaml"}
+	}
+
 	return agentEnrichment{
 		severity:    "blocking",
-		explanation: fmt.Sprintf("Fresh clone detected: %s. The .beads/ directory exists (committed to git) but the local database hasn't been initialized. Run bd init to bootstrap from the tracked config.", dc.Message),
+		explanation: explanation,
 		observed:    dc.Message,
 		expected:    "Local database initialized and ready for use",
-		commands:    []string{"bd init"},
+		commands:    commands,
 		sourceFiles: []string{"cmd/bd/doctor/legacy.go:CheckFreshClone"},
 	}
 }

@@ -9,7 +9,9 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // CheckLegacyBeadsSlashCommands detects old /beads:* slash commands in documentation
@@ -301,6 +303,22 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 				Status:  StatusOK,
 				Message: "Database exists",
 			}
+		}
+		// No local dolt directory — check server mode (FR-020, FR-021).
+		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.IsDoltServerMode() {
+			host := cfg.GetDoltServerHost()
+			// Use DefaultConfig (not deprecated GetDoltServerPort) to resolve
+			// the correct port for standalone server mode (hash-derived).
+			port := doltserver.DefaultConfig(beadsDir).Port
+			user := cfg.GetDoltServerUser()
+			password := cfg.GetDoltServerPassword()
+			dbName := cfg.GetDoltDatabase()
+			result := checkFreshCloneDB(host, port, user, password, dbName)
+			if result.Reachable {
+				syncGitRemote := config.GetStringFromDir(beadsDir, "sync.git-remote")
+				return freshCloneServerResult(result.Exists, dbName, host, port, syncGitRemote)
+			}
+			// Server unreachable — fall through to existing behavior (FR-030).
 		}
 	default:
 		// SQLite (default): check configured .db file path.
