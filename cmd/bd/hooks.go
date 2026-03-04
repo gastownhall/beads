@@ -32,10 +32,6 @@ const inlineHookMarker = "# bd (beads)"
 const hookSectionBeginPrefix = "# --- BEGIN BEADS INTEGRATION"
 const hookSectionEndPrefix = "# --- END BEADS INTEGRATION"
 
-// hookSectionEnd is kept for backward compatibility in tests and external references.
-// New code should use hookSectionEndPrefix for matching (handles both versioned and unversioned).
-const hookSectionEnd = "# --- END BEADS INTEGRATION ---"
-
 // hookSectionBeginLine returns the full begin marker line with the current version.
 func hookSectionBeginLine() string {
 	return fmt.Sprintf("%s v%s ---", hookSectionBeginPrefix, Version)
@@ -63,10 +59,26 @@ func generateHookSection(hookName string) string {
 
 // injectHookSection merges the beads section into existing hook file content.
 // If section markers are found, only the content between them is replaced.
-// If an orphaned BEGIN exists (no matching END), the stale block is removed
-// before injecting the new section.
+// If broken markers exist (orphaned BEGIN, reversed order), the stale markers
+// are removed before injecting the new section.
 // If no markers are found, the section is appended.
 func injectHookSection(existing, section string) string {
+	return injectHookSectionWithDepth(existing, section, 0)
+}
+
+// maxInjectDepth guards against infinite recursion when cleaning broken markers.
+const maxInjectDepth = 5
+
+func injectHookSectionWithDepth(existing, section string, depth int) string {
+	if depth > maxInjectDepth {
+		// Safety: too many recursive cleanups — append as fallback
+		result := existing
+		if !strings.HasSuffix(result, "\n") {
+			result += "\n"
+		}
+		return result + "\n" + section
+	}
+
 	beginIdx := strings.Index(existing, hookSectionBeginPrefix)
 	endIdx := strings.Index(existing, hookSectionEndPrefix)
 
@@ -90,44 +102,15 @@ func injectHookSection(existing, section string) string {
 		}
 
 		return existing[:lineStart] + section + existing[endOfEndMarker:]
-	} else if beginIdx != -1 && endIdx == -1 {
-		// Case 2: orphaned BEGIN without END — remove from BEGIN line
-		// to next blank line, next BEGIN marker, or EOF, then inject section
-		lineStart := strings.LastIndex(existing[:beginIdx], "\n")
-		if lineStart == -1 {
-			lineStart = 0
-		} else {
-			lineStart++ // skip the newline itself
-		}
-
-		// Scan forward from after the BEGIN line for the end of the orphaned block
-		afterBegin := existing[beginIdx:]
-		blockEnd := len(existing)
-
-		lines := strings.SplitAfter(afterBegin, "\n")
-		scanned := beginIdx
-		for i, line := range lines {
-			if i == 0 {
-				// Skip the BEGIN line itself
-				scanned += len(line)
-				continue
-			}
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				// Blank line — end of orphaned block (include the blank line)
-				blockEnd = scanned + len(line)
-				break
-			}
-			if strings.Contains(line, hookSectionBeginPrefix) {
-				// Next BEGIN marker — end before this line
-				blockEnd = scanned
-				break
-			}
-			scanned += len(line)
-		}
-
-		cleaned := existing[:lineStart] + existing[blockEnd:]
-		return injectHookSection(cleaned, section)
+	} else if beginIdx != -1 {
+		// Case 2: broken markers — orphaned BEGIN (no END) or reversed (END before BEGIN).
+		// Remove the orphaned/stale block, then recurse to handle remaining markers.
+		cleaned := removeOrphanedBeginBlock(existing, beginIdx)
+		return injectHookSectionWithDepth(cleaned, section, depth+1)
+	} else if endIdx != -1 {
+		// Case 2b: orphaned END without BEGIN — remove the stale END line
+		cleaned := removeMarkerLine(existing, endIdx, hookSectionEndPrefix)
+		return injectHookSectionWithDepth(cleaned, section, depth+1)
 	}
 
 	// Case 3: no markers — append
@@ -139,18 +122,9 @@ func injectHookSection(existing, section string) string {
 	return result
 }
 
-// removeHookSection removes only the beads section from hook file content.
-// Returns the content with the section removed, and true if a section was found.
-// Handles both valid BEGIN...END pairs and orphaned BEGIN-without-END.
-func removeHookSection(content string) (string, bool) {
-	beginIdx := strings.Index(content, hookSectionBeginPrefix)
-	if beginIdx == -1 {
-		return content, false
-	}
-
-	endIdx := strings.Index(content, hookSectionEndPrefix)
-
-	// Find start of the begin-marker line
+// removeOrphanedBeginBlock removes an orphaned BEGIN block starting at beginIdx.
+// Scans forward from the BEGIN line to the next blank line, next BEGIN marker, or EOF.
+func removeOrphanedBeginBlock(content string, beginIdx int) string {
 	lineStart := strings.LastIndex(content[:beginIdx], "\n")
 	if lineStart == -1 {
 		lineStart = 0
@@ -158,48 +132,109 @@ func removeHookSection(content string) (string, bool) {
 		lineStart++ // skip the newline itself
 	}
 
-	var endOfSection int
-	if endIdx != -1 && endIdx > beginIdx {
-		// Valid BEGIN...END pair
-		endOfSection = endIdx + len(hookSectionEndPrefix)
-		// Consume the rest of the end-marker line
+	afterBegin := content[beginIdx:]
+	blockEnd := len(content)
+
+	lines := strings.SplitAfter(afterBegin, "\n")
+	scanned := beginIdx
+	for i, line := range lines {
+		if i == 0 {
+			// Skip the BEGIN line itself
+			scanned += len(line)
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			// Blank line — end of orphaned block (include the blank line)
+			blockEnd = scanned + len(line)
+			break
+		}
+		if strings.Contains(line, hookSectionBeginPrefix) {
+			// Next BEGIN marker — end before this line
+			blockEnd = scanned
+			break
+		}
+		scanned += len(line)
+	}
+
+	return content[:lineStart] + content[blockEnd:]
+}
+
+// removeMarkerLine removes a single marker line from content.
+func removeMarkerLine(content string, markerIdx int, markerPrefix string) string {
+	lineStart := strings.LastIndex(content[:markerIdx], "\n")
+	if lineStart == -1 {
+		lineStart = 0
+	} else {
+		lineStart++ // skip the newline itself
+	}
+
+	lineEnd := markerIdx + len(markerPrefix)
+	restAfterPrefix := content[lineEnd:]
+	if nlIdx := strings.Index(restAfterPrefix, "\n"); nlIdx != -1 {
+		lineEnd += nlIdx + 1
+	} else {
+		lineEnd = len(content)
+	}
+
+	return content[:lineStart] + content[lineEnd:]
+}
+
+// removeHookSection removes only the beads section from hook file content.
+// Returns the content with the section removed, and true if a section was found.
+// Handles valid BEGIN...END pairs, orphaned BEGIN, orphaned END, and reversed markers.
+func removeHookSection(content string) (string, bool) {
+	beginIdx := strings.Index(content, hookSectionBeginPrefix)
+	endIdx := strings.Index(content, hookSectionEndPrefix)
+
+	if beginIdx == -1 && endIdx == -1 {
+		return content, false
+	}
+
+	if beginIdx != -1 && endIdx != -1 && beginIdx < endIdx {
+		// Valid BEGIN...END pair — remove the whole section
+		lineStart := strings.LastIndex(content[:beginIdx], "\n")
+		if lineStart == -1 {
+			lineStart = 0
+		} else {
+			lineStart++
+		}
+
+		endOfSection := endIdx + len(hookSectionEndPrefix)
 		restAfterPrefix := content[endOfSection:]
 		if nlIdx := strings.Index(restAfterPrefix, "\n"); nlIdx != -1 {
 			endOfSection += nlIdx + 1
 		} else {
 			endOfSection = len(content)
 		}
-	} else {
-		// Orphaned BEGIN without END — remove to next blank line, next BEGIN, or EOF
-		afterBegin := content[beginIdx:]
-		endOfSection = len(content)
 
-		lines := strings.SplitAfter(afterBegin, "\n")
-		scanned := beginIdx
-		for i, line := range lines {
-			if i == 0 {
-				scanned += len(line)
-				continue
-			}
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				endOfSection = scanned + len(line)
-				break
-			}
-			if strings.Contains(line, hookSectionBeginPrefix) {
-				endOfSection = scanned
-				break
-			}
-			scanned += len(line)
+		// Also consume a blank line before the section if present
+		if lineStart >= 2 && content[lineStart-1] == '\n' && content[lineStart-2] == '\n' {
+			lineStart--
+		}
+
+		return content[:lineStart] + content[endOfSection:], true
+	}
+
+	// Broken markers: orphaned BEGIN, orphaned END, or reversed order.
+	// Remove whichever markers exist.
+	result := content
+	if beginIdx != -1 {
+		result = removeOrphanedBeginBlock(result, strings.Index(result, hookSectionBeginPrefix))
+	}
+	if endIdx != -1 {
+		// Re-find END index in the (possibly modified) result
+		if newEndIdx := strings.Index(result, hookSectionEndPrefix); newEndIdx != -1 {
+			result = removeMarkerLine(result, newEndIdx, hookSectionEndPrefix)
 		}
 	}
 
-	// Also consume a blank line before the section if present
-	if lineStart >= 2 && content[lineStart-1] == '\n' && content[lineStart-2] == '\n' {
-		lineStart--
+	// Trim trailing blank lines that may be left from removal
+	for strings.HasSuffix(result, "\n\n\n") {
+		result = result[:len(result)-1]
 	}
 
-	return content[:lineStart] + content[endOfSection:], true
+	return result, true
 }
 
 // HookStatus represents the status of a single git hook

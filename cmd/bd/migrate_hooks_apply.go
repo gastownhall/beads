@@ -139,12 +139,15 @@ func buildHookMigrationExecutionPlan(plan doctor.HookMigrationPlan) hookMigratio
 			execPlan.BlockingErrors = append(execPlan.BlockingErrors, formatHookMigrationBlockingError(hook))
 			continue
 		case "marker_broken":
-			// Broken markers are fixable: replace entire file with clean section
+			// Broken markers are fixable: read existing file and re-inject.
+			// injectHookSection handles orphaned/reversed markers while preserving
+			// user content outside the broken markers.
 			execPlan.WriteOps = append(execPlan.WriteOps, hookMigrationWriteOp{
 				HookName:   hook.Name,
 				HookPath:   hook.HookPath,
 				State:      hook.State,
-				SourceKind: hookMigrationWriteFromTemplate,
+				SourceKind: hookMigrationWriteFromHookFile,
+				SourcePath: hook.HookPath,
 			})
 			continue
 		}
