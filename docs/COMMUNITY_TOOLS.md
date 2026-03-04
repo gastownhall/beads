@@ -54,7 +54,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[nvim-beads](https://github.com/joeblubaugh/nvim-beads)** - Neovim plugin for managing beads. Built by [@joeblubaugh](https://github.com/joeblubaugh). (Lua)
 
-- **[nvim-beads](https://github.com/fancypantalons/nvim-beads)** - Neovim plugin for managing Beads issues. By [@fancypantalons](https://github.com/fancypantalons).
+- **[nvim-beads (fancypantalons)](https://github.com/fancypantalons/nvim-beads)** - Neovim plugin for managing Beads issues. By [@fancypantalons](https://github.com/fancypantalons). (Lua)
 
 - **[beads-manager](https://plugins.jetbrains.com/plugin/30089-beads-manager)** - Jetbrains IDE plugin to manage and view bead details. Maintained by [@developmeh](https://github.com/developmeh). (Kotlin)
 
