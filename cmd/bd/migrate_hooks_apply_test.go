@@ -79,6 +79,56 @@ func TestApplyHookMigrationExecution_LegacyWithBothSidecarsPrefersOld(t *testing
 	assertMissingHookMigrationFile(t, preCommitPath+".backup")
 }
 
+func TestApplyHookMigrationExecution_LegacyWithBackupSidecar(t *testing.T) {
+	repoDir, hooksDir := setupHookMigrationRepo(t)
+	preCommitPath := filepath.Join(hooksDir, "pre-commit")
+
+	writeHookMigrationFile(t, preCommitPath, "#!/usr/bin/env sh\n# bd-shim v2\n# bd-hooks-version: 0.56.1\nexec bd hooks run pre-commit \"$@\"\n")
+	writeHookMigrationFile(t, preCommitPath+".backup", "#!/usr/bin/env sh\necho backup-custom\n")
+
+	plan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("PlanHookMigration failed: %v", err)
+	}
+
+	var hook *doctor.HookMigrationHookPlan
+	for i := range plan.Hooks {
+		if plan.Hooks[i].Name == "pre-commit" {
+			hook = &plan.Hooks[i]
+			break
+		}
+	}
+	if hook == nil {
+		t.Fatal("pre-commit not found in plan")
+	}
+	if hook.State != "legacy_with_backup_sidecar" {
+		t.Fatalf("expected state legacy_with_backup_sidecar, got %q", hook.State)
+	}
+
+	execPlan := buildHookMigrationExecutionPlan(plan)
+	summary, err := applyHookMigrationExecution(execPlan)
+	if err != nil {
+		t.Fatalf("applyHookMigrationExecution failed: %v", err)
+	}
+	if summary.WrittenHookCount != 1 {
+		t.Fatalf("expected 1 written hook, got %d", summary.WrittenHookCount)
+	}
+	if summary.RetiredCount != 1 {
+		t.Fatalf("expected 1 retired artifact, got %d", summary.RetiredCount)
+	}
+
+	rendered := mustReadHookMigrationFile(t, preCommitPath)
+	if !strings.Contains(rendered, "echo backup-custom") {
+		t.Fatalf("expected migrated hook to preserve .backup body, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, hookSectionBeginPrefix) || !strings.Contains(rendered, hookSectionEndPrefix) {
+		t.Fatalf("expected migrated hook to contain marker section, got:\n%s", rendered)
+	}
+
+	assertMissingHookMigrationFile(t, preCommitPath+".backup")
+	assertExistsHookMigrationFile(t, preCommitPath+".backup.migrated")
+}
+
 func TestApplyHookMigrationExecution_CustomWithSidecarsPreservesHookBody(t *testing.T) {
 	repoDir, hooksDir := setupHookMigrationRepo(t)
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")
