@@ -210,6 +210,27 @@ func TestInjectHookSection(t *testing.T) {
 			existing: "#!/bin/sh\necho before\n# --- BEGIN BEADS INTEGRATION v0.40.0 ---\nold content\n# --- END BEADS INTEGRATION ---\necho after\n",
 			wantHas:  []string{"echo before", "echo after", "bd hooks run pre-commit", hookSectionEnd},
 		},
+		{
+			name:     "orphaned BEGIN without END",
+			existing: "#!/bin/sh\n# --- BEGIN BEADS INTEGRATION v0.57.0 ---\nbd hook pre-commit \"$@\"\n",
+			wantHas:  []string{"#!/bin/sh\n", hookSectionBeginPrefix, "bd hooks run pre-commit"},
+		},
+		{
+			name: "orphaned BEGIN followed by valid block",
+			existing: "#!/bin/sh\n" +
+				"# --- BEGIN BEADS INTEGRATION v0.57.0 ---\n" +
+				"bd hook pre-commit \"$@\"\n" +
+				"\n" +
+				"# --- BEGIN BEADS INTEGRATION v0.58.0 ---\n" +
+				"# This section is managed by beads. Do not remove these markers.\n" +
+				"if command -v bd >/dev/null 2>&1; then\n" +
+				"  export BD_GIT_HOOK=1\n" +
+				"  bd hooks run pre-commit \"$@\"\n" +
+				"  _bd_exit=$?; if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\n" +
+				"fi\n" +
+				"# --- END BEADS INTEGRATION ---\n",
+			wantHas: []string{"#!/bin/sh\n", hookSectionBeginPrefix, "bd hooks run pre-commit"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -227,6 +248,19 @@ func TestInjectHookSection(t *testing.T) {
 				}
 				if strings.Contains(result, "v0.40.0") {
 					t.Error("old version should have been replaced")
+				}
+			}
+			// Verify orphaned BEGIN scenarios leave exactly one section
+			if tt.name == "orphaned BEGIN without END" || tt.name == "orphaned BEGIN followed by valid block" {
+				beginCount := strings.Count(result, hookSectionBeginPrefix)
+				if beginCount != 1 {
+					t.Errorf("expected exactly 1 BEGIN marker, got %d\ngot:\n%s", beginCount, result)
+				}
+				if strings.Contains(result, "bd hook pre-commit") && !strings.Contains(result, "bd hooks run pre-commit") {
+					t.Error("stale 'bd hook' command should have been removed")
+				}
+				if strings.Contains(result, "v0.57.0") {
+					t.Error("stale v0.57.0 marker should have been removed")
 				}
 			}
 		})
@@ -259,6 +293,13 @@ func TestRemoveHookSection(t *testing.T) {
 			content:   "#!/bin/sh\n" + generateHookSection("pre-commit"),
 			wantFound: true,
 			wantNot:   []string{hookSectionBeginPrefix},
+		},
+		{
+			name:      "orphaned BEGIN without END",
+			content:   "#!/bin/sh\necho before\n\n# --- BEGIN BEADS INTEGRATION v0.57.0 ---\nbd hook pre-commit \"$@\"\n",
+			wantFound: true,
+			wantHas:   []string{"echo before"},
+			wantNot:   []string{hookSectionBeginPrefix, "bd hook pre-commit"},
 		},
 	}
 

@@ -30,6 +30,10 @@ const inlineHookMarker = "# bd (beads)"
 // Section markers for git hooks (GH#1380) — consistent with AGENTS.md pattern.
 // Only content between markers is managed by beads; user content outside is preserved.
 const hookSectionBeginPrefix = "# --- BEGIN BEADS INTEGRATION"
+const hookSectionEndPrefix = "# --- END BEADS INTEGRATION"
+
+// hookSectionEnd is kept for backward compatibility in tests and external references.
+// New code should use hookSectionEndPrefix for matching (handles both versioned and unversioned).
 const hookSectionEnd = "# --- END BEADS INTEGRATION ---"
 
 // hookSectionBeginLine returns the full begin marker line with the current version.
@@ -54,13 +58,15 @@ func generateHookSection(hookName string) string {
 
 // injectHookSection merges the beads section into existing hook file content.
 // If section markers are found, only the content between them is replaced.
+// If an orphaned BEGIN exists (no matching END), the stale block is removed
+// before injecting the new section.
 // If no markers are found, the section is appended.
 func injectHookSection(existing, section string) string {
 	beginIdx := strings.Index(existing, hookSectionBeginPrefix)
-	endIdx := strings.Index(existing, hookSectionEnd)
+	endIdx := strings.Index(existing, hookSectionEndPrefix)
 
 	if beginIdx != -1 && endIdx != -1 && beginIdx < endIdx {
-		// Find start of the begin-marker line
+		// Case 1: valid BEGIN...END pair — replace between markers
 		lineStart := strings.LastIndex(existing[:beginIdx], "\n")
 		if lineStart == -1 {
 			lineStart = 0
@@ -69,15 +75,57 @@ func injectHookSection(existing, section string) string {
 		}
 
 		// Find end of the end-marker line (including trailing newline)
-		endOfEndMarker := endIdx + len(hookSectionEnd)
-		if endOfEndMarker < len(existing) && existing[endOfEndMarker] == '\n' {
-			endOfEndMarker++
+		endOfEndMarker := endIdx + len(hookSectionEndPrefix)
+		// Consume the rest of the end-marker line (e.g. " v0.58.0 ---\n")
+		restAfterPrefix := existing[endOfEndMarker:]
+		if nlIdx := strings.Index(restAfterPrefix, "\n"); nlIdx != -1 {
+			endOfEndMarker += nlIdx + 1
+		} else {
+			endOfEndMarker = len(existing)
 		}
 
 		return existing[:lineStart] + section + existing[endOfEndMarker:]
+	} else if beginIdx != -1 && endIdx == -1 {
+		// Case 2: orphaned BEGIN without END — remove from BEGIN line
+		// to next blank line, next BEGIN marker, or EOF, then inject section
+		lineStart := strings.LastIndex(existing[:beginIdx], "\n")
+		if lineStart == -1 {
+			lineStart = 0
+		} else {
+			lineStart++ // skip the newline itself
+		}
+
+		// Scan forward from after the BEGIN line for the end of the orphaned block
+		afterBegin := existing[beginIdx:]
+		blockEnd := len(existing)
+
+		lines := strings.SplitAfter(afterBegin, "\n")
+		scanned := beginIdx
+		for i, line := range lines {
+			if i == 0 {
+				// Skip the BEGIN line itself
+				scanned += len(line)
+				continue
+			}
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				// Blank line — end of orphaned block (include the blank line)
+				blockEnd = scanned + len(line)
+				break
+			}
+			if strings.Contains(line, hookSectionBeginPrefix) {
+				// Next BEGIN marker — end before this line
+				blockEnd = scanned
+				break
+			}
+			scanned += len(line)
+		}
+
+		cleaned := existing[:lineStart] + existing[blockEnd:]
+		return injectHookSection(cleaned, section)
 	}
 
-	// No markers found — append
+	// Case 3: no markers — append
 	result := existing
 	if !strings.HasSuffix(result, "\n") {
 		result += "\n"
@@ -88,13 +136,14 @@ func injectHookSection(existing, section string) string {
 
 // removeHookSection removes only the beads section from hook file content.
 // Returns the content with the section removed, and true if a section was found.
+// Handles both valid BEGIN...END pairs and orphaned BEGIN-without-END.
 func removeHookSection(content string) (string, bool) {
 	beginIdx := strings.Index(content, hookSectionBeginPrefix)
-	endIdx := strings.Index(content, hookSectionEnd)
-
-	if beginIdx == -1 || endIdx == -1 || beginIdx > endIdx {
+	if beginIdx == -1 {
 		return content, false
 	}
+
+	endIdx := strings.Index(content, hookSectionEndPrefix)
 
 	// Find start of the begin-marker line
 	lineStart := strings.LastIndex(content[:beginIdx], "\n")
@@ -104,10 +153,40 @@ func removeHookSection(content string) (string, bool) {
 		lineStart++ // skip the newline itself
 	}
 
-	// Find end of the end-marker line
-	endOfEndMarker := endIdx + len(hookSectionEnd)
-	if endOfEndMarker < len(content) && content[endOfEndMarker] == '\n' {
-		endOfEndMarker++
+	var endOfSection int
+	if endIdx != -1 && endIdx > beginIdx {
+		// Valid BEGIN...END pair
+		endOfSection = endIdx + len(hookSectionEndPrefix)
+		// Consume the rest of the end-marker line
+		restAfterPrefix := content[endOfSection:]
+		if nlIdx := strings.Index(restAfterPrefix, "\n"); nlIdx != -1 {
+			endOfSection += nlIdx + 1
+		} else {
+			endOfSection = len(content)
+		}
+	} else {
+		// Orphaned BEGIN without END — remove to next blank line, next BEGIN, or EOF
+		afterBegin := content[beginIdx:]
+		endOfSection = len(content)
+
+		lines := strings.SplitAfter(afterBegin, "\n")
+		scanned := beginIdx
+		for i, line := range lines {
+			if i == 0 {
+				scanned += len(line)
+				continue
+			}
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				endOfSection = scanned + len(line)
+				break
+			}
+			if strings.Contains(line, hookSectionBeginPrefix) {
+				endOfSection = scanned
+				break
+			}
+			scanned += len(line)
+		}
 	}
 
 	// Also consume a blank line before the section if present
@@ -115,7 +194,7 @@ func removeHookSection(content string) (string, bool) {
 		lineStart--
 	}
 
-	return content[:lineStart] + content[endOfEndMarker:], true
+	return content[:lineStart] + content[endOfSection:], true
 }
 
 // HookStatus represents the status of a single git hook
