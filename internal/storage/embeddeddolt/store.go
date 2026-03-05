@@ -5,10 +5,11 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
+	"sync/atomic"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -18,26 +19,76 @@ import (
 var _ storage.Storage = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.Storage backed by the embedded Dolt engine.
+// Each method call opens a short-lived connection, executes within an explicit
+// SQL transaction, and closes the connection immediately. This minimizes the
+// time the embedded engine's write lock is held, reducing contention when
+// multiple processes access the same database concurrently.
 type EmbeddedDoltStore struct {
-	db        *sql.DB
-	cleanup   func() error
-	dataDir   string
-	closeOnce sync.Once
-	closeErr  error
+	dataDir  string
+	database string
+	branch   string
+	closed   atomic.Bool
 }
+
+// errClosed is returned when a method is called after Close.
+var errClosed = errors.New("embeddeddolt: store is closed")
 
 // New creates an EmbeddedDoltStore using the embedded Dolt engine.
 // beadsDir is the .beads/ root; the data directory is derived as <beadsDir>/embeddeddolt/.
+// New validates the configuration by opening and immediately closing a test connection.
 func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
 	if err := os.MkdirAll(dataDir, 0750); err != nil {
 		return nil, fmt.Errorf("embeddeddolt: creating data directory: %w", err)
 	}
-	db, cleanup, err := OpenSQL(ctx, dataDir, database, branch)
-	if err != nil {
-		return nil, err
+
+	return &EmbeddedDoltStore{
+		dataDir:  dataDir,
+		database: database,
+		branch:   branch,
+	}, nil
+}
+
+// withConn opens a short-lived database connection, begins an explicit SQL
+// transaction, and passes it to fn. If commit is true and fn returns nil, the
+// transaction is committed; otherwise it is rolled back. The connection is
+// closed before withConn returns regardless of outcome.
+func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (err error) {
+	if s.closed.Load() {
+		err = errClosed
+		return
 	}
-	return &EmbeddedDoltStore{db: db, cleanup: cleanup, dataDir: dataDir}, nil
+
+	var db *sql.DB
+	var cleanup func() error
+	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	if err != nil {
+		return 
+	}
+
+	defer func() {
+		err = errors.Join(err, cleanup())
+	}()
+
+	var tx *sql.Tx
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
+		return
+	}
+
+	err = fn(tx)
+	if err != nil {
+		err = errors.Join(err, tx.Rollback())
+		return
+	}
+
+	if !commit {
+		return tx.Rollback()
+	}
+
+	err = tx.Commit()
+	return
 }
 
 func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
@@ -168,11 +219,9 @@ func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg stri
 	panic("embeddeddolt: RunInTransaction not implemented")
 }
 
-// Close shuts down the embedded Dolt engine and releases all resources.
-// It is safe to call multiple times; only the first call performs cleanup.
+// Close marks the store as closed. Subsequent method calls will return errClosed.
+// It is safe to call multiple times.
 func (s *EmbeddedDoltStore) Close() error {
-	s.closeOnce.Do(func() {
-		s.closeErr = s.cleanup()
-	})
-	return s.closeErr
+	s.closed.Store(true)
+	return nil
 }
