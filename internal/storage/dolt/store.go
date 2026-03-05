@@ -71,7 +71,8 @@ func isTestDatabaseName(name string) bool {
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
 	db            *sql.DB
-	dbPath        string       // Path to Dolt database directory
+	dbPath        string       // Path to Dolt data directory (server root, e.g. .beads/dolt/)
+	database      string       // Database name (subdirectory under dbPath)
 	closed        atomic.Bool  // Tracks whether Close() has been called
 	connStr       string       // Connection string for reconnection
 	mu            sync.RWMutex // Protects concurrent access
@@ -629,6 +630,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	store := &DoltStore{
 		db:             db,
 		dbPath:         cfg.Path,
+		database:       cfg.Database,
 		connStr:        connStr,
 		breaker:        breaker,
 		committerName:  cfg.CommitterName,
@@ -1138,6 +1140,15 @@ func (s *DoltStore) Path() string {
 	return s.dbPath
 }
 
+// cliDir returns the directory for dolt CLI operations (push/pull/remote/fetch).
+// The actual database lives in a subdirectory of dbPath named after the database.
+func (s *DoltStore) cliDir() string {
+	if s.dbPath == "" {
+		return ""
+	}
+	return filepath.Join(s.dbPath, s.database)
+}
+
 // UnderlyingDB returns the underlying *sql.DB connection
 func (s *DoltStore) UnderlyingDB() *sql.DB {
 	return s.db
@@ -1312,13 +1323,13 @@ func (s *DoltStore) isGitProtocolRemote(ctx context.Context) bool {
 				// Verify remote exists in CLI directory before routing to CLI push/pull.
 				// When the dolt sql-server is externally managed, remotes may exist only
 				// on the server's filesystem, not in the local dbPath.
-				return s.dbPath != "" && doltutil.FindCLIRemote(s.dbPath, s.remote) != ""
+				return s.cliDir() != "" && doltutil.FindCLIRemote(s.cliDir(), s.remote) != ""
 			}
 		}
 	}
 	// Fall back to CLI remotes (covers drift where remote exists only in filesystem)
-	if s.dbPath != "" {
-		if url := doltutil.FindCLIRemote(s.dbPath, s.remote); url != "" {
+	if s.cliDir() != "" {
+		if url := doltutil.FindCLIRemote(s.cliDir(), s.remote); url != "" {
 			return doltutil.IsGitProtocolURL(url)
 		}
 	}
@@ -1346,7 +1357,7 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, force bool, creds *remoteCr
 	}
 	args = append(args, s.remote, s.branch)
 	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/branch
-	cmd.Dir = s.dbPath
+	cmd.Dir = s.cliDir()
 	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1362,7 +1373,7 @@ func (s *DoltStore) doltCLIPull(ctx context.Context, creds *remoteCredentials) e
 	ctx, cancel := context.WithTimeout(ctx, cliExecTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", "pull", s.remote, s.branch) // #nosec G204 -- fixed command
-	cmd.Dir = s.dbPath
+	cmd.Dir = s.cliDir()
 	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
