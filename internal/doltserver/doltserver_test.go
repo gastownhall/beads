@@ -349,19 +349,12 @@ func TestMaxDoltServers(t *testing.T) {
 		}
 	})
 
-	t.Run("gastown", func(t *testing.T) {
-		orig := os.Getenv("GT_ROOT")
-		os.Setenv("GT_ROOT", t.TempDir())
-		defer func() {
-			if orig != "" {
-				os.Setenv("GT_ROOT", orig)
-			} else {
-				os.Unsetenv("GT_ROOT")
-			}
-		}()
+	t.Run("gastown_same_as_standalone", func(t *testing.T) {
+		// After daemon removal, GT_ROOT no longer affects maxDoltServers
+		t.Setenv("GT_ROOT", t.TempDir())
 
-		if max := maxDoltServers(); max != 1 {
-			t.Errorf("expected 1 under Gas Town, got %d", max)
+		if max := maxDoltServers(); max != 3 {
+			t.Errorf("expected 3 (daemon removed, no special GT_ROOT handling), got %d", max)
 		}
 	})
 }
@@ -833,63 +826,20 @@ func TestStopServerProcessRemovesPidAndPort(t *testing.T) {
 	}
 }
 
-func TestRunIdleMonitorExitsOnStaleActivityNoServer(t *testing.T) {
-	// When there's no server running and activity is stale beyond the
-	// idle timeout, the monitor should exit (existing behavior preserved).
+func TestRunIdleMonitorZeroTimeoutExitsImmediately(t *testing.T) {
+	// With zero timeout, the monitor should exit immediately.
 	dir := t.TempDir()
-	t.Setenv("GT_ROOT", "")
-
-	// Write a stale activity timestamp (2x the timeout ago)
-	staleTime := time.Now().Add(-2 * time.Hour)
-	_ = os.WriteFile(activityPath(dir),
-		[]byte(strconv.FormatInt(staleTime.Unix(), 10)), 0600)
-	// Write a monitor PID file
-	_ = os.WriteFile(monitorPidPath(dir),
-		[]byte(strconv.Itoa(os.Getpid())), 0600)
 
 	done := make(chan struct{})
 	go func() {
-		RunIdleMonitor(dir, 1*time.Hour) // timeout=1h, activity=2h ago
+		RunIdleMonitor(dir, 0)
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		// good — exited because stale activity + no server
-	case <-time.After(MonitorCheckInterval + 5*time.Second):
-		t.Fatal("monitor should exit when no server and stale activity")
-	}
-
-	// Monitor should have cleaned up its PID file
-	if _, err := os.Stat(monitorPidPath(dir)); !os.IsNotExist(err) {
-		t.Error("monitor should clean up its PID file on exit")
-	}
-}
-
-func TestRunIdleMonitorGasTownExitsImmediately(t *testing.T) {
-	// Under Gas Town, the monitor should exit immediately regardless
-	// of activity state.
-	dir := t.TempDir()
-
-	// Create a fake GT root with required markers
-	gtRoot := t.TempDir()
-	for _, marker := range []string{"daemon", "deacon", "warrants", "mayor"} {
-		if err := os.MkdirAll(filepath.Join(gtRoot, marker), 0750); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("GT_ROOT", gtRoot)
-
-	done := make(chan struct{})
-	go func() {
-		RunIdleMonitor(dir, 30*time.Minute)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// good — exited immediately under Gas Town
+		// good — exited immediately with zero timeout
 	case <-time.After(2 * time.Second):
-		t.Fatal("RunIdleMonitor should exit immediately under Gas Town")
+		t.Fatal("RunIdleMonitor should exit immediately with zero timeout")
 	}
 }
