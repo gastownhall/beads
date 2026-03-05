@@ -30,6 +30,13 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"hierarchy.max-depth", true},
 		{"hierarchy.custom_setting", true}, // prefix match
 
+		// Backup settings (GH#2358)
+		{"backup.enabled", true},
+		{"backup.interval", true},
+		{"backup.git-push", true},
+		{"backup.git-repo", true},
+		{"backup.future-key", true}, // prefix match
+
 		// Non-yaml keys (should return false)
 		{"jira.url", false},
 		{"jira.project", false},
