@@ -9,12 +9,16 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
 	doltembed "github.com/dolthub/driver"
 )
+
+// validIdentifier matches safe SQL identifiers (letters, digits, underscores, hyphens).
+var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]*$`)
 
 const (
 	commitName  = "beads"
@@ -48,15 +52,20 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	db.SetConnMaxLifetime(0)
 
 	cleanup := func() error {
+		dbErr := db.Close()
+		connErr := connector.Close()
 		// connector.Close → engine.Close → BackgroundThreads.Shutdown
 		// always returns context.Canceled because Shutdown cancels its
-		// own parent context then returns parentCtx.Err().  Filter it
-		// out so callers don't see a spurious error on clean shutdown.
-		err := errors.Join(db.Close(), connector.Close())
-		if errors.Is(err, context.Canceled) {
-			return nil
+		// own parent context then returns parentCtx.Err().  This is
+		// a spurious error from a clean shutdown; filter it from each
+		// result individually so real close errors are still surfaced.
+		if errors.Is(dbErr, context.Canceled) {
+			dbErr = nil
 		}
-		return err
+		if errors.Is(connErr, context.Canceled) {
+			connErr = nil
+		}
+		return errors.Join(dbErr, connErr)
 	}
 
 	if err := db.PingContext(ctx); err != nil {
@@ -64,6 +73,10 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	}
 
 	if strings.TrimSpace(branch) != "" && strings.TrimSpace(database) != "" {
+		if !validIdentifier.MatchString(database) {
+			return nil, nil, errors.Join(
+				fmt.Errorf("invalid database name: %q", database), cleanup())
+		}
 		if _, err := db.ExecContext(ctx, "USE `"+database+"`"); err != nil {
 			return nil, nil, errors.Join(err, cleanup())
 		}

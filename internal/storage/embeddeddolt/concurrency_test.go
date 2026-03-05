@@ -28,6 +28,8 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 	iters := envInt("BEADS_EMBEDDED_DOLT_ITERS", 5)
 	timeout := envDuration("BEADS_EMBEDDED_DOLT_TIMEOUT", 5*time.Minute)
 
+	t.Logf("config: procs=%d iters=%d timeout=%s", procs, iters, timeout)
+
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 
@@ -40,6 +42,7 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 	}
 
 	// Initialize the embedded repo and database once, serially.
+	t.Logf("initializing embedded dolt repo at %s", sharedDir)
 	initDB, initCleanup, err := embeddeddolt.OpenSQL(ctx, sharedDir, "", "")
 	if err != nil {
 		t.Fatalf("init OpenSQL: %v", err)
@@ -54,9 +57,11 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 	if err := initCleanup(); err != nil {
 		t.Fatalf("init cleanup: %v", err)
 	}
+	t.Log("init complete")
 
 	// Build the test binary that subprocesses will exec.
 	testBin := filepath.Join(t.TempDir(), "embeddeddolt.test")
+	t.Logf("building test binary: go test -tags embeddeddolt -c -o %s ./internal/storage/embeddeddolt/", testBin)
 	build := exec.CommandContext(ctx, "go", "test",
 		"-tags", "embeddeddolt",
 		"-c",
@@ -68,12 +73,15 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build test binary: %v\n%s", err, string(out))
 	}
+	t.Log("build complete")
 
+	t.Logf("launching %d subprocesses (%d iterations each)", procs, iters)
 	eg, egCtx := errgroup.WithContext(ctx)
 
 	for p := 0; p < procs; p++ {
 		procN := p
 		eg.Go(func() error {
+			t.Logf("proc %d: starting", procN)
 			cmd := exec.CommandContext(egCtx, testBin, "-test.run=^TestHelperProcess$", "-test.v")
 			cmd.Env = append(os.Environ(),
 				"BEADS_EMBEDDED_DOLT_HELPER=1",
@@ -89,13 +97,16 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 			if !strings.Contains(string(out), "OK") {
 				return fmt.Errorf("proc %d: missing OK in output:\n%s", procN, string(out))
 			}
+			t.Logf("proc %d: done", procN)
 			return nil
 		})
 	}
 
+	t.Log("waiting for subprocesses")
 	if err := eg.Wait(); err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("all %d subprocesses passed", procs)
 }
 
 // TestHelperProcess is the subprocess entry point used by the multi-process
@@ -116,52 +127,62 @@ func TestHelperProcess(t *testing.T) {
 	}
 	procID := os.Getenv("BEADS_EMBEDDED_DOLT_PROC_ID")
 
-	ctx := context.Background()
+	ctx := t.Context()
 	database := "testdb"
 
 	for i := 0; i < iters; i++ {
-		db, cleanup, err := embeddeddolt.OpenSQL(ctx, dir, database, "")
-		if err != nil {
-			t.Fatalf("OpenSQL failed: %v", err)
-		}
+		func() {
+			db, cleanup, err := embeddeddolt.OpenSQL(ctx, dir, database, "")
+			if err != nil {
+				t.Fatalf("OpenSQL failed: %v", err)
+			}
+			defer func() {
+				if err := cleanup(); err != nil {
+					t.Fatalf("cleanup failed: %v", err)
+				}
+			}()
 
-		tag := fmt.Sprintf("proc_%s_iter_%d_pid_%d", procID, i, os.Getpid())
+			tag := fmt.Sprintf("proc_%s_iter_%d_pid_%d", procID, i, os.Getpid())
 
-		// CREATE TABLE IF NOT EXISTS
-		mustExec(t, db, ctx, `CREATE TABLE IF NOT EXISTS concurrency_test (
-			id INT AUTO_INCREMENT PRIMARY KEY,
-			tag VARCHAR(255) NOT NULL,
-			value INT NOT NULL
-		)`)
+			// CREATE TABLE IF NOT EXISTS
+			mustExec(t, db, ctx, `CREATE TABLE IF NOT EXISTS concurrency_test (
+				id INT AUTO_INCREMENT PRIMARY KEY,
+				tag VARCHAR(255) NOT NULL,
+				value INT NOT NULL
+			)`)
 
-		// INSERT
-		res := mustExec(t, db, ctx, "INSERT INTO concurrency_test (tag, value) VALUES (?, ?)", tag, i)
-		rowID, _ := res.LastInsertId()
+			// INSERT
+			res := mustExec(t, db, ctx, "INSERT INTO concurrency_test (tag, value) VALUES (?, ?)", tag, i)
+			rowID, err := res.LastInsertId()
+			if err != nil {
+				t.Fatalf("LastInsertId: %v", err)
+			}
 
-		// SELECT — verify the inserted row.
-		var gotTag string
-		var gotVal int
-		mustQueryRow(t, db, ctx, "SELECT tag, value FROM concurrency_test WHERE id = ?", rowID).Scan(&gotTag, &gotVal)
-		if gotTag != tag || gotVal != i {
-			t.Fatalf("data mismatch: got (%q, %d), want (%q, %d)", gotTag, gotVal, tag, i)
-		}
+			// SELECT — verify the inserted row.
+			var gotTag string
+			var gotVal int
+			if err := mustQueryRow(t, db, ctx, "SELECT tag, value FROM concurrency_test WHERE id = ?", rowID).Scan(&gotTag, &gotVal); err != nil {
+				t.Fatalf("scan tag/value: %v", err)
+			}
+			if gotTag != tag || gotVal != i {
+				t.Fatalf("data mismatch: got (%q, %d), want (%q, %d)", gotTag, gotVal, tag, i)
+			}
 
-		// UPDATE
-		mustExec(t, db, ctx, "UPDATE concurrency_test SET value = ? WHERE id = ?", i+1000, rowID)
+			// UPDATE
+			mustExec(t, db, ctx, "UPDATE concurrency_test SET value = ? WHERE id = ?", i+1000, rowID)
 
-		// DELETE
-		mustExec(t, db, ctx, "DELETE FROM concurrency_test WHERE id = ?", rowID)
+			// DELETE
+			mustExec(t, db, ctx, "DELETE FROM concurrency_test WHERE id = ?", rowID)
 
-		// Verify row is gone.
-		var count int
-		mustQueryRow(t, db, ctx, "SELECT COUNT(*) FROM concurrency_test WHERE id = ?", rowID).Scan(&count)
-		if count != 0 {
-			t.Fatalf("row not deleted: id=%d still present", rowID)
-		}
-
-		if err := cleanup(); err != nil {
-			t.Fatalf("cleanup failed: %v", err)
-		}
+			// Verify row is gone.
+			var count int
+			if err := mustQueryRow(t, db, ctx, "SELECT COUNT(*) FROM concurrency_test WHERE id = ?", rowID).Scan(&count); err != nil {
+				t.Fatalf("scan count: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("row not deleted: id=%d still present", rowID)
+			}
+		}()
 	}
 
 	fmt.Println("OK")
