@@ -63,7 +63,7 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	var cleanup func() error
 	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
 	if err != nil {
-		return 
+		return
 	}
 
 	defer func() {
