@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1905,5 +1906,58 @@ func TestCounterMode_AlreadySeeded(t *testing.T) {
 	}
 	if next.ID != "test-21" {
 		t.Errorf("expected test-21 (counter must not re-seed over existing row), got %q", next.ID)
+	}
+}
+
+// TestSearchIssues_StableOrdering verifies that SearchIssues returns
+// deterministic ordering when multiple issues share the same priority
+// and created_at timestamp. The id column acts as a tiebreaker.
+func TestSearchIssues_StableOrdering(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	now := time.Now()
+	// Create issues with identical priority and created_at but different IDs.
+	for _, id := range []string{"stable-c", "stable-a", "stable-b"} {
+		iss := &types.Issue{
+			ID:        id,
+			Title:     "Stable Ordering Test",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: now,
+		}
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", id, err)
+		}
+	}
+
+	// Run the query multiple times and verify identical ordering each time.
+	var firstOrder string
+	for i := 0; i < 5; i++ {
+		results, err := store.SearchIssues(ctx, "Stable Ordering", types.IssueFilter{})
+		if err != nil {
+			t.Fatalf("run %d: unexpected error: %v", i, err)
+		}
+		if len(results) != 3 {
+			t.Fatalf("run %d: expected 3 results, got %d", i, len(results))
+		}
+		var ids []string
+		for _, r := range results {
+			ids = append(ids, r.ID)
+		}
+		order := strings.Join(ids, ",")
+		if i == 0 {
+			firstOrder = order
+			// With id ASC tiebreaker, expect alphabetical: a, b, c.
+			if ids[0] != "stable-a" || ids[1] != "stable-b" || ids[2] != "stable-c" {
+				t.Errorf("expected [stable-a, stable-b, stable-c], got %v", ids)
+			}
+		} else if order != firstOrder {
+			t.Errorf("run %d: ordering changed from %q to %q", i, firstOrder, order)
+		}
 	}
 }

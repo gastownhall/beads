@@ -63,7 +63,7 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	querySQL := fmt.Sprintf(`
 		SELECT id FROM issues
 		%s
-		ORDER BY priority ASC, created_at DESC
+		ORDER BY priority ASC, created_at DESC, id ASC
 		%s
 	`, whereSQL, limitSQL)
 
@@ -260,18 +260,18 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	var orderBySQL string
 	switch filter.SortPolicy {
 	case types.SortPolicyOldest:
-		orderBySQL = "ORDER BY created_at ASC"
+		orderBySQL = "ORDER BY created_at ASC, id ASC"
 	case types.SortPolicyPriority:
-		orderBySQL = "ORDER BY priority ASC, created_at DESC"
+		orderBySQL = "ORDER BY priority ASC, created_at DESC, id ASC"
 	case types.SortPolicyHybrid, "": // hybrid is the default
 		// Recent issues (created within 48 hours) are sorted by priority;
 		// older issues are sorted by age (oldest first) to prevent starvation.
 		orderBySQL = `ORDER BY
 			CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 48 HOUR) THEN 0 ELSE 1 END ASC,
 			CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 48 HOUR) THEN priority ELSE 999 END ASC,
-			created_at ASC`
+			created_at ASC, id ASC`
 	default:
-		orderBySQL = "ORDER BY priority ASC, created_at DESC"
+		orderBySQL = "ORDER BY priority ASC, created_at DESC, id ASC"
 	}
 
 	// nolint:gosec // G201: whereSQL contains column comparisons with ?, limitSQL is a safe integer
