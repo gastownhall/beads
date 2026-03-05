@@ -817,11 +817,16 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 			_ = db.Close()
 			return nil, "", fmt.Errorf(
 				"database %q not found on Dolt server at %s:%d\n\n"+
-					"This can happen when:\n"+
+					"This usually means a server configuration problem, NOT a missing database.\n"+
+					"Common causes:\n"+
 					"  - The server is serving a different data directory than expected\n"+
-					"  - The database has not been initialized yet\n\n"+
-					"To initialize a new board:  bd init\n"+
-					"To check server status:     bd doctor",
+					"  - The server was restarted and is using a different port\n"+
+					"  - Another project's Dolt server is running on this port\n\n"+
+					"To diagnose:\n"+
+					"  bd doctor                  # Check server and database health\n"+
+					"  bd dolt status             # Show which data directory the server is using\n\n"+
+					"WARNING: Do NOT run 'bd init' or 'bd init --force' to fix this.\n"+
+					"         Re-initializing will create an empty database and orphan your existing data.",
 				cfg.Database, cfg.ServerHost, cfg.ServerPort)
 		}
 

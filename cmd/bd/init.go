@@ -103,6 +103,36 @@ environment variable.`,
 			}
 		}
 
+		// Even with --force, warn about existing data and require confirmation
+		// unless --quiet is set (which indicates programmatic/test use).
+		// This prevents AI agents and users from accidentally destroying data.
+		if force && !quiet {
+			if count, err := countExistingIssues(prefix); err == nil && count > 0 {
+				fmt.Fprintf(os.Stderr, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
+				fmt.Fprintf(os.Stderr, "  Existing issues: %d\n\n", count)
+				fmt.Fprintf(os.Stderr, "  This action CANNOT be undone. All issues, dependencies, and\n")
+				fmt.Fprintf(os.Stderr, "  Dolt commit history will be permanently lost.\n\n")
+				fmt.Fprintf(os.Stderr, "  Before proceeding, consider:\n")
+				fmt.Fprintf(os.Stderr, "    bd export > backup.jsonl    # Export issues to JSONL\n")
+				fmt.Fprintf(os.Stderr, "    bd dolt status              # Check if this is a server config issue\n\n")
+				if term.IsTerminal(int(os.Stdin.Fd())) {
+					fmt.Fprintf(os.Stderr, "Type 'destroy %d issues' to confirm: ", count)
+					scanner := bufio.NewScanner(os.Stdin)
+					scanner.Scan()
+					expected := fmt.Sprintf("destroy %d issues", count)
+					if strings.TrimSpace(scanner.Text()) != expected {
+						fmt.Fprintf(os.Stderr, "\nAborted. Database was NOT modified.\n")
+						os.Exit(1)
+					}
+				} else {
+					// Non-interactive (piped input, AI agent, etc.) — refuse
+					fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
+					fmt.Fprintf(os.Stderr, "Use 'bd export' to back up first, then use --quiet to skip this check.\n")
+					os.Exit(1)
+				}
+			}
+		}
+
 		// Handle stealth mode setup
 		if stealth {
 			if err := setupStealthMode(!quiet); err != nil {
@@ -921,8 +951,9 @@ This workspace is already initialized.
 To use the existing database:
   Just run bd commands normally (e.g., %s)
 
-To force reinitialize (data loss warning):
-  bd init --force --prefix %s
+If the database is genuinely corrupt and unrecoverable:
+  bd export > backup.jsonl              # Back up first!
+  bd init --force --prefix %s           # Then reinitialize
 
 Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 		}
@@ -949,8 +980,9 @@ To use the existing database:
   Just run bd commands normally (e.g., %s)
   The redirect will route to the canonical database.
 
-To force reinitialize (data loss warning):
-  bd init --force --prefix %s
+If the database is genuinely corrupt and unrecoverable:
+  bd export > backup.jsonl              # Back up first!
+  bd init --force --prefix %s           # Then reinitialize
 
 Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent("bd list"), prefix)
 		}
@@ -968,13 +1000,44 @@ This workspace is already initialized.
 To use the existing database:
   Just run bd commands normally (e.g., %s)
 
-To force reinitialize (data loss warning):
-  bd init --force --prefix %s
+If the database is genuinely corrupt and unrecoverable:
+  bd export > backup.jsonl              # Back up first!
+  bd init --force --prefix %s           # Then reinitialize
 
 Aborting.`, ui.RenderWarn("⚠"), dbPath, ui.RenderAccent("bd list"), prefix)
 	}
 
 	return nil // No database found, safe to init
+}
+
+// countExistingIssues attempts to connect to the existing database and count
+// issues. Returns 0 if the database is unreachable or empty. Used by --force
+// safeguard to show users what they're about to destroy.
+func countExistingIssues(_ string) (int, error) {
+	beadsDir := ".beads"
+	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
+		beadsDir = utils.CanonicalizePath(envBeadsDir)
+	} else {
+		beadsDir = beads.FollowRedirect(beadsDir)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = store.Close() }()
+
+	stats, err := store.GetStatistics(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if stats == nil {
+		return 0, nil
+	}
+	return stats.TotalIssues, nil
 }
 
 // checkExistingBeadsData checks for existing database files

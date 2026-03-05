@@ -79,7 +79,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 			Status:  StatusError,
 			Message: "Unable to open database",
 			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
-			Fix:     "Run 'bd doctor --fix' or manually: rm -rf .beads/dolt && bd init",
+			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues",
 		}
 	}
 	defer func() { _ = store.Close() }()
@@ -153,7 +153,7 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 			Status:  StatusError,
 			Message: "Database schema is incomplete or incompatible",
 			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
-			Fix:     "Run: rm -rf .beads/dolt && bd init",
+			Fix:     "Run 'bd doctor --fix' to attempt repair. If schema is incompatible, export data first with 'bd export'",
 		}
 	}
 
@@ -185,7 +185,7 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 			Status:  StatusError,
 			Message: "Failed to open database",
 			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
-			Fix:     "Run: rm -rf .beads/dolt && bd init (will clone from remote if configured)",
+			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server issues",
 		}
 	}
 	defer func() { _ = store.Close() }()

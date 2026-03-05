@@ -30,6 +30,9 @@ ephemeral.sqlite3-shm
 dolt-server.pid
 dolt-server.log
 dolt-server.lock
+dolt-server.port
+dolt-server.activity
+dolt-monitor.pid
 
 # Legacy artifacts (safety net — prevents accidental commits of old files)
 *.db

@@ -139,7 +139,7 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 
 	// Wisp create requires direct store access (daemon auto-bypassed for wisp ops)
 	if store == nil {
-		FatalErrorWithHint("no database connection", "run 'bd init' or 'bd import' to initialize the database")
+		FatalErrorWithHint("no database connection", "check 'bd doctor' and 'bd dolt status' for configuration issues")
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -560,7 +560,7 @@ func runWispGC(cmd *cobra.Command, args []string) {
 
 	// Wisp gc requires direct store access for deletion (daemon auto-bypassed for wisp ops)
 	if store == nil {
-		FatalErrorWithHint("no database connection", "run 'bd init' or 'bd import' to initialize the database")
+		FatalErrorWithHint("no database connection", "check 'bd doctor' and 'bd dolt status' for configuration issues")
 	}
 
 	// --closed mode: purge all closed wisps (batch deletion)
