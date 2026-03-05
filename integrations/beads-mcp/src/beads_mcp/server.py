@@ -71,7 +71,6 @@ logging.basicConfig(
 T = TypeVar("T")
 
 # Global state for cleanup
-_daemon_clients: list[Any] = []
 _cleanup_done = False
 
 # Persistent workspace context (survives across MCP tool calls)
@@ -132,28 +131,16 @@ IMPORTANT: Call context(workspace_root='...') to set your workspace before any w
 
 def cleanup() -> None:
     """Clean up resources on exit.
-    
-    Closes daemon connections and removes temp files.
+
     Safe to call multiple times.
     """
     global _cleanup_done
-    
+
     if _cleanup_done:
         return
-    
+
     _cleanup_done = True
     logger.info("Cleaning up beads-mcp resources...")
-    
-    # Close all daemon client connections
-    for client in _daemon_clients:
-        try:
-            if hasattr(client, 'cleanup'):
-                client.cleanup()
-                logger.debug(f"Closed daemon client: {client}")
-        except Exception as e:
-            logger.warning(f"Error closing daemon client: {e}")
-    
-    _daemon_clients.clear()
     logger.info("Cleanup complete")
 
 

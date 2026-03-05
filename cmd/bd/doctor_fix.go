@@ -206,7 +206,6 @@ func applyFixList(path string, fixes []doctorCheck) {
 	order := []string{
 		"Lock Files",
 		"Permissions",
-		"Daemon Health",
 		"Database Config",
 		"Config Values",
 		"Database Integrity",

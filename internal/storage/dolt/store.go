@@ -600,30 +600,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				return nil, fmt.Errorf("Dolt server auto-started but still unreachable at %s: %w\n\n"+
 					"Check logs: %s", addr, dialErr, doltserver.LogPath(beadsDir))
 			}
-		} else if doltserver.IsDaemonManaged() && os.Getenv("BEADS_TEST_MODE") != "1" {
-			// Gas Town detected (GT_ROOT or filesystem heuristic) — delegate
-			// server start to gt, which manages the lifecycle properly.
-			// Skip in test mode: tests manage their own server via testutil.EnsureDoltContainerForTestMain.
-			gtBin, lookErr := exec.LookPath("gt")
-			if lookErr != nil {
-				return nil, fmt.Errorf("Dolt server unreachable at %s (Gas Town detected but 'gt' not found in PATH): %w\n\n"+
-					"Start the server with: gt dolt start", addr, dialErr)
-			}
-			cmd := exec.CommandContext(ctx, gtBin, "dolt", "start")
-			if out, runErr := cmd.CombinedOutput(); runErr != nil {
-				return nil, fmt.Errorf("Dolt server unreachable at %s and 'gt dolt start' failed: %w\n\ngt output: %s",
-					addr, runErr, strings.TrimSpace(string(out)))
-			}
-			// Retry connection after gt started the server
-			conn, dialErr = net.DialTimeout("tcp", addr, 3*time.Second)
-			if dialErr != nil {
-				breaker.RecordFailure()
-				return nil, fmt.Errorf("Dolt server still unreachable at %s after 'gt dolt start': %w",
-					addr, dialErr)
-			}
 		} else {
 			breaker.RecordFailure()
-			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using Gas Town",
+			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start",
 				addr, dialErr)
 		}
 	}

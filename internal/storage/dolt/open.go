@@ -86,14 +86,13 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 //
 // Priority (highest to lowest):
 //  1. BEADS_TEST_MODE=1                    → always false (tests own the server lifecycle)
-//  2. IsDaemonManaged()                    → always false (Gas Town manages the server)
-//  3. BEADS_DOLT_AUTO_START=0              → always false (explicit env opt-out)
-//  4. explicitPort == true                 → always false (metadata.json has explicit port;
+//  2. BEADS_DOLT_AUTO_START=0              → always false (explicit env opt-out)
+//  3. explicitPort == true                 → always false (metadata.json has explicit port;
 //     auto-starting a different server would create shadow databases)
-//  5. current == true                      → true  (caller option wins over config file,
+//  4. current == true                      → true  (caller option wins over config file,
 //     per NewFromConfigWithOptions contract)
-//  6. doltAutoStartCfg == "false"/"0"/"off" → false (config.yaml opt-out)
-//  7. default                              → true  (standalone user; safe default)
+//  5. doltAutoStartCfg == "false"/"0"/"off" → false (config.yaml opt-out)
+//  6. default                              → true  (standalone user; safe default)
 //
 // doltAutoStartCfg is the raw value of the "dolt.auto-start" key from config.yaml
 // (pass config.GetString("dolt.auto-start") at the call site).
@@ -104,9 +103,6 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 // config-file overrides above.
 func resolveAutoStart(current bool, doltAutoStartCfg string, explicitPort bool) bool {
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
-		return false
-	}
-	if doltserver.IsDaemonManaged() {
 		return false
 	}
 	if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {

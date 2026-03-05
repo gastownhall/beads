@@ -29,7 +29,7 @@ func withStorage(ctx context.Context, store *dolt.DoltStore, dbPath string, fn s
 	if store != nil {
 		return fn(store)
 	} else if dbPath != "" {
-		// Daemon mode: open read-only connection
+		// Open read-only connection
 		roStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath, ReadOnly: true})
 		if err != nil {
 			return err

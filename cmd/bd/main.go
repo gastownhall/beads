@@ -509,13 +509,9 @@ var rootCmd = &cobra.Command{
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 		}
 
-		// Auto-start: enabled by default for standalone users.
-		// Disabled under Gas Town (which manages its own server) or by explicit config.
-		// Gas Town detection uses GT_ROOT and a filesystem heuristic fallback.
+		// Auto-start: enabled by default.
+		// Can be disabled by explicit config or env var.
 		doltCfg.AutoStart = true
-		if doltserver.IsDaemonManaged() {
-			doltCfg.AutoStart = false
-		}
 		if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
 			doltCfg.AutoStart = false
 		}

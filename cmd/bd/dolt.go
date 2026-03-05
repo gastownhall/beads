@@ -270,20 +270,6 @@ required. Use this command for explicit control or diagnostics.`,
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
-		if doltserver.IsDaemonManagedFor(beadsDir) {
-			// Check if daemon's server is already accepting connections
-			cfg := doltserver.DefaultConfig(serverDir)
-			addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-			conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-			if err == nil {
-				_ = conn.Close()
-				fmt.Printf("Dolt server already running on port %d (managed by Gas Town daemon)\n", cfg.Port)
-				return
-			}
-			fmt.Fprintf(os.Stderr, "Warning: Dolt server is normally managed by the Gas Town daemon,\n"+
-				"but no server found on port %d. Starting one.\n\n", cfg.Port)
-		}
-
 		state, err := doltserver.Start(serverDir)
 		if err != nil {
 			if strings.Contains(err.Error(), "already running") {
@@ -306,10 +292,7 @@ var doltStopCmd = &cobra.Command{
 	Long: `Stop the dolt sql-server managed by beads for the current project.
 
 This sends a graceful shutdown signal. The server will restart automatically
-on the next bd command unless auto-start is disabled.
-
-Under Gas Town, the server is managed by the gt daemon and cannot be stopped
-via bd. Use 'gt dolt stop' instead.`,
+on the next bd command unless auto-start is disabled.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
@@ -429,9 +412,6 @@ one tracked by the current project's PID file.`,
 		killed, err := doltserver.KillStaleServers(beadsDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			if doltserver.IsDaemonManagedFor(beadsDir) {
-				fmt.Fprintf(os.Stderr, "\nUnder Gas Town, use 'gt dolt' commands to manage the server.\n")
-			}
 			os.Exit(1)
 		}
 
@@ -896,7 +876,7 @@ func isTimeoutError(err error) bool {
 
 func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
-	doltStopCmd.Flags().Bool("force", false, "Force stop even when managed by Gas Town daemon")
+	doltStopCmd.Flags().Bool("force", false, "Force stop the server")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltIdleMonitorCmd.Flags().String("beads-dir", "", "Path to .beads directory")

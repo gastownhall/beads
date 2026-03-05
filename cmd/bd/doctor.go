@@ -499,7 +499,7 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, roleCheck)
 	// Don't fail overall check for role config, just warn - URL heuristic fallback still works
 
-	// Check 7e: Stale lock files (bootstrap, sync, daemon, startup)
+	// Check 7e: Stale lock files (bootstrap, sync, startup)
 	staleLockCheck := convertDoctorCheck(doctor.CheckStaleLockFiles(path))
 	result.Checks = append(result.Checks, staleLockCheck)
 	if staleLockCheck.Status == statusWarning || staleLockCheck.Status == statusError {

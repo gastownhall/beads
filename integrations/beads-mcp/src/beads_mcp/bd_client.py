@@ -871,75 +871,21 @@ def create_bd_client(
     no_auto_import: Optional[bool] = None,
     working_dir: Optional[str] = None,
 ) -> BdClientBase:
-    """Create a bd client (daemon or CLI-based).
+    """Create a bd CLI client.
 
     Args:
-        prefer_daemon: If True, attempt to use daemon client first, fall back to CLI
-        bd_path: Path to bd executable (for CLI client)
-        beads_dir: Path to .beads directory (for CLI client)
-        beads_db: Path to beads database (deprecated, for CLI client)
+        prefer_daemon: Deprecated, ignored. Kept for API compatibility.
+        bd_path: Path to bd executable
+        beads_dir: Path to .beads directory
+        beads_db: Path to beads database (deprecated)
         actor: Actor name for audit trail
-        no_auto_flush: Disable auto-flush (CLI only)
-        no_auto_import: Disable auto-import (CLI only)
+        no_auto_flush: Disable auto-flush
+        no_auto_import: Disable auto-import
         working_dir: Working directory for database discovery
 
     Returns:
-        BdClientBase implementation (daemon or CLI)
-
-    Note:
-        If prefer_daemon is True and daemon is not running, falls back to CLI client.
-        To check if daemon is running without falling back, use BdDaemonClient directly.
+        BdClientBase implementation (CLI)
     """
-    if prefer_daemon:
-        try:
-            from .bd_daemon_client import BdDaemonClient
-            from pathlib import Path
-
-            # Check if daemon socket exists before creating client
-            # Walk up from working_dir to find .beads/bd.sock, then check global
-            search_dir = Path(working_dir) if working_dir else Path.cwd()
-            socket_found = False
-
-            current = search_dir.resolve()
-            while True:
-                local_beads_dir = current / ".beads"
-                if local_beads_dir.is_dir():
-                    sock_path = local_beads_dir / "bd.sock"
-                    if sock_path.exists():
-                        socket_found = True
-                        break
-                    # Found .beads but no socket - check global before giving up
-                    break
-
-                # Move up one directory
-                parent = current.parent
-                if parent == current:
-                    # Reached filesystem root - check global
-                    break
-                current = parent
-
-            # If no local socket, check global daemon socket at ~/.beads/bd.sock
-            if not socket_found:
-                global_sock_path = Path.home() / ".beads" / "bd.sock"
-                if global_sock_path.exists():
-                    socket_found = True
-
-            if socket_found:
-                # Daemon is running, use it
-                client = BdDaemonClient(
-                    working_dir=working_dir,
-                    actor=actor,
-                )
-                return client
-            # No socket found, fall through to CLI client
-        except ImportError:
-            # Daemon client not available (shouldn't happen but be defensive)
-            pass
-        except Exception:
-            # If daemon setup fails for any reason, fall back to CLI
-            pass
-
-    # Use CLI client
     return BdCliClient(
         bd_path=bd_path,
         beads_dir=beads_dir,
