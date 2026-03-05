@@ -29,8 +29,30 @@ bd stores issue data locally in a Dolt database (`.beads/dolt/`), which is gitig
 
 - bd uses standard git operations (no custom protocols)
 - Export/import operations read and write local files only
-- No network communication except through git itself
+- No network communication except through git and the Dolt dependency (see Network & Privacy below)
 - Git hooks (if used) run with your local user permissions
+
+### Network & Privacy
+
+Beads is local-first — the beads codebase itself contains no telemetry,
+analytics, or outbound network calls.
+
+However, the **Dolt** database engine (a beads dependency) collects usage
+metrics by default, contacting `doltremoteapi.dolthub.com` even when no
+remotes are configured.
+
+To disable Dolt metrics collection, use either method:
+
+```sh
+# Method 1: Dolt config (persistent)
+dolt config --global --add metrics.disabled true
+
+# Method 2: Environment variable (per-session or export in shell profile)
+export DOLT_DISABLE_EVENT_FLUSH=1
+```
+
+To verify, block `doltremoteapi.dolthub.com` in your firewall or DNS — beads
+continues working normally with no degradation.
 
 ### Command Injection Protection
 
