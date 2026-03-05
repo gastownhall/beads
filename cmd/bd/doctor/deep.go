@@ -514,33 +514,42 @@ func checkMoleculeIntegrity(db *sql.DB) DoctorCheck {
 		return check
 	}
 
-	// Find molecules with missing children in a single batch query
+	// Find molecules with missing children using batched IN clauses
+	// to avoid full table scans on Dolt with large molecule sets.
+	const batchSize = 200
 	var brokenMolecules []string
-	molIDs := make([]interface{}, len(molecules))
-	placeholders := make([]string, len(molecules))
-	for i, mol := range molecules {
-		molIDs[i] = mol.ID
-		placeholders[i] = "?"
-	}
+	for start := 0; start < len(molecules); start += batchSize {
+		end := start + batchSize
+		if end > len(molecules) {
+			end = len(molecules)
+		}
+		batch := molecules[start:end]
+		molIDs := make([]interface{}, len(batch))
+		placeholders := make([]string, len(batch))
+		for i, mol := range batch {
+			molIDs[i] = mol.ID
+			placeholders[i] = "?"
+		}
 
-	// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
-	brokenQuery := fmt.Sprintf(`
-		SELECT d.depends_on_id, COUNT(*) AS orphan_count
-		FROM dependencies d
-		WHERE d.depends_on_id IN (%s)
-		  AND d.type = 'parent-child'
-		  AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id)
-		GROUP BY d.depends_on_id`, strings.Join(placeholders, ","))
+		// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
+		brokenQuery := fmt.Sprintf(`
+			SELECT d.depends_on_id, COUNT(*) AS orphan_count
+			FROM dependencies d
+			WHERE d.depends_on_id IN (%s)
+			  AND d.type = 'parent-child'
+			  AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id)
+			GROUP BY d.depends_on_id`, strings.Join(placeholders, ","))
 
-	brokenRows, err := db.Query(brokenQuery, molIDs...)
-	if err == nil {
-		defer brokenRows.Close()
-		for brokenRows.Next() {
-			var molID string
-			var orphanCount int
-			if err := brokenRows.Scan(&molID, &orphanCount); err == nil {
-				brokenMolecules = append(brokenMolecules, fmt.Sprintf("%s (%d missing children)", molID, orphanCount))
+		brokenRows, err := db.Query(brokenQuery, molIDs...)
+		if err == nil {
+			for brokenRows.Next() {
+				var molID string
+				var orphanCount int
+				if err := brokenRows.Scan(&molID, &orphanCount); err == nil {
+					brokenMolecules = append(brokenMolecules, fmt.Sprintf("%s (%d missing children)", molID, orphanCount))
+				}
 			}
+			_ = brokenRows.Close()
 		}
 	}
 

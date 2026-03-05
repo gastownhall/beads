@@ -539,32 +539,36 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 	}
 	childStatusMap := make(map[string]string)
 	if len(allChildIDs) > 0 {
-		placeholders := make([]string, len(allChildIDs))
-		args := make([]interface{}, len(allChildIDs))
-		for i, id := range allChildIDs {
-			placeholders[i] = "?"
-			args[i] = id
-		}
 		// Check both issues and wisps tables for child statuses (bd-w2w)
+		// Uses batched IN clauses (queryBatchSize) to avoid full table scans on Dolt.
 		for _, table := range []string{"issues", "wisps"} {
-			// nolint:gosec // G201: table is hardcoded, placeholders contains only ? markers
-			statusQuery := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", table, strings.Join(placeholders, ","))
-			statusRows, err := s.queryContext(ctx, statusQuery, args...)
-			if err != nil {
-				if isTableNotExistError(err) {
-					continue // wisps table may not exist on pre-migration databases (GH#2271)
+			for start := 0; start < len(allChildIDs); start += queryBatchSize {
+				end := start + queryBatchSize
+				if end > len(allChildIDs) {
+					end = len(allChildIDs)
 				}
-				return nil, fmt.Errorf("failed to batch-fetch child statuses from %s: %w", table, err)
-			}
-			for statusRows.Next() {
-				var id, status string
-				if err := statusRows.Scan(&id, &status); err != nil {
-					_ = statusRows.Close()
-					return nil, wrapScanError("get epics: scan child status", err)
+				batch := allChildIDs[start:end]
+				placeholders, args := doltBuildSQLInClause(batch)
+
+				// nolint:gosec // G201: table is hardcoded, placeholders contains only ? markers
+				statusQuery := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", table, placeholders)
+				statusRows, err := s.queryContext(ctx, statusQuery, args...)
+				if err != nil {
+					if isTableNotExistError(err) {
+						break // wisps table may not exist on pre-migration databases (GH#2271)
+					}
+					return nil, fmt.Errorf("failed to batch-fetch child statuses from %s: %w", table, err)
 				}
-				childStatusMap[id] = status
+				for statusRows.Next() {
+					var id, status string
+					if err := statusRows.Scan(&id, &status); err != nil {
+						_ = statusRows.Close()
+						return nil, wrapScanError("get epics: scan child status", err)
+					}
+					childStatusMap[id] = status
+				}
+				_ = statusRows.Close()
 			}
-			_ = statusRows.Close()
 		}
 	}
 
@@ -1157,34 +1161,36 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 	}
 	_ = depRows.Close() // Redundant close for safety (rows already iterated)
 
-	// Step 2: Batch-fetch status for all children (single batched query)
+	// Step 2: Batch-fetch status for all children (batched IN clauses to avoid full table scans).
 	// Children of a wisp molecule are also wisps, so use the same table.
 	if len(childIDs) > 0 {
-		placeholders := make([]string, len(childIDs))
-		args := make([]interface{}, len(childIDs))
-		for i, id := range childIDs {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		// nolint:gosec // G201: issueTable is hardcoded, placeholders contains only ? markers
-		query := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", issueTable, strings.Join(placeholders, ","))
-		statusRows, err := s.queryContext(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to batch-fetch child statuses: %w", err)
-		}
 		type childInfo struct {
 			status string
 		}
 		childMap := make(map[string]childInfo)
-		for statusRows.Next() {
-			var id, status string
-			if err := statusRows.Scan(&id, &status); err != nil {
-				_ = statusRows.Close()
-				return nil, wrapScanError("get molecule progress: scan status", err)
+		for start := 0; start < len(childIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(childIDs) {
+				end = len(childIDs)
 			}
-			childMap[id] = childInfo{status: status}
+			batch := childIDs[start:end]
+			placeholders, args := doltBuildSQLInClause(batch)
+			// nolint:gosec // G201: issueTable is hardcoded, placeholders contains only ? markers
+			query := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", issueTable, placeholders)
+			statusRows, err := s.queryContext(ctx, query, args...)
+			if err != nil {
+				return nil, fmt.Errorf("failed to batch-fetch child statuses: %w", err)
+			}
+			for statusRows.Next() {
+				var id, status string
+				if err := statusRows.Scan(&id, &status); err != nil {
+					_ = statusRows.Close()
+					return nil, wrapScanError("get molecule progress: scan status", err)
+				}
+				childMap[id] = childInfo{status: status}
+			}
+			_ = statusRows.Close()
 		}
-		_ = statusRows.Close()
 
 		for _, childID := range childIDs {
 			info, ok := childMap[childID]
@@ -1253,33 +1259,49 @@ func (s *DoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID stri
 		}, nil
 	}
 
-	// Find max(updated_at) and max(closed_at) with corresponding step IDs
-	placeholders := make([]string, len(childIDs))
-	args := make([]interface{}, len(childIDs))
-	for i, id := range childIDs {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	inClause := strings.Join(placeholders, ",")
-
-	// Query for the most recently updated child
-	//nolint:gosec // G201: issueTable is hardcoded, placeholders contains only ? markers
+	// Find max(updated_at) and max(closed_at) with corresponding step IDs.
+	// Uses batched IN clauses (queryBatchSize) to avoid full table scans on Dolt.
 	var lastUpdatedAt time.Time
 	var lastUpdatedID string
-	err = s.db.QueryRowContext(ctx, fmt.Sprintf(
-		"SELECT id, updated_at FROM %s WHERE id IN (%s) ORDER BY updated_at DESC LIMIT 1",
-		issueTable, inClause), args...).Scan(&lastUpdatedID, &lastUpdatedAt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query last updated child: %w", err)
-	}
-
-	// Query for the most recently closed child
 	var lastClosedAt sql.NullTime
 	var lastClosedID sql.NullString
-	//nolint:gosec // G201: issueTable is hardcoded
-	_ = s.db.QueryRowContext(ctx, fmt.Sprintf(
-		"SELECT id, closed_at FROM %s WHERE id IN (%s) AND closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1",
-		issueTable, inClause), args...).Scan(&lastClosedID, &lastClosedAt)
+
+	for start := 0; start < len(childIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(childIDs) {
+			end = len(childIDs)
+		}
+		batch := childIDs[start:end]
+		placeholders, args := doltBuildSQLInClause(batch)
+
+		// Query for the most recently updated child in this batch
+		//nolint:gosec // G201: issueTable is hardcoded, placeholders contains only ? markers
+		var batchUpdatedAt time.Time
+		var batchUpdatedID string
+		scanErr := s.db.QueryRowContext(ctx, fmt.Sprintf(
+			"SELECT id, updated_at FROM %s WHERE id IN (%s) ORDER BY updated_at DESC LIMIT 1",
+			issueTable, placeholders), args...).Scan(&batchUpdatedID, &batchUpdatedAt)
+		if scanErr == nil && batchUpdatedAt.After(lastUpdatedAt) {
+			lastUpdatedAt = batchUpdatedAt
+			lastUpdatedID = batchUpdatedID
+		}
+
+		// Query for the most recently closed child in this batch
+		var batchClosedAt sql.NullTime
+		var batchClosedID sql.NullString
+		//nolint:gosec // G201: issueTable is hardcoded
+		_ = s.db.QueryRowContext(ctx, fmt.Sprintf(
+			"SELECT id, closed_at FROM %s WHERE id IN (%s) AND closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1",
+			issueTable, placeholders), args...).Scan(&batchClosedID, &batchClosedAt)
+		if batchClosedAt.Valid && (!lastClosedAt.Valid || batchClosedAt.Time.After(lastClosedAt.Time)) {
+			lastClosedAt = batchClosedAt
+			lastClosedID = batchClosedID
+		}
+	}
+
+	if lastUpdatedID == "" {
+		return nil, fmt.Errorf("failed to query last updated child: no children found")
+	}
 
 	// Pick the most recent between updated_at and closed_at
 	result := &types.MoleculeLastActivity{
