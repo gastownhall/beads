@@ -160,3 +160,28 @@ func TestIsBackupGitPushEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestIsDefaultBranch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		branch string
+		want   bool
+	}{
+		{"main", true},
+		{"master", true},
+		{"feature/my-work", false},
+		{"fix/backup-bug", false},
+		{"develop", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.branch, func(t *testing.T) {
+			t.Parallel()
+			if got := isDefaultBranch(tt.branch); got != tt.want {
+				t.Errorf("isDefaultBranch(%q) = %v, want %v", tt.branch, got, tt.want)
+			}
+		})
+	}
+}
