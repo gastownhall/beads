@@ -35,30 +35,10 @@ var errClosed = errors.New("embeddeddolt: store is closed")
 
 // New creates an EmbeddedDoltStore using the embedded Dolt engine.
 // beadsDir is the .beads/ root; the data directory is derived as <beadsDir>/embeddeddolt/.
-// New validates the configuration by opening and immediately closing a test connection.
 func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
 	if err := os.MkdirAll(dataDir, 0750); err != nil {
 		return nil, fmt.Errorf("embeddeddolt: creating data directory: %w", err)
-	}
-
-	// Ensure the database exists before switching to it.
-	if database != "" {
-		if !validIdentifier.MatchString(database) {
-			return nil, fmt.Errorf("embeddeddolt: invalid database name: %q", database)
-		}
-		db, cleanup, err := OpenSQL(ctx, dataDir, "", "")
-		if err != nil {
-			return nil, fmt.Errorf("embeddeddolt: open for db creation: %w", err)
-		}
-		_, execErr := db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+database+"`")
-		cleanupErr := cleanup()
-		if execErr != nil {
-			return nil, fmt.Errorf("embeddeddolt: creating database %q: %w", database, execErr)
-		}
-		if cleanupErr != nil {
-			return nil, fmt.Errorf("embeddeddolt: cleanup after db creation: %w", cleanupErr)
-		}
 	}
 
 	s := &EmbeddedDoltStore{
@@ -84,9 +64,13 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 
+	if s.database != "" && !validIdentifier.MatchString(s.database) {
+		return fmt.Errorf("embeddeddolt: invalid database name: %q", s.database)
+	}
+
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = OpenSQL(ctx, s.dataDir, "", "")
 	if err != nil {
 		return
 	}
@@ -94,6 +78,20 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	defer func() {
 		err = errors.Join(err, cleanup())
 	}()
+
+	if s.database != "" {
+		if _, err = db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+s.database+"`"); err != nil {
+			return fmt.Errorf("embeddeddolt: creating database: %w", err)
+		}
+		if _, err = db.ExecContext(ctx, "USE `"+s.database+"`"); err != nil {
+			return fmt.Errorf("embeddeddolt: switching to database: %w", err)
+		}
+		if s.branch != "" {
+			if _, err = db.ExecContext(ctx, fmt.Sprintf("SET @@%s_head_ref = %s", s.database, sqlStringLiteral(s.branch))); err != nil {
+				return fmt.Errorf("embeddeddolt: setting branch: %w", err)
+			}
+		}
+	}
 
 	var tx *sql.Tx
 	tx, err = db.BeginTx(ctx, nil)
