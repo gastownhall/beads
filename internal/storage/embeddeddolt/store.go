@@ -42,6 +42,25 @@ func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltS
 		return nil, fmt.Errorf("embeddeddolt: creating data directory: %w", err)
 	}
 
+	// Ensure the database exists before switching to it.
+	if database != "" {
+		if !validIdentifier.MatchString(database) {
+			return nil, fmt.Errorf("embeddeddolt: invalid database name: %q", database)
+		}
+		db, cleanup, err := OpenSQL(ctx, dataDir, "", "")
+		if err != nil {
+			return nil, fmt.Errorf("embeddeddolt: open for db creation: %w", err)
+		}
+		_, execErr := db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+database+"`")
+		cleanupErr := cleanup()
+		if execErr != nil {
+			return nil, fmt.Errorf("embeddeddolt: creating database %q: %w", database, execErr)
+		}
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("embeddeddolt: cleanup after db creation: %w", cleanupErr)
+		}
+	}
+
 	s := &EmbeddedDoltStore{
 		dataDir:  dataDir,
 		database: database,

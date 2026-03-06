@@ -65,7 +65,9 @@ func migrateUp(ctx context.Context, tx *sql.Tx) error {
 	// Find the current version.
 	var current int
 	err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&current)
-	if err != nil {
+	if err == sql.ErrNoRows {
+		current = 0
+	} else if err != nil {
 		return fmt.Errorf("reading current migration version: %w", err)
 	}
 

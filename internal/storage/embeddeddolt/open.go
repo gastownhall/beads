@@ -72,7 +72,7 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 		return nil, nil, errors.Join(err, cleanup())
 	}
 
-	if strings.TrimSpace(branch) != "" && strings.TrimSpace(database) != "" {
+	if strings.TrimSpace(database) != "" {
 		if !validIdentifier.MatchString(database) {
 			return nil, nil, errors.Join(
 				fmt.Errorf("invalid database name: %q", database), cleanup())
@@ -80,8 +80,10 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 		if _, err := db.ExecContext(ctx, "USE `"+database+"`"); err != nil {
 			return nil, nil, errors.Join(err, cleanup())
 		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("SET @@%s_head_ref = %s", database, sqlStringLiteral(branch))); err != nil {
-			return nil, nil, errors.Join(err, cleanup())
+		if strings.TrimSpace(branch) != "" {
+			if _, err := db.ExecContext(ctx, fmt.Sprintf("SET @@%s_head_ref = %s", database, sqlStringLiteral(branch))); err != nil {
+				return nil, nil, errors.Join(err, cleanup())
+			}
 		}
 	}
 
