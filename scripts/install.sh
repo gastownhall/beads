@@ -74,6 +74,35 @@ resign_for_macos() {
 detect_platform() {
     local os arch
 
+    # Detect Windows environments where this bash script won't produce a usable install.
+    # MSYS2, Git Bash, and Cygwin report MINGW*, MSYS*, or CYGWIN* from uname -s.
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            log_error "Windows detected ($(uname -s))."
+            echo ""
+            echo "  This bash installer is for macOS/Linux. On Windows, use the PowerShell installer:"
+            echo ""
+            echo "    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex"
+            echo ""
+            exit 1
+            ;;
+    esac
+
+    # Detect WSL (Windows Subsystem for Linux).
+    # WSL reports uname -s as "Linux" but installs into the Linux filesystem,
+    # which is not accessible from native Windows tools.
+    if [ -f /proc/version ] && grep -qi 'microsoft\|wsl' /proc/version 2>/dev/null; then
+        log_warning "WSL (Windows Subsystem for Linux) detected."
+        echo ""
+        echo "  This will install the Linux version of bd, usable only inside WSL."
+        echo "  If you want bd available in native Windows (PowerShell, cmd), use:"
+        echo ""
+        echo "    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex"
+        echo ""
+        echo "  Continuing with Linux install for WSL in 5 seconds... (Ctrl+C to cancel)"
+        sleep 5
+    fi
+
     case "$(uname -s)" in
         Darwin)
             os="darwin"
