@@ -17,8 +17,10 @@ import (
 	doltembed "github.com/dolthub/driver"
 )
 
-// validIdentifier matches safe SQL identifiers (letters, digits, underscores, hyphens).
-var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]*$`)
+// validIdentifier matches safe SQL identifiers (letters, digits, underscores).
+// Hyphens are excluded because database names are interpolated into system
+// variable identifiers (@@<db>_head_ref) where hyphens are invalid.
+var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 const (
 	commitName  = "beads"
