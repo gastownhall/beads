@@ -570,7 +570,7 @@ func cloneSubgraph(ctx context.Context, s *dolt.DoltStore, subgraph *TemplateSub
 	return &InstantiateResult{
 		NewEpicID: idMapping[subgraph.Root.ID],
 		IDMapping: idMapping,
-		Created:   len(subgraph.Issues),
+		Created:   len(idMapping),
 	}, nil
 }
 
