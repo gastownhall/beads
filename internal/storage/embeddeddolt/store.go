@@ -114,10 +114,22 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	return
 }
 
-// initSchema runs all pending migrations.
+// initSchema runs all pending migrations and commits them to Dolt history.
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return migrateUp(ctx, tx)
+		applied, err := migrateUp(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if applied > 0 {
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
+				return fmt.Errorf("dolt add after migrations: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
+				return fmt.Errorf("dolt commit after migrations: %w", err)
+			}
+		}
+		return nil
 	})
 }
 

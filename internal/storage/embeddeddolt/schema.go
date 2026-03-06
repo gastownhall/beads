@@ -53,13 +53,14 @@ func parseVersion(name string) (int, error) {
 }
 
 // migrateUp applies all embedded .up.sql migrations that haven't been applied yet.
-func migrateUp(ctx context.Context, tx *sql.Tx) error {
+// Returns the number of migrations applied.
+func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 	// Bootstrap the tracking table.
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INT PRIMARY KEY,
 		applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`); err != nil {
-		return fmt.Errorf("creating schema_migrations table: %w", err)
+		return 0, fmt.Errorf("creating schema_migrations table: %w", err)
 	}
 
 	// Find the current version.
@@ -68,18 +69,18 @@ func migrateUp(ctx context.Context, tx *sql.Tx) error {
 	if err == sql.ErrNoRows {
 		current = 0
 	} else if err != nil {
-		return fmt.Errorf("reading current migration version: %w", err)
+		return 0, fmt.Errorf("reading current migration version: %w", err)
 	}
 
 	// Fast path: if current version matches the highest embedded migration, nothing to do.
 	if current >= latestVersion() {
-		return nil
+		return 0, nil
 	}
 
 	// Collect and sort migration files.
 	entries, err := fs.ReadDir(upMigrations, "schema")
 	if err != nil {
-		return fmt.Errorf("reading embedded migrations: %w", err)
+		return 0, fmt.Errorf("reading embedded migrations: %w", err)
 	}
 
 	type migrationFile struct {
@@ -94,7 +95,7 @@ func migrateUp(ctx context.Context, tx *sql.Tx) error {
 		}
 		v, err := parseVersion(e.Name())
 		if err != nil {
-			return fmt.Errorf("parsing migration filename %q: %w", e.Name(), err)
+			return 0, fmt.Errorf("parsing migration filename %q: %w", e.Name(), err)
 		}
 		if v > current {
 			pending = append(pending, migrationFile{version: v, name: e.Name()})
@@ -104,7 +105,7 @@ func migrateUp(ctx context.Context, tx *sql.Tx) error {
 	sort.Slice(pending, func(i, j int) bool { return pending[i].version < pending[j].version })
 
 	if len(pending) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	// Apply each pending migration. The DSN has multiStatements=true,
@@ -112,7 +113,7 @@ func migrateUp(ctx context.Context, tx *sql.Tx) error {
 	for _, mf := range pending {
 		data, err := upMigrations.ReadFile("schema/" + mf.name)
 		if err != nil {
-			return fmt.Errorf("reading migration %s: %w", mf.name, err)
+			return 0, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
 
 		sql := strings.TrimSpace(string(data))
@@ -121,20 +122,15 @@ func migrateUp(ctx context.Context, tx *sql.Tx) error {
 		}
 
 		if _, err := tx.ExecContext(ctx, sql); err != nil {
-			// DOLT_COMMIT "nothing to commit" is expected and benign.
-			if strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
-				// fall through to record the version
-			} else {
-				return fmt.Errorf("migration %s failed: %w", mf.name, err)
-			}
+			return 0, fmt.Errorf("migration %s failed: %w", mf.name, err)
 		}
 
 		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", mf.version); err != nil {
-			return fmt.Errorf("recording migration %s: %w", mf.name, err)
+			return 0, fmt.Errorf("recording migration %s: %w", mf.name, err)
 		}
 	}
 
 	log.Printf("embeddeddolt: applied %d migration(s) (version %d → %d)",
 		len(pending), current, pending[len(pending)-1].version)
-	return nil
+	return len(pending), nil
 }
