@@ -42,11 +42,17 @@ func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltS
 		return nil, fmt.Errorf("embeddeddolt: creating data directory: %w", err)
 	}
 
-	return &EmbeddedDoltStore{
+	s := &EmbeddedDoltStore{
 		dataDir:  dataDir,
 		database: database,
 		branch:   branch,
-	}, nil
+	}
+
+	if err := s.initSchema(ctx); err != nil {
+		return nil, fmt.Errorf("embeddeddolt: init schema: %w", err)
+	}
+
+	return s, nil
 }
 
 // withConn opens a short-lived database connection, begins an explicit SQL
@@ -89,6 +95,13 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 
 	err = tx.Commit()
 	return
+}
+
+// initSchema runs all pending migrations.
+func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return migrateUp(ctx, tx)
+	})
 }
 
 func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {

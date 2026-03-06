@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS interactions (
+    id VARCHAR(32) PRIMARY KEY,
+    kind VARCHAR(64) NOT NULL,
+    created_at DATETIME NOT NULL,
+    actor VARCHAR(255),
+    issue_id VARCHAR(255),
+    model VARCHAR(255),
+    prompt TEXT,
+    response TEXT,
+    error TEXT,
+    tool_name VARCHAR(255),
+    exit_code INT,
+    parent_id VARCHAR(32),
+    label VARCHAR(64),
+    reason TEXT,
+    extra JSON,
+    INDEX idx_interactions_kind (kind),
+    INDEX idx_interactions_created_at (created_at),
+    INDEX idx_interactions_issue_id (issue_id),
+    INDEX idx_interactions_parent_id (parent_id)
+);

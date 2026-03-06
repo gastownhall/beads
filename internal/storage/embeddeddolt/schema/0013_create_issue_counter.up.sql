@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS issue_counter (
+    prefix VARCHAR(255) PRIMARY KEY,
+    last_id INT NOT NULL DEFAULT 0
+);
