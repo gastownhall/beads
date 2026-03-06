@@ -465,7 +465,7 @@ func Start(beadsDir string) (*State, error) {
 	}
 
 	// Start dolt sql-server
-	cmd := exec.Command(doltBin, "sql-server",
+	cmd := exec.Command(doltBin, "sql-server", //nolint:gosec // G702: doltBin is resolved from PATH, not user input
 		"-H", cfg.Host,
 		"-P", strconv.Itoa(actualPort),
 	)
@@ -689,7 +689,7 @@ func waitForReady(host string, port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond) //nolint:gosec // G704: addr is built from internal host+port, not user input
 		if err == nil {
 			_ = conn.Close()
 			return nil

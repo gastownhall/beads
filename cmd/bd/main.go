@@ -685,7 +685,7 @@ func checkBlockedEnvVars() error {
 // Before cancellation, it flushes pending batch commits so that accumulated
 // changes in the Dolt working set are not lost on graceful shutdown.
 func setupGracefulShutdown() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is returned and called by caller
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
