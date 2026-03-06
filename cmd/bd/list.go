@@ -740,7 +740,8 @@ var listCmd = &cobra.Command{
 		}
 
 		// Handle pretty format (GH#654)
-		if prettyFormat {
+		// JSON output takes priority over pretty/tree format (bd-list-json-fix)
+		if prettyFormat && !jsonOutput {
 			// Special handling for --tree --parent combination (hierarchical descendants)
 			if parentID != "" {
 				treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", parentID)
