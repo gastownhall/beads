@@ -35,18 +35,23 @@ var errClosed = errors.New("embeddeddolt: store is closed")
 
 // New creates an EmbeddedDoltStore using the embedded Dolt engine.
 // beadsDir is the .beads/ root; the data directory is derived as <beadsDir>/embeddeddolt/.
-// New validates the configuration by opening and immediately closing a test connection.
 func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
 	if err := os.MkdirAll(dataDir, 0750); err != nil {
 		return nil, fmt.Errorf("embeddeddolt: creating data directory: %w", err)
 	}
 
-	return &EmbeddedDoltStore{
+	s := &EmbeddedDoltStore{
 		dataDir:  dataDir,
 		database: database,
 		branch:   branch,
-	}, nil
+	}
+
+	if err := s.initSchema(ctx); err != nil {
+		return nil, fmt.Errorf("embeddeddolt: init schema: %w", err)
+	}
+
+	return s, nil
 }
 
 // withConn opens a short-lived database connection, begins an explicit SQL
@@ -59,9 +64,13 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 
+	if s.database != "" && !validIdentifier.MatchString(s.database) {
+		return fmt.Errorf("embeddeddolt: invalid database name: %q", s.database)
+	}
+
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = OpenSQL(ctx, s.dataDir, "", "")
 	if err != nil {
 		return
 	}
@@ -69,6 +78,20 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	defer func() {
 		err = errors.Join(err, cleanup())
 	}()
+
+	if s.database != "" {
+		if _, err = db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+s.database+"`"); err != nil {
+			return fmt.Errorf("embeddeddolt: creating database: %w", err)
+		}
+		if _, err = db.ExecContext(ctx, "USE `"+s.database+"`"); err != nil {
+			return fmt.Errorf("embeddeddolt: switching to database: %w", err)
+		}
+		if s.branch != "" {
+			if _, err = db.ExecContext(ctx, fmt.Sprintf("SET @@%s_head_ref = %s", s.database, sqlStringLiteral(s.branch))); err != nil {
+				return fmt.Errorf("embeddeddolt: setting branch: %w", err)
+			}
+		}
+	}
 
 	var tx *sql.Tx
 	tx, err = db.BeginTx(ctx, nil)
@@ -89,6 +112,25 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 
 	err = tx.Commit()
 	return
+}
+
+// initSchema runs all pending migrations and commits them to Dolt history.
+func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		applied, err := migrateUp(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if applied > 0 {
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
+				return fmt.Errorf("dolt add after migrations: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
+				return fmt.Errorf("dolt commit after migrations: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
