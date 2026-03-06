@@ -691,11 +691,16 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 		return err
 	}
 
-	// Check if already present
+	// Check if already present or covered by a parent-directory pattern.
+	// e.g. if ".worktrees" is in .gitignore, ".worktrees/my-branch" is already covered.
 	lines := strings.Split(string(content), "\n")
 	for _, line := range lines {
-		if strings.TrimSpace(line) == entry || strings.TrimSpace(line) == entry+"/" {
-			return nil // Already present
+		trimmed := strings.TrimSuffix(strings.TrimSpace(line), "/")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == entry || strings.HasPrefix(entry+"/", trimmed+"/") {
+			return nil // Already present or covered by a parent pattern
 		}
 	}
 
