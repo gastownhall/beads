@@ -184,7 +184,9 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.PersistentFlags().BoolVar(&sandboxMode, "sandbox", false, "Sandbox mode: disables auto-sync")
 	rootCmd.PersistentFlags().Bool("allow-stale", false, "No-op (kept for gt compatibility)")
-	rootCmd.PersistentFlags().MarkHidden("allow-stale") //nolint:errcheck // flag just registered above
+	if err := rootCmd.PersistentFlags().MarkHidden("allow-stale"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to hide allow-stale flag: %v\n", err)
+	}
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
 	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd sync / bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
@@ -683,7 +685,7 @@ func checkBlockedEnvVars() error {
 // Before cancellation, it flushes pending batch commits so that accumulated
 // changes in the Dolt working set are not lost on graceful shutdown.
 func setupGracefulShutdown() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is returned and called by caller
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)

@@ -354,7 +354,6 @@ sync:
 		}
 	})
 
-
 	t.Run("invalid federation.sovereignty", func(t *testing.T) {
 		configContent := `prefix: test
 federation:

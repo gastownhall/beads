@@ -236,4 +236,3 @@ func TestSovereigntyString(t *testing.T) {
 		t.Errorf("SovereigntyNone.String() = %q, want %q", got, "")
 	}
 }
-

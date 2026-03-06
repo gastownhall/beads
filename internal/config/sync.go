@@ -131,4 +131,3 @@ func (m SyncMode) String() string {
 func (s Sovereignty) String() string {
 	return string(s)
 }
-
