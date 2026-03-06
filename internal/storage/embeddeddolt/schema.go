@@ -29,13 +29,17 @@ func latestVersion() int {
 	latestOnce.Do(func() {
 		entries, err := fs.ReadDir(upMigrations, "schema")
 		if err != nil {
-			return
+			panic(fmt.Sprintf("embeddeddolt: failed to read embedded schema migrations: %v", err))
 		}
 		for _, e := range entries {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".up.sql") {
 				continue
 			}
-			if v, err := parseVersion(e.Name()); err == nil && v > latestVer {
+			v, err := parseVersion(e.Name())
+			if err != nil {
+				panic(fmt.Sprintf("embeddeddolt: invalid migration filename %q: %v", e.Name(), err))
+			}
+			if v > latestVer {
 				latestVer = v
 			}
 		}
@@ -117,12 +121,10 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 		}
 
 		sql := strings.TrimSpace(string(data))
-		if sql == "" {
-			continue
-		}
-
-		if _, err := tx.ExecContext(ctx, sql); err != nil {
-			return 0, fmt.Errorf("migration %s failed: %w", mf.name, err)
+		if sql != "" {
+			if _, err := tx.ExecContext(ctx, sql); err != nil {
+				return 0, fmt.Errorf("migration %s failed: %w", mf.name, err)
+			}
 		}
 
 		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", mf.version); err != nil {

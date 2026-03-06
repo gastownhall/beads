@@ -27,14 +27,13 @@ func TestSchemaAfterInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer store.Close()
 
 	// Open a verification connection.
 	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
 	if err != nil {
+		store.Close()
 		t.Fatalf("OpenSQL: %v", err)
 	}
-	defer cleanup()
 
 	// --- Verify tables ---
 
@@ -66,7 +65,6 @@ func TestSchemaAfterInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SHOW TABLES: %v", err)
 	}
-	defer rows.Close()
 
 	gotTables := map[string]bool{}
 	for rows.Next() {
@@ -79,6 +77,7 @@ func TestSchemaAfterInit(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterating tables: %v", err)
 	}
+	rows.Close()
 
 	for _, want := range expectedTables {
 		if !gotTables[want] {
@@ -150,23 +149,32 @@ func TestSchemaAfterInit(t *testing.T) {
 		t.Errorf("max migration version: got %d, want 22", maxVersion)
 	}
 
-	// --- Verify idempotency: New on same dir succeeds ---
+	// --- Log all tables for debugging ---
+
+	var tableList []string
+	for name := range gotTables {
+		tableList = append(tableList, name)
+	}
+	sort.Strings(tableList)
+	t.Logf("tables found: %s", strings.Join(tableList, ", "))
+
+	// --- Close first store and verification connection ---
 
 	cleanup()
 	store.Close()
+
+	// --- Verify idempotency: New on same dir succeeds ---
 
 	store2, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
 	if err != nil {
 		t.Fatalf("second New (idempotency): %v", err)
 	}
-	defer store2.Close()
 
-	// Verify migrations didn't re-run (still 22 rows in schema_migrations).
 	db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
 	if err != nil {
+		store2.Close()
 		t.Fatalf("second OpenSQL: %v", err)
 	}
-	defer cleanup2()
 
 	var migrationCount int
 	if err := db2.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
@@ -176,7 +184,6 @@ func TestSchemaAfterInit(t *testing.T) {
 		t.Errorf("migration count after second init: got %d, want 22", migrationCount)
 	}
 
-	// Also verify max version unchanged.
 	if err := db2.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
 		t.Fatalf("reading max version after second init: %v", err)
 	}
@@ -184,12 +191,6 @@ func TestSchemaAfterInit(t *testing.T) {
 		t.Errorf("max version after second init: got %d, want 22", maxVersion)
 	}
 
-	// --- Log all tables for debugging ---
-
-	var tableList []string
-	for name := range gotTables {
-		tableList = append(tableList, name)
-	}
-	sort.Strings(tableList)
-	t.Logf("tables found: %s", strings.Join(tableList, ", "))
+	cleanup2()
+	store2.Close()
 }
