@@ -71,6 +71,45 @@ func TestStaleLockFiles(t *testing.T) {
 		}
 	})
 
+	t.Run("stale dolt-access.lock removed at redirect target", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		targetBeadsDir := filepath.Join(tmpDir, "rig", ".beads")
+		if err := os.MkdirAll(targetBeadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		worktreeRoot := filepath.Join(tmpDir, "worktree")
+		worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
+		if err := os.MkdirAll(worktreeBeadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		redirectPath := filepath.Join(worktreeBeadsDir, "redirect")
+		if err := os.WriteFile(redirectPath, []byte("../rig/.beads\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		lockPath := filepath.Join(targetBeadsDir, "dolt-access.lock")
+		if err := os.WriteFile(lockPath, []byte("lock"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		oldTime := time.Now().Add(-10 * time.Minute)
+		if err := os.Chtimes(lockPath, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := StaleLockFiles(worktreeRoot); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Error("stale dolt-access.lock at redirect target should be removed")
+		}
+		if _, err := os.Stat(redirectPath); err != nil {
+			t.Errorf("redirect file should be preserved: %v", err)
+		}
+	})
+
 	t.Run("noms LOCK always removed by doctor fix", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		nomsDir := filepath.Join(tmpDir, ".beads", "dolt", "beads", ".dolt", "noms")
