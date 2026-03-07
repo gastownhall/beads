@@ -42,14 +42,17 @@ type haikuClient struct {
 	auditActor     string
 }
 
-// newHaikuClient creates a new Haiku API client. Env var ANTHROPIC_API_KEY takes precedence over explicit apiKey.
+// newHaikuClient creates a new Haiku API client.
+// API key resolution order: ANTHROPIC_API_KEY env var > ai.api_key config > explicit apiKey parameter.
 func newHaikuClient(apiKey string) (*haikuClient, error) {
 	envKey := os.Getenv("ANTHROPIC_API_KEY")
 	if envKey != "" {
 		apiKey = envKey
+	} else if configKey := config.GetString("ai.api_key"); configKey != "" {
+		apiKey = configKey
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY environment variable or provide via config", errAPIKeyRequired)
+		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY environment variable or ai.api_key in config", errAPIKeyRequired)
 	}
 
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))

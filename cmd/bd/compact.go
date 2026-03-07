@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/compact"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -45,7 +46,7 @@ actively referenced. This is permanent graceful decay - original content is disc
 Modes:
   - Analyze: Export candidates for agent review (no API key needed)
   - Apply: Accept agent-provided summary (no API key needed)
-  - Auto: AI-powered compaction (requires ANTHROPIC_API_KEY, legacy)
+  - Auto: AI-powered compaction (requires ANTHROPIC_API_KEY or ai.api_key, legacy)
   - Dolt: Run Dolt garbage collection (for Dolt-backend repositories)
 
 Tiers:
@@ -166,8 +167,11 @@ Examples:
 
 			// Direct mode
 			apiKey := os.Getenv("ANTHROPIC_API_KEY")
+			if apiKey == "" {
+				apiKey = config.GetString("ai.api_key")
+			}
 			if apiKey == "" && !compactDryRun {
-				fmt.Fprintf(os.Stderr, "Error: --auto mode requires ANTHROPIC_API_KEY environment variable\n")
+				fmt.Fprintf(os.Stderr, "Error: --auto mode requires ANTHROPIC_API_KEY environment variable or ai.api_key in config\n")
 				os.Exit(1)
 			}
 
