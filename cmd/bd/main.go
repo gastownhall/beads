@@ -277,7 +277,7 @@ var rootCmd = &cobra.Command{
 		})
 
 		// If flag wasn't explicitly set, use viper value
-		if !cmd.Flags().Changed("json") {
+		if !cmd.Root().PersistentFlags().Changed("json") {
 			jsonOutput = config.GetBool("json")
 		} else {
 			flagOverrides["json"] = struct {
