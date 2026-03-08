@@ -42,17 +42,43 @@ func hookSectionEndLine() string {
 	return fmt.Sprintf("%s v%s ---", hookSectionEndPrefix, Version)
 }
 
+// hookTimeoutSeconds is the maximum time a beads hook is allowed to run before
+// being killed and allowing the git operation to proceed.  A bounded timeout
+// prevents `bd hooks run` from hanging `git push` indefinitely (GH#2453).
+// The value can be overridden via the BEADS_HOOK_TIMEOUT environment variable.
+const hookTimeoutSeconds = 30
+
 // generateHookSection returns the marked section content for a given hook name.
 // The section is self-contained: it checks for bd availability, runs the hook
 // via 'bd hooks run', and propagates exit codes — without preventing any user
 // content after the section from executing on success.
+//
+// Resilience (GH#2453, GH#2449):
+//   - A configurable timeout prevents hooks from hanging git operations.
+//   - If the beads database is not initialized (exit code 3), the hook exits
+//     successfully with a warning so that git operations are not blocked.
 func generateHookSection(hookName string) string {
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
-		"  bd hooks run " + hookName + " \"$@\"\n" +
-		"  _bd_exit=$?; if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\n" +
+		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
+		"  if command -v timeout >/dev/null 2>&1; then\n" +
+		"    timeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
+		"    _bd_exit=$?\n" +
+		"    if [ $_bd_exit -eq 124 ]; then\n" +
+		"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
+		"      _bd_exit=0\n" +
+		"    fi\n" +
+		"  else\n" +
+		"    bd hooks run " + hookName + " \"$@\"\n" +
+		"    _bd_exit=$?\n" +
+		"  fi\n" +
+		"  if [ $_bd_exit -eq 3 ]; then\n" +
+		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
+		"    _bd_exit=0\n" +
+		"  fi\n" +
+		"  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\n" +
 		"fi\n" +
 		hookSectionEndLine() + "\n"
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,6 +191,65 @@ func TestGenerateHookSection(t *testing.T) {
 	expectedEnd := hookSectionEndLine()
 	if !strings.Contains(section, expectedEnd) {
 		t.Errorf("section missing versioned end marker %q\ngot:\n%s", expectedEnd, section)
+	}
+}
+
+// TestGenerateHookSection_Timeout verifies the timeout wrapper around bd hooks run (GH#2453).
+func TestGenerateHookSection_Timeout(t *testing.T) {
+	section := generateHookSection("pre-push")
+
+	// Must use shell timeout command with configurable duration
+	if !strings.Contains(section, "BEADS_HOOK_TIMEOUT") {
+		t.Error("section missing BEADS_HOOK_TIMEOUT env var")
+	}
+	if !strings.Contains(section, fmt.Sprintf("%d", hookTimeoutSeconds)) {
+		t.Errorf("section missing default timeout %d", hookTimeoutSeconds)
+	}
+	if !strings.Contains(section, "command -v timeout") {
+		t.Error("section missing timeout availability check")
+	}
+
+	// Timeout exit code (124) must be handled gracefully — continue, don't block git
+	if !strings.Contains(section, "_bd_exit -eq 124") {
+		t.Error("section missing timeout exit code handling")
+	}
+	if !strings.Contains(section, "timed out") {
+		t.Error("section missing timeout warning message")
+	}
+
+	// Fallback path when timeout command is not available (e.g. macOS without coreutils)
+	if !strings.Contains(section, "else") {
+		t.Error("section missing fallback for systems without timeout command")
+	}
+}
+
+// TestGenerateHookSection_DBNotInitialized verifies exit code 3 handling (GH#2449).
+func TestGenerateHookSection_DBNotInitialized(t *testing.T) {
+	section := generateHookSection("pre-commit")
+
+	// Exit code 3 = beads database not initialized; hook must continue gracefully
+	if !strings.Contains(section, "_bd_exit -eq 3") {
+		t.Error("section missing exit code 3 (DB not initialized) handling")
+	}
+	if !strings.Contains(section, "database not initialized") {
+		t.Error("section missing DB-not-initialized warning message")
+	}
+
+	// After handling exit code 3, the effective exit must be 0 (success)
+	// Verify the pattern: set _bd_exit=0 after detecting code 3
+	if !strings.Contains(section, "if [ $_bd_exit -eq 3 ]; then") {
+		t.Error("section missing exit code 3 conditional")
+	}
+}
+
+// TestGenerateHookSection_HookNameInMessages verifies hook name appears in warning messages.
+func TestGenerateHookSection_HookNameInMessages(t *testing.T) {
+	for _, hook := range managedHookNames {
+		section := generateHookSection(hook)
+		// Each hook's timeout and DB-missing messages should include the hook name
+		if !strings.Contains(section, "hook '"+hook+"'") {
+			t.Errorf("section for %q missing hook name in warning messages", hook)
+		}
 	}
 }
 
