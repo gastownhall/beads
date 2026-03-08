@@ -411,7 +411,7 @@ func enrichDoltStatus(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("Dolt database status: %s. Reports uncommitted changes, dirty working set, or other Dolt-specific state issues.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Dolt working set is clean (no uncommitted changes)",
-		commands:    []string{"bd sync"},
+		commands:    []string{"bd dolt commit"},
 		sourceFiles: []string{"cmd/bd/doctor/dolt.go:CheckDoltStatus"},
 	}
 }
@@ -543,7 +543,7 @@ func enrichKVSync(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("KV store sync status: %s. The key-value store may be out of sync with the main database.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "KV store is in sync with main database",
-		commands:    []string{"bd sync"},
+		commands:    []string{"bd dolt push"},
 		sourceFiles: []string{"cmd/bd/doctor/kv.go:CheckKVSyncStatus"},
 	}
 }

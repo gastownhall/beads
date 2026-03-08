@@ -86,7 +86,7 @@ Run `bd prime` for workflow context.
 - `bd ready` - Find unblocked work
 - `bd create "Title" --type task --priority 2` - Create issue
 - `bd close <id>` - Complete work
-- `bd sync` - Sync with git (run at session end)
+- `bd dolt push` - Push changes to remote (run at session end)
 ```
 
 ### Step 5: Restart VS Code
@@ -117,7 +117,7 @@ With MCP configured, ask Copilot Chat:
 | `beads_show` | Show issue details | "Show bd-42 details" |
 | `beads_update` | Update issue fields | "Set bd-42 to in progress" |
 | `beads_close` | Close an issue | "Complete bd-42" |
-| `beads_sync` | Sync to git | "Sync my changes" |
+| `beads_dolt_push` | Push changes to remote | "Push my changes" |
 | `beads_dep_add` | Add dependency | "bd-99 blocks bd-42" |
 | `beads_dep_tree` | Show dependency tree | "What depends on bd-42?" |
 
@@ -151,10 +151,10 @@ You: Done with bd-42. Close it with reason "Fixed timeout handling"
 Copilot: [Calls beads_close]
 Closed bd-42: Fixed timeout handling
 
-You: Sync everything to git
+You: Push my changes to the remote
 
-Copilot: [Calls beads_sync]
-Synced: 2 issues updated, committed to git.
+Copilot: [Calls beads_dolt_push]
+Pushed: 2 issues updated, synced to Dolt remote.
 ```
 
 ## CLI vs MCP: When to Use Each
@@ -206,13 +206,13 @@ bd init --quiet
 
 ### Changes not persisting
 
-Run sync at end of session:
+Push changes at end of session:
 
 ```bash
-bd sync
+bd dolt push
 ```
 
-Or ask Copilot: "Sync my beads changes to git"
+Or ask Copilot: "Push my beads changes to the remote"
 
 ### Organization policies blocking MCP
 

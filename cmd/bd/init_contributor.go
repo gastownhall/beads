@@ -236,7 +236,7 @@ Created by: bd init --contributor
 	fmt.Println("  Issues from planning repo will appear in 'bd list'")
 
 	// If this is a fork, configure sync to pull beads from upstream (bd-bx9)
-	// This ensures `bd sync` gets the latest issues from the source repo,
+	// This ensures `bd dolt pull` gets the latest issues from the source repo,
 	// not from the fork's potentially outdated origin/main
 	if isFork {
 		if err := store.SetConfig(ctx, "sync.remote", "upstream"); err != nil {

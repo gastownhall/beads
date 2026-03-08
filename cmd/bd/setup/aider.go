@@ -23,7 +23,7 @@ This project uses **Beads (bd)** for issue tracking. Aider requires explicit com
 1. **Track ALL work in bd** (never use markdown TODOs or comment-based task lists)
 2. **Suggest 'bd ready'** to find available work
 3. **Suggest 'bd create'** for new issues/tasks/bugs
-4. **Suggest 'bd sync'** at end of session
+4. **Suggest 'bd dolt push'** at end of session
 5. **ALWAYS suggest commands** - user will run them via /run
 
 ## Quick Command Reference (suggest these to user)
@@ -34,7 +34,7 @@ This project uses **Beads (bd)** for issue tracking. Aider requires explicit com
 - ` + "`bd update <id> --claim`" + ` - Claim work atomically
 - ` + "`bd close <id>`" + ` - Mark complete
 - ` + "`bd dep add <issue> <depends-on>`" + ` - Add dependency (issue depends on depends-on)
-- ` + "`bd sync`" + ` - Sync with git remote
+- ` + "`bd dolt push`" + ` - Push changes to Dolt remote
 
 ## Workflow Pattern to Suggest
 
@@ -42,7 +42,7 @@ This project uses **Beads (bd)** for issue tracking. Aider requires explicit com
 2. **Claim task**: "Run ` + "`/run bd update <id> --claim`" + ` to claim it atomically"
 3. **Do the work**
 4. **Complete**: "Run ` + "`/run bd close <id>`" + ` when done"
-5. **Sync**: "Run ` + "`/run bd sync`" + ` to push changes"
+5. **Sync**: "Run ` + "`/run bd dolt push`" + ` to push changes"
 
 ## Context Loading
 
@@ -69,7 +69,7 @@ Suggest ` + "`/run bd prime`" + ` for complete workflow documentation (~1-2k tok
 - **Always use /run prefix** - Aider requires explicit command execution
 - **Link discovered work** - Use ` + "`--deps discovered-from:<parent-id>`" + ` when creating issues found during work
 - **Include descriptions** - Always provide meaningful context when creating issues
-- **End session with sync** - Remind user to run ` + "`/run bd sync`" + ` before ending session
+- **End session with sync** - Remind user to run ` + "`/run bd dolt push`" + ` before ending session
 
 For detailed docs: see AGENTS.md, QUICKSTART.md, or run ` + "`bd --help`" + `
 `
@@ -107,7 +107,7 @@ The AI will **suggest** bd commands, but you must confirm them.
 
 5. Sync at end of session:
    ` + "```bash" + `
-   /run bd sync
+   /run bd dolt push
    ` + "```" + `
 
 ## Configuration

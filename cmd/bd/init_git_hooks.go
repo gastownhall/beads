@@ -304,7 +304,7 @@ func printJJAliasInstructions() {
 	fmt.Printf("Jujutsu doesn't support hooks yet. To auto-export beads on push,\n")
 	fmt.Printf("add this alias to your jj config (~/.config/jj/config.toml):\n\n")
 	fmt.Printf("  %s\n", ui.RenderAccent("[aliases]"))
-	fmt.Printf("  %s\n", ui.RenderAccent(`push = ["util", "exec", "--", "sh", "-c", "bd sync --flush-only && jj git push \"$@\"", ""]`))
+	fmt.Printf("  %s\n", ui.RenderAccent(`push = ["util", "exec", "--", "sh", "-c", "bd dolt commit && bd dolt push && jj git push \"$@\"", ""]`))
 	fmt.Printf("\nThen use %s instead of %s\n\n", ui.RenderAccent("jj push"), ui.RenderAccent("jj git push"))
 	fmt.Printf("For more details, see: https://github.com/steveyegge/beads/blob/main/docs/JUJUTSU.md\n\n")
 }

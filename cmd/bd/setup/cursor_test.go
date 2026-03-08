@@ -15,7 +15,7 @@ func TestCursorRulesTemplate(t *testing.T) {
 		"bd create",
 		"bd update",
 		"bd close",
-		"bd sync",
+		"bd dolt push",
 		"BEADS INTEGRATION",
 	}
 

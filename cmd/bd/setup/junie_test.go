@@ -13,7 +13,7 @@ func TestJunieGuidelinesTemplate(t *testing.T) {
 		"bd create",
 		"bd update",
 		"bd close",
-		"bd sync",
+		"bd dolt push",
 		"mcp_beads_ready",
 		"mcp_beads_list",
 		"mcp_beads_create",
@@ -490,8 +490,8 @@ func TestJunieGuidelinesWorkflowPattern(t *testing.T) {
 	if !strings.Contains(guidelines, "bd ready") {
 		t.Error("Should mention bd ready")
 	}
-	if !strings.Contains(guidelines, "bd sync") {
-		t.Error("Should mention bd sync")
+	if !strings.Contains(guidelines, "bd dolt push") {
+		t.Error("Should mention bd dolt push")
 	}
 
 	// Should explain MCP tools

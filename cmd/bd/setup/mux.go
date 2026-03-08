@@ -33,7 +33,7 @@ set -euo pipefail
 # Claude PreCompact approximation for Mux: keep beads metadata synced after file edits.
 if [ "${MUX_TOOL:-}" = "file_edit_replace_string" ] || [ "${MUX_TOOL:-}" = "file_edit_insert" ]; then
   if command -v bd >/dev/null 2>&1; then
-    bd sync >/dev/null 2>&1 || true
+    bd dolt push >/dev/null 2>&1 || true
   elif [ -x "$HOME/bin/bd" ]; then
     "$HOME/bin/bd" sync >/dev/null 2>&1 || true
   fi
