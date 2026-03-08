@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestProtocol_ImportPreservesRelationalData asserts that relational data
@@ -89,9 +90,12 @@ func TestProtocol_FieldsRoundTrip(t *testing.T) {
 	assertField(t, issue, "assignee", "alice")
 	assertFieldFloat(t, issue, "estimated_minutes", 180)
 
-	// Date fields: accept any RFC3339 that starts with the correct date
-	assertFieldPrefix(t, issue, "due_at", "2099-03-15")
-	assertFieldPrefix(t, issue, "defer_until", "2099-01-15")
+	// Date fields: date-only inputs are parsed as local midnight, then stored as UTC.
+	// The UTC representation may show the previous day in west-of-UTC timezones.
+	dueLocal, _ := time.ParseInLocation("2006-01-02", "2099-03-15", time.Local)
+	deferLocal, _ := time.ParseInLocation("2006-01-02", "2099-01-15", time.Local)
+	assertFieldPrefix(t, issue, "due_at", dueLocal.UTC().Format("2006-01-02"))
+	assertFieldPrefix(t, issue, "defer_until", deferLocal.UTC().Format("2006-01-02"))
 }
 
 // TestProtocol_MetadataRoundTrip asserts that JSON metadata set via
