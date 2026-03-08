@@ -1883,7 +1883,7 @@ func TestInitBackendFlag(t *testing.T) {
 		if !strings.Contains(outStr, "SQLite backend has been removed") {
 			t.Errorf("Expected 'SQLite backend has been removed' message, got: %s", outStr)
 		}
-		if !strings.Contains(outStr, "bd migrate --to-dolt") {
+		if !strings.Contains(outStr, "bd init --from-jsonl") {
 			t.Errorf("Expected migration instructions, got: %s", outStr)
 		}
 

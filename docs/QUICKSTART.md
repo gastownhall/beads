@@ -39,7 +39,7 @@ The wizard will:
 Notes:
 - Dolt is the default (and only) storage backend. Data is stored in `.beads/dolt/`.
 - Dolt uses a `dolt sql-server` for database operations.
-- To migrate from an older SQLite installation, run `bd migrate --to-dolt`.
+- To import issues from an older installation, run `bd init --from-jsonl`.
 
 ### Role Configuration
 

@@ -12,7 +12,7 @@ import (
 )
 
 // TestMigrateCommand removed: detectDatabases, getDBVersion, formatDBList, dbInfo
-// were removed in Dolt-native pruning. Migration is now handled by bd init --to-dolt.
+// were removed in Dolt-native pruning. Migration is now handled by bd init --from-jsonl.
 
 // TestFormatDBList removed: formatDBList and dbInfo types were removed.
 

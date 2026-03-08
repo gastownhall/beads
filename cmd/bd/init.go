@@ -72,8 +72,8 @@ environment variable.`,
 			fmt.Fprintf(os.Stderr, "Dolt is now the default (and only) storage backend for beads.\n")
 			fmt.Fprintf(os.Stderr, "To initialize with Dolt:\n")
 			fmt.Fprintf(os.Stderr, "  bd init\n\n")
-			fmt.Fprintf(os.Stderr, "To migrate an existing SQLite database to Dolt:\n")
-			fmt.Fprintf(os.Stderr, "  bd migrate --to-dolt\n\n")
+			fmt.Fprintf(os.Stderr, "To import issues from an existing JSONL export:\n")
+			fmt.Fprintf(os.Stderr, "  bd init --from-jsonl\n\n")
 			fmt.Fprintf(os.Stderr, "See: https://github.com/steveyegge/beads/blob/main/docs/DOLT-BACKEND.md\n")
 			os.Exit(1)
 		} else if backendFlag != "" && backendFlag != "dolt" {
