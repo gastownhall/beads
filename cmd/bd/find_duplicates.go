@@ -36,7 +36,7 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
@@ -93,8 +93,8 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 
 	// AI method requires API key
 	if method == "ai" {
-		if os.Getenv("ANTHROPIC_API_KEY") == "" {
-			FatalError("--method ai requires ANTHROPIC_API_KEY environment variable")
+		if os.Getenv("ANTHROPIC_API_KEY") == "" && config.GetString("ai.api_key") == "" {
+			FatalError("--method ai requires ANTHROPIC_API_KEY environment variable or ai.api_key in config")
 		}
 	}
 
@@ -363,6 +363,9 @@ func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold floa
 	fmt.Fprintf(os.Stderr, "Analyzing %d candidate pairs with AI...\n", len(candidates))
 
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		apiKey = config.GetString("ai.api_key")
+	}
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
 
 	var pairs []duplicatePair
