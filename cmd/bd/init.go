@@ -974,8 +974,15 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 					gitRemote := config.GetString("sync.git-remote")
 					return initGuardServerMessage(dbName, host, port, prefix, gitRemote)
 				}
-				// If server unreachable (FR-030) or DB exists (FR-012) or
-				// error during check: fall through to existing behavior.
+				if result.Reachable && result.Exists {
+					// Server up and DB exists — fall through to "already initialized" error.
+				} else {
+					// Server unreachable or error during check: this is a fresh clone
+					// with committed metadata.json but no local dolt/ directory.
+					// Allow init to proceed so the user can bootstrap the database
+					// (e.g. via --from-jsonl). (GH#2433)
+					return nil
+				}
 			}
 
 			location := doltPath
