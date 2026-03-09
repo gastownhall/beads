@@ -202,7 +202,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 	// Check Dolt database health
 	ctx := context.Background()
 	doltPath := getDatabasePath(beadsDir)
-	store, err := dolt.New(ctx, &dolt.Config{Path: doltPath, ReadOnly: true, Database: doltDatabaseName(beadsDir)})
+	store, err := dolt.New(ctx, doltServerConfig(beadsDir, doltPath))
 	if err != nil {
 		result.Ready = false
 		result.DoltHealthy = false

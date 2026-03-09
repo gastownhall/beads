@@ -262,6 +262,44 @@ func TestDefaultConfig(t *testing.T) {
 	})
 }
 
+func TestEnsurePortFile(t *testing.T) {
+	beadsDir := t.TempDir()
+	portFile := filepath.Join(beadsDir, "dolt-server.port")
+
+	if err := EnsurePortFile(beadsDir, 14567); err != nil {
+		t.Fatalf("EnsurePortFile(write missing): %v", err)
+	}
+	if data, err := os.ReadFile(portFile); err != nil {
+		t.Fatalf("ReadFile(missing): %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != "14567" {
+		t.Fatalf("port file = %q, want 14567", got)
+	}
+
+	if err := os.WriteFile(portFile, []byte("bad"), 0600); err != nil {
+		t.Fatalf("WriteFile(corrupt): %v", err)
+	}
+	if err := EnsurePortFile(beadsDir, 14568); err != nil {
+		t.Fatalf("EnsurePortFile(repair corrupt): %v", err)
+	}
+	if data, err := os.ReadFile(portFile); err != nil {
+		t.Fatalf("ReadFile(repaired): %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != "14568" {
+		t.Fatalf("repaired port file = %q, want 14568", got)
+	}
+
+	if err := os.WriteFile(portFile, []byte("14569"), 0600); err != nil {
+		t.Fatalf("WriteFile(stale): %v", err)
+	}
+	if err := EnsurePortFile(beadsDir, 14570); err != nil {
+		t.Fatalf("EnsurePortFile(update stale): %v", err)
+	}
+	if data, err := os.ReadFile(portFile); err != nil {
+		t.Fatalf("ReadFile(updated): %v", err)
+	} else if got := strings.TrimSpace(string(data)); got != "14570" {
+		t.Fatalf("updated port file = %q, want 14570", got)
+	}
+}
+
 func TestStopNotRunning(t *testing.T) {
 	dir := t.TempDir()
 

@@ -230,6 +230,19 @@ func writePortFile(beadsDir string, port int) error {
 	return os.WriteFile(portPath(beadsDir), []byte(strconv.Itoa(port)), 0600)
 }
 
+// EnsurePortFile makes the repo-local port file match the connected server port.
+// This is a best-effort repair path for upgraded repos that are missing
+// .beads/dolt-server.port even though commands can still connect.
+func EnsurePortFile(beadsDir string, port int) error {
+	if beadsDir == "" || port <= 0 {
+		return nil
+	}
+	if readPortFile(beadsDir) == port {
+		return nil
+	}
+	return writePortFile(beadsDir, port)
+}
+
 // DefaultConfig returns config with sensible defaults.
 // Priority: env var > metadata.json > config.yaml / global config > port file > DerivePort.
 //
@@ -352,6 +365,7 @@ func EnsureRunning(beadsDir string) (int, error) {
 		return 0, err
 	}
 	if state.Running {
+		_ = EnsurePortFile(serverDir, state.Port)
 		// Touch activity file so idle monitor knows we're active
 		touchActivity(serverDir)
 		return state.Port, nil
