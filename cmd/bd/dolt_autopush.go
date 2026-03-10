@@ -2,13 +2,63 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 )
+
+// pushState tracks auto-push state in a local file (.beads/push-state.json)
+// instead of the Dolt metadata table, to avoid merge conflicts on multi-machine
+// setups (GH#2466).
+type pushState struct {
+	LastPush   string `json:"last_push"`   // RFC3339 timestamp
+	LastCommit string `json:"last_commit"` // Dolt commit hash
+}
+
+func pushStatePath() (string, error) {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return "", fmt.Errorf("not in a beads repository")
+	}
+	return filepath.Join(beadsDir, "push-state.json"), nil
+}
+
+func loadPushState() (*pushState, error) {
+	path, err := pushStatePath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // path is constructed internally
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var ps pushState
+	if err := json.Unmarshal(data, &ps); err != nil {
+		return nil, err
+	}
+	return &ps, nil
+}
+
+func savePushState(ps *pushState) error {
+	path, err := pushStatePath()
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(ps, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, data)
+}
 
 // isDoltAutoPushEnabled returns whether auto-push to Dolt remote should run.
 // If user explicitly configured dolt.auto-push, use that.
@@ -46,19 +96,22 @@ func maybeAutoPush(ctx context.Context) {
 		return
 	}
 
+	// Load local push state (file-based, not in Dolt metadata table).
+	// This avoids merge conflicts on multi-machine setups (GH#2466).
+	ps, err := loadPushState()
+	if err != nil {
+		debug.Logf("dolt auto-push: failed to load push state: %v\n", err)
+		return
+	}
+
 	// Debounce: skip if we pushed recently
 	interval := config.GetDuration("dolt.auto-push-interval")
 	if interval == 0 {
 		interval = 5 * time.Minute
 	}
 
-	lastPushStr, err := st.GetMetadata(ctx, "dolt_auto_push_last")
-	if err != nil {
-		debug.Logf("dolt auto-push: failed to get last push time: %v\n", err)
-		return
-	}
-	if lastPushStr != "" {
-		lastPush, err := time.Parse(time.RFC3339, lastPushStr)
+	if ps != nil && ps.LastPush != "" {
+		lastPush, err := time.Parse(time.RFC3339, ps.LastPush)
 		if err == nil && time.Since(lastPush) < interval {
 			debug.Logf("dolt auto-push: throttled (last push %s ago, interval %s)\n",
 				time.Since(lastPush).Round(time.Second), interval)
@@ -72,8 +125,7 @@ func maybeAutoPush(ctx context.Context) {
 		debug.Logf("dolt auto-push: failed to get current commit: %v\n", err)
 		return
 	}
-	lastPushedCommit, _ := st.GetMetadata(ctx, "dolt_auto_push_commit")
-	if currentCommit == lastPushedCommit && lastPushedCommit != "" {
+	if ps != nil && currentCommit == ps.LastCommit && ps.LastCommit != "" {
 		debug.Logf("dolt auto-push: no changes since last push\n")
 		return
 	}
@@ -85,13 +137,10 @@ func maybeAutoPush(ctx context.Context) {
 		return
 	}
 
-	// Record last push time and commit
+	// Record last push time and commit to local file
 	now := time.Now().UTC().Format(time.RFC3339)
-	if err := st.SetMetadata(ctx, "dolt_auto_push_last", now); err != nil {
-		debug.Logf("dolt auto-push: failed to record push time: %v\n", err)
-	}
-	if err := st.SetMetadata(ctx, "dolt_auto_push_commit", currentCommit); err != nil {
-		debug.Logf("dolt auto-push: failed to record push commit: %v\n", err)
+	if err := savePushState(&pushState{LastPush: now, LastCommit: currentCommit}); err != nil {
+		debug.Logf("dolt auto-push: failed to save push state: %v\n", err)
 	}
 
 	debug.Logf("dolt auto-push: pushed successfully\n")

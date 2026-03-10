@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -110,4 +111,63 @@ func TestMaybeAutoPush_DisabledByConfig(t *testing.T) {
 
 	// Should not panic or attempt push
 	maybeAutoPush(context.Background())
+}
+
+func TestLoadSavePushState(t *testing.T) {
+
+	// Create a temp .beads dir with metadata.json so FindBeadsDir works
+	tmp := t.TempDir()
+	beadsDir := filepath.Join(tmp, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	// No file yet → nil, nil
+	ps, err := loadPushState()
+	if err != nil {
+		t.Fatalf("loadPushState (no file): %v", err)
+	}
+	if ps != nil {
+		t.Fatalf("loadPushState (no file): got %+v, want nil", ps)
+	}
+
+	// Save and reload
+	want := &pushState{LastPush: "2026-03-09T12:00:00Z", LastCommit: "abc123"}
+	if err := savePushState(want); err != nil {
+		t.Fatalf("savePushState: %v", err)
+	}
+	got, err := loadPushState()
+	if err != nil {
+		t.Fatalf("loadPushState: %v", err)
+	}
+	if got == nil || got.LastPush != want.LastPush || got.LastCommit != want.LastCommit {
+		t.Errorf("loadPushState = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadPushState_CorruptJSON(t *testing.T) {
+
+	tmp := t.TempDir()
+	beadsDir := filepath.Join(tmp, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	// Write garbage
+	if err := os.WriteFile(filepath.Join(beadsDir, "push-state.json"), []byte(`not json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadPushState()
+	if err == nil {
+		t.Error("loadPushState with corrupt JSON: expected error, got nil")
+	}
 }
