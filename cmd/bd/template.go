@@ -164,6 +164,23 @@ func loadDescendants(ctx context.Context, s *dolt.DoltStore, subgraph *TemplateS
 			continue // Already in subgraph
 		}
 
+		// Check if this hierarchical child has been reparented to a different parent (GH#2476).
+		// If it has an explicit parent-child dependency pointing elsewhere, skip it —
+		// the ID pattern match is stale and the child belongs to another molecule.
+		depRecs, err := s.GetDependencyRecords(ctx, child.ID)
+		if err == nil {
+			reparented := false
+			for _, dep := range depRecs {
+				if dep.Type == types.DepParentChild && dep.DependsOnID != parentID {
+					reparented = true
+					break
+				}
+			}
+			if reparented {
+				continue
+			}
+		}
+
 		// Add to subgraph
 		subgraph.Issues = append(subgraph.Issues, child)
 		subgraph.IssueMap[child.ID] = child

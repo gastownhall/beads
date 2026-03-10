@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -295,6 +296,88 @@ func TestAutoCloseCompletedMolecule(t *testing.T) {
 
 		// Should not panic — early return because root is already closed
 		autoCloseCompletedMolecule(ctx, s, step.ID, "test-actor", "test-session")
+	})
+
+	t.Run("ClosesWhenReparentedStepExcluded", func(t *testing.T) {
+		// Create molecule root (Epic A)
+		root := &types.Issue{
+			Title:     "Epic with reparented child",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeEpic,
+			Labels:    []string{BeadsTemplateLabel},
+			CreatedAt: time.Now(),
+		}
+		if err := s.CreateIssue(ctx, root, "test"); err != nil {
+			t.Fatalf("Failed to create root: %v", err)
+		}
+
+		// Create 3 child steps with dotted IDs (triggers Strategy 2 in loadDescendants)
+		var steps []*types.Issue
+		for i := 1; i <= 3; i++ {
+			step := &types.Issue{
+				ID:        fmt.Sprintf("%s.%d", root.ID, i),
+				Title:     fmt.Sprintf("Step %d", i),
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+				CreatedAt: time.Now(),
+			}
+			if err := s.CreateIssue(ctx, step, "test"); err != nil {
+				t.Fatalf("Failed to create step %d: %v", i, err)
+			}
+			if err := s.AddDependency(ctx, &types.Dependency{
+				IssueID:     step.ID,
+				DependsOnID: root.ID,
+				Type:        types.DepParentChild,
+			}, "test"); err != nil {
+				t.Fatalf("Failed to add parent-child dep for step %d: %v", i, err)
+			}
+			steps = append(steps, step)
+		}
+
+		// Create Epic B for reparenting target
+		epicB := &types.Issue{
+			Title:     "Epic B (reparent target)",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeEpic,
+			CreatedAt: time.Now(),
+		}
+		if err := s.CreateIssue(ctx, epicB, "test"); err != nil {
+			t.Fatalf("Failed to create Epic B: %v", err)
+		}
+
+		// Reparent step 3: remove old parent dep, add new one to Epic B
+		if err := s.RemoveDependency(ctx, steps[2].ID, root.ID, "test"); err != nil {
+			t.Fatalf("Failed to remove old parent dep: %v", err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     steps[2].ID,
+			DependsOnID: epicB.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add new parent dep: %v", err)
+		}
+
+		// Close steps 1 and 2 (the remaining children of Epic A)
+		for _, step := range steps[:2] {
+			if err := s.CloseIssue(ctx, step.ID, "done", "test-actor", "test-session"); err != nil {
+				t.Fatalf("Failed to close %s: %v", step.ID, err)
+			}
+		}
+
+		// Trigger auto-close — should succeed since only 2 children remain
+		autoCloseCompletedMolecule(ctx, s, steps[1].ID, "test-actor", "test-session")
+
+		// Verify root auto-closed (reparented step should be excluded from molecule)
+		updatedRoot, err := s.GetIssue(ctx, root.ID)
+		if err != nil {
+			t.Fatalf("Failed to get root: %v", err)
+		}
+		if updatedRoot.Status != types.StatusClosed {
+			t.Errorf("Root status = %q, want %q (reparented step should be excluded from molecule)", updatedRoot.Status, types.StatusClosed)
+		}
 	})
 }
 
