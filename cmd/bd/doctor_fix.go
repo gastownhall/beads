@@ -287,8 +287,6 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Untracked Files":
 			fmt.Printf("  ⚠ Untracked JSONL fix removed (Dolt-native storage)\n")
 			continue
-		case "Merge Artifacts":
-			err = fix.MergeArtifacts(path)
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path, doctorVerbose)
 		case "Child-Parent Dependencies":

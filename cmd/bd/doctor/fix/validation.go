@@ -1,12 +1,9 @@
 package fix
 
 import (
-	"bufio"
 	"database/sql"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -21,92 +18,6 @@ func getDatabasePath(beadsDir string) string {
 		return filepath.Join(beadsDir, "dolt") // fallback to default
 	}
 	return cfg.DatabasePath(beadsDir)
-}
-
-// MergeArtifacts removes temporary git merge files from .beads directory.
-func MergeArtifacts(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
-		return err
-	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	// Read patterns from .gitignore or use defaults
-	patterns, err := readMergeArtifactPatterns(beadsDir)
-	if err != nil {
-		patterns = []string{
-			"*.base.jsonl",
-			"*.left.jsonl",
-			"*.right.jsonl",
-			"*.meta.json",
-		}
-	}
-
-	// Find and delete matching files
-	var deleted int
-	var errors []string
-
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(filepath.Join(beadsDir, pattern))
-		if err != nil {
-			continue
-		}
-		for _, file := range matches {
-			if err := os.Remove(file); err != nil {
-				if !os.IsNotExist(err) {
-					errors = append(errors, fmt.Sprintf("%s: %v", filepath.Base(file), err))
-				}
-			} else {
-				deleted++
-				fmt.Printf("  Removed %s\n", filepath.Base(file))
-			}
-		}
-	}
-
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to remove some files: %s", strings.Join(errors, "; "))
-	}
-
-	if deleted == 0 {
-		fmt.Println("  No merge artifacts to remove")
-	} else {
-		fmt.Printf("  Removed %d merge artifact(s)\n", deleted)
-	}
-
-	return nil
-}
-
-// readMergeArtifactPatterns reads patterns from .beads/.gitignore merge section
-func readMergeArtifactPatterns(beadsDir string) ([]string, error) {
-	gitignorePath := filepath.Join(beadsDir, ".gitignore")
-	file, err := os.Open(gitignorePath) // #nosec G304 - path constructed from beadsDir
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var patterns []string
-	inMergeSection := false
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if strings.Contains(line, "Merge artifacts") {
-			inMergeSection = true
-			continue
-		}
-
-		if inMergeSection && strings.HasPrefix(line, "#") {
-			break
-		}
-
-		if inMergeSection && line != "" && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "!") {
-			patterns = append(patterns, line)
-		}
-	}
-
-	return patterns, scanner.Err()
 }
 
 // OrphanedDependencies removes dependencies pointing to non-existent issues.

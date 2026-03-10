@@ -349,7 +349,6 @@ var rootCmd = &cobra.Command{
 			"powershell",
 			"prime",
 			"quickstart",
-			"resolve-conflicts",
 			"setup",
 			"version",
 			"zsh",

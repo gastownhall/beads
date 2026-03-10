@@ -5,10 +5,6 @@ package doctor
 // Non-CGO stubs for doctor checks that require Dolt database access.
 // These checks are skipped in non-CGO builds.
 
-func CheckMergeArtifacts(_ string) DoctorCheck {
-	return DoctorCheck{Name: "Merge Artifacts", Status: StatusWarning, Message: "Skipped: requires CGO"}
-}
-
 func CheckOrphanedDependencies(_ string) DoctorCheck {
 	return DoctorCheck{Name: "Orphaned Dependencies", Status: StatusWarning, Message: "Skipped: requires CGO"}
 }

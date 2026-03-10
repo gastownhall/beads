@@ -139,7 +139,6 @@ func cleanJSONLArtifacts(beadsDir string) (removed, skipped, errCount int) {
 	// Safe to delete (not the primary data source)
 	safeFiles := []string{
 		"issues.jsonl.new",
-		"beads.left.jsonl",
 	}
 
 	for _, name := range safeFiles {

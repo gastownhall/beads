@@ -711,12 +711,7 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, untrackedCheck)
 	// Don't fail overall check for untracked files, just warn
 
-	// Check 21: Merge artifacts (from bd clean)
-	mergeArtifactsCheck := convertDoctorCheck(doctor.CheckMergeArtifacts(path))
-	result.Checks = append(result.Checks, mergeArtifactsCheck)
-	// Don't fail overall check for merge artifacts, just warn
-
-	// Check 22: Orphaned dependencies (from bd repair-deps, bd validate)
+	// Check 21: Orphaned dependencies (from bd repair-deps, bd validate)
 	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn

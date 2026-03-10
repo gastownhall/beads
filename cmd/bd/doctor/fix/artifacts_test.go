@@ -100,7 +100,7 @@ func TestClassicArtifacts_CleansJSONLInDoltDir(t *testing.T) {
 	}
 
 	// Create safe-to-delete JSONL artifacts
-	for _, name := range []string{"issues.jsonl.new", "beads.left.jsonl"} {
+	for _, name := range []string{"issues.jsonl.new"} {
 		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(`{"id":"test"}`), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -122,7 +122,7 @@ func TestClassicArtifacts_CleansJSONLInDoltDir(t *testing.T) {
 	}
 
 	// Safe files should be removed
-	for _, name := range []string{"issues.jsonl.new", "beads.left.jsonl", "interactions.jsonl"} {
+	for _, name := range []string{"issues.jsonl.new", "interactions.jsonl"} {
 		if _, err := os.Stat(filepath.Join(beadsDir, name)); !os.IsNotExist(err) {
 			t.Errorf("%s should have been removed", name)
 		}

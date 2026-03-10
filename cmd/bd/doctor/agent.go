@@ -120,7 +120,6 @@ var agentEnrichers = map[string]enricher{
 	"Test Pollution":               enrichTestPollution,
 	"Orphaned Dependencies":        enrichOrphanedDeps,
 	"Child-Parent Dependencies":    enrichChildParentDeps,
-	"Merge Artifacts":              enrichMergeArtifacts,
 	"Classic Artifacts":            enrichClassicArtifacts,
 	"Embedded Mode Concurrency":    enrichEmbeddedConcurrency,
 	"Pending Migrations":           enrichPendingMigrations,
@@ -490,17 +489,6 @@ func enrichChildParentDeps(dc DoctorCheck) agentEnrichment {
 		expected:    "No dependency edges between parent and child issues",
 		commands:    []string{"bd doctor --fix --fix-child-parent"},
 		sourceFiles: []string{"cmd/bd/doctor/validation.go:CheckChildParentDependencies"},
-	}
-}
-
-func enrichMergeArtifacts(dc DoctorCheck) agentEnrichment {
-	return agentEnrichment{
-		severity:    "advisory",
-		explanation: fmt.Sprintf("Merge artifacts found: %s. Git merge markers or backup files from conflict resolution are present in .beads/. These can be safely cleaned up.", dc.Message),
-		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No merge artifacts in .beads/",
-		commands:    []string{"bd doctor --fix"},
-		sourceFiles: []string{"cmd/bd/doctor/validation.go:CheckMergeArtifacts"},
 	}
 }
 
