@@ -388,6 +388,10 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, hooksCheck)
 	// Don't fail overall check for missing hooks, just warn
 
+	// Check for stale .legacy hook sidecars calling removed "bd hook" command (GH#2398)
+	legacyCheck := convertWithCategory(doctor.CheckStaleLegacyHooks(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, legacyCheck)
+
 	// Check git hooks Dolt compatibility (hooks without Dolt check cause errors)
 	doltHooksCheck := convertWithCategory(doctor.CheckGitHooksDoltCompatibility(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, doltHooksCheck)

@@ -530,6 +530,72 @@ func gitRevListCount(ctx context.Context, path string, rangeExpr string) (int, e
 	return n, nil
 }
 
+// staleBdHookPattern matches the removed "bd hook <name>" command (not "bd hooks run").
+// This was removed in v0.58.0 and replaced by "bd hooks run".
+var staleBdHookPattern = regexp.MustCompile(`\bbd\s+hook\s+(?:pre-commit|post-merge|pre-push|post-checkout|prepare-commit-msg)\b`)
+
+// CheckStaleLegacyHooks detects *.legacy sidecar hooks (created by Python's pre-commit
+// framework) that still call the removed "bd hook" command. These cause "unknown command"
+// errors at runtime even though "bd hooks list" and "bd doctor" show green. (GH#2398)
+func CheckStaleLegacyHooks() DoctorCheck {
+	hooksDir, err := git.GetGitHooksDir()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Stale Legacy Hooks",
+			Status:  StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	entries, err := os.ReadDir(hooksDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Stale Legacy Hooks",
+			Status:  StatusOK,
+			Message: "N/A (cannot read hooks directory)",
+		}
+	}
+
+	var staleFiles []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".legacy") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(hooksDir, name))
+		if err != nil {
+			continue
+		}
+		if staleBdHookPattern.Match(content) {
+			staleFiles = append(staleFiles, name)
+		}
+	}
+
+	if len(staleFiles) == 0 {
+		return DoctorCheck{
+			Name:    "Stale Legacy Hooks",
+			Status:  StatusOK,
+			Message: "No stale legacy hook sidecars",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Stale Legacy Hooks",
+		Status:  StatusWarning,
+		Message: fmt.Sprintf("%d stale .legacy hook(s) calling removed 'bd hook' command", len(staleFiles)),
+		Detail:  fmt.Sprintf("Files: %s", strings.Join(staleFiles, ", ")),
+		Fix:     "Remove or update these files: rm " + strings.Join(staleFilePaths(hooksDir, staleFiles), " "),
+	}
+}
+
+func staleFilePaths(hooksDir string, names []string) []string {
+	paths := make([]string, len(names))
+	for i, name := range names {
+		paths[i] = filepath.Join(hooksDir, name)
+	}
+	return paths
+}
+
 // CheckGitHooksDoltCompatibility checks if installed git hooks are compatible with Dolt backend.
 // Hooks installed before Dolt support was added don't have the backend check and will
 // fail with confusing errors on git pull/commit.

@@ -331,3 +331,57 @@ func TestCheckOrphanedIssues_DoltBackend(t *testing.T) {
 		t.Errorf("expected N/A message, got %q", check.Message)
 	}
 }
+
+func TestCheckStaleLegacyHooks(t *testing.T) {
+	t.Run("no legacy files", func(t *testing.T) {
+		dir := t.TempDir()
+		setupGitRepoInDir(t, dir)
+		runInDir(t, dir, func() {
+			check := CheckStaleLegacyHooks()
+			if check.Status != StatusOK {
+				t.Errorf("expected OK, got %q: %s", check.Status, check.Message)
+			}
+		})
+	})
+
+	t.Run("stale legacy hook with removed bd hook command", func(t *testing.T) {
+		dir := t.TempDir()
+		setupGitRepoInDir(t, dir)
+		hooksDir := filepath.Join(dir, ".git", "hooks")
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit.legacy"),
+			"#!/bin/sh\nexec bd hook pre-commit \"$@\"\n")
+		runInDir(t, dir, func() {
+			check := CheckStaleLegacyHooks()
+			if check.Status != StatusWarning {
+				t.Errorf("expected warning, got %q: %s", check.Status, check.Message)
+			}
+			if !strings.Contains(check.Detail, "pre-commit.legacy") {
+				t.Errorf("expected detail to mention pre-commit.legacy, got %q", check.Detail)
+			}
+		})
+	})
+
+	t.Run("legacy hook with current bd hooks run command is OK", func(t *testing.T) {
+		dir := t.TempDir()
+		setupGitRepoInDir(t, dir)
+		hooksDir := filepath.Join(dir, ".git", "hooks")
+		writeHookFile(t, filepath.Join(hooksDir, "pre-commit.legacy"),
+			"#!/bin/sh\nbd hooks run pre-commit \"$@\"\n")
+		runInDir(t, dir, func() {
+			check := CheckStaleLegacyHooks()
+			if check.Status != StatusOK {
+				t.Errorf("expected OK, got %q: %s", check.Status, check.Message)
+			}
+		})
+	})
+
+	t.Run("not in git repo", func(t *testing.T) {
+		dir := t.TempDir()
+		runInDir(t, dir, func() {
+			check := CheckStaleLegacyHooks()
+			if check.Status != StatusOK {
+				t.Errorf("expected OK, got %q", check.Status)
+			}
+		})
+	})
+}
