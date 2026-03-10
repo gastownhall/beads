@@ -969,9 +969,11 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 
 				result := checkDatabaseOnServer(host, port, user, password, dbName)
 				if result.Reachable && !result.Exists && result.Err == nil {
-					// Server up but DB missing — show refined message (FR-010, FR-011).
-					gitRemote := config.GetString("sync.git-remote")
-					return initGuardServerMessage(dbName, host, port, prefix, gitRemote)
+					// Server is up but DB doesn't exist. Since we also know
+					// doltDirExists==false, this is a fresh clone — there's no
+					// local database to protect. Allow init to proceed so the
+					// user can bootstrap (e.g. via --from-jsonl). (GH#2433)
+					return nil
 				}
 				if result.Reachable && result.Exists {
 					// Server up and DB exists — fall through to "already initialized" error.

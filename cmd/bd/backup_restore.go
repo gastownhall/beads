@@ -232,6 +232,9 @@ func restoreConfig(ctx context.Context, s *dolt.DoltStore, path string, dryRun b
 // Uses raw SQL with dynamic columns to match the backup export format exactly,
 // avoiding type mismatches between DB values (e.g., int 0/1 for booleans) and
 // Go struct types.
+//
+// The JSONL may contain denormalized data from `bd export` (labels, dependencies,
+// comment counts). These are extracted and inserted into their proper tables.
 func restoreIssues(ctx context.Context, s *dolt.DoltStore, path string, dryRun bool) (int, error) {
 	lines, err := readJSONLFile(path)
 	if err != nil {
@@ -270,15 +273,82 @@ func restoreIssues(ctx context.Context, s *dolt.DoltStore, path string, dryRun b
 			continue
 		}
 
+		issueID, _ := row["id"].(string)
+
+		// Extract denormalized relational data before SQL insertion.
+		// `bd export` embeds labels ([]string) and dependencies ([]*Dependency)
+		// in each issue row, but they belong in separate tables.
+		var labels []interface{}
+		if v, ok := row["labels"]; ok {
+			if arr, ok := v.([]interface{}); ok {
+				labels = arr
+			}
+			delete(row, "labels")
+		}
+
+		var deps []interface{}
+		if v, ok := row["dependencies"]; ok {
+			if arr, ok := v.([]interface{}); ok {
+				deps = arr
+			}
+			delete(row, "dependencies")
+		}
+
+		// Remove computed count fields that don't exist in the issues table.
+		delete(row, "dependency_count")
+		delete(row, "dependent_count")
+		delete(row, "comment_count")
+		delete(row, "parent")
+
 		n, warnings := restoreTableRow(ctx, db, "issues", row)
 		count += n
 		_ = warnings
+
+		if n == 0 {
+			continue // insertion failed, skip relational data
+		}
+
+		// Insert extracted labels into the labels table
+		for _, l := range labels {
+			if label, ok := l.(string); ok && label != "" {
+				_, _ = db.ExecContext(ctx,
+					"INSERT IGNORE INTO labels (issue_id, label) VALUES (?, ?)",
+					issueID, label)
+			}
+		}
+
+		// Insert extracted dependencies into the dependencies table
+		for _, d := range deps {
+			dep, ok := d.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			depIssueID, _ := dep["issue_id"].(string)
+			dependsOnID, _ := dep["depends_on_id"].(string)
+			depType, _ := dep["type"].(string)
+			createdBy, _ := dep["created_by"].(string)
+			metadata, _ := dep["metadata"].(string)
+			if metadata == "" {
+				metadata = "{}"
+			}
+			if depIssueID == "" || dependsOnID == "" {
+				continue
+			}
+			createdAtStr, _ := dep["created_at"].(string)
+			createdAt := parseTimeOrNow(createdAtStr)
+			_, _ = db.ExecContext(ctx,
+				"INSERT IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, ?, ?)",
+				depIssueID, dependsOnID, depType, createdAt, createdBy, metadata)
+		}
 	}
 	return count, nil
 }
 
 // restoreTableRow inserts a single row from a JSONL map into the given table.
 // Uses INSERT IGNORE to handle duplicates gracefully. Returns (1, 0) on success.
+//
+// Values that are slices ([]interface{}) are serialized to JSON strings before
+// insertion, since the SQL driver cannot handle Go slice types directly.
 func restoreTableRow(ctx context.Context, db *sql.DB, table string, row map[string]interface{}) (int, int) {
 	if len(row) == 0 {
 		return 0, 0
@@ -289,6 +359,22 @@ func restoreTableRow(ctx context.Context, db *sql.DB, table string, row map[stri
 	placeholders := make([]string, 0, len(row))
 
 	for col, val := range row {
+		// Convert slice/map types that the SQL driver cannot handle directly.
+		// These typically come from JSON arrays or nested objects in the JSONL.
+		switch v := val.(type) {
+		case []interface{}:
+			serialized, err := json.Marshal(v)
+			if err != nil {
+				continue // skip unparseable values
+			}
+			val = string(serialized)
+		case map[string]interface{}:
+			serialized, err := json.Marshal(v)
+			if err != nil {
+				continue
+			}
+			val = string(serialized)
+		}
 		cols = append(cols, "`"+col+"`")
 		placeholders = append(placeholders, "?")
 		vals = append(vals, val)

@@ -337,6 +337,114 @@ func TestBackupRestoreMissingDir(t *testing.T) {
 	}
 }
 
+// TestBackupRestoreDenormalized verifies that `bd backup restore` handles
+// denormalized JSONL from `bd export`, which embeds labels, dependencies,
+// and count fields directly in issue rows. These must be extracted and
+// inserted into their proper relational tables.
+func TestBackupRestoreDenormalized(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	ensureTestMode(t)
+	saved := saveAndRestoreGlobals(t)
+	_ = saved
+
+	tmpDir := t.TempDir()
+	backupPath := filepath.Join(tmpDir, "backup")
+	if err := os.MkdirAll(backupPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write JSONL with denormalized data (as produced by `bd export`)
+	issuesData := `{"id":"dn-1","title":"Issue with labels","description":"has embedded labels","status":"open","priority":2,"issue_type":"task","labels":["backend","urgent"],"dependencies":[],"dependency_count":0,"dependent_count":0,"comment_count":0}
+{"id":"dn-2","title":"Issue with deps","description":"has embedded deps","status":"open","priority":1,"issue_type":"bug","labels":["frontend"],"dependencies":[{"issue_id":"dn-2","depends_on_id":"dn-1","type":"blocks","created_at":"2026-01-15T10:30:00Z","created_by":"tester","metadata":"{}"}],"dependency_count":1,"dependent_count":0,"comment_count":0}
+`
+	if err := os.WriteFile(filepath.Join(backupPath, "issues.jsonl"), []byte(issuesData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a fresh store
+	dbName := uniqueTestDBName(t)
+	testDBPath := filepath.Join(t.TempDir(), "dolt")
+	writeTestMetadata(t, testDBPath, dbName)
+	s := newTestStore(t, testDBPath)
+	store = s
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	t.Cleanup(func() {
+		store = nil
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	})
+
+	ctx := context.Background()
+
+	result, err := runBackupRestore(ctx, s, backupPath, false)
+	if err != nil {
+		t.Fatalf("restore denormalized: %v", err)
+	}
+
+	// Both issues should be restored
+	if result.Issues != 2 {
+		t.Errorf("restored issues = %d, want 2", result.Issues)
+	}
+	if result.Warnings != 0 {
+		t.Errorf("restore warnings = %d, want 0", result.Warnings)
+	}
+
+	// Verify issues exist
+	issue1, err := s.GetIssue(ctx, "dn-1")
+	if err != nil {
+		t.Fatalf("get issue dn-1: %v", err)
+	}
+	if issue1.Title != "Issue with labels" {
+		t.Errorf("issue1 title = %q, want %q", issue1.Title, "Issue with labels")
+	}
+
+	issue2, err := s.GetIssue(ctx, "dn-2")
+	if err != nil {
+		t.Fatalf("get issue dn-2: %v", err)
+	}
+	if issue2.Title != "Issue with deps" {
+		t.Errorf("issue2 title = %q, want %q", issue2.Title, "Issue with deps")
+	}
+
+	// Verify labels were extracted and inserted into the labels table
+	labels1, err := s.GetLabels(ctx, "dn-1")
+	if err != nil {
+		t.Fatalf("get labels dn-1: %v", err)
+	}
+	if len(labels1) != 2 {
+		t.Errorf("dn-1 labels count = %d, want 2 (got %v)", len(labels1), labels1)
+	}
+
+	labels2, err := s.GetLabels(ctx, "dn-2")
+	if err != nil {
+		t.Fatalf("get labels dn-2: %v", err)
+	}
+	if len(labels2) != 1 {
+		t.Errorf("dn-2 labels count = %d, want 1 (got %v)", len(labels2), labels2)
+	}
+
+	// Verify dependencies were extracted and inserted into the dependencies table
+	deps, err := s.GetDependencies(ctx, "dn-2")
+	if err != nil {
+		t.Fatalf("get dependencies dn-2: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Errorf("dn-2 dependencies count = %d, want 1", len(deps))
+	}
+	if len(deps) > 0 && deps[0].ID != "dn-1" {
+		t.Errorf("dn-2 depends_on = %q, want %q", deps[0].ID, "dn-1")
+	}
+}
+
 func TestReadJSONLFile(t *testing.T) {
 	t.Parallel()
 
