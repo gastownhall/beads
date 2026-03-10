@@ -30,11 +30,13 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	database := configfile.DefaultDoltDatabase
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
-	// Use doltserver.DefaultConfig for port resolution (env > config > Gas Town > DerivePort).
-	// cfg.GetDoltServerPort() is deprecated — it falls back to 3307 which is wrong
-	// for standalone mode where the port is hash-derived from the project path.
+	// Use doltserver.DefaultConfig for port resolution (env > port file > config.yaml).
+	// Port 0 means no server running yet.
 	dsCfg := doltserver.DefaultConfig(beadsDir)
 	port := dsCfg.Port
+	if port == 0 {
+		return nil, nil, fmt.Errorf("no Dolt server port configured and no server running; run any bd command to auto-start")
+	}
 
 	if cfg != nil {
 		host = cfg.GetDoltServerHost()

@@ -2,25 +2,23 @@
 // It provides transparent auto-start so that `bd init` and `bd <command>` work
 // without manual server management.
 //
-// The default port is 3307 (configfile.DefaultDoltServerPort),
-// matching shared Homebrew Dolt servers. If another project's Dolt server already
-// occupies port 3307, Start falls back to DerivePort for per-project isolation
-// (hash-derived, range 13307–14306). Users with explicit port config in
-// metadata.json or BEADS_DOLT_SERVER_PORT env var always use that port instead.
+// Port assignment uses OS-assigned ephemeral ports by default. When no explicit
+// port is configured (env var, config.yaml, metadata.json), Start() asks the OS
+// for a free port via net.Listen(":0"), passes it to dolt sql-server, and writes
+// the actual port to dolt-server.port. This eliminates the birthday-problem
+// collisions that plagued the old hash-derived port scheme (GH#2098, GH#2372).
 //
-// Anti-proliferation: the server enforces one-server-one-port. If the canonical
-// port is busy, the server identifies and handles the occupant rather than
-// silently starting on another port.
+// Users with explicit port config via BEADS_DOLT_SERVER_PORT env var or
+// config.yaml always use that port instead, with conflict detection via
+// reclaimPort.
 //
-// Server state files (PID, log, lock) live in the .beads/ directory.
+// Server state files (PID, port, log, lock) live in the .beads/ directory.
 package doltserver
 
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"hash/fnv"
 	"net"
 	"os"
 	"os/exec"
@@ -36,11 +34,9 @@ import (
 	"github.com/steveyegge/beads/internal/lockfile"
 )
 
-// Port range for auto-derived ports.
-const (
-	portRangeBase = 13307
-	portRangeSize = 1000
-)
+// maxEphemeralPortAttempts is the number of times Start() retries ephemeral
+// port allocation when the TOCTOU race causes a bind failure.
+const maxEphemeralPortAttempts = 10
 
 // resolveServerDir returns the canonical server directory for dolt state files.
 // Returns beadsDir unchanged.
@@ -83,7 +79,7 @@ func ResolveDoltDir(beadsDir string) string {
 // Config holds the server configuration.
 type Config struct {
 	BeadsDir string // Path to .beads/ directory
-	Port     int    // MySQL protocol port (0 = use DefaultDoltServerPort 3307)
+	Port     int    // MySQL protocol port (0 = allocate ephemeral port on Start)
 	Host     string // Bind address (default: 127.0.0.1)
 }
 
@@ -107,35 +103,18 @@ func maxDoltServers() int {
 	return 3
 }
 
-// ErrPortOccupiedByOtherProject is returned by reclaimPort when the canonical
-// port is held by another beads project's Dolt server (different data dir).
-// Start uses this to fall back to DerivePort for per-project isolation.
-var ErrPortOccupiedByOtherProject = fmt.Errorf("port occupied by another project's dolt server")
-
-// fallbackPort returns the DerivePort value for a beadsDir, used when the
-// default port (3307) is occupied by another project's Dolt server.
-func fallbackPort(beadsDir string) int {
-	return DerivePort(beadsDir)
-}
-
-// DerivePort computes a stable port from the beadsDir path.
-// Maps to range 13307–14306 (1000 ports) to avoid common service ports.
-// The port is deterministic: same path always yields the same port.
-//
-// The 1000-port hash space means collisions become likely around 9+
-// concurrent projects (~3.9% probability via the birthday paradox with
-// fnv32a % 1000). This is acceptable because reclaimPort() in Start()
-// detects when another project's server already occupies the derived
-// port and falls back gracefully — hash collisions cause a retry, not
-// a failure.
-func DerivePort(beadsDir string) int {
-	abs, err := filepath.Abs(beadsDir)
+// allocateEphemeralPort asks the OS for a free TCP port on host.
+// It binds to port 0, reads the assigned port, and closes the listener.
+// The caller should pass the returned port to dolt sql-server promptly
+// to minimize the TOCTOU window.
+func allocateEphemeralPort(host string) (int, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
-		abs = beadsDir
+		return 0, fmt.Errorf("allocating ephemeral port: %w", err)
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(abs))
-	return portRangeBase + int(h.Sum32()%uint32(portRangeSize))
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port, nil
 }
 
 // isPortAvailable checks if a TCP port is available for binding.
@@ -149,11 +128,12 @@ func isPortAvailable(host string, port int) bool {
 	return true
 }
 
-// reclaimPort ensures the canonical port is available for use.
+// reclaimPort ensures an explicit (user-configured) port is available for use.
+// Only called for explicit ports (env var, config.yaml, metadata.json).
 // If the port is busy:
 //   - If our dolt server (same data dir) → return its PID for adoption
 //   - If a stale/orphan dolt sql-server holds it → kill it and reclaim
-//   - If a non-dolt process holds it → return error (don't silently use another port)
+//   - If another project's dolt or a non-dolt process → return error
 //
 // Returns (adoptPID, nil) when an existing server should be adopted.
 // Returns (0, nil) when the port is free for a new server.
@@ -190,8 +170,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 	}
 
 	// Another beads project's Dolt server is on this port.
-	// Don't kill it — return a sentinel so Start can fall back to DerivePort.
-	return 0, ErrPortOccupiedByOtherProject
+	return 0, fmt.Errorf("port %d is in use by another project's dolt server (PID %d).\n\nFree the port or use a different one with: bd dolt set port <port>", port, pid)
 }
 
 // countDoltProcesses returns the number of running dolt sql-server processes.
@@ -240,13 +219,13 @@ func EnsurePortFile(beadsDir string, port int) error {
 }
 
 // DefaultConfig returns config with sensible defaults.
-// Priority: env var > metadata.json > config.yaml / global config > port file > DerivePort.
+// Priority: env var > port file > config.yaml / global config > metadata.json.
+// Returns port 0 when no source provides a port, meaning Start() should
+// allocate an ephemeral port from the OS.
 //
 // The port file (dolt-server.port) is written by Start() with the actual port
 // the server is listening on. Consulting it here ensures that commands
-// connecting to an already-running server use the correct port — even when
-// Start() fell back to DerivePort because another project occupied the default
-// port.
+// connecting to an already-running server use the correct port.
 func DefaultConfig(beadsDir string) *Config {
 	cfg := &Config{
 		BeadsDir: beadsDir,
@@ -296,9 +275,10 @@ func DefaultConfig(beadsDir string) *Config {
 		}
 	}
 
-	if cfg.Port == 0 {
-		cfg.Port = DerivePort(beadsDir)
-	}
+	// Port 0 means "no configured port" — Start() will allocate an
+	// ephemeral port from the OS. This replaces the old DerivePort
+	// hash-based fallback that suffered from birthday-problem collisions
+	// (GH#2098, GH#2372).
 
 	return cfg
 }
@@ -336,11 +316,25 @@ func IsRunning(beadsDir string) (*State, error) {
 		return &State{Running: false}, nil
 	}
 
-	// Read actual port from port file; fall back to config-derived port
+	// Read actual port from port file; fall back to config-derived port.
 	port := readPortFile(beadsDir)
 	if port == 0 {
 		cfg := DefaultConfig(beadsDir)
 		port = cfg.Port
+	}
+	if port == 0 {
+		// Server is running but we can't determine its port (port file
+		// missing, no explicit config). Stop the orphan so that callers
+		// (EnsureRunning) trigger a fresh Start() with a new port file.
+		fmt.Fprintf(os.Stderr, "Dolt server (PID %d) running but port unknown; stopping for restart\n", pid)
+		if err := gracefulStop(pid, 5*time.Second); err != nil {
+			// Best-effort kill
+			if proc, findErr := os.FindProcess(pid); findErr == nil {
+				_ = proc.Kill()
+			}
+		}
+		_ = os.Remove(pidPath(beadsDir))
+		return &State{Running: false}, nil
 	}
 	return &State{
 		Running: true,
@@ -436,71 +430,107 @@ func Start(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("opening log file: %w", err)
 	}
 
-	// Reclaim the canonical port. If another project's Dolt holds it,
-	// fall back to a hash-derived port for per-project isolation.
+	// Resolve the port to use. Explicit ports (env/config) go through
+	// reclaimPort for conflict detection. Port 0 means ephemeral — allocate
+	// a fresh port from the OS with retry for TOCTOU races.
 	actualPort := cfg.Port
-	adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
-	if reclaimErr != nil {
-		if errors.Is(reclaimErr, ErrPortOccupiedByOtherProject) {
-			// Another project's Dolt server is on the default port —
-			// use a hash-derived port for this project instead.
-			fmt.Fprintf(os.Stderr, "Port %d occupied by another project's Dolt server; falling back to port %d\n", actualPort, fallbackPort(beadsDir))
-			actualPort = fallbackPort(beadsDir)
-			adoptPID, reclaimErr = reclaimPort(cfg.Host, actualPort, beadsDir)
-			if reclaimErr != nil {
-				_ = logFile.Close()
-				return nil, fmt.Errorf("cannot start dolt server on fallback port %d: %w", actualPort, reclaimErr)
-			}
-		} else {
+	explicitPort := actualPort > 0
+
+	if explicitPort {
+		// Explicit port: check for conflicts and adopt existing servers.
+		adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
+		if reclaimErr != nil {
 			_ = logFile.Close()
 			return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
 		}
-	}
-	if adoptPID > 0 {
-		// Existing server is ours (same data dir) — adopt it
-		_ = logFile.Close()
-		_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
-		_ = writePortFile(beadsDir, actualPort)
-		return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
+		if adoptPID > 0 {
+			_ = logFile.Close()
+			_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
+			_ = writePortFile(beadsDir, actualPort)
+			return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
+		}
 	}
 
-	// Start dolt sql-server
-	cmd := exec.Command(doltBin, "sql-server", //nolint:gosec // G702: doltBin is resolved from PATH, not user input
-		"-H", cfg.Host,
-		"-P", strconv.Itoa(actualPort),
-	)
-	cmd.Dir = doltDir
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.Stdin = nil
-	// New process group so server survives bd exit
-	cmd.SysProcAttr = procAttrDetached()
+	// Start dolt sql-server, with retry loop for ephemeral port TOCTOU.
+	var pid int
+	var lastErr error
+	attempts := 1
+	if !explicitPort {
+		attempts = maxEphemeralPortAttempts
+	}
 
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		return nil, fmt.Errorf("starting dolt sql-server: %w", err)
+	for i := 0; i < attempts; i++ {
+		if !explicitPort {
+			p, allocErr := allocateEphemeralPort(cfg.Host)
+			if allocErr != nil {
+				lastErr = allocErr
+				continue
+			}
+			actualPort = p
+		}
+
+		cmd := exec.Command(doltBin, "sql-server", //nolint:gosec // doltBin is resolved from PATH, not user input
+			"-H", cfg.Host,
+			"-P", strconv.Itoa(actualPort),
+		)
+		cmd.Dir = doltDir
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		cmd.Stdin = nil
+		cmd.SysProcAttr = procAttrDetached()
+
+		if startErr := cmd.Start(); startErr != nil {
+			lastErr = startErr
+			if !explicitPort {
+				continue // retry with a new ephemeral port
+			}
+			_ = logFile.Close()
+			return nil, fmt.Errorf("starting dolt sql-server: %w", startErr)
+		}
+
+		pid = cmd.Process.Pid
+		_ = cmd.Process.Release()
+
+		// Quick check: did the process exit immediately (bind failure)?
+		// Give it a moment to fail on port bind before proceeding.
+		time.Sleep(200 * time.Millisecond)
+		if !isProcessAlive(pid) {
+			lastErr = fmt.Errorf("dolt sql-server exited immediately on port %d (attempt %d/%d)", actualPort, i+1, attempts)
+			pid = 0
+			if !explicitPort {
+				continue
+			}
+			_ = logFile.Close()
+			return nil, lastErr
+		}
+
+		lastErr = nil
+		break
 	}
 	_ = logFile.Close()
 
-	pid := cmd.Process.Pid
+	if lastErr != nil {
+		return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\nCheck logs: %s",
+			attempts, lastErr, logPath(beadsDir))
+	}
 
 	// Write PID and port files
 	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(pid)), 0600); err != nil {
-		_ = cmd.Process.Kill()
+		if proc, findErr := os.FindProcess(pid); findErr == nil {
+			_ = proc.Kill()
+		}
 		return nil, fmt.Errorf("writing PID file: %w", err)
 	}
 	if err := writePortFile(beadsDir, actualPort); err != nil {
-		_ = cmd.Process.Kill()
+		if proc, findErr := os.FindProcess(pid); findErr == nil {
+			_ = proc.Kill()
+		}
 		_ = os.Remove(pidPath(beadsDir))
 		return nil, fmt.Errorf("writing port file: %w", err)
 	}
 
-	// Release the process handle so it outlives us
-	_ = cmd.Process.Release()
-
 	// Wait for server to accept connections
 	if err := waitForReady(cfg.Host, actualPort, 10*time.Second); err != nil {
-		// Server started but not responding — clean up
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
 			_ = proc.Kill()
 		}

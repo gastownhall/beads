@@ -517,10 +517,13 @@ func applyConfigDefaults(cfg *Config) {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			cfg.ServerPort = p
 		}
-	} else if cfg.ServerPort == 0 {
-		cfg.ServerPort = DefaultSQLPort
 	}
-	// Test mode guard: if we'd hit production, force port 1 instead.
+	// Port 0 means "not yet resolved" — auto-start (EnsureRunning) will
+	// allocate an ephemeral port. Don't default to 3307 as that caused
+	// cross-project data leakage (GH#2098, GH#2372).
+	//
+	// Test mode guard: force port 1 (immediate fail) if we'd hit production
+	// or have no port, to prevent test databases leaking onto production.
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
 			cfg.ServerPort = 1
@@ -596,7 +599,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
 					addr, startErr)
 			}
-			// Update port in case EnsureRunning used a derived port
+			// Update port — EnsureRunning allocates an ephemeral port
 			if port != cfg.ServerPort {
 				cfg.ServerPort = port
 				addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))

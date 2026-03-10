@@ -379,10 +379,8 @@ environment variable.`,
 		// AutoStart is always enabled during init — we need a server to initialize the database.
 		//
 		// Use doltserver.DefaultConfig to resolve the port via the standard chain
-		// (env var → port file → config.yaml → DerivePort). Without this, the
-		// store's applyConfigDefaults falls back to DefaultSQLPort (3307), which
-		// may belong to a DIFFERENT project's server, causing cross-project data
-		// leakage (GH#2372).
+		// (env var → port file → config.yaml). Port 0 means auto-start will
+		// allocate an ephemeral port (GH#2098, GH#2372).
 		doltDefaults := doltserver.DefaultConfig(beadsDir)
 		doltCfg := &dolt.Config{
 			Path:            storagePath,

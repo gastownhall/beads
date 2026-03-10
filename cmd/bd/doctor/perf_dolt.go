@@ -56,7 +56,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 		GoVersion: runtime.Version(),
 	}
 
-	// Resolve server config (handles standalone hash-derived ports)
+	// Resolve server config (handles standalone ephemeral ports)
 	dsCfg := doltserver.DefaultConfig(beadsDir)
 
 	// Check server status

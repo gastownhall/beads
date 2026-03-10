@@ -36,9 +36,18 @@ func runCheckHealth(path string) {
 		return
 	}
 
-	// Try connecting to Dolt server for config/version checks
+	// Try connecting to Dolt server for config/version checks.
+	// Use doltserver.DefaultConfig for port resolution — GetDoltServerPort
+	// falls back to 3307 which is wrong for ephemeral ports.
 	host := cfg.GetDoltServerHost()
 	port := doltserver.DefaultConfig(beadsDir).Port
+	if port == 0 {
+		// No server running yet — skip DB checks, only check hooks.
+		if issue := doctor.CheckHooksQuick(Version); issue != "" {
+			printCheckHealthHint([]string{issue})
+		}
+		return
+	}
 	database := cfg.GetDoltDatabase()
 
 	var issues []string

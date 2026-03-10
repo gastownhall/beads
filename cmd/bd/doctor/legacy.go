@@ -308,7 +308,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.IsDoltServerMode() {
 			host := cfg.GetDoltServerHost()
 			// Use DefaultConfig (not deprecated GetDoltServerPort) to resolve
-			// the correct port for standalone server mode (hash-derived).
+			// the correct port for standalone server mode (ephemeral).
 			port := doltserver.DefaultConfig(beadsDir).Port
 			user := cfg.GetDoltServerUser()
 			password := cfg.GetDoltServerPassword()

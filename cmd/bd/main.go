@@ -495,10 +495,8 @@ var rootCmd = &cobra.Command{
 			doltCfg.Database = cfg.GetDoltDatabase()
 
 			doltCfg.ServerHost = cfg.GetDoltServerHost()
-			// cfg.GetDoltServerPort() falls back to 3307 which is wrong for
-			// standalone mode where the port is hash-derived from the beadsDir
-			// path. Use doltserver.DefaultConfig() which checks metadata.json,
-			// env vars, and falls back to the hash-derived port.
+			// Use doltserver.DefaultConfig for port resolution (env > port file >
+			// config.yaml). Port 0 is fine here — auto-start will resolve it.
 			doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 			doltCfg.ServerUser = cfg.GetDoltServerUser()
 			doltCfg.ServerPassword = cfg.GetDoltServerPassword()
