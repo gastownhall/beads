@@ -459,7 +459,7 @@ func Start(beadsDir string) (*State, error) {
 		attempts = maxEphemeralPortAttempts
 	}
 
-	for i := 0; i < attempts; i++ {
+	for i := range attempts {
 		if !explicitPort {
 			p, allocErr := allocateEphemeralPort(cfg.Host)
 			if allocErr != nil {

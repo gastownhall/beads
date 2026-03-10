@@ -481,6 +481,35 @@ func TestIsRunningReadsPortFile(t *testing.T) {
 	}
 }
 
+// --- IsRunning port-zero orphan recovery ---
+
+func TestIsRunningOrphanNoPortFile(t *testing.T) {
+	// When PID file exists but process is dead and no port file,
+	// IsRunning should clean up and return Running=false.
+	// (The orphan kill path for *live* processes requires a real dolt server,
+	// but the dead-PID cleanup path exercises the same code structure.)
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// Write PID file with dead PID, no port file
+	if err := os.WriteFile(pidPath(dir), []byte("99999999"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Error("expected Running=false for dead PID with no port file")
+	}
+	// PID file should be cleaned up
+	if _, err := os.Stat(pidPath(dir)); !os.IsNotExist(err) {
+		t.Error("expected PID file to be removed")
+	}
+}
+
 func TestCleanupStateFiles(t *testing.T) {
 	dir := t.TempDir()
 
@@ -570,33 +599,6 @@ func TestDefaultConfigPortFileTakesPrecedence(t *testing.T) {
 	cfg := DefaultConfig(dir)
 	if cfg.Port != 14567 {
 		t.Errorf("expected port file port 14567, got %d", cfg.Port)
-	}
-}
-
-// --- IsRunning port-zero orphan recovery ---
-
-func TestIsRunningOrphanNoPortFile(t *testing.T) {
-	// When PID file exists but process is dead and no port file,
-	// IsRunning should clean up and return Running=false.
-	dir := t.TempDir()
-	t.Setenv("GT_ROOT", "")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
-
-	// Write PID file with dead PID, no port file
-	if err := os.WriteFile(pidPath(dir), []byte("99999999"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	state, err := IsRunning(dir)
-	if err != nil {
-		t.Fatalf("IsRunning error: %v", err)
-	}
-	if state.Running {
-		t.Error("expected Running=false for dead PID with no port file")
-	}
-	// PID file should be cleaned up
-	if _, err := os.Stat(pidPath(dir)); !os.IsNotExist(err) {
-		t.Error("expected PID file to be removed")
 	}
 }
 
