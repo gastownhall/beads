@@ -408,14 +408,35 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 1b: Metadata config file (GH#2478)
+	// Must come before database checks since they depend on metadata.json.
+	beadsDir := filepath.Join(path, ".beads")
+	beadsDir = beads.FollowRedirect(beadsDir)
+	configPath := configfile.ConfigPath(beadsDir)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		metaCheck := doctorCheck{
+			Name:     "Metadata Config",
+			Status:   statusError,
+			Message:  "metadata.json is missing",
+			Fix:      "Run 'bd doctor --fix' to regenerate with defaults, or 'bd init --force'",
+			Category: doctor.CategoryCore,
+		}
+		result.Checks = append(result.Checks, metaCheck)
+		result.OverallOK = false
+	} else {
+		result.Checks = append(result.Checks, doctorCheck{
+			Name:     "Metadata Config",
+			Status:   statusOK,
+			Message:  "metadata.json present",
+			Category: doctor.CategoryCore,
+		})
+	}
+
 	// GH#1981: Run lock health check BEFORE any checks that open embedded
 	// Dolt databases. Earlier checks (CheckDatabaseVersion, CheckSchemaCompatibility,
 	// etc.) create noms LOCK files via flock(); if CheckLockHealth runs after them,
 	// it detects those same-process locks as "held by another process" (false positive).
 	earlyLockCheck := doctor.CheckLockHealth(path)
-
-	beadsDir := filepath.Join(path, ".beads")
-	beadsDir = beads.FollowRedirect(beadsDir)
 
 	// bd-jgxi: Auto-migrate database version before checking it.
 	// Since doctor skips PersistentPreRun DB init (it's in noDbCommands),

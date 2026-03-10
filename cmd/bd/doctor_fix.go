@@ -204,6 +204,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 	// Rough dependency chain:
 	// permissions/lock cleanup → config sanity → DB integrity/migrations.
 	order := []string{
+		"Metadata Config",
 		"Lock Files",
 		"Permissions",
 		"Database Config",
@@ -243,6 +244,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 
 		var err error
 		switch check.Name {
+		case "Metadata Config":
+			err = fix.FixMissingMetadataJSON(path)
 		case "Gitignore":
 			err = doctor.FixGitignore(path)
 		case "Project Gitignore":

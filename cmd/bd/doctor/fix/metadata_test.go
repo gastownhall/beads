@@ -80,6 +80,83 @@ func TestFixMissingMetadata_DoltConfigExists(t *testing.T) {
 	t.Logf("FixMissingMetadata result: %v", err)
 }
 
+// TestFixMissingMetadataJSON_Regenerates verifies that FixMissingMetadataJSON
+// creates a metadata.json file when it's missing but .beads/ exists (GH#2478).
+func TestFixMissingMetadataJSON_Regenerates(t *testing.T) {
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	configPath := filepath.Join(beadsDir, "metadata.json")
+
+	// Verify metadata.json does not exist
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatal("metadata.json should not exist before fix")
+	}
+
+	// Run the fix
+	if err := FixMissingMetadataJSON(dir); err != nil {
+		t.Fatalf("FixMissingMetadataJSON failed: %v", err)
+	}
+
+	// Verify metadata.json was created
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		t.Fatal("metadata.json should exist after fix")
+	}
+
+	// Verify it contains valid config
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("Failed to load regenerated config: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("Loaded config should not be nil")
+	}
+	if cfg.GetBackend() != configfile.BackendDolt {
+		t.Errorf("Backend = %q, want %q", cfg.GetBackend(), configfile.BackendDolt)
+	}
+}
+
+// TestFixMissingMetadataJSON_NoOpWhenPresent verifies that FixMissingMetadataJSON
+// does nothing when metadata.json already exists.
+func TestFixMissingMetadataJSON_NoOpWhenPresent(t *testing.T) {
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+
+	// Create metadata.json with custom content
+	cfg := &configfile.Config{
+		Database:  "custom-db",
+		Backend:   configfile.BackendDolt,
+		DoltMode:  "embedded",
+		ProjectID: "test-project-123",
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	// Run the fix — should be a no-op
+	if err := FixMissingMetadataJSON(dir); err != nil {
+		t.Fatalf("FixMissingMetadataJSON failed: %v", err)
+	}
+
+	// Verify original config is preserved (not overwritten with defaults)
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+	if loaded.ProjectID != "test-project-123" {
+		t.Errorf("ProjectID = %q, want %q (fix should not overwrite existing config)", loaded.ProjectID, "test-project-123")
+	}
+}
+
+// TestFixMissingMetadataJSON_NotBeadsWorkspace verifies that FixMissingMetadataJSON
+// returns an error for paths without a .beads directory.
+func TestFixMissingMetadataJSON_NotBeadsWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	err := FixMissingMetadataJSON(dir)
+	if err == nil {
+		t.Error("expected error for non-beads workspace")
+	}
+}
+
 // setupGitRepoInDir initializes a git repo in the given directory with a remote.
 func setupGitRepoInDir(t *testing.T, dir string) {
 	t.Helper()
