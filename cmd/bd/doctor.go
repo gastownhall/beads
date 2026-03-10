@@ -520,6 +520,13 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
 
+	// Check 7a1: Project identity (GH#2372 backfill)
+	projectIDCheck := convertWithCategory(doctor.CheckProjectIdentity(path), doctor.CategoryData)
+	result.Checks = append(result.Checks, projectIDCheck)
+	if projectIDCheck.Status == statusWarning || projectIDCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
 	// Check 7b: Multi-repo custom types discovery (bd-9ji4z)
 	multiRepoTypesCheck := convertWithCategory(doctor.CheckMultiRepoTypes(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, multiRepoTypesCheck)

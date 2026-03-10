@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"fmt"
 	"os"
 	"os/exec"
@@ -492,7 +491,7 @@ environment variable.`,
 			// This UUID is stored in both metadata.json and the database,
 			// and verified on every connection to detect cross-project leakage.
 			if cfg.ProjectID == "" {
-				cfg.ProjectID = generateProjectID()
+				cfg.ProjectID = configfile.GenerateProjectID()
 			}
 
 			// Always store backend explicitly in metadata.json
@@ -1215,19 +1214,6 @@ func promptContributorMode() (isContributor bool, err error) {
 
 // verifyMetadata writes a metadata field and verifies the write succeeded.
 // Returns true if write+verify succeeded, false with warning if either failed.
-// generateProjectID creates a UUID v4 for project identity verification.
-func generateProjectID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		// Fallback: use timestamp + PID as a unique-enough identifier
-		return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
-	}
-	// Set version (4) and variant (RFC 4122)
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
 func verifyMetadata(ctx context.Context, store *dolt.DoltStore, key, value string) bool {
 	if err := store.SetMetadata(ctx, key, value); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write %s metadata: %v\n", key, err)

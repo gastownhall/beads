@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -213,6 +214,98 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 		Status:  StatusOK,
 		Message: "Basic query check passed",
 		Detail:  "Storage: Dolt",
+	}
+}
+
+// CheckProjectIdentity detects missing project_id in metadata.json and/or
+// _project_id in the database. Projects initialized before GH#2372 lack these
+// fields and are unprotected against cross-project data leakage.
+func CheckProjectIdentity(path string) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return DoctorCheck{
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  "N/A (no metadata.json)",
+			Category: CategoryData,
+		}
+	}
+
+	doltPath := getDatabasePath(beadsDir)
+	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+		return DoctorCheck{
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  "N/A (no database)",
+			Category: CategoryData,
+		}
+	}
+
+	hasLocalID := cfg.ProjectID != ""
+
+	// Check database for _project_id
+	ctx := context.Background()
+	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	if err != nil {
+		// Can't open DB — report based on metadata.json alone
+		if !hasLocalID {
+			return DoctorCheck{
+				Name:     "Project Identity",
+				Status:   StatusWarning,
+				Message:  "Missing project_id in metadata.json (unable to check database)",
+				Fix:      "Run 'bd doctor --fix' to generate and backfill project identity",
+				Category: CategoryData,
+			}
+		}
+		return DoctorCheck{
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  "metadata.json has project_id (unable to verify database)",
+			Category: CategoryData,
+		}
+	}
+	defer func() { _ = store.Close() }()
+
+	dbID, err := store.GetMetadata(ctx, "_project_id")
+	hasDBID := err == nil && dbID != ""
+
+	if hasLocalID && hasDBID {
+		if cfg.ProjectID != dbID {
+			return DoctorCheck{
+				Name:     "Project Identity",
+				Status:   StatusError,
+				Message:  fmt.Sprintf("Project ID mismatch: metadata.json=%s, database=%s", cfg.ProjectID, dbID),
+				Detail:   "This may indicate cross-project data leakage (GH#2372)",
+				Fix:      "Run 'bd dolt status' to diagnose. Do NOT run 'bd init'",
+				Category: CategoryData,
+			}
+		}
+		return DoctorCheck{
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("project_id: %s", cfg.ProjectID),
+			Category: CategoryData,
+		}
+	}
+
+	// At least one is missing
+	var missing []string
+	if !hasLocalID {
+		missing = append(missing, "metadata.json")
+	}
+	if !hasDBID {
+		missing = append(missing, "database")
+	}
+
+	return DoctorCheck{
+		Name:     "Project Identity",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("Missing project_id in: %s (pre-GH#2372 project)", strings.Join(missing, ", ")),
+		Detail:   "Without project identity, cross-project data leakage cannot be detected",
+		Fix:      "Run 'bd doctor --fix' to generate and backfill project identity",
+		Category: CategoryData,
 	}
 }
 
