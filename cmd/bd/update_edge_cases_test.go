@@ -233,7 +233,7 @@ func TestCLI_UpdateInvalidPriority(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command(testBD, "update", id, "-p", tc.priority)
 			cmd.Dir = tmpDir
-			cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+			cmd.Env = os.Environ()
 			out, err := cmd.CombinedOutput()
 
 			if err == nil {
@@ -332,7 +332,7 @@ func TestCLI_UpdateNegativeEstimate(t *testing.T) {
 	// Try negative estimate
 	cmd := exec.Command(testBD, "update", id, "--estimate", "-5")
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Errorf("Expected error for negative estimate, but command succeeded. Output: %s", out)
@@ -426,7 +426,7 @@ func TestCLI_UpdateInvalidDueDate(t *testing.T) {
 
 	cmd := exec.Command(testBD, "update", id, "--due", "not-a-date")
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Errorf("Expected error for invalid --due, but command succeeded. Output: %s", out)
@@ -443,7 +443,7 @@ func initExecTestDB(t *testing.T) string {
 	tmpDir := createTempDirWithCleanup(t)
 	initCmd := exec.Command(testBD, "init", "--prefix", "test", "--quiet")
 	initCmd.Dir = tmpDir
-	initCmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	initCmd.Env = os.Environ()
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		t.Fatalf("init failed: %v\n%s", err, out)
 	}
@@ -455,7 +455,7 @@ func createExecTestIssue(t *testing.T, tmpDir, title string) string {
 	t.Helper()
 	createCmd := exec.Command(testBD, "create", title, "-p", "1", "--json")
 	createCmd.Dir = tmpDir
-	createCmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	createCmd.Env = os.Environ()
 	out, err := createCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("create failed: %v\n%s", err, out)
@@ -592,7 +592,7 @@ func TestCLI_UpdateMultipleIssuesExec(t *testing.T) {
 	// Update both at once
 	cmd := exec.Command(testBD, "update", id1, id2, "--status", "in_progress")
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("update failed: %v\n%s", err, out)
 	}
@@ -601,7 +601,7 @@ func TestCLI_UpdateMultipleIssuesExec(t *testing.T) {
 	for _, id := range []string{id1, id2} {
 		showCmd := exec.Command(testBD, "show", id, "--json")
 		showCmd.Dir = tmpDir
-		showCmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		showCmd.Env = os.Environ()
 		showOut, err := showCmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("show %s failed: %v\n%s", id, err, showOut)

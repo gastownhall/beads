@@ -123,7 +123,7 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 
 	// Sync all clones once (hash IDs prevent collisions, don't need multiple rounds)
 	for _, clone := range []string{cloneA, cloneB, cloneC} {
-		runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
+		runCmdOutputWithEnvAllowError(t, clone, map[string]string{}, true, bdPath, "sync")
 	}
 
 	// Verify all clones have all 3 issues
@@ -174,7 +174,7 @@ func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 
 	// Sync both clones once (hash IDs handle dedup automatically)
 	for _, clone := range []string{cloneA, cloneB} {
-		runCmdOutputWithEnvAllowError(t, clone, map[string]string{"BEADS_NO_DAEMON": "1"}, true, bdPath, "sync")
+		runCmdOutputWithEnvAllowError(t, clone, map[string]string{}, true, bdPath, "sync")
 	}
 
 	// Verify both clones have exactly 1 issue (deduplication worked)
@@ -241,13 +241,12 @@ func setupClone(t *testing.T, tmpDir, remoteDir, name, bdPath string) string {
 
 func createIssueInClone(t *testing.T, cloneDir, title string) {
 	t.Helper()
-	runCmdWithEnv(t, cloneDir, map[string]string{"BEADS_NO_DAEMON": "1"}, getBDCommand(), "create", title, "-t", "task", "-p", "1", "--json")
+	runCmdWithEnv(t, cloneDir, map[string]string{}, getBDCommand(), "create", title, "-t", "task", "-p", "1", "--json")
 }
 
 func getTitlesFromClone(t *testing.T, cloneDir string) map[string]bool {
 	t.Helper()
 	listJSON := runCmdOutputWithEnv(t, cloneDir, map[string]string{
-		"BEADS_NO_DAEMON":   "1",
 		"BD_NO_AUTO_IMPORT": "1",
 	}, getBDCommand(), "list", "--json")
 
@@ -301,12 +300,12 @@ func installGitHooks(t *testing.T, repoDir string) {
 	bdCmd := strings.ReplaceAll(getBDCommand(), "\\", "/")
 
 	preCommit := fmt.Sprintf(`#!/bin/sh
-%s --no-daemon export -o .beads/issues.jsonl >/dev/null 2>&1 || true
+%s export -o .beads/issues.jsonl >/dev/null 2>&1 || true
 git add .beads/issues.jsonl >/dev/null 2>&1 || true
 exit 0
 `, bdCmd)
 	postMerge := fmt.Sprintf(`#!/bin/sh
-%s --no-daemon import -i .beads/issues.jsonl >/dev/null 2>&1 || true
+%s import -i .beads/issues.jsonl >/dev/null 2>&1 || true
 exit 0
 `, bdCmd)
 	os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(preCommit), 0755)

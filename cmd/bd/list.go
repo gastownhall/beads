@@ -21,10 +21,10 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 )
 
-// storageExecutor handles operations that need to work with both direct store and daemon mode
+// storageExecutor handles operations that need a store connection
 type storageExecutor func(store *dolt.DoltStore) error
 
-// withStorage executes an operation with either the direct store or a read-only store in daemon mode
+// withStorage executes an operation with either the direct store or a read-only store
 func withStorage(ctx context.Context, store *dolt.DoltStore, dbPath string, fn storageExecutor) error {
 	if store != nil {
 		return fn(store)

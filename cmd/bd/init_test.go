@@ -155,8 +155,6 @@ func TestInitCommand(t *testing.T) {
 					"*.db-journal",
 					"*.db-wal",
 					"*.db-shm",
-					"daemon.log",
-					"daemon.pid",
 					"bd.sock",
 					"dolt/",
 					"dolt-access.lock",
@@ -1697,7 +1695,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		// Run init with --database to specify a pre-existing database name
 		cmd := exec.Command(bd, "init", "--database", "myapp_production", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init --database failed: %v\n%s", err, out)
@@ -1728,7 +1726,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		// --database should override prefix for DB name, but prefix still sets issue_prefix
 		cmd := exec.Command(bd, "init", "--database", "shared_db", "--prefix", "team-alpha", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init --database --prefix failed: %v\n%s", err, out)
@@ -1774,7 +1772,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		// Run init with --database
 		cmd := exec.Command(bd, "init", "--database", "test_server_cfg", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init --database failed: %v\n%s", err, out)
@@ -1807,7 +1805,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		// Run init with an invalid database name (contains semicolon = SQL injection)
 		cmd := exec.Command(bd, "init", "--database", "bad;name", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatal("Expected error for invalid database name, but command succeeded")
@@ -1831,7 +1829,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		// Database name with spaces should fail validation
 		cmd := exec.Command(bd, "init", "--database", "my database", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatal("Expected error for database name with spaces, but command succeeded")
@@ -1849,7 +1847,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		// Database name with backtick injection should fail validation
 		cmd := exec.Command(bd, "init", "--database", "db`; DROP DATABASE x; --", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatal("Expected error for database name with backtick injection, but command succeeded")
@@ -1870,7 +1868,7 @@ func TestInitBackendFlag(t *testing.T) {
 
 		cmd := exec.Command(bd, "init", "--backend", "sqlite", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatal("Expected non-zero exit for --backend=sqlite, but command succeeded")
@@ -1899,7 +1897,7 @@ func TestInitBackendFlag(t *testing.T) {
 
 		cmd := exec.Command(bd, "init", "--backend", "postgres", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatal("Expected non-zero exit for --backend=postgres, but command succeeded")
@@ -1917,7 +1915,7 @@ func TestInitBackendFlag(t *testing.T) {
 
 		cmd := exec.Command(bd, "init", "--backend", "dolt", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init --backend=dolt should succeed: %v\n%s", err, out)
@@ -1930,7 +1928,7 @@ func TestInitBackendFlag(t *testing.T) {
 
 		cmd := exec.Command(bd, "init", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init should default to dolt: %v\n%s", err, out)

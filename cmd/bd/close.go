@@ -85,7 +85,7 @@ create, update, show, or close operation).`,
 
 		// Resolve partial IDs first, handling cross-rig routing
 		var resolvedIDs []string
-		var routedArgs []string // IDs that need cross-repo routing (bypass daemon)
+		var routedArgs []string // IDs that need cross-repo routing
 		// Direct mode - check routing for each ID
 		for _, id := range args {
 			if needsRouting(id) {

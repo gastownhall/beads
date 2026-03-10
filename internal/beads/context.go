@@ -344,12 +344,12 @@ func isPathInSafeBoundary(path string) bool {
 // GetRepoContextForWorkspace returns a fresh RepoContext for a specific workspace.
 //
 // Unlike GetRepoContext(), this function:
-//   - Does NOT cache results (daemon handles multiple workspaces)
+//   - Does NOT cache results (caller may handle multiple workspaces)
 //   - Does NOT respect BEADS_DIR (workspace path is explicit)
 //   - Resolves worktree relationships correctly
 //
-// This is designed for long-running processes like the daemon that need to handle
-// multiple workspaces or detect context changes (DMN-001).
+// This is designed for processes that need to handle
+// multiple workspaces or detect context changes.
 //
 // The function temporarily changes to the workspace directory to resolve paths,
 // then restores the original directory.
@@ -380,7 +380,7 @@ func GetRepoContextForWorkspace(workspacePath string) (*RepoContext, error) {
 
 // buildRepoContextForWorkspace constructs RepoContext for a specific workspace.
 // Unlike buildRepoContext(), this ignores BEADS_DIR env var since the workspace
-// path is explicitly provided (used by daemon).
+// path is explicitly provided.
 func buildRepoContextForWorkspace(workspacePath string) (*RepoContext, error) {
 	// 1. Determine if we're in a worktree and find the main repo root
 	var repoRoot string

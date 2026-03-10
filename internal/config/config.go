@@ -642,7 +642,7 @@ func ResolveExternalProjectPath(projectName string) string {
 
 	// Resolve relative paths from repo root (parent of .beads/), NOT CWD.
 	// This ensures paths like "../beads" in config resolve correctly
-	// when running from different directories or in daemon context.
+	// when running from different directories.
 	if !filepath.IsAbs(path) {
 		// Config is at .beads/config.yaml, so go up twice to get repo root
 		configFile := ConfigFileUsed()

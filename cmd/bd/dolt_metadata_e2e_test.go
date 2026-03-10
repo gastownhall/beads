@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestE2E_InitDoltMetadataRoundtrip verifies that bd init --backend dolt writes
@@ -32,12 +31,8 @@ func TestE2E_InitDoltMetadataRoundtrip(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 	_ = runCommandInDir(tmpDir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
 
-	socketPath := filepath.Join(tmpDir, ".beads", "bd.sock")
 	env := append(os.Environ(),
 		"BEADS_TEST_MODE=1",
-		"BEADS_AUTO_START_DAEMON=true",
-		"BEADS_NO_DAEMON=0",
-		"BD_SOCKET="+socketPath,
 	)
 
 	// Init dolt backend
@@ -49,16 +44,6 @@ func TestE2E_InitDoltMetadataRoundtrip(t *testing.T) {
 		}
 		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
 	}
-
-	// Ensure daemon cleanup
-	t.Cleanup(func() {
-		_, _ = runBDExecAllowErrorWithEnv(t, tmpDir, env, "daemon", "stop")
-		sockPath := filepath.Join(tmpDir, ".beads", "bd.sock")
-		waitFor(t, 2*time.Second, 50*time.Millisecond, func() bool {
-			_, err := os.Stat(sockPath)
-			return os.IsNotExist(err)
-		})
-	})
 
 	// Run doctor and verify no metadata warnings
 	doctorOut, _ := runBDExecAllowErrorWithEnv(t, tmpDir, env, "doctor")
@@ -109,12 +94,8 @@ func TestE2E_DoctorFixMetadataRoundtrip(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 	_ = runCommandInDir(tmpDir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
 
-	socketPath := filepath.Join(tmpDir, ".beads", "bd.sock")
 	env := append(os.Environ(),
 		"BEADS_TEST_MODE=1",
-		"BEADS_AUTO_START_DAEMON=true",
-		"BEADS_NO_DAEMON=0",
-		"BD_SOCKET="+socketPath,
 	)
 
 	// Init dolt backend (which now writes metadata via Phase 1)
@@ -126,16 +107,6 @@ func TestE2E_DoctorFixMetadataRoundtrip(t *testing.T) {
 		}
 		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
 	}
-
-	// Ensure daemon cleanup
-	t.Cleanup(func() {
-		_, _ = runBDExecAllowErrorWithEnv(t, tmpDir, env, "daemon", "stop")
-		sockPath := filepath.Join(tmpDir, ".beads", "bd.sock")
-		waitFor(t, 2*time.Second, 50*time.Millisecond, func() bool {
-			_, err := os.Stat(sockPath)
-			return os.IsNotExist(err)
-		})
-	})
 
 	// Delete metadata to simulate a pre-Phase-1 database
 	sqlOut, sqlErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "sql",
@@ -192,12 +163,8 @@ func TestE2E_MigrateDoltMetadata(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 	_ = runCommandInDir(tmpDir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
 
-	socketPath := filepath.Join(tmpDir, ".beads", "bd.sock")
 	env := append(os.Environ(),
 		"BEADS_TEST_MODE=1",
-		"BEADS_AUTO_START_DAEMON=true",
-		"BEADS_NO_DAEMON=0",
-		"BD_SOCKET="+socketPath,
 	)
 
 	// Init dolt backend (writes all metadata via Phase 1)
@@ -209,16 +176,6 @@ func TestE2E_MigrateDoltMetadata(t *testing.T) {
 		}
 		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
 	}
-
-	// Ensure daemon cleanup
-	t.Cleanup(func() {
-		_, _ = runBDExecAllowErrorWithEnv(t, tmpDir, env, "daemon", "stop")
-		sockPath := filepath.Join(tmpDir, ".beads", "bd.sock")
-		waitFor(t, 2*time.Second, 50*time.Millisecond, func() bool {
-			_, err := os.Stat(sockPath)
-			return os.IsNotExist(err)
-		})
-	})
 
 	// Delete repo_id and clone_id to simulate a pre-Phase-3 database
 	// (bd_version is set by init, but identity fields are missing)

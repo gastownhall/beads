@@ -40,17 +40,6 @@ func runBDForCoverage(t *testing.T, dir string, args ...string) (stdout string, 
 	os.Stdout = wOut
 	os.Stderr = wErr
 
-	// Ensure direct mode.
-	oldNoDaemon, noDaemonWasSet := os.LookupEnv("BEADS_NO_DAEMON")
-	os.Setenv("BEADS_NO_DAEMON", "1")
-	defer func() {
-		if noDaemonWasSet {
-			_ = os.Setenv("BEADS_NO_DAEMON", oldNoDaemon)
-		} else {
-			os.Unsetenv("BEADS_NO_DAEMON")
-		}
-	}()
-
 	// Mark tests explicitly.
 	oldTestMode, testModeWasSet := os.LookupEnv("BEADS_TEST_MODE")
 	os.Setenv("BEADS_TEST_MODE", "1")

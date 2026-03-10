@@ -79,9 +79,6 @@ async def mcp_client(bd_executable, temp_db, monkeypatch):
     # The workspace root is the parent directory
     workspace_root = os.path.dirname(temp_db)
 
-    # Disable daemon mode for tests (prevents daemon accumulation and timeouts)
-    os.environ["BEADS_NO_DAEMON"] = "1"
-
     # Create test client
     async with Client(mcp) as client:
         # Automatically set context for the tests
@@ -94,7 +91,6 @@ async def mcp_client(bd_executable, temp_db, monkeypatch):
     os.environ.pop("BEADS_WORKING_DIR", None)
     os.environ.pop("BEADS_DB", None)
     os.environ.pop("BEADS_DIR", None)
-    os.environ.pop("BEADS_NO_DAEMON", None)
 
 
 @pytest.mark.asyncio
@@ -642,7 +638,6 @@ async def test_context_init_action(bd_executable):
     os.environ.pop("BEADS_WORKING_DIR", None)
     os.environ.pop("BEADS_DB", None)
     os.environ.pop("BEADS_DIR", None)
-    os.environ["BEADS_NO_DAEMON"] = "1"
 
     # Create a fresh temp directory without any beads database
     temp_dir = tempfile.mkdtemp(prefix="beads_init_test_")

@@ -124,7 +124,6 @@ func TestConfigFile(t *testing.T) {
 	// Create a config file
 	configContent := `
 json: true
-no-daemon: true
 actor: configuser
 `
 	configPath := filepath.Join(tmpDir, "config.yaml")
@@ -159,10 +158,6 @@ actor: configuser
 		t.Errorf("GetBool(json) = %v, want true", got)
 	}
 
-	if got := GetBool("no-daemon"); got != true {
-		t.Errorf("GetBool(no-daemon) = %v, want true", got)
-	}
-
 	if got := GetString("actor"); got != "configuser" {
 		t.Errorf("GetString(actor) = %q, want \"configuser\"", got)
 	}
@@ -185,7 +180,6 @@ func TestLocalConfigOverride(t *testing.T) {
 	// Create main config file with some settings
 	configContent := `
 json: false
-no-daemon: false
 actor: project-user
 `
 	configPath := filepath.Join(beadsDir, "config.yaml")
@@ -195,7 +189,6 @@ actor: project-user
 
 	// Create local config file that overrides some settings
 	localConfigContent := `
-no-daemon: true
 actor: local-user
 `
 	localConfigPath := filepath.Join(beadsDir, "config.local.yaml")
@@ -212,10 +205,6 @@ actor: local-user
 	}
 
 	// Test that local config values override project config values
-	if got := GetBool("no-daemon"); got != true {
-		t.Errorf("GetBool(no-daemon) = %v, want true (local override)", got)
-	}
-
 	if got := GetString("actor"); got != "local-user" {
 		t.Errorf("GetString(actor) = %q, want \"local-user\" (local override)", got)
 	}

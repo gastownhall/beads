@@ -158,7 +158,7 @@ Examples:
 				FatalErrorRespectJSON("%v", err)
 			}
 
-			// Check for cycles after adding dependency (both daemon and direct mode)
+			// Check for cycles after adding dependency
 			warnIfCyclesExist(fromStore)
 
 			if jsonOutput {

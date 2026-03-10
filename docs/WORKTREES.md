@@ -126,7 +126,7 @@ Main Repository
 bd automatically detects when you're in a git worktree:
 
 **Default behavior (no sync-branch configured):**
-- Uses embedded mode for safety (single-writer, no daemon needed)
+- Uses embedded mode for safety (single-writer, no server needed)
 - All commands work correctly without additional setup
 
 **With sync-branch configured:**

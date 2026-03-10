@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestDoltDoctor_NoSQLiteWarningsAfterInitAndCreate(t *testing.T) {
@@ -28,12 +27,8 @@ func TestDoltDoctor_NoSQLiteWarningsAfterInitAndCreate(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.email", "test@example.com")
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 
-	socketPath := filepath.Join(tmpDir, ".beads", "bd.sock")
 	env := []string{
 		"BEADS_TEST_MODE=1",
-		"BEADS_AUTO_START_DAEMON=true",
-		"BEADS_NO_DAEMON=0",
-		"BD_SOCKET=" + socketPath,
 	}
 
 	// Init dolt backend.
@@ -46,16 +41,6 @@ func TestDoltDoctor_NoSQLiteWarningsAfterInitAndCreate(t *testing.T) {
 		}
 		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
 	}
-
-	// Ensure daemon cleanup so temp dir removal doesn't flake.
-	t.Cleanup(func() {
-		_, _ = runBDExecAllowErrorWithEnv(t, tmpDir, env, "daemon", "stop")
-		sockPath := filepath.Join(tmpDir, ".beads", "bd.sock")
-		waitFor(t, 2*time.Second, 50*time.Millisecond, func() bool {
-			_, err := os.Stat(sockPath)
-			return os.IsNotExist(err)
-		})
-	})
 
 	// Create one issue so the store is definitely initialized.
 	createOut, createErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "create", "doctor dolt smoke", "--json")

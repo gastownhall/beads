@@ -62,7 +62,7 @@ func createExecTestIssueWithID(t *testing.T, tmpDir, title, id string) string {
 	t.Helper()
 	cmd := exec.Command(testBD, "create", title, "-p", "1", "--id", id, "--json")
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("create with --id %s failed: %v\n%s", id, err, out)
@@ -83,7 +83,7 @@ func runBD(t *testing.T, tmpDir string, args ...string) []byte {
 	t.Helper()
 	cmd := exec.Command(testBD, args...)
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
@@ -96,7 +96,7 @@ func assertParentLists(t *testing.T, tmpDir, parentID, childID string, shouldApp
 	t.Helper()
 	cmd := exec.Command(testBD, "list", "--parent", parentID, "--json")
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if shouldAppear {

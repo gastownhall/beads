@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 )
@@ -64,19 +63,6 @@ func testMainInner(m *testing.M) int {
 	// which raced under t.Parallel().
 	_ = os.Setenv("BEADS_TEST_MODE", "1")
 
-	// Prevent daemon auto-start and ensure tests don't interact with any running daemon.
-	// This prevents false positives in the test guard when a background daemon touches
-	// .beads files (like issues.jsonl via auto-sync) during test execution.
-	origNoDaemon := os.Getenv("BEADS_NO_DAEMON")
-	os.Setenv("BEADS_NO_DAEMON", "1")
-	defer func() {
-		if origNoDaemon != "" {
-			os.Setenv("BEADS_NO_DAEMON", origNoDaemon)
-		} else {
-			os.Unsetenv("BEADS_NO_DAEMON")
-		}
-	}()
-
 	// Clear BEADS_DIR to prevent tests from accidentally picking up the project's
 	// .beads directory via git repo detection when there's a redirect file.
 	// Each test that needs a .beads directory should set BEADS_DIR explicitly.
@@ -101,13 +87,8 @@ func testMainInner(m *testing.M) int {
 		return m.Run()
 	}
 
-	// Stop any running daemon for this repo to prevent false positives in the guard.
-	// The daemon auto-syncs and touches files like issues.jsonl, which would trigger
-	// the guard even though tests didn't cause the change.
 	repoRoot := findRepoRootFrom(origWD)
-	if repoRoot != "" {
-		stopRepoDaemon(repoRoot)
-	} else {
+	if repoRoot == "" {
 		return m.Run()
 	}
 
@@ -127,9 +108,6 @@ func testMainInner(m *testing.M) int {
 		// interactions.jsonl excluded: legitimately created by init during tests
 		"deletions.jsonl",
 		"molecules.jsonl",
-		"daemon.lock",
-		"daemon.pid",
-		"bd.sock",
 	}
 
 	before := snapshotFiles(repoBeadsDir, watch)
@@ -207,35 +185,4 @@ func findRepoRootFrom(wd string) string {
 		wd = parent
 	}
 	return ""
-}
-
-// stopRepoDaemon stops any running daemon for the given repository.
-// This prevents false positives in the test guard when a background daemon
-// touches .beads files during test execution. Uses exec to avoid import cycles.
-func stopRepoDaemon(repoRoot string) {
-	beadsDir := filepath.Join(repoRoot, ".beads")
-	socketPath := filepath.Join(beadsDir, "bd.sock")
-
-	// Check if socket exists (quick check before shelling out)
-	if _, err := os.Stat(socketPath); err != nil {
-		return // no daemon running
-	}
-
-	// Shell out to bd daemon stop. We can't call the daemon functions directly
-	// from TestMain because they have complex dependencies. Using exec is cleaner.
-	cmd := exec.Command("bd", "daemon", "stop")
-	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
-
-	// Best-effort stop - ignore errors (daemon may not be running)
-	_ = cmd.Run()
-
-	// Wait for daemon socket to disappear (graceful shutdown).
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socketPath); os.IsNotExist(err) {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
 }

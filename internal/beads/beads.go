@@ -311,7 +311,7 @@ func FindDatabasePath() string {
 // - Any *.db file (excluding backups and vc.db)
 // - A dolt/ directory (Dolt database)
 //
-// Returns false for directories that only contain daemon registry files.
+// Returns false for directories that only contain legacy registry files.
 // This prevents FindBeadsDir from returning ~/.beads/ which only has registry.json.
 func hasBeadsProjectFiles(beadsDir string) bool {
 	// Check for project configuration files

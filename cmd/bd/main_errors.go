@@ -38,7 +38,7 @@ func handleFreshCloneError(err error) bool {
 }
 
 // isWispOperation returns true if the command operates on ephemeral wisps.
-// Wisp operations auto-bypass the daemon because wisps are local-only.
+// Wisp operations use direct store access (local-only).
 // Detects:
 //   - mol wisp subcommands (create, list, gc, or direct proto invocation)
 //   - mol burn (only operates on wisps)

@@ -152,7 +152,6 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 
 	// Export issues only — wisps are ephemeral and excluded from backup.
 	// They can be regenerated from the database if needed for disaster recovery.
-	// (The daemon's JSONL git backup in jsonl_git_backup.go follows the same pattern.)
 	n, err := exportTable(ctx, store, dir, "issues.jsonl", "SELECT * FROM issues ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("backup issues: %w", err)

@@ -271,7 +271,6 @@ func (w *workspace) runEnv() []string {
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + w.dir,
-		"BEADS_NO_DAEMON=1",
 		"BEADS_TEST_MODE=1",
 		"GIT_CONFIG_NOSYSTEM=1",
 	}

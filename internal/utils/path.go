@@ -144,8 +144,7 @@ func NormalizePathForComparison(path string) string {
 }
 
 // PathsEqual compares two paths for equality, handling case-insensitive
-// filesystems and symlinks. This is the preferred way to compare workspace
-// paths in the daemon registry and discovery code.
+// filesystems and symlinks.
 func PathsEqual(path1, path2 string) bool {
 	return NormalizePathForComparison(path1) == NormalizePathForComparison(path2)
 }

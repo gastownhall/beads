@@ -749,7 +749,7 @@ var createCmd = &cobra.Command{
 		}
 
 		// If issue was routed to a different repo, commit pending changes.
-		// Push is NOT done here — the daemon handles periodic pushes to
+		// Push is NOT done here — periodic sync handles pushes to
 		// DoltHub remotes. Per-create pushes caused 22GB of git-remote-cache
 		// bloat with dozens of agents creating wisps constantly (hq-glw).
 		if repoPath != "." && targetStore != nil {

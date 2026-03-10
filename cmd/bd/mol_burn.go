@@ -58,7 +58,7 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 
-	// mol burn requires direct store access (daemon auto-bypassed for wisp ops)
+	// mol burn requires direct store access
 	if store == nil {
 		FatalErrorWithHint("no database connection", "run 'bd init' or 'bd import' to initialize the database")
 	}

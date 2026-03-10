@@ -312,7 +312,7 @@ Also triggers Dolt push/pull if a remote is configured.`,
 			}
 		}
 
-		// Push is handled by daemon periodic task, not per-operation.
+		// Push is handled by periodic sync, not per-operation.
 		// Manual push available via: bd dolt push
 
 		if jsonOutput {

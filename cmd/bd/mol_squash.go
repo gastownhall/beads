@@ -65,7 +65,7 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 
-	// mol squash requires direct store access (daemon auto-bypassed for wisp ops)
+	// mol squash requires direct store access
 	if store == nil {
 		FatalErrorWithHint("no database connection", "run 'bd init' or 'bd import' to initialize the database")
 	}

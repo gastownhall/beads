@@ -8,14 +8,14 @@ Beads uses Dolt as its storage backend. Dolt provides a version-controlled SQL d
 - **Multi-writer support** — server mode enables concurrent agents
 - **Built-in history** — every write creates a Dolt commit
 - **Native branching** — Dolt branches independent of git branches
-- **Single-binary option** — embedded mode for solo users (no daemon needed)
+- **Single-binary option** — embedded mode for solo users (no server needed)
 
 ## Getting Started
 
 ### New Project
 
 ```bash
-# Embedded mode (single writer, no daemon — default for standalone)
+# Embedded mode (single writer, no server — default for standalone)
 bd init
 
 # Server mode (multi-writer, e.g. Gas Town)
@@ -48,7 +48,7 @@ standalone Beads users. The `bd` binary includes everything; just `bd init` and 
 - Single-writer (one process at a time)
 - Data lives in `.beads/dolt/` alongside your code
 - Push to GitHub with `bd dolt push` — code and issues in one repo
-- Zero ops: no daemon, no ports, no PID files
+- Zero ops: no server, no ports, no PID files
 
 ### Server Mode (Multi-Writer / Gas Town)
 

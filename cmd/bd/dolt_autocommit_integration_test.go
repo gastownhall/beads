@@ -109,7 +109,6 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 
 	env := []string{
 		"BEADS_TEST_MODE=1",
-		"BEADS_NO_DAEMON=1",
 	}
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
@@ -171,7 +170,6 @@ func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
 
 	env := []string{
 		"BEADS_TEST_MODE=1",
-		"BEADS_NO_DAEMON=1",
 	}
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
@@ -231,7 +229,6 @@ func TestDoltAutoCommit_Off_DoesNotAdvanceHead(t *testing.T) {
 
 	env := []string{
 		"BEADS_TEST_MODE=1",
-		"BEADS_NO_DAEMON=1",
 	}
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")

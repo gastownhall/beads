@@ -26,7 +26,7 @@ func TestCLI_ReopenClearsDeferUntil(t *testing.T) {
 	// Defer the issue to far future
 	cmd := exec.Command(testBD, "update", id, "--defer", "+8760h") // 1 year
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("defer failed: %v\n%s", err, out)
 	}
@@ -34,7 +34,7 @@ func TestCLI_ReopenClearsDeferUntil(t *testing.T) {
 	// Close it
 	cmd = exec.Command(testBD, "close", id)
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("close failed: %v\n%s", err, out)
 	}
@@ -42,7 +42,7 @@ func TestCLI_ReopenClearsDeferUntil(t *testing.T) {
 	// Reopen it
 	cmd = exec.Command(testBD, "reopen", id)
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("reopen failed: %v\n%s", err, out)
 	}
@@ -50,7 +50,7 @@ func TestCLI_ReopenClearsDeferUntil(t *testing.T) {
 	// Verify defer_until is cleared
 	cmd = exec.Command(testBD, "show", id, "--json")
 	cmd.Dir = tmpDir
-	cmd.Env = append(os.Environ(), "BEADS_NO_DAEMON=1")
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("show failed: %v\n%s", err, out)

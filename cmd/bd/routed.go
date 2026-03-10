@@ -263,7 +263,7 @@ func getRoutedStoreForID(ctx context.Context, id string) (*routing.RoutedStorage
 }
 
 // needsRouting checks if an ID would be routed to a different beads directory.
-// This is used to decide whether to bypass the daemon for cross-repo lookups.
+// This is used to decide whether to use direct store access for cross-repo lookups.
 func needsRouting(id string) bool {
 	if dbPath == "" || beadsDirOverride() {
 		return false

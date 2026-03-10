@@ -137,7 +137,7 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 
-	// Wisp create requires direct store access (daemon auto-bypassed for wisp ops)
+	// Wisp create requires direct store access
 	if store == nil {
 		FatalErrorWithHint("no database connection", "check 'bd doctor' and 'bd dolt status' for configuration issues")
 	}
@@ -558,7 +558,7 @@ func runWispGC(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Wisp gc requires direct store access for deletion (daemon auto-bypassed for wisp ops)
+	// Wisp gc requires direct store access for deletion
 	if store == nil {
 		FatalErrorWithHint("no database connection", "check 'bd doctor' and 'bd dolt status' for configuration issues")
 	}

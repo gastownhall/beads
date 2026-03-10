@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -50,15 +49,7 @@ func startDaemonForChaosTest(t *testing.T, bdExe, ws, dbPath string) *exec.Cmd {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	// Inherit environment, but explicitly ensure daemon mode is allowed.
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "BEADS_NO_DAEMON=") {
-			continue
-		}
-		env = append(env, e)
-	}
-	cmd.Env = env
+	cmd.Env = os.Environ()
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start daemon: %v", err)
@@ -90,7 +81,6 @@ func runBDWithEnv(ctx context.Context, exe, dir, dbPath string, env map[string]s
 	cmd := exec.CommandContext(ctx, exe, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
-		"BEADS_NO_DAEMON=1",
 		"BEADS_DIR="+filepath.Join(dir, ".beads"),
 	)
 	for k, v := range env {
