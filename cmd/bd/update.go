@@ -94,8 +94,8 @@ create, update, show, or close operation).`,
 		if descChanged {
 			updates["description"] = description
 		}
-		if cmd.Flags().Changed("design") {
-			design, _ := cmd.Flags().GetString("design")
+		design, designChanged := getDesignFlag(cmd)
+		if designChanged {
 			updates["design"] = design
 		}
 		if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {

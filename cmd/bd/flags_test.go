@@ -340,3 +340,107 @@ func TestGetDescriptionFlag(t *testing.T) {
 		}
 	})
 }
+
+func TestGetDesignFlag(t *testing.T) {
+	// Helper to create a cobra command with common issue flags registered
+	newCmd := func() *cobra.Command {
+		cmd := &cobra.Command{
+			Use: "test",
+			Run: func(cmd *cobra.Command, args []string) {},
+		}
+		registerCommonIssueFlags(cmd)
+		return cmd
+	}
+
+	t.Run("InlineDesignFlag", func(t *testing.T) {
+		cmd := newCmd()
+		if err := cmd.ParseFlags([]string{"--design", "inline design content"}); err != nil {
+			t.Fatalf("failed to parse flags: %v", err)
+		}
+
+		got, changed := getDesignFlag(cmd)
+		if !changed {
+			t.Error("expected changed=true")
+		}
+		if got != "inline design content" {
+			t.Errorf("expected 'inline design content', got %q", got)
+		}
+	})
+
+	t.Run("DesignFileFlag", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		filePath := filepath.Join(tmpDir, "design.md")
+		content := "## Architecture\n\nUse microservices.\n"
+		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+			t.Fatalf("failed to write test file: %v", err)
+		}
+
+		cmd := newCmd()
+		if err := cmd.ParseFlags([]string{"--design-file", filePath}); err != nil {
+			t.Fatalf("failed to parse flags: %v", err)
+		}
+
+		got, changed := getDesignFlag(cmd)
+		if !changed {
+			t.Error("expected changed=true")
+		}
+		if got != content {
+			t.Errorf("expected %q, got %q", content, got)
+		}
+	})
+
+	t.Run("DesignFileStdin", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("failed to create pipe: %v", err)
+		}
+		oldStdin := os.Stdin
+		os.Stdin = r
+		t.Cleanup(func() { os.Stdin = oldStdin })
+
+		content := "Design from stdin\nWith multiple lines\n"
+		go func() {
+			w.WriteString(content)
+			w.Close()
+		}()
+
+		cmd := newCmd()
+		if err := cmd.ParseFlags([]string{"--design-file", "-"}); err != nil {
+			t.Fatalf("failed to parse flags: %v", err)
+		}
+
+		got, changed := getDesignFlag(cmd)
+		if !changed {
+			t.Error("expected changed=true")
+		}
+		if got != content {
+			t.Errorf("expected %q, got %q", content, got)
+		}
+	})
+
+	t.Run("NoFlagsSet", func(t *testing.T) {
+		cmd := newCmd()
+		if err := cmd.ParseFlags([]string{}); err != nil {
+			t.Fatalf("failed to parse flags: %v", err)
+		}
+
+		got, changed := getDesignFlag(cmd)
+		if changed {
+			t.Error("expected changed=false when no flags set")
+		}
+		if got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("MutualExclusionRegistered", func(t *testing.T) {
+		cmd := newCmd()
+		// Verify both flags are registered
+		if cmd.Flags().Lookup("design") == nil {
+			t.Fatal("expected --design flag to be registered")
+		}
+		if cmd.Flags().Lookup("design-file") == nil {
+			t.Fatal("expected --design-file flag to be registered")
+		}
+	})
+}

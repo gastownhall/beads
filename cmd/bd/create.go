@@ -99,7 +99,7 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		design, _ := cmd.Flags().GetString("design")
+		design, _ := getDesignFlag(cmd)
 		acceptance, _ := cmd.Flags().GetString("acceptance")
 		notes, _ := cmd.Flags().GetString("notes")
 		specID, _ := cmd.Flags().GetString("spec-id")

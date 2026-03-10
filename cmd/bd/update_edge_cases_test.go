@@ -390,6 +390,36 @@ func TestCLI_UpdateDesignField(t *testing.T) {
 	}
 }
 
+// TestCLI_UpdateDesignFile tests setting the design field via --design-file.
+func TestCLI_UpdateDesignFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Design file test", "-p", "1", "--json")
+	var issue map[string]interface{}
+	json.Unmarshal([]byte(out), &issue)
+	id := issue["id"].(string)
+
+	// Write design content to a temp file
+	designText := "## Architecture\n\nUse microservices pattern with gRPC."
+	designFile := filepath.Join(tmpDir, "design.md")
+	if err := os.WriteFile(designFile, []byte(designText), 0644); err != nil {
+		t.Fatalf("failed to write design file: %v", err)
+	}
+
+	runBDInProcess(t, tmpDir, "update", id, "--design-file", designFile)
+
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	var updated []map[string]interface{}
+	json.Unmarshal([]byte(out), &updated)
+	got, _ := updated[0]["design"].(string)
+	if got != designText {
+		t.Errorf("Expected design=%q, got: %q", designText, got)
+	}
+}
+
 // TestCLI_UpdateAcceptanceCriteria tests the --acceptance flag.
 func TestCLI_UpdateAcceptanceCriteria(t *testing.T) {
 	if testing.Short() {

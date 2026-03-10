@@ -26,6 +26,8 @@ func registerCommonIssueFlags(cmd *cobra.Command) {
 	cmd.MarkFlagsMutuallyExclusive("stdin", "body")
 	cmd.MarkFlagsMutuallyExclusive("stdin", "message")
 	cmd.Flags().String("design", "", "Design notes")
+	cmd.Flags().String("design-file", "", "Read design from file (use - for stdin)")
+	cmd.MarkFlagsMutuallyExclusive("design", "design-file")
 	cmd.Flags().String("acceptance", "", "Acceptance criteria")
 	cmd.Flags().String("notes", "", "Additional notes")
 	cmd.Flags().String("append-notes", "", "Append to existing notes (with newline separator)")
@@ -168,6 +170,27 @@ func getDescriptionFlag(cmd *cobra.Command) (string, bool) {
 	}
 
 	return desc, descChanged
+}
+
+// getDesignFlag retrieves the design value from --design-file or --design.
+// Returns the value, whether any flag was explicitly changed, and any error.
+func getDesignFlag(cmd *cobra.Command) (string, bool) {
+	if cmd.Flags().Changed("design-file") {
+		path, _ := cmd.Flags().GetString("design-file")
+		content, err := readBodyFile(path)
+		if err != nil {
+			FatalError("reading from stin: %v", err)
+		}
+
+		return content, true
+	}
+
+	if cmd.Flags().Changed("design") {
+		v, _ := cmd.Flags().GetString("design")
+		return v, true
+	}
+
+	return "", false
 }
 
 // readBodyFile reads the description content from a file.
