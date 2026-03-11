@@ -728,14 +728,15 @@ func TestDoltStoreDependencies(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Create parent and child issues
+	// Create parent and child issues (both tasks — cross-type blocking
+	// is disallowed per GH#1495)
 	parent := &types.Issue{
 		ID:          "test-parent",
 		Title:       "Parent Issue",
 		Description: "Parent description",
 		Status:      types.StatusOpen,
 		Priority:    1,
-		IssueType:   types.TypeEpic,
+		IssueType:   types.TypeTask,
 	}
 	child := &types.Issue{
 		ID:          "test-child",
