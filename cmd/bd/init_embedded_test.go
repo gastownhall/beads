@@ -924,3 +924,105 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedInitConcurrent launches 10 concurrent bd init processes against
+// the same directory to verify init is safe to run concurrently / is idempotent.
+// All processes should either succeed or fail gracefully — no panics, no
+// corrupted database, and the final state must be consistent.
+func TestEmbeddedInitConcurrent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+
+	const N = 10
+	env := bdEnv(dir)
+
+	// Launch N concurrent bd init processes against the same directory.
+	var wg sync.WaitGroup
+	type result struct {
+		idx int
+		out string
+		err error
+	}
+	results := make([]result, N)
+
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			cmd := exec.Command(bd, "init", "--prefix", "conc", "--force", "--quiet")
+			cmd.Dir = dir
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			results[idx] = result{idx: idx, out: string(out), err: err}
+		}(i)
+	}
+	wg.Wait()
+
+	// At least one must succeed; none should panic.
+	successes := 0
+	for _, r := range results {
+		if strings.Contains(r.out, "panic") {
+			t.Errorf("goroutine %d panicked:\n%s", r.idx, r.out)
+		}
+		if r.err == nil {
+			successes++
+		} else {
+			t.Logf("goroutine %d failed (non-fatal): %v\n%s", r.idx, r.err, r.out)
+		}
+	}
+	if successes == 0 {
+		t.Fatal("all 10 concurrent bd init processes failed; at least one should succeed")
+	}
+	t.Logf("%d/%d processes succeeded", successes, N)
+
+	// After all processes finish, the database must be in a consistent state.
+	beadsDir := filepath.Join(dir, ".beads")
+
+	// embeddeddolt directory must exist
+	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
+	if _, err := os.Stat(embeddedDir); os.IsNotExist(err) {
+		t.Fatal("embeddeddolt/ directory missing after concurrent init")
+	}
+
+	// .dolt directory must exist
+	doltDir := filepath.Join(embeddedDir, "conc", ".dolt")
+	if _, err := os.Stat(doltDir); os.IsNotExist(err) {
+		t.Fatalf(".dolt directory missing at %s", doltDir)
+	}
+
+	// Database must be readable with correct config
+	val := readBackConfig(t, beadsDir, "conc", "issue_prefix")
+	if val != "conc" {
+		t.Errorf("issue_prefix: got %q, want %q", val, "conc")
+	}
+
+	// metadata.json must be valid
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("failed to load metadata.json: %v", err)
+	}
+	if cfg.Backend != configfile.BackendDolt {
+		t.Errorf("Backend: got %q, want %q", cfg.Backend, configfile.BackendDolt)
+	}
+
+	// If dolt CLI is available, verify the repo isn't corrupted
+	if doltBin, err := exec.LookPath("dolt"); err == nil {
+		dbDir := filepath.Join(embeddedDir, "conc")
+
+		statusOut := runDolt(t, doltBin, dbDir, "status")
+		if !strings.Contains(statusOut, "nothing to commit") {
+			t.Errorf("expected clean working set after concurrent init, got:\n%s", statusOut)
+		}
+
+		logOut := runDolt(t, doltBin, dbDir, "log", "--oneline")
+		if !strings.Contains(logOut, "schema: apply migrations") {
+			t.Errorf("missing 'schema: apply migrations' commit:\n%s", logOut)
+		}
+	}
+}
