@@ -97,6 +97,12 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"mol_type", "=", "swarm", ""},
 		},
+		{
+			name:     "quoted string with colon",
+			input:    `label="gt:merge-request"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"label", "=", "gt:merge-request", ""},
+		},
 	}
 
 	for _, tt := range tests {
@@ -300,6 +306,13 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 			query: "label=urgent",
 			expectFilter: func(f *types.IssueFilter) bool {
 				return len(f.Labels) == 1 && f.Labels[0] == "urgent"
+			},
+		},
+		{
+			name:  "label with colon (quoted)",
+			query: `label="gt:merge-request"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return len(f.Labels) == 1 && f.Labels[0] == "gt:merge-request"
 			},
 		},
 		{
