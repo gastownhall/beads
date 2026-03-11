@@ -20,6 +20,8 @@ A curated list of articles and tutorials about Beads.
 
 ## Community Articles
 
+_Note: the development pace of Beads is very fast and it's easy for offsite content to become outdated._
+
 - [An Introduction to Beads](https://ianbull.com/posts/beads) by Ian Bull - A practical introduction to Beads with setup instructions and workflow tips.
 
 - [Beads: Memory for Your Coding Agents](https://paddo.dev/blog/beads-memory-for-coding-agents/) by Paddo - Deep dive into how Beads stores everything in Git and what it's really for.
