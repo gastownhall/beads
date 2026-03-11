@@ -23,6 +23,26 @@ var (
 	primeExportMode  bool
 )
 
+// resolveGlobalPrimePath returns the path to ~/.config/beads/PRIME.md if it
+// exists. configDirOverride is used for testing; pass "" for production.
+func resolveGlobalPrimePath(configDirOverride string) string {
+	var configDir string
+	if configDirOverride != "" {
+		configDir = configDirOverride
+	} else {
+		var err error
+		configDir, err = os.UserConfigDir()
+		if err != nil {
+			return ""
+		}
+	}
+	p := filepath.Join(configDir, "beads", "PRIME.md")
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
+}
+
 var primeCmd = &cobra.Command{
 	Use:     "prime",
 	GroupID: "setup",
@@ -85,6 +105,14 @@ Workflow customization:
 			if content, err := os.ReadFile(redirectedPrimePath); err == nil {
 				fmt.Print(string(content))
 				return
+			}
+			// Fall back to global config (~/.config/beads/PRIME.md)
+			// #nosec G304 -- path constructed from UserConfigDir which we control
+			if globalPath := resolveGlobalPrimePath(""); globalPath != "" {
+				if content, err := os.ReadFile(globalPath); err == nil {
+					fmt.Print(string(content))
+					return
+				}
 			}
 		}
 
