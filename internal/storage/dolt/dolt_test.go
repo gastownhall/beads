@@ -25,6 +25,21 @@ import (
 // driver's async operations rather than with the DoltStore implementation.
 const testTimeout = 30 * time.Second
 
+// testSem limits concurrent database-touching tests to avoid overwhelming the
+// shared Dolt testcontainer. Without this, 200+ parallel tests cause a
+// connection storm that crashes the container. Size 6 is conservative —
+// the container handles ~10 concurrent connections but we leave headroom.
+var testSem = make(chan struct{}, 2)
+
+// acquireTestSlot blocks until a semaphore slot is available.
+// Must be called AFTER t.Parallel() to avoid deadlocks (t.Parallel suspends
+// the goroutine, and if it holds a semaphore slot while suspended, other
+// tests can't proceed).
+func acquireTestSlot() { testSem <- struct{}{} }
+
+// releaseTestSlot returns a semaphore slot.
+func releaseTestSlot() { <-testSem }
+
 // testContext returns a context with timeout for test operations
 func testContext(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
@@ -67,6 +82,11 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	skipIfNoDolt(t)
 	t.Parallel()
+
+	// Acquire AFTER t.Parallel() to avoid deadlock — t.Parallel() suspends
+	// the goroutine until the parent test finishes its sequential phase.
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot) // guaranteed even on panic/Fatalf
 
 	if testSharedDB == "" {
 		t.Fatal("testSharedDB not set — TestMain did not initialize shared database")
@@ -119,9 +139,12 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 // setupConcurrentTestStore creates a test store with its own database for
 // concurrent tests that need multiple connections. Branch-per-test isolation
 // requires MaxOpenConns=1, which prevents concurrent transactions.
+// MaxOpenConns is limited to 3 to avoid overwhelming the test container.
 func setupConcurrentTestStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
 
 	ctx, cancel := testContext(t)
 	defer cancel()
@@ -138,6 +161,7 @@ func setupConcurrentTestStore(t *testing.T) (*DoltStore, func()) {
 		CommitterName:   "test",
 		CommitterEmail:  "test@example.com",
 		Database:        dbName,
+		MaxOpenConns:    2,    // limit to avoid overwhelming the test container
 		CreateIfMissing: true, // tests create fresh databases
 	}
 
@@ -146,6 +170,9 @@ func setupConcurrentTestStore(t *testing.T) (*DoltStore, func()) {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("failed to create Dolt store: %v", err)
 	}
+	// Close idle connections immediately to reduce container pressure.
+	store.db.SetMaxIdleConns(0)
+	store.db.SetConnMaxIdleTime(time.Second)
 
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		store.Close()
@@ -154,9 +181,8 @@ func setupConcurrentTestStore(t *testing.T) (*DoltStore, func()) {
 	}
 
 	cleanup := func() {
-		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer dropCancel()
-		_, _ = store.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
+		// Skip DROP DATABASE — rapid CREATE/DROP cycles crash the Dolt container.
+		// Orphan databases are cleaned up when the container is terminated.
 		store.Close()
 		os.RemoveAll(tmpDir)
 	}

@@ -73,6 +73,13 @@ func newCircuitBreaker(port int) *circuitBreaker {
 // If the probe succeeds, the breaker resets to closed immediately. This
 // avoids the half-open→open re-trip race that can leave the breaker stuck.
 func (cb *circuitBreaker) Allow() bool {
+	// In test mode, bypass the circuit breaker entirely. Tests manage their
+	// own server lifecycle via testcontainers, and the file-based breaker
+	// state persists across test runs causing cascading false-positive trips.
+	if os.Getenv("BEADS_TEST_MODE") == "1" {
+		return true
+	}
+
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 

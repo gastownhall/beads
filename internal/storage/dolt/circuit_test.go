@@ -17,6 +17,7 @@ func TestCircuitBreaker_InitiallyAllows(t *testing.T) {
 }
 
 func TestCircuitBreaker_TripsAfterThreshold(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "") // need real breaker behavior
 	cb := newTestCircuitBreaker(t)
 
 	// Record failures up to threshold
@@ -74,6 +75,7 @@ func TestCircuitBreaker_SuccessResets(t *testing.T) {
 }
 
 func TestCircuitBreaker_ActiveProbeAfterCooldown_NoServer(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
 	cb := newTestCircuitBreaker(t)
 
 	// Trip the breaker
@@ -101,6 +103,7 @@ func TestCircuitBreaker_ActiveProbeAfterCooldown_NoServer(t *testing.T) {
 }
 
 func TestCircuitBreaker_ActiveProbeAfterCooldown_ServerUp(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
 	// Start a TCP listener to simulate a healthy server
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -133,6 +136,7 @@ func TestCircuitBreaker_ActiveProbeAfterCooldown_ServerUp(t *testing.T) {
 }
 
 func TestCircuitBreaker_LegacyHalfOpenState(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
 	// If a state file has half-open from an older version, the breaker
 	// should handle it gracefully via active probe.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -182,6 +186,7 @@ func TestCircuitBreaker_Reset(t *testing.T) {
 }
 
 func TestCircuitBreaker_SharedState(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
 	// Two breakers for the same port should share state via the file
 	dir := t.TempDir()
 	path := filepath.Join(dir, "circuit.json")

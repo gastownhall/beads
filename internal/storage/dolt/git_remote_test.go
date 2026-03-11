@@ -622,6 +622,8 @@ func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) 
 	t.Helper()
 	skipIfNoDolt(t)
 	skipIfNoGit(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
 
 	baseDir, err := os.MkdirTemp("", "embedded-git-remote-test-*")
 	if err != nil {

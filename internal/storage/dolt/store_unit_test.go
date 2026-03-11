@@ -19,6 +19,8 @@ func newTestDoltDB(t *testing.T) (*sql.DB, func()) {
 	if testServerPort == 0 {
 		t.Skip("Test Dolt server not running, skipping test")
 	}
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
 
 	dbName := uniqueTestDBName(t)
 
@@ -41,11 +43,8 @@ func newTestDoltDB(t *testing.T) (*sql.DB, func()) {
 
 	return db, func() {
 		db.Close()
-		cleanup, cErr := sql.Open("mysql", adminDSN)
-		if cErr == nil {
-			cleanup.Exec("DROP DATABASE IF EXISTS `" + dbName + "`")
-			cleanup.Close()
-		}
+		// Skip DROP DATABASE — rapid CREATE/DROP cycles crash the Dolt container.
+		// Orphan databases are cleaned up when the container terminates.
 	}
 }
 

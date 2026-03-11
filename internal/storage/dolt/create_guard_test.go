@@ -95,10 +95,10 @@ func createTestDatabase(t *testing.T, port int, dbName string) {
 }
 
 func dropTestDatabase(t *testing.T, port int, dbName string) {
-	t.Helper()
-	db := rawTestConn(t, port)
-	defer db.Close()
-	db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName)) //nolint:errcheck
+	// No-op: rapid DROP DATABASE crashes the Dolt test container.
+	// Orphan databases are cleaned up when the container terminates.
+	_ = port
+	_ = dbName
 }
 
 func containsAny(s string, substrs ...string) bool {
@@ -112,11 +112,14 @@ func containsAny(s string, substrs ...string) bool {
 }
 
 // skipIfNoServer skips the test if the shared test Dolt server is not running.
+// Acquires a semaphore slot (released via t.Cleanup) to limit container load.
 func skipIfNoServer(t *testing.T) {
 	t.Helper()
 	if testServerPort == 0 {
 		t.Skip("no test Dolt server running")
 	}
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
 }
 
 // --- Guard tests ---

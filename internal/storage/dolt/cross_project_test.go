@@ -33,6 +33,8 @@ import (
 func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, storeB *DoltStore, cleanup func()) {
 	t.Helper()
 	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -96,10 +98,8 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 	}
 
 	cleanup = func() {
-		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer dropCancel()
-		_, _ = storeA.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbNameA))
-		_, _ = storeB.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbNameB))
+		// Skip DROP DATABASE — rapid CREATE/DROP cycles crash the Dolt container.
+		// Orphan databases are cleaned up when the container terminates.
 		storeA.Close()
 		storeB.Close()
 		os.RemoveAll(tmpDirA)
@@ -201,6 +201,8 @@ func TestCrossProject_ReadIsolation_DifferentPrefixes(t *testing.T) {
 
 func TestCrossProject_PortCollision_SameDatabase(t *testing.T) {
 	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
 
 	ctx, cancel := concurrentTestContext(t)
 	defer cancel()
@@ -261,9 +263,7 @@ func TestCrossProject_PortCollision_SameDatabase(t *testing.T) {
 	}
 
 	defer func() {
-		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer dropCancel()
-		_, _ = storeA.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", sharedDB))
+		// Skip DROP DATABASE — rapid CREATE/DROP cycles crash the Dolt container.
 		storeA.Close()
 		storeB.Close()
 		os.RemoveAll(tmpDirA)
