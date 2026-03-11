@@ -447,10 +447,6 @@ environment variable.`,
 			fmt.Fprintf(os.Stderr, "Error: failed to connect to dolt server: %v\n", err)
 			os.Exit(1)
 		}
-		doltStore, ok := store.(*dolt.DoltStore)
-		if !ok {
-			panic(fmt.Sprintf("newDoltStore returned unexpected type %T", store))
-		}
 
 		// Configure the git remote in the Dolt store so bd dolt push/pull
 		// work immediately after bootstrap. Also add the remote when
@@ -631,7 +627,7 @@ environment variable.`,
 				_ = store.Close()
 				FatalError("--from-jsonl specified but %s does not exist", localJSONLPath)
 			}
-			issueCount, importErr := importFromLocalJSONL(ctx, doltStore, localJSONLPath)
+			issueCount, importErr := importFromLocalJSONL(ctx, store, localJSONLPath)
 			if importErr != nil {
 				_ = store.Close()
 				FatalError("failed to import from JSONL: %v", importErr)
@@ -674,7 +670,7 @@ environment variable.`,
 
 		// Run contributor wizard if --contributor flag is set or user chose contributor
 		if contributor {
-			if err := runContributorWizard(ctx, doltStore); err != nil {
+			if err := runContributorWizard(ctx, store); err != nil {
 				canceled := isCanceled(err)
 				if canceled {
 					fmt.Fprintln(os.Stderr, "Setup canceled.")
@@ -697,7 +693,7 @@ environment variable.`,
 
 		// Run team wizard if --team flag is set
 		if team {
-			if err := runTeamWizard(ctx, doltStore); err != nil {
+			if err := runTeamWizard(ctx, store); err != nil {
 				canceled := isCanceled(err)
 				if canceled {
 					fmt.Fprintln(os.Stderr, "Setup canceled.")
@@ -1139,7 +1135,7 @@ func countExistingIssues(_ string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := newDoltStoreFromConfig(ctx, beadsDir)
 	if err != nil {
 		return 0, err
 	}

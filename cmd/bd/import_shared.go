@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -46,7 +45,7 @@ type ImportResult struct {
 
 // importIssuesCore imports issues into the Dolt store.
 // This is a bridge function that delegates to the Dolt store's batch creation.
-func importIssuesCore(ctx context.Context, _ string, store *dolt.DoltStore, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
+func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
 	if opts.DryRun || len(issues) == 0 {
 		return &ImportResult{Skipped: len(issues)}, nil
 	}
@@ -66,7 +65,7 @@ func importIssuesCore(ctx context.Context, _ string, store *dolt.DoltStore, issu
 // Unlike git-based import, this reads from the current working tree, preserving
 // any manual cleanup done to the JSONL file (e.g., via bd compact --purge-tombstones).
 // Returns the number of issues imported and any error.
-func importFromLocalJSONL(ctx context.Context, store *dolt.DoltStore, localPath string) (int, error) {
+func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localPath string) (int, error) {
 	//nolint:gosec // G304: path from user-provided CLI argument
 	data, err := os.ReadFile(localPath)
 	if err != nil {
