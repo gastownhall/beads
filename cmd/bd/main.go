@@ -334,6 +334,7 @@ var rootCmd = &cobra.Command{
 			"__complete",       // Cobra's internal completion command (shell completions work without db)
 			"__completeNoDesc", // Cobra's completion without descriptions (used by fish)
 			"bash",
+			"bootstrap",
 			"completion",
 			"doctor",
 			"dolt", // bare "bd dolt" shows help only; subcommands handled below
@@ -548,6 +549,12 @@ var rootCmd = &cobra.Command{
 		storeActive = true
 		storeMutex.Unlock()
 
+		// Validate workspace identity for write commands (GH#2438, GH#2372)
+		// Skip for read-only commands since they can't corrupt data
+		if !useReadOnly && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
+			validateWorkspaceIdentity(rootCtx, beadsDir)
+		}
+
 		// Initialize hook runner
 		// dbPath is .beads/something.db, so workspace root is parent of .beads
 		if dbPath != "" {
@@ -725,6 +732,51 @@ func flushBatchCommitOnShutdown() {
 		fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", commitErr)
 	} else if committed {
 		fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
+	}
+}
+
+// validateWorkspaceIdentity checks that the project identity from metadata.json
+// matches the database's stored project_id. A mismatch indicates configuration
+// drift — the CLI may be pointing at the wrong database (GH#2438, GH#2372).
+//
+// This check only runs for write commands because:
+// 1. Read commands are safe even against wrong databases (no data mutation)
+// 2. The check requires an open store connection
+// 3. New databases won't have _project_id yet (bootstrap case)
+func validateWorkspaceIdentity(ctx context.Context, beadsDir string) {
+	if store == nil {
+		return // No store connection, nothing to validate
+	}
+
+	// Load project_id from metadata.json
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return // No config, skip validation (fresh init)
+	}
+	configProjectID := cfg.ProjectID
+	if configProjectID == "" {
+		return // No project_id in config (pre-identity era)
+	}
+
+	// Get project_id from database
+	dbProjectID, err := store.GetMetadata(ctx, "_project_id")
+	if err != nil || dbProjectID == "" {
+		return // No project_id in DB (new or pre-identity database)
+	}
+
+	// Compare: mismatch means drift
+	if configProjectID != dbProjectID {
+		fmt.Fprintf(os.Stderr, "Error: workspace identity mismatch detected\n\n")
+		fmt.Fprintf(os.Stderr, "  metadata.json project_id: %s\n", configProjectID)
+		fmt.Fprintf(os.Stderr, "  database _project_id:     %s\n\n", dbProjectID)
+		fmt.Fprintf(os.Stderr, "This means the CLI config and database belong to different projects.\n")
+		fmt.Fprintf(os.Stderr, "Possible causes:\n")
+		fmt.Fprintf(os.Stderr, "  • BEADS_DIR points to a different project's .beads/\n")
+		fmt.Fprintf(os.Stderr, "  • Dolt server endpoint changed and now serves a different database\n")
+		fmt.Fprintf(os.Stderr, "  • metadata.json was copied from another project\n\n")
+		fmt.Fprintf(os.Stderr, "To diagnose: bd context --json\n")
+		fmt.Fprintf(os.Stderr, "To override: set BEADS_SKIP_IDENTITY_CHECK=1\n")
+		os.Exit(1)
 	}
 }
 
