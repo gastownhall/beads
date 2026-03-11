@@ -113,6 +113,15 @@ create, update, show, or close operation).`,
 				continue
 			}
 
+			// Epic close guard: prevent closing epics with open children (mw-local-4so.5.2)
+			if !force && issue != nil && issue.IssueType == types.TypeEpic {
+				openChildren := countEpicOpenChildren(ctx, id)
+				if openChildren > 0 {
+					fmt.Fprintf(os.Stderr, "cannot close epic %s: %d open child issue(s); close children first or use --force to override\n", id, openChildren)
+					continue
+				}
+			}
+
 			// Check gate satisfaction for machine-checkable gates (GH#1467)
 			if !force {
 				if err := checkGateSatisfaction(issue); err != nil {
@@ -395,4 +404,20 @@ func autoCloseCompletedMolecule(ctx context.Context, s *dolt.DoltStore, closedSt
 	if !jsonOutput {
 		fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
 	}
+}
+
+// countEpicOpenChildren returns the number of open (non-closed) children for an epic.
+// Uses GetDependentsWithMetadata to find parent-child relationships.
+func countEpicOpenChildren(ctx context.Context, epicID string) int {
+	dependents, err := store.GetDependentsWithMetadata(ctx, epicID)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, dep := range dependents {
+		if dep.DependencyType == types.DepParentChild && dep.Issue.Status != types.StatusClosed {
+			count++
+		}
+	}
+	return count
 }

@@ -102,7 +102,12 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	return doltResults, nil
 }
 
-// GetReadyWork returns issues that are ready to work on (not blocked)
+// GetReadyWork returns issues that are ready to work on (not blocked).
+//
+// Blocking semantics are unified through computeBlockedIDs, which is the
+// canonical source of truth for both GetReadyWork and GetBlockedIssues.
+// The molecule subgraph analysis (analyzeMoleculeParallel) uses equivalent
+// logic scoped to an in-memory subgraph rather than the full database.
 func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

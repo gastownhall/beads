@@ -112,7 +112,7 @@ Example:
 					refs := refCounts[issue.ID]
 					weight := 0
 					if score, ok := structuralScores[issue.ID]; ok {
-						weight = score.dependentCount + score.dependsOnCount
+						weight = score.dependentCount*3 + score.dependsOnCount
 					}
 					marker := "  "
 					if issue.ID == target.ID {
@@ -246,9 +246,12 @@ func countStructuralRelationships(groups [][]*types.Issue) map[string]*issueScor
 
 // chooseMergeTarget selects the best issue to merge into
 // Priority order:
-// 1. Highest structural weight (dependents + dependencies) - most connected issue wins
-// 2. Highest text reference count (mentions in descriptions/notes)
-// 3. Lexicographically smallest ID (stable tiebreaker)
+//  1. Highest structural weight - most connected issue wins
+//     Dependents (children) are weighted 3× more than depends-on references
+//     because discarding an issue with children orphans them (catastrophic),
+//     while losing a depends-on link is recoverable.
+//  2. Highest text reference count (mentions in descriptions/notes)
+//  3. Lexicographically smallest ID (stable tiebreaker)
 func chooseMergeTarget(group []*types.Issue, refCounts map[string]int, structuralScores map[string]*issueScore) *types.Issue {
 	if len(group) == 0 {
 		return nil
@@ -257,9 +260,9 @@ func chooseMergeTarget(group []*types.Issue, refCounts map[string]int, structura
 	getScore := func(id string) (int, int) {
 		weight := 0
 		if score, ok := structuralScores[id]; ok {
-			// Weight = children/dependents + dependencies
-			// An issue with ANY structural connections should be preferred over an empty shell
-			weight = score.dependentCount + score.dependsOnCount
+			// Dependents (children that would be orphaned) count 3× more than
+			// depends-on references (which survive closure as links).
+			weight = score.dependentCount*3 + score.dependsOnCount
 		}
 		textRefs := refCounts[id]
 		return weight, textRefs
@@ -321,7 +324,7 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 				"references":      refCounts[issue.ID],
 				"dependents":      dependents,
 				"dependencies":    dependencies,
-				"weight":          dependents + dependencies,
+				"weight":          dependents*3 + dependencies,
 				"is_merge_target": issue.ID == target.ID,
 			}
 		}
@@ -344,24 +347,55 @@ func formatDuplicateGroupsJSON(groups [][]*types.Issue, refCounts map[string]int
 }
 
 // performMerge executes the merge operation:
-// 1. Closes all source issues with a reason indicating they are duplicates
-// 2. Links each source to the target with a "related" dependency
+// 1. Re-parents children of source issues to the target (prevents orphaning)
+// 2. Closes all source issues with a reason indicating they are duplicates
+// 3. Links each source to the target with a "related" dependency
 // Returns a map with the merge result for JSON output
 func performMerge(targetID string, sourceIDs []string) map[string]interface{} {
 	ctx := rootCtx
 	result := map[string]interface{}{
-		"target":  targetID,
-		"sources": sourceIDs,
-		"closed":  []string{},
-		"linked":  []string{},
-		"errors":  []string{},
+		"target":     targetID,
+		"sources":    sourceIDs,
+		"closed":     []string{},
+		"linked":     []string{},
+		"reparented": []string{},
+		"errors":     []string{},
 	}
 
 	closedIDs := []string{}
 	linkedIDs := []string{}
+	reparentedIDs := []string{}
 	errors := []string{}
 
 	for _, sourceID := range sourceIDs {
+		// Re-parent children before closing to prevent orphaning.
+		// Get dependents with metadata to find parent-child relationships.
+		dependents, err := store.GetDependentsWithMetadata(ctx, sourceID)
+		if err == nil {
+			for _, dep := range dependents {
+				if dep.DependencyType != types.DepParentChild {
+					continue
+				}
+				childID := dep.Issue.ID
+				// Remove old parent-child link
+				if err := store.RemoveDependency(ctx, childID, sourceID, getActor()); err != nil {
+					errors = append(errors, fmt.Sprintf("failed to remove parent link %s→%s: %v", childID, sourceID, err))
+					continue
+				}
+				// Add new parent-child link to target
+				newDep := &types.Dependency{
+					IssueID:     childID,
+					DependsOnID: targetID,
+					Type:        types.DepParentChild,
+				}
+				if err := store.AddDependency(ctx, newDep, getActor()); err != nil {
+					errors = append(errors, fmt.Sprintf("failed to reparent %s to %s: %v", childID, targetID, err))
+					continue
+				}
+				reparentedIDs = append(reparentedIDs, childID)
+			}
+		}
+
 		// Close the duplicate issue
 		reason := fmt.Sprintf("Duplicate of %s", targetID)
 		if err := store.CloseIssue(ctx, sourceID, reason, actor, ""); err != nil {
@@ -376,7 +410,7 @@ func performMerge(targetID string, sourceIDs []string) map[string]interface{} {
 			DependsOnID: targetID,
 			Type:        types.DependencyType("related"),
 		}
-		if err := store.AddDependency(ctx, dep, actor); err != nil {
+		if err := store.AddDependency(ctx, dep, getActor()); err != nil {
 			errors = append(errors, fmt.Sprintf("failed to link %s to %s: %v", sourceID, targetID, err))
 			continue
 		}
@@ -385,6 +419,7 @@ func performMerge(targetID string, sourceIDs []string) map[string]interface{} {
 
 	result["closed"] = closedIDs
 	result["linked"] = linkedIDs
+	result["reparented"] = reparentedIDs
 	result["errors"] = errors
 
 	return result

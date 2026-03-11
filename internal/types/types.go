@@ -665,6 +665,11 @@ type IssueDetails struct {
 	Dependents   []*IssueWithDependencyMetadata `json:"dependents,omitempty"`
 	Comments     []*Comment                     `json:"comments,omitempty"`
 	Parent       *string                        `json:"parent,omitempty"`
+
+	// Epic progress fields (populated only for issue_type=epic with children)
+	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
+	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
+	EpicCloseable      *bool `json:"epic_closeable,omitempty"`
 }
 
 // DependencyType categorizes the relationship

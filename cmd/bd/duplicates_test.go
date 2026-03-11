@@ -182,20 +182,36 @@ func TestChooseMergeTarget(t *testing.T) {
 			wantID: "bd-1", // Issue with dependencies should be kept over empty shell
 		},
 		{
-			name: "weight combines dependents and dependencies (GH#1022)",
+			name: "dependents weighted 3x more than depends-on (anti-orphan)",
 			group: []*types.Issue{
 				{ID: "bd-1", Title: "Task"}, // Has only dependents (children)
-				{ID: "bd-2", Title: "Task"}, // Has both dependents and dependencies
+				{ID: "bd-2", Title: "Task"}, // Has more depends-on but fewer children
 			},
 			refCounts: map[string]int{
 				"bd-1": 0,
 				"bd-2": 0,
 			},
 			structuralScores: map[string]*issueScore{
-				"bd-1": {dependentCount: 5, dependsOnCount: 0, textRefs: 0}, // Weight = 5
-				"bd-2": {dependentCount: 3, dependsOnCount: 4, textRefs: 0}, // Weight = 7
+				"bd-1": {dependentCount: 5, dependsOnCount: 0, textRefs: 0}, // Weight = 5*3 = 15
+				"bd-2": {dependentCount: 3, dependsOnCount: 4, textRefs: 0}, // Weight = 3*3+4 = 13
 			},
-			wantID: "bd-2", // Higher combined weight wins
+			wantID: "bd-1", // More children wins (anti-orphan weighting)
+		},
+		{
+			name: "depends-on still contributes when dependents are equal",
+			group: []*types.Issue{
+				{ID: "bd-1", Title: "Task"},
+				{ID: "bd-2", Title: "Task"},
+			},
+			refCounts: map[string]int{
+				"bd-1": 0,
+				"bd-2": 0,
+			},
+			structuralScores: map[string]*issueScore{
+				"bd-1": {dependentCount: 2, dependsOnCount: 0, textRefs: 0}, // Weight = 2*3 = 6
+				"bd-2": {dependentCount: 2, dependsOnCount: 3, textRefs: 0}, // Weight = 2*3+3 = 9
+			},
+			wantID: "bd-2", // Equal dependents, more deps wins
 		},
 	}
 

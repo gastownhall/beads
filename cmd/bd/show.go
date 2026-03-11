@@ -153,6 +153,26 @@ var showCmd = &cobra.Command{
 				details.Dependents, _ = issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
 
 				details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
+
+				// Epic progress: count children status for epic issues
+				if issue.IssueType == types.TypeEpic && details.Dependents != nil {
+					total, closed := 0, 0
+					for _, dep := range details.Dependents {
+						if dep.DependencyType == types.DepParentChild {
+							total++
+							if dep.Issue.Status == types.StatusClosed {
+								closed++
+							}
+						}
+					}
+					if total > 0 {
+						details.EpicTotalChildren = &total
+						details.EpicClosedChildren = &closed
+						closeable := total == closed
+						details.EpicCloseable = &closeable
+					}
+				}
+
 				// Compute parent from dependencies
 				for _, dep := range details.Dependencies {
 					if dep.DependencyType == types.DepParentChild {
@@ -290,6 +310,24 @@ var showCmd = &cobra.Command{
 					fmt.Printf("\n%s\n", ui.RenderBold("CHILDREN"))
 					for _, dep := range children {
 						fmt.Println(formatDependencyLine("↳", dep))
+					}
+					// Epic progress summary
+					if issue.IssueType == types.TypeEpic {
+						closedCount := 0
+						for _, dep := range children {
+							if dep.Issue.Status == types.StatusClosed {
+								closedCount++
+							}
+						}
+						pct := 0
+						if len(children) > 0 {
+							pct = (closedCount * 100) / len(children)
+						}
+						if closedCount == len(children) {
+							fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closedCount, len(children), pct)
+						} else {
+							fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closedCount, len(children), pct)
+						}
 					}
 				}
 				if len(blocks) > 0 {

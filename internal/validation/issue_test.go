@@ -284,6 +284,61 @@ func TestHasType(t *testing.T) {
 	}
 }
 
+func TestEpicHasOpenChildren(t *testing.T) {
+	tests := []struct {
+		name           string
+		issue          *types.Issue
+		force          bool
+		openChildCount int
+		wantErr        bool
+	}{
+		{
+			name:           "nil issue passes",
+			issue:          nil,
+			force:          false,
+			openChildCount: 5,
+			wantErr:        false,
+		},
+		{
+			name:           "non-epic passes regardless of children",
+			issue:          &types.Issue{ID: "bd-test", IssueType: types.TypeTask},
+			force:          false,
+			openChildCount: 10,
+			wantErr:        false,
+		},
+		{
+			name:           "epic with no open children passes",
+			issue:          &types.Issue{ID: "bd-test", IssueType: types.TypeEpic},
+			force:          false,
+			openChildCount: 0,
+			wantErr:        false,
+		},
+		{
+			name:           "epic with open children fails",
+			issue:          &types.Issue{ID: "bd-test", IssueType: types.TypeEpic},
+			force:          false,
+			openChildCount: 3,
+			wantErr:        true,
+		},
+		{
+			name:           "epic with open children passes with force",
+			issue:          &types.Issue{ID: "bd-test", IssueType: types.TypeEpic},
+			force:          true,
+			openChildCount: 3,
+			wantErr:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := EpicHasOpenChildren(tt.force, tt.openChildCount)("bd-test", tt.issue)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("EpicHasOpenChildren() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestForUpdate(t *testing.T) {
 	tests := []struct {
 		name    string
