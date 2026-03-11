@@ -99,7 +99,7 @@ bd dep tree <issue-id>
 2. **Create issues proactively**: When you notice work, file it immediately
 3. **Link discovered work**: Use `bd dep add --type discovered-from`
 4. **Close with context**: Always provide --reason when closing
-5. **Sync changes**: Run `bd sync` to push changes to the Dolt remote
+5. **Sync changes**: Run `bd dolt push` to push changes to the Dolt remote
 ```
 
 ### Step 4: Commit and Push
@@ -275,7 +275,7 @@ bd init
 
 **Cause**: Two sessions modified issues concurrently
 
-**Fix**: Run `bd sync` to resolve via Dolt's merge. See the main beads TROUBLESHOOTING.md for details.
+**Fix**: Run `bd dolt pull` to resolve via Dolt's merge. See the main beads TROUBLESHOOTING.md for details.
 
 ### Slow Installation
 
@@ -319,20 +319,20 @@ WORKFLOW:
 5. File new issues: Create issues for any work discovered
 6. Link issues: Use `bd dep add` to track relationships
 7. Close when done: `bd close <id> --reason "what you did"`
-8. Sync changes: Run `bd sync` at end of session
+8. Sync changes: Run `bd dolt push` at end of session
 
 ALWAYS:
 - Use --json flags for programmatic parsing
 - Create issues proactively (don't let work be forgotten)
 - Link related issues with dependencies
 - Close issues with descriptive reasons
-- Run `bd sync` at end of sessions
+- Run `bd dolt push` at end of sessions
 
 NEVER:
 - Use markdown TODOs (use bd instead)
 - Work on blocked issues (check `bd show <id>` for blockers)
 - Close issues without --reason
-- Forget to run `bd sync` at end of sessions
+- Forget to run `bd dolt push` at end of sessions
 ```
 
 ## 🎉 Success Criteria

@@ -93,9 +93,9 @@ bd hooks install
 
 ### Git Integration
 
-**Dolt sync**: Dolt handles sync natively via `bd sync`. No JSONL export/import needed.
+**Dolt sync**: Dolt handles sync natively via `bd dolt push` / `bd dolt pull`. No JSONL export/import needed.
 
-**Protected branches**: Use `bd init --branch beads-metadata` to commit to separate branch. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
+**Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
 
 **Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/ADVANCED.md](docs/ADVANCED.md).
 

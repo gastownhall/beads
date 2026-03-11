@@ -198,7 +198,7 @@ bd dolt push    # Push changes to Dolt remote
 bd dolt pull    # Pull changes from Dolt remote
 ```
 
-The `bd import` and `bd export` commands exist for data migration and portability (e.g., bootstrapping new clones, backing up data), not for day-to-day sync.
+The `bd export` command exists for data portability (e.g., backing up data), and `bd init --from-jsonl` can bootstrap a new database from an export. These are not needed for day-to-day sync.
 
 ### What if my database feels stale after a colleague pushes changes?
 
@@ -301,7 +301,7 @@ We don't have automated migration tools yet, but you can:
 
 1. Export issues from your current tracker (usually CSV or JSON)
 2. Write a simple script to convert to bd's JSONL format
-3. Import with `bd import -i issues.jsonl`
+3. Place the JSONL file at `.beads/issues.jsonl` and run `bd init --from-jsonl`
 
 See [examples/](../examples/) for scripting patterns. Contributions welcome!
 
@@ -434,15 +434,9 @@ See [WORKTREES.md](WORKTREES.md) for details.
 
 ### Why did beads create worktrees in my .git directory?
 
-Beads automatically creates git worktrees when using the **sync-branch** feature. This happens when you:
-- Run `bd init --branch <name>`
-- Set `bd config set sync.branch <name>`
+Older versions of beads created git worktrees for a **sync-branch** feature that has since been removed. Dolt now stores data under `refs/dolt/data`, separate from standard Git refs, so a separate branch is no longer needed.
 
-The worktrees allow beads to commit issue updates to a separate branch without switching your working directory.
-
-**Location:** `.git/beads-worktrees/<sync-branch>/`
-
-**Common issue:** If you see "branch already checked out" errors when switching branches, remove the beads worktrees:
+If you have leftover worktrees from an older version, you can safely remove them:
 
 ```bash
 rm -rf .git/beads-worktrees

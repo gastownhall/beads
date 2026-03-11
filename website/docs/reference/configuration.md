@@ -94,7 +94,7 @@ path = ".beads/issues.jsonl"  # Default export file path (for bd export command)
 [git]
 auto_commit = true            # Auto-commit on sync
 auto_push = true              # Auto-push on sync
-commit_message = "bd sync"    # Default commit message
+commit_message = "bd: auto-commit"  # Default commit message
 ```
 
 ### Hooks

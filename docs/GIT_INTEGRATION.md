@@ -31,24 +31,14 @@ Git worktrees share the same `.git` directory and `.beads` database:
 
 ## Protected Branch Workflows
 
-**If your repository uses protected branches** (GitHub, GitLab, etc.), bd can commit to a separate branch instead of `main`:
+**Note:** Beads data is stored in Dolt under `refs/dolt/data`, separate from standard Git refs. This means beads does not commit to any Git branch, so protected branch workflows are not affected.
 
-### Configuration
+Sync with remotes using Dolt's native push/pull:
 
 ```bash
-# Initialize with separate sync branch
-bd init --branch beads-sync
-
-# Or configure existing setup
-bd config set sync.branch beads-sync
+bd dolt push    # Push changes to Dolt remote
+bd dolt pull    # Pull changes from Dolt remote
 ```
-
-### How It Works
-
-- Beads commits issue updates to `beads-sync` instead of `main`
-- Uses git worktrees (lightweight checkouts) in `.git/beads-worktrees/`
-- Your main working directory is never affected
-- Periodically merge `beads-sync` back to `main` via pull request
 
 ### Daily Workflow (Unchanged for Agents)
 

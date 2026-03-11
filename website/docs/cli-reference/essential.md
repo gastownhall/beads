@@ -158,22 +158,34 @@ bd blocked
 bd blocked --json
 ```
 
-## bd sync
+## bd dolt push
 
-Force immediate sync to git.
+Push changes to a Dolt remote.
 
 ```bash
-bd sync [flags]
+bd dolt push [flags]
 ```
 
 Performs:
 1. Dolt commit (snapshot current database state)
-2. Dolt push to remote
+2. Push to Dolt remote
 
 **Examples:**
 ```bash
-bd sync
-bd sync --json
+bd dolt push
+```
+
+## bd dolt pull
+
+Pull changes from a Dolt remote.
+
+```bash
+bd dolt pull [flags]
+```
+
+**Examples:**
+```bash
+bd dolt pull
 ```
 
 ## bd info

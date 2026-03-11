@@ -67,7 +67,7 @@ If main isn't protected:
 bd create "Implement feature X" -p 1
 
 # Dolt server auto-commits to main
-# (or run 'bd sync' manually)
+# (or run 'bd dolt push' manually)
 
 # Pull to see team's issues
 git pull
@@ -83,7 +83,7 @@ If main is protected:
 bd create "Implement feature X" -p 1
 
 # Auto-commits to beads-metadata branch
-# (or run 'bd sync' manually)
+# (or run 'bd dolt push' manually)
 
 # Push beads-metadata
 git push origin beads-metadata
@@ -225,10 +225,11 @@ Benefits:
 
 ### Manual Sync
 
-Sync when you want:
+Push and pull when you want:
 
 ```bash
-bd sync  # Export, commit, pull, import, push
+bd dolt push  # Push local changes to remote
+bd dolt pull  # Pull remote changes locally
 ```
 
 Benefits:
@@ -238,7 +239,7 @@ Benefits:
 
 ## Conflict Resolution
 
-Hash-based IDs prevent most conflicts. Dolt handles merges natively using three-way merge, similar to git. If conflicts occur during `bd sync`:
+Hash-based IDs prevent most conflicts. Dolt handles merges natively using three-way merge, similar to git. If conflicts occur during `bd dolt pull`:
 
 ```bash
 # View conflicts
@@ -250,7 +251,7 @@ bd sql "CALL dolt_conflicts_resolve('--ours')"
 bd sql "CALL dolt_conflicts_resolve('--theirs')"
 
 # Complete the sync
-bd sync
+bd dolt push
 ```
 
 ## Protected Branch Best Practices
@@ -291,10 +292,10 @@ bd sync
 
 ### Q: How do team members see each other's issues?
 
-A: Issues are stored in Dolt, which supports distributed sync. Use `bd sync` to pull and push changes.
+A: Issues are stored in Dolt, which supports distributed sync. Use `bd dolt pull` to fetch and `bd dolt push` to share changes.
 
 ```bash
-bd sync
+bd dolt pull
 bd list  # See everyone's issues
 ```
 
@@ -310,7 +311,8 @@ A: Turn it off:
 bd config set dolt.auto-commit off
 
 # Sync manually
-bd sync
+bd dolt push
+bd dolt pull
 ```
 
 ### Q: Can we use different sync branches per person?
@@ -329,7 +331,7 @@ A: Add to your CI pipeline:
 # In .github/workflows/main.yml
 - name: Sync beads issues
   run: |
-    bd sync
+    bd dolt push
     git push origin beads-metadata
 ```
 
@@ -363,7 +365,7 @@ Dolt handles merges natively. If conflicts occur during sync:
 ```bash
 bd sql "SELECT * FROM dolt_conflicts"
 bd sql "CALL dolt_conflicts_resolve('--ours')"
-bd sync
+bd dolt push
 ```
 
 See [GIT_INTEGRATION.md](../../docs/GIT_INTEGRATION.md) for details.
@@ -373,8 +375,8 @@ See [GIT_INTEGRATION.md](../../docs/GIT_INTEGRATION.md) for details.
 Manually sync:
 
 ```bash
-bd sync
-git push
+bd dolt push
+bd dolt pull
 ```
 
 Check for conflicts:

@@ -15,9 +15,11 @@ This guide explains how to use beads with protected branches on platforms like G
 
 ## Overview
 
-**Problem:** GitHub and other platforms let you protect branches (like `main`) to require pull requests for all changes. This prevents beads from auto-committing issue updates directly to `main`.
+**Note:** This document describes a workflow that has been **removed**. Beads now stores data in Dolt under `refs/dolt/data`, separate from standard Git refs. Beads does not commit to any Git branch, so protected branch workflows are not affected.
 
-**Solution:** Beads can commit to a separate branch (like `beads-sync`) using git worktrees, while keeping your main working directory untouched. Periodically merge the metadata branch back to `main` via a pull request.
+**Previous problem:** GitHub and other platforms let you protect branches (like `main`) to require pull requests for all changes. Previously, beads committed issue data to Git branches, which conflicted with branch protection.
+
+**Current solution:** Beads uses Dolt-native sync (`bd dolt push` / `bd dolt pull`). No Git branch commits are needed. The information below is retained for historical reference and for users migrating from older versions.
 
 **Benefits:**
 - ✅ Works with any git platform's branch protection
@@ -33,10 +35,10 @@ This guide explains how to use beads with protected branches on platforms like G
 
 ```bash
 cd your-project
-bd init --branch beads-sync
+bd init
 ```
 
-This creates a `.beads/` directory and configures beads to commit to `beads-sync` instead of `main`.
+This creates a `.beads/` directory with a Dolt database. Sync is handled via `bd dolt push` / `bd dolt pull`.
 
 **Important:** After initialization, you'll see some untracked files that should be committed to your protected branch:
 
@@ -50,7 +52,7 @@ git commit -m "Initialize beads issue tracker"
 git push origin main  # Or create a PR if required
 ```
 
-**Files created by `bd init --branch`:**
+**Files created by `bd init`:**
 
 Files that should be committed to your protected branch (main):
 - `.beads/.gitignore` - Tells git what to ignore in .beads/ directory
@@ -142,13 +144,11 @@ When you update an issue:
 
 ```bash
 cd your-project
-bd init --branch beads-sync
+bd init
 ```
 
 This will:
-- Create `.beads/` directory with database
-- Set `sync.branch` config to `beads-sync`
-- Import any existing issues from git (if present)
+- Create `.beads/` directory with Dolt database
 - Prompt to install git hooks (recommended: say yes)
 
 ### Option 2: Migrate Existing Project
@@ -246,7 +246,7 @@ git push origin beads-sync
 # 3. After PR is merged, update your local main
 git checkout main
 git pull
-bd import  # Import the merged changes
+bd dolt pull  # Pull latest changes
 ```
 
 ### Option 2: Direct Merge (If Allowed)
@@ -254,14 +254,9 @@ bd import  # Import the merged changes
 If you have push access to `main`:
 
 ```bash
-# Check what will be merged
-git log main..beads-sync --oneline
-
-# Merge sync branch to main
-git checkout main
-git merge beads-sync --no-ff
-git push
-bd import  # Import merged changes to database
+# Sync via Dolt (no git branch merge needed)
+bd dolt push
+bd dolt pull
 ```
 
 **Safety checks:**
@@ -385,9 +380,8 @@ No! This is a pure git solution that works on any platform. Just protect your `m
 Yes! Use any branch name except `main` or `master` (git worktrees cannot checkout the same branch in multiple locations):
 
 ```bash
-bd init --branch my-custom-branch
-# or
-bd config set sync.branch my-custom-branch
+bd dolt remote add origin <remote-url>
+bd dolt push
 ```
 
 ### Can I change the branch name later?
@@ -608,7 +602,7 @@ git fetch upstream
 # Merge upstream beads-sync to yours
 git checkout beads-sync
 git merge upstream/beads-sync
-bd import  # Import merged changes
+bd dolt pull  # Pull merged changes
 ```
 
 ### Custom Worktree Location

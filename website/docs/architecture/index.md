@@ -34,7 +34,7 @@ flowchart TD
 :::info Source of Truth
 **Dolt** is the source of truth. Every write auto-commits to Dolt history, providing full version control, branching, and merge capabilities at the database level.
 
-Recovery is straightforward: pull from a Dolt remote, or use `bd import` to load from a JSONL backup.
+Recovery is straightforward: pull from a Dolt remote with `bd dolt pull`, or use `bd init --from-jsonl` to bootstrap from a JSONL backup.
 :::
 
 ### Why Dolt?
@@ -109,7 +109,7 @@ For CI/CD pipelines, containers, and single-use scenarios, no server is needed. 
 
 ```bash
 bd create "CI-generated issue"
-bd sync
+bd dolt push
 ```
 
 **When embedded mode is appropriate:**
@@ -139,7 +139,7 @@ See [Sync Failures Recovery](/recovery/sync-failures) for sync race condition tr
 Dolt's version control makes recovery straightforward:
 
 1. **Lost database?** → Pull from Dolt remote: `bd dolt pull`
-2. **Have a JSONL backup?** → Import it: `bd import -i backup.jsonl`
+2. **Have a JSONL backup?** → Bootstrap from it: `bd init --from-jsonl backup.jsonl`
 3. **Merge conflicts?** → Dolt handles cell-level merge natively
 
 ### Universal Recovery Sequence

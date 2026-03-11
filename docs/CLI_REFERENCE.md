@@ -561,37 +561,26 @@ bd gate add-waiter <gate-id> <waiter>
 
 ## Database Management
 
-### Import/Export
+### Export / Bootstrap
 
 ```bash
-# Import issues from JSONL
-bd import -i .beads/issues.jsonl --dry-run      # Preview changes
-bd import -i .beads/issues.jsonl                # Import and update issues
-bd import -i .beads/issues.jsonl --dedupe-after # Import + detect duplicates
+# Export issues to JSONL
+bd export -o issues.jsonl
 
-# Handle missing parents during import
-bd import -i issues.jsonl --orphan-handling allow      # Default: import orphans without validation
-bd import -i issues.jsonl --orphan-handling resurrect  # Auto-resurrect deleted parents as tombstones
-bd import -i issues.jsonl --orphan-handling skip       # Skip orphans with warning
-bd import -i issues.jsonl --orphan-handling strict     # Fail if parent is missing
+# Bootstrap a new database from an export
+bd init --from-jsonl                            # Reads .beads/issues.jsonl
 
-# Configure default orphan handling behavior
+# Configure orphan handling for pulls and bootstrapping
 bd config set import.orphan_handling "resurrect"
-bd dolt push  # Now uses resurrect mode by default
+bd dolt pull  # Respects import.orphan_handling setting
 ```
 
-**Orphan handling modes:**
+**Orphan handling modes** (apply to `bd dolt pull` and `bd init --from-jsonl`):
 
 - **`allow` (default)** - Import orphaned children without parent validation. Most permissive, ensures no data loss even if hierarchy is temporarily broken.
-- **`resurrect`** - Search JSONL history for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data. Dependencies are also resurrected on best-effort basis.
+- **`resurrect`** - Search for deleted parents and recreate them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data.
 - **`skip`** - Skip orphaned children with warning. Partial import succeeds but some issues are excluded.
-- **`strict`** - Fail import immediately if a child's parent is missing. Use when database integrity is critical.
-
-**When to use:**
-- Use `allow` (default) for daily imports and auto-sync
-- Use `resurrect` when importing from databases with deleted parents
-- Use `strict` for controlled imports requiring guaranteed parent existence
-- Use `skip` rarely - only for selective imports
+- **`strict`** - Fail immediately if a child's parent is missing. Use when database integrity is critical.
 
 See [CONFIG.md](CONFIG.md#example-import-orphan-handling) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md#import-fails-with-missing-parent-errors) for more details.
 

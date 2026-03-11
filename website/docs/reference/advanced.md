@@ -115,7 +115,8 @@ Events:
 ### Create Multiple
 
 ```bash
-cat issues.jsonl | bd import -i -
+# Bootstrap a new database from JSONL
+bd init --from-jsonl issues.jsonl
 ```
 
 ### Update Multiple

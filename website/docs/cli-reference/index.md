@@ -39,7 +39,8 @@ Most frequently used:
 | `bd update` | Update issue fields |
 | `bd close` | Close an issue |
 | `bd ready` | Show unblocked work |
-| `bd sync` | Force sync to git |
+| `bd dolt push` | Push changes to Dolt remote |
+| `bd dolt pull` | Pull changes from Dolt remote |
 
 ### Issue Management
 
@@ -77,9 +78,9 @@ Most frequently used:
 
 | Command | Description |
 |---------|-------------|
-| `bd sync` | Full sync cycle |
+| `bd dolt push` | Push changes to Dolt remote |
+| `bd dolt pull` | Pull changes from Dolt remote |
 | `bd export` | Export data to JSONL |
-| `bd import` | Import data from JSONL |
 | `bd migrate` | Migrate database schema |
 
 ### System
@@ -165,14 +166,14 @@ bd blocked
 ### Syncing
 
 ```bash
-# Full sync (Dolt commit + push)
-bd sync
+# Push changes to Dolt remote
+bd dolt push
+
+# Pull changes from Dolt remote
+bd dolt pull
 
 # Export to file
 bd export -o backup.jsonl
-
-# Import from file
-bd import -i backup.jsonl
 ```
 
 ## See Also

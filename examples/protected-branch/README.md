@@ -77,8 +77,8 @@ If you're not using the Dolt server:
 bd create "Fix bug in login" -t bug -p 0
 bd update bd-XXXXX --status closed
 
-# Manually flush to sync branch
-bd sync --flush-only
+# Manually push to remote
+bd dolt push
 
 # Verify commit
 git log beads-metadata -1
@@ -100,7 +100,7 @@ gh pr create --base main --head beads-metadata \
 # After PR is approved and merged:
 git checkout main
 git pull
-bd import  # Import merged changes to database
+bd dolt pull  # Pull merged changes into local database
 ```
 
 Option 2: Direct merge (if you have push access):
@@ -113,7 +113,7 @@ git log main..beads-metadata --oneline
 git checkout main
 git merge beads-metadata --no-ff
 git push
-bd import  # Import merged changes to database
+bd dolt pull  # Pull merged changes into local database
 ```
 
 ### 6. Multi-Clone Sync
@@ -123,12 +123,12 @@ If you have multiple clones or agents:
 ```bash
 # Clone 1: Create issue
 bd create "New feature" -t feature -p 1
-bd sync --flush-only  # Commit to beads-metadata
+bd dolt push  # Push to remote
 git push origin beads-metadata
 
 # Clone 2: Pull changes
 git fetch origin beads-metadata
-bd sync --no-push  # Pull from sync branch and import
+bd dolt pull  # Pull from remote into local database
 bd list  # See the new feature issue
 ```
 
@@ -203,7 +203,7 @@ my-project/
 
 - **No workflow changes:** Agents use `bd create`, `bd update`, etc. as normal
 - **Let the Dolt server handle it:** With auto-commit enabled, agents don't think about sync
-- **Session end:** Run `bd sync` at end of session to ensure everything is committed
+- **Session end:** Run `bd dolt push` at end of session to ensure everything is pushed
 
 ### Troubleshooting
 
@@ -212,7 +212,7 @@ my-project/
 Dolt handles merges natively using three-way merge. If conflicts occur:
 1. Run `bd sql "SELECT * FROM dolt_conflicts"` to view them
 2. Resolve with `bd sql "CALL dolt_conflicts_resolve('--ours')"` or `'--theirs'`
-3. Complete with `bd sync`
+3. Complete with `bd dolt push`
 
 **"Worktree doesn't exist"**
 
@@ -276,4 +276,4 @@ jobs:
 
 - [docs/PROTECTED_BRANCHES.md](../../docs/PROTECTED_BRANCHES.md) - Complete guide
 - [AGENTS.md](../../AGENTS.md) - Agent integration instructions
-- [commands/sync.md](../../claude-plugin/commands/sync.md) - `bd sync` command reference
+- [docs/QUICKSTART.md](../../docs/QUICKSTART.md) - `bd dolt push` / `bd dolt pull` usage

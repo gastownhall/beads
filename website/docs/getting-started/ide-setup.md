@@ -19,7 +19,7 @@ bd setup claude
 
 This installs:
 - **SessionStart hook** - Runs `bd prime` when Claude Code starts
-- **PreCompact hook** - Ensures `bd sync` before context compaction
+- **PreCompact hook** - Ensures `bd dolt push` before context compaction
 
 **How it works:**
 1. SessionStart hook runs `bd prime` automatically
@@ -40,7 +40,7 @@ If you prefer manual configuration, add to your Claude Code hooks:
 {
   "hooks": {
     "SessionStart": ["bd prime"],
-    "PreCompact": ["bd sync"]
+    "PreCompact": ["bd dolt push"]
   }
 }
 ```

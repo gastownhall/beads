@@ -82,7 +82,7 @@ Copilot: Closed bd-42
 | `beads_show` | Show issue details |
 | `beads_update` | Update issue |
 | `beads_close` | Close issue |
-| `beads_sync` | Sync to git |
+| `beads_dolt_push` | Push to Dolt remote |
 | `beads_dep_add` | Add dependency |
 | `beads_dep_tree` | Show dependency tree |
 
@@ -100,7 +100,7 @@ Quick reference:
 - `bd ready` - Find unblocked work
 - `bd create "Title" --type task --priority 2` - Create issue
 - `bd close <id>` - Complete work
-- `bd sync` - Sync with git
+- `bd dolt push` - Push changes to Dolt remote
 ```
 
 ## Troubleshooting
@@ -136,7 +136,7 @@ bd init --quiet
 
 ### What about git hooks?
 
-Git hooks are optional. They auto-sync issues but you can skip them during `bd init` and manually run `bd sync` instead.
+Git hooks are optional. They auto-sync issues but you can skip them during `bd init` and manually run `bd dolt push` / `bd dolt pull` instead.
 
 ## See Also
 

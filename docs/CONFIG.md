@@ -151,7 +151,7 @@ The sync mode controls how beads synchronizes data with git and/or Dolt remotes.
 
 #### Sync Mode
 
-Beads uses `dolt-native` sync mode exclusively. Dolt remotes handle sync directly with cell-level merge. Manual `bd import` / `bd export` are available for migration and portability.
+Beads uses `dolt-native` sync mode exclusively. Dolt remotes handle sync directly with cell-level merge. Use `bd export` for data portability and `bd init --from-jsonl` to bootstrap a new database from an export.
 
 #### Sync Triggers
 
@@ -548,25 +548,24 @@ bd config set import.orphan_handling "allow"
 
 **Mode details:**
 
-- **`strict`** - Import fails immediately if a child's parent is missing. Use when database integrity is critical.
-- **`resurrect`** - Searches the full JSONL file for missing parents and recreates them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data. Dependencies are also resurrected on best-effort basis.
+- **`strict`** - Fails immediately if a child's parent is missing. Use when database integrity is critical.
+- **`resurrect`** - Searches for missing parents and recreates them as tombstones (Status=Closed, Priority=4). Preserves hierarchy with minimal data. Dependencies are also resurrected on best-effort basis.
 - **`skip`** - Skips orphaned children with a warning. Partial import succeeds but some issues are excluded.
-- **`allow`** - Imports orphans without parent validation. Most permissive, works around import bugs. **This is the default** because it ensures all data is imported even if hierarchy is temporarily broken.
+- **`allow`** - Imports orphans without parent validation. Most permissive. **This is the default** because it ensures all data is imported even if hierarchy is temporarily broken.
 
-**Override per command:**
+These modes apply when bootstrapping a database with `bd init --from-jsonl` or when `bd dolt pull` merges remote data:
+
 ```bash
-# Override config for a single import
-bd import -i issues.jsonl --orphan-handling strict
-
-# Auto-import (sync) uses config value
+# Override config for a single pull
+bd config set import.orphan_handling "resurrect"
 bd dolt pull  # Respects import.orphan_handling setting
 ```
 
 **When to use each mode:**
 
-- Use `allow` (default) for daily imports and auto-sync - ensures no data loss
-- Use `resurrect` when importing from another database that had parent deletions
-- Use `strict` only for controlled imports where you need to guarantee parent existence
+- Use `allow` (default) for daily sync - ensures no data loss
+- Use `resurrect` when pulling from remotes that had parent deletions
+- Use `strict` only when you need to guarantee parent existence
 - Use `skip` rarely - only when you want to selectively import a subset
 
 ### Example: Sync Safety Options

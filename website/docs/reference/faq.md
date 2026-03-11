@@ -52,19 +52,22 @@ In CI/CD or single-agent environments, beads uses embedded mode automatically (n
 
 ## Usage
 
-### How do I sync issues to git?
+### How do I sync issues?
 
 ```bash
-# Manual sync:
-bd sync
+# Push changes to Dolt remote:
+bd dolt push
+
+# Pull changes from Dolt remote:
+bd dolt pull
 ```
 
 ### How do I handle merge conflicts?
 
-Dolt handles merge conflicts at the database level. If conflicts arise during sync:
+Dolt handles merge conflicts at the database level. If conflicts arise during pull:
 ```bash
 bd doctor --fix
-bd sync
+bd dolt push
 ```
 
 ### Can multiple agents work on the same repo?
@@ -120,10 +123,7 @@ bd setup aider    # Aider
 
 ### Can beads import from GitHub Issues?
 
-Yes:
-```bash
-bd import --from github --repo owner/repo
-```
+Yes — see the [GitHub integration documentation](https://github.com/steveyegge/beads/blob/main/docs/GITHUB_IMPORT.md) for details.
 
 ## Troubleshooting
 
@@ -144,8 +144,8 @@ bd dolt start
 ### Why aren't my changes syncing?
 
 ```bash
-# Force sync
-bd sync
+# Force push to Dolt remote
+bd dolt push
 
 # Check hooks
 bd hooks status

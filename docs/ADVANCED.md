@@ -73,8 +73,8 @@ bd duplicates --auto-merge
 # Preview what would be merged
 bd duplicates --dry-run
 
-# Detect duplicates during import
-bd import -i issues.jsonl --dedupe-after
+# Detect duplicates after initializing from JSONL
+bd init --from-jsonl  # then: bd duplicates
 ```
 
 **How it works:**
@@ -255,25 +255,19 @@ bd vc resolve
 
 ### Understanding Same-ID Scenarios
 
-When you encounter the same ID during import, it's an **update operation**, not a collision:
+When you encounter the same ID during a Dolt pull or database bootstrap, it's an **update operation**, not a collision:
 
 - Hash IDs are content-based and remain stable across updates
 - Same ID + different fields = normal update to existing issue
-- bd automatically applies updates when importing
+- Dolt's cell-level merge resolves updates automatically
 
-**Preview changes before importing:**
+**Bootstrapping from an export:**
 ```bash
-# Preview an import
-bd import -i data.jsonl --dry-run
+# Export from one database
+bd export -o data.jsonl
 
-# Output shows:
-# Exact matches (idempotent): 15
-# New issues: 5
-# Updates: 3
-#
-# Issues to be updated:
-#   bd-a3f2: Fix authentication (changed: priority, status)
-#   bd-b8e1: Add feature (changed: description)
+# Bootstrap a new database from the export
+bd init --from-jsonl
 ```
 
 ## Custom Git Hooks

@@ -73,7 +73,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[jira-beads-sync](https://github.com/conallob/jira-beads-sync)** - CLI tool & Claude Code plugin to sync tasks from Jira into beads and publish beads task states back to Jira. Built by [@conallob](https://github.com/conallob). (Go)
 
-- **[stringer](https://github.com/davetashner/stringer)** - Codebase archaeology CLI that mines git repos for TODOs, churn hotspots, lottery-risk files, dependency health, and more. Outputs JSONL for `bd import`. Install with `brew install davetashner/tap/stringer`. Built by [@davetashner](https://github.com/davetashner). (Go)
+- **[stringer](https://github.com/davetashner/stringer)** - Codebase archaeology CLI that mines git repos for TODOs, churn hotspots, lottery-risk files, dependency health, and more. Outputs JSONL compatible with `bd init --from-jsonl`. Install with `brew install davetashner/tap/stringer`. Built by [@davetashner](https://github.com/davetashner). (Go)
 
 ## SDKs & Libraries
 

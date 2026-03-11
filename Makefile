@@ -160,6 +160,10 @@ fmt-check:
 	fi
 	@echo "All Go files are properly formatted"
 
+# Validate documentation references against actual CLI flags
+check-docs: build
+	@./scripts/check-doc-flags.sh ./bd
+
 # Clean build artifacts and benchmark profiles
 clean:
 	@echo "Cleaning..."
@@ -181,5 +185,6 @@ help:
 	@echo "  make install-force - Install bd, skipping the origin/main update check"
 	@echo "  make fmt          - Format all Go files with gofmt"
 	@echo "  make fmt-check    - Check Go formatting (for CI)"
+	@echo "  make check-docs   - Validate docs against CLI flags"
 	@echo "  make clean        - Remove build artifacts and profile files"
 	@echo "  make help         - Show this help message"

@@ -82,7 +82,7 @@ bd setup junie --remove
 
 - `bd prime` - Get full workflow context
 - `bd ready` - Find unblocked work
-- `bd sync` - Sync changes to git (run at session end)
+- `bd dolt push` - Push issue changes to Dolt remote (run at session end)
 
 ## License
 

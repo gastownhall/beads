@@ -63,16 +63,7 @@ bd doctor --fix
 
 ## Protected Branches
 
-For protected main branches:
-
-```bash
-bd init --branch beads-sync
-```
-
-This:
-- Creates a separate `beads-sync` branch
-- Syncs issues to that branch
-- Avoids direct commits to main
+Dolt stores data under `refs/dolt/data`, separate from Git refs. This means beads data doesn't conflict with protected Git branches — no special branch flag is needed.
 
 ## Git Worktrees
 
@@ -92,7 +83,7 @@ bd list
 git checkout -b feature-x
 bd create "Feature X" -t feature
 # Work...
-bd sync
+bd dolt push
 git push
 ```
 
@@ -102,7 +93,7 @@ git push
 # In fork
 bd init --contributor
 # Work in separate planning repo...
-bd sync
+bd dolt push
 ```
 
 ### Team Workflow
@@ -110,7 +101,8 @@ bd sync
 ```bash
 bd init --team
 # All team members share the Dolt database
-bd sync  # Pulls latest changes via Dolt replication
+bd dolt pull   # Pull latest changes from Dolt remote
+bd dolt push   # Push your changes to Dolt remote
 ```
 
 ### Duplicate Detection
@@ -124,6 +116,6 @@ bd duplicates --auto-merge
 ## Best Practices
 
 1. **Install hooks** - `bd hooks install`
-2. **Sync regularly** - `bd sync` at session end
-3. **Pull before work** - Get latest issues
+2. **Push regularly** - `bd dolt push` at session end
+3. **Pull before work** - `bd dolt pull` to get latest issues
 4. **Worktrees use embedded mode automatically**

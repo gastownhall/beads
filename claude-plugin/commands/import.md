@@ -1,36 +1,18 @@
 ---
-description: Import issues from JSONL format
-argument-hint: [-i input-file]
+description: Import issues from JSONL format (removed)
+argument-hint: (removed)
 ---
 
-Import issues from JSON Lines format (one JSON object per line).
+`bd import` has been **removed**.
 
-## Usage
+## Migration
 
-- **From stdin**: `bd import` (reads from stdin)
-- **From file**: `bd import -i issues.jsonl`
-- **Preview**: `bd import -i issues.jsonl --dry-run`
-
-## Behavior
-
-- **Existing issues** (same ID): Updated with new data
-- **New issues**: Created
-- **Same-ID scenarios**: With hash-based IDs (v0.20.1+), same ID = same issue being updated (not a collision)
-
-## Preview Changes
-
-Use `--dry-run` to see what will change before importing:
+If you need to import issues from a JSONL file, use `bd init` with the `--from-jsonl` flag:
 
 ```bash
-bd import -i issues.jsonl --dry-run
-# Shows: new issues, updates, exact matches
+bd init <prefix> --from-jsonl issues.jsonl
 ```
 
-## When to Use
+## Note
 
-Dolt is the primary storage backend, so manual import is rarely needed. Use `bd import` when you need to load data from an external JSONL file or migrate from a legacy JSONL-based setup.
-
-## Options
-
-- **--skip-existing**: Skip updates to existing issues
-- **--strict**: Fail on dependency errors instead of warnings
+Dolt is the primary storage backend. Manual JSONL import is no longer supported as a standalone command.

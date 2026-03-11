@@ -15,7 +15,7 @@ This section provides step-by-step recovery procedures for common Beads issues. 
 | Database Corruption | SQLite errors, missing data | [Database Corruption](/recovery/database-corruption) |
 | Merge Conflicts | Dolt conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |
 | Circular Dependencies | Cycle detection errors | [Circular Dependencies](/recovery/circular-dependencies) |
-| Sync Failures | `bd sync` errors | [Sync Failures](/recovery/sync-failures) |
+| Sync Failures | `bd dolt push`/`bd dolt pull` errors | [Sync Failures](/recovery/sync-failures) |
 
 ## Quick Diagnostic
 

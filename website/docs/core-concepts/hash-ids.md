@@ -114,8 +114,8 @@ bd list --full-ids
 If migrating from a system with sequential IDs:
 
 ```bash
-# Import preserves original IDs in metadata
-bd import -i old-issues.json
+# Bootstrap from a JSONL export (preserves original IDs in metadata)
+bd init --from-jsonl old-issues.jsonl
 
 # View original ID
 bd show bd-new --json | jq '.original_id'

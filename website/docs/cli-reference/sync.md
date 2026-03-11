@@ -8,34 +8,49 @@ sidebar_position: 6
 
 Commands for synchronizing with Dolt.
 
-## bd sync
+## bd dolt push
 
-Full sync cycle: Dolt commit and push.
+Push changes to a Dolt remote.
 
 ```bash
-bd sync [flags]
+bd dolt push [flags]
 ```
 
 **What it does:**
 1. Dolt commit (snapshot current database state)
-2. Dolt push to remote
-
-**Flags:**
-```bash
---json     JSON output
---dry-run  Preview without changes
-```
+2. Push commits to Dolt remote
 
 **Examples:**
 ```bash
-bd sync
-bd sync --json
+bd dolt push
 ```
 
 **When to use:**
 - End of work session
-- Before switching branches
+- Before switching machines
 - After significant changes
+
+## bd dolt pull
+
+Pull changes from a Dolt remote.
+
+```bash
+bd dolt pull [flags]
+```
+
+**What it does:**
+1. Fetches commits from Dolt remote
+2. Merges into local database
+
+**Examples:**
+```bash
+bd dolt pull
+```
+
+**When to use:**
+- Start of work session
+- After switching machines
+- Before creating new issues (to avoid duplicates)
 
 ## bd export
 
@@ -60,41 +75,6 @@ bd export --dry-run
 ```
 
 **When to use:** `bd export` is for backup and data migration, not day-to-day sync. Dolt handles sync natively via `bd dolt push`/`bd dolt pull`.
-
-## bd import
-
-Import from JSONL file (for migration and recovery).
-
-```bash
-bd import -i <file> [flags]
-```
-
-**Flags:**
-```bash
---input, -i           Input file (required)
---dry-run             Preview without changes
---orphan-handling     How to handle missing parents
---dedupe-after        Run duplicate detection after import
---json                JSON output
-```
-
-**Orphan handling modes:**
-| Mode | Behavior |
-|------|----------|
-| `allow` | Import orphans without validation (default) |
-| `resurrect` | Restore deleted parents as tombstones |
-| `skip` | Skip orphaned children with warning |
-| `strict` | Fail if parent missing |
-
-**Examples:**
-```bash
-bd import -i backup.jsonl
-bd import -i backup.jsonl --dry-run
-bd import -i issues.jsonl --orphan-handling resurrect
-bd import -i issues.jsonl --dedupe-after --json
-```
-
-**When to use:** `bd import` is for loading data from external JSONL files or migrating from a legacy setup. For day-to-day sync, use `bd dolt push`/`bd dolt pull`.
 
 ## bd migrate
 
@@ -157,21 +137,21 @@ Start the Dolt server with `bd dolt start`.
 
 In CI/CD pipelines and ephemeral environments, no server is needed:
 - Changes written directly to the database
-- Must manually sync
+- Must manually push to remote
 
 ```bash
 bd create "CI-generated task"
-bd sync  # Manual sync needed
+bd dolt push  # Manual push needed
 ```
 
 ## Conflict Resolution
 
 Dolt handles conflict resolution at the database level using its built-in
-merge capabilities. When conflicts arise during `dolt pull`, Dolt identifies
+merge capabilities. When conflicts arise during `bd dolt pull`, Dolt identifies
 conflicting rows and allows resolution through SQL.
 
 ```bash
-# Check for conflicts after sync
+# Check for conflicts after pull
 bd doctor --fix
 ```
 
@@ -187,12 +167,13 @@ bd delete bd-42
 bd deleted
 bd deleted --since=30d
 
-# Deletions propagate via Dolt sync
-bd sync
+# Deletions propagate via Dolt push
+bd dolt push
 ```
 
 ## Best Practices
 
-1. **Always sync at session end** - `bd sync`
-2. **Install git hooks** - `bd hooks install`
-3. **Check sync status** - `bd info` shows sync state
+1. **Always push at session end** - `bd dolt push`
+2. **Always pull at session start** - `bd dolt pull`
+3. **Install git hooks** - `bd hooks install`
+4. **Check sync status** - `bd info` shows sync state

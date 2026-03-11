@@ -16,7 +16,9 @@ Beads now provides **enhanced Git worktree support** with a shared database arch
 
 ### Why Beads Creates Worktrees
 
-When you configure a **sync branch** (via `bd init --branch <name>` or `bd config set sync.branch <name>`), beads needs to commit issue updates to that branch without switching your working directory away from your current branch.
+**Note:** The sync-branch feature has been removed. Dolt now stores data under `refs/dolt/data`, separate from standard Git refs, so a separate branch is no longer needed. The information below applies only to older versions of beads.
+
+When a **sync branch** was configured (via `bd config set sync.branch <name>`), beads needed to commit issue updates to that branch without switching your working directory away from your current branch.
 
 **Solution:** Beads creates a lightweight worktree that:
 - Contains only the `.beads/` directory (sparse checkout)
@@ -264,7 +266,7 @@ bd config set sync.branch ""
 
 **Symptoms:** You notice `.git/beads-worktrees/` or entries in `.git/worktrees/` that you didn't create.
 
-**Cause:** Beads automatically creates worktrees when using the sync-branch feature (configured via `bd init --branch` or `bd config set sync.branch`).
+**Cause:** Older versions of beads created worktrees for the sync-branch feature (configured via `bd config set sync.branch`). This feature has been removed.
 
 **Solution:** See [Beads-Created Worktrees](#beads-created-worktrees-sync-branch) section above for details on what these are and how to remove them if unwanted.
 

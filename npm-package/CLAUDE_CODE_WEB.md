@@ -305,7 +305,7 @@ While working:
 
 When done:
 - Close the issue: `bd close <id> --reason "Description of what was done"`
-- Run `bd sync` to push issue changes
+- Run `bd dolt push` to push issue changes
 ```
 
 ## Alternative: Package as Project Dependency

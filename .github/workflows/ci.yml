@@ -17,6 +17,24 @@ jobs:
       - name: Check all versions match
         run: ./scripts/check-versions.sh
 
+  # Check documentation references match actual CLI flags
+  check-doc-flags:
+    name: Check doc flags freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build bd
+        run: CGO_ENABLED=0 go build -o bd ./cmd/bd/
+
+      - name: Validate docs against CLI
+        run: ./scripts/check-doc-flags.sh ./bd
+
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
     name: Check for .beads changes

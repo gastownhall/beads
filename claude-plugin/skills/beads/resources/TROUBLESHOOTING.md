@@ -243,7 +243,7 @@ This is a **known SQLite limitation**, not a bd bug.
 
 3. **Import existing issues (if you have a JSONL backup):**
    ```bash
-   bd import -i issues-backup.jsonl
+   bd init myproject --from-jsonl issues-backup.jsonl
    ```
 
 **Alternative: Use global `~/.beads/` database**

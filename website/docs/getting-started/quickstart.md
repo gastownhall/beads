@@ -26,7 +26,8 @@ bd init --contributor
 bd init --team
 
 # Protected main branch (GitHub/GitLab)
-bd init --branch beads-sync
+# Note: Dolt stores data under refs/dolt/data, separate from
+# Git refs, so no --branch flag is needed.
 ```
 
 The wizard will:

@@ -59,13 +59,13 @@ bd ready
 ### End Session
 
 ```bash
-bd sync
+bd dolt push
 ```
 
 ## Best Practices
 
 1. **Keep issues visible** - Use `bd prime` to inject issue context
-2. **Sync regularly** - Run `bd sync` after significant changes
+2. **Push regularly** - Run `bd dolt push` after significant changes
 3. **Use discovered-from** - Track issues found during work
 4. **Document context** - Include descriptions in issues
 
@@ -83,9 +83,9 @@ aider --message "Working on bd-42: Fix auth bug"
 # 4. Create discovered issues
 bd create "Found related bug" --deps discovered-from:bd-42 --json
 
-# 5. Complete and sync
+# 5. Complete and push
 bd close bd-42 --reason "Fixed"
-bd sync
+bd dolt push
 ```
 
 ## Troubleshooting
