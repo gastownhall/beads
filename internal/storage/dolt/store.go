@@ -601,6 +601,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			}
 			// Update port — EnsureRunning allocates an ephemeral port
 			if port != cfg.ServerPort {
+				if cfg.ServerPort > 0 {
+					fmt.Fprintf(os.Stderr, "Warning: Dolt server endpoint changed: port %d → %d (auto-start)\n", cfg.ServerPort, port)
+					fmt.Fprintf(os.Stderr, "  Previous port was unreachable. If other tools expect port %d, they may see stale data.\n", cfg.ServerPort)
+					fmt.Fprintf(os.Stderr, "  To pin a port: set dolt.port in .beads/config.yaml\n")
+				}
 				cfg.ServerPort = port
 				addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
 			}

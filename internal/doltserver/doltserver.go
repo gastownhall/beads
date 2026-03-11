@@ -278,8 +278,12 @@ func EnsurePortFile(beadsDir string, port int) error {
 	if beadsDir == "" || port <= 0 {
 		return nil
 	}
-	if readPortFile(beadsDir) == port {
+	existing := readPortFile(beadsDir)
+	if existing == port {
 		return nil
+	}
+	if existing > 0 {
+		fmt.Fprintf(os.Stderr, "Info: updating port file %d → %d in %s\n", existing, port, beadsDir)
 	}
 	return writePortFile(beadsDir, port)
 }
