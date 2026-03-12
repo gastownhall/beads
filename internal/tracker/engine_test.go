@@ -22,8 +22,8 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("Dolt not installed, skipping test")
 	}
-	if testSharedDB == "" {
-		t.Fatal("testSharedDB not set — TestMain did not initialize shared database")
+	if testServerPort == 0 || testSharedDB == "" {
+		t.Skip("shared test Dolt database not initialized, skipping test")
 	}
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{

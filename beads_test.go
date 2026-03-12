@@ -55,7 +55,7 @@ func skipIfNoDoltServer(t *testing.T) {
 }
 
 func TestOpen(t *testing.T) {
-	skipIfNoDolt(t)
+	skipIfNoDoltServer(t)
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test-dolt")
@@ -188,7 +188,7 @@ func TestOpenFromConfig_ServerModeFailsWithoutServer(t *testing.T) {
 }
 
 func TestOpenFromConfig_NoMetadata(t *testing.T) {
-	skipIfNoDolt(t)
+	skipIfNoDoltServer(t)
 	// Missing metadata.json should use defaults (server mode)
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

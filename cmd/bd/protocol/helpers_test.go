@@ -163,6 +163,9 @@ func newWorkspace(t *testing.T) *workspace {
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("skipping: dolt not installed")
 	}
+	if testDoltPort == 0 {
+		t.Skip("skipping: test Dolt server not available")
+	}
 	bd := buildBD(t)
 	dir := t.TempDir()
 	w := &workspace{dir: dir, bd: bd, t: t}

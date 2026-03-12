@@ -12,7 +12,13 @@ import (
 // helpAllFlag is the --all flag for the help command
 var helpAllFlag bool
 
-// registerHelpAllFlag adds the --all flag to Cobra's auto-generated help command.
+// helpDocFlag is the --doc flag for generating single command docs
+var helpDocFlag string
+
+// helpListFlag is the --list flag for listing available commands
+var helpListFlag bool
+
+// registerHelpAllFlag adds the --all, --doc, and --list flags to Cobra's auto-generated help command.
 // Must be called after rootCmd.InitDefaultHelpCmd() has run (i.e., after first Execute
 // or explicit init). We hook it in init() after all subcommands are registered.
 func registerHelpAllFlag() {
@@ -20,10 +26,22 @@ func registerHelpAllFlag() {
 	for _, cmd := range rootCmd.Commands() {
 		if cmd.Name() == "help" {
 			cmd.Flags().BoolVar(&helpAllFlag, "all", false, "Show help for all commands in a single document")
+			cmd.Flags().StringVar(&helpDocFlag, "doc", "", "Generate markdown docs for a single command (use - for stdout)")
+			cmd.Flags().BoolVar(&helpListFlag, "list", false, "List all available commands")
 
-			// Wrap the existing Run to check --all first
+			// Wrap the existing Run to check --all, --doc, and --list first
 			originalRun := cmd.Run
 			cmd.Run = func(cmd *cobra.Command, args []string) {
+				if helpListFlag {
+					// Handle --list flag: list all available commands
+					listAllCommands(os.Stdout, rootCmd)
+					return
+				}
+				if helpDocFlag != "" {
+					// Handle --doc flag: generate single command docs
+					writeSingleCommandDoc(os.Stdout, rootCmd, helpDocFlag)
+					return
+				}
 				if helpAllFlag {
 					writeAllHelp(os.Stdout, rootCmd)
 					return
@@ -171,6 +189,121 @@ func writeCommandHelp(w io.Writer, cmd *cobra.Command, parentPath string, depth 
 				continue
 			}
 			writeCommandHelp(w, sub, fullPath, depth+1)
+		}
+	}
+}
+
+// sidebarPositionMap maps command names to their Docusaurus sidebar position
+// This controls the ordering of commands in the website sidebar.
+var sidebarPositionMap = map[string]int{
+	"create":  10,
+	"list":    20,
+	"ready":   30,
+	"show":    40,
+	"update":  50,
+	"close":   60,
+	"delete":  70,
+	"reopen":  80,
+	"dep":     100,
+	"label":   110,
+	"state":   120,
+	"sync":    200,
+	"import":  210,
+	"export":  220,
+	"mol":     300,
+	"formula": 310,
+	"init":    400,
+	"setup":   410,
+	"config":  420,
+	"prime":   500,
+	"doctor":  600,
+	"admin":   610,
+	"migrate": 620,
+}
+
+// writeSingleCommandDoc generates markdown documentation for a single command
+// with Docusaurus frontmatter for website integration.
+func writeSingleCommandDoc(w io.Writer, root *cobra.Command, cmdName string) {
+	// Find the command (handle nested commands like "mol pour")
+	cmd := findCommand(root, cmdName)
+	if cmd == nil {
+		fmt.Fprintf(os.Stderr, "Error: command not found: %s\n", cmdName)
+		fmt.Fprintf(os.Stderr, "Available commands: ")
+		for _, c := range root.Commands() {
+			if c.IsAvailableCommand() {
+				fmt.Fprintf(os.Stderr, "%s ", c.Name())
+			}
+		}
+		fmt.Fprintln(os.Stderr)
+		os.Exit(1)
+	}
+
+	// Get sidebar position (default to 999 if not in map)
+	position := 999
+	if pos, ok := sidebarPositionMap[cmdName]; ok {
+		position = pos
+	}
+
+	// Generate Docusaurus frontmatter
+	fmt.Fprintf(w, "---\n")
+	fmt.Fprintf(w, "id: %s\n", cmdName)
+	fmt.Fprintf(w, "title: bd %s\n", cmdName)
+	fmt.Fprintf(w, "sidebar_position: %d\n", position)
+	fmt.Fprintf(w, "---\n")
+	fmt.Fprintf(w, "\n")
+	fmt.Fprintf(w, "<!-- AUTO-GENERATED: do not edit manually -->\n")
+	fmt.Fprintf(w, "Generated from `bd help --doc %s` (bd version %s)\n\n", cmdName, Version)
+
+	// Generate the command help (using h2 for single command)
+	writeCommandHelp(w, cmd, "bd", 2)
+}
+
+// findCommand finds a command by name in the command tree.
+// Supports nested commands like "mol pour" by splitting on space.
+func findCommand(root *cobra.Command, name string) *cobra.Command {
+	// Handle nested commands (e.g., "mol pour")
+	parts := strings.Split(name, " ")
+
+	var current *cobra.Command
+	for i, part := range parts {
+		if i == 0 {
+			// Start from root's direct commands
+			current = findDirectCommand(root, part)
+		} else {
+			// Look in subcommands of current
+			if current != nil {
+				current = findDirectCommand(current, part)
+			}
+		}
+		if current == nil {
+			return nil
+		}
+	}
+	return current
+}
+
+// findDirectCommand finds a direct child command by name.
+func findDirectCommand(parent *cobra.Command, name string) *cobra.Command {
+	for _, cmd := range parent.Commands() {
+		if cmd.Name() == name {
+			return cmd
+		}
+		// Also check aliases
+		for _, alias := range cmd.Aliases {
+			if alias == name {
+				return cmd
+			}
+		}
+	}
+	return nil
+}
+
+// listAllCommands prints all available commands, one per line.
+// Used by the generate-cli-docs.sh script.
+func listAllCommands(w io.Writer, root *cobra.Command) {
+	for _, cmd := range root.Commands() {
+		if cmd.IsAvailableCommand() {
+			fmt.Fprintln(w, cmd.Name())
 		}
 	}
 }
