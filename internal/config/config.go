@@ -27,24 +27,38 @@ func Initialize() error {
 	// Set config type to yaml (we only load config.yaml, not config.json)
 	v.SetConfigType("yaml")
 
-	// Explicitly locate config.yaml and use SetConfigFile to avoid picking up config.json
-	// Precedence: BEADS_DIR > project .beads/config.yaml > ~/.config/bd/config.yaml > ~/.beads/config.yaml
-	configFileSet := false
+	// Collect config files from lowest to highest priority.
+	// We load the lowest first with ReadInConfig, then MergeInConfig each
+	// subsequent file so higher-priority values overwrite lower-priority ones.
+	//
+	// Precedence (highest to lowest):
+	//   BEADS_DIR/config.yaml > project .beads/config.yaml > ~/.config/bd/config.yaml > ~/.beads/config.yaml
+	//
+	// Previously, only ONE config file was loaded (the highest-priority match),
+	// which meant user-level config was silently ignored when project-level
+	// config existed — e.g., the idle-monitor daemon with BEADS_DIR set (GH#2375).
+	var configPaths []string     // ordered lowest priority first
+	var primaryConfigPath string // project-level config (for config.local.yaml and SaveConfigValue)
 
-	// 0. Check BEADS_DIR first (highest priority)
-	// This ensures bd commands with BEADS_DIR set find the correct config
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" && !configFileSet {
-		configPath := filepath.Join(beadsDir, "config.yaml")
-		if _, err := os.Stat(configPath); err == nil {
-			v.SetConfigFile(configPath)
-			configFileSet = true
+	// 3. Legacy: ~/.beads/config.yaml (lowest priority)
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		p := filepath.Join(homeDir, ".beads", "config.yaml")
+		if _, err := os.Stat(p); err == nil {
+			configPaths = append(configPaths, p)
 		}
 	}
 
-	// 1. Walk up from CWD to find project .beads/config.yaml
-	//    This allows commands to work from subdirectories
+	// 2. User: ~/.config/bd/config.yaml
+	if configDir, err := os.UserConfigDir(); err == nil {
+		p := filepath.Join(configDir, "bd", "config.yaml")
+		if _, err := os.Stat(p); err == nil {
+			configPaths = append(configPaths, p)
+		}
+	}
+
+	// 1. Project: walk up from CWD to find .beads/config.yaml
 	cwd, err := os.Getwd()
-	if err == nil && !configFileSet {
+	if err == nil {
 		// In the beads repo, `.beads/config.yaml` is tracked and may set sync.mode=dolt-native.
 		// In `go test` (especially for `cmd/bd`), we want to avoid unintentionally picking up
 		// the repo-local config, while still allowing tests to load config.yaml from temp repos.
@@ -66,42 +80,31 @@ func Initialize() error {
 		// Walk up parent directories to find .beads/config.yaml
 		for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
 			beadsDir := filepath.Join(dir, ".beads")
-			configPath := filepath.Join(beadsDir, "config.yaml")
-			if _, err := os.Stat(configPath); err == nil {
+			p := filepath.Join(beadsDir, "config.yaml")
+			if _, err := os.Stat(p); err == nil {
 				if ignoreRepoConfig && moduleRoot != "" {
 					// Only ignore the repo-local config (moduleRoot/.beads/config.yaml).
-					wantIgnore := filepath.Clean(configPath) == filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))
+					wantIgnore := filepath.Clean(p) == filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))
 					if wantIgnore {
 						continue
 					}
 				}
-				// Found .beads/config.yaml - set it explicitly
-				v.SetConfigFile(configPath)
-				configFileSet = true
+				configPaths = append(configPaths, p)
+				primaryConfigPath = p
 				break
 			}
 		}
 	}
 
-	// 2. User config directory (~/.config/bd/config.yaml)
-	if !configFileSet {
-		if configDir, err := os.UserConfigDir(); err == nil {
-			configPath := filepath.Join(configDir, "bd", "config.yaml")
-			if _, err := os.Stat(configPath); err == nil {
-				v.SetConfigFile(configPath)
-				configFileSet = true
+	// 0. BEADS_DIR: highest priority
+	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+		p := filepath.Join(beadsDir, "config.yaml")
+		if _, err := os.Stat(p); err == nil {
+			// Avoid duplicate if BEADS_DIR points to same config as CWD walk
+			if primaryConfigPath == "" || filepath.Clean(p) != filepath.Clean(primaryConfigPath) {
+				configPaths = append(configPaths, p)
 			}
-		}
-	}
-
-	// 3. Home directory (~/.beads/config.yaml)
-	if !configFileSet {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			configPath := filepath.Join(homeDir, ".beads", "config.yaml")
-			if _, err := os.Stat(configPath); err == nil {
-				v.SetConfigFile(configPath)
-				configFileSet = true
-			}
+			primaryConfigPath = p
 		}
 	}
 
@@ -194,23 +197,37 @@ func Initialize() error {
 	// Maps project names to paths for resolving external: blocked_by references
 	v.SetDefault("external_projects", map[string]string{})
 
-	// Read config file if it was found
-	if configFileSet {
+	// Load config files: lowest priority first, each MergeInConfig overwrites
+	if len(configPaths) > 0 {
+		v.SetConfigFile(configPaths[0])
 		if err := v.ReadInConfig(); err != nil {
 			return fmt.Errorf("error reading config file: %w", err)
 		}
-		debug.Logf("Debug: loaded config from %s\n", v.ConfigFileUsed())
+		debug.Logf("Debug: loaded config from %s\n", configPaths[0])
+
+		for _, p := range configPaths[1:] {
+			v.SetConfigFile(p)
+			if err := v.MergeInConfig(); err != nil {
+				return fmt.Errorf("error merging config file %s: %w", p, err)
+			}
+			debug.Logf("Debug: merged config from %s\n", p)
+		}
+
+		// Restore primary config path as ConfigFileUsed (used by SaveConfigValue,
+		// ResolveExternalProjectPath, etc.)
+		v.SetConfigFile(primaryConfigPath)
 
 		// Merge local config overrides if present (config.local.yaml)
 		// This allows machine-specific settings without polluting tracked config
-		configDir := filepath.Dir(v.ConfigFileUsed())
-		localConfigPath := filepath.Join(configDir, "config.local.yaml")
+		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), "config.local.yaml")
 		if _, err := os.Stat(localConfigPath); err == nil {
 			v.SetConfigFile(localConfigPath)
 			if err := v.MergeInConfig(); err != nil {
 				return fmt.Errorf("error merging local config file: %w", err)
 			}
 			debug.Logf("Debug: merged local config from %s\n", localConfigPath)
+			// Restore primary as ConfigFileUsed
+			v.SetConfigFile(primaryConfigPath)
 		}
 	} else {
 		// No config.yaml found - use defaults and environment variables
