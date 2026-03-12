@@ -1587,6 +1587,13 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 	if s.isGitProtocolRemote(ctx) {
 		return s.doltCLIPush(ctx, true, creds)
 	}
+	// Credential CLI routing: when credentials are set and server is external,
+	// route through CLI subprocess so credentials reach the dolt process via
+	// cmd.Env (applyToCmd). The SQL path's withEnvCredentials sets process-wide
+	// env vars that an external server cannot see.
+	if s.shouldUseCLIForCredentials(ctx) {
+		return s.doltCLIPush(ctx, true, creds)
+	}
 	if s.remoteUser != "" {
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
@@ -1638,6 +1645,18 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 	// but still need CLI to avoid SQL connection timeout.
 	// Credentials are passed directly to the subprocess via cmd.Env.
 	if s.isGitProtocolRemote(ctx) {
+		if err := s.doltCLIPull(ctx, creds); err != nil {
+			return err
+		}
+		if err := s.resetAutoIncrements(ctx); err != nil {
+			return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
+		}
+		return nil
+	}
+	// Credential CLI routing: mirrors git-protocol path including resetAutoIncrements.
+	// Skips pullWithAutoResolve (consistent with git-protocol Pull — CLI manages its
+	// own connections and conflict handling).
+	if s.shouldUseCLIForCredentials(ctx) {
 		if err := s.doltCLIPull(ctx, creds); err != nil {
 			return err
 		}
