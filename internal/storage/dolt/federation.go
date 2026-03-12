@@ -278,12 +278,12 @@ func (s *DoltStore) isPeerGitProtocolRemote(ctx context.Context, peer string) bo
 				if !doltutil.IsGitProtocolURL(r.URL) {
 					return false
 				}
-				return s.cliDir() != "" && doltutil.FindCLIRemote(s.cliDir(), peer) != ""
+				return s.CLIDir() != "" && doltutil.FindCLIRemote(s.CLIDir(), peer) != ""
 			}
 		}
 	}
-	if s.cliDir() != "" {
-		if url := doltutil.FindCLIRemote(s.cliDir(), peer); url != "" {
+	if s.CLIDir() != "" {
+		if url := doltutil.FindCLIRemote(s.CLIDir(), peer); url != "" {
 			return doltutil.IsGitProtocolURL(url)
 		}
 	}
@@ -295,7 +295,7 @@ func (s *DoltStore) isPeerGitProtocolRemote(ctx context.Context, peer string) bo
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPushToPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
 	cmd := exec.CommandContext(ctx, "dolt", "push", peer, s.branch) // #nosec G204 -- fixed command with validated peer/branch
-	cmd.Dir = s.cliDir()
+	cmd.Dir = s.CLIDir()
 	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -309,7 +309,7 @@ func (s *DoltStore) doltCLIPushToPeer(ctx context.Context, peer string, creds *r
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
 	cmd := exec.CommandContext(ctx, "dolt", "pull", peer, s.branch) // #nosec G204 -- fixed command with validated peer/branch
-	cmd.Dir = s.cliDir()
+	cmd.Dir = s.CLIDir()
 	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -323,7 +323,7 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds 
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
 	cmd := exec.CommandContext(ctx, "dolt", "fetch", peer) // #nosec G204 -- fixed command with validated peer
-	cmd.Dir = s.cliDir()
+	cmd.Dir = s.CLIDir()
 	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

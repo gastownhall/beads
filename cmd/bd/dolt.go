@@ -555,7 +555,7 @@ var doltRemoteAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		name, url := args[0], args[1]
-		dbPath := st.Path()
+		dbPath := st.CLIDir()
 
 		// Check existing remotes on both surfaces
 		sqlRemotes, _ := st.ListRemotes(ctx)
@@ -640,7 +640,7 @@ var doltRemoteListCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
 			os.Exit(1)
 		}
-		dbPath := st.Path()
+		dbPath := st.CLIDir()
 
 		sqlRemotes, sqlErr := st.ListRemotes(ctx)
 		if sqlErr != nil {
@@ -751,7 +751,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		name := args[0]
-		dbPath := st.Path()
+		dbPath := st.CLIDir()
 
 		// Check both surfaces for conflicts
 		sqlRemotes, _ := st.ListRemotes(ctx)
