@@ -298,7 +298,7 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, sinceID int64
 func (s *EmbeddedDoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	stats := &types.Statistics{}
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `
+		if err := tx.QueryRowContext(ctx, `
 			SELECT
 				COUNT(*) AS total,
 				COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0),
@@ -314,12 +314,24 @@ func (s *EmbeddedDoltStore) GetStatistics(ctx context.Context) (*types.Statistic
 			&stats.ClosedIssues,
 			&stats.DeferredIssues,
 			&stats.PinnedIssues,
-		)
+		); err != nil {
+			return err
+		}
+
+		blockedIDs, err := computeBlockedIDs(ctx, tx, true)
+		if err != nil {
+			return err
+		}
+		stats.BlockedIssues = len(blockedIDs)
+		stats.ReadyIssues = stats.OpenIssues - stats.BlockedIssues
+		if stats.ReadyIssues < 0 {
+			stats.ReadyIssues = 0
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("embeddeddolt: get statistics: %w", err)
 	}
-	stats.ReadyIssues = stats.OpenIssues
 	return stats, nil
 }
 
