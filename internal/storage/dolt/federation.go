@@ -117,6 +117,32 @@ func (s *DoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, erro
 	return remotes, rows.Err()
 }
 
+// syncCLIRemotesToSQL re-registers CLI-level remotes into the SQL server.
+// After a server restart, dolt_remotes (in-memory) is empty while CLI remotes
+// (persisted in .dolt/config) survive. This is best-effort: errors are silently
+// ignored because a missing remote will surface a clear error at push/pull time.
+// See GH#2315.
+func (s *DoltStore) syncCLIRemotesToSQL(ctx context.Context) {
+	dir := s.cliDir()
+	if dir == "" {
+		return
+	}
+	cliRemotes, err := doltutil.ListCLIRemotes(dir)
+	if err != nil || len(cliRemotes) == 0 {
+		return
+	}
+	sqlRemotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return
+	}
+	sqlMap := doltutil.ToRemoteNameMap(sqlRemotes)
+	for _, r := range cliRemotes {
+		if _, exists := sqlMap[r.Name]; !exists {
+			_ = s.AddRemote(ctx, r.Name, r.URL)
+		}
+	}
+}
+
 // RemoveRemote removes a configured remote.
 func (s *DoltStore) RemoveRemote(ctx context.Context, name string) error {
 	_, err := s.execContext(ctx, "CALL DOLT_REMOTE('remove', ?)", name)

@@ -707,6 +707,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// replaces the former branch-per-polecat approach (BD_BRANCH).
 	store.branch = "main"
 
+	// GH#2315: Sync CLI remotes into SQL server on store open.
+	// After a server restart, dolt_remotes is empty (not persisted across sessions).
+	// CLI remotes survive in .dolt/config. Re-register them so DOLT_PUSH/DOLT_PULL work.
+	if !cfg.ReadOnly {
+		store.syncCLIRemotesToSQL(ctx)
+	}
+
 	return store, nil
 }
 
