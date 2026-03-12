@@ -900,27 +900,27 @@ environment variable.`,
 		}
 
 		// Run limited diagnostics to verify init succeeded.
-		// Uses runInitDiagnostics (not runDiagnostics) to only check things
-		// that should be true immediately after init — skips git-dependent,
-		// federation, and other post-setup checks that aren't applicable yet.
-		doctorResult := runInitDiagnostics(cwd)
-		// Check if there are any warnings or errors (not just critical failures)
-		hasIssues := false
-		for _, check := range doctorResult.Checks {
-			if check.Status != statusOK {
-				hasIssues = true
-				break
-			}
-		}
-		if hasIssues {
-			fmt.Printf("%s Setup incomplete. Some issues were detected:\n", ui.RenderWarn("⚠"))
-			// Show just the warnings/errors, not all checks
+		// Skipped in embedded mode: diagnostics use dolt.NewFromConfigWithOptions
+		// which auto-starts a dolt sql-server. Embedded init already validates
+		// the database via initSchema.
+		if !isEmbeddedDolt {
+			doctorResult := runInitDiagnostics(cwd)
+			hasIssues := false
 			for _, check := range doctorResult.Checks {
 				if check.Status != statusOK {
-					fmt.Printf("  • %s: %s\n", check.Name, check.Message)
+					hasIssues = true
+					break
 				}
 			}
-			fmt.Printf("\nRun %s to see details and fix these issues.\n\n", ui.RenderAccent("bd doctor --fix"))
+			if hasIssues {
+				fmt.Printf("%s Setup incomplete. Some issues were detected:\n", ui.RenderWarn("⚠"))
+				for _, check := range doctorResult.Checks {
+					if check.Status != statusOK {
+						fmt.Printf("  • %s: %s\n", check.Name, check.Message)
+					}
+				}
+				fmt.Printf("\nRun %s to see details and fix these issues.\n\n", ui.RenderAccent("bd doctor --fix"))
+			}
 		}
 	},
 }

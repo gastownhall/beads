@@ -861,13 +861,11 @@ func runInitDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 3: Schema compatibility (server-mode only; embedded validates during initSchema)
-	if !isEmbeddedDolt {
-		schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
-		result.Checks = append(result.Checks, schemaCheck)
-		if schemaCheck.Status == statusError {
-			result.OverallOK = false
-		}
+	// Check 3: Schema compatibility
+	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	result.Checks = append(result.Checks, schemaCheck)
+	if schemaCheck.Status == statusError {
+		result.OverallOK = false
 	}
 
 	// Check 4: Permissions
@@ -877,22 +875,18 @@ func runInitDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Checks 5-6: Dolt server connection and schema (server-mode only;
-	// embedded mode has no sql-server to connect to).
-	if !isEmbeddedDolt {
-		// Check 5: Dolt connection — validates init actually created a working DB
-		doltConnCheck := convertDoctorCheck(doctor.CheckDoltConnection(path))
-		result.Checks = append(result.Checks, doltConnCheck)
-		if doltConnCheck.Status == statusError {
-			result.OverallOK = false
-		}
+	// Check 5: Dolt connection — validates init actually created a working DB
+	doltConnCheck := convertDoctorCheck(doctor.CheckDoltConnection(path))
+	result.Checks = append(result.Checks, doltConnCheck)
+	if doltConnCheck.Status == statusError {
+		result.OverallOK = false
+	}
 
-		// Check 6: Dolt schema — validates tables were created
-		doltSchemaCheck := convertDoctorCheck(doctor.CheckDoltSchema(path))
-		result.Checks = append(result.Checks, doltSchemaCheck)
-		if doltSchemaCheck.Status == statusError {
-			result.OverallOK = false
-		}
+	// Check 6: Dolt schema — validates tables were created
+	doltSchemaCheck := convertDoctorCheck(doctor.CheckDoltSchema(path))
+	result.Checks = append(result.Checks, doltSchemaCheck)
+	if doltSchemaCheck.Status == statusError {
+		result.OverallOK = false
 	}
 
 	return result
