@@ -55,18 +55,13 @@ func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltS
 	return s, nil
 }
 
-// withConn opens a short-lived database connection, begins an explicit SQL
-// transaction, and passes it to fn. If commit is true and fn returns nil, the
-// transaction is committed; otherwise it is rolled back. The connection is
-// closed before withConn returns regardless of outcome.
-func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (err error) {
+// withRootConn opens a short-lived database connection without selecting any
+// database or branch, begins an explicit SQL transaction, and passes it to fn.
+// This is used during initialization when the database may not yet exist.
+func (s *EmbeddedDoltStore) withRootConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (err error) {
 	if s.closed.Load() {
 		err = errClosed
 		return
-	}
-
-	if s.database != "" && !validIdentifier.MatchString(s.database) {
-		return fmt.Errorf("embeddeddolt: invalid database name: %q", s.database)
 	}
 
 	var db *sql.DB
@@ -79,20 +74,6 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	defer func() {
 		err = errors.Join(err, cleanup())
 	}()
-
-	if s.database != "" {
-		if _, err = db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+s.database+"`"); err != nil {
-			return fmt.Errorf("embeddeddolt: creating database: %w", err)
-		}
-		if _, err = db.ExecContext(ctx, "USE `"+s.database+"`"); err != nil {
-			return fmt.Errorf("embeddeddolt: switching to database: %w", err)
-		}
-		if s.branch != "" {
-			if _, err = db.ExecContext(ctx, fmt.Sprintf("SET @@%s_head_ref = %s", s.database, sqlStringLiteral(s.branch))); err != nil {
-				return fmt.Errorf("embeddeddolt: setting branch: %w", err)
-			}
-		}
-	}
 
 	var tx *sql.Tx
 	tx, err = db.BeginTx(ctx, nil)
@@ -115,9 +96,74 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	return
 }
 
-// initSchema runs all pending migrations and commits them to Dolt history.
+// withConn opens a short-lived database connection configured for the store's
+// database and branch, begins an explicit SQL transaction, and passes it to
+// fn. If commit is true and fn returns nil, the transaction is committed;
+// otherwise it is rolled back. The connection is closed before withConn
+// returns regardless of outcome.
+//
+// The database must already exist (created during initSchema).
+func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (err error) {
+	if s.closed.Load() {
+		err = errClosed
+		return
+	}
+
+	var db *sql.DB
+	var cleanup func() error
+	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, cleanup())
+	}()
+
+	var tx *sql.Tx
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
+		return
+	}
+
+	err = fn(tx)
+	if err != nil {
+		err = errors.Join(err, tx.Rollback())
+		return
+	}
+
+	if !commit {
+		return tx.Rollback()
+	}
+
+	err = tx.Commit()
+	return
+}
+
+// initSchema creates the database (if needed) and runs all pending migrations,
+// committing them to Dolt history. Uses withRootConn so the database can be
+// created before USE; this avoids running CREATE DATABASE inside withConn,
+// which is not safe for concurrent use in the embedded Dolt engine.
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+	return s.withRootConn(ctx, true, func(tx *sql.Tx) error {
+		if s.database != "" {
+			if !validIdentifier.MatchString(s.database) {
+				return fmt.Errorf("embeddeddolt: invalid database name: %q", s.database)
+			}
+			if _, err := tx.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+s.database+"`"); err != nil {
+				return fmt.Errorf("embeddeddolt: creating database: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, "USE `"+s.database+"`"); err != nil {
+				return fmt.Errorf("embeddeddolt: switching to database: %w", err)
+			}
+			if s.branch != "" {
+				if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET @@%s_head_ref = %s", s.database, sqlStringLiteral(s.branch))); err != nil {
+					return fmt.Errorf("embeddeddolt: setting branch: %w", err)
+				}
+			}
+		}
+
 		applied, err := migrateUp(ctx, tx)
 		if err != nil {
 			return err
