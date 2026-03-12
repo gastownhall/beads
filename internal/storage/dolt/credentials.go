@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // Credential storage and encryption for federation peers.
@@ -470,3 +471,55 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 
 // FederationPeer is an alias for storage.FederationPeer for convenience.
 type FederationPeer = storage.FederationPeer
+
+// shouldUseCLIForPeerCredentials returns true when federation operations for a
+// specific peer should use CLI subprocess routing instead of SQL path.
+// Called inside withPeerCredentials callback where creds are already resolved.
+//
+// Returns true when ALL conditions are met:
+//  1. Peer credentials exist (resolved from federation_peers table)
+//  2. Server is in server mode (not embedded)
+//  3. Local CLI directory is available
+//  4. The peer remote is configured in the local CLI directory
+func (s *DoltStore) shouldUseCLIForPeerCredentials(_ context.Context, peer string, creds *remoteCredentials) bool {
+	if creds.empty() {
+		return false // no credentials to pass
+	}
+	if !s.serverMode {
+		return false // embedded mode: withEnvCredentials works in-process
+	}
+	cliDir := s.CLIDir()
+	if cliDir == "" {
+		return false // no local directory for CLI operations
+	}
+	return doltutil.FindCLIRemote(cliDir, peer) != ""
+}
+
+// shouldUseCLIForCredentials returns true when CLI subprocess routing should
+// be used instead of SQL path for credential-bearing push/pull operations.
+//
+// When true, callers should route through doltCLIPush/Pull instead of
+// CALL DOLT_PUSH/PULL, because withEnvCredentials() sets env vars on the
+// bd client process — the external server process cannot see them.
+//
+// Returns true when ALL conditions are met:
+//  1. Credentials exist (remoteUser or remotePassword non-empty)
+//  2. Server is in server mode (not embedded)
+//  3. Local CLI directory is available
+//  4. The remote is configured in the local CLI directory
+func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context) bool {
+	if s.remoteUser == "" && s.remotePassword == "" {
+		return false // no credentials to pass
+	}
+	if !s.serverMode {
+		return false // embedded mode: withEnvCredentials works in-process
+	}
+	cliDir := s.CLIDir()
+	if cliDir == "" {
+		return false // no local directory for CLI operations
+	}
+	// Only route to CLI if the remote is configured locally.
+	// Shared server / external server modes may have CLIDir pointing
+	// to wrong directory — FindCLIRemote returns "" in those cases.
+	return doltutil.FindCLIRemote(cliDir, s.remote) != ""
+}

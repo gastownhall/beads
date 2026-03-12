@@ -26,6 +26,11 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		// Credential CLI routing: when peer has credentials and server is external,
+		// route through CLI subprocess (same rationale as store.go Push).
+		if s.shouldUseCLIForPeerCredentials(ctx, peer, creds) {
+			return s.doltCLIPushToPeer(ctx, peer, creds)
+		}
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, s.branch); err != nil {
 				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
@@ -66,6 +71,18 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 		return conflicts, err
 	}
 	err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		// Credential CLI routing: mirrors git-protocol peer pull path.
+		if s.shouldUseCLIForPeerCredentials(ctx, peer, creds) {
+			if pullErr := s.doltCLIPullFromPeer(ctx, peer, creds); pullErr != nil {
+				c, conflictErr := s.GetConflicts(ctx)
+				if conflictErr == nil && len(c) > 0 {
+					conflicts = c
+					return nil
+				}
+				return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
+			}
+			return nil
+		}
 		return withEnvCredentials(creds, func() error {
 			if pullErr := s.execWithLongTimeout(ctx, "CALL DOLT_PULL(?)", peer); pullErr != nil {
 				c, conflictErr := s.GetConflicts(ctx)
@@ -91,6 +108,10 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		// Credential CLI routing: route fetch through CLI subprocess.
+		if s.shouldUseCLIForPeerCredentials(ctx, peer, creds) {
+			return s.doltCLIFetchFromPeer(ctx, peer, creds)
+		}
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
 				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)

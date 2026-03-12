@@ -1,7 +1,9 @@
 package dolt
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -195,5 +197,146 @@ func TestInitCredentialKeyEmptyDbPath(t *testing.T) {
 	}
 	if store.credentialKey != nil {
 		t.Error("expected nil key when dbPath is empty")
+	}
+}
+
+// setupCredentialTestStore creates a DoltStore with a dolt-initialized CLI directory
+// and "origin" remote for credential routing tests. Requires dolt CLI.
+func setupCredentialTestStore(t *testing.T, remoteUser, remotePassword string, serverMode, setupRemote bool) *DoltStore {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbName := "testdb"
+	dbDir := filepath.Join(tmpDir, dbName)
+
+	if setupRemote {
+		if err := os.MkdirAll(dbDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("dolt", "init")
+		cmd.Dir = dbDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("dolt init failed: %s: %v", out, err)
+		}
+		cmd = exec.Command("dolt", "remote", "add", "origin", "https://example.com/repo")
+		cmd.Dir = dbDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("dolt remote add failed: %s: %v", out, err)
+		}
+	}
+
+	return &DoltStore{
+		remoteUser:     remoteUser,
+		remotePassword: remotePassword,
+		serverMode:     serverMode,
+		dbPath:         tmpDir,
+		database:       dbName,
+		remote:         "origin",
+	}
+}
+
+// TestCredentialCLIRouting verifies the shouldUseCLIForCredentials guard that controls
+// CLI subprocess routing for Push, ForcePush, and Pull when credentials are set.
+// The guard is shared across all three operations (same insertion pattern in store.go).
+func TestCredentialCLIRouting(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping credential routing test")
+	}
+
+	tests := []struct {
+		name           string
+		remoteUser     string
+		remotePassword string
+		serverMode     bool
+		setupRemote    bool // if true, init dolt dir and add "origin" remote
+		wantCLI        bool
+	}{
+		// Positive cases: guard returns true → CLI routing for Push/ForcePush/Pull
+		{"credentials+serverMode+remote", "user", "pass", true, true, true},
+		{"password only", "", "pass", true, true, true},
+		// Negative cases: guard returns false → SQL fallback
+		{"no credentials", "", "", true, true, false},
+		{"no server mode (embedded)", "user", "pass", false, true, false},
+		{"no CLI remote", "user", "pass", true, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := setupCredentialTestStore(t, tt.remoteUser, tt.remotePassword, tt.serverMode, tt.setupRemote)
+			got := store.shouldUseCLIForCredentials(context.Background())
+			if got != tt.wantCLI {
+				t.Errorf("shouldUseCLIForCredentials() = %v, want %v", got, tt.wantCLI)
+			}
+		})
+	}
+}
+
+func TestCredentialCLIRoutingExternalServer(t *testing.T) {
+	// External server mode: credentials set but CLIDir points to a directory
+	// without the remote configured. Guard should return false (SQL fallback).
+	store := &DoltStore{
+		remoteUser:     "user",
+		remotePassword: "pass",
+		serverMode:     true,
+		dbPath:         t.TempDir(), // empty dir, no .dolt/
+		database:       "testdb",
+		remote:         "origin",
+	}
+	if store.shouldUseCLIForCredentials(context.Background()) {
+		t.Error("expected false for external server mode (no CLI remote in CLIDir)")
+	}
+}
+
+func TestCredentialCLIRoutingNoRemote(t *testing.T) {
+	// When credentials are set but no CLI remote exists,
+	// shouldUseCLIForCredentials returns false, allowing
+	// fallthrough to the SQL path (withEnvCredentials).
+	store := &DoltStore{
+		remoteUser:     "user",
+		remotePassword: "pass",
+		serverMode:     true,
+		dbPath:         t.TempDir(),
+		database:       "nodb",
+		remote:         "origin",
+	}
+	if store.shouldUseCLIForCredentials(context.Background()) {
+		t.Error("expected false when CLI remote does not exist")
+	}
+}
+
+// TestFederationCredentialCLIRouting verifies the shouldUseCLIForPeerCredentials guard
+// that controls CLI subprocess routing for federation PushTo, PullFrom, and Fetch
+// when peer credentials are resolved from the federation_peers table.
+func TestFederationCredentialCLIRouting(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping credential routing test")
+	}
+
+	tests := []struct {
+		name        string
+		serverMode  bool
+		setupRemote bool
+		credsEmpty  bool
+		wantCLI     bool
+	}{
+		{"peer credentials+serverMode+remote", true, true, false, true},
+		{"no peer credentials", true, true, true, false},
+		{"no server mode (embedded)", false, true, false, false},
+		{"no CLI remote for peer", true, false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := setupCredentialTestStore(t, "", "", tt.serverMode, tt.setupRemote)
+
+			var creds *remoteCredentials
+			if !tt.credsEmpty {
+				creds = &remoteCredentials{username: "peeruser", password: "peerpass"}
+			} else {
+				creds = &remoteCredentials{}
+			}
+
+			got := store.shouldUseCLIForPeerCredentials(context.Background(), "origin", creds)
+			if got != tt.wantCLI {
+				t.Errorf("shouldUseCLIForPeerCredentials() = %v, want %v", got, tt.wantCLI)
+			}
+		})
 	}
 }
