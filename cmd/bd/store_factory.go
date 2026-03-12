@@ -10,6 +10,8 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
+const isEmbeddedDolt = false
+
 // newDoltStore creates a storage backend from an explicit config.
 // Used by bd init and PersistentPreRun.
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {

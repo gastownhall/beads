@@ -866,20 +866,24 @@ environment variable.`,
 			fmt.Printf("\n%s bd initialized successfully!\n\n", ui.RenderPass("✓"))
 		}
 		fmt.Printf("  Backend: %s\n", ui.RenderAccent(backend))
-		host := serverHost
-		if host == "" {
-			host = configfile.DefaultDoltServerHost
+		if isEmbeddedDolt {
+			fmt.Printf("  Mode: %s\n", ui.RenderAccent("embedded"))
+		} else {
+			host := serverHost
+			if host == "" {
+				host = configfile.DefaultDoltServerHost
+			}
+			port := serverPort
+			if port == 0 {
+				port = doltserver.DefaultConfig(beadsDir).Port
+			}
+			user := serverUser
+			if user == "" {
+				user = configfile.DefaultDoltServerUser
+			}
+			fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
+			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s:%d", user, host, port)))
 		}
-		port := serverPort
-		if port == 0 {
-			port = doltserver.DefaultConfig(beadsDir).Port
-		}
-		user := serverUser
-		if user == "" {
-			user = configfile.DefaultDoltServerUser
-		}
-		fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
-		fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s:%d", user, host, port)))
 		fmt.Printf("  Database: %s\n", ui.RenderAccent(dbName))
 		fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(prefix))
 		fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))

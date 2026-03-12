@@ -12,6 +12,8 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
+const isEmbeddedDolt = true
+
 // newDoltStore creates an embedded Dolt storage backend.
 // The dolt.Config is used only for BeadsDir and Database; server fields are ignored.
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
