@@ -25,6 +25,7 @@ For Dolt-native backups (preserves full commit history, faster for large databas
 
 Other subcommands:
   bd backup status          Show backup status (JSONL + Dolt)
+  bd backup export-git      Export the current JSONL snapshot to a git branch
   bd backup restore [path]  Restore from JSONL backup files
 
 DoltHub is recommended for cloud backup:
