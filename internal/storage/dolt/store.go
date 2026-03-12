@@ -1188,6 +1188,14 @@ func (s *DoltStore) CLIDir() string {
 	return filepath.Join(s.dbPath, s.database)
 }
 
+// CLIDir returns the directory for dolt CLI operations (push/pull/remote/fetch).
+// The actual database lives in a subdirectory of Path() named after the database.
+// Use this instead of Path() when running dolt CLI commands that target the
+// actual database (e.g., remote add/remove, push, pull).
+func (s *DoltStore) CLIDir() string {
+	return s.cliDir()
+}
+
 // UnderlyingDB returns the underlying *sql.DB connection
 func (s *DoltStore) UnderlyingDB() *sql.DB {
 	return s.db
