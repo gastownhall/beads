@@ -223,10 +223,35 @@ func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
 	})
 }
 
+// knownListFlags maps bare words that users might pass as positional args
+// but are actually flag names. Each maps to a hint for the error message.
+var knownListFlags = map[string]string{
+	"ready":   "--ready",
+	"tree":    "--tree",
+	"flat":    "--flat",
+	"all":     "--all",
+	"long":    "--long",
+	"watch":   "--watch",
+	"pretty":  "--pretty",
+	"pinned":  "--pinned",
+	"overdue": "--overdue",
+}
+
 var listCmd = &cobra.Command{
 	Use:     "list",
 	GroupID: "issues",
 	Short:   "List issues",
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return nil
+		}
+		for _, arg := range args {
+			if hint, ok := knownListFlags[arg]; ok {
+				return fmt.Errorf("unknown argument %q; did you mean %q or 'bd %s'?", arg, hint, arg)
+			}
+		}
+		return fmt.Errorf("bd list does not accept positional arguments; use flags instead (see bd list --help)")
+	},
 	Run: func(cmd *cobra.Command, args []string) {
 		status, _ := cmd.Flags().GetString("status")
 		// --state is alias for --status (desire path: bd-9h3w)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -41,6 +42,57 @@ func TestParseLabelArgs(t *testing.T) {
 
 			if label != tt.expectLabel {
 				t.Errorf("Expected label %q, got %q", tt.expectLabel, label)
+			}
+		})
+	}
+}
+
+func TestListRejectsPositionalArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:    "no args is fine",
+			args:    []string{},
+			wantErr: false,
+		},
+		{
+			name:      "ready is rejected with hint",
+			args:      []string{"ready"},
+			wantErr:   true,
+			errSubstr: `did you mean "--ready"`,
+		},
+		{
+			name:      "tree is rejected with hint",
+			args:      []string{"tree"},
+			wantErr:   true,
+			errSubstr: `did you mean "--tree"`,
+		},
+		{
+			name:      "unknown arg is rejected generically",
+			args:      []string{"foobar"},
+			wantErr:   true,
+			errSubstr: "does not accept positional arguments",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := listCmd.Args(listCmd, tt.args)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Expected error for args %v, got nil", tt.args)
+				}
+				if !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Errorf("Error %q should contain %q", err.Error(), tt.errSubstr)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error for args %v: %v", tt.args, err)
+				}
 			}
 		})
 	}
