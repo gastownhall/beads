@@ -272,17 +272,18 @@ func GetValueSource(key string) ConfigSource {
 		return SourceDefault
 	}
 
-	// Check if value is set from environment variable
-	// Viper's IsSet returns true if the key is set from any source (env, config, or default)
-	// We need to check specifically for env var by looking at the env var directly
+	// Check if value is set from environment variable.
+	// Use LookupEnv (not Getenv) so that explicitly-set-but-empty vars like
+	// BD_BACKUP_ENABLED= are recognized as "set by the user" rather than
+	// falling through to the default/auto-detect path.
 	envKey := "BD_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
-	if os.Getenv(envKey) != "" {
+	if _, ok := os.LookupEnv(envKey); ok {
 		return SourceEnvVar
 	}
 
 	// Check BEADS_ prefixed env vars for legacy compatibility
 	beadsEnvKey := "BEADS_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
-	if os.Getenv(beadsEnvKey) != "" {
+	if _, ok := os.LookupEnv(beadsEnvKey); ok {
 		return SourceEnvVar
 	}
 
@@ -343,18 +344,15 @@ func CheckOverrides(flagOverrides map[string]struct {
 		for _, key := range v.AllKeys() {
 			envSource := GetValueSource(key)
 			if envSource == SourceEnvVar && v.InConfig(key) {
-				// Env var is overriding config file value
-				// Get the config file value by temporarily unsetting the env
+				// Env var is overriding config file value.
+				// Use LookupEnv to detect presence — empty-string env vars
+				// are still intentional overrides.
 				envKey := "BD_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
-				envValue := os.Getenv(envKey)
-				if envValue == "" {
+				if _, ok := os.LookupEnv(envKey); !ok {
 					envKey = "BEADS_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
-					envValue = os.Getenv(envKey)
-				}
-
-				// Skip if no env var actually set (shouldn't happen but be safe)
-				if envValue == "" {
-					continue
+					if _, ok := os.LookupEnv(envKey); !ok {
+						continue
+					}
 				}
 
 				overrides = append(overrides, ConfigOverride{
