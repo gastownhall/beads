@@ -441,6 +441,8 @@ github.com/dolthub/driver v0.2.1-0.20260306012832-bbe1450551e0 h1:gt2qb6EXP/xEQo
 github.com/dolthub/driver v0.2.1-0.20260306012832-bbe1450551e0/go.mod h1:wkebQul87/Ho9vr3TBPhsGi2k2jenAVEmgShIW9cYwM=
 github.com/dolthub/driver v0.2.1-0.20260311215624-ecee5fde8a5f h1:JGu647ZvkyofoLSsbq9SUZBbfLliBL85bMrKTgzwWks=
 github.com/dolthub/driver v0.2.1-0.20260311215624-ecee5fde8a5f/go.mod h1:jqVIagYjni1fdj9lDX0KaJ7cljMiGqLHh35yEzGNKl8=
+github.com/dolthub/driver v0.2.1-0.20260311222540-669bd7f66d2d h1:o1WKrj5xWNUHbsMW5n6YB5Yy+hXkWdTGOJPTUG8pNVM=
+github.com/dolthub/driver v0.2.1-0.20260311222540-669bd7f66d2d/go.mod h1:jqVIagYjni1fdj9lDX0KaJ7cljMiGqLHh35yEzGNKl8=
 github.com/dolthub/eventsapi_schema v0.0.0-20260205214132-a7a3c84c84a1 h1:QePoMpa5qlquwUqRVyF9KAHsJAlYbE2+eZkMPAxeBXc=
 github.com/dolthub/eventsapi_schema v0.0.0-20260205214132-a7a3c84c84a1/go.mod h1:evuptFmr/0/j0X/g+3cveHEEOM5tqyRA15FNgirtOY0=
 github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69 h1:JShhbqMw26nKx3pqqu/cFxOpzBkN+4elVhzuUfgDw2k=
