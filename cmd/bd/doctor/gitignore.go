@@ -18,6 +18,19 @@ bd.sock
 bd.sock.startlock
 sync-state.json
 last-touched
+.exclusive-lock
+
+# Daemon runtime (lock, log, pid)
+daemon.*
+
+# Interactions log (runtime, not versioned)
+interactions.jsonl
+
+# Push state (runtime, per-machine)
+push-state.json
+
+# Lock files (various runtime locks)
+*.lock
 
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
@@ -42,6 +55,9 @@ dolt-server.pid
 dolt-server.log
 dolt-server.lock
 dolt-server.port
+
+# Corrupt backup directories (created by bd doctor --fix recovery)
+*.corrupt.backup/
 
 # Backup data (auto-exported JSONL, local-only)
 backup/
@@ -85,6 +101,10 @@ var requiredPatterns = []string{
 	"dolt-server.log",
 	"dolt-server.lock",
 	"dolt-server.port",
+	"daemon.*",
+	"interactions.jsonl",
+	"*.lock",
+	"*.corrupt.backup/",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
