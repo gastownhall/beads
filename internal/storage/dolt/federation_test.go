@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -515,6 +516,97 @@ func TestSyncCLIRemotesToSQL(t *testing.T) {
 
 	// Clean up CLI remote
 	_ = doltutil.RemoveCLIRemote(dir, remoteName)
+	_ = store.RemoveRemote(ctx, remoteName)
+}
+
+// TestMigrateServerRootRemotes verifies GH#2118: remotes added in the dolt
+// server root directory (.beads/dolt/) are propagated to the database
+// subdirectory (.beads/dolt/<database>/) during syncCLIRemotesToSQL.
+// This handles the common case where users run `dolt remote add` in the
+// visible server root instead of the database subdirectory.
+func TestMigrateServerRootRemotes(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	remoteName := "test-root-remote"
+	remoteURL := "file:///tmp/test-root-remote"
+
+	// Set up CLIDir with dolt init (database directory)
+	cliDir := store.CLIDir()
+	if cliDir == "" {
+		t.Skip("no CLI dir available")
+	}
+	if err := os.MkdirAll(cliDir, 0755); err != nil {
+		t.Fatalf("failed to create CLI dir: %v", err)
+	}
+	initCmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
+	initCmd.Dir = cliDir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		// Might already be initialized
+		if !strings.Contains(string(out), "already") {
+			t.Fatalf("dolt init in CLIDir failed: %s: %v", out, err)
+		}
+	}
+
+	// Set up server root (dbPath) with dolt init — separate from CLIDir
+	rootDir := store.Path()
+	if rootDir == "" || rootDir == cliDir {
+		t.Skip("dbPath same as CLIDir — migration not applicable")
+	}
+	if _, err := os.Stat(filepath.Join(rootDir, ".dolt")); err != nil {
+		// Initialize root dir if needed
+		if err := os.MkdirAll(rootDir, 0755); err != nil {
+			t.Fatalf("failed to create root dir: %v", err)
+		}
+		initRootCmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
+		initRootCmd.Dir = rootDir
+		if out, err := initRootCmd.CombinedOutput(); err != nil {
+			if !strings.Contains(string(out), "already") {
+				t.Fatalf("dolt init in root failed: %s: %v", out, err)
+			}
+		}
+	}
+
+	// Add remote to server root (the wrong place — simulates the user's mistake)
+	if err := doltutil.AddCLIRemote(rootDir, remoteName, remoteURL); err != nil {
+		t.Fatalf("failed to add remote to server root: %v", err)
+	}
+	defer func() { _ = doltutil.RemoveCLIRemote(rootDir, remoteName) }()
+
+	// Verify remote is NOT in CLIDir before migration
+	if url := doltutil.FindCLIRemote(cliDir, remoteName); url != "" {
+		t.Fatalf("remote should not be in CLIDir before migration, found: %s", url)
+	}
+
+	// Remove from SQL if present (simulate clean state)
+	_ = store.RemoveRemote(ctx, remoteName)
+
+	// Run sync — should discover remote in server root and migrate to CLIDir + SQL
+	store.syncCLIRemotesToSQL(ctx)
+
+	// Verify remote was migrated to CLIDir
+	if url := doltutil.FindCLIRemote(cliDir, remoteName); url == "" {
+		t.Error("expected remote to be migrated to CLIDir")
+	} else if url != remoteURL {
+		t.Errorf("CLIDir remote URL = %q, want %q", url, remoteURL)
+	}
+
+	// Verify remote was registered in SQL
+	has, err := store.HasRemote(ctx, remoteName)
+	if err != nil {
+		t.Fatalf("HasRemote failed: %v", err)
+	}
+	if !has {
+		t.Error("expected remote to be registered in SQL after migration")
+	}
+
+	// Clean up
+	_ = doltutil.RemoveCLIRemote(cliDir, remoteName)
 	_ = store.RemoveRemote(ctx, remoteName)
 }
 

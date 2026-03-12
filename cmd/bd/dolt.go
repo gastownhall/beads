@@ -157,7 +157,9 @@ uncommitted changes in its working set).`,
 			if err := st.ForcePush(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
-					fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+					fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
+					fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
+					fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
 				}
 				os.Exit(1)
 			}
@@ -165,7 +167,9 @@ uncommitted changes in its working set).`,
 			if err := st.Push(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
-					fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+					fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
+					fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
+					fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
 				}
 				os.Exit(1)
 			}
@@ -193,7 +197,9 @@ variables for authentication.`,
 		if err := st.Pull(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if isRemoteNotFoundErr(err) {
-				fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+				fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
+				fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
+				fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
 			}
 			os.Exit(1)
 		}
