@@ -450,13 +450,6 @@ func EnsureRunning(beadsDir string) (int, error) {
 		return state.Port, nil
 	}
 
-	// Clean up orphaned dolt sql-server processes before starting a new one.
-	// Without this, servers accumulate when parent processes crash or are
-	// force-killed without graceful shutdown (GH#2372).
-	if killed, err := KillStaleServers(serverDir); err == nil && len(killed) > 0 {
-		fmt.Fprintf(os.Stderr, "Info: cleaned up %d orphaned dolt sql-server process(es)\n", len(killed))
-	}
-
 	s, err := Start(serverDir)
 	if err != nil {
 		return 0, err
@@ -504,6 +497,15 @@ func Start(beadsDir string) (*State, error) {
 	// Re-check after acquiring lock (double-check pattern)
 	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
 		return state, nil
+	}
+
+	// Clean up orphaned dolt sql-server processes INSIDE the lock.
+	// This MUST happen under the lock to prevent a race where one process
+	// kills a server that another process is in the middle of starting
+	// (PID file not yet written). Without this, concurrent bd processes
+	// can cause journal corruption (GH#2430).
+	if killed, killErr := KillStaleServers(beadsDir); killErr == nil && len(killed) > 0 {
+		fmt.Fprintf(os.Stderr, "Info: cleaned up %d orphaned dolt sql-server process(es)\n", len(killed))
 	}
 
 	// Ensure dolt binary exists
