@@ -179,7 +179,7 @@ func getDesignFlag(cmd *cobra.Command) (string, bool) {
 		path, _ := cmd.Flags().GetString("design-file")
 		content, err := readBodyFile(path)
 		if err != nil {
-			FatalError("reading from stin: %v", err)
+			FatalError("reading from stdin: %v", err)
 		}
 
 		return content, true
