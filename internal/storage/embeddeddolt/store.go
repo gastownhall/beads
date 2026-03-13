@@ -187,9 +187,7 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	})
 }
 
-func (s *EmbeddedDoltStore) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	panic("embeddeddolt: GetIssue not implemented")
-}
+// GetIssue is implemented in get_issue.go.
 
 func (s *EmbeddedDoltStore) GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error) {
 	panic("embeddeddolt: GetIssueByExternalRef not implemented")
@@ -215,9 +213,7 @@ func (s *EmbeddedDoltStore) SearchIssues(ctx context.Context, query string, filt
 	panic("embeddeddolt: SearchIssues not implemented")
 }
 
-func (s *EmbeddedDoltStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	panic("embeddeddolt: AddDependency not implemented")
-}
+// AddDependency is implemented in dependencies.go.
 
 func (s *EmbeddedDoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
 	panic("embeddeddolt: RemoveDependency not implemented")
@@ -243,17 +239,13 @@ func (s *EmbeddedDoltStore) GetDependencyTree(ctx context.Context, issueID strin
 	panic("embeddeddolt: GetDependencyTree not implemented")
 }
 
-func (s *EmbeddedDoltStore) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	panic("embeddeddolt: AddLabel not implemented")
-}
+// AddLabel is implemented in labels.go.
 
 func (s *EmbeddedDoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	panic("embeddeddolt: RemoveLabel not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetLabels(ctx context.Context, issueID string) ([]string, error) {
-	panic("embeddeddolt: GetLabels not implemented")
-}
+// GetLabels is implemented in labels.go.
 
 func (s *EmbeddedDoltStore) GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error) {
 	panic("embeddeddolt: GetIssuesByLabel not implemented")
@@ -464,9 +456,7 @@ func (s *EmbeddedDoltStore) PromoteFromEphemeral(ctx context.Context, id string,
 	panic("embeddeddolt: PromoteFromEphemeral not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetNextChildID(ctx context.Context, parentID string) (string, error) {
-	panic("embeddeddolt: GetNextChildID not implemented")
-}
+// GetNextChildID is implemented in child_id.go.
 
 func (s *EmbeddedDoltStore) RenameCounterPrefix(ctx context.Context, oldPrefix, newPrefix string) error {
 	panic("embeddeddolt: RenameCounterPrefix not implemented")
