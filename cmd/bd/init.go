@@ -190,8 +190,10 @@ environment variable.`,
 			prefix = filepath.Base(cwd)
 		}
 
-		// Normalize prefix: strip trailing hyphens
-		// The hyphen is added automatically during ID generation
+		// Normalize prefix: strip leading dots and trailing hyphens.
+		// Leading dots produce invalid Dolt database names (e.g. ".claude" -> "bd_.claude").
+		// The trailing hyphen is added automatically during ID generation.
+		prefix = strings.TrimLeft(prefix, ".")
 		prefix = strings.TrimRight(prefix, "-")
 
 		// Sanitize prefix for use as a MySQL database name.
@@ -370,11 +372,13 @@ environment variable.`,
 		if existingCfg, _ := configfile.Load(beadsDir); existingCfg != nil && existingCfg.DoltDatabase != "" {
 			dbName = existingCfg.DoltDatabase
 		} else if prefix != "" {
-			// Sanitize hyphens to underscores for SQL-idiomatic database names.
+			// Sanitize hyphens and dots to underscores for SQL-idiomatic database names.
+			// Dots are invalid in Dolt/MySQL identifiers (e.g. from ".claude" directories).
 			// Must match the sanitization applied to metadata.json DoltDatabase
 			// field (line below), otherwise init creates a database with one name
 			// but metadata.json records a different name, causing reopens to fail.
 			dbName = strings.ReplaceAll(prefix, "-", "_")
+			dbName = strings.ReplaceAll(dbName, ".", "_")
 		} else {
 			dbName = "beads"
 		}
