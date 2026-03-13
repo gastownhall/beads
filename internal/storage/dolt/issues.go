@@ -17,8 +17,7 @@ import (
 )
 
 // CreateIssue creates a new issue.
-// Delegates SQL work to issueops. Callers are responsible for Dolt versioning
-// (e.g., store.Commit) after this returns.
+// Delegates SQL work to issueops; handles Dolt versioning for non-ephemeral issues.
 func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
 	if issue == nil {
 		return fmt.Errorf("issue must not be nil")
@@ -46,6 +45,22 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		return err
 	}
 
+	// Dolt versioning — wisps are transient and skip DOLT_COMMIT.
+	if !issue.Ephemeral {
+		// GH#2455: Stage only the tables we modified, then commit without -A
+		// to avoid sweeping up stale config changes from concurrent operations.
+		for _, table := range []string{"issues", "events"} {
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+				return fmt.Errorf("dolt add %s: %w", table, err)
+			}
+		}
+		commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+	}
+
 	return tx.Commit()
 }
 
@@ -58,14 +73,13 @@ func (s *DoltStore) CreateIssues(ctx context.Context, issues []*types.Issue, act
 }
 
 // CreateIssuesWithFullOptions creates multiple issues with full options control.
-// Delegates SQL work to issueops. Callers are responsible for Dolt versioning
-// (e.g., store.Commit) after this returns.
+// Delegates SQL work to issueops; handles Dolt versioning for non-ephemeral batches.
 func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
 	if len(issues) == 0 {
 		return nil
 	}
 
-	// All-ephemeral fast path: individual transactions.
+	// All-ephemeral fast path: individual transactions, no Dolt versioning.
 	if issueops.AllEphemeral(issues) {
 		for _, issue := range issues {
 			issue.Ephemeral = true
@@ -97,6 +111,16 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 
 	if err := issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts); err != nil {
 		return err
+	}
+
+	// GH#2455: Stage only the tables we modified, then commit without -A.
+	for _, table := range []string{"issues", "events", "labels", "comments", "dependencies", "child_counters"} {
+		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+	}
+	commitMsg := fmt.Sprintf("bd: create %d issue(s)", len(issues))
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+		return fmt.Errorf("dolt commit: %w", err)
 	}
 
 	return tx.Commit()

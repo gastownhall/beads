@@ -581,6 +581,12 @@ var createCmd = &cobra.Command{
 			FatalError("%v", err)
 		}
 
+		// Track whether any post-create writes occurred. CreateIssue commits
+		// the issue to Dolt internally, but subsequent AddDependency/AddLabel
+		// calls only write to the working set. A follow-up Dolt commit is
+		// needed to persist them (GH#2009).
+		postCreateWrites := false
+
 		// If parent was specified, add parent-child dependency
 		if parentID != "" {
 			dep := &types.Dependency{
@@ -590,6 +596,8 @@ var createCmd = &cobra.Command{
 			}
 			if err := store.AddDependency(ctx, dep, actor); err != nil {
 				WarnError("failed to add parent-child dependency %s -> %s: %v", issue.ID, parentID, err)
+			} else {
+				postCreateWrites = true
 			}
 		}
 
@@ -610,6 +618,8 @@ var createCmd = &cobra.Command{
 		for _, label := range labels {
 			if err := store.AddLabel(ctx, issue.ID, label, actor); err != nil {
 				WarnError("failed to add label %s: %v", label, err)
+			} else {
+				postCreateWrites = true
 			}
 		}
 
@@ -627,12 +637,16 @@ var createCmd = &cobra.Command{
 				agentLabel := "role_type:" + issue.RoleType
 				if err := store.AddLabel(ctx, issue.ID, agentLabel, actor); err != nil {
 					WarnError("failed to add role_type label: %v", err)
+				} else {
+					postCreateWrites = true
 				}
 			}
 			if issue.Rig != "" {
 				rigLabel := "rig:" + issue.Rig
 				if err := store.AddLabel(ctx, issue.ID, rigLabel, actor); err != nil {
 					WarnError("failed to add rig label: %v", err)
+				} else {
+					postCreateWrites = true
 				}
 			}
 		}
@@ -687,6 +701,8 @@ var createCmd = &cobra.Command{
 			}
 			if err := store.AddDependency(ctx, dep, actor); err != nil {
 				WarnError("failed to add dependency %s -> %s: %v", issue.ID, dependsOnID, err)
+			} else {
+				postCreateWrites = true
 			}
 		}
 
@@ -718,15 +734,21 @@ var createCmd = &cobra.Command{
 			}
 			if err := store.AddDependency(ctx, dep, actor); err != nil {
 				WarnError("failed to add waits-for dependency %s -> %s: %v", issue.ID, waitsFor, err)
+			} else {
+				postCreateWrites = true
 			}
 		}
 
-		// Commit the issue and all metadata (deps, labels) to Dolt in a
-		// single commit. Without this, changes remain in the working set
-		// and can be lost on push, sync, or server restart (GH#2009).
-		commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
-		if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-			FatalError("failed to commit: %v", err)
+		// Commit post-create metadata (deps, labels) to Dolt. CreateIssue's
+		// internal DOLT_COMMIT only covers the issue row; AddDependency and
+		// AddLabel write to the SQL working set without a Dolt commit. Without
+		// this, the metadata is visible but not durable — it can be lost on
+		// push, sync, or server restart (GH#2009).
+		if postCreateWrites {
+			commitMsg := fmt.Sprintf("bd: create %s (metadata)", issue.ID)
+			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+				WarnError("failed to commit post-create metadata: %v", err)
+			}
 		}
 
 		// If issue was routed to a different repo, commit pending changes.
