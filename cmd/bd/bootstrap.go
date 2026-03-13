@@ -27,6 +27,7 @@ Unlike 'bd init --force', bootstrap will never delete existing issues.
 Bootstrap auto-detects the right action:
   • If sync.git-remote is configured: clones from the remote
   • If .beads/backup/*.jsonl exists: restores from backup
+  • If .beads/issues.jsonl exists: imports from git-tracked JSONL
   • If no database exists: creates a fresh one
   • If database already exists: validates and reports status
 
@@ -91,12 +92,13 @@ Examples:
 
 // BootstrapPlan describes what bootstrap will do.
 type BootstrapPlan struct {
-	Action      string `json:"action"` // "sync", "restore", "init", "none"
+	Action      string `json:"action"` // "sync", "restore", "jsonl-import", "init", "none"
 	Reason      string `json:"reason"` // Human-readable explanation
 	BeadsDir    string `json:"beads_dir"`
 	Database    string `json:"database"`
 	SyncRemote  string `json:"sync_remote,omitempty"`
 	BackupDir   string `json:"backup_dir,omitempty"`
+	JSONLFile   string `json:"jsonl_file,omitempty"`
 	HasExisting bool   `json:"has_existing"`
 }
 
@@ -149,6 +151,15 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		return plan
 	}
 
+	// Check for git-tracked JSONL (the portable export format)
+	gitJSONL := filepath.Join(beadsDir, "issues.jsonl")
+	if _, err := os.Stat(gitJSONL); err == nil {
+		plan.JSONLFile = gitJSONL
+		plan.Action = "jsonl-import"
+		plan.Reason = "Git-tracked issues.jsonl found — will import from " + gitJSONL
+		return plan
+	}
+
 	// Fresh setup
 	plan.Action = "init"
 	plan.Reason = "No existing database, remote, or backup — will create fresh database"
@@ -167,6 +178,10 @@ func printBootstrapPlan(plan BootstrapPlan) {
 	case "restore":
 		fmt.Printf("Bootstrap plan: restore from backup\n")
 		fmt.Printf("  Backup dir: %s\n", plan.BackupDir)
+	case "jsonl-import":
+		fmt.Printf("Bootstrap plan: import from git-tracked JSONL\n")
+		fmt.Printf("  JSONL file: %s\n", plan.JSONLFile)
+		fmt.Printf("  Database: %s\n", plan.Database)
 	case "init":
 		fmt.Printf("Bootstrap plan: create fresh database\n")
 		fmt.Printf("  Database: %s\n", plan.Database)
@@ -199,6 +214,8 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config) error {
 		return executeSyncAction(ctx, plan, cfg)
 	case "restore":
 		return executeRestoreAction(ctx, plan, cfg)
+	case "jsonl-import":
+		return executeJSONLImportAction(ctx, plan, cfg)
 	case "init":
 		return executeInitAction(ctx, plan, cfg)
 	}
@@ -272,6 +289,47 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 
 	fmt.Fprintf(os.Stderr, "Restored from backup: %d issues, %d comments, %d dependencies, %d labels\n",
 		result.Issues, result.Comments, result.Dependencies, result.Labels)
+	return nil
+}
+
+func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+	doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
+	if err := os.MkdirAll(doltDir, 0o750); err != nil {
+		return fmt.Errorf("create dolt directory: %w", err)
+	}
+
+	prefix := inferPrefix(cfg)
+	dbName := cfg.GetDoltDatabase()
+
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            doltDir,
+		Database:        dbName,
+		CreateIfMissing: true,
+		AutoStart:       true,
+		BeadsDir:        plan.BeadsDir,
+	})
+	if err != nil {
+		return fmt.Errorf("create database: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		return fmt.Errorf("set issue prefix: %w", err)
+	}
+	if err := store.Commit(ctx, "bd bootstrap: init"); err != nil {
+		return fmt.Errorf("commit init: %w", err)
+	}
+
+	count, err := importFromLocalJSONL(ctx, store, plan.JSONLFile)
+	if err != nil {
+		return fmt.Errorf("import from JSONL: %w", err)
+	}
+
+	if err := store.Commit(ctx, "bd bootstrap: import from issues.jsonl"); err != nil {
+		return fmt.Errorf("commit import: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", count, plan.JSONLFile)
 	return nil
 }
 
