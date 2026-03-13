@@ -36,7 +36,7 @@
 
 ### Git Workflow
 - Install git hooks: `bd hooks install`
-- Use `bd sync` for remote sync (Dolt-native replication)
+- Use `bd dolt push` / `bd dolt pull` for remote sync
 
 ## Issue Tracking with bd
 
@@ -59,7 +59,8 @@ bd list --status open --priority 1 --json
 bd show <id> --json
 
 # Sync (if remote configured)
-bd sync  # Sync with Dolt remote
+bd dolt push                   # Push to Dolt remote
+bd dolt pull                   # Pull from Dolt remote
 ```
 
 ### Workflow
@@ -69,7 +70,7 @@ bd sync  # Sync with Dolt remote
 3. **Work on it**: Implement, test, document
 4. **Discover new work?** `bd create "Found bug" --description="What was found and why" -p 1 --deps discovered-from:<parent-id> --json`
 5. **Complete**: `bd close <id> --reason "Done" --json`
-6. **Sync**: `bd sync` (sync with Dolt remote if configured)
+6. **Sync**: `bd dolt push` (push to Dolt remote if configured)
 
 **IMPORTANT**: Always include `--description` when creating issues. Issues without descriptions lack context for future work.
 
@@ -121,7 +122,7 @@ Use the beads MCP server for native function calls instead of shell commands:
 
 - ✅ Use bd for ALL task tracking
 - ✅ Always use `--json` flag for programmatic use
-- ✅ Use `bd sync` for remote sync
+- ✅ Use `bd dolt push` / `bd dolt pull` for remote sync
 - ✅ Test with `t.TempDir() in Go tests`
 - ❌ Do NOT create markdown TODO lists
 - ❌ Do NOT create test issues in production DB

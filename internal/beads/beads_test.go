@@ -141,6 +141,128 @@ func TestFindDatabasePathNotFound(t *testing.T) {
 	_ = result
 }
 
+// TestFindDatabasePath_BEADS_DB_Directory tests that FindDatabasePath behaves
+// correctly when BEADS_DB points to a directory (like .beads/) rather than a
+// .db file. This is a regression test for a bug where main.go:476 does
+// beadsDir := filepath.Dir(dbPath), which resolves one level too high when
+// dbPath is a directory.
+//
+// With BEADS_DIR, FindDatabasePath returns .beads/dolt (a path inside .beads/),
+// so filepath.Dir() correctly yields .beads/. But with BEADS_DB pointing to
+// .beads/, it returns .beads/ itself, so filepath.Dir() yields the parent —
+// causing stray dolt/ directories and broken server connections.
+func TestFindDatabasePath_BEADS_DB_Directory(t *testing.T) {
+	// Save original env vars
+	originalDB := os.Getenv("BEADS_DB")
+	originalDir := os.Getenv("BEADS_DIR")
+	defer func() {
+		if originalDB != "" {
+			os.Setenv("BEADS_DB", originalDB)
+		} else {
+			os.Unsetenv("BEADS_DB")
+		}
+		if originalDir != "" {
+			os.Setenv("BEADS_DIR", originalDir)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+	}()
+
+	// Create a .beads/ directory with dolt/ inside, mimicking a real project
+	tmpDir, err := os.MkdirTemp("", "beads-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o750); err != nil {
+		t.Fatalf("Failed to create dolt dir: %v", err)
+	}
+
+	// Resolve symlinks for comparison (macOS /var → /private/var)
+	beadsDirResolved, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		beadsDirResolved = beadsDir
+	}
+
+	// Test with BEADS_DIR — this works correctly
+	os.Unsetenv("BEADS_DB")
+	os.Setenv("BEADS_DIR", beadsDir)
+	resultDir := FindDatabasePath()
+	resultDirResolved, _ := filepath.EvalSymlinks(resultDir)
+	derivedFromDir := filepath.Dir(resultDirResolved)
+	if derivedFromDir != beadsDirResolved {
+		t.Errorf("BEADS_DIR: filepath.Dir(FindDatabasePath()) = %q, want %q",
+			derivedFromDir, beadsDirResolved)
+	}
+
+	// Test with BEADS_DB pointing to the same directory — this is the bug.
+	// FindDatabasePath returns .beads/ itself (not .beads/dolt), so
+	// filepath.Dir() yields the parent directory instead of .beads/.
+	os.Unsetenv("BEADS_DIR")
+	os.Setenv("BEADS_DB", beadsDir)
+	resultDB := FindDatabasePath()
+	resultDBResolved, _ := filepath.EvalSymlinks(resultDB)
+	derivedFromDB := filepath.Dir(resultDBResolved)
+	if derivedFromDB != beadsDirResolved {
+		t.Errorf("BEADS_DB (directory): filepath.Dir(FindDatabasePath()) = %q, want %q\n"+
+			"FindDatabasePath returned %q — should return a path inside .beads/, not .beads/ itself",
+			derivedFromDB, beadsDirResolved, resultDBResolved)
+	}
+}
+
+// TestFindDatabasePath_BEADS_DB_DirectoryTrailingSlash verifies that a
+// trailing slash on BEADS_DB doesn't change the outcome — path canonicalization
+// strips it, so the same filepath.Dir() bug applies.
+func TestFindDatabasePath_BEADS_DB_DirectoryTrailingSlash(t *testing.T) {
+	originalDB := os.Getenv("BEADS_DB")
+	originalDir := os.Getenv("BEADS_DIR")
+	defer func() {
+		if originalDB != "" {
+			os.Setenv("BEADS_DB", originalDB)
+		} else {
+			os.Unsetenv("BEADS_DB")
+		}
+		if originalDir != "" {
+			os.Setenv("BEADS_DIR", originalDir)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+	}()
+
+	tmpDir, err := os.MkdirTemp("", "beads-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o750); err != nil {
+		t.Fatalf("Failed to create dolt dir: %v", err)
+	}
+
+	beadsDirResolved, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		beadsDirResolved = beadsDir
+	}
+
+	// Set BEADS_DB with trailing slash
+	os.Unsetenv("BEADS_DIR")
+	os.Setenv("BEADS_DB", beadsDir+string(filepath.Separator))
+
+	result := FindDatabasePath()
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	derived := filepath.Dir(resultResolved)
+	if derived != beadsDirResolved {
+		t.Errorf("BEADS_DB (trailing slash): filepath.Dir(FindDatabasePath()) = %q, want %q\n"+
+			"FindDatabasePath returned %q",
+			derived, beadsDirResolved, resultResolved)
+	}
+}
+
 // TestHasBeadsProjectFiles verifies that hasBeadsProjectFiles correctly
 // distinguishes between project directories and daemon-only directories (bd-420)
 func TestHasBeadsProjectFiles(t *testing.T) {
@@ -413,21 +535,22 @@ func setupDetachedCommitBeadsWorktree(t *testing.T) (string, string, string) {
 		t.Skipf("git not available: %v", err)
 	}
 
-	runGitInDir(t, tmpDir, "--git-dir", bareDir, "worktree", "add", "-b", "main", mainWorktreeDir)
-	runGitInDir(t, mainWorktreeDir, "config", "user.email", "test@example.com")
-	runGitInDir(t, mainWorktreeDir, "config", "user.name", "Test User")
+	// A bare repo starts with no commits, so HEAD is invalid. Create an
+	// initial empty commit so "git worktree add -b main" can succeed.
+	// We use plumbing commands since "git commit" requires a worktree.
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "config", "user.email", "test@example.com")
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "config", "user.name", "Test User")
+	emptyTree := runGitInDir(t, tmpDir, "--git-dir", bareDir, "hash-object", "-t", "tree", "/dev/null")
+	initCommit := runGitInDir(t, tmpDir, "--git-dir", bareDir, "commit-tree", "-m", "Initial commit", emptyTree)
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "update-ref", "HEAD", initCommit)
+
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "worktree", "add", mainWorktreeDir, "main")
 
 	mainBeadsDir := filepath.Join(mainWorktreeDir, ".beads")
 	mainDoltDir := filepath.Join(mainBeadsDir, "dolt")
 	if err := os.MkdirAll(mainDoltDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(mainWorktreeDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	runGitInDir(t, mainWorktreeDir, "add", "-A")
-	runGitInDir(t, mainWorktreeDir, "commit", "-m", "Initial commit")
 
 	head := runGitInDir(t, mainWorktreeDir, "rev-parse", "HEAD")
 	detachedWorktreeDir := filepath.Join(storeDir, "refs", "commits", head)

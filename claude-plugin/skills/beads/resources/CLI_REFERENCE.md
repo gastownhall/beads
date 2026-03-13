@@ -1,7 +1,7 @@
 # CLI Command Reference
 
 **For:** AI agents and developers using bd command-line interface
-**Version:** 0.47.1+
+**Version:** 0.60.0+
 
 ## Quick Navigation
 

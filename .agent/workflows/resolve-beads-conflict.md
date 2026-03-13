@@ -10,10 +10,10 @@ Beads uses Dolt as its storage backend. Dolt handles merges natively using its b
 
 ```bash
 bd doctor
-bd sync
+bd dolt pull
 ```
 
-If `bd sync` reports merge conflicts, Dolt will list the conflicting tables and rows.
+If `bd dolt pull` reports merge conflicts, Dolt will list the conflicting tables and rows.
 
 ## 2. Resolve Conflicts
 
@@ -35,8 +35,8 @@ bd sql "CALL dolt_conflicts_resolve('--theirs')"
 # Verify the resolution
 bd list --json | head
 
-# Complete the sync
-bd sync
+# Push the resolved state
+bd dolt push
 ```
 
 ## Legacy: JSONL Merge Conflicts

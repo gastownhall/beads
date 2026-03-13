@@ -55,6 +55,7 @@ environment variable.`,
 		team, _ := cmd.Flags().GetBool("team")
 		stealth, _ := cmd.Flags().GetBool("stealth")
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
+		skipAgents, _ := cmd.Flags().GetBool("skip-agents")
 		force, _ := cmd.Flags().GetBool("force")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 		// Dolt server connection flags
@@ -802,8 +803,8 @@ environment variable.`,
 		}
 
 		// Add agent instructions to AGENTS.md
-		// Skip in stealth mode (user wants invisible setup) and quiet mode (suppress all output)
-		if !stealth {
+		// Skip in stealth mode (user wants invisible setup) or when explicitly skipped
+		if !stealth && !skipAgents {
 			agentsTemplate, _ := cmd.Flags().GetString("agents-template")
 			if isBareGitRepo() {
 				if !quiet {
@@ -933,6 +934,7 @@ func init() {
 	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: global gitattributes and gitignore, no local repo tracking")
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
+	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude settings generation")
 	initCmd.Flags().Bool("force", false, "Force re-initialization even if database already has issues (may cause data loss)")
 	initCmd.Flags().Bool("from-jsonl", false, "Import issues from .beads/issues.jsonl instead of git history")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
