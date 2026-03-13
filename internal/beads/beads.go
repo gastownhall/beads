@@ -426,7 +426,16 @@ func FindDatabasePath() string {
 
 	// 2. Check BEADS_DB environment variable (deprecated but still supported)
 	if envDB := os.Getenv("BEADS_DB"); envDB != "" {
-		return utils.CanonicalizePath(envDB)
+		absDB := utils.CanonicalizePath(envDB)
+		// If BEADS_DB points to a directory rather than a file, treat it
+		// like BEADS_DIR to avoid filepath.Dir() resolving one level too
+		// high in the caller (cmd/bd/main.go). See GH#2548.
+		if info, err := os.Stat(absDB); err == nil && info.IsDir() {
+			if dbPath := findDatabaseInBeadsDir(absDB, false); dbPath != "" {
+				return dbPath
+			}
+		}
+		return absDB
 	}
 
 	// 3. Search for .beads/*.db in current directory and ancestors
