@@ -222,7 +222,11 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	for name, varDef := range formula.Vars {
 		merged.Vars[name] = varDef
 	}
-	merged.Steps = append(merged.Steps, formula.Steps...)
+
+	// Merge child steps: override parent steps by ID (preserving position),
+	// append new child steps at the end.
+	merged.Steps = mergeSteps(merged.Steps, formula.Steps)
+
 	merged.Compose = mergeComposeRules(merged.Compose, formula.Compose)
 
 	// Use child description if set
@@ -263,6 +267,34 @@ func (p *Parser) loadFormula(name string) (*Formula, error) {
 // This is the public API for loading formulas used by expansion operators.
 func (p *Parser) LoadByName(name string) (*Formula, error) {
 	return p.loadFormula(name)
+}
+
+// mergeSteps merges child steps into parent steps.
+// Child steps with the same ID as a parent step replace the parent step
+// in-place (preserving position). Child steps with new IDs are appended.
+func mergeSteps(parent, child []*Step) []*Step {
+	// Index parent steps by ID for quick lookup
+	parentIdx := make(map[string]int, len(parent))
+	for i, s := range parent {
+		parentIdx[s.ID] = i
+	}
+
+	// Copy parent steps (will be modified in-place for overrides)
+	result := make([]*Step, len(parent))
+	copy(result, parent)
+
+	// Apply child steps
+	for _, cs := range child {
+		if idx, exists := parentIdx[cs.ID]; exists {
+			// Override: replace parent step at same position
+			result[idx] = cs
+		} else {
+			// New step: append at end
+			result = append(result, cs)
+		}
+	}
+
+	return result
 }
 
 // mergeComposeRules merges two compose rule sets.

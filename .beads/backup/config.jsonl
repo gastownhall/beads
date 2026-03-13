@@ -1,0 +1,12 @@
+{"key":"auto_compact_enabled","value":"false"}
+{"key":"compact_batch_size","value":"50"}
+{"key":"compact_parallel_workers","value":"5"}
+{"key":"compact_tier1_days","value":"30"}
+{"key":"compact_tier1_dep_levels","value":"2"}
+{"key":"compact_tier2_commits","value":"100"}
+{"key":"compact_tier2_days","value":"90"}
+{"key":"compact_tier2_dep_levels","value":"5"}
+{"key":"compaction_enabled","value":"false"}
+{"key":"issue_prefix","value":"be"}
+{"key":"schema_version","value":"6"}
+{"key":"types.custom","value":"molecule,convoy,message,event,gate,merge-request,agent,role,rig,session"}
