@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**beads** (command: `bd`) is a Git-backed issue tracker designed for AI-supervised coding workflows. We dogfood our own tool for all task tracking.
+**beads** (command: `bd`) is a Dolt-powered issue tracker designed for AI-supervised coding workflows. Git integration is optional. We dogfood our own tool for all task tracking.
 
 **Key Features:**
 - Dependency-aware issue tracking

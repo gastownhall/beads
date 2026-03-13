@@ -4,7 +4,7 @@ This document describes bd's overall architecture - the data model, sync mechani
 
 ## The Two-Layer Data Model
 
-bd's core design enables a distributed, git-backed issue tracker that feels like a centralized database. The architecture has two synchronized layers:
+bd's core design enables a distributed, Dolt-powered issue tracker that feels like a centralized database. The architecture has two synchronized layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

@@ -224,7 +224,7 @@ bd init --quiet 2>&1 | grep -v "already initialized"
 - ✅ **Persistent memory**: Issue context survives session resets
 - ✅ **Structured planning**: Dependencies create clear work order
 - ✅ **Automatic setup**: No manual intervention needed
-- ✅ **Git-backed**: All issues are version controlled
+- ✅ **Dolt-backed**: All issues are version controlled
 - ✅ **Fast queries**: `bd ready` finds work instantly
 
 ### For Humans

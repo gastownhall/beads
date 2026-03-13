@@ -1,7 +1,7 @@
 ---
 name: beads
 description: >
-  Git-backed issue tracker for multi-session work with dependencies and persistent
+  Dolt-powered issue tracker for multi-session work with dependencies and persistent
   memory across conversation compaction. Use when work spans sessions, has blockers,
   or needs context recovery after compaction. Trigger with "create task", "what's
   ready", "track this work", "resume after compaction". Make sure to use this skill
@@ -25,7 +25,7 @@ Graph-based issue tracker that survives conversation compaction. Provides persis
 | bd (persistent) | TodoWrite (ephemeral) |
 |-----------------|----------------------|
 | Multi-session, dependencies, compaction survival | Single-session linear tasks |
-| Git-backed team sync | Conversation-scoped |
+| Dolt-backed team sync | Conversation-scoped |
 
 See [BOUNDARIES.md](${CLAUDE_SKILL_DIR}/resources/BOUNDARIES.md) for detailed comparison.
 
@@ -36,7 +36,7 @@ bd --version  # Requires v0.60.0+
 ```
 
 - **bd CLI** installed and in PATH
-- **Git repository** (bd requires git for sync)
+- **Git repository** (optional — use `BEADS_DIR` + `--stealth` for git-free operation)
 - **Initialization**: `bd init` run once (humans do this, not agents)
 
 ## CLI Reference
