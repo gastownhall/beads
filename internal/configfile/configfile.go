@@ -262,21 +262,40 @@ func (c *Config) GetDoltServerHost() string {
 // GetDoltServerPort returns the Dolt server port.
 // Checks BEADS_DOLT_SERVER_PORT env var first, then BEADS_DOLT_PORT (Gas Town sets this),
 // then config, then default.
+//
+// BEADS_DOLT_PORT is only applied when the config host is localhost (127.0.0.1 or
+// empty). When config explicitly points at a remote host (e.g. dolt.lan), the
+// env var is skipped because it refers to the local Gas Town Dolt instance and
+// would produce an invalid host:port combination (e.g. dolt.lan:3307).
 func (c *Config) GetDoltServerPort() int {
+	// BEADS_DOLT_SERVER_PORT is the explicit override — always wins.
 	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
 		if port, err := strconv.Atoi(p); err == nil {
 			return port
 		}
 	}
+	// BEADS_DOLT_PORT (from GT_DOLT_PORT) is a localhost hint. Only apply when
+	// config host is localhost or unset; skip when config targets a remote host.
 	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil {
-			return port
+		if !c.isRemoteHost() {
+			if port, err := strconv.Atoi(p); err == nil {
+				return port
+			}
 		}
 	}
 	if c.DoltServerPort > 0 {
 		return c.DoltServerPort
 	}
 	return DefaultDoltServerPort
+}
+
+// isRemoteHost returns true if the config explicitly sets a non-localhost host.
+func (c *Config) isRemoteHost() bool {
+	h := c.DoltServerHost
+	if h == "" {
+		return false
+	}
+	return h != "127.0.0.1" && h != "localhost" && h != "::1"
 }
 
 // GetDoltServerUser returns the Dolt server MySQL user.

@@ -514,6 +514,39 @@ func TestEnvVarOverrides(t *testing.T) {
 		}
 	})
 
+	t.Run("BEADS_DOLT_PORT skipped when config has remote host", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_PORT", "3307")
+		cfg := &Config{DoltServerHost: "dolt.lan", DoltServerPort: 3306}
+		if got := cfg.GetDoltServerPort(); got != 3306 {
+			t.Errorf("GetDoltServerPort() = %d, want 3306 (env should not override remote host port)", got)
+		}
+	})
+
+	t.Run("BEADS_DOLT_PORT applied when config has localhost host", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_PORT", "3307")
+		cfg := &Config{DoltServerHost: "127.0.0.1", DoltServerPort: 3306}
+		if got := cfg.GetDoltServerPort(); got != 3307 {
+			t.Errorf("GetDoltServerPort() = %d, want 3307 (env should override localhost port)", got)
+		}
+	})
+
+	t.Run("BEADS_DOLT_PORT applied when config has empty host", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_PORT", "3307")
+		cfg := &Config{DoltServerPort: 3306}
+		if got := cfg.GetDoltServerPort(); got != 3307 {
+			t.Errorf("GetDoltServerPort() = %d, want 3307 (env should override when host is default)", got)
+		}
+	})
+
+	t.Run("BEADS_DOLT_SERVER_PORT still overrides even with remote host", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "3309")
+		t.Setenv("BEADS_DOLT_PORT", "3307")
+		cfg := &Config{DoltServerHost: "dolt.lan", DoltServerPort: 3306}
+		if got := cfg.GetDoltServerPort(); got != 3309 {
+			t.Errorf("GetDoltServerPort() = %d, want 3309 (explicit SERVER_PORT always wins)", got)
+		}
+	})
+
 	t.Run("user env var overrides config", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
 		cfg := &Config{DoltServerUser: "admin"}
