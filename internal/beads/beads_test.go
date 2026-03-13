@@ -413,21 +413,22 @@ func setupDetachedCommitBeadsWorktree(t *testing.T) (string, string, string) {
 		t.Skipf("git not available: %v", err)
 	}
 
-	runGitInDir(t, tmpDir, "--git-dir", bareDir, "worktree", "add", "-b", "main", mainWorktreeDir)
-	runGitInDir(t, mainWorktreeDir, "config", "user.email", "test@example.com")
-	runGitInDir(t, mainWorktreeDir, "config", "user.name", "Test User")
+	// A bare repo starts with no commits, so HEAD is invalid. Create an
+	// initial empty commit so "git worktree add -b main" can succeed.
+	// We use plumbing commands since "git commit" requires a worktree.
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "config", "user.email", "test@example.com")
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "config", "user.name", "Test User")
+	emptyTree := runGitInDir(t, tmpDir, "--git-dir", bareDir, "hash-object", "-t", "tree", "/dev/null")
+	initCommit := runGitInDir(t, tmpDir, "--git-dir", bareDir, "commit-tree", "-m", "Initial commit", emptyTree)
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "update-ref", "HEAD", initCommit)
+
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "worktree", "add", mainWorktreeDir, "main")
 
 	mainBeadsDir := filepath.Join(mainWorktreeDir, ".beads")
 	mainDoltDir := filepath.Join(mainBeadsDir, "dolt")
 	if err := os.MkdirAll(mainDoltDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(mainWorktreeDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	runGitInDir(t, mainWorktreeDir, "add", "-A")
-	runGitInDir(t, mainWorktreeDir, "commit", "-m", "Initial commit")
 
 	head := runGitInDir(t, mainWorktreeDir, "rev-parse", "HEAD")
 	detachedWorktreeDir := filepath.Join(storeDir, "refs", "commits", head)
