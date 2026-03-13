@@ -10,18 +10,14 @@ import (
 )
 
 // GetIssueInTx retrieves a single issue by ID within an existing transaction,
-// including its labels. Returns storage.ErrNotFound (wrapped) if the issue
-// does not exist.
-//
-//nolint:gosec // G201: issueTable/labelTable are caller-controlled constants
-func GetIssueInTx(ctx context.Context, tx *sql.Tx, issueTable, labelTable, id string) (*types.Issue, error) {
-	if issueTable == "" {
-		issueTable = "issues"
-	}
-	if labelTable == "" {
-		labelTable = "labels"
-	}
+// including its labels. Automatically routes to the wisps/wisp_labels tables
+// if the ID is an active wisp. Returns storage.ErrNotFound (wrapped) if the
+// issue does not exist in either table.
+func GetIssueInTx(ctx context.Context, tx *sql.Tx, id string) (*types.Issue, error) {
+	isWisp := IsActiveWispInTx(ctx, tx, id)
+	issueTable, labelTable, _, _ := WispTableRouting(isWisp)
 
+	//nolint:gosec // G201: issueTable is from WispTableRouting ("issues" or "wisps")
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT %s FROM %s WHERE id = ?`, IssueSelectColumns, issueTable), id)
 	issue, err := ScanIssueFrom(row)
 	if err == sql.ErrNoRows {
