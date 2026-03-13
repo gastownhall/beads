@@ -28,7 +28,7 @@ func TestFindWispDependentsRecursive(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, parent, "test"); err != nil {
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
 		t.Fatalf("create parent wisp: %v", err)
 	}
 
@@ -47,10 +47,10 @@ func TestFindWispDependentsRecursive(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, child1, "test"); err != nil {
+	if err := store.CreateIssue(ctx, child1, "test"); err != nil {
 		t.Fatalf("create child1: %v", err)
 	}
-	if err := store.createWisp(ctx, child2, "test"); err != nil {
+	if err := store.CreateIssue(ctx, child2, "test"); err != nil {
 		t.Fatalf("create child2: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestFindWispDependentsRecursive(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, grandchild, "test"); err != nil {
+	if err := store.CreateIssue(ctx, grandchild, "test"); err != nil {
 		t.Fatalf("create grandchild: %v", err)
 	}
 
@@ -230,8 +230,8 @@ func createTestWisp(t *testing.T, ctx context.Context, store *DoltStore, title s
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, w, "test"); err != nil {
-		t.Fatalf("createWisp %q: %v", title, err)
+	if err := store.CreateIssue(ctx, w, "test"); err != nil {
+		t.Fatalf("CreateIssue (wisp) %q: %v", title, err)
 	}
 	return w
 }
@@ -441,7 +441,7 @@ func TestFindWispDependentsRecursive_NoDependents(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, wisp, "test"); err != nil {
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
 		t.Fatalf("create wisp: %v", err)
 	}
 

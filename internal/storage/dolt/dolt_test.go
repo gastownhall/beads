@@ -381,8 +381,8 @@ func TestCreateWispNoDoubleHyphen(t *testing.T) {
 		IssueType: types.TypeBug,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, wisp, "test-user"); err != nil {
-		t.Fatalf("createWisp failed: %v", err)
+	if err := store.CreateIssue(ctx, wisp, "test-user"); err != nil {
+		t.Fatalf("CreateIssue (wisp) failed: %v", err)
 	}
 
 	// Wisp ID should contain "gt-wisp-" not "gt--wisp-"
@@ -411,8 +411,8 @@ func TestCreateWispNoDoublePrefix(t *testing.T) {
 		Ephemeral: true,
 		IDPrefix:  "wisp", // Set by cloneSubgraph for wisp molecules
 	}
-	if err := store.createWisp(ctx, wisp, "test-user"); err != nil {
-		t.Fatalf("createWisp failed: %v", err)
+	if err := store.CreateIssue(ctx, wisp, "test-user"); err != nil {
+		t.Fatalf("CreateIssue (wisp) failed: %v", err)
 	}
 
 	// ID should be "<prefix>-wisp-<hash>", NOT "<prefix>-wisp-wisp-<hash>"
@@ -641,8 +641,8 @@ func TestClosePromotedWisp(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, wisp, "tester"); err != nil {
-		t.Fatalf("createWisp failed: %v", err)
+	if err := store.CreateIssue(ctx, wisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue (wisp) failed: %v", err)
 	}
 	if !IsEphemeralID(wisp.ID) {
 		t.Fatalf("expected wisp ID to match ephemeral pattern, got %q", wisp.ID)
