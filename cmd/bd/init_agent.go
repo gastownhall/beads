@@ -66,13 +66,13 @@ func updateAgentFile(filename string, verbose bool, templatePath string) error {
 		return nil
 	}
 
-	// Append beads section (includes landing-the-plane)
+	// Append beads section with profile metadata (includes landing-the-plane)
 	newContent := contentStr
 	if !strings.HasSuffix(newContent, "\n") {
 		newContent += "\n"
 	}
 
-	newContent += "\n" + agents.EmbeddedBeadsSection()
+	newContent += "\n" + agents.RenderSection(agents.ProfileFull)
 
 	// #nosec G306 - markdown needs to be readable
 	if err := os.WriteFile(filename, []byte(newContent), 0644); err != nil {
