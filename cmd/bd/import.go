@@ -26,7 +26,7 @@ EXAMPLES:
   bd import backup.jsonl           # Import from a specific file
   bd import --dry-run              # Show what would be imported`,
 	GroupID: "sync",
-	RunE:   runImport,
+	RunE:    runImport,
 }
 
 var (
