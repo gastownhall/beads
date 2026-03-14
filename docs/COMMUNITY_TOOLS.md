@@ -11,17 +11,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[Mardi Gras](https://github.com/quietpublish/mardi-gras)** - Parade-themed terminal UI with real-time updates, Gas Town agent orchestration, tmux integration, and Claude Code dispatch. Uses `bd list --json`. Built by [@matt-wright86](https://github.com/matt-wright86). (Go)
 
-- **[bdui](https://github.com/assimelha/bdui)** - Real-time terminal UI with tree view, dependency graph, and vim-style navigation. Built by [@assimelha](https://github.com/assimelha). (Node.js)
-
 - **[perles](https://github.com/zjrosen/perles)** - Terminal UI search, dependency and kanban viewer powered by a custom BQL (Beads Query Language). Built by [@zjrosen](https://github.com/zjrosen). (Go)
-
-- **[beads.el](https://codeberg.org/ctietze/beads.el)** - Emacs UI to browse, edit, and manage beads. Built by [@ctietze](https://codeberg.org/ctietze). (Elisp)
-
-- **[lazybeads](https://github.com/codegangsta/lazybeads)** - Lightweight terminal UI built with Bubble Tea for browsing and managing beads issues. Built by [@codegangsta](https://github.com/codegangsta). (Go)
-
-- **[bsv](https://github.com/bglenden/bsv)** - Simple two-panel terminal (TUI) viewer with tree navigation organized by epic/task/sub-task, markdown rendering, and mouse support. Built by [@bglenden](https://github.com/bglenden). (Rust)
-
-- **[abacus](https://github.com/ChrisEdwards/abacus)** - A powerful terminal UI for visualizing and navigating Beads issue tracking databases.
 
 ## Web UIs
 
@@ -29,31 +19,13 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[BeadBoard](https://github.com/zenchantlive/beadboard)** - Windows-native control center with multi-project registry, dependency graph explorer, agent sessions hub, and timeline. Built by [@zenchantlive](https://github.com/zenchantlive). (Next.js/TypeScript)
 
-- **[beads-viz-prototype](https://github.com/mattbeane/beads-viz-prototype)** - Web-based visualization generating interactive HTML from `bd export`. Built by [@mattbeane](https://github.com/mattbeane). (Python)
-
-- **[beads-dashboard](https://github.com/rhydlewis/beads-dashboard)** - A local, lean metrics dashboard for your beads data. Provides insights into lead time, throughput and other continuous improvement metrics. Includes a filterable table view of "all issues". Built by [@rhydlewis](https://github.com/rhydlewis). (Node.js/React)
-
-
-- **[beads-kanban-ui](https://github.com/AvivK5498/Beads-Kanban-UI)** - Visual Kanban board with git branch status tracking, epic/subtask management, design doc viewer, and activity timeline. Install via npm: `npm install -g beads-kanban-ui`. Built by [@AvivK5498](https://github.com/AvivK5498). (TypeScript/Rust)
 - **[beads-web](https://github.com/weselow/beads-web)** - Actively maintained fork of beads-kanban-ui. Cross-platform single-binary distribution (macOS, Linux, Windows), 7 visual themes, Dolt direct SQL integration, Windows multi-drive path support, drag-and-drop status updates. Download from [GitHub Releases](https://github.com/weselow/beads-web/releases). Built by [@weselow](https://github.com/weselow). (TypeScript/Rust)
-
-- **[beads-pm-ui](https://github.com/qosha1/beads-pm-ui)** - Gantt chart timeline view, project / team based filtering (via folder structure), quarterly goal setting and dependency chain visualization. Inline editable. Built by [@qosha1](https://github.com/qosha1). (Nextjs/Typscript)
-
-- **[Beadspace](https://github.com/cameronsjo/beadspace)** - Drop-in GitHub Pages dashboard with triage suggestions, priority/status breakdowns, and searchable issue table. Single HTML file, zero build dependencies, auto-deploys via GitHub Action. Built by [@cameronsjo](https://github.com/cameronsjo). (HTML/CSS/JS)
-
-- **[beadsmap](https://github.com/dariye/beadsmap)** - Interactive roadmap visualization with timeline (Gantt), list, and table views. Multi-source support, dependency arrows, milestone grouping, GitHub integration via OAuth device flow, and light/dark/system themes. Ships as a single `index.html`. Built by [@dariye](https://github.com/dariye). (Svelte/TypeScript)
 
 ## Editor Extensions
 
 - **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and server management. Built by [@jdillon](https://github.com/jdillon). (TypeScript)
 
-- **[Agent Native Abstraction Layer for Beads](https://marketplace.visualstudio.com/items?itemName=AgentNativeAbstractionLayer.agent-native-kanban)** (ANAL Beads) - VS Code Kanban board. Maintained by [@sebcook-ctrl](https://github.com/sebcook-ctrl). (Node.js)
-
-- **[Beads-Kanban](https://github.com/davidcforbes/Beads-Kanban)** - VS Code Kanban board for Beads issue tracking. Maintained by [@davidcforbes](https://github.com/davidcforbes). (TypeScript)
-
 - **[opencode-beads](https://github.com/joshuadavidthomas/opencode-beads)** - OpenCode plugin with automatic context injection, `/bd-*` slash commands, and autonomous task agent. Built by [@joshuadavidthomas](https://github.com/joshuadavidthomas). (Node.js)
-
-- **[nvim-beads](https://github.com/joeblubaugh/nvim-beads)** - Neovim plugin for managing beads. Built by [@joeblubaugh](https://github.com/joeblubaugh). (Lua)
 
 - **[nvim-beads (fancypantalons)](https://github.com/fancypantalons/nvim-beads)** - Neovim plugin for managing Beads issues. By [@fancypantalons](https://github.com/fancypantalons). (Lua)
 
@@ -63,15 +35,9 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[Beads Task-Issue Tracker](https://github.com/w3dev33/beads-task-issue-tracker)** - Cross-platform desktop application (macOS, Windows, Linux) for browsing, creating, and managing Beads issues with a visual interface. Features multi-project support with favorites, image attachments, dashboard with statistics, advanced filtering, and dark/light theme. Built by [@w3dev33](https://github.com/w3dev33). (Tauri/Vue)
 
-- **[Beadster](https://github.com/beadster/beadster)** - macOS app for browsing and managing issues from `.beads/` directories in git repositories. Built by [@podviaznikov](https://github.com/podviaznikov). (Swift)
-
--  **[Parade](https://github.com/JeremyKalmus/parade)** - Electron app for workflow orchestration with visual Kanban board, discovery wizard, and task visualization. Run with `npx parade-init`. Built by [@JeremyKalmus](https://github.com/JeremyKalmus). (Electron/React)
-
 - **[Beadbox](https://github.com/beadbox/beadbox)** - Native macOS dashboard with real-time sync, epic tree progress bars, multi-workspace support, and inline editing. Install with `brew tap beadbox/cask && brew install --cask beadbox`. Built by [@nmelo](https://github.com/nmelo). (Tauri/Next.js)
 
 ## Data Source Middleware
-
-- **[jira-beads-sync](https://github.com/conallob/jira-beads-sync)** - CLI tool & Claude Code plugin to sync tasks from Jira into beads and publish beads task states back to Jira. Built by [@conallob](https://github.com/conallob). (Go)
 
 - **[stringer](https://github.com/davetashner/stringer)** - Codebase archaeology CLI that mines git repos for TODOs, churn hotspots, lottery-risk files, dependency health, and more. Outputs JSONL compatible with `bd init --from-jsonl`. Install with `brew install davetashner/tap/stringer`. Built by [@davetashner](https://github.com/davetashner). (Go)
 
@@ -85,7 +51,6 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[beads-compound](https://github.com/roberto-mello/beads-compound-plugin)** - Claude Code plugin marketplace with persistent memory and compound-engineering workflows. Hooks auto-capture knowledge from `bd comments add` at session end and inject relevant entries at session start based on open beads. Includes 28 specialized agents, 26 commands, and 15 skills for planning, review, research, and parallel work. Also supports OpenCode and Gemini CLI. Built by [@roberto-mello](https://github.com/roberto-mello). (Bash/TypeScript)
 
-- **[beads-orchestration](https://github.com/AvivK5498/Claude-Code-Beads-Orchestration)** - Multi-agent orchestration skill for Claude Code. Orchestrator investigates issues, manages beads tasks automatically, and delegates to tech-specific supervisors on isolated branches. Includes hooks for workflow enforcement, epic/subtask support, and optional external provider delegation (Codex/Gemini). Install via npm: `npm install -g @avivkaplan/beads-orchestration`. Built by [@AvivK5498](https://github.com/AvivK5498). (Node.js/Python)
 - **[claude-protocol](https://github.com/weselow/claude-protocol)** - Actively maintained fork of beads-orchestration. Ground-up rewrite optimized for Claude 4.6 family models: trigger-based dev rules (TDD, logging, resilience), cross-platform Node.js hooks (replaced 19 bash scripts with 8 .cjs hooks), mandatory checklist verification, session-start dashboard, knowledge base with auto-capture. Install via `npx claude-protocol init`. Built by [@weselow](https://github.com/weselow). (Node.js/Python)
 
 ## Coordination Servers
@@ -93,6 +58,42 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 - **[BeadHub](https://github.com/beadhub/beadhub)** - Open-source coordination server for AI agent teams running beads. The `bdh` CLI is a transparent wrapper over `bd` that adds work claiming, file reservation, presence awareness, and inter-agent messaging (async mail and sync chat). Includes a web dashboard. Free hosted at beadhub.ai for open-source projects. Built by [@juanre](https://github.com/juanre). (Python/TypeScript)
 
 ## Historical / Stale
+
+- **[bdui](https://github.com/assimelha/bdui)** - Real-time terminal UI with tree view, dependency graph, and vim-style navigation. Built by [@assimelha](https://github.com/assimelha). (Node.js)
+
+- **[beads.el](https://codeberg.org/ctietze/beads.el)** - Emacs UI to browse, edit, and manage beads. Built by [@ctietze](https://codeberg.org/ctietze). (Elisp)
+
+- **[lazybeads](https://github.com/codegangsta/lazybeads)** - Lightweight terminal UI built with Bubble Tea for browsing and managing beads issues. Built by [@codegangsta](https://github.com/codegangsta). (Go)
+
+- **[bsv](https://github.com/bglenden/bsv)** - Simple two-panel terminal (TUI) viewer with tree navigation organized by epic/task/sub-task, markdown rendering, and mouse support. Built by [@bglenden](https://github.com/bglenden). (Rust)
+
+- **[abacus](https://github.com/ChrisEdwards/abacus)** - A powerful terminal UI for visualizing and navigating Beads issue tracking databases.
+
+- **[beads-viz-prototype](https://github.com/mattbeane/beads-viz-prototype)** - Web-based visualization generating interactive HTML from `bd export`. Built by [@mattbeane](https://github.com/mattbeane). (Python)
+
+- **[beads-dashboard](https://github.com/rhydlewis/beads-dashboard)** - A local, lean metrics dashboard for your beads data. Provides insights into lead time, throughput and other continuous improvement metrics. Includes a filterable table view of "all issues". Built by [@rhydlewis](https://github.com/rhydlewis). (Node.js/React)
+
+- **[beads-kanban-ui](https://github.com/AvivK5498/Beads-Kanban-UI)** - Visual Kanban board with git branch status tracking, epic/subtask management, design doc viewer, and activity timeline. Install via npm: `npm install -g beads-kanban-ui`. Built by [@AvivK5498](https://github.com/AvivK5498). (TypeScript/Rust)
+
+- **[beads-pm-ui](https://github.com/qosha1/beads-pm-ui)** - Gantt chart timeline view, project / team based filtering (via folder structure), quarterly goal setting and dependency chain visualization. Inline editable. Built by [@qosha1](https://github.com/qosha1). (Nextjs/Typscript)
+
+- **[Beadspace](https://github.com/cameronsjo/beadspace)** - Drop-in GitHub Pages dashboard with triage suggestions, priority/status breakdowns, and searchable issue table. Single HTML file, zero build dependencies, auto-deploys via GitHub Action. Built by [@cameronsjo](https://github.com/cameronsjo). (HTML/CSS/JS)
+
+- **[beadsmap](https://github.com/dariye/beadsmap)** - Interactive roadmap visualization with timeline (Gantt), list, and table views. Multi-source support, dependency arrows, milestone grouping, GitHub integration via OAuth device flow, and light/dark/system themes. Ships as a single `index.html`. Built by [@dariye](https://github.com/dariye). (Svelte/TypeScript)
+
+- **[Agent Native Abstraction Layer for Beads](https://marketplace.visualstudio.com/items?itemName=AgentNativeAbstractionLayer.agent-native-kanban)** (ANAL Beads) - VS Code Kanban board. Maintained by [@sebcook-ctrl](https://github.com/sebcook-ctrl). (Node.js)
+
+- **[Beads-Kanban](https://github.com/davidcforbes/Beads-Kanban)** - VS Code Kanban board for Beads issue tracking. Maintained by [@davidcforbes](https://github.com/davidcforbes). (TypeScript)
+
+- **[nvim-beads](https://github.com/joeblubaugh/nvim-beads)** - Neovim plugin for managing beads. Built by [@joeblubaugh](https://github.com/joeblubaugh). (Lua)
+
+- **[Beadster](https://github.com/beadster/beadster)** - macOS app for browsing and managing issues from `.beads/` directories in git repositories. Built by [@podviaznikov](https://github.com/podviaznikov). (Swift)
+
+-  **[Parade](https://github.com/JeremyKalmus/parade)** - Electron app for workflow orchestration with visual Kanban board, discovery wizard, and task visualization. Run with `npx parade-init`. Built by [@JeremyKalmus](https://github.com/JeremyKalmus). (Electron/React)
+
+- **[jira-beads-sync](https://github.com/conallob/jira-beads-sync)** - CLI tool & Claude Code plugin to sync tasks from Jira into beads and publish beads task states back to Jira. Built by [@conallob](https://github.com/conallob). (Go)
+
+- **[beads-orchestration](https://github.com/AvivK5498/Claude-Code-Beads-Orchestration)** - Multi-agent orchestration skill for Claude Code. Orchestrator investigates issues, manages beads tasks automatically, and delegates to tech-specific supervisors on isolated branches. Includes hooks for workflow enforcement, epic/subtask support, and optional external provider delegation (Codex/Gemini). Install via npm: `npm install -g @avivkaplan/beads-orchestration`. Built by [@AvivK5498](https://github.com/AvivK5498). (Node.js/Python)
 
 - **[beads_viewer](https://github.com/Dicklesworthstone/beads_viewer)** - Terminal interface with tree navigation and vim-style commands. Not compatible with Dolt-based beads (v0.50+); see [issue #121](https://github.com/Dicklesworthstone/beads_viewer/issues/121). Built by [@Dicklesworthstone](https://github.com/Dicklesworthstone). (Go)
 

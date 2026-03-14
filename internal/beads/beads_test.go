@@ -534,6 +534,10 @@ func setupDetachedCommitBeadsWorktree(t *testing.T) (string, string, string) {
 	if err := cmd.Run(); err != nil {
 		t.Skipf("git not available: %v", err)
 	}
+	// Ensure HEAD points to main regardless of init.defaultBranch setting.
+	// Without this, worktree add -b main fails on systems where the default
+	// branch is not "main". Fix inspired by PR #2565 (cwalv).
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 
 	// A bare repo starts with no commits, so HEAD is invalid. Create an
 	// initial empty commit so "git worktree add -b main" can succeed.

@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // ContextInfo contains the effective backend identity and repository context.
@@ -86,7 +87,11 @@ Examples:
 
 		if cfg.IsDoltServerMode() {
 			info.ServerHost = cfg.GetDoltServerHost()
-			info.ServerPort = cfg.GetDoltServerPort()
+			// Use doltserver.DefaultConfig to resolve the actual runtime port
+			// (from port file, env var, etc.) instead of the static config default.
+			// This matches what "bd dolt show" does (GH#2555).
+			dsCfg := doltserver.DefaultConfig(rc.BeadsDir)
+			info.ServerPort = dsCfg.Port
 		}
 
 		if dataDir := cfg.GetDoltDataDir(); dataDir != "" {

@@ -11,14 +11,14 @@
 
 # Beads Documentation
 
-**Beads** (`bd`) is a git-backed issue tracker designed for AI-supervised coding workflows.
+**Beads** (`bd`) is a Dolt-powered issue tracker designed for AI-supervised coding workflows.
 
 ## Why Beads?
 
 Traditional issue trackers (Jira, GitHub Issues) weren't designed for AI agents. Beads was built from the ground up for:
 
 - **AI-native workflows** - Hash-based IDs prevent collisions when multiple agents work concurrently
-- **Git-backed storage** - Issues sync via JSONL files, enabling collaboration across branches
+- **Dolt-backed storage** - Version-controlled SQL database with cell-level merge and native sync
 - **Dependency-aware execution** - `bd ready` shows only unblocked work
 - **Formula system** - Declarative templates for repeatable workflows
 - **Multi-agent coordination** - Routing, gates, and molecules for complex workflows
@@ -5442,7 +5442,7 @@ bd info --json | jq '.config'
 
 Beads was designed specifically for AI-supervised coding workflows:
 - **Hash-based IDs** prevent collisions with concurrent agents
-- **Git-backed storage** enables branch-based workflows
+- **Dolt-backed storage** enables branch-based workflows
 - **Dependency-aware** ready queue for automated work selection
 - **Formula system** for declarative workflow templates
 

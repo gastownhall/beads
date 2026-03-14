@@ -66,7 +66,7 @@ type Storage interface {
 	AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error)
 	GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error)
 	GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error)
-	GetAllEventsSince(ctx context.Context, sinceID int64) ([]*types.Event, error)
+	GetAllEventsSince(ctx context.Context, since time.Time) ([]*types.Event, error)
 
 	// Statistics
 	GetStatistics(ctx context.Context) (*types.Statistics, error)

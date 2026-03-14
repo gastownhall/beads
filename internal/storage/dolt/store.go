@@ -68,6 +68,40 @@ func isTestDatabaseName(name string) bool {
 	return false
 }
 
+// autoStartRefs tracks in-process reference counts for auto-started dolt
+// sql-server processes, keyed by resolved server directory. When the count
+// drops to zero, the server is stopped. This prevents test-started servers
+// from leaking (GH#2542) while allowing multiple stores to share one server.
+var autoStartRefs struct {
+	mu sync.Mutex
+	m  map[string]int
+}
+
+func autoStartAcquire(serverDir string) {
+	autoStartRefs.mu.Lock()
+	defer autoStartRefs.mu.Unlock()
+	if autoStartRefs.m == nil {
+		autoStartRefs.m = make(map[string]int)
+	}
+	autoStartRefs.m[serverDir]++
+}
+
+// autoStartRelease decrements the refcount for serverDir and stops the server
+// when it reaches zero. Returns any error from stopping the server.
+func autoStartRelease(serverDir string) error {
+	autoStartRefs.mu.Lock()
+	defer autoStartRefs.mu.Unlock()
+	if autoStartRefs.m == nil {
+		return nil
+	}
+	autoStartRefs.m[serverDir]--
+	if autoStartRefs.m[serverDir] <= 0 {
+		delete(autoStartRefs.m, serverDir)
+		return doltserver.Stop(serverDir)
+	}
+	return nil
+}
+
 // Compile-time interface check.
 var _ storage.DoltStorage = (*DoltStore)(nil)
 
@@ -110,6 +144,11 @@ type DoltStore struct {
 	remoteUser     string // Remote auth user for Hosted Dolt push/pull (optional)
 	remotePassword string // Remote auth password for Hosted Dolt push/pull (optional)
 	serverMode     bool   // true when connected to external dolt sql-server (not embedded)
+
+	// autoStartedServerDir is set when this store triggered a dolt sql-server
+	// auto-start. Close() uses it to stop the server when the last store
+	// referencing it is closed (tracked via autoStartRefs).
+	autoStartedServerDir string
 }
 
 // Config holds Dolt database configuration
@@ -581,6 +620,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		return nil, ErrCircuitOpen
 	}
 
+	// Tracks server dir if we auto-started a server (for cleanup in Close, GH#2542).
+	var autoStartedDir string
+
 	// Fail-fast TCP check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
 	// rather than waiting for MySQL driver timeouts.
@@ -593,12 +635,17 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			if beadsDir == "" {
 				beadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
 			}
-			port, startErr := doltserver.EnsureRunning(beadsDir)
+			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(beadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
 					"To start manually: bd dolt start\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
 					addr, startErr)
+			}
+			// Track auto-started servers so Close() can stop them (GH#2542).
+			if startedByUs {
+				autoStartedDir = doltserver.ResolveServerDir(beadsDir)
+				autoStartAcquire(autoStartedDir)
 			}
 			// Update port — EnsureRunning allocates an ephemeral port
 			if port != cfg.ServerPort {
@@ -613,6 +660,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// Retry connection with longer timeout (server just started)
 			conn, dialErr = net.DialTimeout("tcp", addr, 2*time.Second)
 			if dialErr != nil {
+				// Release auto-start ref on connection failure
+				if autoStartedDir != "" {
+					_ = autoStartRelease(autoStartedDir)
+				}
 				breaker.RecordFailure()
 				return nil, fmt.Errorf("Dolt server auto-started but still unreachable at %s: %w\n\n"+
 					"Check logs: %s", addr, dialErr, doltserver.LogPath(beadsDir))
@@ -640,19 +691,20 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	store := &DoltStore{
-		db:             db,
-		dbPath:         cfg.Path,
-		database:       cfg.Database,
-		connStr:        connStr,
-		breaker:        breaker,
-		committerName:  cfg.CommitterName,
-		committerEmail: cfg.CommitterEmail,
-		remote:         cfg.Remote,
-		branch:         "main",
-		remoteUser:     cfg.RemoteUser,
-		remotePassword: cfg.RemotePassword,
-		serverMode:     true,
-		readOnly:       cfg.ReadOnly,
+		db:                   db,
+		dbPath:               cfg.Path,
+		database:             cfg.Database,
+		connStr:              connStr,
+		breaker:              breaker,
+		committerName:        cfg.CommitterName,
+		committerEmail:       cfg.CommitterEmail,
+		remote:               cfg.Remote,
+		branch:               "main",
+		remoteUser:           cfg.RemoteUser,
+		remotePassword:       cfg.RemotePassword,
+		serverMode:           true,
+		readOnly:             cfg.ReadOnly,
+		autoStartedServerDir: autoStartedDir,
 	}
 
 	// Schema initialization for server mode (idempotent).
@@ -1143,6 +1195,15 @@ func (s *DoltStore) Close() error {
 		}
 	}
 	s.db = nil
+
+	// Stop auto-started server when the last store referencing it closes.
+	if s.autoStartedServerDir != "" {
+		if stopErr := autoStartRelease(s.autoStartedServerDir); stopErr != nil {
+			// Best-effort: don't mask other errors
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop auto-started dolt server: %v\n", stopErr)
+		}
+		s.autoStartedServerDir = ""
+	}
 
 	// Clean up 0-byte noms LOCK files. The Dolt engine creates these when
 	// opening a database; they should be removed on clean shutdown but may
@@ -1648,20 +1709,14 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 		if err := s.doltCLIPull(ctx, creds); err != nil {
 			return err
 		}
-		if err := s.resetAutoIncrements(ctx); err != nil {
-			return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
-		}
 		return nil
 	}
-	// Credential CLI routing: mirrors git-protocol path including resetAutoIncrements.
+	// Credential CLI routing: mirrors git-protocol path.
 	// Skips pullWithAutoResolve (consistent with git-protocol Pull — CLI manages its
 	// own connections and conflict handling).
 	if s.shouldUseCLIForCredentials(ctx) {
 		if err := s.doltCLIPull(ctx, creds); err != nil {
 			return err
-		}
-		if err := s.resetAutoIncrements(ctx); err != nil {
-			return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
 		}
 		return nil
 	}
@@ -1670,17 +1725,11 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 			if err := s.pullWithAutoResolve(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
 				return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
 			}
-			if err := s.resetAutoIncrements(ctx); err != nil {
-				return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
-			}
 			return nil
 		})
 	}
 	if err := s.pullWithAutoResolve(ctx, "CALL DOLT_PULL(?, ?)", s.remote, s.branch); err != nil {
 		return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
-	}
-	if err := s.resetAutoIncrements(ctx); err != nil {
-		return fmt.Errorf("failed to reset auto-increments after pull: %w", err)
 	}
 	return nil
 }
@@ -1795,31 +1844,6 @@ func (s *DoltStore) tryAutoResolveMetadataConflicts(ctx context.Context, tx *sql
 	return true, nil
 }
 
-func (s *DoltStore) resetAutoIncrements(ctx context.Context) error {
-	tables := []string{"events", "comments", "issue_snapshots", "compaction_snapshots", "wisp_events", "wisp_comments"}
-	for _, table := range tables {
-		var maxID int64
-		//nolint:gosec // G201: table is a hardcoded constant
-		err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COALESCE(MAX(id), 0) FROM %s", table)).Scan(&maxID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			var mysqlErr *mysql.MySQLError
-			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1146 {
-				continue
-			}
-			return fmt.Errorf("failed to query max id for %s: %w", table, err)
-		}
-		if maxID > 0 {
-			//nolint:gosec // G201: table is a hardcoded constant
-			if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d", table, maxID+1)); err != nil {
-				return fmt.Errorf("failed to reset AUTO_INCREMENT for %s: %w", table, err)
-			}
-		}
-	}
-	return nil
-}
 
 // Branch creates a new branch
 func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {

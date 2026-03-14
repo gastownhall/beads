@@ -287,4 +287,49 @@ func TestImportFromLocalJSONL(t *testing.T) {
 			t.Errorf("Expected auto-detected prefix 'myprefix', got %q", prefix)
 		}
 	})
+
+	t.Run("re-import does not duplicate comments", func(t *testing.T) {
+		// Comments use an auto-increment PK, so a naive INSERT would create
+		// duplicates on every re-import. PersistComments must deduplicate
+		// by checking (issue_id, author, created_at) before inserting.
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlContent := `{"id":"test-cmt1","title":"Issue with comments","type":"task","status":"open","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z","comments":[{"author":"alice","text":"First comment","created_at":"2025-01-01T12:00:00Z"},{"author":"bob","text":"Second comment","created_at":"2025-01-01T13:00:00Z"}]}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+
+		// First import
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("first import failed: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("Expected 1 issue imported, got %d", count)
+		}
+
+		// Second import — same data
+		count2, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("second import failed: %v", err)
+		}
+		if count2 != 1 {
+			t.Errorf("Expected 1 issue on re-import, got %d", count2)
+		}
+
+		// Verify comments were NOT duplicated
+		issue, err := store.GetIssue(ctx, "test-cmt1")
+		if err != nil {
+			t.Fatalf("Failed to get issue: %v", err)
+		}
+		if len(issue.Comments) != 2 {
+			t.Errorf("Expected 2 comments after re-import, got %d (duplicates!)", len(issue.Comments))
+		}
+	})
 }

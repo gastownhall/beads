@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -254,24 +255,24 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 	}
 
 	if filter.TitleSearch != "" {
-		whereClauses = append(whereClauses, "title LIKE ?")
-		args = append(args, "%"+filter.TitleSearch+"%")
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.TitleSearch)+"%")
 	}
 	if filter.TitleContains != "" {
-		whereClauses = append(whereClauses, "title LIKE ?")
-		args = append(args, "%"+filter.TitleContains+"%")
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.TitleContains)+"%")
 	}
 	if filter.DescriptionContains != "" {
-		whereClauses = append(whereClauses, "description LIKE ?")
-		args = append(args, "%"+filter.DescriptionContains+"%")
+		whereClauses = append(whereClauses, "LOWER(description) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.DescriptionContains)+"%")
 	}
 	if filter.NotesContains != "" {
-		whereClauses = append(whereClauses, "notes LIKE ?")
-		args = append(args, "%"+filter.NotesContains+"%")
+		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.NotesContains)+"%")
 	}
 	if filter.ExternalRefContains != "" {
-		whereClauses = append(whereClauses, "external_ref LIKE ?")
-		args = append(args, "%"+filter.ExternalRefContains+"%")
+		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
 	}
 
 	// Status
@@ -845,19 +846,16 @@ func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, autho
 	}
 
 	createdAt = createdAt.UTC()
+	id := uuid.Must(uuid.NewV7()).String()
 	//nolint:gosec // G201: table is hardcoded
-	res, err := t.tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, author, text, created_at)
-		VALUES (?, ?, ?, ?)
-	`, table), issueID, author, text, createdAt)
+	_, err = t.tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (id, issue_id, author, text, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, table), id, issueID, author, text, createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add comment: %w", err)
 	}
 	t.markDirty(table)
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get comment id: %w", err)
-	}
 
 	return &types.Comment{ID: id, IssueID: issueID, Author: author, Text: text, CreatedAt: createdAt}, nil
 }
@@ -873,7 +871,7 @@ func (t *doltTransaction) GetIssueComments(ctx context.Context, issueID string) 
 		SELECT id, issue_id, author, text, created_at
 		FROM %s
 		WHERE issue_id = ?
-		ORDER BY created_at ASC
+		ORDER BY created_at ASC, id ASC
 	`, table), issueID)
 	if err != nil {
 		return nil, wrapQueryError("get comments in tx", err)

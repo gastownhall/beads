@@ -1,7 +1,7 @@
 # Beads (bd)
 
-> Git-backed issue tracker for AI-supervised coding workflows.
-> Dolt-powered CLI with formulas, molecules, and multi-agent coordination.
+> Dolt-powered issue tracker for AI-supervised coding workflows.
+> CLI with formulas, molecules, and multi-agent coordination.
 
 ## Quick Start
 

@@ -1,6 +1,6 @@
 # bd - Beads
 
-**Distributed, git-backed graph issue tracker for AI agents.**
+**Distributed graph issue tracker for AI agents, powered by [Dolt](https://github.com/dolthub/dolt).**
 
 **Platforms:** macOS, Linux, Windows, FreeBSD
 
@@ -55,7 +55,7 @@ Beads supports hierarchical IDs for epics:
 * `bd-a3f8.1` (Task)
 * `bd-a3f8.1.1` (Sub-task)
 
-**Stealth Mode:** Run `bd init --stealth` to use Beads locally without committing files to the main repo. Perfect for personal use on shared projects.
+**Stealth Mode:** Run `bd init --stealth` to use Beads locally without committing files to the main repo. Perfect for personal use on shared projects. See [Git-Free Usage](#-git-free-usage) below.
 
 **Contributor vs Maintainer:** When working on open-source projects:
 
@@ -73,6 +73,37 @@ Beads supports hierarchical IDs for epics:
 ## 🌐 Community Tools
 
 See [docs/COMMUNITY_TOOLS.md](docs/COMMUNITY_TOOLS.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
+
+## 🚀 Git-Free Usage
+
+Beads works without git. The Dolt database is the storage backend — git
+integration (hooks, repo discovery, identity) is optional.
+
+```bash
+# Initialize without git
+export BEADS_DIR=/path/to/your/project/.beads
+bd init --quiet --stealth
+
+# All core commands work with zero git calls
+bd create "Fix auth bug" -p 1 -t bug
+bd ready --json
+bd update bd-a1b2 --claim
+bd prime
+bd close bd-a1b2 "Fixed"
+```
+
+`BEADS_DIR` tells bd where to put the `.beads/` database directory,
+bypassing git repo discovery. `--stealth` sets `no-git-ops: true` in
+config, disabling all git hook installation and git operations.
+
+This is useful for:
+- **Non-git VCS** (Sapling, Jujutsu, Piper) — no `.git/` directory needed
+- **Monorepos** — point `BEADS_DIR` at a specific subdirectory
+- **CI/CD** — isolated task tracking without repo-level side effects
+- **Evaluation/testing** — ephemeral databases in `/tmp`
+
+For daemon mode without git, use `bd daemon start --local`
+(see [PR #433](https://github.com/steveyegge/beads/pull/433)).
 
 ## 📝 Documentation
 

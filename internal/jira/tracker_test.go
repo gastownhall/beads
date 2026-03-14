@@ -590,7 +590,7 @@ func (s *configStore) GetIssueComments(_ context.Context, _ string) ([]*types.Co
 func (s *configStore) GetEvents(_ context.Context, _ string, _ int) ([]*types.Event, error) {
 	return nil, nil
 }
-func (s *configStore) GetAllEventsSince(_ context.Context, _ int64) ([]*types.Event, error) {
+func (s *configStore) GetAllEventsSince(_ context.Context, _ time.Time) ([]*types.Event, error) {
 	return nil, nil
 }
 func (s *configStore) GetStatistics(_ context.Context) (*types.Statistics, error) { return nil, nil }

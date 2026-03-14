@@ -7,7 +7,7 @@ slug: /
 
 # Beads Documentation
 
-**Beads** (`bd`) is a git-backed issue tracker designed for AI-supervised coding workflows.
+**Beads** (`bd`) is a Dolt-powered issue tracker designed for AI-supervised coding workflows.
 
 ## Why Beads?
 

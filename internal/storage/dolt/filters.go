@@ -60,24 +60,24 @@ func buildIssueFilterClauses(query string, filter types.IssueFilter, tables filt
 	}
 
 	if filter.TitleSearch != "" {
-		whereClauses = append(whereClauses, "title LIKE ?")
-		args = append(args, "%"+filter.TitleSearch+"%")
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.TitleSearch)+"%")
 	}
 	if filter.TitleContains != "" {
-		whereClauses = append(whereClauses, "title LIKE ?")
-		args = append(args, "%"+filter.TitleContains+"%")
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.TitleContains)+"%")
 	}
 	if filter.DescriptionContains != "" {
-		whereClauses = append(whereClauses, "description LIKE ?")
-		args = append(args, "%"+filter.DescriptionContains+"%")
+		whereClauses = append(whereClauses, "LOWER(description) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.DescriptionContains)+"%")
 	}
 	if filter.NotesContains != "" {
-		whereClauses = append(whereClauses, "notes LIKE ?")
-		args = append(args, "%"+filter.NotesContains+"%")
+		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.NotesContains)+"%")
 	}
 	if filter.ExternalRefContains != "" {
-		whereClauses = append(whereClauses, "external_ref LIKE ?")
-		args = append(args, "%"+filter.ExternalRefContains+"%")
+		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
+		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
 	}
 
 	// Status filters

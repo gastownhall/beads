@@ -274,8 +274,10 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 }
 
 // PersistComments writes issue.Comments into the appropriate comments table.
-// Note: ON DUPLICATE KEY UPDATE is a no-op here since the comments table uses
-// an auto-increment PK. Kept for consistency with DoltStore (GH#2061).
+// The comments table uses an auto-increment PK, so ON DUPLICATE KEY UPDATE
+// would never match. Instead, we check for an existing identical comment
+// (same issue_id, author, and created_at) before inserting to prevent
+// duplicates on re-import.
 func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) error {
 	if len(issue.Comments) == 0 {
 		return nil
@@ -289,11 +291,24 @@ func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) error 
 		if createdAt.IsZero() {
 			createdAt = time.Now().UTC()
 		}
+		// Check for existing identical comment to prevent duplicates on re-import.
+		// The auto-increment PK means ON DUPLICATE KEY UPDATE would never fire,
+		// so we do an explicit existence check instead.
+		var exists int
+		//nolint:gosec // G201: table is determined by ephemeral flag
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT COUNT(*) FROM %s
+			WHERE issue_id = ? AND author = ? AND created_at = ?
+		`, commentTable), issue.ID, comment.Author, createdAt).Scan(&exists); err != nil {
+			return fmt.Errorf("failed to check comment existence for %s: %w", issue.ID, err)
+		}
+		if exists > 0 {
+			continue
+		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE text = VALUES(text)
 		`, commentTable), issue.ID, comment.Author, comment.Text, createdAt)
 		if err != nil {
 			return fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
