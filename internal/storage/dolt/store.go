@@ -558,6 +558,15 @@ func applyConfigDefaults(cfg *Config) {
 			cfg.ServerPort = p
 		}
 	}
+	// If env var didn't provide a port, consult the full resolution chain:
+	// port file > config.yaml > metadata.json (GH#2590).
+	// Previously, port 0 fell through to the MySQL driver default (3307),
+	// causing cross-project connections when another Dolt sat on 3307.
+	if cfg.ServerPort == 0 && cfg.Path != "" {
+		if resolved := doltserver.DefaultConfig(cfg.Path); resolved.Port > 0 {
+			cfg.ServerPort = resolved.Port
+		}
+	}
 	// Port 0 means "not yet resolved" — auto-start (EnsureRunning) will
 	// allocate an ephemeral port. Don't default to 3307 as that caused
 	// cross-project data leakage (GH#2098, GH#2372).
@@ -1843,7 +1852,6 @@ func (s *DoltStore) tryAutoResolveMetadataConflicts(ctx context.Context, tx *sql
 
 	return true, nil
 }
-
 
 // Branch creates a new branch
 func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
