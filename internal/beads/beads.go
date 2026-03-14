@@ -9,6 +9,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,66 @@ const CanonicalDatabaseName = "beads.db"
 
 // RedirectFileName is the name of the file that redirects to another .beads directory
 const RedirectFileName = "redirect"
+
+// SourceDatabaseInfo contains the dolt_database name from a source .beads/metadata.json,
+// preserved across a redirect so that the source directory's database identity is not
+// lost when the redirect target has a different dolt_database.
+//
+// When a .beads/redirect points to a shared .beads directory that serves multiple
+// databases, the source's metadata.json may specify a different dolt_database than
+// the target's. This struct captures the source database name so callers can
+// restore it after redirect resolution.
+type SourceDatabaseInfo struct {
+	// SourceDir is the original .beads directory (before redirect)
+	SourceDir string
+	// TargetDir is the resolved .beads directory (after redirect)
+	TargetDir string
+	// WasRedirected is true if a redirect was followed
+	WasRedirected bool
+	// SourceDatabase is dolt_database from the source metadata.json (raw field,
+	// NOT the env-var-aware GetDoltDatabase()). Empty if no source metadata exists
+	// or the source has no dolt_database configured.
+	SourceDatabase string
+}
+
+// ResolveRedirect follows a .beads/redirect file and captures the source directory's
+// dolt_database from metadata.json BEFORE following the redirect. This preserves
+// the source database identity across redirects.
+//
+// The env var BEADS_DOLT_SERVER_DATABASE still takes highest priority (handled by
+// GetDoltDatabase() in callers). This function only captures the raw config field
+// so callers can use it as an override when the env var is not set.
+//
+// Returns SourceDatabaseInfo with WasRedirected=true if a redirect was followed,
+// and SourceDatabase set to the source's dolt_database (if any).
+func ResolveRedirect(beadsDir string) SourceDatabaseInfo {
+	info := SourceDatabaseInfo{
+		SourceDir: beadsDir,
+		TargetDir: beadsDir,
+	}
+
+	// Read source metadata.json directly (NOT via configfile.Load which may trigger
+	// Dolt connections or recursive FollowRedirect calls causing deadlocks).
+	// We only need the raw dolt_database field.
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	if data, err := os.ReadFile(metadataPath); err == nil {
+		var raw struct {
+			DoltDatabase string `json:"dolt_database"`
+		}
+		if json.Unmarshal(data, &raw) == nil {
+			info.SourceDatabase = raw.DoltDatabase
+		}
+	}
+
+	// Follow redirect
+	resolved := FollowRedirect(beadsDir)
+	if resolved != beadsDir {
+		info.WasRedirected = true
+		info.TargetDir = resolved
+	}
+
+	return info
+}
 
 // FollowRedirect checks if a .beads directory contains a redirect file and follows it.
 // If a redirect file exists, it returns the target .beads directory path.

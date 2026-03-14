@@ -181,8 +181,15 @@ func ResolveBeadsDirForRig(rigOrPrefix, currentBeadsDir string) (beadsDir string
 		targetPath = filepath.Join(townRoot, route.Path, ".beads")
 	}
 
-	// Follow redirect if present
-	targetPath = beads.FollowRedirect(targetPath)
+	// Follow redirect, preserving source dolt_database
+	rInfo := beads.ResolveRedirect(targetPath)
+	targetPath = rInfo.TargetDir
+	if rInfo.WasRedirected && rInfo.SourceDatabase != "" && os.Getenv("BEADS_DOLT_SERVER_DATABASE") == "" {
+		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", rInfo.SourceDatabase)
+		if os.Getenv("BD_DEBUG_ROUTING") != "" {
+			fmt.Fprintf(os.Stderr, "[routing] Preserved source dolt_database %q across redirect for rig %q\n", rInfo.SourceDatabase, rigOrPrefix)
+		}
+	}
 
 	// Verify the target exists
 	if info, statErr := os.Stat(targetPath); statErr != nil || !info.IsDir() {
@@ -231,6 +238,10 @@ func ResolveToExternalRef(id, beadsDir string) string {
 // It first checks the local beads directory, then consults routes.jsonl for prefix-based routing.
 // If routes.jsonl is not found locally, it searches up to the town root.
 //
+// When a redirect is followed, the source directory's dolt_database is preserved via
+// BEADS_DOLT_SERVER_DATABASE env var so GetDoltDatabase() picks it up automatically.
+// This prevents the redirect target's database from overriding the source's.
+//
 // Parameters:
 //   - ctx: context for database operations
 //   - id: the issue ID to look up
@@ -259,8 +270,15 @@ func ResolveBeadsDirForID(ctx context.Context, id, currentBeadsDir string) (stri
 						targetPath = filepath.Join(townRoot, route.Path, ".beads")
 					}
 
-					// Follow redirect if present
-					targetPath = beads.FollowRedirect(targetPath)
+					// Follow redirect, preserving source dolt_database
+					rInfo := beads.ResolveRedirect(targetPath)
+					targetPath = rInfo.TargetDir
+					if rInfo.WasRedirected && rInfo.SourceDatabase != "" && os.Getenv("BEADS_DOLT_SERVER_DATABASE") == "" {
+						_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", rInfo.SourceDatabase)
+						if os.Getenv("BD_DEBUG_ROUTING") != "" {
+							fmt.Fprintf(os.Stderr, "[routing] Preserved source dolt_database %q across redirect for %s\n", rInfo.SourceDatabase, id)
+						}
+					}
 
 					// Verify the target exists
 					if info, err := os.Stat(targetPath); err == nil && info.IsDir() {

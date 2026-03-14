@@ -78,7 +78,10 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore *dolt.DoltSto
 	// Check if this ID routes to a different beads directory.
 	beadsDir := filepath.Dir(dbPath)
 	targetDir, routed, routeErr := routing.ResolveBeadsDirForID(ctx, id, beadsDir)
-	routesDifferently := routeErr == nil && routed && targetDir != beadsDir
+	// Redirects may resolve back to the same .beads directory but with a different
+	// dolt_database. ResolveBeadsDirForID sets BEADS_DOLT_SERVER_DATABASE when a
+	// redirect changes the database, so we check for that too.
+	routesDifferently := routeErr == nil && routed && (targetDir != beadsDir || os.Getenv("BEADS_DOLT_SERVER_DATABASE") != "")
 
 	// When routing says this ID belongs to a different database, go directly
 	// to the routed store. Checking the local store first would risk finding
@@ -204,7 +207,10 @@ func getIssueWithRouting(ctx context.Context, localStore *dolt.DoltStore, id str
 	// Check if this ID routes to a different beads directory.
 	beadsDir := filepath.Dir(dbPath)
 	targetDir, routed, routeErr := routing.ResolveBeadsDirForID(ctx, id, beadsDir)
-	routesDifferently := routeErr == nil && routed && targetDir != beadsDir
+	// Redirects may resolve back to the same .beads directory but with a different
+	// dolt_database. ResolveBeadsDirForID sets BEADS_DOLT_SERVER_DATABASE when a
+	// redirect changes the database, so we check for that too.
+	routesDifferently := routeErr == nil && routed && (targetDir != beadsDir || os.Getenv("BEADS_DOLT_SERVER_DATABASE") != "")
 
 	if routesDifferently {
 		routedStore, err := dolt.NewFromConfig(ctx, targetDir)

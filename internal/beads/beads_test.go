@@ -1,12 +1,14 @@
 package beads
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -1811,5 +1813,234 @@ func TestFindDatabasePath_WorktreeNoLocalDB(t *testing.T) {
 
 	if resultResolved != mainDoltResolved {
 		t.Errorf("FindDatabasePath() = %q, want main repo shared db %q", result, mainDoltDir)
+	}
+}
+
+// writeMetadataJSON writes a metadata.json file to the given .beads directory.
+func writeMetadataJSON(t *testing.T, beadsDir string, cfg *configfile.Config) {
+	t.Helper()
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal metadata.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+}
+
+// TestResolveRedirect_PreservesSourceDatabase tests that ResolveRedirect captures
+// the source rig's dolt_database from metadata.json before following a redirect.
+// When a source directory has a redirect to a shared directory with a different
+// dolt_database, the source database name must be preserved.
+func TestResolveRedirect_PreservesSourceDatabase(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Resolve symlinks for macOS /private/var path consistency
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	// Create source .beads with dolt_database: "lola"
+	sourceDir := filepath.Join(tmpDir, "lola", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, sourceDir, &configfile.Config{
+		Database:     "beads.db",
+		DoltMode:     "server",
+		DoltDatabase: "lola",
+	})
+
+	// Create target (shared) .beads with dolt_database: "hq"
+	targetDir := filepath.Join(tmpDir, "town", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, targetDir, &configfile.Config{
+		Database:     "beads.db",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+
+	// Write redirect from source to target
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := ResolveRedirect(sourceDir)
+
+	// Verify redirect was followed
+	if !info.WasRedirected {
+		t.Error("expected WasRedirected=true")
+	}
+
+	// Verify source database is preserved
+	if info.SourceDatabase != "lola" {
+		t.Errorf("SourceDatabase = %q, want %q", info.SourceDatabase, "lola")
+	}
+
+	// Verify source and target dirs are correct
+	sourceResolved, _ := filepath.EvalSymlinks(sourceDir)
+	targetResolved, _ := filepath.EvalSymlinks(targetDir)
+	infoSourceResolved, _ := filepath.EvalSymlinks(info.SourceDir)
+	infoTargetResolved, _ := filepath.EvalSymlinks(info.TargetDir)
+
+	if infoSourceResolved != sourceResolved {
+		t.Errorf("SourceDir = %q, want %q", info.SourceDir, sourceDir)
+	}
+	if infoTargetResolved != targetResolved {
+		t.Errorf("TargetDir = %q, want %q", info.TargetDir, targetDir)
+	}
+}
+
+// TestResolveRedirect_NoRedirect tests that ResolveRedirect works correctly when
+// there is no redirect file (source and target are the same).
+func TestResolveRedirect_NoRedirect(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, beadsDir, &configfile.Config{
+		Database:     "beads.db",
+		DoltDatabase: "mydb",
+	})
+
+	info := ResolveRedirect(beadsDir)
+
+	if info.WasRedirected {
+		t.Error("expected WasRedirected=false when no redirect file exists")
+	}
+	if info.SourceDatabase != "mydb" {
+		t.Errorf("SourceDatabase = %q, want %q", info.SourceDatabase, "mydb")
+	}
+
+	beadsDirResolved, _ := filepath.EvalSymlinks(beadsDir)
+	infoSourceResolved, _ := filepath.EvalSymlinks(info.SourceDir)
+	infoTargetResolved, _ := filepath.EvalSymlinks(info.TargetDir)
+
+	if infoSourceResolved != beadsDirResolved {
+		t.Errorf("SourceDir = %q, want %q", info.SourceDir, beadsDir)
+	}
+	if infoTargetResolved != beadsDirResolved {
+		t.Errorf("TargetDir = %q, want same as source %q when no redirect", info.TargetDir, beadsDir)
+	}
+}
+
+// TestResolveRedirect_NoSourceMetadata tests that ResolveRedirect handles a source
+// directory with no metadata.json (SourceDatabase should be empty).
+func TestResolveRedirect_NoSourceMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "rig", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// No metadata.json in source
+
+	targetDir := filepath.Join(tmpDir, "town", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, targetDir, &configfile.Config{
+		Database:     "beads.db",
+		DoltDatabase: "hq",
+	})
+
+	// Write redirect from source to target
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := ResolveRedirect(sourceDir)
+
+	if !info.WasRedirected {
+		t.Error("expected WasRedirected=true")
+	}
+	if info.SourceDatabase != "" {
+		t.Errorf("SourceDatabase = %q, want empty string when no source metadata", info.SourceDatabase)
+	}
+}
+
+// TestResolveRedirect_SourceHasNoDoltDatabase tests that ResolveRedirect handles
+// a source whose metadata.json exists but has no dolt_database field.
+func TestResolveRedirect_SourceHasNoDoltDatabase(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "rig", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Source metadata has no dolt_database
+	writeMetadataJSON(t, sourceDir, &configfile.Config{
+		Database: "beads.db",
+	})
+
+	targetDir := filepath.Join(tmpDir, "town", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, targetDir, &configfile.Config{
+		Database:     "beads.db",
+		DoltDatabase: "hq",
+	})
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := ResolveRedirect(sourceDir)
+
+	if !info.WasRedirected {
+		t.Error("expected WasRedirected=true")
+	}
+	// No dolt_database in source => SourceDatabase should be empty
+	// This means the target's dolt_database will be used (no override)
+	if info.SourceDatabase != "" {
+		t.Errorf("SourceDatabase = %q, want empty string when source has no dolt_database", info.SourceDatabase)
+	}
+}
+
+// TestResolveRedirect_SourceDatabaseAvailableForRouting tests that ResolveRedirect
+// captures the source database so callers (like routing code) can set the env var.
+// The env var is NOT set by FollowRedirect itself (that caused hangs from circular
+// configfile.Load calls). Instead, routing callers use ResolveRedirect and set
+// BEADS_DOLT_SERVER_DATABASE explicitly.
+func TestResolveRedirect_SourceDatabaseAvailableForRouting(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	// Create source .beads with dolt_database: "lola"
+	sourceDir := filepath.Join(tmpDir, "lola", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, sourceDir, &configfile.Config{
+		DoltDatabase: "lola",
+	})
+
+	// Create target (shared) .beads with dolt_database: "hq"
+	targetDir := filepath.Join(tmpDir, "town", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, targetDir, &configfile.Config{
+		DoltDatabase: "hq",
+	})
+
+	// Write redirect
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := ResolveRedirect(sourceDir)
+
+	// Source database should be available for routing callers to use
+	if info.SourceDatabase != "lola" {
+		t.Errorf("SourceDatabase = %q, want %q", info.SourceDatabase, "lola")
+	}
+	if !info.WasRedirected {
+		t.Error("expected WasRedirected=true")
 	}
 }
