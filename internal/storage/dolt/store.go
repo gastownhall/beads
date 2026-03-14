@@ -1844,7 +1844,6 @@ func (s *DoltStore) tryAutoResolveMetadataConflicts(ctx context.Context, tx *sql
 	return true, nil
 }
 
-
 // Branch creates a new branch
 func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
 	ctx, span := doltTracer.Start(ctx, "dolt.branch",
