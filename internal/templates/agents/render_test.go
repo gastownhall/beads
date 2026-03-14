@@ -123,10 +123,10 @@ func TestRenderSectionFullBackcompat(t *testing.T) {
 
 func TestParseMarker(t *testing.T) {
 	tests := []struct {
-		name    string
-		line    string
-		want    SectionMeta
-		wantOK  bool
+		name   string
+		line   string
+		want   SectionMeta
+		wantOK bool
 	}{
 		{
 			name:   "new format with profile and hash",
