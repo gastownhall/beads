@@ -153,6 +153,28 @@ func TestIsRunningStalePID(t *testing.T) {
 	}
 }
 
+func TestIsRunningStalePIDRemovesPortFile(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(pidPath(dir), []byte("99999999"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Error("expected Running=false for stale PID")
+	}
+	if _, err := os.Stat(portPath(dir)); !os.IsNotExist(err) {
+		t.Error("expected stale port file to be removed")
+	}
+}
+
 func TestIsRunningCorruptPID(t *testing.T) {
 	dir := t.TempDir()
 
@@ -181,6 +203,28 @@ func TestIsRunningCorruptPID(t *testing.T) {
 	// PID file should have been cleaned up
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Error("expected corrupt PID file to be removed")
+	}
+}
+
+func TestIsRunningCorruptPIDRemovesPortFile(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(pidPath(dir), []byte("not-a-number"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Error("expected Running=false for corrupt PID file")
+	}
+	if _, err := os.Stat(portPath(dir)); !os.IsNotExist(err) {
+		t.Error("expected stale port file to be removed")
 	}
 }
 
@@ -533,6 +577,70 @@ func TestCleanupStateFiles(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("expected %s to be removed", filepath.Base(path))
 		}
+	}
+}
+
+func TestKillStaleServersPreservesOtherRepoServers(t *testing.T) {
+	dir := t.TempDir()
+	canonicalPID := 111
+	sameRepoOrphanPID := 222
+	otherRepoPID := 333
+
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(canonicalPID)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var killed []int
+	got, err := killStaleServersForDir(
+		dir,
+		[]int{canonicalPID, sameRepoOrphanPID, otherRepoPID},
+		func(pid int, doltDir string) bool {
+			if doltDir != ResolveDoltDir(dir) {
+				t.Fatalf("unexpected dolt dir: got %q want %q", doltDir, ResolveDoltDir(dir))
+			}
+			return pid == canonicalPID || pid == sameRepoOrphanPID
+		},
+		func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("killStaleServersForDir error: %v", err)
+	}
+	if len(got) != 1 || got[0] != sameRepoOrphanPID {
+		t.Fatalf("killed=%v, want [%d]", got, sameRepoOrphanPID)
+	}
+	if len(killed) != 1 || killed[0] != sameRepoOrphanPID {
+		t.Fatalf("kill callback got %v, want [%d]", killed, sameRepoOrphanPID)
+	}
+}
+
+func TestKillStaleServersWithoutCanonicalPIDOnlyKillsOwnedDir(t *testing.T) {
+	dir := t.TempDir()
+	sameRepoOrphanPID := 222
+	otherRepoPID := 333
+
+	var killed []int
+	got, err := killStaleServersForDir(
+		dir,
+		[]int{sameRepoOrphanPID, otherRepoPID},
+		func(pid int, _ string) bool {
+			return pid == sameRepoOrphanPID
+		},
+		func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("killStaleServersForDir error: %v", err)
+	}
+	if len(got) != 1 || got[0] != sameRepoOrphanPID {
+		t.Fatalf("killed=%v, want [%d]", got, sameRepoOrphanPID)
+	}
+	if len(killed) != 1 || killed[0] != sameRepoOrphanPID {
+		t.Fatalf("kill callback got %v, want [%d]", killed, sameRepoOrphanPID)
 	}
 }
 
