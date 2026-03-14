@@ -79,7 +79,7 @@ func installAgents(env agentsEnv, integration agentsIntegration) error {
 	}
 
 	var currentContent string
-	data, err := os.ReadFile(resolvedPath)
+	data, err := os.ReadFile(resolvedPath) // #nosec G304 -- resolvedPath is derived from env.agentsPath via ResolveForWrite
 	if err == nil {
 		currentContent = string(data)
 	} else if !os.IsNotExist(err) {
