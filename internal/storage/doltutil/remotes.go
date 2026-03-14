@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/storage"
 )
 
 // ShellQuote returns s wrapped in single quotes with any embedded single

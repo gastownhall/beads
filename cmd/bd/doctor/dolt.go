@@ -12,10 +12,10 @@ import (
 	// MySQL driver for connecting to dolt sql-server
 	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/lockfile"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/doltserver"
+	"github.com/gastownhall/beads/internal/lockfile"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // openDoltDB opens a connection to the Dolt SQL server via MySQL protocol.

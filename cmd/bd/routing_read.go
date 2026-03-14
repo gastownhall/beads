@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/debug"
+	"github.com/gastownhall/beads/internal/routing"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // getRoutingConfigValue resolves routing config from YAML/env first, then DB config.

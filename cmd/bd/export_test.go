@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/gastownhall/beads/internal/testutil"
 )
 
 func TestExportToFile(t *testing.T) {

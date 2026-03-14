@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // runContributorWizard guides the user through OSS contributor setup

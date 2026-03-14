@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/git"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // preCommitFrameworkPattern matches pre-commit or prek framework hooks.
@@ -306,5 +306,5 @@ func printJJAliasInstructions() {
 	fmt.Printf("  %s\n", ui.RenderAccent("[aliases]"))
 	fmt.Printf("  %s\n", ui.RenderAccent(`push = ["util", "exec", "--", "sh", "-c", "bd dolt commit && bd dolt push && jj git push \"$@\"", ""]`))
 	fmt.Printf("\nThen use %s instead of %s\n\n", ui.RenderAccent("jj push"), ui.RenderAccent("jj git push"))
-	fmt.Printf("For more details, see: https://github.com/steveyegge/beads/blob/main/docs/GIT_INTEGRATION.md#branchless-workflows-jujutsu--jj\n\n")
+	fmt.Printf("For more details, see: https://github.com/gastownhall/beads/blob/main/docs/GIT_INTEGRATION.md#branchless-workflows-jujutsu--jj\n\n")
 }

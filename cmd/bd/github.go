@@ -9,11 +9,11 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/github"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/github"
+	"github.com/gastownhall/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/tracker"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // GitHubConfig holds GitHub connection configuration.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // TestUpdateIssueIDUpdatesWispTables verifies that renaming a regular issue

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // captureGraphOutput captures stdout output during f() execution

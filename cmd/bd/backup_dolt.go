@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/doltserver"
 )
 
 // --- Dolt-native backup commands ---

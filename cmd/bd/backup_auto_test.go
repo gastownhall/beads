@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/gastownhall/beads/internal/config"
 )
 
 func TestIsBackupAutoEnabled(t *testing.T) {

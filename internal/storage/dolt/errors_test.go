@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/storage"
 )
 
 func TestWrapDBError(t *testing.T) {

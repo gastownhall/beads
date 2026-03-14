@@ -25,7 +25,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/gastownhall/beads/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------

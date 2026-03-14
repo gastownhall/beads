@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/gastownhall/beads/internal/storage/embeddeddolt"
 	"golang.org/x/sync/errgroup"
 )
 

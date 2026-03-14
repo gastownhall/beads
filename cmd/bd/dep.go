@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/routing"
+	"github.com/gastownhall/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/types"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // getBeadsDir returns the .beads directory path, derived from the global dbPath.

@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/cmd/bd/doctor"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/debug"
+	"github.com/gastownhall/beads/internal/doltserver"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // localVersionFile is the gitignored file that stores the last bd version used locally.

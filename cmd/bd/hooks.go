@@ -12,8 +12,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/git"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/git"
 )
 
 // managedHookNames lists the git hooks managed by beads.

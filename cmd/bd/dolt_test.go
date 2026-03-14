@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/gastownhall/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/doltserver"
 )
 
 func TestDoltShowConfigNotInRepo(t *testing.T) {

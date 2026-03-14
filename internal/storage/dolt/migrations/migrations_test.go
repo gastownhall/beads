@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/gastownhall/beads/internal/testutil"
 )
 
 // openTestDoltBranch returns a *sql.DB connected to an isolated branch on the

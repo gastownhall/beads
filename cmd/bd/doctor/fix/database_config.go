@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/configfile"
 )
 
 // DatabaseConfig auto-detects and fixes metadata.json database config mismatches.

@@ -17,10 +17,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/gastownhall/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/git"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/utils"
 )
 
 // CanonicalDatabaseName is the required database filename for all beads repositories

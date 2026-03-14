@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/git"
+	"github.com/gastownhall/beads/internal/git"
 )
 
 // CheckHooksQuick does a fast check for outdated git hooks.

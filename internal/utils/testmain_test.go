@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/gastownhall/beads/internal/testutil"
 )
 
 // testServerPort is the port of the isolated test Dolt server (0 = not running).

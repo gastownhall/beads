@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // validRefPattern matches valid Dolt commit hashes (32 hex chars) or branch names.

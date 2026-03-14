@@ -20,7 +20,7 @@ package main
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // TestDualMode_UpdateCustomType tests updating issue type to a custom type

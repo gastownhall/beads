@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/gastownhall/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/utils"
 )
 
 // Valid slot names for agent beads

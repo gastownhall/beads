@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // SuppressConfigPrefix is the config namespace for suppressing specific doctor warnings.

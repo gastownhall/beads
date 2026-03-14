@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/gastownhall/beads/internal/testutil"
 )
 
 // testServerPort is the port of the shared test Dolt server (0 = not running).

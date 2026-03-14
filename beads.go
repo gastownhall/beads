@@ -10,9 +10,9 @@ package beads
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // Storage is the interface for beads storage operations

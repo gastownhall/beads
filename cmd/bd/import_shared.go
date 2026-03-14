@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/types"
+	"github.com/gastownhall/beads/internal/utils"
 )
 
 // ImportOptions configures import behavior.

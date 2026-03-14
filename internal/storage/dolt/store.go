@@ -36,10 +36,10 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/gastownhall/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/doltserver"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/storage/doltutil"
 )
 
 // DefaultSQLPort is the default port for dolt sql-server.
@@ -301,7 +301,7 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 
 // doltTracer is the OTel tracer for SQL-level spans.
 // It uses the global provider, which is a no-op until telemetry.Init() is called.
-var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
+var doltTracer = otel.Tracer("github.com/gastownhall/beads/storage/dolt")
 
 // doltMetrics holds OTel metric instruments for the dolt storage backend.
 // Instruments are registered against the global delegating provider at init time,
@@ -314,7 +314,7 @@ var doltMetrics struct {
 }
 
 func init() {
-	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
+	m := otel.Meter("github.com/gastownhall/beads/storage/dolt")
 	doltMetrics.retryCount, _ = m.Int64Counter("bd.db.retry_count",
 		metric.WithDescription("SQL operations retried due to server-mode transient errors"),
 		metric.WithUnit("{retry}"),

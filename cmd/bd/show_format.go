@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/types"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // formatShortIssue returns a compact one-line representation of an issue

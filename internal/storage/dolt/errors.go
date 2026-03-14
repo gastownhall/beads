@@ -10,7 +10,7 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/storage"
 )
 
 // Sentinel errors for the dolt storage layer.

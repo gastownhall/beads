@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/gastownhall/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/doltserver"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/storage/doltutil"
 )
 
 // CheckRemoteConsistency compares remotes registered in the SQL server

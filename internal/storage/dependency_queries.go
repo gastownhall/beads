@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // DependencyQueryStore provides extended dependency queries beyond the base Storage interface.

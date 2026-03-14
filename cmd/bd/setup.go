@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/cmd/bd/setup"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/recipes"
+	"github.com/gastownhall/beads/cmd/bd/setup"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/recipes"
 )
 
 var (

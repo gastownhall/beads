@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/configfile"
 )
 
 // TestConfigWinsOverConvention verifies SC-003: when metadata.json already

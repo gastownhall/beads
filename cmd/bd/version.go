@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/beads"
 )
 
 var (

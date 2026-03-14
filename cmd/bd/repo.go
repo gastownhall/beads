@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 var repoCmd = &cobra.Command{

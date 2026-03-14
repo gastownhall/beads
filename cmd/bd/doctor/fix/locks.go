@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // StaleLockFiles removes stale lock files from the .beads directory.

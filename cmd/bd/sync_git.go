@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/beads"
 )
 
 // isGitRepo checks if the current working directory is in a git repository.

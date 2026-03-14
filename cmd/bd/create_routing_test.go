@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/gastownhall/beads/internal/config"
 )
 
 func TestGetRoutingConfigValue_DBFallback(t *testing.T) {

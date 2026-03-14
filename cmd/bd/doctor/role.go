@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // CheckBeadsRole verifies that beads.role is configured.

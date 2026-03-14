@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/gastownhall/beads/internal/config"
 )
 
 // SetConfig sets a configuration value

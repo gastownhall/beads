@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/storage/doltutil"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // Federation Prototype Tests

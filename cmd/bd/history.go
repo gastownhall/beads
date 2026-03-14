@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 var (

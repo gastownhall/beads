@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 const (

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/storage/doltutil"
 )
 
 // FederatedStorage implementation for DoltStore

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // =============================================================================

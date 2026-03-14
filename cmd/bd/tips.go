@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // Tip represents a contextual hint that can be shown to users after successful commands

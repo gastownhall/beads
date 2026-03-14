@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/beads"
 )
 
 // ErrTestBinary is returned when getBdBinary detects it's running as a test binary.

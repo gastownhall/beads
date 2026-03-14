@@ -14,10 +14,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/idgen"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/idgen"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // IsWisp returns true if the issue should be routed to the wisps table.

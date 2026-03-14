@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/doltserver"
+	"github.com/gastownhall/beads/internal/storage/doltutil"
+	"github.com/gastownhall/beads/internal/ui"
 	"golang.org/x/term"
 )
 

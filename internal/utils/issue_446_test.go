@@ -13,7 +13,7 @@ import (
 // Hash length scales with birthday algorithm: 3, 4, 5, 6, 7, 8 chars.
 // All lengths can be all-letters by chance.
 //
-// See: https://github.com/steveyegge/beads/issues/446
+// See: https://github.com/gastownhall/beads/issues/446
 func TestExtractIssuePrefixAllLetterHash(t *testing.T) {
 	// Only 3-char all-letter suffixes should be accepted as hashes.
 	// 4+ char all-letter suffixes still require a digit.
@@ -76,7 +76,7 @@ func TestExtractIssuePrefixWordSuffix(t *testing.T) {
 //   - "hacker-news-ko4" → "hacker" (wrong, should be "hacker-news")
 //   - "me-py-toolkit-abc" → "me" (wrong, should be "me-py-toolkit")
 //
-// See: https://github.com/steveyegge/beads/issues/405
+// See: https://github.com/gastownhall/beads/issues/405
 func TestExtractIssuePrefixMultiHyphen(t *testing.T) {
 	tests := []struct {
 		issueID  string

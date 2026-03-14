@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/types"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // displayShowIssue displays a single issue (reusable for watch mode)

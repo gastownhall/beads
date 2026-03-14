@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/beads"
 )
 
 const lastTouchedFile = "last-touched"

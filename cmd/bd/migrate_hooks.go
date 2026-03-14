@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/gastownhall/beads/cmd/bd/doctor"
 	"golang.org/x/term"
 )
 

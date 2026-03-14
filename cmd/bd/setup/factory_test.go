@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/templates/agents"
+	"github.com/gastownhall/beads/internal/templates/agents"
 )
 
 func TestUpdateBeadsSection(t *testing.T) {

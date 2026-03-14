@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/gastownhall/beads/internal/config"
 )
 
 // beforeTestsHook is set by CGO-tagged test files to perform setup before tests run

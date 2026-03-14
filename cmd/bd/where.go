@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/utils"
 )
 
 // WhereResult contains information about the active beads location

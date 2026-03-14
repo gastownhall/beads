@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/debug"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/debug"
 )
 
 // isBackupAutoEnabled returns whether backup should run.

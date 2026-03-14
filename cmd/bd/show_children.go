@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/types"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // showIssueChildren displays only the children of the specified issue(s)

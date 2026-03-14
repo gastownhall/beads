@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // computeBlockedIDs returns the set of issue IDs that are blocked by active

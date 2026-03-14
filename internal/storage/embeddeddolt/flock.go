@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/gastownhall/beads/internal/lockfile"
 )
 
 // Lock holds an exclusive flock on the embeddeddolt data directory.

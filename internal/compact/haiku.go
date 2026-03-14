@@ -14,10 +14,10 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
-	"github.com/steveyegge/beads/internal/audit"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/telemetry"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/audit"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/telemetry"
+	"github.com/gastownhall/beads/internal/types"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -109,7 +109,7 @@ var aiMetrics struct {
 var aiMetricsOnce sync.Once
 
 func initAIMetrics() {
-	m := telemetry.Meter("github.com/steveyegge/beads/ai")
+	m := telemetry.Meter("github.com/gastownhall/beads/ai")
 	aiMetrics.inputTokens, _ = m.Int64Counter("bd.ai.input_tokens",
 		metric.WithDescription("Anthropic API input tokens consumed"),
 		metric.WithUnit("{token}"),
@@ -125,7 +125,7 @@ func initAIMetrics() {
 }
 
 func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string, error) {
-	tracer := telemetry.Tracer("github.com/steveyegge/beads/ai")
+	tracer := telemetry.Tracer("github.com/gastownhall/beads/ai")
 	ctx, span := tracer.Start(ctx, "anthropic.messages.new")
 	defer span.End()
 	span.SetAttributes(

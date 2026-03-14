@@ -5,8 +5,8 @@ package main
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/config"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 const defaultTitleLength = 255

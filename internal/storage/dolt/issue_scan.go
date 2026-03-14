@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // issueSelectColumns is the canonical column list for full issue hydration.

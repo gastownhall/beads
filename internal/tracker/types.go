@@ -9,7 +9,7 @@ package tracker
 import (
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // TrackerIssue represents an issue from an external tracker in a generic format.

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/timeparsing"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/timeparsing"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // QueryResult contains the result of evaluating a query.

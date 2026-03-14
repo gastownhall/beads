@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // setupTwoProjectStores creates two DoltStore instances on the same server,

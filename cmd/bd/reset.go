@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/git"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 var resetCmd = &cobra.Command{

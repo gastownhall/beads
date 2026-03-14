@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/gastownhall/beads/internal/storage/embeddeddolt"
 )
 
 func TestSchemaAfterInit(t *testing.T) {

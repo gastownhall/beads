@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/cmd/bd/doctor"
+	"github.com/gastownhall/beads/cmd/bd/doctor/fix"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // runArtifactsCheck runs detailed classic artifact detection.

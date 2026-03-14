@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/configfile"
 )
 
 func TestRunDoltPerformanceDiagnostics_RequiresServer(t *testing.T) {

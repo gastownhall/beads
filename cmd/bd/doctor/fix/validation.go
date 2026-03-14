@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/configfile"
 )
 
 // getDatabasePath returns the actual database directory path, respecting dolt_data_dir.

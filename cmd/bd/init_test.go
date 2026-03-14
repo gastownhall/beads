@@ -14,10 +14,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/git"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // skipIfNoDolt skips the test when no Dolt server is available.

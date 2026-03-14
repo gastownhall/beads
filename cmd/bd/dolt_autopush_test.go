@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/gastownhall/beads/internal/config"
 )
 
 func TestIsDoltAutoPushEnabled_ExplicitConfig(t *testing.T) {

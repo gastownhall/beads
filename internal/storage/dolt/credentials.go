@@ -16,8 +16,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/storage/doltutil"
 )
 
 // Credential storage and encryption for federation peers.

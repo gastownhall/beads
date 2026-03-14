@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/configfile"
 )
 
 var upgradeCmd = &cobra.Command{

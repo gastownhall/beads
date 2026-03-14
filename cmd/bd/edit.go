@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/utils"
 )
 
 var editCmd = &cobra.Command{

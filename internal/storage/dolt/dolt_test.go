@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/testutil"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/storage/doltutil"
+	"github.com/gastownhall/beads/internal/testutil"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // testTimeout is the maximum time for any single test operation.

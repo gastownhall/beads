@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // renderGraphDOT renders the graph in Graphviz DOT format.

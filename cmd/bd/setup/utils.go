@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/gastownhall/beads/internal/utils"
 )
 
 // atomicWriteFile writes data to a file atomically using a unique temporary file.

@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // AdvancedQueryStore provides repo mtime tracking, molecule queries, and stale issue detection.

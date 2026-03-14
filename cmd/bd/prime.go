@@ -11,9 +11,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads"
-	internalbeads "github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/gastownhall/beads"
+	internalbeads "github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/config"
 )
 
 var (

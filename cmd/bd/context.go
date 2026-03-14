@@ -8,8 +8,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/gastownhall/beads/internal/hooks"
+	"github.com/gastownhall/beads/internal/storage/dolt"
 )
 
 // CommandContext holds all runtime state for command execution.

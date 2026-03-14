@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/gastownhall/beads/internal/lockfile"
 )
 
 // TestRunDoltHealthChecks_NonDoltBackend was removed: SQLite backend no longer

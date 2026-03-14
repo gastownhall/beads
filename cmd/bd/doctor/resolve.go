@@ -1,6 +1,6 @@
 package doctor
 
-import "github.com/steveyegge/beads/internal/beads"
+import "github.com/gastownhall/beads/internal/beads"
 
 // resolveBeadsDir follows any redirect/symlink in the beads directory.
 // Extracted from maintenance.go to be available in non-CGO builds.

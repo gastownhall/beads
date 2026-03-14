@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/types"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // dagEdgeInfo represents a directed edge routed through a gutter column

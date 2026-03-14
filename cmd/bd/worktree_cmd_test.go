@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/gastownhall/beads/internal/utils"
 )
 
 // TestGetRedirectTarget tests that getRedirectTarget resolves redirect paths correctly.

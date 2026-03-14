@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/jira"
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/jira"
+	"github.com/gastownhall/beads/internal/tracker"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 var jiraCmd = &cobra.Command{

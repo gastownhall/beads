@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 var quickstartCmd = &cobra.Command{
@@ -79,7 +79,7 @@ var quickstartCmd = &cobra.Command{
 		fmt.Printf("    • Add your own tables (e.g., %s)\n", ui.RenderAccent("myapp_executions"))
 		fmt.Printf("    • Join with %s table for powerful queries\n", ui.RenderAccent("issues"))
 		fmt.Printf("    • See database extension docs for integration patterns:\n")
-		fmt.Printf("      %s\n\n", ui.RenderAccent("https://github.com/steveyegge/beads/blob/main/docs/EXTENDING.md"))
+		fmt.Printf("      %s\n\n", ui.RenderAccent("https://github.com/gastownhall/beads/blob/main/docs/EXTENDING.md"))
 
 		fmt.Printf("%s\n", ui.RenderBold("GIT WORKFLOW (AUTO-SYNC)"))
 		fmt.Printf("  bd automatically keeps git in sync:\n")

@@ -4,7 +4,7 @@ package storage
 import (
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/gastownhall/beads/internal/types"
 )
 
 // HistoryEntry represents an issue at a specific point in history.

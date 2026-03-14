@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/gastownhall/beads/internal/beads"
+	"github.com/gastownhall/beads/internal/storage"
+	"github.com/gastownhall/beads/internal/ui"
 )
 
 // runTeamWizard guides the user through team workflow setup

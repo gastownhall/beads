@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/gastownhall/beads/internal/testutil"
 )
 
 // baselineBin is the path to the pinned baseline bd binary.
@@ -178,7 +178,7 @@ func getBaseline() (string, error) {
 	}
 	ver := strings.TrimPrefix(version, "v")
 	asset := fmt.Sprintf("beads_%s_%s_%s.tar.gz", ver, runtime.GOOS, runtime.GOARCH)
-	url := fmt.Sprintf("https://github.com/steveyegge/beads/releases/download/%s/%s", version, asset)
+	url := fmt.Sprintf("https://github.com/gastownhall/beads/releases/download/%s/%s", version, asset)
 
 	fmt.Fprintf(os.Stderr, "Downloading baseline: %s\n", url)
 	if err := downloadAndExtract(url, cachedBin); err != nil {
