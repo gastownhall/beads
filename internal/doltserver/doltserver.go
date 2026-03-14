@@ -814,7 +814,9 @@ func LogPath(beadsDir string) string {
 }
 
 // KillStaleServers finds and kills orphan dolt sql-server processes
-// not tracked by the canonical PID file.
+// that belong to THIS repo but are not tracked by the canonical PID file.
+// Only kills processes whose working directory matches this repo's dolt
+// data directory. Processes serving other repos are left untouched.
 // Returns the PIDs of killed processes.
 func KillStaleServers(beadsDir string) ([]int, error) {
 	allPIDs := listDoltProcessPIDs()
@@ -833,6 +835,10 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 		}
 	}
 
+	// Only kill orphaned processes running from THIS repo's data directory.
+	// Other repos' dolt servers are not our responsibility.
+	doltDir := ResolveDoltDir(beadsDir)
+
 	var killed []int
 	for _, pid := range allPIDs {
 		if pid == os.Getpid() {
@@ -840,6 +846,11 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 		}
 		if canonicalPIDs[pid] {
 			continue // preserve canonical server
+		}
+		// Only kill processes whose CWD matches our data directory.
+		// Processes serving other repos must not be touched.
+		if !isProcessInDir(pid, doltDir) {
+			continue
 		}
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
 			_ = proc.Kill()
