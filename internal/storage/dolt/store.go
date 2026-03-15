@@ -109,6 +109,7 @@ var _ storage.DoltStorage = (*DoltStore)(nil)
 type DoltStore struct {
 	db            *sql.DB
 	dbPath        string       // Path to Dolt data directory (server root, e.g. .beads/dolt/)
+	beadsDir      string       // Path to .beads directory (parent of dbPath)
 	database      string       // Database name (subdirectory under dbPath)
 	closed        atomic.Bool  // Tracks whether Close() has been called
 	connStr       string       // Connection string for reconnection
@@ -690,9 +691,15 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		return nil, fmt.Errorf("failed to ping Dolt database: %w", err)
 	}
 
+	beadsDir := cfg.BeadsDir
+	if beadsDir == "" && cfg.Path != "" {
+		beadsDir = filepath.Dir(cfg.Path) // cfg.Path is .beads/dolt → parent is .beads/
+	}
+
 	store := &DoltStore{
 		db:                   db,
 		dbPath:               cfg.Path,
+		beadsDir:             beadsDir,
 		database:             cfg.Database,
 		connStr:              connStr,
 		breaker:              breaker,
@@ -1843,7 +1850,6 @@ func (s *DoltStore) tryAutoResolveMetadataConflicts(ctx context.Context, tx *sql
 
 	return true, nil
 }
-
 
 // Branch creates a new branch
 func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
