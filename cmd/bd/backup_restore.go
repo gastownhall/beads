@@ -411,11 +411,11 @@ func restoreComments(ctx context.Context, db *sql.DB, path string, dryRun bool) 
 	warnings := 0
 	for _, line := range lines {
 		var comment struct {
-			ID        json.Number `json:"id"`
-			IssueID   string      `json:"issue_id"`
-			Author    string      `json:"author"`
-			Text      string      `json:"text"`
-			CreatedAt string      `json:"created_at"`
+			ID        string `json:"id"`
+			IssueID   string `json:"issue_id"`
+			Author    string `json:"author"`
+			Text      string `json:"text"`
+			CreatedAt string `json:"created_at"`
 		}
 		if err := json.Unmarshal(line, &comment); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: skipping invalid comment line: %v\n", err)
@@ -547,14 +547,14 @@ func restoreEvents(ctx context.Context, db *sql.DB, path string, dryRun bool) (i
 	warnings := 0
 	for _, line := range lines {
 		var event struct {
-			ID        json.Number `json:"id"`
-			IssueID   string      `json:"issue_id"`
-			EventType string      `json:"event_type"`
-			Actor     string      `json:"actor"`
-			OldValue  *string     `json:"old_value"`
-			NewValue  *string     `json:"new_value"`
-			Comment   *string     `json:"comment"`
-			CreatedAt string      `json:"created_at"`
+			ID        string  `json:"id"`
+			IssueID   string  `json:"issue_id"`
+			EventType string  `json:"event_type"`
+			Actor     string  `json:"actor"`
+			OldValue  *string `json:"old_value"`
+			NewValue  *string `json:"new_value"`
+			Comment   *string `json:"comment"`
+			CreatedAt string  `json:"created_at"`
 		}
 		if err := json.Unmarshal(line, &event); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: skipping invalid event line: %v\n", err)

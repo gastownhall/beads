@@ -245,6 +245,95 @@ func TestBackupRestoreDryRun(t *testing.T) {
 	}
 }
 
+func TestBackupRestoreAcceptsUUIDCommentAndEventIDs(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	ensureTestMode(t)
+	saved := saveAndRestoreGlobals(t)
+	_ = saved
+
+	tmpDir := t.TempDir()
+	backupPath := filepath.Join(tmpDir, "backup")
+	if err := os.MkdirAll(backupPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	issuesData := `{"id":"uuid-1","title":"UUID Restore","status":"open","priority":2,"issue_type":"task"}` + "\n"
+	if err := os.WriteFile(filepath.Join(backupPath, "issues.jsonl"), []byte(issuesData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	commentsData := `{"id":"c6b39fb0-a0fa-4f4a-8cd2-2d5f3f3d8b73","issue_id":"uuid-1","author":"tester","text":"comment restored","created_at":"2026-03-14T18:00:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(backupPath, "comments.jsonl"), []byte(commentsData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	eventsData := `{"id":"ec2dd5f8-8e1a-4aa9-9c27-3fda5d7406fc","issue_id":"uuid-1","event_type":"created","actor":"tester","created_at":"2026-03-14T18:00:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(backupPath, "events.jsonl"), []byte(eventsData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	dbName := uniqueTestDBName(t)
+	testDBPath := filepath.Join(t.TempDir(), "dolt")
+	writeTestMetadata(t, testDBPath, dbName)
+	s := newTestStore(t, testDBPath)
+	store = s
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	t.Cleanup(func() {
+		store = nil
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	})
+
+	ctx := context.Background()
+	stderr := captureStderr(t, func() {
+		result, err := runBackupRestore(ctx, s, backupPath, false)
+		if err != nil {
+			t.Fatalf("restore uuid comment/event ids: %v", err)
+		}
+		if result.Issues != 1 {
+			t.Errorf("restored issues = %d, want 1", result.Issues)
+		}
+		if result.Comments != 1 {
+			t.Errorf("restored comments = %d, want 1", result.Comments)
+		}
+		if result.Events != 1 {
+			t.Errorf("restored events = %d, want 1", result.Events)
+		}
+		if result.Warnings != 0 {
+			t.Errorf("restore warnings = %d, want 0", result.Warnings)
+		}
+	})
+
+	if stderr != "" {
+		t.Fatalf("expected no restore warnings, got stderr: %s", stderr)
+	}
+
+	var commentCount int
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM comments WHERE issue_id = ?`, "uuid-1").Scan(&commentCount); err != nil {
+		t.Fatalf("count restored comments: %v", err)
+	}
+	if commentCount != 1 {
+		t.Errorf("comment count = %d, want 1", commentCount)
+	}
+
+	var eventCount int
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE issue_id = ?`, "uuid-1").Scan(&eventCount); err != nil {
+		t.Fatalf("count restored events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Errorf("event count = %d, want 1", eventCount)
+	}
+}
+
 func TestBackupRestoreDependenciesWithoutMetadataDefaultsToEmptyObject(t *testing.T) {
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available")
