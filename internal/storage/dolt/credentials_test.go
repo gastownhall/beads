@@ -56,7 +56,7 @@ func TestEncryptDecryptWithWrongKey(t *testing.T) {
 func TestCredentialKeyFileGeneration(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	store := &DoltStore{dbPath: tmpDir}
+	store := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
 
 	// Key file should not exist yet
 	keyPath := filepath.Join(tmpDir, credentialKeyFile)
@@ -97,13 +97,13 @@ func TestCredentialKeyFileReload(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// First store generates the key
-	store1 := &DoltStore{dbPath: tmpDir}
+	store1 := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
 	if err := store1.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey (store1) failed: %v", err)
 	}
 
 	// Second store should load the same key from file
-	store2 := &DoltStore{dbPath: tmpDir}
+	store2 := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
 	if err := store2.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey (store2) failed: %v", err)
 	}
@@ -117,12 +117,12 @@ func TestCredentialKeyNotPredictable(t *testing.T) {
 	tmpDir1 := t.TempDir()
 	tmpDir2 := t.TempDir()
 
-	store1 := &DoltStore{dbPath: tmpDir1}
+	store1 := &DoltStore{dbPath: tmpDir1, beadsDir: tmpDir1}
 	if err := store1.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey (store1) failed: %v", err)
 	}
 
-	store2 := &DoltStore{dbPath: tmpDir2}
+	store2 := &DoltStore{dbPath: tmpDir2, beadsDir: tmpDir2}
 	if err := store2.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey (store2) failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestCredentialKeyNotPredictable(t *testing.T) {
 
 func TestEncryptDecryptRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
-	store := &DoltStore{dbPath: tmpDir}
+	store := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
 	if err := store.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey failed: %v", err)
 	}
@@ -197,6 +197,71 @@ func TestInitCredentialKeyEmptyDbPath(t *testing.T) {
 	}
 	if store.credentialKey != nil {
 		t.Error("expected nil key when dbPath is empty")
+	}
+}
+
+func TestCredentialKeyMigrationFromDbPath(t *testing.T) {
+	// Simulate old layout: key file in .beads/dolt/ (dbPath)
+	beadsDir := t.TempDir()
+	dbPath := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(dbPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write key to old location
+	oldKey := make([]byte, 32)
+	for i := range oldKey {
+		oldKey[i] = byte(i)
+	}
+	oldKeyPath := filepath.Join(dbPath, credentialKeyFile)
+	if err := os.WriteFile(oldKeyPath, oldKey, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &DoltStore{dbPath: dbPath, beadsDir: beadsDir}
+	if err := store.initCredentialKey(t.Context()); err != nil {
+		t.Fatalf("initCredentialKey failed: %v", err)
+	}
+
+	// Key should be loaded from old location
+	if string(store.credentialKey) != string(oldKey) {
+		t.Error("migrated key does not match original")
+	}
+
+	// New location should now have the key
+	newKeyPath := filepath.Join(beadsDir, credentialKeyFile)
+	newKey, err := os.ReadFile(newKeyPath)
+	if err != nil {
+		t.Fatalf("key file should exist at new location: %v", err)
+	}
+	if string(newKey) != string(oldKey) {
+		t.Error("key at new location does not match original")
+	}
+
+	// Old location should be cleaned up
+	if _, err := os.Stat(oldKeyPath); err == nil {
+		t.Error("old key file should have been removed after migration")
+	}
+}
+
+func TestCredentialKeyNoGhostDir(t *testing.T) {
+	// In shared-server mode, dbPath (.beads/dolt/) should NOT be created
+	beadsDir := t.TempDir()
+	dbPath := filepath.Join(beadsDir, "dolt") // does not exist
+
+	store := &DoltStore{dbPath: dbPath, beadsDir: beadsDir}
+	if err := store.initCredentialKey(t.Context()); err != nil {
+		t.Fatalf("initCredentialKey failed: %v", err)
+	}
+
+	// The key should be written to beadsDir, not dbPath
+	if _, err := os.Stat(filepath.Join(beadsDir, credentialKeyFile)); err != nil {
+		t.Error("key file should exist in beadsDir")
+	}
+
+	// dbPath directory should NOT have been created
+	if _, err := os.Stat(dbPath); err == nil {
+		t.Error("dbPath directory should not be created in shared-server mode — ghost directory bug")
 	}
 }
 

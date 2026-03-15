@@ -48,21 +48,35 @@ func validatePeerName(name string) error {
 }
 
 // initCredentialKey loads or generates the credential encryption key.
-// If a key file exists at <dbPath>/.beads-credential-key, it is loaded.
-// Otherwise, a new random key is generated, any existing credentials are
-// migrated from the old dbPath-derived key, and the new key is saved.
+// The key file is stored in .beads/ (beadsDir), NOT in .beads/dolt/ (dbPath),
+// to avoid creating ghost directories in shared-server mode (GH bd-cby).
+// Falls back to the old dbPath location for transparent migration.
 func (s *DoltStore) initCredentialKey(ctx context.Context) error {
-	if s.dbPath == "" {
+	if s.beadsDir == "" {
 		return nil // No filesystem path — credential encryption unavailable
 	}
 
-	keyPath := filepath.Join(s.dbPath, credentialKeyFile)
+	keyPath := filepath.Join(s.beadsDir, credentialKeyFile)
 
-	// Try to load existing key file
-	key, err := os.ReadFile(keyPath) //nolint:gosec // G304: keyPath is derived from trusted dbPath, not user input
+	// Try to load from new location (.beads/)
+	key, err := os.ReadFile(keyPath) //nolint:gosec // G304: keyPath is derived from trusted beadsDir, not user input
 	if err == nil && len(key) == 32 {
 		s.credentialKey = key
 		return nil
+	}
+
+	// Migration: try old location (.beads/dolt/) and move to new location
+	if s.dbPath != "" {
+		oldKeyPath := filepath.Join(s.dbPath, credentialKeyFile)
+		oldKey, oldErr := os.ReadFile(oldKeyPath) //nolint:gosec // G304: oldKeyPath is derived from trusted dbPath
+		if oldErr == nil && len(oldKey) == 32 {
+			// Write to new location, then remove old file
+			if writeErr := os.WriteFile(keyPath, oldKey, 0600); writeErr == nil {
+				_ = os.Remove(oldKeyPath)
+			}
+			s.credentialKey = oldKey
+			return nil
+		}
 	}
 
 	// Generate new random 32-byte key (AES-256)
@@ -76,12 +90,8 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 		return fmt.Errorf("failed to migrate credential keys: %w", err)
 	}
 
-	// Ensure the directory exists before writing the key file
-	if err := os.MkdirAll(s.dbPath, 0700); err != nil {
-		return fmt.Errorf("failed to create directory for credential key: %w", err)
-	}
-
 	// Write key file with owner-only permissions (0600)
+	// beadsDir (.beads/) always exists — no MkdirAll needed
 	if err := os.WriteFile(keyPath, key, 0600); err != nil {
 		return fmt.Errorf("failed to write credential key file: %w", err)
 	}
