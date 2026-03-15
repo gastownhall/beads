@@ -722,6 +722,9 @@ var rootCmd = &cobra.Command{
 		// Auto-backup: export JSONL to .beads/backup/ if enabled and due
 		maybeAutoBackup(rootCtx)
 
+		// Auto-export: write git-tracked JSONL for portability if enabled and due
+		maybeAutoExport(rootCtx)
+
 		// Auto-push: push to Dolt remote if enabled and due.
 		// Skip for read-only commands to avoid unnecessary network operations
 		// and metadata writes on commands like bd list/show/ready (GH#2191).
