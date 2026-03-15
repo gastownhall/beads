@@ -406,6 +406,16 @@ environment variable.`,
 					fmt.Printf("  %s Bootstrapped from git remote: %s\n", ui.RenderPass("✓"), gitRemoteURL)
 				}
 			}
+		} else if !force && isGitRepo() && !isBareGitRepo() {
+			// Warn if origin has an existing beads database.
+			// Don't auto-clone here — bd bootstrap handles that.
+			if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
+				if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+					fmt.Fprintf(os.Stderr, "Note: origin has an existing beads database (refs/dolt/data).\n")
+					fmt.Fprintf(os.Stderr, "  Run 'bd bootstrap' instead to clone it.\n")
+					fmt.Fprintf(os.Stderr, "  Continuing with fresh database initialization.\n\n")
+				}
+			}
 		}
 
 		// Build config. Beads always uses dolt sql-server.
