@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,11 +29,15 @@ and 'bd backup restore'.
 By default, exports only regular issues (excluding infrastructure beads
 like agents, rigs, roles, and messages). Use --all to include everything.
 
+Memories (from 'bd remember') are included by default. Use --no-memories
+to exclude them.
+
 EXAMPLES:
-  bd export                          # Export to stdout
-  bd export -o backup.jsonl          # Export to file
-  bd export --all -o full.jsonl      # Include infra + templates + gates
-  bd export --scrub -o clean.jsonl   # Exclude test/pollution records`,
+  bd export                              # Export issues + memories to stdout
+  bd export -o backup.jsonl              # Export to file
+  bd export --no-memories                # Export issues only
+  bd export --all -o full.jsonl          # Include infra + templates + gates
+  bd export --scrub -o clean.jsonl       # Exclude test/pollution records`,
 	GroupID: "sync",
 	RunE:    runExport,
 }
@@ -42,6 +47,7 @@ var (
 	exportAll          bool
 	exportIncludeInfra bool
 	exportScrub        bool
+	exportNoMemories   bool
 )
 
 func init() {
@@ -49,6 +55,7 @@ func init() {
 	exportCmd.Flags().BoolVar(&exportAll, "all", false, "Include all records (infra, templates, gates)")
 	exportCmd.Flags().BoolVar(&exportIncludeInfra, "include-infra", false, "Include infrastructure beads (agents, rigs, roles, messages)")
 	exportCmd.Flags().BoolVar(&exportScrub, "scrub", false, "Exclude test/pollution records")
+	exportCmd.Flags().BoolVar(&exportNoMemories, "no-memories", false, "Exclude persistent memories from the export")
 	rootCmd.AddCommand(exportCmd)
 }
 
@@ -117,7 +124,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 		issues = filterOutPollution(issues)
 	}
 
-	if len(issues) == 0 {
+	if len(issues) == 0 && exportNoMemories {
 		if exportOutput != "" {
 			fmt.Fprintln(os.Stderr, "No issues to export.")
 		}
@@ -174,6 +181,38 @@ func runExport(cmd *cobra.Command, args []string) error {
 		count++
 	}
 
+	// Export memories if not excluded
+	memoryCount := 0
+	if !exportNoMemories {
+		allConfig, err := store.GetAllConfig(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to read config for memories: %w", err)
+		}
+		fullPrefix := kvPrefix + memoryPrefix
+		for k, v := range allConfig {
+			if !strings.HasPrefix(k, fullPrefix) {
+				continue
+			}
+			userKey := strings.TrimPrefix(k, fullPrefix)
+			record := map[string]string{
+				"_type": "memory",
+				"key":   userKey,
+				"value": v,
+			}
+			data, err := json.Marshal(record)
+			if err != nil {
+				return fmt.Errorf("failed to marshal memory %s: %w", userKey, err)
+			}
+			if _, err := w.Write(data); err != nil {
+				return fmt.Errorf("failed to write: %w", err)
+			}
+			if _, err := w.Write([]byte{'\n'}); err != nil {
+				return fmt.Errorf("failed to write newline: %w", err)
+			}
+			memoryCount++
+		}
+	}
+
 	// Sync to disk if writing to file
 	if f, ok := w.(*os.File); ok && f != os.Stdout {
 		if err := f.Sync(); err != nil {
@@ -183,7 +222,11 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	// Print summary to stderr (not stdout, to avoid mixing with JSONL)
 	if exportOutput != "" {
-		fmt.Fprintf(os.Stderr, "Exported %d issues to %s\n", count, exportOutput)
+		if memoryCount > 0 {
+			fmt.Fprintf(os.Stderr, "Exported %d issues and %d memories to %s\n", count, memoryCount, exportOutput)
+		} else {
+			fmt.Fprintf(os.Stderr, "Exported %d issues to %s\n", count, exportOutput)
+		}
 	}
 
 	return nil
