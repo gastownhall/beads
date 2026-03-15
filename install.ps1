@@ -136,6 +136,43 @@ function Get-WindowsArch {
     }
 }
 
+function Get-ExpectedReleaseChecksum {
+    param(
+        [Parameter(Mandatory)]$Release,
+        [Parameter(Mandatory)][string]$AssetName,
+        [Parameter(Mandatory)][string]$TempRoot
+    )
+
+    $checksumsAsset = $Release.assets | Where-Object { $_.name -eq "checksums.txt" } | Select-Object -First 1
+    if (-not $checksumsAsset) {
+        Write-WarningMsg "Release does not include checksums.txt; refusing unverified install."
+        return $null
+    }
+
+    $checksumsPath = Join-Path $TempRoot "checksums.txt"
+    try {
+        Invoke-WebRequest -Uri $checksumsAsset.browser_download_url -OutFile $checksumsPath
+    } catch {
+        Write-WarningMsg "Failed to download checksums.txt: $_"
+        return $null
+    }
+
+    foreach ($line in Get-Content -Path $checksumsPath) {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq "") {
+            continue
+        }
+
+        $parts = $trimmed -split '\s+'
+        if ($parts.Count -ge 2 -and $parts[1].TrimStart("*") -eq $AssetName) {
+            return $parts[0].ToLowerInvariant()
+        }
+    }
+
+    Write-WarningMsg "No checksum entry found for $AssetName in checksums.txt"
+    return $null
+}
+
 function Install-FromRelease {
     Write-Info "Installing bd from GitHub releases..."
 
@@ -174,6 +211,20 @@ function Install-FromRelease {
     try {
         Write-Info "Downloading $assetName..."
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+
+        Write-Info "Verifying release checksum..."
+        $expectedChecksum = Get-ExpectedReleaseChecksum -Release $release -AssetName $assetName -TempRoot $tempRoot
+        if (-not $expectedChecksum) {
+            return $false
+        }
+
+        $actualChecksum = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualChecksum -ne $expectedChecksum) {
+            Write-WarningMsg "Checksum mismatch for $assetName; refusing to install."
+            return $false
+        }
+
+        Write-Success "Checksum verified for $assetName"
 
         Write-Info "Extracting archive..."
         Microsoft.PowerShell.Archive\Expand-Archive -Path $zipPath -DestinationPath $tempRoot -Force

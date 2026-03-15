@@ -4,6 +4,8 @@
 
 Some antivirus software may flag beads (`bd` or `bd.exe`) as malicious. This is a **false positive** - beads is a legitimate, open-source command-line tool for issue tracking.
 
+Beads release installers now verify downloaded archives against release `checksums.txt` before installation. For users who manually install binaries, checksum verification should be the first trust step before running `bd` or creating antivirus exclusions.
+
 ## Why This Happens
 
 Go binaries (including beads) are sometimes flagged by antivirus software due to:
@@ -26,7 +28,27 @@ Kaspersky's PDM (Proactive Defense Module) uses behavioral analysis that commonl
 
 ## Solutions for Users
 
-### Option 1: Add Exclusion (Recommended)
+### Option 1: Verify File Integrity (Recommended First)
+
+Before running a downloaded binary or adding antivirus exclusions, verify the file is legitimate:
+
+1. Download beads from the [official GitHub releases](https://github.com/steveyegge/beads/releases)
+2. Verify the SHA256 checksum matches the `checksums.txt` file in the release
+3. If a release includes code signing, verify that signature too
+
+**Verify checksum (Windows PowerShell):**
+```powershell
+Get-FileHash bd.exe -Algorithm SHA256
+```
+
+**Verify checksum (macOS/Linux):**
+```bash
+shasum -a 256 bd
+```
+
+Compare the output with the checksum in `checksums.txt` from the release page.
+
+### Option 2: Add Exclusion (After Verification)
 
 Add beads to your antivirus exclusion list:
 
@@ -46,26 +68,6 @@ Add beads to your antivirus exclusion list:
 **Other antivirus software:**
 - Look for "Exclusions", "Whitelist", or "Trusted Applications" settings
 - Add the beads installation directory or executable
-
-### Option 2: Verify File Integrity
-
-Before adding an exclusion, verify the downloaded file is legitimate:
-
-1. Download beads from the [official GitHub releases](https://github.com/steveyegge/beads/releases)
-2. Verify the SHA256 checksum matches the `checksums.txt` file in the release
-3. Check the file is signed (future releases will include code signing)
-
-**Verify checksum (Windows PowerShell):**
-```powershell
-Get-FileHash bd.exe -Algorithm SHA256
-```
-
-**Verify checksum (macOS/Linux):**
-```bash
-shasum -a 256 bd
-```
-
-Compare the output with the checksum in `checksums.txt` from the release page.
 
 ### Option 3: Report False Positive
 
@@ -150,7 +152,7 @@ However, results vary by antivirus vendor and version.
 
 Yes. Beads is:
 - Open source (all code is auditable on [GitHub](https://github.com/steveyegge/beads))
-- Signed releases include checksums for verification
+- Releases include checksums for verification
 - Used by developers worldwide
 - A simple CLI tool for issue tracking
 
@@ -178,9 +180,9 @@ False positives may still occur with new releases until the certificate builds r
 ### Should I disable my antivirus?
 
 **No.** Instead:
-1. Add beads to your antivirus exclusions (safe and recommended)
+1. Verify release checksums before first run
 2. Keep your antivirus enabled for other threats
-3. Verify checksums of downloaded files before adding exclusions
+3. Add beads to your antivirus exclusions only after verification if detections persist
 
 ## Reporting Issues
 

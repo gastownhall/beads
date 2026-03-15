@@ -70,6 +70,16 @@ Beads supports hierarchical IDs for epics:
 
 **Requirements:** Linux, FreeBSD, macOS, or Windows.
 
+### Security And Verification
+
+Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.
+
+The install scripts verify release checksums before install. For manual installs, do this verification yourself before first run.
+
+On macOS, `scripts/install.sh` preserves the downloaded signature by default. Local ad-hoc re-signing is explicit opt-in via `BEADS_INSTALL_RESIGN_MACOS=1`.
+
+See [docs/ANTIVIRUS.md](docs/ANTIVIRUS.md) for Windows AV false-positive guidance and verification workflow.
+
 ## 🌐 Community Tools
 
 See [docs/COMMUNITY_TOOLS.md](docs/COMMUNITY_TOOLS.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
