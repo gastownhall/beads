@@ -903,6 +903,12 @@ environment variable.`,
 			}
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
 			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s:%d", user, host, port)))
+			// Warn when using the default localhost — this is the #1 misconfiguration
+			// for setups where Dolt runs on a remote machine (e.g., over Tailscale).
+			if serverHost == "" && os.Getenv("BEADS_DOLT_SERVER_HOST") == "" {
+				fmt.Fprintf(os.Stderr, "\n  %s Server host defaulted to %s.\n", ui.RenderWarn("⚠"), configfile.DefaultDoltServerHost)
+				fmt.Fprintf(os.Stderr, "    If your Dolt server is remote, set BEADS_DOLT_SERVER_HOST or pass --server-host.\n")
+			}
 		}
 		fmt.Printf("  Database: %s\n", ui.RenderAccent(dbName))
 		fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(prefix))
