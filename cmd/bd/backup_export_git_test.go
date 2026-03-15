@@ -4,23 +4,26 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
 var expectedBackupSnapshotFiles = []string{
-	".beads/backup/issues.jsonl",
-	".beads/backup/events.jsonl",
-	".beads/backup/comments.jsonl",
-	".beads/backup/dependencies.jsonl",
-	".beads/backup/labels.jsonl",
-	".beads/backup/config.jsonl",
 	".beads/backup/backup_state.json",
+	".beads/backup/comments.jsonl",
+	".beads/backup/config.jsonl",
+	".beads/backup/dependencies.jsonl",
+	".beads/backup/events.jsonl",
+	".beads/backup/labels.jsonl",
+	".beads/backup/issues.jsonl",
+	".beads/backup/manifest.json",
 }
 
 type backupExportGitHarness struct {
@@ -42,8 +45,8 @@ func TestBackupExportGitCreatesBranchAndPushesSnapshot(t *testing.T) {
 		t.Fatalf("unexpected result: %+v", result)
 	}
 	assertCurrentBranch(t, h.repoDir, "main")
-	assertBranchHasExpectedBackupFiles(t, h.repoDir, backupExportGitDefaultBranch)
-	assertRemoteBranchExists(t, h.remoteDir, backupExportGitDefaultBranch)
+	assertBranchHasExpectedBackupFiles(t, h.repoDir, backupGitDefaultBranch)
+	assertRemoteBranchExists(t, h.remoteDir, backupGitDefaultBranch)
 }
 
 func TestBackupExportGitUpdatesExistingBranch(t *testing.T) {
@@ -53,14 +56,14 @@ func TestBackupExportGitUpdatesExistingBranch(t *testing.T) {
 	if _, err := runBackupExportGit(h.ctx, backupExportGitOptions{}); err != nil {
 		t.Fatalf("first runBackupExportGit: %v", err)
 	}
-	firstHead := gitOutput(t, h.repoDir, "rev-parse", backupExportGitDefaultBranch)
+	firstHead := gitOutput(t, h.repoDir, "rev-parse", backupGitDefaultBranch)
 
 	insertBackupExportGitIssue(t, h.ctx, "upd-2", "Second export")
 	result, err := runBackupExportGit(h.ctx, backupExportGitOptions{})
 	if err != nil {
 		t.Fatalf("second runBackupExportGit: %v", err)
 	}
-	secondHead := gitOutput(t, h.repoDir, "rev-parse", backupExportGitDefaultBranch)
+	secondHead := gitOutput(t, h.repoDir, "rev-parse", backupGitDefaultBranch)
 
 	if !result.Changed || !result.Committed || !result.Pushed {
 		t.Fatalf("unexpected result: %+v", result)
@@ -68,7 +71,7 @@ func TestBackupExportGitUpdatesExistingBranch(t *testing.T) {
 	if secondHead == firstHead {
 		t.Fatalf("backup branch head did not change: %s", secondHead)
 	}
-	content := gitShowFile(t, h.repoDir, backupExportGitDefaultBranch, ".beads/backup/issues.jsonl")
+	content := gitShowFile(t, h.repoDir, backupGitDefaultBranch, ".beads/backup/issues.jsonl")
 	if !strings.Contains(content, `"title":"Second export"`) {
 		t.Fatalf("issues.jsonl missing updated issue:\n%s", content)
 	}
@@ -82,19 +85,55 @@ func TestBackupExportGitNoChangesSkipsCommitAndPush(t *testing.T) {
 	if _, err := runBackupExportGit(h.ctx, backupExportGitOptions{}); err != nil {
 		t.Fatalf("first runBackupExportGit: %v", err)
 	}
-	firstHead := gitOutput(t, h.repoDir, "rev-parse", backupExportGitDefaultBranch)
+	firstHead := gitOutput(t, h.repoDir, "rev-parse", backupGitDefaultBranch)
 
 	result, err := runBackupExportGit(h.ctx, backupExportGitOptions{})
 	if err != nil {
 		t.Fatalf("second runBackupExportGit: %v", err)
 	}
-	secondHead := gitOutput(t, h.repoDir, "rev-parse", backupExportGitDefaultBranch)
+	secondHead := gitOutput(t, h.repoDir, "rev-parse", backupGitDefaultBranch)
 
 	if result.Changed || result.Committed || result.Pushed {
 		t.Fatalf("expected no-op result, got %+v", result)
 	}
 	if firstHead != secondHead {
 		t.Fatalf("expected backup branch head to stay at %s, got %s", firstHead, secondHead)
+	}
+}
+
+func TestBackupExportGitWritesManifest(t *testing.T) {
+	h := setupBackupExportGitHarness(t)
+	insertBackupExportGitIssue(t, h.ctx, "manifest-1", "Manifest issue")
+
+	result, err := runBackupExportGit(h.ctx, backupExportGitOptions{})
+	if err != nil {
+		t.Fatalf("runBackupExportGit: %v", err)
+	}
+
+	manifestPath := filepath.Join(result.BackupDir, backupGitManifestFilename)
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("local backup dir should not contain %s", backupGitManifestFilename)
+	}
+
+	content := gitShowFile(t, h.repoDir, backupGitDefaultBranch, filepath.ToSlash(filepath.Join(backupGitPathspec, backupGitManifestFilename)))
+	var manifest backupGitManifest
+	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	if manifest.Format != "bd-backup-git-manifest-v1" {
+		t.Fatalf("manifest format = %q", manifest.Format)
+	}
+	if manifest.BDVersion != Version {
+		t.Fatalf("manifest bd_version = %q, want %q", manifest.BDVersion, Version)
+	}
+	if manifest.LastDoltCommit == "" {
+		t.Fatal("manifest missing dolt commit")
+	}
+	if manifest.Counts.Issues != 1 {
+		t.Fatalf("manifest issues = %d, want 1", manifest.Counts.Issues)
+	}
+	if manifest.SnapshotTimestamp.IsZero() {
+		t.Fatal("manifest snapshot timestamp is zero")
 	}
 }
 
@@ -110,11 +149,11 @@ func TestBackupExportGitDryRunHasNoSideEffects(t *testing.T) {
 	if !result.DryRun || !result.WouldExport || !result.WouldCopy || !result.WouldCommit || !result.WouldPush {
 		t.Fatalf("unexpected dry-run result: %+v", result)
 	}
-	if gitRefExistsForTest(t, h.repoDir, "refs/heads/"+backupExportGitDefaultBranch) {
-		t.Fatalf("dry-run should not create local branch %s", backupExportGitDefaultBranch)
+	if gitRefExistsForTest(t, h.repoDir, "refs/heads/"+backupGitDefaultBranch) {
+		t.Fatalf("dry-run should not create local branch %s", backupGitDefaultBranch)
 	}
-	if gitRefExistsForTest(t, h.remoteDir, "refs/heads/"+backupExportGitDefaultBranch, "--git-dir") {
-		t.Fatalf("dry-run should not create remote branch %s", backupExportGitDefaultBranch)
+	if gitRefExistsForTest(t, h.remoteDir, "refs/heads/"+backupGitDefaultBranch, "--git-dir") {
+		t.Fatalf("dry-run should not create remote branch %s", backupGitDefaultBranch)
 	}
 	assertCurrentBranch(t, h.repoDir, "main")
 }
@@ -137,12 +176,12 @@ func TestBackupExportGitLeavesUnrelatedWorkingTreeChangesUntouched(t *testing.T)
 		t.Fatalf("expected README.md to remain modified, got:\n%s", status)
 	}
 
-	changedFiles := nonEmptyLines(gitOutput(t, h.repoDir, "show", "--name-only", "--pretty=format:", backupExportGitDefaultBranch))
+	changedFiles := nonEmptyLines(gitOutput(t, h.repoDir, "show", "--name-only", "--pretty=format:", backupGitDefaultBranch))
 	if len(changedFiles) == 0 {
 		t.Fatal("expected committed files on backup branch")
 	}
 	for _, changed := range changedFiles {
-		if !strings.HasPrefix(changed, backupExportGitPathspec+"/") {
+		if !strings.HasPrefix(changed, backupGitPathspec+"/") {
 			t.Fatalf("backup branch committed unrelated path %q", changed)
 		}
 	}
@@ -228,13 +267,16 @@ func insertBackupExportGitIssue(t *testing.T, ctx context.Context, id, title str
 
 func assertBranchHasExpectedBackupFiles(t *testing.T, repoDir, branch string) {
 	t.Helper()
-	got := nonEmptyLines(gitOutput(t, repoDir, "ls-tree", "-r", "--name-only", branch, "--", backupExportGitPathspec))
-	if len(got) != len(expectedBackupSnapshotFiles) {
-		t.Fatalf("backup branch files = %v, want %v", got, expectedBackupSnapshotFiles)
+	got := nonEmptyLines(gitOutput(t, repoDir, "ls-tree", "-r", "--name-only", branch, "--", backupGitPathspec))
+	slices.Sort(got)
+	want := append([]string(nil), expectedBackupSnapshotFiles...)
+	slices.Sort(want)
+	if len(got) != len(want) {
+		t.Fatalf("backup branch files = %v, want %v", got, want)
 	}
-	for i, want := range expectedBackupSnapshotFiles {
-		if got[i] != want {
-			t.Fatalf("backup branch file[%d] = %q, want %q", i, got[i], want)
+	for i, expected := range want {
+		if got[i] != expected {
+			t.Fatalf("backup branch file[%d] = %q, want %q", i, got[i], expected)
 		}
 	}
 }

@@ -50,20 +50,8 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			}
 		}
 
-		// Verify backup directory exists and has files
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
-		}
-
-		// Check for issues.jsonl as minimum requirement
-		issuesPath := filepath.Join(dir, "issues.jsonl")
-		if _, err := os.Stat(issuesPath); os.IsNotExist(err) {
-			return fmt.Errorf("no issues.jsonl found in %s\nThis doesn't look like a valid backup directory", dir)
-		}
-
-		// Validate schema of issues.jsonl before proceeding (GH#2492)
-		if err := validateIssueJSONLSchema(issuesPath); err != nil {
-			return fmt.Errorf("backup validation failed: %w", err)
+		if err := validateBackupRestoreDir(dir); err != nil {
+			return err
 		}
 
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -121,6 +109,10 @@ type restoreResult struct {
 // runBackupRestore imports all JSONL backup tables into the Dolt store.
 // Order matters: config first (sets prefix), then issues, then related tables.
 func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun bool) (*restoreResult, error) {
+	if s == nil {
+		return nil, fmt.Errorf("database is not initialized. Run 'bd init' first")
+	}
+
 	result := &restoreResult{}
 	db := s.DB()
 
@@ -197,6 +189,23 @@ func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun
 	}
 
 	return result, nil
+}
+
+func validateBackupRestoreDir(dir string) error {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
+	}
+
+	issuesPath := filepath.Join(dir, "issues.jsonl")
+	if _, err := os.Stat(issuesPath); os.IsNotExist(err) {
+		return fmt.Errorf("no issues.jsonl found in %s\nThis doesn't look like a valid backup directory", dir)
+	}
+
+	if err := validateIssueJSONLSchema(issuesPath); err != nil {
+		return fmt.Errorf("backup validation failed: %w", err)
+	}
+
+	return nil
 }
 
 // restoreConfig reads config.jsonl and sets each key-value pair.

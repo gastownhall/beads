@@ -5,18 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 const (
-	backupExportGitDefaultBranch = "beads-backup"
-	backupExportGitDefaultRemote = "origin"
-	backupExportGitPathspec      = ".beads/backup"
 	backupExportGitCommitMessage = "bd backup export-git"
 )
 
@@ -83,8 +77,8 @@ change primary storage or Dolt remote configuration.`,
 }
 
 func init() {
-	backupExportGitCmd.Flags().String("branch", backupExportGitDefaultBranch, "Target git branch for backup artifacts")
-	backupExportGitCmd.Flags().String("remote", backupExportGitDefaultRemote, "Git remote to push")
+	backupExportGitCmd.Flags().String("branch", backupGitDefaultBranch, "Target git branch for backup artifacts")
+	backupExportGitCmd.Flags().String("remote", backupGitDefaultRemote, "Git remote to push")
 	backupExportGitCmd.Flags().Bool("dry-run", false, "Show what would happen without creating a worktree, committing, or pushing")
 	backupExportGitCmd.Flags().Bool("force", false, "Force a fresh backup export before comparing and copying")
 	backupCmd.AddCommand(backupExportGitCmd)
@@ -122,19 +116,19 @@ func runBackupExportGit(ctx context.Context, opts backupExportGitOptions) (_ *ba
 		return result, nil
 	}
 
-	if _, err := runBackupExport(ctx, opts.Force); err != nil {
+	state, err := runBackupExport(ctx, opts.Force)
+	if err != nil {
 		return nil, err
 	}
 	result.Exported = true
 
-	tempRoot, err := os.MkdirTemp("", "bd-backup-export-git-*")
+	tempRoot, worktreeDir, err := createTempBackupGitWorktree("bd-backup-export-git-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temp worktree dir: %w", err)
+		return nil, err
 	}
-	worktreeDir := filepath.Join(tempRoot, "worktree")
 	worktreeAdded := false
 	defer func() {
-		cleanupErr := cleanupBackupExportGitWorktree(repoRoot, worktreeDir, tempRoot, worktreeAdded)
+		cleanupErr := cleanupTempBackupGitWorktree(repoRoot, worktreeDir, tempRoot, worktreeAdded)
 		if cleanupErr != nil {
 			if retErr != nil {
 				retErr = errors.Join(retErr, cleanupErr)
@@ -144,21 +138,24 @@ func runBackupExportGit(ctx context.Context, opts backupExportGitOptions) (_ *ba
 		}
 	}()
 
-	if err := addBackupExportGitWorktree(ctx, repoRoot, opts.Remote, opts.Branch, worktreeDir); err != nil {
+	if err := addBackupBranchWorktree(ctx, repoRoot, opts.Remote, opts.Branch, worktreeDir); err != nil {
 		return nil, err
 	}
 	worktreeAdded = true
 
-	dstBackupDir := filepath.Join(worktreeDir, filepath.FromSlash(backupExportGitPathspec))
+	dstBackupDir := filepath.Join(worktreeDir, filepath.FromSlash(backupGitPathspec))
 	if err := syncBackupSnapshot(backupDirPath, dstBackupDir); err != nil {
 		return nil, fmt.Errorf("copy backup snapshot: %w", err)
 	}
-
-	if err := gitExecInDir(ctx, worktreeDir, "add", "-A", "-f", "--", backupExportGitPathspec); err != nil {
-		return nil, fmt.Errorf("git add %s: %w", backupExportGitPathspec, err)
+	if err := writeBackupGitManifest(dstBackupDir, state); err != nil {
+		return nil, fmt.Errorf("write backup manifest: %w", err)
 	}
 
-	changed, err := gitHasCachedChanges(ctx, worktreeDir, backupExportGitPathspec)
+	if err := gitExecInDir(ctx, worktreeDir, "add", "-A", "-f", "--", backupGitPathspec); err != nil {
+		return nil, fmt.Errorf("git add %s: %w", backupGitPathspec, err)
+	}
+
+	changed, err := gitHasCachedChanges(ctx, worktreeDir, backupGitPathspec)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +164,7 @@ func runBackupExportGit(ctx context.Context, opts backupExportGitOptions) (_ *ba
 		return result, nil
 	}
 
-	if err := gitExecInDir(ctx, worktreeDir, "commit", "-m", backupExportGitCommitMessage, "--", backupExportGitPathspec); err != nil {
+	if err := gitExecInDir(ctx, worktreeDir, "commit", "-m", backupExportGitCommitMessage, "--", backupGitPathspec); err != nil {
 		return result, fmt.Errorf("git commit: %w", err)
 	}
 	result.Committed = true
@@ -182,14 +179,8 @@ func runBackupExportGit(ctx context.Context, opts backupExportGitOptions) (_ *ba
 }
 
 func normalizeBackupExportGitOptions(opts backupExportGitOptions) backupExportGitOptions {
-	opts.Branch = strings.TrimSpace(opts.Branch)
-	if opts.Branch == "" {
-		opts.Branch = backupExportGitDefaultBranch
-	}
-	opts.Remote = strings.TrimSpace(opts.Remote)
-	if opts.Remote == "" {
-		opts.Remote = backupExportGitDefaultRemote
-	}
+	opts.Branch = normalizeBackupGitRef(opts.Branch, backupGitDefaultBranch)
+	opts.Remote = normalizeBackupGitRef(opts.Remote, backupGitDefaultRemote)
 	return opts
 }
 
@@ -197,7 +188,7 @@ func printBackupExportGitResult(result *backupExportGitResult) {
 	if result.DryRun {
 		fmt.Printf("Dry run: would export backup snapshot to git branch %s\n", result.Branch)
 		fmt.Printf("  Remote: %s\n", result.Remote)
-		fmt.Printf("  Would copy: %s/\n", backupExportGitPathspec)
+		fmt.Printf("  Would copy: %s/\n", backupGitPathspec)
 		fmt.Println("  Would commit if changed")
 		fmt.Println("  Would push to remote")
 		return
@@ -212,7 +203,7 @@ func printBackupExportGitResult(result *backupExportGitResult) {
 
 	fmt.Printf("Exported backup snapshot to git branch %s\n", result.Branch)
 	fmt.Printf("  Remote: %s\n", result.Remote)
-	fmt.Printf("  Path: %s/\n", backupExportGitPathspec)
+	fmt.Printf("  Path: %s/\n", backupGitPathspec)
 	fmt.Println("  Commit: created")
 	fmt.Println("  Push: complete")
 }
@@ -240,134 +231,4 @@ func marshalBackupExportGitResultJSON(result *backupExportGitResult) ([]byte, er
 		payload["commit_message"] = result.CommitMessage
 	}
 	return json.MarshalIndent(payload, "", "  ")
-}
-
-func addBackupExportGitWorktree(ctx context.Context, repoRoot, remote, branch, worktreeDir string) error {
-	localExists, err := gitRefExists(ctx, repoRoot, "refs/heads/"+branch)
-	if err != nil {
-		return err
-	}
-	if localExists {
-		if err := gitExecInDir(ctx, repoRoot, "worktree", "add", worktreeDir, branch); err != nil {
-			return fmt.Errorf("git worktree add %s: %w", branch, err)
-		}
-		return nil
-	}
-
-	remoteRef := fmt.Sprintf("refs/remotes/%s/%s", remote, branch)
-	remoteExists, err := gitRefExists(ctx, repoRoot, remoteRef)
-	if err != nil {
-		return err
-	}
-	if remoteExists {
-		if err := gitExecInDir(ctx, repoRoot, "worktree", "add", "-b", branch, worktreeDir, remote+"/"+branch); err != nil {
-			return fmt.Errorf("git worktree add %s from %s/%s: %w", branch, remote, branch, err)
-		}
-		return nil
-	}
-
-	if err := gitExecInDir(ctx, repoRoot, "worktree", "add", "-b", branch, worktreeDir); err != nil {
-		return fmt.Errorf("git worktree add -b %s: %w", branch, err)
-	}
-	return nil
-}
-
-func cleanupBackupExportGitWorktree(repoRoot, worktreeDir, tempRoot string, worktreeAdded bool) error {
-	var errs []error
-	if worktreeAdded {
-		if err := gitExecInDir(context.Background(), repoRoot, "worktree", "remove", "--force", worktreeDir); err != nil {
-			errs = append(errs, fmt.Errorf("remove temp worktree: %w", err))
-		}
-	}
-	if tempRoot != "" {
-		if err := os.RemoveAll(tempRoot); err != nil {
-			errs = append(errs, fmt.Errorf("remove temp worktree dir: %w", err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
-	exitCode, err := gitExitCodeInDir(ctx, dir, "show-ref", "--verify", "--quiet", ref)
-	if err != nil {
-		return false, fmt.Errorf("git show-ref %s: %w", ref, err)
-	}
-	if exitCode == 1 {
-		return false, nil
-	}
-	if exitCode != 0 {
-		return false, fmt.Errorf("git show-ref %s exited with code %d", ref, exitCode)
-	}
-	return true, nil
-}
-
-func gitHasCachedChanges(ctx context.Context, dir, pathspec string) (bool, error) {
-	exitCode, err := gitExitCodeInDir(ctx, dir, "diff", "--cached", "--quiet", "--", pathspec)
-	if err != nil {
-		return false, fmt.Errorf("git diff --cached %s: %w", pathspec, err)
-	}
-	if exitCode == 1 {
-		return true, nil
-	}
-	if exitCode != 0 {
-		return false, fmt.Errorf("git diff --cached %s exited with code %d", pathspec, exitCode)
-	}
-	return false, nil
-}
-
-func syncBackupSnapshot(srcDir, dstDir string) error {
-	if err := os.RemoveAll(dstDir); err != nil {
-		return fmt.Errorf("clear destination backup dir: %w", err)
-	}
-	if err := os.MkdirAll(dstDir, 0755); err != nil {
-		return fmt.Errorf("create destination backup dir: %w", err)
-	}
-	return copyDirContents(srcDir, dstDir)
-}
-
-func copyDirContents(srcDir, dstDir string) error {
-	entries, err := os.ReadDir(srcDir)
-	if err != nil {
-		return fmt.Errorf("read source backup dir: %w", err)
-	}
-	for _, entry := range entries {
-		srcPath := filepath.Join(srcDir, entry.Name())
-		dstPath := filepath.Join(dstDir, entry.Name())
-		info, err := entry.Info()
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", srcPath, err)
-		}
-		if entry.IsDir() {
-			if err := os.MkdirAll(dstPath, info.Mode().Perm()); err != nil {
-				return fmt.Errorf("create %s: %w", dstPath, err)
-			}
-			if err := copyDirContents(srcPath, dstPath); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := copyFileContents(srcPath, dstPath, info.Mode().Perm()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func copyFileContents(srcPath, dstPath string, mode os.FileMode) error {
-	src, err := os.Open(srcPath) //nolint:gosec // source path is internal backup output
-	if err != nil {
-		return fmt.Errorf("open %s: %w", srcPath, err)
-	}
-	defer src.Close()
-
-	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode) //nolint:gosec // destination path is a temp worktree path constructed by the command
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dstPath, err)
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return fmt.Errorf("copy %s: %w", srcPath, err)
-	}
-	return nil
 }
