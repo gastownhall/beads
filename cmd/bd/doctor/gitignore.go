@@ -110,19 +110,7 @@ var requiredPatterns = []string{
 // CheckGitignore checks if .beads/.gitignore is up to date.
 // repoPath is the project root directory.
 func CheckGitignore(repoPath string) DoctorCheck {
-	gitignorePath := filepath.Join(repoPath, ".beads", ".gitignore")
-
-	// If a redirect exists, check the gitignore at the redirect target instead
-	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
-	// #nosec G304 -- redirect path is fixed to .beads/redirect
-	if data, err := os.ReadFile(redirectPath); err == nil {
-		target := parseRedirectTarget(data)
-		if target != "" {
-			beadsDir := filepath.Dir(redirectPath)
-			resolvedTarget := resolveRedirectTarget(beadsDir, target)
-			gitignorePath = filepath.Join(resolvedTarget, ".gitignore")
-		}
-	}
+	gitignorePath := filepath.Join(ResolveBeadsDirForRepo(repoPath), ".gitignore")
 
 	// Check if file exists
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- path is constructed from known parts
@@ -165,19 +153,7 @@ func CheckGitignore(repoPath string) DoctorCheck {
 // If a redirect exists, it writes to the redirect target's .gitignore instead.
 // repoPath is the project root directory.
 func FixGitignore(repoPath string) error {
-	gitignorePath := filepath.Join(repoPath, ".beads", ".gitignore")
-
-	// If a redirect exists, fix the gitignore at the redirect target instead
-	redirectPath := filepath.Join(repoPath, ".beads", "redirect")
-	// #nosec G304 -- redirect path is fixed to .beads/redirect
-	if data, err := os.ReadFile(redirectPath); err == nil {
-		target := parseRedirectTarget(data)
-		if target != "" {
-			beadsDir := filepath.Dir(redirectPath)
-			resolvedTarget := resolveRedirectTarget(beadsDir, target)
-			gitignorePath = filepath.Join(resolvedTarget, ".gitignore")
-		}
-	}
+	gitignorePath := filepath.Join(ResolveBeadsDirForRepo(repoPath), ".gitignore")
 
 	// If file exists and is read-only, fix permissions first
 	if info, err := os.Stat(gitignorePath); err == nil {
