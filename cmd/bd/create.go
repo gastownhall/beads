@@ -86,6 +86,22 @@ var createCmd = &cobra.Command{
 		// Get field values
 		description, _ := getDescriptionFlag(cmd)
 
+		skills, _ := cmd.Flags().GetString("skills")
+		if skills != "" {
+			if description != "" {
+				description += "\n\n"
+			}
+			description += "## Required Skills\n" + skills
+		}
+
+		ctxStr, _ := cmd.Flags().GetString("context")
+		if ctxStr != "" {
+			if description != "" {
+				description += "\n\n"
+			}
+			description += "## Context\n" + ctxStr
+		}
+
 		// Check if description is required by config
 		if description == "" && !isTestIssue(title) {
 			if config.GetBool("create.require-description") {
@@ -794,6 +810,8 @@ func init() {
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().String("spec-id", "", "Link to specification document")
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
+	createCmd.Flags().String("skills", "", "Required skills for this issue")
+	createCmd.Flags().String("context", "", "Additional context for the issue")
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
 	_ = createCmd.Flags().MarkHidden("label") // Only fails if flag missing (caught in tests)
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")

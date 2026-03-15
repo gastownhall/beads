@@ -151,7 +151,7 @@ The sync mode controls how beads synchronizes data with git and/or Dolt remotes.
 
 #### Sync Mode
 
-Beads uses `dolt-native` sync mode exclusively. Dolt remotes handle sync directly with cell-level merge. Use `bd export` for data portability and `bd init --from-jsonl` to bootstrap a new database from an export.
+Beads uses `dolt-native` sync mode exclusively. Dolt remotes handle sync directly with cell-level merge. Use `bd export` for issue portability, `bd backup` / `bd backup restore` for supported JSONL backup snapshots, and `bd backup export-git` / `bd backup fetch-git` to move those snapshots through a git branch.
 
 #### Sync Triggers
 

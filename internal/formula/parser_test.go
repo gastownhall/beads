@@ -1406,6 +1406,315 @@ title = "Start {{wisp_type}} on {{rig_name}}"
 	}
 }
 
+// be-58b: Tests for step override in extends
+
+func TestResolve_ChildStepOverridesParentByID(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Parent formula with workspace-setup step
+	parent := `{
+  "formula": "mol-base",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {"id": "workspace-setup", "title": "Parent workspace setup"},
+    {"id": "build", "title": "Build", "depends_on": ["workspace-setup"]}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "mol-base.formula.json"), []byte(parent), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	// Child overrides workspace-setup with different title
+	child := `{
+  "formula": "mol-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["mol-base"],
+  "steps": [
+    {"id": "workspace-setup", "title": "Child workspace setup"}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "mol-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// Should have 2 steps (override, not 3 from concatenation)
+	if len(resolved.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(resolved.Steps))
+	}
+
+	// workspace-setup should have child's title
+	if resolved.Steps[0].Title != "Child workspace setup" {
+		t.Errorf("Steps[0].Title = %q, want 'Child workspace setup'", resolved.Steps[0].Title)
+	}
+
+	// build should still be present
+	if resolved.Steps[1].ID != "build" {
+		t.Errorf("Steps[1].ID = %q, want 'build'", resolved.Steps[1].ID)
+	}
+}
+
+func TestResolve_OverridePreservesParentPosition(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "mol-base",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {"id": "step-a", "title": "A"},
+    {"id": "step-b", "title": "B"},
+    {"id": "step-c", "title": "C"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "mol-base.formula.json"), []byte(parent), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	// Child overrides step-b (middle step) — should keep position [1]
+	child := `{
+  "formula": "mol-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["mol-base"],
+  "steps": [
+    {"id": "step-b", "title": "B-override"}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "mol-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// Should have 3 steps, not 4
+	if len(resolved.Steps) != 3 {
+		t.Fatalf("len(Steps) = %d, want 3", len(resolved.Steps))
+	}
+
+	// Order should be preserved: A, B-override, C
+	wantIDs := []string{"step-a", "step-b", "step-c"}
+	for i, wantID := range wantIDs {
+		if resolved.Steps[i].ID != wantID {
+			t.Errorf("Steps[%d].ID = %q, want %q", i, resolved.Steps[i].ID, wantID)
+		}
+	}
+
+	// The overridden step should have child's title
+	if resolved.Steps[1].Title != "B-override" {
+		t.Errorf("Steps[1].Title = %q, want 'B-override'", resolved.Steps[1].Title)
+	}
+}
+
+func TestResolve_ChildNewStepsAppendedAfterParent(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "mol-base",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {"id": "init", "title": "Init"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "mol-base.formula.json"), []byte(parent), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	// Child adds new steps and overrides init
+	child := `{
+  "formula": "mol-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["mol-base"],
+  "steps": [
+    {"id": "init", "title": "Custom Init"},
+    {"id": "deploy", "title": "Deploy", "depends_on": ["init"]}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "mol-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// 2 steps: init (overridden) + deploy (new)
+	if len(resolved.Steps) != 2 {
+		t.Fatalf("len(Steps) = %d, want 2", len(resolved.Steps))
+	}
+
+	if resolved.Steps[0].ID != "init" || resolved.Steps[0].Title != "Custom Init" {
+		t.Errorf("Steps[0] = {%s, %s}, want {init, Custom Init}", resolved.Steps[0].ID, resolved.Steps[0].Title)
+	}
+	if resolved.Steps[1].ID != "deploy" {
+		t.Errorf("Steps[1].ID = %q, want 'deploy'", resolved.Steps[1].ID)
+	}
+}
+
+func TestResolve_MultipleOverrides(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "mol-base",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {"id": "step-a", "title": "A"},
+    {"id": "step-b", "title": "B"},
+    {"id": "step-c", "title": "C"},
+    {"id": "step-d", "title": "D"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "mol-base.formula.json"), []byte(parent), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	// Child overrides step-a and step-c
+	child := `{
+  "formula": "mol-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["mol-base"],
+  "steps": [
+    {"id": "step-a", "title": "A-new"},
+    {"id": "step-c", "title": "C-new"}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "mol-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if len(resolved.Steps) != 4 {
+		t.Fatalf("len(Steps) = %d, want 4", len(resolved.Steps))
+	}
+
+	wantTitles := []string{"A-new", "B", "C-new", "D"}
+	for i, want := range wantTitles {
+		if resolved.Steps[i].Title != want {
+			t.Errorf("Steps[%d].Title = %q, want %q", i, resolved.Steps[i].Title, want)
+		}
+	}
+}
+
+func TestResolve_NeedsReferencesToOverriddenStepStillResolve(t *testing.T) {
+	dir := t.TempDir()
+	formulaDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	parent := `{
+  "formula": "mol-base",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {"id": "workspace-setup", "title": "Parent setup"},
+    {"id": "build", "title": "Build", "needs": ["workspace-setup"]},
+    {"id": "test", "title": "Test", "depends_on": ["build"]}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(formulaDir, "mol-base.formula.json"), []byte(parent), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	// Child overrides workspace-setup; build's needs reference should still resolve
+	child := `{
+  "formula": "mol-child",
+  "version": 1,
+  "type": "workflow",
+  "extends": ["mol-base"],
+  "steps": [
+    {"id": "workspace-setup", "title": "Custom setup"}
+  ]
+}`
+	childPath := filepath.Join(formulaDir, "mol-child.formula.json")
+	if err := os.WriteFile(childPath, []byte(child), 0644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	p := NewParser(formulaDir)
+	formula, err := p.ParseFile(childPath)
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	resolved, err := p.Resolve(formula)
+	if err != nil {
+		t.Fatalf("Resolve should succeed (needs refs still valid): %v", err)
+	}
+
+	// 3 steps: workspace-setup (overridden), build, test
+	if len(resolved.Steps) != 3 {
+		t.Fatalf("len(Steps) = %d, want 3", len(resolved.Steps))
+	}
+
+	// build should still reference workspace-setup
+	if resolved.Steps[1].Needs[0] != "workspace-setup" {
+		t.Errorf("Steps[1].Needs = %v, want [workspace-setup]", resolved.Steps[1].Needs)
+	}
+}
+
 func TestParseTOML_MixedVarFormats(t *testing.T) {
 	// Test mixing simple strings and full table definitions
 	tomlData := `

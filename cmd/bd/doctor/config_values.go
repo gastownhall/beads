@@ -363,7 +363,7 @@ func checkDatabaseConfigValues(repoPath string) []string {
 
 	// Open Dolt store in read-only mode
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		issues = append(issues, fmt.Sprintf("database: failed to open Dolt store: %v", err))
 		return issues

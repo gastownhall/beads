@@ -561,13 +561,19 @@ bd gate add-waiter <gate-id> <waiter>
 
 ## Database Management
 
-### Export / Bootstrap
+### Export / Backup / Bootstrap
 
 ```bash
-# Export issues to JSONL
+# Export issues to issue JSONL
 bd export -o issues.jsonl
 
-# Bootstrap a new database from an export
+# Write or restore the supported JSONL backup snapshot
+bd backup
+bd backup restore
+bd backup export-git
+bd backup fetch-git
+
+# Bootstrap a new database from an issue export
 bd init --from-jsonl                            # Reads .beads/issues.jsonl
 
 # Configure orphan handling for pulls and bootstrapping

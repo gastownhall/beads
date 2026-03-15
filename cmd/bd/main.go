@@ -505,15 +505,9 @@ var rootCmd = &cobra.Command{
 		}
 		doltCfg.SyncGitRemote = config.GetString("sync.git-remote")
 
-		// Auto-start: enabled by default.
-		// Can be disabled by explicit config or env var.
-		doltCfg.AutoStart = true
-		if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
-			doltCfg.AutoStart = false
-		}
-		if v := config.GetString("dolt.auto-start"); v == "false" || v == "0" || v == "off" {
-			doltCfg.AutoStart = false
-		}
+		// Keep standalone CLI auto-start behavior centralized so doctor and
+		// other helper paths stay in lockstep with the main command path.
+		dolt.ApplyCLIAutoStart(beadsDir, doltCfg)
 
 		// Server mode defaults auto-commit to OFF because the server handles
 		// commits via its own transaction lifecycle; firing DOLT_COMMIT after

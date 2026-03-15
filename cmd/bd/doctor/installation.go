@@ -69,7 +69,7 @@ func CheckPermissions(path string) DoctorCheck {
 			}
 			// Try to open Dolt store read-only to verify accessibility
 			ctx := context.Background()
-			store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+			store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 			if err != nil {
 				return DoctorCheck{
 					Name:    "Permissions",

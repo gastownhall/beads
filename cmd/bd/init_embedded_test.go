@@ -379,17 +379,12 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// --from-jsonl requires CreateIssuesWithFullOptions, not yet implemented.
 		cmd := exec.Command(bd, "init", "--prefix", "jl", "--from-jsonl", "--quiet")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		out, err := cmd.CombinedOutput()
-		if err == nil {
-			t.Fatal("--from-jsonl should fail: CreateIssuesWithFullOptions not yet implemented")
-		}
-		combined := string(out)
-		if !strings.Contains(combined, "not implemented") && !strings.Contains(combined, "panic") {
-			t.Logf("--from-jsonl failed with: %s", combined)
+		if err != nil {
+			t.Fatalf("--from-jsonl should succeed now that CreateIssuesWithFullOptions is implemented: %v\n%s", err, out)
 		}
 	})
 

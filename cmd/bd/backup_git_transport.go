@@ -20,20 +20,11 @@ const (
 )
 
 type backupGitManifest struct {
-	Format            string         `json:"format"`
-	BDVersion         string         `json:"bd_version"`
-	SnapshotTimestamp time.Time      `json:"snapshot_timestamp"`
-	LastDoltCommit    string         `json:"last_dolt_commit"`
-	Counts            manifestCounts `json:"counts"`
-}
-
-type manifestCounts struct {
-	Issues       int `json:"issues"`
-	Events       int `json:"events"`
-	Comments     int `json:"comments"`
-	Dependencies int `json:"dependencies"`
-	Labels       int `json:"labels"`
-	Config       int `json:"config"`
+	Format            string       `json:"format"`
+	BDVersion         string       `json:"bd_version"`
+	SnapshotTimestamp time.Time    `json:"snapshot_timestamp"`
+	LastDoltCommit    string       `json:"last_dolt_commit"`
+	Counts            backupCounts `json:"counts"`
 }
 
 func normalizeBackupGitRef(value, fallback string) string {
@@ -202,14 +193,7 @@ func writeBackupGitManifest(dstDir string, state *backupState) error {
 		BDVersion:         Version,
 		SnapshotTimestamp: state.Timestamp,
 		LastDoltCommit:    state.LastDoltCommit,
-		Counts: manifestCounts{
-			Issues:       state.Counts.Issues,
-			Events:       state.Counts.Events,
-			Comments:     state.Counts.Comments,
-			Dependencies: state.Counts.Dependencies,
-			Labels:       state.Counts.Labels,
-			Config:       state.Counts.Config,
-		},
+		Counts:            state.Counts,
 	}
 
 	data, err := json.MarshalIndent(manifest, "", "  ")

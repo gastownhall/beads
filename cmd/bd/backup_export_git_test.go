@@ -34,7 +34,7 @@ type backupExportGitHarness struct {
 
 func TestBackupExportGitCreatesBranchAndPushesSnapshot(t *testing.T) {
 	h := setupBackupExportGitHarness(t)
-	insertBackupExportGitIssue(t, h.ctx, "exp-1", "Export Git Issue 1")
+	insertBackupExportGitIssue(t, h.ctx, "test-exp-1", "Export Git Issue 1")
 
 	result, err := runBackupExportGit(h.ctx, backupExportGitOptions{})
 	if err != nil {
@@ -51,14 +51,14 @@ func TestBackupExportGitCreatesBranchAndPushesSnapshot(t *testing.T) {
 
 func TestBackupExportGitUpdatesExistingBranch(t *testing.T) {
 	h := setupBackupExportGitHarness(t)
-	insertBackupExportGitIssue(t, h.ctx, "upd-1", "First export")
+	insertBackupExportGitIssue(t, h.ctx, "test-upd-1", "First export")
 
 	if _, err := runBackupExportGit(h.ctx, backupExportGitOptions{}); err != nil {
 		t.Fatalf("first runBackupExportGit: %v", err)
 	}
 	firstHead := gitOutput(t, h.repoDir, "rev-parse", backupGitDefaultBranch)
 
-	insertBackupExportGitIssue(t, h.ctx, "upd-2", "Second export")
+	insertBackupExportGitIssue(t, h.ctx, "test-upd-2", "Second export")
 	result, err := runBackupExportGit(h.ctx, backupExportGitOptions{})
 	if err != nil {
 		t.Fatalf("second runBackupExportGit: %v", err)
@@ -80,7 +80,7 @@ func TestBackupExportGitUpdatesExistingBranch(t *testing.T) {
 
 func TestBackupExportGitNoChangesSkipsCommitAndPush(t *testing.T) {
 	h := setupBackupExportGitHarness(t)
-	insertBackupExportGitIssue(t, h.ctx, "same-1", "No change export")
+	insertBackupExportGitIssue(t, h.ctx, "test-same-1", "No change export")
 
 	if _, err := runBackupExportGit(h.ctx, backupExportGitOptions{}); err != nil {
 		t.Fatalf("first runBackupExportGit: %v", err)
@@ -139,7 +139,7 @@ func TestBackupExportGitWritesManifest(t *testing.T) {
 
 func TestBackupExportGitDryRunHasNoSideEffects(t *testing.T) {
 	h := setupBackupExportGitHarness(t)
-	insertBackupExportGitIssue(t, h.ctx, "dry-1", "Dry run issue")
+	insertBackupExportGitIssue(t, h.ctx, "test-dry-1", "Dry run issue")
 
 	result, err := runBackupExportGit(h.ctx, backupExportGitOptions{DryRun: true})
 	if err != nil {
@@ -160,7 +160,7 @@ func TestBackupExportGitDryRunHasNoSideEffects(t *testing.T) {
 
 func TestBackupExportGitLeavesUnrelatedWorkingTreeChangesUntouched(t *testing.T) {
 	h := setupBackupExportGitHarness(t)
-	insertBackupExportGitIssue(t, h.ctx, "dirty-1", "Dirty tree issue")
+	insertBackupExportGitIssue(t, h.ctx, "test-dirty-1", "Dirty tree issue")
 
 	readmePath := filepath.Join(h.repoDir, "README.md")
 	if err := os.WriteFile(readmePath, []byte("modified locally\n"), 0644); err != nil {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // CheckEmbeddedModeConcurrency detects when a project is using Dolt embedded
@@ -13,7 +14,7 @@ import (
 // processes). Recommends switching to server mode for multi-agent workflows.
 // Addresses GH#2086.
 func CheckEmbeddedModeConcurrency(path string) DoctorCheck {
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
@@ -25,7 +26,7 @@ func CheckEmbeddedModeConcurrency(path string) DoctorCheck {
 		}
 	}
 
-	if cfg.IsDoltServerMode() {
+	if isServerBackedRuntime(beadsDir, cfg) {
 		return DoctorCheck{
 			Name:     "Embedded Mode Concurrency",
 			Status:   StatusOK,
@@ -81,6 +82,27 @@ func CheckEmbeddedModeConcurrency(path string) DoctorCheck {
 		Fix:      "Start the Dolt server: bd dolt start",
 		Category: CategoryRuntime,
 	}
+}
+
+// isServerBackedRuntime reports whether this repo is using Beads' server-backed
+// Dolt runtime, even when older metadata.json files omit dolt_mode.
+func isServerBackedRuntime(beadsDir string, cfg *configfile.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.IsDoltServerMode() || doltserver.IsSharedServerMode() {
+		return true
+	}
+	if cfg.DoltServerPort > 0 {
+		return true
+	}
+	if os.Getenv("BEADS_DOLT_SERVER_PORT") != "" || os.Getenv("BEADS_DOLT_PORT") != "" {
+		return true
+	}
+
+	serverDir := doltserver.ResolveServerDir(beadsDir)
+	state, err := doltserver.IsRunning(serverDir)
+	return err == nil && state != nil && state.Running
 }
 
 // joinIssues joins issue strings with semicolons.

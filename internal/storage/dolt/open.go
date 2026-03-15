@@ -10,10 +10,45 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 )
 
+// ApplyCLIAutoStart sets the same standalone auto-start policy used by the
+// normal CLI path. This intentionally ignores metadata.json explicit-port
+// suppression so doctor and other CLI helper paths behave the same way as
+// cmd/bd/main.go on cold repo-local standalone setups.
+func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
+	autoStartCfg := config.GetString("dolt.auto-start")
+	if autoStartCfg == "" {
+		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
+	}
+	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, false)
+}
+
 // NewFromConfig creates a DoltStore based on the metadata.json configuration.
 // beadsDir is the path to the .beads directory.
 func NewFromConfig(ctx context.Context, beadsDir string) (*DoltStore, error) {
 	return NewFromConfigWithOptions(ctx, beadsDir, nil)
+}
+
+// NewFromConfigWithCLIOptions creates a DoltStore using the standalone CLI
+// auto-start policy from cmd/bd/main.go instead of the explicit-port
+// suppression used by library-style config opens. This is for CLI helper paths
+// like `bd doctor` that should behave the same way as normal top-level CLI
+// commands on cold repo-local standalone setups.
+func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Config) (*DoltStore, error) {
+	fileCfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
+	if fileCfg == nil {
+		fileCfg = configfile.DefaultConfig()
+	}
+
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	applyResolvedConfig(beadsDir, fileCfg, cfg)
+	ApplyCLIAutoStart(beadsDir, cfg)
+
+	return New(ctx, cfg)
 }
 
 // NewFromConfigWithOptions creates a DoltStore with options from metadata.json.

@@ -19,21 +19,25 @@ var backupCmd = &cobra.Command{
 Without a subcommand, exports all tables to JSONL files in .beads/backup/.
 Events are exported incrementally using a high-water mark.
 
-For Dolt-native backups (preserves full commit history, faster for large databases):
+JSONL backup commands (portable snapshot for backup/restore transport):
+  bd backup                Export the current JSONL backup snapshot
+  bd backup status         Show JSONL + Dolt backup status
+  bd backup export-git     Publish the JSONL snapshot to a git branch
+  bd backup fetch-git      Fetch a backup snapshot from a git branch and restore it
+  bd backup restore [path] Restore from JSONL backup files
+
+Dolt-native backup commands (preserve full commit history, faster for large databases):
   bd backup init <path>     Set up a backup destination (filesystem or DoltHub)
   bd backup sync            Push to configured backup destination
-
-Other subcommands:
-  bd backup status          Show backup status (JSONL + Dolt)
-  bd backup export-git      Export the current JSONL snapshot to a git branch
-  bd backup restore [path]  Restore from JSONL backup files
 
 DoltHub is recommended for cloud backup:
   bd backup init https://doltremoteapi.dolthub.com/<user>/<repo>
   Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
 
-Note: Git-protocol remotes are NOT recommended for Dolt backups — push times
-exceed 20 minutes, cache grows unboundedly, and force-push is needed after recovery.`,
+Note: The git-protocol remote warning below applies to Dolt-native backups,
+not to 'bd backup export-git'. Git-protocol remotes are NOT recommended for
+Dolt backups — push times exceed 20 minutes, cache grows unboundedly, and
+force-push is needed after recovery.`,
 	GroupID: "sync",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		state, err := runBackupExport(rootCtx, backupForce)
@@ -107,6 +111,8 @@ var backupStatusCmd = &cobra.Command{
 			fmt.Println()
 			fmt.Println("JSONL backup (portable):")
 			fmt.Println("  bd backup                Run JSONL export now")
+			fmt.Println("  bd backup export-git     Publish snapshot to a git branch")
+			fmt.Println("  bd backup fetch-git      Restore from a backup git branch")
 			fmt.Println("  Auto-backup runs every 15m when a git remote is detected")
 			fmt.Println()
 			fmt.Println("Dolt backup (preserves history, faster for large databases):")

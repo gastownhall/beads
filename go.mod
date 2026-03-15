@@ -9,7 +9,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.26.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/dolthub/driver v0.2.1-0.20260311222540-669bd7f66d2d
+	github.com/dolthub/driver v0.2.1-0.20260314000741-0fe74e7ee31a
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/muesli/termenv v0.16.0
@@ -120,12 +120,12 @@ require (
 	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dolthub/aws-sdk-go-ini-parser v0.0.0-20250305001723-2821c37f6c12 // indirect
-	github.com/dolthub/dolt/go v0.40.5-0.20260311213424-84e3c2ca847e // indirect
+	github.com/dolthub/dolt/go v0.40.5-0.20260313234613-4069302e7692 // indirect
 	github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69 // indirect
 	github.com/dolthub/flatbuffers/v23 v23.3.3-dh.2 // indirect
 	github.com/dolthub/fslock v0.0.3 // indirect
 	github.com/dolthub/go-icu-regex v0.0.0-20250916051405-78a38d478790 // indirect
-	github.com/dolthub/go-mysql-server v0.20.1-0.20260311204756-b77b4b7c3924 // indirect
+	github.com/dolthub/go-mysql-server v0.20.1-0.20260313230549-0986a7fcf0fe // indirect
 	github.com/dolthub/gozstd v0.0.0-20240423170813-23a2903bca63 // indirect
 	github.com/dolthub/ishell v0.0.0-20240701202509-2b217167d718 // indirect
 	github.com/dolthub/jsonpath v0.0.2-0.20240227200619-19675ab05c71 // indirect
@@ -222,6 +222,7 @@ require (
 	github.com/xitongsys/parquet-go v1.6.2 // indirect
 	github.com/xitongsys/parquet-go-source v0.0.0-20240122235623-d6294584ab18 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/xtaci/smux v1.5.56 // indirect
 	github.com/yuin/goldmark v1.7.13 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect

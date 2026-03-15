@@ -29,7 +29,7 @@ func CheckIDFormat(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Issue IDs",
@@ -107,7 +107,7 @@ func CheckDependencyCycles(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
@@ -294,7 +294,7 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
@@ -325,7 +325,7 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 		}
 	}
 
-	currentRepoID, err := beads.ComputeRepoID()
+	currentRepoID, err := beads.ComputeRepoIDForPath(path)
 	if err != nil {
 		if strings.Contains(err.Error(), "not a git repository") {
 			return DoctorCheck{

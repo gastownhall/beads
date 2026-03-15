@@ -382,15 +382,17 @@ func IsRunning(beadsDir string) (*State, error) {
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		// Corrupt PID file — clean up
+		// Corrupt PID file implies stale state; clear the port file too.
 		_ = os.Remove(pidPath(beadsDir))
+		_ = os.Remove(portPath(beadsDir))
 		return &State{Running: false}, nil
 	}
 
 	// Check if process is alive
 	if !isProcessAlive(pid) {
-		// Process is dead — stale PID file
+		// Process is dead — clear all tracked state for this server.
 		_ = os.Remove(pidPath(beadsDir))
+		_ = os.Remove(portPath(beadsDir))
 		return &State{Running: false}, nil
 	}
 
@@ -813,16 +815,15 @@ func LogPath(beadsDir string) string {
 	return logPath(beadsDir)
 }
 
-// KillStaleServers finds and kills orphan dolt sql-server processes
-// not tracked by the canonical PID file.
-// Returns the PIDs of killed processes.
-func KillStaleServers(beadsDir string) ([]int, error) {
-	allPIDs := listDoltProcessPIDs()
+// killStaleServersForDir finds and kills orphan dolt sql-server processes for
+// the current repo's Dolt data directory that are not tracked by the canonical
+// PID file. Servers owned by other repos are preserved.
+func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, string) bool, kill func(int) error) ([]int, error) {
 	if len(allPIDs) == 0 {
 		return nil, nil
 	}
 
-	// Collect canonical PIDs (ones we should NOT kill)
+	// Collect canonical PIDs (ones we should NOT kill).
 	canonicalPIDs := make(map[int]bool)
 	serverDir := resolveServerDir(beadsDir)
 	if serverDir != "" {
@@ -833,6 +834,8 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 		}
 	}
 
+	ownedDoltDir := ResolveDoltDir(serverDir)
+
 	var killed []int
 	for _, pid := range allPIDs {
 		if pid == os.Getpid() {
@@ -841,12 +844,33 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 		if canonicalPIDs[pid] {
 			continue // preserve canonical server
 		}
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Kill()
+		if !inDir(pid, ownedDoltDir) {
+			continue // preserve other repos' Dolt servers
+		}
+		if err := kill(pid); err == nil {
 			killed = append(killed, pid)
 		}
 	}
 	return killed, nil
+}
+
+// KillStaleServers finds and kills orphan dolt sql-server processes for the
+// current repo's Dolt data directory that are not tracked by the canonical PID
+// file. Returns the PIDs of killed processes.
+func KillStaleServers(beadsDir string) ([]int, error) {
+	allPIDs := listDoltProcessPIDs()
+	return killStaleServersForDir(
+		beadsDir,
+		allPIDs,
+		isProcessInDir,
+		func(pid int) error {
+			proc, err := os.FindProcess(pid)
+			if err != nil {
+				return err
+			}
+			return proc.Kill()
+		},
+	)
 }
 
 // waitForReady polls TCP until the server accepts connections.

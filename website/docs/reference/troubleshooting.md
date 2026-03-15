@@ -69,8 +69,11 @@ bd doctor --fix
 # Or pull from Dolt remote
 bd dolt pull
 
-# Or bootstrap from a JSONL backup if available
-bd init --from-jsonl backup.jsonl
+# Or restore from a local JSONL backup snapshot
+bd backup restore
+
+# Or fetch the latest snapshot from a backup git branch
+bd backup fetch-git
 ```
 
 ## Dolt Server Issues
@@ -113,8 +116,11 @@ bd hooks status
 ### Recovery from backup
 
 ```bash
-# Bootstrap from JSONL backup
-bd init --from-jsonl backup.jsonl
+# Restore from a local JSONL backup snapshot
+bd backup restore
+
+# Or fetch the latest snapshot from a backup git branch
+bd backup fetch-git
 
 # Or pull from Dolt remote
 bd dolt pull

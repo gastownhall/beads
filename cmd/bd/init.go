@@ -454,6 +454,11 @@ environment variable.`,
 		}
 		defer initLock.Unlock()
 
+		// Clean stale noms LOCK files from previously crashed processes
+		// before opening the embedded store. Without this, a crashed init
+		// leaves LOCK files that cause nil pointer dereference in DoltDB.
+		dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
+
 		store, err := newDoltStore(ctx, doltCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %v\n", err)
