@@ -153,7 +153,7 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 	}
 
 	table := "issues"
-	if issue.Ephemeral {
+	if issue.Ephemeral || issue.NoHistory {
 		table = "wisps"
 	}
 

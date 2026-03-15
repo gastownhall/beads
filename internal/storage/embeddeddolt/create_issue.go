@@ -46,12 +46,14 @@ func (s *EmbeddedDoltStore) CreateIssuesWithFullOptions(ctx context.Context, iss
 		return nil
 	}
 
-	// All-ephemeral fast path: create each wisp individually within
+	// All-wisps fast path: create each wisp/no-history issue individually within
 	// its own transaction, threading opts through so that callers'
 	// SkipPrefixValidation / OrphanHandling settings are respected.
-	if issueops.AllEphemeral(issues) {
+	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
-			issue.Ephemeral = true
+			if !issue.NoHistory {
+				issue.Ephemeral = true
+			}
 			if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 				bc, err := issueops.NewBatchContext(ctx, tx, opts)
 				if err != nil {

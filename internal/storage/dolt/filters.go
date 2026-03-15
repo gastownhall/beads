@@ -103,14 +103,13 @@ func buildIssueFilterClauses(query string, filter types.IssueFilter, tables filt
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM %s WHERE issue_type = ?)", tables.main))
 		args = append(args, *filter.IssueType)
 	}
-	// Use subquery for type exclusion to prevent Dolt mergeJoinIter panic (same as above).
 	if len(filter.ExcludeTypes) > 0 {
 		placeholders := make([]string, len(filter.ExcludeTypes))
 		for i, t := range filter.ExcludeTypes {
 			placeholders[i] = "?"
 			args = append(args, string(t))
 		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM %s WHERE issue_type NOT IN (%s))", tables.main, strings.Join(placeholders, ",")))
+		whereClauses = append(whereClauses, fmt.Sprintf("issue_type NOT IN (%s)", strings.Join(placeholders, ",")))
 	}
 
 	// Assignee

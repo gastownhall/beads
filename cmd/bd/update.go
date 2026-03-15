@@ -221,14 +221,28 @@ create, update, show, or close operation).`,
 		// Note: storage layer uses "wisp" field name, maps to "ephemeral" column
 		ephemeralChanged := cmd.Flags().Changed("ephemeral")
 		persistentChanged := cmd.Flags().Changed("persistent")
+		noHistoryChanged := cmd.Flags().Changed("no-history")
+		historyChanged := cmd.Flags().Changed("history")
 		if ephemeralChanged && persistentChanged {
 			FatalErrorRespectJSON("cannot specify both --ephemeral and --persistent flags")
+		}
+		if noHistoryChanged && ephemeralChanged {
+			FatalErrorRespectJSON("cannot specify both --no-history and --ephemeral flags")
+		}
+		if noHistoryChanged && historyChanged {
+			FatalErrorRespectJSON("cannot specify both --no-history and --history flags")
 		}
 		if ephemeralChanged {
 			updates["wisp"] = true
 		}
 		if persistentChanged {
 			updates["wisp"] = false
+		}
+		if noHistoryChanged {
+			updates["no_history"] = true
+		}
+		if historyChanged {
+			updates["no_history"] = false
 		}
 		// Metadata flag (GH#1413)
 		if cmd.Flags().Changed("metadata") {
@@ -590,6 +604,8 @@ func init() {
 	// Ephemeral/persistent flags
 	updateCmd.Flags().Bool("ephemeral", false, "Mark issue as ephemeral (wisp) - not exported to JSONL")
 	updateCmd.Flags().Bool("persistent", false, "Mark issue as persistent (promote wisp to regular issue)")
+	updateCmd.Flags().Bool("no-history", false, "Mark issue as no-history (skip Dolt commits, not GC-eligible)")
+	updateCmd.Flags().Bool("history", false, "Clear no-history flag (re-enable Dolt commit history)")
 	// Metadata flag (GH#1413)
 	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Incremental metadata edits (GH#1406)

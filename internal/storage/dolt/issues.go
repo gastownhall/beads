@@ -22,9 +22,10 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 	if issue == nil {
 		return fmt.Errorf("issue must not be nil")
 	}
-	// Route ephemeral issues and infra types to wisps table.
-	if issue.Ephemeral || s.IsInfraTypeCtx(ctx, issue.IssueType) {
-		issue.Ephemeral = true
+	// Route to wisps table if ephemeral, no-history, or infra type.
+	useWispsTable := issue.Ephemeral || issue.NoHistory || s.IsInfraTypeCtx(ctx, issue.IssueType)
+	if useWispsTable && !issue.NoHistory {
+		issue.Ephemeral = true // infra types get marked ephemeral (legacy behavior)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -45,8 +46,8 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		return err
 	}
 
-	// Dolt versioning — wisps are transient and skip DOLT_COMMIT.
-	if !issue.Ephemeral {
+	// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT.
+	if !issue.Ephemeral && !issue.NoHistory {
 		// GH#2455: Stage only the tables we modified, then commit without -A
 		// to avoid sweeping up stale config changes from concurrent operations.
 		for _, table := range []string{"issues", "events"} {
@@ -79,10 +80,13 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
-	// All-ephemeral fast path: individual transactions, no Dolt versioning.
-	if issueops.AllEphemeral(issues) {
+	// All-wisps fast path: individual transactions, no Dolt versioning.
+	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
+	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
-			issue.Ephemeral = true
+			if !issue.NoHistory {
+				issue.Ephemeral = true
+			}
 			tx, err := s.db.BeginTx(ctx, nil)
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction: %w", err)
@@ -184,6 +188,15 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps)
 	if s.isActiveWisp(ctx, id) {
 		return s.updateWisp(ctx, id, updates, actor)
+	}
+
+	// If updating a regular issue to no-history or ephemeral, migrate it to the
+	// wisps table instead of updating in-place. Table routing only happens at
+	// create time by default, so we must perform the migration here. (be-x4l)
+	_, settingNoHistory := updates["no_history"]
+	_, settingWisp := updates["wisp"]
+	if settingNoHistory || settingWisp {
+		return s.DemoteToWisp(ctx, id, updates, actor)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1021,7 +1034,7 @@ func isAllowedUpdateField(key string) bool {
 		"issue_type": true, "estimated_minutes": true, "external_ref": true, "spec_id": true,
 		"closed_at": true, "close_reason": true, "closed_by_session": true,
 		"source_repo": true,
-		"sender":      true, "wisp": true, "wisp_type": true, "pinned": true,
+		"sender":      true, "wisp": true, "wisp_type": true, "no_history": true, "pinned": true,
 		"hook_bead": true, "role_bead": true, "agent_state": true, "last_activity": true,
 		"role_type": true, "rig": true, "mol_type": true, "holder": true,
 		"event_category": true, "event_actor": true, "event_target": true, "event_payload": true,

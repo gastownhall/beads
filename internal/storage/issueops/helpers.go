@@ -21,9 +21,9 @@ import (
 )
 
 // IsWisp returns true if the issue should be routed to the wisps table.
-// Matches the DoltStore check: issue.Ephemeral || ID contains "-wisp-".
+// Matches the DoltStore check: issue.Ephemeral || issue.NoHistory || ID contains "-wisp-".
 func IsWisp(issue *types.Issue) bool {
-	return issue.Ephemeral || strings.Contains(issue.ID, "-wisp-")
+	return issue.Ephemeral || issue.NoHistory || strings.Contains(issue.ID, "-wisp-")
 }
 
 // TableRouting returns the issue and event table names for an issue,
@@ -46,7 +46,7 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
 			compaction_level, compacted_at, compacted_at_commit, original_size,
-			sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
+			sender, ephemeral, no_history, wisp_type, pinned, is_template, crystallizes,
 			mol_type, work_type, quality_score, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
@@ -57,7 +57,7 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
@@ -87,7 +87,7 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
 		issue.CompactionLevel, issue.CompactedAt, NullStringPtr(issue.CompactedAtCommit), NullIntVal(issue.OriginalSize),
-		issue.Sender, issue.Ephemeral, issue.WispType, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
+		issue.Sender, issue.Ephemeral, issue.NoHistory, issue.WispType, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
 		issue.MolType, issue.WorkType, issue.QualityScore, issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),

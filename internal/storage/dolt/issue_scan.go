@@ -14,7 +14,7 @@ const issueSelectColumns = `id, content_hash, title, description, design, accept
 	       status, priority, issue_type, assignee, estimated_minutes,
 	       created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
 	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-	       sender, ephemeral, wisp_type, pinned, is_template, crystallizes,
+	       sender, ephemeral, no_history, wisp_type, pinned, is_template, crystallizes,
 	       await_type, await_id, timeout_ns, waiters,
 	       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
 	       event_kind, actor, target, payload,
@@ -42,7 +42,7 @@ func scanIssueFrom(s issueScanner) (*types.Issue, error) {
 	var sender, wispType, molType, eventKind, actor, target, payload sql.NullString
 	var awaitType, awaitID, waiters sql.NullString
 	var hookBead, roleBead, agentState, roleType, rig sql.NullString
-	var ephemeral, pinned, isTemplate, crystallizes sql.NullInt64
+	var ephemeral, noHistory, pinned, isTemplate, crystallizes sql.NullInt64
 	var qualityScore sql.NullFloat64
 	var metadata sql.NullString
 
@@ -52,7 +52,7 @@ func scanIssueFrom(s issueScanner) (*types.Issue, error) {
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &createdBy, &owner, &updatedAtStr, &closedAt, &externalRef, &specID,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
-		&sender, &ephemeral, &wispType, &pinned, &isTemplate, &crystallizes,
+		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate, &crystallizes,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
 		&eventKind, &actor, &target, &payload,
@@ -116,6 +116,9 @@ func scanIssueFrom(s issueScanner) (*types.Issue, error) {
 	}
 	if ephemeral.Valid && ephemeral.Int64 != 0 {
 		issue.Ephemeral = true
+	}
+	if noHistory.Valid && noHistory.Int64 != 0 {
+		issue.NoHistory = true
 	}
 	if wispType.Valid {
 		issue.WispType = types.WispType(wispType.String)

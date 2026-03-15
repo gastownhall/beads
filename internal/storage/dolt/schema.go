@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS issues (
     -- Messaging fields
     sender VARCHAR(255) DEFAULT '',
     ephemeral TINYINT(1) DEFAULT 0,
+    -- NoHistory: stored in wisps table but NOT GC-eligible (gh-2619)
+    no_history TINYINT(1) DEFAULT 0,
     -- Wisp classification for TTL-based compaction (gt-9br)
     wisp_type VARCHAR(32) DEFAULT '',
     -- Pinned field

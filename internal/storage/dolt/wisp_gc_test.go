@@ -425,6 +425,69 @@ func TestCommitWithConfig_IncludesConfig(t *testing.T) {
 	}
 }
 
+// TestWispGC_SkipsNoHistoryBeads verifies that wisp GC does NOT collect beads
+// with NoHistory=true. NoHistory beads are stored in the wisps table but have
+// ephemeral=0, so the GC filter (Ephemeral=true → "ephemeral = 1") must
+// exclude them. This is the explicit regression test for gh-2619.
+func TestWispGC_SkipsNoHistoryBeads(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Create a NoHistory bead: stored in wisps table, but NOT GC-eligible.
+	noHistoryBead := &types.Issue{
+		Title:     "no-history bead (must survive GC)",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		NoHistory: true,
+	}
+	if err := store.CreateIssue(ctx, noHistoryBead, "test"); err != nil {
+		t.Fatalf("create no-history bead: %v", err)
+	}
+
+	// Create a normal ephemeral wisp: should be visible to GC.
+	ephemeralWisp := &types.Issue{
+		Title:     "normal ephemeral wisp (GC-eligible)",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, ephemeralWisp, "test"); err != nil {
+		t.Fatalf("create ephemeral wisp: %v", err)
+	}
+
+	// Query with Ephemeral=true — the exact filter used by wisp GC.
+	ephemeralTrue := true
+	filter := types.IssueFilter{
+		Ephemeral: &ephemeralTrue,
+		Limit:     5000,
+	}
+	issues, err := store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+
+	// Build set of returned IDs.
+	found := make(map[string]bool, len(issues))
+	for _, iss := range issues {
+		found[iss.ID] = true
+	}
+
+	// NoHistory bead must NOT appear in GC query results.
+	if found[noHistoryBead.ID] {
+		t.Errorf("GC safety violation: NoHistory bead %s was returned by Ephemeral=true filter", noHistoryBead.ID)
+	}
+
+	// Normal ephemeral wisp MUST appear (sanity-check that the query works).
+	if !found[ephemeralWisp.ID] {
+		t.Errorf("sanity: ephemeral wisp %s was not returned by Ephemeral=true filter", ephemeralWisp.ID)
+	}
+}
+
 // TestFindWispDependentsRecursive_NoDependents verifies wisps with no
 // dependents return an empty map.
 func TestFindWispDependentsRecursive_NoDependents(t *testing.T) {
