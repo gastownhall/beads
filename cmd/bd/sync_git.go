@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 )
@@ -78,9 +80,14 @@ func gitRemoteGetURL(remote string) (string, error) {
 }
 
 // gitLsRemoteHasRef checks if a remote has a specific ref.
-// Returns false on any error (network, no remote, etc).
+// Returns false on any error (network, no remote, timeout, etc).
+// Uses a 10s timeout since this is a network call used for auto-detection,
+// and suppresses credential prompts to avoid blocking on SSH remotes.
 func gitLsRemoteHasRef(remote, ref string) bool {
-	cmd := exec.Command("git", "ls-remote", remote, ref)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", remote, ref)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
 		return false
