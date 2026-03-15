@@ -28,7 +28,6 @@ func TestBackupStateRoundTrip(t *testing.T) {
 
 	// Save and reload
 	state.LastDoltCommit = "abc123"
-	state.LastEventID = 42
 	state.Timestamp = time.Date(2026, 2, 26, 12, 0, 0, 0, time.UTC)
 	state.Counts.Issues = 10
 	state.Counts.Events = 100
@@ -43,9 +42,6 @@ func TestBackupStateRoundTrip(t *testing.T) {
 	}
 	if loaded.LastDoltCommit != "abc123" {
 		t.Errorf("commit = %q, want abc123", loaded.LastDoltCommit)
-	}
-	if loaded.LastEventID != 42 {
-		t.Errorf("event ID = %d, want 42", loaded.LastEventID)
 	}
 	if loaded.Counts.Issues != 10 {
 		t.Errorf("issues = %d, want 10", loaded.Counts.Issues)

@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS issue_snapshots (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id CHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID()),
     issue_id VARCHAR(255) NOT NULL,
     snapshot_time DATETIME NOT NULL,
     compaction_level INT NOT NULL,

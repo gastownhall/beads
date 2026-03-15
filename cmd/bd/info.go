@@ -323,7 +323,7 @@ var versionChanges = []VersionChange{
 			"FIX: Reparented child no longer appears under old parent",
 			"FIX: Dolt port resolution uses ephemeral port (not hardcoded 3307)",
 			"FIX: Doctor checks respect dolt-data-dir config",
-			"FIX: AUTO_INCREMENT reset after DOLT_PULL",
+			"FIX: UUID primary keys replace AUTO_INCREMENT (federation-safe)",
 			"FIX: Windows compatibility (Makefile, connectex, doltserver)",
 			"FIX: Batch SQL IN-clause queries prevent query explosion",
 			"FIX: Conditional-blocks deps evaluated in readiness checks",

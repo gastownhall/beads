@@ -289,7 +289,7 @@ func TestImportFromLocalJSONL(t *testing.T) {
 	})
 
 	t.Run("re-import does not duplicate comments", func(t *testing.T) {
-		// Comments use an auto-increment PK, so a naive INSERT would create
+		// Comments use a UUID PK (DEFAULT UUID()), so a naive INSERT would create
 		// duplicates on every re-import. PersistComments must deduplicate
 		// by checking (issue_id, author, created_at) before inserting.
 		tmpDir := t.TempDir()

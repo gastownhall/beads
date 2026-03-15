@@ -922,14 +922,14 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 	t.Log("Full round-trip sync verified: source -> git remote -> clone -> git remote -> source")
 }
 
-func TestAutoIncrementAfterPull(t *testing.T) {
+func TestCreateIssueAfterPull(t *testing.T) {
 	store, setup, cleanup := setupEmbeddedGitRemote(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// Create an issue via the store API (generates AUTO_INCREMENT event rows)
+	// Create an issue via the store API (generates UUID event rows)
 	sourceIssue := &types.Issue{
 		ID:        "ai-src-001",
 		Title:     "Source issue before push",
@@ -947,7 +947,7 @@ func TestAutoIncrementAfterPull(t *testing.T) {
 		t.Fatalf("source Push failed: %v", err)
 	}
 
-	// Simulate a second peer via CLI: clone, add data with AUTO_INCREMENT
+	// Simulate a second peer via CLI: clone, add data with UUID
 	// rows (issue + event), commit, and push back to the shared remote.
 	cloneDir := filepath.Join(setup.baseDir, "clone-ai")
 	doltClone(t, setup.remoteURL, cloneDir)
@@ -958,9 +958,9 @@ func TestAutoIncrementAfterPull(t *testing.T) {
 	sourceCommitAndPush(t, cloneDir, "Add ai-clone-001 with event")
 
 	// Pull into the source store — this is the code path under test.
-	// Without resetAutoIncrements, the next CreateIssue would fail with
-	// a duplicate key error because the events AUTO_INCREMENT counter
-	// was not updated to account for the rows merged in by DOLT_PULL.
+	// With UUID primary keys, there are no counter collisions after pull.
+	// This test verifies that CreateIssue works correctly after pulling
+	// rows created by a different clone.
 	if err := store.Pull(ctx); err != nil {
 		t.Fatalf("Pull failed: %v", err)
 	}
@@ -973,7 +973,7 @@ func TestAutoIncrementAfterPull(t *testing.T) {
 		Priority:  2,
 	}
 	if err := store.CreateIssue(ctx, postPullIssue, "tester"); err != nil {
-		t.Fatalf("CreateIssue after pull failed (AUTO_INCREMENT not reset?): %v", err)
+		t.Fatalf("CreateIssue after pull failed: %v", err)
 	}
 
 	var eventCount int
