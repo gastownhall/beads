@@ -388,11 +388,7 @@ func findLocalBeadsDir() string {
 		}
 	}
 
-	// Check for worktree - use main repo's .beads
-	// Note: GetMainRepoRoot() is safe to call outside a git repo - it returns an error
-	mainRepoRoot, err := git.GetMainRepoRoot()
-	if err == nil && mainRepoRoot != "" {
-		beadsDir := filepath.Join(mainRepoRoot, ".beads")
+	if beadsDir := GetWorktreeFallbackBeadsDir(); beadsDir != "" {
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
 		}
@@ -589,20 +585,20 @@ func FindBeadsDir() string {
 			}
 		}
 
-		// 2c. Fall back to main repository's .beads
-		var err error
-		mainRepoRoot, err = git.GetMainRepoRoot()
-		if err == nil && mainRepoRoot != "" {
-			beadsDir := filepath.Join(mainRepoRoot, ".beads")
-			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-				// Follow redirect if present
-				beadsDir = FollowRedirect(beadsDir)
-
-				// Validate directory contains actual project files
-				if hasBeadsProjectFiles(beadsDir) {
-					return beadsDir
+		// 2c. Fall back to the canonical shared .beads for this worktree.
+		if fallbackBeadsDir := GetWorktreeFallbackBeadsDir(); fallbackBeadsDir != "" {
+			if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
+				fallbackBeadsDir = FollowRedirect(fallbackBeadsDir)
+				if hasBeadsProjectFiles(fallbackBeadsDir) {
+					return fallbackBeadsDir
 				}
 			}
+		}
+
+		var err error
+		mainRepoRoot, err = git.GetMainRepoRoot()
+		if err != nil {
+			mainRepoRoot = ""
 		}
 	}
 
@@ -674,6 +670,26 @@ func findGitRoot() string {
 	return git.GetRepoRoot()
 }
 
+// GetWorktreeFallbackBeadsDir returns the canonical shared .beads location for
+// the current git worktree when no local redirect or worktree-local .beads is present.
+func GetWorktreeFallbackBeadsDir() string {
+	if !git.IsWorktree() {
+		return ""
+	}
+
+	commonDir, err := git.GetGitCommonDir()
+	if err != nil || commonDir == "" {
+		return ""
+	}
+
+	commonDir = utils.CanonicalizePath(commonDir)
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Join(filepath.Dir(commonDir), ".beads")
+	}
+
+	return filepath.Join(commonDir, ".beads")
+}
+
 // worktreeRedirectTarget returns the resolved redirect target for the current
 // worktree's .beads/redirect file, or empty string if not in a worktree or no
 // redirect exists. This centralizes the per-worktree redirect override logic
@@ -739,20 +755,19 @@ func findDatabaseInTree() string {
 			}
 		}
 
-		// Fall back: search main repository root
-		var err error
-		mainRepoRoot, err = git.GetMainRepoRoot()
-		if err == nil && mainRepoRoot != "" {
-			beadsDir := filepath.Join(mainRepoRoot, ".beads")
-			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-				// Follow redirect if present
-				beadsDir = FollowRedirect(beadsDir)
-
-				// Use helper to find database (with warnings for auto-discovery)
-				if dbPath := findDatabaseInBeadsDir(beadsDir, true); dbPath != "" {
+		// Fall back: search the canonical shared .beads for this worktree.
+		if fallbackBeadsDir := GetWorktreeFallbackBeadsDir(); fallbackBeadsDir != "" {
+			if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
+				fallbackBeadsDir = FollowRedirect(fallbackBeadsDir)
+				if dbPath := findDatabaseInBeadsDir(fallbackBeadsDir, true); dbPath != "" {
 					return dbPath
 				}
 			}
+		}
+		var err error
+		mainRepoRoot, err = git.GetMainRepoRoot()
+		if err != nil {
+			mainRepoRoot = ""
 		}
 		// If not found in main repo, fall back to worktree search below
 	}

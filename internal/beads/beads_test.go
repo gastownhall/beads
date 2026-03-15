@@ -582,6 +582,28 @@ func runGitInDir(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
+func setupBareParentWorktree(t *testing.T) (string, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "repo.git")
+	mainWorktreeDir := filepath.Join(tmpDir, "main")
+	featureWorktreeDir := filepath.Join(tmpDir, "feature")
+
+	runGitInDir(t, tmpDir, "init", "--bare", bareDir)
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "config", "user.email", "test@example.com")
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "config", "user.name", "Test User")
+	emptyTree := runGitInDir(t, tmpDir, "--git-dir", bareDir, "hash-object", "-t", "tree", "/dev/null")
+	initCommit := runGitInDir(t, tmpDir, "--git-dir", bareDir, "commit-tree", "-m", "Initial commit", emptyTree)
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "update-ref", "HEAD", initCommit)
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "worktree", "add", mainWorktreeDir, "main")
+	runGitInDir(t, mainWorktreeDir, "branch", "feature")
+	runGitInDir(t, tmpDir, "--git-dir", bareDir, "worktree", "add", featureWorktreeDir, "feature")
+
+	return bareDir, featureWorktreeDir
+}
+
 // TestFollowRedirect tests the redirect file functionality
 func TestFollowRedirect(t *testing.T) {
 	tests := []struct {
@@ -2042,5 +2064,75 @@ func TestResolveRedirect_SourceDatabaseAvailableForRouting(t *testing.T) {
 	}
 	if !info.WasRedirected {
 		t.Error("expected WasRedirected=true")
+	}
+}
+
+func TestFindBeadsDir_BareParentWorktreeFallback(t *testing.T) {
+	originalEnvDir := os.Getenv("BEADS_DIR")
+	originalEnvDB := os.Getenv("BEADS_DB")
+	defer func() {
+		if originalEnvDir != "" {
+			os.Setenv("BEADS_DIR", originalEnvDir)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+		if originalEnvDB != "" {
+			os.Setenv("BEADS_DB", originalEnvDB)
+		} else {
+			os.Unsetenv("BEADS_DB")
+		}
+	}()
+	os.Unsetenv("BEADS_DIR")
+	os.Unsetenv("BEADS_DB")
+
+	bareDir, worktreeDir := setupBareParentWorktree(t)
+	bareBeadsDir := filepath.Join(bareDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(bareBeadsDir, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(worktreeDir)
+	git.ResetCaches()
+
+	result := FindBeadsDir()
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	bareBeadsResolved, _ := filepath.EvalSymlinks(bareBeadsDir)
+	if resultResolved != bareBeadsResolved {
+		t.Errorf("FindBeadsDir() = %q, want bare parent .beads %q", result, bareBeadsDir)
+	}
+}
+
+func TestFindDatabasePath_BareParentWorktreeFallback(t *testing.T) {
+	originalEnvDir := os.Getenv("BEADS_DIR")
+	originalEnvDB := os.Getenv("BEADS_DB")
+	defer func() {
+		if originalEnvDir != "" {
+			os.Setenv("BEADS_DIR", originalEnvDir)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+		if originalEnvDB != "" {
+			os.Setenv("BEADS_DB", originalEnvDB)
+		} else {
+			os.Unsetenv("BEADS_DB")
+		}
+	}()
+	os.Unsetenv("BEADS_DIR")
+	os.Unsetenv("BEADS_DB")
+
+	bareDir, worktreeDir := setupBareParentWorktree(t)
+	bareDoltDir := filepath.Join(bareDir, ".beads", "dolt")
+	if err := os.MkdirAll(bareDoltDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(worktreeDir)
+	git.ResetCaches()
+
+	result := FindDatabasePath()
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	bareDoltResolved, _ := filepath.EvalSymlinks(bareDoltDir)
+	if resultResolved != bareDoltResolved {
+		t.Errorf("FindDatabasePath() = %q, want bare parent db %q", result, bareDoltDir)
 	}
 }
