@@ -57,7 +57,7 @@ func FixMissingMetadata(path string, bdVersion string) error {
 
 	// Check and repair repo_id
 	if val, err := store.GetMetadata(ctx, "repo_id"); err == nil && val == "" {
-		repoID, err := beads.ComputeRepoID()
+		repoID, err := beads.ComputeRepoIDForPath(path)
 		if err != nil {
 			// Non-git environment: warn and skip (FR-015)
 			fmt.Printf("  Warning: could not compute repo_id (not in a git repo?): %v\n", err)
@@ -71,7 +71,7 @@ func FixMissingMetadata(path string, bdVersion string) error {
 
 	// Check and repair clone_id
 	if val, err := store.GetMetadata(ctx, "clone_id"); err == nil && val == "" {
-		cloneID, err := beads.GetCloneID()
+		cloneID, err := beads.GetCloneIDForPath(path)
 		if err != nil {
 			// Non-standard environment: warn and skip (FR-016)
 			fmt.Printf("  Warning: could not compute clone_id: %v\n", err)

@@ -325,7 +325,7 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 		}
 	}
 
-	currentRepoID, err := beads.ComputeRepoID()
+	currentRepoID, err := beads.ComputeRepoIDForPath(path)
 	if err != nil {
 		if strings.Contains(err.Error(), "not a git repository") {
 			return DoctorCheck{
