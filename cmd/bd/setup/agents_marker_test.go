@@ -247,6 +247,39 @@ func TestCheckAgentsCurrent(t *testing.T) {
 	}
 }
 
+func TestCheckAgentsMinimalAcceptsFullProfile(t *testing.T) {
+	env, _, _ := newFactoryTestEnv(t)
+	section := agents.RenderSection(agents.ProfileFull)
+	if err := os.WriteFile(env.agentsPath, []byte(section), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	integration := agentsIntegration{
+		name:         "ClaudeCode",
+		setupCommand: "bd setup claude",
+		profile:      agents.ProfileMinimal,
+	}
+	if err := checkAgents(env, integration); err != nil {
+		t.Fatalf("expected full profile to be accepted for minimal integration, got %v", err)
+	}
+}
+
+func TestCheckAgentsMissingUsesTargetFileName(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	env := agentsEnv{
+		agentsPath: filepath.Join(t.TempDir(), "CLAUDE.md"),
+		stdout:     stdout,
+		stderr:     &bytes.Buffer{},
+	}
+	integration := agentsIntegration{name: "ClaudeCode", setupCommand: "bd setup claude", profile: agents.ProfileMinimal}
+	err := checkAgents(env, integration)
+	if !errors.Is(err, errAgentsFileMissing) {
+		t.Fatalf("expected errAgentsFileMissing, got %v", err)
+	}
+	if !strings.Contains(stdout.String(), "CLAUDE.md not found") {
+		t.Fatalf("expected target filename in output, got: %s", stdout.String())
+	}
+}
+
 func TestInstallAgentsPreservesFullProfile(t *testing.T) {
 	// Simulate: file already has full profile, requesting minimal install
 	env, stdout, _ := newFactoryTestEnv(t)

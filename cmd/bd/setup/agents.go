@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/templates/agents"
@@ -64,8 +65,17 @@ func resolveProfile(integration agentsIntegration) agents.Profile {
 	return agents.ProfileFull
 }
 
+func agentsFileName(path string) string {
+	base := filepath.Base(path)
+	if base == "" || base == "." {
+		return path
+	}
+	return base
+}
+
 func installAgents(env agentsEnv, integration agentsIntegration) error {
 	_, _ = fmt.Fprintf(env.stdout, "Installing %s integration...\n", integration.name)
+	agentsFile := agentsFileName(env.agentsPath)
 
 	profile := resolveProfile(integration)
 
@@ -107,14 +117,14 @@ func installAgents(env agentsEnv, integration agentsIntegration) error {
 				_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 				return err
 			}
-			_, _ = fmt.Fprintln(env.stdout, "✓ Updated existing beads section in AGENTS.md")
+			_, _ = fmt.Fprintf(env.stdout, "✓ Updated existing beads section in %s\n", agentsFile)
 		} else {
 			newContent := currentContent + "\n\n" + beadsSection
 			if err := atomicWriteFile(env.agentsPath, []byte(newContent)); err != nil {
 				_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 				return err
 			}
-			_, _ = fmt.Fprintln(env.stdout, "✓ Added beads section to existing AGENTS.md")
+			_, _ = fmt.Fprintf(env.stdout, "✓ Added beads section to existing %s\n", agentsFile)
 		}
 	} else {
 		newContent := createNewAgentsFileWithProfile(profile)
@@ -122,7 +132,7 @@ func installAgents(env agentsEnv, integration agentsIntegration) error {
 			_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 			return err
 		}
-		_, _ = fmt.Fprintln(env.stdout, "✓ Created new AGENTS.md with beads integration")
+		_, _ = fmt.Fprintf(env.stdout, "✓ Created new %s with beads integration\n", agentsFile)
 	}
 
 	_, _ = fmt.Fprintf(env.stdout, "\n✓ %s integration installed\n", integration.name)
@@ -138,9 +148,11 @@ func installAgents(env agentsEnv, integration agentsIntegration) error {
 }
 
 func checkAgents(env agentsEnv, integration agentsIntegration) error {
+	agentsFile := agentsFileName(env.agentsPath)
+
 	data, err := os.ReadFile(env.agentsPath)
 	if os.IsNotExist(err) {
-		_, _ = fmt.Fprintln(env.stdout, "✗ AGENTS.md not found")
+		_, _ = fmt.Fprintf(env.stdout, "✗ %s not found\n", agentsFile)
 		_, _ = fmt.Fprintf(env.stdout, "  Run: %s\n", integration.setupCommand)
 		return errAgentsFileMissing
 	} else if err != nil {
@@ -150,7 +162,7 @@ func checkAgents(env agentsEnv, integration agentsIntegration) error {
 
 	content := string(data)
 	if !containsBeadsMarker(content) {
-		_, _ = fmt.Fprintln(env.stdout, "⚠ AGENTS.md exists but no beads section found")
+		_, _ = fmt.Fprintf(env.stdout, "⚠ %s exists but no beads section found\n", agentsFile)
 		_, _ = fmt.Fprintf(env.stdout, "  Run: %s (to add beads section)\n", integration.setupCommand)
 		return errBeadsSectionMissing
 	}
@@ -167,8 +179,15 @@ func checkAgents(env agentsEnv, integration agentsIntegration) error {
 	}
 	meta := agents.ParseMarker(line)
 
-	currentHash := agents.CurrentHash(profile)
-	if meta != nil && meta.Hash == currentHash && existingProf == profile {
+	checkProfile := profile
+	if profile == agents.ProfileMinimal && existingProf == agents.ProfileFull {
+		// Accept full profile as current when a minimal integration targets the same
+		// file (typically via symlinks like CLAUDE.md -> AGENTS.md).
+		checkProfile = agents.ProfileFull
+	}
+
+	currentHash := agents.CurrentHash(checkProfile)
+	if meta != nil && meta.Hash == currentHash && existingProf == checkProfile {
 		_, _ = fmt.Fprintf(env.stdout, "✓ %s integration installed: %s (current)\n", integration.name, env.agentsPath)
 		return nil
 	}
@@ -181,9 +200,10 @@ func checkAgents(env agentsEnv, integration agentsIntegration) error {
 
 func removeAgents(env agentsEnv, integration agentsIntegration) error {
 	_, _ = fmt.Fprintf(env.stdout, "Removing %s integration...\n", integration.name)
+	agentsFile := agentsFileName(env.agentsPath)
 	data, err := os.ReadFile(env.agentsPath)
 	if os.IsNotExist(err) {
-		_, _ = fmt.Fprintln(env.stdout, "No AGENTS.md file found")
+		_, _ = fmt.Fprintf(env.stdout, "No %s file found\n", agentsFile)
 		return nil
 	} else if err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: failed to read %s: %v\n", env.agentsPath, err)
@@ -192,7 +212,7 @@ func removeAgents(env agentsEnv, integration agentsIntegration) error {
 
 	content := string(data)
 	if !containsBeadsMarker(content) {
-		_, _ = fmt.Fprintln(env.stdout, "No beads section found in AGENTS.md")
+		_, _ = fmt.Fprintf(env.stdout, "No beads section found in %s\n", agentsFile)
 		return nil
 	}
 
@@ -202,7 +222,7 @@ func removeAgents(env agentsEnv, integration agentsIntegration) error {
 		_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 		return err
 	}
-	_, _ = fmt.Fprintln(env.stdout, "✓ Removed beads section from AGENTS.md")
+	_, _ = fmt.Fprintf(env.stdout, "✓ Removed beads section from %s\n", agentsFile)
 	return nil
 }
 

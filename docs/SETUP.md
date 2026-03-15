@@ -9,18 +9,18 @@ The `bd setup` command uses a **recipe-based architecture** to configure beads i
 
 ### `bd prime` as SSOT
 
-`bd prime` is the **single source of truth** for operational workflow commands. The AGENTS.md beads section provides a pointer to `bd prime` for hook-enabled agents (Claude, Gemini) or the full command reference for hookless agents (Factory, Codex, Mux).
+`bd prime` is the **single source of truth** for operational workflow commands. The beads section in each tool's instruction file provides a pointer to `bd prime` for hook-enabled agents (Claude, Gemini) or the full command reference for hookless agents (Factory, Codex, Mux).
 
 ### Profiles
 
-Each integration uses one of two **profiles** that control how much content is written to AGENTS.md:
+Each integration uses one of two **profiles** that control how much content is written to tool instruction files (`AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`):
 
 | Profile | Used By | Content |
 |---------|---------|---------|
 | `full` | Factory, Codex, Mux, OpenCode | Complete command reference, issue types, priorities, workflow |
 | `minimal` | Claude Code, Gemini CLI | Pointer to `bd prime`, quick reference only (~60% smaller) |
 
-Hook-enabled agents (Claude, Gemini) use the `minimal` profile because `bd prime` injects full context at session start. Hookless agents need the `full` profile because AGENTS.md is their only source of instructions.
+Hook-enabled agents (Claude, Gemini) use the `minimal` profile because `bd prime` injects full context at session start. Hookless agents need the `full` profile because their instruction file is their only source of instructions.
 
 **Profile precedence:** If a file already has a `full` profile section and a `minimal` profile tool installs to the same file (e.g., via symlinks), the `full` profile is preserved to avoid information loss.
 
@@ -32,8 +32,8 @@ Hook-enabled agents (Claude, Gemini) use the `minimal` profile because `bd prime
 | `windsurf` | `.windsurf/rules/beads.md` | Rules file |
 | `cody` | `.cody/rules/beads.md` | Rules file |
 | `kilocode` | `.kilocode/rules/beads.md` | Rules file |
-| `claude` | `~/.claude/settings.json` | SessionStart/PreCompact hooks |
-| `gemini` | `~/.gemini/settings.json` | SessionStart/PreCompress hooks |
+| `claude` | `~/.claude/settings.json` + `CLAUDE.md` | SessionStart/PreCompact hooks + minimal section |
+| `gemini` | `~/.gemini/settings.json` + `GEMINI.md` | SessionStart/PreCompress hooks + minimal section |
 | `factory` | `AGENTS.md` | Marked section |
 | `codex` | `AGENTS.md` | Marked section |
 | `mux` | `AGENTS.md` | Marked section |
@@ -234,21 +234,26 @@ bd setup claude --stealth
 **Project installation** (`.claude/settings.local.json`):
 - Same hooks, but only active for this project
 
+**Instruction file** (`CLAUDE.md` in project root):
+- Minimal-profile beads section pointing to `bd prime`
+- Managed with hash/version markers for safe updates and `--check` freshness detection
+
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--check` | Check if integration is installed |
-| `--remove` | Remove beads hooks |
+| `--check` | Check both hooks and the managed `CLAUDE.md` beads section |
+| `--remove` | Remove beads hooks and managed `CLAUDE.md` beads section |
 | `--project` | Install for this project only (not globally) |
 | `--stealth` | Use `bd prime --stealth` (flush only, no git operations) |
 
 ### Examples
 
 ```bash
-# Check if hooks are installed
+# Check hooks + CLAUDE.md beads section
 bd setup claude --check
 # Output: ✓ Global hooks installed: /Users/you/.claude/settings.json
+#         ✓ Claude Code integration installed: /path/to/CLAUDE.md (current)
 
 # Remove hooks
 bd setup claude --remove
@@ -292,21 +297,26 @@ bd setup gemini --stealth
 **Project installation** (`.gemini/settings.json`):
 - Same hooks, but only active for this project
 
+**Instruction file** (`GEMINI.md` in project root):
+- Minimal-profile beads section pointing to `bd prime`
+- Managed with hash/version markers for safe updates and `--check` freshness detection
+
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--check` | Check if integration is installed |
-| `--remove` | Remove beads hooks |
+| `--check` | Check both hooks and the managed `GEMINI.md` beads section |
+| `--remove` | Remove beads hooks and managed `GEMINI.md` beads section |
 | `--project` | Install for this project only (not globally) |
 | `--stealth` | Use `bd prime --stealth` (flush only, no git operations) |
 
 ### Examples
 
 ```bash
-# Check if hooks are installed
+# Check hooks + GEMINI.md beads section
 bd setup gemini --check
 # Output: ✓ Global hooks installed: /Users/you/.gemini/settings.json
+#         ✓ Gemini CLI integration installed: /path/to/GEMINI.md (current)
 
 # Remove hooks
 bd setup gemini --remove
@@ -427,7 +437,7 @@ This respects Aider's philosophy of keeping humans in control while still levera
 | Feature | Factory.ai | Codex | Mux | Claude Code | Gemini CLI | Cursor | Aider |
 |---------|-----------|-------|-----|-------------|------------|--------|-------|
 | Command execution | Automatic | Automatic | Automatic | Automatic | Automatic | Automatic | Manual (/run) |
-| Context injection | AGENTS.md | AGENTS.md | AGENTS.md | Hooks | Hooks | Rules file | Config file |
+| Context injection | AGENTS.md | AGENTS.md | AGENTS.md | Hooks + CLAUDE.md | Hooks + GEMINI.md | Rules file | Config file |
 | Global install | No (per-project) | No (per-project) | No (per-project) | Yes | Yes | No (per-project) | No (per-project) |
 | Stealth mode | N/A | N/A | N/A | Yes | Yes | N/A | N/A |
 | Standard format | Yes (AGENTS.md) | Yes (AGENTS.md) | Yes (AGENTS.md) | No (proprietary) | No (proprietary) | No (proprietary) | No (proprietary) |
@@ -446,7 +456,7 @@ This respects Aider's philosophy of keeping humans in control while still levera
 
 4. **Use stealth mode in CI/CD** - `bd setup claude --stealth` or `bd setup gemini --stealth` avoids git operations that might fail in automated environments
 
-5. **Commit AGENTS.md to git** - This ensures all team members and AI tools get the same instructions
+5. **Commit instruction files to git** - This ensures all team members and AI tools get the same instructions (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, as applicable)
 
 6. **Run `bd doctor` after setup** - Verifies the integration is working:
    ```bash

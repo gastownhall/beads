@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/templates/agents"
 )
 
 func newGeminiTestEnv(t *testing.T) (geminiEnv, *bytes.Buffer, *bytes.Buffer) {
@@ -113,6 +115,14 @@ func TestInstallGemini_Global(t *testing.T) {
 	if !strings.Contains(out, "Gemini CLI integration installed") {
 		t.Errorf("expected success message, got: %s", out)
 	}
+	instructionsPath := filepath.Join(env.projectDir, geminiInstructionsFile)
+	instructions, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", geminiInstructionsFile, err)
+	}
+	if !strings.Contains(string(instructions), "profile:minimal") {
+		t.Fatalf("expected minimal profile in %s", geminiInstructionsFile)
+	}
 }
 
 func TestInstallGemini_Project(t *testing.T) {
@@ -132,6 +142,10 @@ func TestInstallGemini_Project(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "Installing Gemini CLI hooks for this project") {
 		t.Errorf("expected project install message, got: %s", out)
+	}
+	instructionsPath := filepath.Join(env.projectDir, geminiInstructionsFile)
+	if _, err := os.Stat(instructionsPath); err != nil {
+		t.Fatalf("expected %s to be created: %v", geminiInstructionsFile, err)
 	}
 }
 
@@ -268,12 +282,39 @@ func TestCheckGemini_ProjectInstalled(t *testing.T) {
 	}
 }
 
+func TestCheckGemini_MissingInstructions(t *testing.T) {
+	env, stdout, _ := newGeminiTestEnv(t)
+
+	if err := installGemini(env, false, false); err != nil {
+		t.Fatalf("installGemini: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(env.projectDir, geminiInstructionsFile)); err != nil {
+		t.Fatalf("remove %s: %v", geminiInstructionsFile, err)
+	}
+
+	stdout.Reset()
+	err := checkGemini(env)
+	if err != errAgentsFileMissing {
+		t.Fatalf("expected errAgentsFileMissing, got: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, geminiInstructionsFile+" not found") {
+		t.Fatalf("expected missing %s message, got: %s", geminiInstructionsFile, out)
+	}
+}
+
 func TestRemoveGemini_Global(t *testing.T) {
 	env, stdout, _ := newGeminiTestEnv(t)
 
 	// Install first
 	if err := installGemini(env, false, false); err != nil {
 		t.Fatalf("installGemini: %v", err)
+	}
+	instructionsPath := filepath.Join(env.projectDir, geminiInstructionsFile)
+	if err := os.WriteFile(instructionsPath, []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("seed %s: %v", geminiInstructionsFile, err)
 	}
 
 	stdout.Reset()
@@ -291,6 +332,13 @@ func TestRemoveGemini_Global(t *testing.T) {
 	sessionStart, ok := hooks["SessionStart"].([]interface{})
 	if ok && len(sessionStart) > 0 {
 		t.Error("SessionStart hooks should be empty")
+	}
+	instructions, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", geminiInstructionsFile, err)
+	}
+	if strings.Contains(string(instructions), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("expected beads section removed from %s", geminiInstructionsFile)
 	}
 
 	out := stdout.String()
