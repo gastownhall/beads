@@ -93,7 +93,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	}
 	// Exclude future-deferred issues unless IncludeDeferred is set
 	if !filter.IncludeDeferred {
-		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= NOW())")
+		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
 	}
 	// Exclude children of future-deferred parents (GH#1190)
 	// Pre-compute excluded IDs using separate single-table queries to avoid
@@ -773,7 +773,7 @@ func (s *DoltStore) getChildrenOfDeferredParents(ctx context.Context) ([]string,
 	// Step 1: Get IDs of issues with future defer_until
 	deferredRows, err := s.queryContext(ctx, `
 		SELECT id FROM issues
-		WHERE defer_until IS NOT NULL AND defer_until > NOW()
+		WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()
 	`)
 	if err != nil {
 		return nil, wrapQueryError("deferred parents: get deferred issues", err)
