@@ -79,9 +79,16 @@ curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/insta
 
 The installer will:
 - Detect your platform (macOS/Linux/FreeBSD, amd64/arm64)
+- Verify downloaded release archives against release `checksums.txt`
 - Install via `go install` if Go is available
 - Fall back to building from source if needed
 - Guide you through PATH setup if necessary
+
+On macOS, the script preserves the downloaded binary signature by default. If you explicitly want ad-hoc local re-signing, opt in:
+
+```bash
+BEADS_INSTALL_RESIGN_MACOS=1 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+```
 
 ### Comparison of Installation Methods
 
@@ -199,7 +206,7 @@ Beads now ships with native Windows support—no MSYS or MinGW required.
 irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
 ```
 
-The script installs a prebuilt Windows release if available. Go is only required for `go install` or building from source.
+The script installs a prebuilt Windows release if available and verifies the downloaded ZIP checksum against release `checksums.txt`. Go is only required for `go install` or building from source.
 
 **Dolt backend on Windows:** Supported via pure-Go regex backend. Windows builds automatically use Go's stdlib `regexp` instead of ICU regex to avoid CGO/header dependencies. If you need full ICU regex semantics, use Linux/macOS (or WSL) with ICU installed.
 

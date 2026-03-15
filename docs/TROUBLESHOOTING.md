@@ -202,11 +202,7 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
 
 **Solutions**:
 
-1. **Add bd to antivirus exclusions** (recommended):
-   - Add the bd installation directory to your antivirus exclusion list
-   - This is safe - beads is open source and checksums are provided
-
-2. **Verify file integrity before excluding**:
+1. **Verify file integrity first**:
    ```bash
    # Windows PowerShell
    Get-FileHash bd.exe -Algorithm SHA256
@@ -215,6 +211,10 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
    shasum -a 256 bd
    ```
    Compare with checksums from the [GitHub release page](https://github.com/steveyegge/beads/releases)
+
+2. **Add bd to antivirus exclusions only after verification**:
+   - Add the bd installation directory to your antivirus exclusion list
+   - Keep antivirus enabled for everything else
 
 3. **Report the false positive**:
    - Help improve detection by reporting to your antivirus vendor
@@ -967,6 +967,10 @@ bd init -v
 ### macOS: Gatekeeper blocking execution
 
 If macOS blocks bd:
+
+1. Verify the downloaded binary checksum matches the release `checksums.txt`.
+2. If you used `scripts/install.sh`, note that macOS ad-hoc re-signing is now **opt-in** (`BEADS_INSTALL_RESIGN_MACOS=1`).
+3. Use one of the approval paths below.
 
 ```bash
 # Remove quarantine attribute

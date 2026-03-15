@@ -74,7 +74,9 @@ Beads supports hierarchical IDs for epics:
 
 Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.
 
-On macOS, Gatekeeper behavior depends on the signature state of the binary. If you use the install script, review `scripts/install.sh` and prefer explicit verification steps before first run.
+The install scripts verify release checksums before install. For manual installs, do this verification yourself before first run.
+
+On macOS, `scripts/install.sh` preserves the downloaded signature by default. Local ad-hoc re-signing is explicit opt-in via `BEADS_INSTALL_RESIGN_MACOS=1`.
 
 See [docs/ANTIVIRUS.md](docs/ANTIVIRUS.md) for Windows AV false-positive guidance and verification workflow.
 
