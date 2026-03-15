@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -145,6 +147,99 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 		}
 		if !strings.Contains(msg, "bd init") {
 			t.Errorf("expected bd init suggestion, got:\n%s", msg)
+		}
+	})
+
+	t.Run("hint detects backup files in beads dir (GH#2327)", func(t *testing.T) {
+		// Create a temp .beads/backup/ with a JSONL file
+		tmpDir := t.TempDir()
+		backupDir := filepath.Join(tmpDir, "backup")
+		if err := os.MkdirAll(backupDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(backupDir, "issues.jsonl"), []byte(`{"id":"x"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := baseCfg
+		cfg.BeadsDir = tmpDir
+		err := databaseNotFoundError(&cfg)
+		msg := err.Error()
+
+		if !strings.Contains(msg, "Backup files found") {
+			t.Errorf("expected backup detection hint, got:\n%s", msg)
+		}
+		if !strings.Contains(msg, "bd backup restore") {
+			t.Errorf("expected bd backup restore suggestion, got:\n%s", msg)
+		}
+		// Should still mention branch switching as a common cause
+		if !strings.Contains(msg, "branch") {
+			t.Errorf("expected branch-switch mention, got:\n%s", msg)
+		}
+	})
+
+	t.Run("no backup hint when no backup files exist", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		cfg := baseCfg
+		cfg.BeadsDir = tmpDir
+		err := databaseNotFoundError(&cfg)
+		msg := err.Error()
+
+		if strings.Contains(msg, "Backup files found") {
+			t.Errorf("should not mention backups when none exist, got:\n%s", msg)
+		}
+	})
+}
+
+func TestHasBackupFiles(t *testing.T) {
+	t.Run("returns false for empty beadsDir", func(t *testing.T) {
+		if HasBackupFiles("") {
+			t.Error("expected false for empty beadsDir")
+		}
+	})
+
+	t.Run("returns false when backup dir does not exist", func(t *testing.T) {
+		if HasBackupFiles(t.TempDir()) {
+			t.Error("expected false when backup dir missing")
+		}
+	})
+
+	t.Run("returns false when backup dir is empty", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tmpDir, "backup"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if HasBackupFiles(tmpDir) {
+			t.Error("expected false when backup dir is empty")
+		}
+	})
+
+	t.Run("returns false when backup dir has non-jsonl files", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		backupDir := filepath.Join(tmpDir, "backup")
+		if err := os.MkdirAll(backupDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(backupDir, "state.json"), []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if HasBackupFiles(tmpDir) {
+			t.Error("expected false when only non-jsonl files present")
+		}
+	})
+
+	t.Run("returns true when backup dir has jsonl files", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		backupDir := filepath.Join(tmpDir, "backup")
+		if err := os.MkdirAll(backupDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(backupDir, "issues.jsonl"), []byte(`{"id":"x"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if !HasBackupFiles(tmpDir) {
+			t.Error("expected true when jsonl files present")
 		}
 	})
 }

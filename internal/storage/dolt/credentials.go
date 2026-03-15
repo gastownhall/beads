@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // Credential storage and encryption for federation peers.
@@ -47,21 +48,35 @@ func validatePeerName(name string) error {
 }
 
 // initCredentialKey loads or generates the credential encryption key.
-// If a key file exists at <dbPath>/.beads-credential-key, it is loaded.
-// Otherwise, a new random key is generated, any existing credentials are
-// migrated from the old dbPath-derived key, and the new key is saved.
+// The key file is stored in .beads/ (beadsDir), NOT in .beads/dolt/ (dbPath),
+// to avoid creating ghost directories in shared-server mode (GH bd-cby).
+// Falls back to the old dbPath location for transparent migration.
 func (s *DoltStore) initCredentialKey(ctx context.Context) error {
-	if s.dbPath == "" {
+	if s.beadsDir == "" {
 		return nil // No filesystem path — credential encryption unavailable
 	}
 
-	keyPath := filepath.Join(s.dbPath, credentialKeyFile)
+	keyPath := filepath.Join(s.beadsDir, credentialKeyFile)
 
-	// Try to load existing key file
-	key, err := os.ReadFile(keyPath) //nolint:gosec // G304: keyPath is derived from trusted dbPath, not user input
+	// Try to load from new location (.beads/)
+	key, err := os.ReadFile(keyPath) //nolint:gosec // G304: keyPath is derived from trusted beadsDir, not user input
 	if err == nil && len(key) == 32 {
 		s.credentialKey = key
 		return nil
+	}
+
+	// Migration: try old location (.beads/dolt/) and move to new location
+	if s.dbPath != "" {
+		oldKeyPath := filepath.Join(s.dbPath, credentialKeyFile)
+		oldKey, oldErr := os.ReadFile(oldKeyPath) //nolint:gosec // G304: oldKeyPath is derived from trusted dbPath
+		if oldErr == nil && len(oldKey) == 32 {
+			// Write to new location, then remove old file
+			if writeErr := os.WriteFile(keyPath, oldKey, 0600); writeErr == nil {
+				_ = os.Remove(oldKeyPath)
+			}
+			s.credentialKey = oldKey
+			return nil
+		}
 	}
 
 	// Generate new random 32-byte key (AES-256)
@@ -75,12 +90,8 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 		return fmt.Errorf("failed to migrate credential keys: %w", err)
 	}
 
-	// Ensure the directory exists before writing the key file
-	if err := os.MkdirAll(s.dbPath, 0700); err != nil {
-		return fmt.Errorf("failed to create directory for credential key: %w", err)
-	}
-
 	// Write key file with owner-only permissions (0600)
+	// beadsDir (.beads/) always exists — no MkdirAll needed
 	if err := os.WriteFile(keyPath, key, 0600); err != nil {
 		return fmt.Errorf("failed to write credential key file: %w", err)
 	}
@@ -470,3 +481,55 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 
 // FederationPeer is an alias for storage.FederationPeer for convenience.
 type FederationPeer = storage.FederationPeer
+
+// shouldUseCLIForPeerCredentials returns true when federation operations for a
+// specific peer should use CLI subprocess routing instead of SQL path.
+// Called inside withPeerCredentials callback where creds are already resolved.
+//
+// Returns true when ALL conditions are met:
+//  1. Peer credentials exist (resolved from federation_peers table)
+//  2. Server is in server mode (not embedded)
+//  3. Local CLI directory is available
+//  4. The peer remote is configured in the local CLI directory
+func (s *DoltStore) shouldUseCLIForPeerCredentials(_ context.Context, peer string, creds *remoteCredentials) bool {
+	if creds.empty() {
+		return false // no credentials to pass
+	}
+	if !s.serverMode {
+		return false // embedded mode: withEnvCredentials works in-process
+	}
+	cliDir := s.CLIDir()
+	if cliDir == "" {
+		return false // no local directory for CLI operations
+	}
+	return doltutil.FindCLIRemote(cliDir, peer) != ""
+}
+
+// shouldUseCLIForCredentials returns true when CLI subprocess routing should
+// be used instead of SQL path for credential-bearing push/pull operations.
+//
+// When true, callers should route through doltCLIPush/Pull instead of
+// CALL DOLT_PUSH/PULL, because withEnvCredentials() sets env vars on the
+// bd client process — the external server process cannot see them.
+//
+// Returns true when ALL conditions are met:
+//  1. Credentials exist (remoteUser or remotePassword non-empty)
+//  2. Server is in server mode (not embedded)
+//  3. Local CLI directory is available
+//  4. The remote is configured in the local CLI directory
+func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context) bool {
+	if s.remoteUser == "" && s.remotePassword == "" {
+		return false // no credentials to pass
+	}
+	if !s.serverMode {
+		return false // embedded mode: withEnvCredentials works in-process
+	}
+	cliDir := s.CLIDir()
+	if cliDir == "" {
+		return false // no local directory for CLI operations
+	}
+	// Only route to CLI if the remote is configured locally.
+	// Shared server / external server modes may have CLIDir pointing
+	// to wrong directory — FindCLIRemote returns "" in those cases.
+	return doltutil.FindCLIRemote(cliDir, s.remote) != ""
+}

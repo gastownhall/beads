@@ -247,7 +247,7 @@ func TestSearchWispsFilterParity(t *testing.T) {
 		DueAt:       &future,
 		DeferUntil:  &future,
 	}
-	if err := store.createWisp(ctx, wisp, "test-actor"); err != nil {
+	if err := store.CreateIssue(ctx, wisp, "test-actor"); err != nil {
 		t.Fatalf("failed to create test wisp: %v", err)
 	}
 

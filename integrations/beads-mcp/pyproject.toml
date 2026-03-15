@@ -1,12 +1,12 @@
 [project]
 name = "beads-mcp"
-version = "0.59.0"
+version = "0.60.0"
 description = "MCP server for beads issue tracker."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
-    "fastmcp==3.1.0",
+    "fastmcp==3.1.1",
     "pydantic==2.12.5",
     "pydantic-settings==2.13.1",
 ]

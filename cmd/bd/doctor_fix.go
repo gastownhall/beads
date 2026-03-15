@@ -255,6 +255,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = doctor.FixRedirectTracking(path)
 		case "Last-Touched Tracking":
 			err = doctor.FixLastTouchedTracking(path)
+		case "Tracked Runtime Files":
+			err = doctor.FixTrackedRuntimeFiles(path)
 		case "Git Hooks":
 			err = fix.GitHooks(path)
 		case "Sync Divergence":

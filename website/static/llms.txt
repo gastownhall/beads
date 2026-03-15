@@ -1,7 +1,7 @@
 # Beads (bd)
 
-> Git-backed issue tracker for AI-supervised coding workflows.
-> Dolt-powered CLI with formulas, molecules, and multi-agent coordination.
+> Dolt-powered issue tracker for AI-supervised coding workflows.
+> CLI with formulas, molecules, and multi-agent coordination.
 
 ## Quick Start
 
@@ -24,7 +24,8 @@ bd show bd-42 --json                      # Show details
 bd update bd-42 --claim                   # Start work
 bd close bd-42 --reason "Done"            # Close issue
 bd ready --json                           # Show unblocked work
-bd sync                                   # Sync to git
+bd dolt push                              # Push to Dolt remote
+bd backup export-git                      # Publish backup snapshot to a git branch
 ```
 
 ## For AI Agents
@@ -32,7 +33,8 @@ bd sync                                   # Sync to git
 - Always use `--json` for programmatic access
 - Always include `--description` when creating issues
 - Use `--deps discovered-from:<id>` to link found issues
-- Run `bd sync` at end of every session
+- Use `bd dolt push` / `bd dolt pull` for Dolt remotes
+- Use `bd backup` / `bd backup export-git` for portable backups
 
 ## Key Concepts
 
@@ -41,27 +43,27 @@ bd sync                                   # Sync to git
 - **Formulas**: Declarative workflow templates (TOML/JSON)
 - **Molecules**: Work graphs from formulas
 - **Gates**: Async coordination (human/timer/github)
-- **Wisps**: Ephemeral workflows (don't sync to git)
+- **Wisps**: Ephemeral workflows (excluded from JSONL backups)
 
 ## Recovery
 
 Quick fixes for common issues:
 
-- Database Corruption: `git checkout HEAD~1 -- .beads/`
-- Merge Conflicts: Resolve JSONL conflicts, then `bd sync`
+- Database Recovery: `bd backup restore` or `bd backup fetch-git`
+- Merge Conflicts: Use Dolt merge/recovery tools, then `bd dolt pull`
 - Circular Dependencies: `bd doctor` (diagnose only, NEVER --fix)
-- Sync Failures: `bd sync --import-only`
+- Sync Failures: `bd dolt pull`
 
 Full runbooks: https://steveyegge.github.io/beads/recovery/
 
 ## Session Close Protocol
 
 Before ending any AI session:
-1. `bd sync` - push changes to git
-2. `bd status` - verify clean state
+1. `bd dolt push` - if using a Dolt remote
+2. `git push` - publish your code changes
 3. Resolve conflicts before closing
 
-WARNING: Skipping sync causes data loss in multi-agent workflows.
+WARNING: Skipping sync or backup publication causes stale state in multi-agent workflows.
 
 ## Documentation
 

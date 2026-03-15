@@ -73,7 +73,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Database",
@@ -136,7 +136,7 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Schema Compatibility",
@@ -179,7 +179,7 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Database Integrity",
@@ -247,7 +247,7 @@ func CheckProjectIdentity(path string) DoctorCheck {
 
 	// Check database for _project_id
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		// Can't open DB — report based on metadata.json alone
 		if !hasLocalID {
@@ -367,7 +367,7 @@ func CheckDatabaseSize(path string) DoctorCheck {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Large Database",

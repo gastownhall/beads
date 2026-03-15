@@ -27,7 +27,7 @@ func GetSuppressedChecks(path string) map[string]bool {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return suppressed
 	}

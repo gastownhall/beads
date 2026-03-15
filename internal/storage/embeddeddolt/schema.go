@@ -8,7 +8,6 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,7 +131,5 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 		}
 	}
 
-	log.Printf("embeddeddolt: applied %d migration(s) (version %d → %d)",
-		len(pending), current, pending[len(pending)-1].version)
 	return len(pending), nil
 }

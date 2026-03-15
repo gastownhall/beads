@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
@@ -11,10 +12,20 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
+const isEmbeddedDolt = true
+
 // newDoltStore creates an embedded Dolt storage backend.
 // The dolt.Config is used only for BeadsDir and Database; server fields are ignored.
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
 	return embeddeddolt.New(ctx, cfg.BeadsDir, cfg.Database, "main")
+}
+
+// acquireEmbeddedLock acquires an exclusive flock on the embeddeddolt data
+// directory derived from beadsDir. The caller must defer lock.Unlock().
+// Used by commands that require single-writer access (e.g., bd init).
+func acquireEmbeddedLock(beadsDir string) (*embeddeddolt.Lock, error) {
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	return embeddeddolt.TryLock(dataDir)
 }
 
 // newDoltStoreFromConfig creates an embedded Dolt storage backend from the

@@ -922,14 +922,14 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 	t.Log("Full round-trip sync verified: source -> git remote -> clone -> git remote -> source")
 }
 
-func TestAutoIncrementAfterPull(t *testing.T) {
+func TestCreateIssueAfterPull(t *testing.T) {
 	store, setup, cleanup := setupEmbeddedGitRemote(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// Create an issue via the store API (generates AUTO_INCREMENT event rows)
+	// Create an issue via the store API (generates UUID event rows)
 	sourceIssue := &types.Issue{
 		ID:        "ai-src-001",
 		Title:     "Source issue before push",
@@ -947,7 +947,7 @@ func TestAutoIncrementAfterPull(t *testing.T) {
 		t.Fatalf("source Push failed: %v", err)
 	}
 
-	// Simulate a second peer via CLI: clone, add data with AUTO_INCREMENT
+	// Simulate a second peer via CLI: clone, add data with UUID
 	// rows (issue + event), commit, and push back to the shared remote.
 	cloneDir := filepath.Join(setup.baseDir, "clone-ai")
 	doltClone(t, setup.remoteURL, cloneDir)
@@ -958,9 +958,9 @@ func TestAutoIncrementAfterPull(t *testing.T) {
 	sourceCommitAndPush(t, cloneDir, "Add ai-clone-001 with event")
 
 	// Pull into the source store — this is the code path under test.
-	// Without resetAutoIncrements, the next CreateIssue would fail with
-	// a duplicate key error because the events AUTO_INCREMENT counter
-	// was not updated to account for the rows merged in by DOLT_PULL.
+	// With UUID primary keys, there are no counter collisions after pull.
+	// This test verifies that CreateIssue works correctly after pulling
+	// rows created by a different clone.
 	if err := store.Pull(ctx); err != nil {
 		t.Fatalf("Pull failed: %v", err)
 	}
@@ -973,7 +973,7 @@ func TestAutoIncrementAfterPull(t *testing.T) {
 		Priority:  2,
 	}
 	if err := store.CreateIssue(ctx, postPullIssue, "tester"); err != nil {
-		t.Fatalf("CreateIssue after pull failed (AUTO_INCREMENT not reset?): %v", err)
+		t.Fatalf("CreateIssue after pull failed: %v", err)
 	}
 
 	var eventCount int
@@ -1117,4 +1117,144 @@ CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, 
 	// SQL sees git+https:// remote in testdb; CLI directory (clientDataDir) has none.
 	// isGitProtocolRemote should return false to route through SQL.
 	require.False(t, store.isGitProtocolRemote(ctx))
+}
+
+// TestCredentialCLIRoutingE2E verifies that Push succeeds via CLI subprocess
+// routing when DOLT_REMOTE_USER is set and the dolt server is external.
+//
+// Setup:
+//   - Bare git repo as remote (file:// URL, no auth needed)
+//   - dolt sql-server started from serverDataDir (with testdb + schema + remote)
+//   - DoltStore in server mode with remoteUser set, CLI dir has the remote
+//
+// The test proves routing works end-to-end: if shouldUseCLIForCredentials
+// routes to doltCLIPush, the CLI uses the file:// remote and push succeeds.
+// If the guard fails and falls through to SQL withEnvCredentials, the external
+// server process cannot see the env vars and push fails (SC-001).
+func TestCredentialCLIRoutingE2E(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping test")
+	}
+	skipIfNoGit(t)
+
+	baseDir, err := os.MkdirTemp("", "credential-cli-routing-e2e-*")
+	if err != nil {
+		t.Fatalf("failed to create base dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(baseDir) })
+
+	// 1. Create bare git repo as the push target
+	remoteDir := filepath.Join(baseDir, "remote.git")
+	runCmd(t, baseDir, "git", "init", "--bare", "-b", "main", remoteDir)
+	// Seed with initial commit so push can fast-forward
+	seedDir := filepath.Join(baseDir, "seed")
+	if err := os.MkdirAll(seedDir, 0o755); err != nil {
+		t.Fatalf("failed to create seed dir: %v", err)
+	}
+	runCmd(t, seedDir, "git", "init", "-b", "main")
+	runCmd(t, seedDir, "git", "commit", "--allow-empty", "-m", "init")
+	runCmd(t, seedDir, "git", "remote", "add", "origin", remoteDir)
+	runCmd(t, seedDir, "git", "push", "-u", "origin", "main")
+
+	remoteURL := "file://" + remoteDir
+
+	// 2. Server data directory: init dolt, create testdb with schema + remote
+	serverDataDir := filepath.Join(baseDir, "server-data")
+	if err := os.MkdirAll(serverDataDir, 0o755); err != nil {
+		t.Fatalf("failed to create server data dir: %v", err)
+	}
+	runCmd(t, serverDataDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
+
+	testdbDir := filepath.Join(serverDataDir, "testdb")
+	if err := os.MkdirAll(testdbDir, 0o755); err != nil {
+		t.Fatalf("failed to create testdb dir: %v", err)
+	}
+	runCmd(t, testdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
+	// Add remote to server's testdb (so SQL DOLT_REMOTE -v can see it)
+	runCmd(t, testdbDir, "dolt", "remote", "add", "origin", remoteURL)
+
+	initSchemaSQL := fmt.Sprintf(`%s
+%s
+%s
+%s
+CALL DOLT_ADD('.');
+CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, readyIssuesView, blockedIssuesView)
+	runDoltSQL(t, testdbDir, initSchemaSQL)
+
+	// 3. Start dolt sql-server from server root
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("failed to find free port: %v", err)
+	}
+	serverCmd := exec.Command("dolt", "sql-server",
+		"-H", "127.0.0.1",
+		"-P", fmt.Sprintf("%d", port),
+	)
+	serverCmd.Dir = serverDataDir
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start dolt sql-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = serverCmd.Process.Kill()
+		_ = serverCmd.Wait()
+	})
+
+	if !testutil.WaitForServer(port, 15*time.Second) {
+		t.Fatal("dolt sql-server did not become ready within timeout")
+	}
+
+	// 4. Client CLI directory: separate dolt init WITH the file:// remote
+	// This is the CLI dir that shouldUseCLIForCredentials checks via FindCLIRemote.
+	clientDataDir := filepath.Join(baseDir, "client-data")
+	clientTestdbDir := filepath.Join(clientDataDir, "testdb")
+	if err := os.MkdirAll(clientTestdbDir, 0o755); err != nil {
+		t.Fatalf("failed to create client testdb dir: %v", err)
+	}
+	runCmd(t, clientTestdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
+	runCmd(t, clientTestdbDir, "dolt", "remote", "add", "origin", remoteURL)
+
+	// 5. Clean env to prevent interference from test harness
+	for _, env := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_TEST_MODE"} {
+		if prev, ok := os.LookupEnv(env); ok {
+			t.Cleanup(func() { os.Setenv(env, prev) })
+		} else {
+			t.Cleanup(func() { os.Unsetenv(env) })
+		}
+		os.Unsetenv(env)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 6. Create DoltStore in server mode with credentials
+	store, err := New(ctx, &Config{
+		Path:            clientDataDir,
+		Database:        "testdb",
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		ServerUser:      "root",
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		AutoStart:       false,
+		CreateIfMissing: false,
+		Remote:          "origin",
+		RemoteUser:      "testuser",     // triggers credential CLI routing
+		RemotePassword:  "testpassword", // passed via applyToCmd to subprocess env
+	})
+	if err != nil {
+		t.Fatalf("failed to create DoltStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// Verify preconditions: not a git-protocol remote, but credentials trigger CLI routing
+	require.False(t, store.isGitProtocolRemote(ctx), "file:// is not git-protocol")
+	require.True(t, store.shouldUseCLIForCredentials(ctx), "should route through CLI for credentials")
+	require.True(t, store.serverMode, "store should be in server mode")
+
+	// 7. Push should succeed via CLI credential routing
+	// If the guard works: doltCLIPush uses CLI dir's file:// remote → success
+	// If guard fails: withEnvCredentials + SQL CALL DOLT_PUSH('--user',...) → fails
+	// (external server can't see env vars set on bd client process)
+	err = store.Push(ctx)
+	require.NoError(t, err, "Push should succeed via CLI credential routing (SC-001)")
 }

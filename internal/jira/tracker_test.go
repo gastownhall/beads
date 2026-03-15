@@ -590,7 +590,7 @@ func (s *configStore) GetIssueComments(_ context.Context, _ string) ([]*types.Co
 func (s *configStore) GetEvents(_ context.Context, _ string, _ int) ([]*types.Event, error) {
 	return nil, nil
 }
-func (s *configStore) GetAllEventsSince(_ context.Context, _ int64) ([]*types.Event, error) {
+func (s *configStore) GetAllEventsSince(_ context.Context, _ time.Time) ([]*types.Event, error) {
 	return nil, nil
 }
 func (s *configStore) GetStatistics(_ context.Context) (*types.Statistics, error) { return nil, nil }
@@ -598,6 +598,88 @@ func (s *configStore) RunInTransaction(_ context.Context, _ string, _ func(tx st
 	return nil
 }
 func (s *configStore) Close() error { return nil }
+
+func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
+	var capturedJQL string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/search/jql" {
+			capturedJQL = r.URL.Query().Get("jql")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"issues":     []Issue{},
+				"total":      0,
+				"maxResults": 50,
+				"startAt":    0,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	store := &configStore{
+		data: map[string]string{
+			"jira.pull_jql": `labels = "agent-ready"`,
+		},
+	}
+
+	tr := &Tracker{
+		client:     newTestClient(srv.URL, "3"),
+		store:      store,
+		projectKey: "TEST",
+		apiVersion: "3",
+	}
+
+	_, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{State: "open"})
+	if err != nil {
+		t.Fatalf("FetchIssues error: %v", err)
+	}
+
+	if !strings.Contains(capturedJQL, `labels = "agent-ready"`) {
+		t.Errorf("JQL should contain pull_jql filter, got: %s", capturedJQL)
+	}
+}
+
+func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
+	var capturedJQL string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/search/jql" {
+			capturedJQL = r.URL.Query().Get("jql")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"issues":     []Issue{},
+				"total":      0,
+				"maxResults": 50,
+				"startAt":    0,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	store := &configStore{
+		data: map[string]string{},
+	}
+
+	tr := &Tracker{
+		client:     newTestClient(srv.URL, "3"),
+		store:      store,
+		projectKey: "TEST",
+		apiVersion: "3",
+	}
+
+	_, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{State: "open"})
+	if err != nil {
+		t.Fatalf("FetchIssues error: %v", err)
+	}
+
+	if strings.Contains(capturedJQL, "agent-ready") {
+		t.Errorf("JQL should NOT contain pull_jql filter when unconfigured, got: %s", capturedJQL)
+	}
+}
 
 func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 	store := &configStore{

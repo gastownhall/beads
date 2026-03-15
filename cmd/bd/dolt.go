@@ -157,7 +157,9 @@ uncommitted changes in its working set).`,
 			if err := st.ForcePush(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
-					fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+					fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
+					fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
+					fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
 				}
 				os.Exit(1)
 			}
@@ -165,7 +167,9 @@ uncommitted changes in its working set).`,
 			if err := st.Push(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
-					fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+					fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
+					fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
+					fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
 				}
 				os.Exit(1)
 			}
@@ -193,7 +197,9 @@ variables for authentication.`,
 		if err := st.Pull(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if isRemoteNotFoundErr(err) {
-				fmt.Fprintf(os.Stderr, "Hint: run 'bd dolt remote add <name> <url>' to register the remote.\n")
+				fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
+				fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
+				fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
 			}
 			os.Exit(1)
 		}
@@ -358,13 +364,15 @@ var doltKillallCmd = &cobra.Command{
 	Use:   "killall",
 	Short: "Kill all orphan Dolt server processes",
 	Long: `Find and kill orphan dolt sql-server processes not tracked by the
-canonical PID file.
+canonical PID file for the current repo's Dolt data directory.
 
 Under Gas Town, the canonical server lives at $GT_ROOT/.beads/. Any other
-dolt sql-server processes are considered orphans and will be killed.
+dolt sql-server processes using that shared data directory are considered
+orphans and will be killed.
 
-In standalone mode, all dolt sql-server processes are killed except the
-one tracked by the current project's PID file.`,
+In standalone mode, only dolt sql-server processes using the current
+project's Dolt data directory are eligible for cleanup. Other projects'
+servers are preserved.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {

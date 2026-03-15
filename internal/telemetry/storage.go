@@ -336,10 +336,10 @@ func (s *InstrumentedStorage) GetEvents(ctx context.Context, issueID string, lim
 	return v, err
 }
 
-func (s *InstrumentedStorage) GetAllEventsSince(ctx context.Context, sinceID int64) ([]*types.Event, error) {
-	attrs := []attribute.KeyValue{attribute.Int64("bd.since_id", sinceID)}
+func (s *InstrumentedStorage) GetAllEventsSince(ctx context.Context, since time.Time) ([]*types.Event, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.since", since.Format(time.RFC3339))}
 	ctx, span, t := s.op(ctx, "GetAllEventsSince", attrs...)
-	v, err := s.inner.GetAllEventsSince(ctx, sinceID)
+	v, err := s.inner.GetAllEventsSince(ctx, since)
 	s.done(ctx, span, t, err, attrs...)
 	return v, err
 }

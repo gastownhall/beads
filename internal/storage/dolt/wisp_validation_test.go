@@ -7,8 +7,8 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestCreateWispValidation verifies that createWisp enforces the same field
-// validation as CreateIssue (validation parity, GH#2031).
+// TestCreateWispValidation verifies that CreateIssue enforces field
+// validation for ephemeral issues (wisps) (validation parity, GH#2031).
 func TestCreateWispValidation(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

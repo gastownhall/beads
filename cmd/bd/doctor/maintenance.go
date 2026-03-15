@@ -524,7 +524,7 @@ func loadMaintenanceIssues(path string) ([]*types.Issue, error) {
 
 func loadMaintenanceIssuesFromDatabase(beadsDir string) ([]*types.Issue, error) {
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}

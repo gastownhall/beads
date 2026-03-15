@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS compaction_snapshots (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id CHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID()),
     issue_id VARCHAR(255) NOT NULL,
     compaction_level INT NOT NULL,
     snapshot_json BLOB NOT NULL,

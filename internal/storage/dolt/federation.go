@@ -3,7 +3,9 @@ package dolt
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,6 +26,11 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		// Credential CLI routing: when peer has credentials and server is external,
+		// route through CLI subprocess (same rationale as store.go Push).
+		if s.shouldUseCLIForPeerCredentials(ctx, peer, creds) {
+			return s.doltCLIPushToPeer(ctx, peer, creds)
+		}
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, s.branch); err != nil {
 				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
@@ -64,6 +71,18 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 		return conflicts, err
 	}
 	err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		// Credential CLI routing: mirrors git-protocol peer pull path.
+		if s.shouldUseCLIForPeerCredentials(ctx, peer, creds) {
+			if pullErr := s.doltCLIPullFromPeer(ctx, peer, creds); pullErr != nil {
+				c, conflictErr := s.GetConflicts(ctx)
+				if conflictErr == nil && len(c) > 0 {
+					conflicts = c
+					return nil
+				}
+				return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
+			}
+			return nil
+		}
 		return withEnvCredentials(creds, func() error {
 			if pullErr := s.execWithLongTimeout(ctx, "CALL DOLT_PULL(?)", peer); pullErr != nil {
 				c, conflictErr := s.GetConflicts(ctx)
@@ -89,6 +108,10 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+		// Credential CLI routing: route fetch through CLI subprocess.
+		if s.shouldUseCLIForPeerCredentials(ctx, peer, creds) {
+			return s.doltCLIFetchFromPeer(ctx, peer, creds)
+		}
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
 				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
@@ -121,6 +144,13 @@ func (s *DoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, erro
 // After a server restart, dolt_remotes (in-memory) is empty while CLI remotes
 // (persisted in .dolt/config) survive. This is best-effort: errors are silently
 // ignored because a missing remote will surface a clear error at push/pull time.
+//
+// GH#2118: Also checks the server root directory (dbPath) for remotes that were
+// added there instead of the database subdirectory (CLIDir). Users commonly run
+// `dolt remote add` in .beads/dolt/ (server root) rather than .beads/dolt/<db>/
+// (database dir). When found, these remotes are propagated to the database CLI
+// directory so that CLI push/pull can find them.
+//
 // See GH#2315.
 func (s *DoltStore) syncCLIRemotesToSQL(ctx context.Context) {
 	dir := s.CLIDir()
@@ -128,7 +158,18 @@ func (s *DoltStore) syncCLIRemotesToSQL(ctx context.Context) {
 		return
 	}
 	cliRemotes, err := doltutil.ListCLIRemotes(dir)
-	if err != nil || len(cliRemotes) == 0 {
+	if err != nil {
+		cliRemotes = nil
+	}
+
+	// GH#2118: If the database directory has no remotes (or doesn't exist),
+	// check the server root directory. Users often run `dolt remote add` in
+	// .beads/dolt/ (server root) instead of .beads/dolt/<database>/.
+	if len(cliRemotes) == 0 {
+		cliRemotes = s.migrateServerRootRemotes(dir)
+	}
+
+	if len(cliRemotes) == 0 {
 		return
 	}
 	sqlRemotes, err := s.ListRemotes(ctx)
@@ -141,6 +182,39 @@ func (s *DoltStore) syncCLIRemotesToSQL(ctx context.Context) {
 			_ = s.AddRemote(ctx, r.Name, r.URL)
 		}
 	}
+}
+
+// migrateServerRootRemotes checks the dolt server root directory (dbPath) for
+// remotes that should be propagated to the database CLI directory (CLIDir).
+// This handles GH#2118: users run `dolt remote add` in .beads/dolt/ (server root)
+// instead of .beads/dolt/<database>/ (where CLI push/pull actually runs).
+//
+// Returns the combined CLI remotes after migration, or nil if nothing to migrate.
+func (s *DoltStore) migrateServerRootRemotes(cliDir string) []storage.RemoteInfo {
+	rootDir := s.dbPath
+	if rootDir == "" || rootDir == cliDir {
+		return nil
+	}
+	// Server root must have .dolt/ (from dolt init)
+	if _, err := os.Stat(filepath.Join(rootDir, ".dolt")); err != nil {
+		return nil
+	}
+	rootRemotes, err := doltutil.ListCLIRemotes(rootDir)
+	if err != nil || len(rootRemotes) == 0 {
+		return nil
+	}
+	// Database dir must have .dolt/ to accept CLI remotes
+	if _, err := os.Stat(filepath.Join(cliDir, ".dolt")); err != nil {
+		return nil
+	}
+	// Propagate server-root remotes to the database directory
+	for _, r := range rootRemotes {
+		if existing := doltutil.FindCLIRemote(cliDir, r.Name); existing == "" {
+			_ = doltutil.AddCLIRemote(cliDir, r.Name, r.URL)
+		}
+	}
+	combined, _ := doltutil.ListCLIRemotes(cliDir)
+	return combined
 }
 
 // RemoveRemote removes a configured remote.

@@ -103,7 +103,7 @@ func scanIssueFromTable(ctx context.Context, db *sql.DB, table, id string) (*typ
 
 // recordEventInTable records an event in the specified events table.
 //
-//nolint:gosec // G201: table is a hardcoded constant ("events" or "wisp_events")
+//nolint:gosec,unparam // G201: table is a hardcoded constant; unparam: table is always "wisp_events" currently but kept for API symmetry with insertIssueIntoTable
 func recordEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, eventType types.EventType, actor, newValue string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (issue_id, event_type, actor, old_value, new_value)
@@ -212,89 +212,6 @@ func wispPrefix(configPrefix string, issue *types.Issue) string {
 		return configPrefix + "-" + issue.IDPrefix
 	}
 	return configPrefix + "-wisp"
-}
-
-// createWisp creates an issue in the wisps table.
-func (s *DoltStore) createWisp(ctx context.Context, issue *types.Issue, actor string) error {
-	issue.Ephemeral = true
-
-	// Fetch custom statuses and types for validation (parity with CreateIssue)
-	customStatuses, err := s.GetCustomStatuses(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get custom statuses: %w", err)
-	}
-	customTypes, err := s.GetCustomTypes(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get custom types: %w", err)
-	}
-
-	now := time.Now().UTC()
-	if issue.CreatedAt.IsZero() {
-		issue.CreatedAt = now
-	} else {
-		issue.CreatedAt = issue.CreatedAt.UTC()
-	}
-	if issue.UpdatedAt.IsZero() {
-		issue.UpdatedAt = now
-	} else {
-		issue.UpdatedAt = issue.UpdatedAt.UTC()
-	}
-
-	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
-		maxTime := issue.CreatedAt
-		if issue.UpdatedAt.After(maxTime) {
-			maxTime = issue.UpdatedAt
-		}
-		closedAt := maxTime.Add(time.Second)
-		issue.ClosedAt = &closedAt
-	}
-
-	// Validate issue fields (parity with CreateIssue)
-	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
-		return fmt.Errorf("validation failed: %w", err)
-	}
-
-	if issue.ContentHash == "" {
-		issue.ContentHash = issue.ComputeContentHash()
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Get prefix from config
-	var configPrefix string
-	err = tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_prefix").Scan(&configPrefix)
-	if err == sql.ErrNoRows || configPrefix == "" {
-		return fmt.Errorf("database not initialized: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)")
-	} else if err != nil {
-		return fmt.Errorf("failed to get config: %w", err)
-	}
-
-	// Normalize prefix: strip trailing hyphen to prevent double-hyphen IDs (bd-6uly)
-	configPrefix = strings.TrimSuffix(configPrefix, "-")
-
-	// Generate wisp ID if not provided
-	if issue.ID == "" {
-		prefix := wispPrefix(configPrefix, issue)
-		generatedID, err := generateIssueIDInTable(ctx, tx, "wisps", prefix, issue, actor)
-		if err != nil {
-			return fmt.Errorf("failed to generate wisp ID: %w", err)
-		}
-		issue.ID = generatedID
-	}
-
-	if err := insertIssueIntoTable(ctx, tx, "wisps", issue); err != nil {
-		return fmt.Errorf("failed to insert wisp: %w", err)
-	}
-
-	if err := recordEventInTable(ctx, tx, "wisp_events", issue.ID, types.EventCreated, actor, ""); err != nil {
-		return fmt.Errorf("failed to record creation event: %w", err)
-	}
-
-	return wrapTransactionError("commit create wisp", tx.Commit())
 }
 
 // getWisp retrieves an issue from the wisps table.

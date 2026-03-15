@@ -118,7 +118,7 @@ func readTypesFromDB(beadsDir string) ([]string, error) {
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +183,7 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	}
 
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		return nil
 	}

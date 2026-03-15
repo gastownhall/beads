@@ -24,9 +24,17 @@ type dbQuerier interface {
 }
 
 // backupState tracks watermarks for incremental backup.
+type backupCounts struct {
+	Issues       int `json:"issues"`
+	Events       int `json:"events"`
+	Comments     int `json:"comments"`
+	Dependencies int `json:"dependencies"`
+	Labels       int `json:"labels"`
+	Config       int `json:"config"`
+}
+
 type backupState struct {
 	LastDoltCommit string    `json:"last_dolt_commit"`
-	LastEventID    int64     `json:"last_event_id"`
 	Timestamp      time.Time `json:"timestamp"`
 	Counts         struct {
 		Issues       int `json:"issues"`
@@ -125,8 +133,25 @@ func atomicWriteFile(path string, data []byte) error {
 	return nil
 }
 
+// getBackupPrefix returns the issue prefix for the current project.
+// It checks the YAML config first (authoritative in shared-server mode),
+// then falls back to the database config table.
+func getBackupPrefix(ctx context.Context) string {
+	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
+		return yamlPrefix
+	}
+	if store != nil {
+		if dbPrefix, err := store.GetConfig(ctx, "issue_prefix"); err == nil && dbPrefix != "" {
+			return dbPrefix
+		}
+	}
+	return ""
+}
+
 // runBackupExport exports all tables to JSONL files in .beads/backup/.
 // Returns the updated state.
+// When a project prefix is configured, only issues belonging to this project
+// are exported. This prevents cross-project contamination on shared Dolt servers.
 func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	dir, err := backupDir()
 	if err != nil {
@@ -150,37 +175,77 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 		}
 	}
 
+	// Resolve the project prefix for scoping.
+	// On shared Dolt servers, the database contains issues from ALL projects.
+	// We must filter by prefix to avoid exporting (and later restoring) foreign issues.
+	prefix := getBackupPrefix(ctx)
+	prefixFilter := prefix + "-" // e.g. "Prosa-"
+
+	var n int
+
 	// Export issues only — wisps are ephemeral and excluded from backup.
 	// They can be regenerated from the database if needed for disaster recovery.
-	n, err := exportTable(ctx, store, dir, "issues.jsonl", "SELECT * FROM issues ORDER BY id")
+	if prefix != "" {
+		n, err = exportTable(ctx, store, dir, "issues.jsonl",
+			"SELECT * FROM issues WHERE id LIKE ? ORDER BY id", prefixFilter+"%")
+	} else {
+		n, err = exportTable(ctx, store, dir, "issues.jsonl",
+			"SELECT * FROM issues ORDER BY id")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("backup issues: %w", err)
 	}
 	state.Counts.Issues = n
 
-	n, err = exportTable(ctx, store, dir, "events.jsonl",
-		"SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at FROM events ORDER BY created_at ASC, id ASC")
+	if prefix != "" {
+		n, err = exportTable(ctx, store, dir, "events.jsonl",
+			"SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at FROM events WHERE issue_id LIKE ? ORDER BY created_at ASC, id ASC",
+			prefixFilter+"%")
+	} else {
+		n, err = exportTable(ctx, store, dir, "events.jsonl",
+			"SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at FROM events ORDER BY created_at ASC, id ASC")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("backup events: %w", err)
 	}
 	state.Counts.Events = n
 
-	n, err = exportTable(ctx, store, dir, "comments.jsonl",
-		"SELECT id, issue_id, author, text, created_at FROM comments ORDER BY id")
+	if prefix != "" {
+		n, err = exportTable(ctx, store, dir, "comments.jsonl",
+			"SELECT id, issue_id, author, text, created_at FROM comments WHERE issue_id LIKE ? ORDER BY id",
+			prefixFilter+"%")
+	} else {
+		n, err = exportTable(ctx, store, dir, "comments.jsonl",
+			"SELECT id, issue_id, author, text, created_at FROM comments ORDER BY id")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("backup comments: %w", err)
 	}
 	state.Counts.Comments = n
 
-	n, err = exportTable(ctx, store, dir, "dependencies.jsonl",
-		"SELECT issue_id, depends_on_id, type, created_at, created_by, metadata FROM dependencies ORDER BY issue_id, depends_on_id")
+	if prefix != "" {
+		// For dependencies, both issue_id and depends_on_id should belong to this project.
+		// We filter on issue_id (the dependent) having our prefix.
+		n, err = exportTable(ctx, store, dir, "dependencies.jsonl",
+			"SELECT issue_id, depends_on_id, type, created_at, created_by, metadata FROM dependencies WHERE issue_id LIKE ? ORDER BY issue_id, depends_on_id",
+			prefixFilter+"%")
+	} else {
+		n, err = exportTable(ctx, store, dir, "dependencies.jsonl",
+			"SELECT issue_id, depends_on_id, type, created_at, created_by, metadata FROM dependencies ORDER BY issue_id, depends_on_id")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("backup dependencies: %w", err)
 	}
 	state.Counts.Dependencies = n
 
-	n, err = exportTable(ctx, store, dir, "labels.jsonl",
-		"SELECT issue_id, label FROM labels ORDER BY issue_id, label")
+	if prefix != "" {
+		n, err = exportTable(ctx, store, dir, "labels.jsonl",
+			"SELECT issue_id, label FROM labels WHERE issue_id LIKE ? ORDER BY issue_id, label",
+			prefixFilter+"%")
+	} else {
+		n, err = exportTable(ctx, store, dir, "labels.jsonl",
+			"SELECT issue_id, label FROM labels ORDER BY issue_id, label")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("backup labels: %w", err)
 	}
@@ -218,8 +283,9 @@ func truncateHash(h string) string {
 
 // exportTable streams query results to a JSONL file using atomic write (temp file + rename).
 // Uses bounded memory regardless of result set size.
-func exportTable(ctx context.Context, q dbQuerier, dir, filename, query string) (int, error) {
-	rows, err := q.QueryContext(ctx, query)
+// Optional args are passed as query parameters (for WHERE clause filtering).
+func exportTable(ctx context.Context, q dbQuerier, dir, filename, query string, args ...any) (int, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("query failed: %w", err)
 	}

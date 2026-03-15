@@ -55,6 +55,7 @@ environment variable.`,
 		team, _ := cmd.Flags().GetBool("team")
 		stealth, _ := cmd.Flags().GetBool("stealth")
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
+		skipAgents, _ := cmd.Flags().GetBool("skip-agents")
 		force, _ := cmd.Flags().GetBool("force")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 		// Dolt server connection flags
@@ -189,8 +190,10 @@ environment variable.`,
 			prefix = filepath.Base(cwd)
 		}
 
-		// Normalize prefix: strip trailing hyphens
-		// The hyphen is added automatically during ID generation
+		// Normalize prefix: strip leading dots and trailing hyphens.
+		// Leading dots produce invalid Dolt database names (e.g. ".claude" -> "bd_.claude").
+		// The trailing hyphen is added automatically during ID generation.
+		prefix = strings.TrimLeft(prefix, ".")
 		prefix = strings.TrimRight(prefix, "-")
 
 		// Sanitize prefix for use as a MySQL database name.
@@ -369,11 +372,13 @@ environment variable.`,
 		if existingCfg, _ := configfile.Load(beadsDir); existingCfg != nil && existingCfg.DoltDatabase != "" {
 			dbName = existingCfg.DoltDatabase
 		} else if prefix != "" {
-			// Sanitize hyphens to underscores for SQL-idiomatic database names.
+			// Sanitize hyphens and dots to underscores for SQL-idiomatic database names.
+			// Dots are invalid in Dolt/MySQL identifiers (e.g. from ".claude" directories).
 			// Must match the sanitization applied to metadata.json DoltDatabase
 			// field (line below), otherwise init creates a database with one name
 			// but metadata.json records a different name, causing reopens to fail.
 			dbName = strings.ReplaceAll(prefix, "-", "_")
+			dbName = strings.ReplaceAll(dbName, ".", "_")
 		} else {
 			dbName = "beads"
 		}
@@ -399,6 +404,16 @@ environment variable.`,
 				bootstrappedFromRemote = true
 				if !quiet {
 					fmt.Printf("  %s Bootstrapped from git remote: %s\n", ui.RenderPass("✓"), gitRemoteURL)
+				}
+			}
+		} else if !force && isGitRepo() && !isBareGitRepo() {
+			// Warn if origin has an existing beads database.
+			// Don't auto-clone here — bd bootstrap handles that.
+			if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
+				if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+					fmt.Fprintf(os.Stderr, "Note: origin has an existing beads database (refs/dolt/data).\n")
+					fmt.Fprintf(os.Stderr, "  Run 'bd bootstrap' instead to clone it.\n")
+					fmt.Fprintf(os.Stderr, "  Continuing with fresh database initialization.\n\n")
 				}
 			}
 		}
@@ -442,14 +457,22 @@ environment variable.`,
 			doltCfg.ServerUser = serverUser
 		}
 
-		store, err := newDoltStore(ctx, doltCfg)
+		initLock, err := acquireEmbeddedLock(beadsDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to connect to dolt server: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		doltStore, ok := store.(*dolt.DoltStore)
-		if !ok {
-			panic(fmt.Sprintf("newDoltStore returned unexpected type %T", store))
+		defer initLock.Unlock()
+
+		// Clean stale noms LOCK files from previously crashed processes
+		// before opening the embedded store. Without this, a crashed init
+		// leaves LOCK files that cause nil pointer dereference in DoltDB.
+		dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
+
+		store, err := newDoltStore(ctx, doltCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %v\n", err)
+			os.Exit(1)
 		}
 
 		// Configure the git remote in the Dolt store so bd dolt push/pull
@@ -631,7 +654,7 @@ environment variable.`,
 				_ = store.Close()
 				FatalError("--from-jsonl specified but %s does not exist", localJSONLPath)
 			}
-			issueCount, importErr := importFromLocalJSONL(ctx, doltStore, localJSONLPath)
+			issueCount, importErr := importFromLocalJSONL(ctx, store, localJSONLPath)
 			if importErr != nil {
 				_ = store.Close()
 				FatalError("failed to import from JSONL: %v", importErr)
@@ -674,7 +697,7 @@ environment variable.`,
 
 		// Run contributor wizard if --contributor flag is set or user chose contributor
 		if contributor {
-			if err := runContributorWizard(ctx, doltStore); err != nil {
+			if err := runContributorWizard(ctx, store); err != nil {
 				canceled := isCanceled(err)
 				if canceled {
 					fmt.Fprintln(os.Stderr, "Setup canceled.")
@@ -697,7 +720,7 @@ environment variable.`,
 
 		// Run team wizard if --team flag is set
 		if team {
-			if err := runTeamWizard(ctx, doltStore); err != nil {
+			if err := runTeamWizard(ctx, store); err != nil {
 				canceled := isCanceled(err)
 				if canceled {
 					fmt.Fprintln(os.Stderr, "Setup canceled.")
@@ -799,8 +822,8 @@ environment variable.`,
 		}
 
 		// Add agent instructions to AGENTS.md
-		// Skip in stealth mode (user wants invisible setup) and quiet mode (suppress all output)
-		if !stealth {
+		// Skip in stealth mode (user wants invisible setup) or when explicitly skipped
+		if !stealth && !skipAgents {
 			agentsTemplate, _ := cmd.Flags().GetString("agents-template")
 			if isBareGitRepo() {
 				if !quiet {
@@ -863,47 +886,61 @@ environment variable.`,
 			fmt.Printf("\n%s bd initialized successfully!\n\n", ui.RenderPass("✓"))
 		}
 		fmt.Printf("  Backend: %s\n", ui.RenderAccent(backend))
-		host := serverHost
-		if host == "" {
-			host = configfile.DefaultDoltServerHost
+		if isEmbeddedDolt {
+			fmt.Printf("  Mode: %s\n", ui.RenderAccent("embedded"))
+		} else {
+			host := serverHost
+			if host == "" {
+				host = configfile.DefaultDoltServerHost
+			}
+			port := serverPort
+			if port == 0 {
+				port = doltserver.DefaultConfig(beadsDir).Port
+			}
+			user := serverUser
+			if user == "" {
+				user = configfile.DefaultDoltServerUser
+			}
+			fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
+			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s:%d", user, host, port)))
 		}
-		port := serverPort
-		if port == 0 {
-			port = doltserver.DefaultConfig(beadsDir).Port
-		}
-		user := serverUser
-		if user == "" {
-			user = configfile.DefaultDoltServerUser
-		}
-		fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
-		fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s:%d", user, host, port)))
 		fmt.Printf("  Database: %s\n", ui.RenderAccent(dbName))
 		fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(prefix))
 		fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
 		fmt.Printf("Run %s to get started.\n\n", ui.RenderAccent("bd quickstart"))
 
-		// Run limited diagnostics to verify init succeeded.
-		// Uses runInitDiagnostics (not runDiagnostics) to only check things
-		// that should be true immediately after init — skips git-dependent,
-		// federation, and other post-setup checks that aren't applicable yet.
-		doctorResult := runInitDiagnostics(cwd)
-		// Check if there are any warnings or errors (not just critical failures)
-		hasIssues := false
-		for _, check := range doctorResult.Checks {
-			if check.Status != statusOK {
-				hasIssues = true
-				break
-			}
+		// Detect backup files from a previous session (GH#2327).
+		// This catches the branch-switch scenario: user ran bd init on a new
+		// branch and the database was created fresh, but backup JSONL files
+		// exist from a prior backup on this or another branch.
+		if !bootstrappedFromRemote && dolt.HasBackupFiles(beadsDir) {
+			fmt.Printf("  %s Backup files detected in .beads/backup/\n", ui.RenderWarn("!"))
+			fmt.Printf("    To restore issues from a previous backup, run:\n")
+			fmt.Printf("      %s\n\n", ui.RenderAccent("bd backup restore"))
 		}
-		if hasIssues {
-			fmt.Printf("%s Setup incomplete. Some issues were detected:\n", ui.RenderWarn("⚠"))
-			// Show just the warnings/errors, not all checks
+
+		// Run limited diagnostics to verify init succeeded.
+		// Skipped in embedded mode: diagnostics use dolt.NewFromConfigWithOptions
+		// which auto-starts a dolt sql-server. Embedded init already validates
+		// the database via initSchema.
+		if !isEmbeddedDolt {
+			doctorResult := runInitDiagnostics(cwd)
+			hasIssues := false
 			for _, check := range doctorResult.Checks {
 				if check.Status != statusOK {
-					fmt.Printf("  • %s: %s\n", check.Name, check.Message)
+					hasIssues = true
+					break
 				}
 			}
-			fmt.Printf("\nRun %s to see details and fix these issues.\n\n", ui.RenderAccent("bd doctor --fix"))
+			if hasIssues {
+				fmt.Printf("%s Setup incomplete. Some issues were detected:\n", ui.RenderWarn("⚠"))
+				for _, check := range doctorResult.Checks {
+					if check.Status != statusOK {
+						fmt.Printf("  • %s: %s\n", check.Name, check.Message)
+					}
+				}
+				fmt.Printf("\nRun %s to see details and fix these issues.\n\n", ui.RenderAccent("bd doctor --fix"))
+			}
 		}
 	},
 }
@@ -916,6 +953,7 @@ func init() {
 	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: global gitattributes and gitignore, no local repo tracking")
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
+	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude settings generation")
 	initCmd.Flags().Bool("force", false, "Force re-initialization even if database already has issues (may cause data loss)")
 	initCmd.Flags().Bool("from-jsonl", false, "Import issues from .beads/issues.jsonl instead of git history")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
@@ -1129,7 +1167,7 @@ func countExistingIssues(_ string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := newDoltStoreFromConfig(ctx, beadsDir)
 	if err != nil {
 		return 0, err
 	}

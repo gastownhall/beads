@@ -681,6 +681,13 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, lastTouchedTrackingCheck)
 	// Don't fail overall check for last-touched tracking, just warn
 
+	// Check 14h: tracked runtime/sensitive files (GH#2535)
+	trackedRuntimeCheck := convertDoctorCheck(doctor.CheckTrackedRuntimeFiles(path))
+	result.Checks = append(result.Checks, trackedRuntimeCheck)
+	if trackedRuntimeCheck.Status == statusError {
+		result.OverallOK = false // Sensitive files in git is a real problem
+	}
+
 	// Check 15a: Git working tree cleanliness (AGENTS.md hygiene)
 	gitWorkingTreeCheck := convertWithCategory(doctor.CheckGitWorkingTree(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, gitWorkingTreeCheck)

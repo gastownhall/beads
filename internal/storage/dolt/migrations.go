@@ -28,6 +28,7 @@ var migrationsList = []Migration{
 	{"infra_to_wisps", migrations.MigrateInfraToWisps},
 	{"wisp_dep_type_index", migrations.MigrateWispDepTypeIndex},
 	{"cleanup_autopush_metadata", migrations.MigrateCleanupAutopushMetadata},
+	{"uuid_primary_keys", migrations.MigrateUUIDPrimaryKeys},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.
@@ -40,8 +41,20 @@ func RunMigrations(db *sql.DB) error {
 		}
 	}
 
-	// Commit schema changes via Dolt (idempotent - no-ops if nothing changed)
-	_, err := db.Exec("CALL DOLT_COMMIT('-Am', 'schema: auto-migrate')")
+	// GH#2455: Stage only schema tables (not config) to avoid sweeping up
+	// stale issue_prefix changes from concurrent operations. The old '-Am'
+	// approach staged ALL dirty tables including config.
+	migrationTables := []string{
+		"issues", "wisps", "events", "wisp_events", "dependencies",
+		"wisp_dependencies", "labels", "wisp_labels", "comments",
+		"wisp_comments", "metadata", "child_counters", "issue_counter",
+		"issue_snapshots", "compaction_snapshots", "federation_peers",
+		"dolt_ignore",
+	}
+	for _, table := range migrationTables {
+		_, _ = db.Exec("CALL DOLT_ADD(?)", table)
+	}
+	_, err := db.Exec("CALL DOLT_COMMIT('-m', 'schema: auto-migrate')")
 	if err != nil {
 		// "nothing to commit" is expected when migrations were already applied
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {

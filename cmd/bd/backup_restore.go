@@ -33,6 +33,9 @@ This command:
 Use this after losing your Dolt database (machine crash, new clone, etc.)
 when you have JSONL backups on disk or in git.
 
+If your backup snapshots are stored in a git branch, use 'bd backup fetch-git'
+to fetch that branch into a temporary worktree and restore from it.
+
 The database must already be initialized (run 'bd init' first if needed).
 To initialize and restore in one step, use: bd init && bd backup restore`,
 	Args: cobra.MaximumNArgs(1),
@@ -50,20 +53,8 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			}
 		}
 
-		// Verify backup directory exists and has files
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
-		}
-
-		// Check for issues.jsonl as minimum requirement
-		issuesPath := filepath.Join(dir, "issues.jsonl")
-		if _, err := os.Stat(issuesPath); os.IsNotExist(err) {
-			return fmt.Errorf("no issues.jsonl found in %s\nThis doesn't look like a valid backup directory", dir)
-		}
-
-		// Validate schema of issues.jsonl before proceeding (GH#2492)
-		if err := validateIssueJSONLSchema(issuesPath); err != nil {
-			return fmt.Errorf("backup validation failed: %w", err)
+		if err := validateBackupRestoreDir(dir); err != nil {
+			return err
 		}
 
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -120,9 +111,20 @@ type restoreResult struct {
 
 // runBackupRestore imports all JSONL backup tables into the Dolt store.
 // Order matters: config first (sets prefix), then issues, then related tables.
+// When a project prefix is configured, only entries belonging to this project
+// are imported. This prevents cross-project contamination on shared Dolt servers.
 func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun bool) (*restoreResult, error) {
+	if s == nil {
+		return nil, fmt.Errorf("database is not initialized. Run 'bd init' first")
+	}
+
 	result := &restoreResult{}
 	db := s.DB()
+
+	// Resolve the project prefix for scoping.
+	// Check YAML config first (authoritative in shared-server mode),
+	// then fall back to the database config table.
+	prefix := getBackupPrefix(ctx)
 
 	// 1. Restore config (sets issue_prefix and other settings)
 	configPath := filepath.Join(dir, "config.jsonl")
@@ -137,7 +139,7 @@ func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun
 
 	// 2. Restore issues (must come before comments/deps/labels which reference issue IDs)
 	issuesPath := filepath.Join(dir, "issues.jsonl")
-	n, err := restoreIssues(ctx, s, issuesPath, dryRun)
+	n, err := restoreIssues(ctx, s, issuesPath, dryRun, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("restore issues: %w", err)
 	}
@@ -146,7 +148,7 @@ func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun
 	// 3. Restore comments
 	commentsPath := filepath.Join(dir, "comments.jsonl")
 	if _, err := os.Stat(commentsPath); err == nil {
-		n, warnings, err := restoreComments(ctx, db, commentsPath, dryRun)
+		n, warnings, err := restoreComments(ctx, db, commentsPath, dryRun, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("restore comments: %w", err)
 		}
@@ -157,7 +159,7 @@ func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun
 	// 4. Restore dependencies
 	depsPath := filepath.Join(dir, "dependencies.jsonl")
 	if _, err := os.Stat(depsPath); err == nil {
-		n, warnings, err := restoreDependencies(ctx, db, depsPath, dryRun)
+		n, warnings, err := restoreDependencies(ctx, db, depsPath, dryRun, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("restore dependencies: %w", err)
 		}
@@ -168,7 +170,7 @@ func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun
 	// 5. Restore labels
 	labelsPath := filepath.Join(dir, "labels.jsonl")
 	if _, err := os.Stat(labelsPath); err == nil {
-		n, warnings, err := restoreLabels(ctx, db, labelsPath, dryRun)
+		n, warnings, err := restoreLabels(ctx, db, labelsPath, dryRun, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("restore labels: %w", err)
 		}
@@ -179,7 +181,7 @@ func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun
 	// 6. Restore events
 	eventsPath := filepath.Join(dir, "events.jsonl")
 	if _, err := os.Stat(eventsPath); err == nil {
-		n, warnings, err := restoreEvents(ctx, db, eventsPath, dryRun)
+		n, warnings, err := restoreEvents(ctx, db, eventsPath, dryRun, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("restore events: %w", err)
 		}
@@ -197,6 +199,32 @@ func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun
 	}
 
 	return result, nil
+}
+
+func validateBackupRestoreDir(dir string) error {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
+	}
+
+	issuesPath := filepath.Join(dir, "issues.jsonl")
+	if _, err := os.Stat(issuesPath); os.IsNotExist(err) {
+		return fmt.Errorf("no issues.jsonl found in %s\nThis doesn't look like a valid backup directory", dir)
+	}
+
+	if err := validateIssueJSONLSchema(issuesPath); err != nil {
+		return fmt.Errorf("backup validation failed: %w", err)
+	}
+
+	return nil
+}
+
+// issueIDMatchesPrefix checks whether an issue ID belongs to the given project prefix.
+// Returns true if prefix is empty (no filtering) or if the ID starts with "prefix-".
+func issueIDMatchesPrefix(issueID, prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	return strings.HasPrefix(issueID, prefix+"-")
 }
 
 // restoreConfig reads config.jsonl and sets each key-value pair.
@@ -240,16 +268,37 @@ func restoreConfig(ctx context.Context, s *dolt.DoltStore, path string, dryRun b
 // avoiding type mismatches between DB values (e.g., int 0/1 for booleans) and
 // Go struct types.
 //
+// When prefix is non-empty, only issues whose ID starts with "prefix-" are restored.
+// This prevents importing foreign-project issues from shared-server backups.
+//
 // The JSONL may contain denormalized data from `bd export` (labels, dependencies,
 // comment counts). These are extracted and inserted into their proper tables.
-func restoreIssues(ctx context.Context, s *dolt.DoltStore, path string, dryRun bool) (int, error) {
+func restoreIssues(ctx context.Context, s *dolt.DoltStore, path string, dryRun bool, prefix string) (int, error) {
 	lines, err := readJSONLFile(path)
 	if err != nil {
 		return 0, err
 	}
 
-	if dryRun || len(lines) == 0 {
-		return len(lines), nil
+	if len(lines) == 0 {
+		return 0, nil
+	}
+
+	// When doing a dry run, count only matching issues
+	if dryRun {
+		if prefix == "" {
+			return len(lines), nil
+		}
+		count := 0
+		for _, line := range lines {
+			var row map[string]interface{}
+			if err := json.Unmarshal(line, &row); err != nil {
+				continue
+			}
+			if id, ok := row["id"].(string); ok && issueIDMatchesPrefix(id, prefix) {
+				count++
+			}
+		}
+		return count, nil
 	}
 
 	db := s.DB()
@@ -281,6 +330,11 @@ func restoreIssues(ctx context.Context, s *dolt.DoltStore, path string, dryRun b
 		}
 
 		issueID, _ := row["id"].(string)
+
+		// Skip issues that don't belong to this project
+		if !issueIDMatchesPrefix(issueID, prefix) {
+			continue
+		}
 
 		// Extract denormalized relational data before SQL insertion.
 		// `bd export` embeds labels ([]string) and dependencies ([]*Dependency)
@@ -401,7 +455,8 @@ func restoreTableRow(ctx context.Context, db *sql.DB, table string, row map[stri
 // restoreComments reads comments.jsonl and inserts them via raw SQL.
 // Uses raw SQL to avoid side effects (the high-level API validates issue existence
 // and may fail for wisps that haven't been restored yet).
-func restoreComments(ctx context.Context, db *sql.DB, path string, dryRun bool) (int, int, error) {
+// When prefix is non-empty, only comments for matching issue IDs are restored.
+func restoreComments(ctx context.Context, db *sql.DB, path string, dryRun bool, prefix string) (int, int, error) {
 	lines, err := readJSONLFile(path)
 	if err != nil {
 		return 0, 0, err
@@ -411,11 +466,11 @@ func restoreComments(ctx context.Context, db *sql.DB, path string, dryRun bool) 
 	warnings := 0
 	for _, line := range lines {
 		var comment struct {
-			ID        json.Number `json:"id"`
-			IssueID   string      `json:"issue_id"`
-			Author    string      `json:"author"`
-			Text      string      `json:"text"`
-			CreatedAt string      `json:"created_at"`
+			ID        string `json:"id"`
+			IssueID   string `json:"issue_id"`
+			Author    string `json:"author"`
+			Text      string `json:"text"`
+			CreatedAt string `json:"created_at"`
 		}
 		if err := json.Unmarshal(line, &comment); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: skipping invalid comment line: %v\n", err)
@@ -423,6 +478,10 @@ func restoreComments(ctx context.Context, db *sql.DB, path string, dryRun bool) 
 			continue
 		}
 		if comment.IssueID == "" {
+			continue
+		}
+		// Skip comments for issues that don't belong to this project
+		if !issueIDMatchesPrefix(comment.IssueID, prefix) {
 			continue
 		}
 		if !dryRun {
@@ -444,7 +503,8 @@ func restoreComments(ctx context.Context, db *sql.DB, path string, dryRun bool) 
 
 // restoreDependencies reads dependencies.jsonl and inserts them via raw SQL.
 // Uses raw SQL to avoid validation side effects (cycle detection, existence checks).
-func restoreDependencies(ctx context.Context, db *sql.DB, path string, dryRun bool) (int, int, error) {
+// When prefix is non-empty, only dependencies where issue_id matches are restored.
+func restoreDependencies(ctx context.Context, db *sql.DB, path string, dryRun bool, prefix string) (int, int, error) {
 	lines, err := readJSONLFile(path)
 	if err != nil {
 		return 0, 0, err
@@ -467,6 +527,10 @@ func restoreDependencies(ctx context.Context, db *sql.DB, path string, dryRun bo
 			continue
 		}
 		if dep.IssueID == "" || dep.DependsOnID == "" {
+			continue
+		}
+		// Skip dependencies where the issue doesn't belong to this project
+		if !issueIDMatchesPrefix(dep.IssueID, prefix) {
 			continue
 		}
 		if !dryRun {
@@ -500,7 +564,8 @@ func restoreDependencies(ctx context.Context, db *sql.DB, path string, dryRun bo
 
 // restoreLabels reads labels.jsonl and inserts them via raw SQL.
 // Uses raw SQL to avoid event creation side effects from AddLabel.
-func restoreLabels(ctx context.Context, db *sql.DB, path string, dryRun bool) (int, int, error) {
+// When prefix is non-empty, only labels for matching issue IDs are restored.
+func restoreLabels(ctx context.Context, db *sql.DB, path string, dryRun bool, prefix string) (int, int, error) {
 	lines, err := readJSONLFile(path)
 	if err != nil {
 		return 0, 0, err
@@ -521,6 +586,10 @@ func restoreLabels(ctx context.Context, db *sql.DB, path string, dryRun bool) (i
 		if label.IssueID == "" || label.Label == "" {
 			continue
 		}
+		// Skip labels for issues that don't belong to this project
+		if !issueIDMatchesPrefix(label.IssueID, prefix) {
+			continue
+		}
 		if !dryRun {
 			_, err := db.ExecContext(ctx, `
 				INSERT IGNORE INTO labels (issue_id, label) VALUES (?, ?)
@@ -537,7 +606,8 @@ func restoreLabels(ctx context.Context, db *sql.DB, path string, dryRun bool) (i
 }
 
 // restoreEvents reads events.jsonl and inserts them via raw SQL.
-func restoreEvents(ctx context.Context, db *sql.DB, path string, dryRun bool) (int, int, error) {
+// When prefix is non-empty, only events for matching issue IDs are restored.
+func restoreEvents(ctx context.Context, db *sql.DB, path string, dryRun bool, prefix string) (int, int, error) {
 	lines, err := readJSONLFile(path)
 	if err != nil {
 		return 0, 0, err
@@ -547,14 +617,14 @@ func restoreEvents(ctx context.Context, db *sql.DB, path string, dryRun bool) (i
 	warnings := 0
 	for _, line := range lines {
 		var event struct {
-			ID        json.Number `json:"id"`
-			IssueID   string      `json:"issue_id"`
-			EventType string      `json:"event_type"`
-			Actor     string      `json:"actor"`
-			OldValue  *string     `json:"old_value"`
-			NewValue  *string     `json:"new_value"`
-			Comment   *string     `json:"comment"`
-			CreatedAt string      `json:"created_at"`
+			ID        string  `json:"id"`
+			IssueID   string  `json:"issue_id"`
+			EventType string  `json:"event_type"`
+			Actor     string  `json:"actor"`
+			OldValue  *string `json:"old_value"`
+			NewValue  *string `json:"new_value"`
+			Comment   *string `json:"comment"`
+			CreatedAt string  `json:"created_at"`
 		}
 		if err := json.Unmarshal(line, &event); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: skipping invalid event line: %v\n", err)
@@ -562,6 +632,10 @@ func restoreEvents(ctx context.Context, db *sql.DB, path string, dryRun bool) (i
 			continue
 		}
 		if event.IssueID == "" {
+			continue
+		}
+		// Skip events for issues that don't belong to this project
+		if !issueIDMatchesPrefix(event.IssueID, prefix) {
 			continue
 		}
 		if !dryRun {

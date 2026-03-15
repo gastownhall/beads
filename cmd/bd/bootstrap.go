@@ -127,10 +127,22 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		return plan
 	}
 
-	// Check for backup JSONL files
+	// Auto-detect: probe origin for refs/dolt/data
+	if isGitRepo() && !isBareGitRepo() {
+		if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
+			if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+				plan.SyncRemote = gitURLToDoltRemote(originURL)
+				plan.Action = "sync"
+				plan.Reason = "Found existing beads database on origin (refs/dolt/data) — will clone from " + originURL
+				return plan
+			}
+		}
+	}
+
+	// Check for backup JSONL files (must be non-empty to be useful)
 	backupDir := filepath.Join(beadsDir, "backup")
 	issuesFile := filepath.Join(backupDir, "issues.jsonl")
-	if _, err := os.Stat(issuesFile); err == nil {
+	if info, err := os.Stat(issuesFile); err == nil && info.Size() > 0 {
 		plan.BackupDir = backupDir
 		plan.Action = "restore"
 		plan.Reason = "Backup files found — will restore from " + backupDir

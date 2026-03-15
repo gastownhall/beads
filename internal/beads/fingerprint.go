@@ -13,27 +13,21 @@ import (
 
 // ComputeRepoID generates a unique identifier for this git repository
 func ComputeRepoID() (string, error) {
-	cmd := exec.Command("git", "config", "--get", "remote.origin.url")
-	output, err := cmd.Output()
+	return ComputeRepoIDForPath("")
+}
+
+// ComputeRepoIDForPath generates a unique identifier for the git repository
+// rooted at or containing repoPath. An empty repoPath uses the current cwd.
+func ComputeRepoIDForPath(repoPath string) (string, error) {
+	output, err := runGitInRepo(repoPath, "config", "--get", "remote.origin.url")
 	if err != nil {
-		cmd = exec.Command("git", "rev-parse", "--show-toplevel")
-		output, err = cmd.Output()
+		output, err = runGitInRepo(repoPath, "rev-parse", "--show-toplevel")
 		if err != nil {
 			return "", fmt.Errorf("not a git repository")
 		}
 
-		repoPath := strings.TrimSpace(string(output))
-		absPath, err := filepath.Abs(repoPath)
-		if err != nil {
-			absPath = repoPath
-		}
-
-		evalPath, err := filepath.EvalSymlinks(absPath)
-		if err != nil {
-			evalPath = absPath
-		}
-
-		normalized := filepath.ToSlash(evalPath)
+		repoRoot := strings.TrimSpace(string(output))
+		normalized := normalizedRepoPath(repoRoot)
 		hash := sha256.Sum256([]byte(normalized))
 		return hex.EncodeToString(hash[:16]), nil
 	}
@@ -115,21 +109,39 @@ func canonicalizeGitURL(rawURL string) (string, error) {
 
 // GetCloneID generates a unique ID for this specific clone (not shared with other clones)
 func GetCloneID() (string, error) {
+	return GetCloneIDForPath("")
+}
+
+// GetCloneIDForPath generates a unique ID for the specific clone rooted at or
+// containing repoPath. An empty repoPath uses the current cwd.
+func GetCloneIDForPath(repoPath string) (string, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		return "", fmt.Errorf("failed to get hostname: %w", err)
 	}
 
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
+	output, err := runGitInRepo(repoPath, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %w", err)
 	}
 
-	repoRoot := strings.TrimSpace(string(output))
-	absPath, err := filepath.Abs(repoRoot)
+	normalizedPath := normalizedRepoPath(strings.TrimSpace(string(output)))
+	hash := sha256.Sum256([]byte(hostname + ":" + normalizedPath))
+	return hex.EncodeToString(hash[:8]), nil
+}
+
+func runGitInRepo(repoPath string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	if repoPath != "" {
+		cmd.Dir = repoPath
+	}
+	return cmd.Output()
+}
+
+func normalizedRepoPath(repoPath string) string {
+	absPath, err := filepath.Abs(repoPath)
 	if err != nil {
-		absPath = repoRoot
+		absPath = repoPath
 	}
 
 	evalPath, err := filepath.EvalSymlinks(absPath)
@@ -137,7 +149,5 @@ func GetCloneID() (string, error) {
 		evalPath = absPath
 	}
 
-	normalizedPath := filepath.ToSlash(evalPath)
-	hash := sha256.Sum256([]byte(hostname + ":" + normalizedPath))
-	return hex.EncodeToString(hash[:8]), nil
+	return filepath.ToSlash(evalPath)
 }

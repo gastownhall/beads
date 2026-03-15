@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -78,17 +79,17 @@ func gitBackup(ctx context.Context) error {
 	}
 
 	// Check if there's anything to commit
-	diffCmd := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet", "--", relDir)
-	if gitDir != "" {
-		diffCmd.Dir = gitDir
+	exitCode, err := gitExitCodeInDir(ctx, gitDir, "diff", "--cached", "--quiet", "--", relDir)
+	if err != nil {
+		return fmt.Errorf("git diff --cached %s: %w", relDir, err)
 	}
-	out, err := diffCmd.CombinedOutput()
-	if err == nil {
+	if exitCode == 0 {
 		debug.Logf("backup: no git changes to commit\n")
 		return nil // nothing staged
 	}
-	// exit code 1 = there are differences (good, we want to commit)
-	_ = out
+	if exitCode != 1 {
+		return fmt.Errorf("git diff --cached %s exited with code %d", relDir, exitCode)
+	}
 
 	// git commit
 	msg := fmt.Sprintf("bd: backup %s", time.Now().UTC().Format("2006-01-02 15:04"))
@@ -113,20 +114,19 @@ func gitBackup(ctx context.Context) error {
 func findGitRoot(path string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	cmd.Dir = path
+	cmdDir := path
 	// If path is a file, use its parent directory
 	if info, err := os.Stat(path); err == nil && !info.IsDir() {
-		cmd.Dir = filepath.Dir(path)
+		cmdDir = filepath.Dir(path)
 	}
-	out, err := cmd.Output()
+	out, err := gitOutputInDir(ctx, cmdDir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("git rev-parse timed out after 5s for path %s", path)
 		}
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(out), nil
 }
 
 // gitExec runs a git command in the current directory and returns any error.
@@ -145,4 +145,35 @@ func gitExecInDir(ctx context.Context, dir string, args ...string) error {
 		return fmt.Errorf("%s: %s", err, out)
 	}
 	return nil
+}
+
+// gitOutputInDir runs a git command and returns trimmed stdout.
+func gitOutputInDir(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitExitCodeInDir runs a git command and returns its exit code.
+// Exit code 0 indicates success. Exit code 1 is often used by git for
+// predicate-style commands such as show-ref/diff --quiet.
+func gitExitCodeInDir(ctx context.Context, dir string, args ...string) (int, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode(), nil
+		}
+		return -1, err
+	}
+	return 0, nil
 }

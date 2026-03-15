@@ -12,7 +12,7 @@ sidebar_position: 5
 
 Beads was designed specifically for AI-supervised coding workflows:
 - **Hash-based IDs** prevent collisions with concurrent agents
-- **Git-backed storage** enables branch-based workflows
+- **Dolt-backed storage** enables branch-based workflows
 - **Dependency-aware** ready queue for automated work selection
 - **Formula system** for declarative workflow templates
 

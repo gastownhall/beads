@@ -26,7 +26,7 @@ const { origin: siteUrl, baseUrl } = parseUrl(siteUrlEnv);
 
 const config: Config = {
   title: 'Beads Documentation',
-  tagline: 'Git-backed issue tracker for AI-supervised coding workflows',
+  tagline: 'Dolt-powered issue tracker for AI-supervised coding workflows',
   favicon: 'img/favicon.svg',
 
   // Enable Mermaid diagrams in markdown

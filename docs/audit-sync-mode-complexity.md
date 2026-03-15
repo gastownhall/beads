@@ -122,15 +122,14 @@ A shared sync engine for external trackers (Linear, GitLab, Jira) with `PullHook
 
 **Recommendation: No changes needed.** This is separate from Dolt sync mode and is already well-factored.
 
-### Auto-Increment Reset After Pull (Workaround)
+### Auto-Increment Reset After Pull (Resolved)
 
-**File:** `internal/storage/dolt/store.go` (lines 1464-1488)
+**Status:** Resolved in v0.60+ by migrating to UUID primary keys.
 
-After every pull, `resetAutoIncrements()` iterates over 6 hardcoded tables and resets their `AUTO_INCREMENT` to `MAX(id) + 1`. This is called in all three Pull routing paths and in the Pull after federation sync.
-
-**Assessment:** This is a workaround for a Dolt behavior where pulling can leave auto-increment values out of sync. The hardcoded table list is brittle.
-
-**Recommendation: Monitor.** If Dolt fixes this upstream, this workaround can be removed. Consider making the table list configurable or deriving it from schema introspection if more tables are added.
+The `resetAutoIncrements()` workaround was removed when all six affected tables
+(events, comments, issue_snapshots, compaction_snapshots, wisp_events,
+wisp_comments) were migrated from `BIGINT AUTO_INCREMENT` to `CHAR(36) UUID()`
+primary keys. UUID PKs eliminate counter collisions in multi-clone federation.
 
 ## Summary of Recommendations
 
@@ -144,7 +143,7 @@ After every pull, `resetAutoIncrements()` iterates over 6 hardcoded tables and r
 | Conflict/field strategies | **No change** | - | Already clean |
 | Sovereignty tiers | **No change** | - | Already clean |
 | Tracker SyncEngine | **No change** | - | Already clean |
-| Auto-increment reset | **Monitor** for Dolt upstream fix | - | Future cleanup |
+| Auto-increment reset | **Resolved** — removed via UUID PK migration | - | Done |
 
 ## Files Analyzed
 
@@ -154,7 +153,7 @@ After every pull, `resetAutoIncrements()` iterates over 6 hardcoded tables and r
 | `internal/config/sync_test.go` | 436 | Tests for all sync config types |
 | `internal/config/config.go` | 921 | Config initialization, defaults, SyncConfig/ConflictConfig structs |
 | `internal/config/yaml_config.go` | ~300 | YAML config management, yaml-only keys |
-| `internal/storage/dolt/store.go` | 1668 | DoltStore: Push, Pull, ForcePush, auto-increment reset |
+| `internal/storage/dolt/store.go` | 1668 | DoltStore: Push, Pull, ForcePush |
 | `internal/storage/dolt/federation.go` | 340 | Federation sync: Sync, PushTo, PullFrom, Fetch |
 | `internal/storage/dolt/credentials.go` | 473 | Federation peer credentials, encryption |
 | `internal/storage/versioned.go` | 60 | Shared types: Conflict, SyncStatus, FederationPeer |

@@ -156,6 +156,24 @@ func TestOutputContextFunction(t *testing.T) {
 	}
 }
 
+func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
+	defer stubIsEphemeralBranch(false)()
+	defer stubPrimeHasGitRemote(true)()
+
+	var buf bytes.Buffer
+	if err := outputPrimeContext(&buf, false, false); err != nil {
+		t.Fatalf("outputPrimeContext failed: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "bd update <id> --claim") {
+		t.Fatal("prime output should teach bd update <id> --claim")
+	}
+	if strings.Contains(output, "bd update <id> --status=in_progress") {
+		t.Fatal("prime output should not teach bd update <id> --status=in_progress")
+	}
+}
+
 // stubIsEphemeralBranch temporarily replaces isEphemeralBranch
 // with a stub returning returnValue.
 //

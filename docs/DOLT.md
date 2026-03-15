@@ -147,16 +147,19 @@ bd federation status
 
 When someone clones a repository that uses Dolt backend:
 
-1. On first `bd` command (e.g., `bd list`), bootstrap runs automatically
-2. A fresh Dolt database is created
-3. If a Dolt remote is configured, data is pulled from the remote
-4. Work continues normally
+1. Run `bd bootstrap` in the clone
+2. If the git remote has `refs/dolt/data` (pushed via `bd dolt push`),
+   `bd bootstrap` auto-detects it and clones the database from the remote
+3. Work continues normally — all existing issues are available
 
-**No manual steps required.** The bootstrap:
-- Detects fresh clone (no Dolt database yet)
-- Acquires a lock to prevent race conditions
-- Initializes the Dolt database and pulls from configured remotes
-- Creates initial Dolt commit
+**No manual steps required** beyond `bd bootstrap`. The auto-detect:
+- Probes `origin` for `refs/dolt/data`
+- Clones the Dolt database from the remote (instead of creating a fresh one)
+- Configures the Dolt remote for future `bd dolt push`/`pull`
+
+If `sync.git-remote` is set in `.beads/config.yaml`, that takes precedence
+over auto-detection. `bd init` will warn if it detects `refs/dolt/data` on
+origin and suggest using `bd bootstrap` instead.
 
 ### Verifying Bootstrap Worked
 

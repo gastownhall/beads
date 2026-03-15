@@ -81,9 +81,9 @@ PackageUrl: https://github.com/steveyegge/beads
 License: MIT
 LicenseUrl: https://github.com/steveyegge/beads/blob/main/LICENSE
 Copyright: Copyright (c) 2024 Steve Yegge
-ShortDescription: Distributed, git-backed graph issue tracker for AI agents
+ShortDescription: Distributed, Dolt-powered graph issue tracker for AI agents
 Description: |
-  beads (bd) is a distributed, git-backed graph issue tracker designed for AI-supervised coding workflows.
+  beads (bd) is a distributed, Dolt-powered graph issue tracker designed for AI-supervised coding workflows.
   It provides a persistent, structured memory for coding agents, replacing messy markdown plans with a
   dependency-aware graph that allows agents to handle long-horizon tasks without losing context.
 Moniker: bd

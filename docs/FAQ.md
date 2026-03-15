@@ -198,7 +198,7 @@ bd dolt push    # Push changes to Dolt remote
 bd dolt pull    # Pull changes from Dolt remote
 ```
 
-The `bd export` command exists for data portability (e.g., backing up data), and `bd init --from-jsonl` can bootstrap a new database from an export. These are not needed for day-to-day sync.
+The `bd export` command exists for issue portability and interchange. For supported backup and restore flows, use `bd backup` to write JSONL backup snapshots, `bd backup restore` to restore them, and `bd backup export-git` / `bd backup fetch-git` if you want those snapshots published to a git branch. None of these are needed for day-to-day Dolt sync.
 
 ### What if my database feels stale after a colleague pushes changes?
 

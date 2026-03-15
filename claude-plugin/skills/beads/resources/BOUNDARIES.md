@@ -86,7 +86,7 @@ Need to resume work after significant time with full context.
 - Complex features split across sprints
 - Research projects with long investigation periods
 
-**Why bd wins**: Git-backed database persists indefinitely. All context, decisions, and history available on resume. No relying on conversation scrollback or markdown files.
+**Why bd wins**: Dolt-backed database persists indefinitely. All context, decisions, and history available on resume. No relying on conversation scrollback or markdown files.
 
 ---
 
@@ -142,7 +142,7 @@ Just need a checklist to show progress to user.
 
 | Aspect | bd | TodoWrite |
 |--------|-----|-----------|
-| **Persistence** | Git-backed, survives compaction | Session-only, lost after conversation |
+| **Persistence** | Dolt-backed, survives compaction | Session-only, lost after conversation |
 | **Dependencies** | Graph-based, automatic ready detection | Manual, no automatic tracking |
 | **Discoverability** | `bd ready` surfaces work | Scroll conversation for todos |
 | **Complexity** | Handles nested epics, blockers | Flat list only |

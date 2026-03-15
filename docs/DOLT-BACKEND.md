@@ -123,7 +123,7 @@ Beads uses `dolt-native` sync mode exclusively:
 - Uses Dolt remotes (DoltHub, S3, GCS, etc.)
 - Native database-level sync with cell-level merge
 - Supports branching and merging
-- `bd export` available for data portability; `bd init --from-jsonl` for bootstrapping from exports
+- `bd export` available for issue portability; `bd backup` / `bd backup restore` for JSONL backup snapshots
 
 ## Dolt Remotes
 

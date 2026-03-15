@@ -124,7 +124,11 @@ bd migrate
 If you need to restore from a JSONL backup:
 
 ```bash
-bd init --from-jsonl backup.jsonl
+bd init
+bd backup restore
+
+# Or fetch the latest snapshot from a backup git branch
+bd backup fetch-git
 ```
 
 Or pull from a Dolt remote:

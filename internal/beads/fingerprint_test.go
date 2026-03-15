@@ -6,6 +6,27 @@ import (
 	"testing"
 )
 
+func initFingerprintGitRepo(t *testing.T, dir string, remote string) {
+	t.Helper()
+
+	cmds := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test"},
+	}
+	if remote != "" {
+		cmds = append(cmds, []string{"git", "remote", "add", "origin", remote})
+	}
+
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("command %v failed: %v", args, err)
+		}
+	}
+}
+
 func TestCanonicalizeGitURL_HTTPS(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -162,20 +183,7 @@ func TestCanonicalizeGitURL_Whitespace(t *testing.T) {
 func TestComputeRepoID_WithRemote(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Init git repo and set remote origin
-	cmds := [][]string{
-		{"git", "init"},
-		{"git", "config", "user.email", "test@test.com"},
-		{"git", "config", "user.name", "Test"},
-		{"git", "remote", "add", "origin", "https://github.com/testuser/testrepo.git"},
-	}
-	for _, args := range cmds {
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = tmpDir
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("command %v failed: %v", args, err)
-		}
-	}
+	initFingerprintGitRepo(t, tmpDir, "https://github.com/testuser/testrepo.git")
 
 	t.Chdir(tmpDir)
 
@@ -203,12 +211,7 @@ func TestComputeRepoID_WithRemote(t *testing.T) {
 func TestComputeRepoID_WithoutRemote(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Init git repo WITHOUT remote
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Skipf("git not available: %v", err)
-	}
+	initFingerprintGitRepo(t, tmpDir, "")
 
 	t.Chdir(tmpDir)
 
@@ -238,11 +241,7 @@ func TestComputeRepoID_NotGitRepo(t *testing.T) {
 func TestGetCloneID(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	if err := cmd.Run(); err != nil {
-		t.Skipf("git not available: %v", err)
-	}
+	initFingerprintGitRepo(t, tmpDir, "")
 
 	t.Chdir(tmpDir)
 
@@ -283,11 +282,7 @@ func TestGetCloneID_DifferentClonesDifferentIDs(t *testing.T) {
 	tmpDir2 := t.TempDir()
 
 	for _, dir := range []string{tmpDir1, tmpDir2} {
-		cmd := exec.Command("git", "init")
-		cmd.Dir = dir
-		if err := cmd.Run(); err != nil {
-			t.Skipf("git not available: %v", err)
-		}
+		initFingerprintGitRepo(t, dir, "")
 	}
 
 	// Get ID from first repo
@@ -308,5 +303,53 @@ func TestGetCloneID_DifferentClonesDifferentIDs(t *testing.T) {
 
 	if id1 == id2 {
 		t.Errorf("different clones should have different IDs, both got %q", id1)
+	}
+}
+
+func TestComputeRepoIDForPath_UsesTargetRepoOutsideCWD(t *testing.T) {
+	repoA := t.TempDir()
+	repoB := t.TempDir()
+
+	initFingerprintGitRepo(t, repoA, "https://github.com/testuser/repo-a.git")
+	initFingerprintGitRepo(t, repoB, "https://github.com/testuser/repo-b.git")
+
+	t.Chdir(repoB)
+	want, err := ComputeRepoID()
+	if err != nil {
+		t.Fatalf("ComputeRepoID() for target repo returned error: %v", err)
+	}
+
+	t.Chdir(repoA)
+	got, err := ComputeRepoIDForPath(repoB)
+	if err != nil {
+		t.Fatalf("ComputeRepoIDForPath() returned error: %v", err)
+	}
+
+	if got != want {
+		t.Errorf("ComputeRepoIDForPath(%q) = %q, want %q", repoB, got, want)
+	}
+}
+
+func TestGetCloneIDForPath_UsesTargetRepoOutsideCWD(t *testing.T) {
+	repoA := t.TempDir()
+	repoB := t.TempDir()
+
+	initFingerprintGitRepo(t, repoA, "")
+	initFingerprintGitRepo(t, repoB, "")
+
+	t.Chdir(repoB)
+	want, err := GetCloneID()
+	if err != nil {
+		t.Fatalf("GetCloneID() for target repo returned error: %v", err)
+	}
+
+	t.Chdir(repoA)
+	got, err := GetCloneIDForPath(repoB)
+	if err != nil {
+		t.Fatalf("GetCloneIDForPath() returned error: %v", err)
+	}
+
+	if got != want {
+		t.Errorf("GetCloneIDForPath(%q) = %q, want %q", repoB, got, want)
 	}
 }

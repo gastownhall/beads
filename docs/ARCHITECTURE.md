@@ -4,7 +4,7 @@ This document describes bd's overall architecture - the data model, sync mechani
 
 ## The Two-Layer Data Model
 
-bd's core design enables a distributed, git-backed issue tracker that feels like a centralized database. The architecture has two synchronized layers:
+bd's core design enables a distributed, Dolt-powered issue tracker that feels like a centralized database. The architecture has two synchronized layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -49,7 +49,7 @@ bd's core design enables a distributed, git-backed issue tracker that feels like
 
 **Dolt for distribution:** Native push/pull to Dolt remotes (DoltHub, S3, GCS). No special sync server needed. Issues travel with your code. Offline work just works.
 
-**Export for portability:** `bd export` outputs JSONL format for data migration and interoperability. Use `bd init --from-jsonl` to bootstrap a new database from an export.
+**Export and backup:** `bd export` outputs issue JSONL for data migration and interoperability. Use `bd backup` and `bd backup restore` for supported JSONL backup snapshots, and `bd backup export-git` / `bd backup fetch-git` when you want those snapshots stored in a git branch.
 
 ## Write Path
 
@@ -85,7 +85,8 @@ All queries run directly against the local Dolt database:
 2. **Sync:** Use `bd dolt pull` to fetch updates from Dolt remotes
 
 Key implementation:
-- Import (for bootstrapping/migration): `cmd/bd/import.go`
+- JSONL backup restore: `cmd/bd/backup_restore.go`
+- Issue bootstrap/migration: `cmd/bd/init.go`
 - Dolt storage: `internal/storage/dolt/`
 
 ## Hash-Based Collision Prevention
@@ -296,7 +297,8 @@ Each issue in the Dolt database (and in JSONL exports via `bd export`) has the f
 | Dolt implementation | `internal/storage/dolt/` |
 | RPC protocol | `internal/rpc/protocol.go`, `server_*.go` |
 | Export logic (portability) | `cmd/bd/export.go` |
-| Import logic (migration) | `cmd/bd/import.go` |
+| JSONL backup restore | `cmd/bd/backup_restore.go` |
+| Issue bootstrap/migration | `cmd/bd/init.go` |
 
 ## Wisps and Molecules
 

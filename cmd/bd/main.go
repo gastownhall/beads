@@ -281,7 +281,7 @@ var rootCmd = &cobra.Command{
 				WasSet bool
 			}{jsonOutput, true}
 		}
-		if !cmd.Flags().Changed("readonly") {
+		if !cmd.Root().PersistentFlags().Changed("readonly") {
 			readonlyMode = config.GetBool("readonly")
 		} else {
 			flagOverrides["readonly"] = struct {
@@ -289,25 +289,25 @@ var rootCmd = &cobra.Command{
 				WasSet bool
 			}{readonlyMode, true}
 		}
-		if !cmd.Flags().Changed("db") && dbPath == "" {
+		if !cmd.Root().PersistentFlags().Changed("db") && dbPath == "" {
 			dbPath = config.GetString("db")
-		} else if cmd.Flags().Changed("db") {
+		} else if cmd.Root().PersistentFlags().Changed("db") {
 			flagOverrides["db"] = struct {
 				Value  interface{}
 				WasSet bool
 			}{dbPath, true}
 		}
-		if !cmd.Flags().Changed("actor") && actor == "" {
+		if !cmd.Root().PersistentFlags().Changed("actor") && actor == "" {
 			actor = config.GetString("actor")
-		} else if cmd.Flags().Changed("actor") {
+		} else if cmd.Root().PersistentFlags().Changed("actor") {
 			flagOverrides["actor"] = struct {
 				Value  interface{}
 				WasSet bool
 			}{actor, true}
 		}
-		if !cmd.Flags().Changed("dolt-auto-commit") && strings.TrimSpace(doltAutoCommit) == "" {
+		if !cmd.Root().PersistentFlags().Changed("dolt-auto-commit") && strings.TrimSpace(doltAutoCommit) == "" {
 			doltAutoCommit = config.GetString("dolt.auto-commit")
-		} else if cmd.Flags().Changed("dolt-auto-commit") {
+		} else if cmd.Root().PersistentFlags().Changed("dolt-auto-commit") {
 			flagOverrides["dolt-auto-commit"] = struct {
 				Value  interface{}
 				WasSet bool
@@ -405,7 +405,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Auto-detect sandboxed environment (Phase 2 for GH #353)
-		if !cmd.Flags().Changed("sandbox") {
+		if !cmd.Root().PersistentFlags().Changed("sandbox") {
 			if isSandboxed() {
 				sandboxMode = true
 				fmt.Fprintf(os.Stderr, "ℹ️  Sandbox detected, using direct mode\n")
@@ -505,15 +505,9 @@ var rootCmd = &cobra.Command{
 		}
 		doltCfg.SyncGitRemote = config.GetString("sync.git-remote")
 
-		// Auto-start: enabled by default.
-		// Can be disabled by explicit config or env var.
-		doltCfg.AutoStart = true
-		if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
-			doltCfg.AutoStart = false
-		}
-		if v := config.GetString("dolt.auto-start"); v == "false" || v == "0" || v == "off" {
-			doltCfg.AutoStart = false
-		}
+		// Keep standalone CLI auto-start behavior centralized so doctor and
+		// other helper paths stay in lockstep with the main command path.
+		dolt.ApplyCLIAutoStart(beadsDir, doltCfg)
 
 		// Server mode defaults auto-commit to OFF because the server handles
 		// commits via its own transaction lifecycle; firing DOLT_COMMIT after

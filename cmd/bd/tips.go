@@ -383,7 +383,7 @@ func initDefaultTips() {
 	// This is a proactive health check that trumps educational tips (ox-cli pattern)
 	InjectTip(
 		"sync_conflict",
-		"Run 'bd sync' to resolve sync conflict",
+		"Run 'bd dolt pull' to resolve sync conflict",
 		200, // Higher than Claude setup - sync issues are urgent
 		0,   // No frequency limit - always show when applicable
 		1.0, // 100% probability - always show when condition is true

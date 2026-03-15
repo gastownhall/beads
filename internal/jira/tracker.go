@@ -93,6 +93,11 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 	// Build JQL query
 	jql := fmt.Sprintf("project = %q", t.projectKey)
 
+	// User-configured pull_jql filter (e.g. 'labels = "agent-ready"')
+	if pullJQL, _ := t.getConfig(ctx, "jira.pull_jql", "JIRA_PULL_JQL"); pullJQL != "" {
+		jql += " AND " + pullJQL
+	}
+
 	// State filter
 	switch opts.State {
 	case "open":

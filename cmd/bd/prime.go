@@ -442,7 +442,7 @@ git push                    # Push to remote
 ### Creating & Updating
 - ` + "`bd create --title=\"Summary of this issue\" --description=\"Why this issue exists and what needs to be done\" --type=task|bug|feature --priority=2`" + ` - New issue
   - Priority: 0-4 or P0-P4 (0=critical, 2=medium, 4=backlog). NOT "high"/"medium"/"low"
-- ` + "`bd update <id> --status=in_progress`" + ` - Claim work
+- ` + "`bd update <id> --claim`" + ` - Claim work
 - ` + "`bd update <id> --assignee=username`" + ` - Assign to someone
 - ` + "`bd update <id> --title/--description/--notes/--design`" + ` - Update fields inline
 - ` + "`bd close <id>`" + ` - Mark complete
@@ -468,7 +468,7 @@ git push                    # Push to remote
 ` + "```bash" + `
 bd ready           # Find available work
 bd show <id>       # Review issue details
-bd update <id> --status=in_progress  # Claim it
+bd update <id> --claim  # Claim it
 ` + "```" + `
 
 ` + completingWorkflow + `

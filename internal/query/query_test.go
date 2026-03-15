@@ -75,6 +75,12 @@ func TestLexer(t *testing.T) {
 			values:   []string{"title", "=", "hello world", ""},
 		},
 		{
+			name:     "compound expression with colon in label value",
+			input:    "ephemeral=true AND label=gt:merge-request AND status=open",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"ephemeral", "=", "true", "AND", "label", "=", "gt:merge-request", "AND", "status", "=", "open", ""},
+		},
+		{
 			name:     "case insensitive keywords",
 			input:    "status=open and priority>1 or type=bug",
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenGreater, TokenNumber, TokenOr, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
@@ -101,6 +107,12 @@ func TestLexer(t *testing.T) {
 			name:     "quoted string with colon",
 			input:    `label="gt:merge-request"`,
 			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"label", "=", "gt:merge-request", ""},
+		},
+		{
+			name:     "unquoted identifier with colon",
+			input:    "label=gt:merge-request",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "gt:merge-request", ""},
 		},
 	}
@@ -311,6 +323,13 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 		{
 			name:  "label with colon (quoted)",
 			query: `label="gt:merge-request"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return len(f.Labels) == 1 && f.Labels[0] == "gt:merge-request"
+			},
+		},
+		{
+			name:  "label with colon (unquoted)",
+			query: "label=gt:merge-request",
 			expectFilter: func(f *types.IssueFilter) bool {
 				return len(f.Labels) == 1 && f.Labels[0] == "gt:merge-request"
 			},

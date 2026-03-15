@@ -53,7 +53,7 @@ const wispDependenciesSchema = `CREATE TABLE wisp_dependencies (
 )`
 
 const wispEventsSchema = `CREATE TABLE wisp_events (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id CHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID()),
     issue_id VARCHAR(255) NOT NULL,
     event_type VARCHAR(32) NOT NULL,
     actor VARCHAR(255) DEFAULT '',
@@ -65,7 +65,7 @@ const wispEventsSchema = `CREATE TABLE wisp_events (
 )`
 
 const wispCommentsSchema = `CREATE TABLE wisp_comments (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id CHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID()),
     issue_id VARCHAR(255) NOT NULL,
     author VARCHAR(255) DEFAULT '',
     text TEXT NOT NULL,

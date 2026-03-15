@@ -18,8 +18,12 @@ var exportCmd = &cobra.Command{
 	Long: `Export all issues to JSONL (newline-delimited JSON) format.
 
 Each line is a complete JSON object representing one issue, including its
-labels, dependencies, and comment count. The output is compatible with
-'bd import' for round-trip backup and restore.
+labels, dependencies, and comment count.
+
+This command is for issue export, migration, and interoperability. It does
+not produce the JSONL backup snapshot used by 'bd backup restore'. For
+supported backup/restore flows, use 'bd backup', 'bd backup export-git',
+and 'bd backup restore'.
 
 By default, exports only regular issues (excluding infrastructure beads
 like agents, rigs, roles, and messages). Use --all to include everything.

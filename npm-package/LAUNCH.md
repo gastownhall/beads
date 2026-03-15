@@ -124,8 +124,8 @@ Create `.github/workflows/publish-npm.yml` to auto-publish on GitHub releases.
 - ✅ **Platform detection** - Works on macOS, Linux, Windows
 - ✅ **Full feature parity** - Native SQLite, all commands work
 - ✅ **Claude Code ready** - Perfect for SessionStart hooks
-- ✅ **Git-backed** - Issues version controlled
-- ✅ **Multi-agent** - Shared database via git
+- ✅ **Dolt-backed** - Issues version controlled
+- ✅ **Multi-agent** - Shared database via Dolt remotes
 
 ## 📈 Package Stats
 

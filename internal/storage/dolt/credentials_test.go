@@ -1,7 +1,9 @@
 package dolt
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -54,7 +56,7 @@ func TestEncryptDecryptWithWrongKey(t *testing.T) {
 func TestCredentialKeyFileGeneration(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	store := &DoltStore{dbPath: tmpDir}
+	store := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
 
 	// Key file should not exist yet
 	keyPath := filepath.Join(tmpDir, credentialKeyFile)
@@ -95,13 +97,13 @@ func TestCredentialKeyFileReload(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// First store generates the key
-	store1 := &DoltStore{dbPath: tmpDir}
+	store1 := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
 	if err := store1.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey (store1) failed: %v", err)
 	}
 
 	// Second store should load the same key from file
-	store2 := &DoltStore{dbPath: tmpDir}
+	store2 := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
 	if err := store2.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey (store2) failed: %v", err)
 	}
@@ -115,12 +117,12 @@ func TestCredentialKeyNotPredictable(t *testing.T) {
 	tmpDir1 := t.TempDir()
 	tmpDir2 := t.TempDir()
 
-	store1 := &DoltStore{dbPath: tmpDir1}
+	store1 := &DoltStore{dbPath: tmpDir1, beadsDir: tmpDir1}
 	if err := store1.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey (store1) failed: %v", err)
 	}
 
-	store2 := &DoltStore{dbPath: tmpDir2}
+	store2 := &DoltStore{dbPath: tmpDir2, beadsDir: tmpDir2}
 	if err := store2.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey (store2) failed: %v", err)
 	}
@@ -133,7 +135,7 @@ func TestCredentialKeyNotPredictable(t *testing.T) {
 
 func TestEncryptDecryptRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
-	store := &DoltStore{dbPath: tmpDir}
+	store := &DoltStore{dbPath: tmpDir, beadsDir: tmpDir}
 	if err := store.initCredentialKey(t.Context()); err != nil {
 		t.Fatalf("initCredentialKey failed: %v", err)
 	}
@@ -195,5 +197,211 @@ func TestInitCredentialKeyEmptyDbPath(t *testing.T) {
 	}
 	if store.credentialKey != nil {
 		t.Error("expected nil key when dbPath is empty")
+	}
+}
+
+func TestCredentialKeyMigrationFromDbPath(t *testing.T) {
+	// Simulate old layout: key file in .beads/dolt/ (dbPath)
+	beadsDir := t.TempDir()
+	dbPath := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(dbPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write key to old location
+	oldKey := make([]byte, 32)
+	for i := range oldKey {
+		oldKey[i] = byte(i)
+	}
+	oldKeyPath := filepath.Join(dbPath, credentialKeyFile)
+	if err := os.WriteFile(oldKeyPath, oldKey, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &DoltStore{dbPath: dbPath, beadsDir: beadsDir}
+	if err := store.initCredentialKey(t.Context()); err != nil {
+		t.Fatalf("initCredentialKey failed: %v", err)
+	}
+
+	// Key should be loaded from old location
+	if string(store.credentialKey) != string(oldKey) {
+		t.Error("migrated key does not match original")
+	}
+
+	// New location should now have the key
+	newKeyPath := filepath.Join(beadsDir, credentialKeyFile)
+	newKey, err := os.ReadFile(newKeyPath)
+	if err != nil {
+		t.Fatalf("key file should exist at new location: %v", err)
+	}
+	if string(newKey) != string(oldKey) {
+		t.Error("key at new location does not match original")
+	}
+
+	// Old location should be cleaned up
+	if _, err := os.Stat(oldKeyPath); err == nil {
+		t.Error("old key file should have been removed after migration")
+	}
+}
+
+func TestCredentialKeyNoGhostDir(t *testing.T) {
+	// In shared-server mode, dbPath (.beads/dolt/) should NOT be created
+	beadsDir := t.TempDir()
+	dbPath := filepath.Join(beadsDir, "dolt") // does not exist
+
+	store := &DoltStore{dbPath: dbPath, beadsDir: beadsDir}
+	if err := store.initCredentialKey(t.Context()); err != nil {
+		t.Fatalf("initCredentialKey failed: %v", err)
+	}
+
+	// The key should be written to beadsDir, not dbPath
+	if _, err := os.Stat(filepath.Join(beadsDir, credentialKeyFile)); err != nil {
+		t.Error("key file should exist in beadsDir")
+	}
+
+	// dbPath directory should NOT have been created
+	if _, err := os.Stat(dbPath); err == nil {
+		t.Error("dbPath directory should not be created in shared-server mode — ghost directory bug")
+	}
+}
+
+// setupCredentialTestStore creates a DoltStore with a dolt-initialized CLI directory
+// and "origin" remote for credential routing tests. Requires dolt CLI.
+func setupCredentialTestStore(t *testing.T, remoteUser, remotePassword string, serverMode, setupRemote bool) *DoltStore {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbName := "testdb"
+	dbDir := filepath.Join(tmpDir, dbName)
+
+	if setupRemote {
+		if err := os.MkdirAll(dbDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("dolt", "init")
+		cmd.Dir = dbDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("dolt init failed: %s: %v", out, err)
+		}
+		cmd = exec.Command("dolt", "remote", "add", "origin", "https://example.com/repo")
+		cmd.Dir = dbDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("dolt remote add failed: %s: %v", out, err)
+		}
+	}
+
+	return &DoltStore{
+		remoteUser:     remoteUser,
+		remotePassword: remotePassword,
+		serverMode:     serverMode,
+		dbPath:         tmpDir,
+		database:       dbName,
+		remote:         "origin",
+	}
+}
+
+// TestCredentialCLIRouting verifies the shouldUseCLIForCredentials guard that controls
+// CLI subprocess routing for Push, ForcePush, and Pull when credentials are set.
+// The guard is shared across all three operations (same insertion pattern in store.go).
+func TestCredentialCLIRouting(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping credential routing test")
+	}
+
+	tests := []struct {
+		name           string
+		remoteUser     string
+		remotePassword string
+		serverMode     bool
+		setupRemote    bool // if true, init dolt dir and add "origin" remote
+		wantCLI        bool
+	}{
+		// Positive cases: guard returns true → CLI routing for Push/ForcePush/Pull
+		{"credentials+serverMode+remote", "user", "pass", true, true, true},
+		{"password only", "", "pass", true, true, true},
+		// Negative cases: guard returns false → SQL fallback
+		{"no credentials", "", "", true, true, false},
+		{"no server mode (embedded)", "user", "pass", false, true, false},
+		{"no CLI remote", "user", "pass", true, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := setupCredentialTestStore(t, tt.remoteUser, tt.remotePassword, tt.serverMode, tt.setupRemote)
+			got := store.shouldUseCLIForCredentials(context.Background())
+			if got != tt.wantCLI {
+				t.Errorf("shouldUseCLIForCredentials() = %v, want %v", got, tt.wantCLI)
+			}
+		})
+	}
+}
+
+func TestCredentialCLIRoutingExternalServer(t *testing.T) {
+	// External server mode: credentials set but CLIDir points to a directory
+	// without the remote configured. Guard should return false (SQL fallback).
+	store := &DoltStore{
+		remoteUser:     "user",
+		remotePassword: "pass",
+		serverMode:     true,
+		dbPath:         t.TempDir(), // empty dir, no .dolt/
+		database:       "testdb",
+		remote:         "origin",
+	}
+	if store.shouldUseCLIForCredentials(context.Background()) {
+		t.Error("expected false for external server mode (no CLI remote in CLIDir)")
+	}
+}
+
+func TestCredentialCLIRoutingNoRemote(t *testing.T) {
+	// When credentials are set but no CLI remote exists,
+	// shouldUseCLIForCredentials returns false, allowing
+	// fallthrough to the SQL path (withEnvCredentials).
+	store := &DoltStore{
+		remoteUser:     "user",
+		remotePassword: "pass",
+		serverMode:     true,
+		dbPath:         t.TempDir(),
+		database:       "nodb",
+		remote:         "origin",
+	}
+	if store.shouldUseCLIForCredentials(context.Background()) {
+		t.Error("expected false when CLI remote does not exist")
+	}
+}
+
+// TestFederationCredentialCLIRouting verifies the shouldUseCLIForPeerCredentials guard
+// that controls CLI subprocess routing for federation PushTo, PullFrom, and Fetch
+// when peer credentials are resolved from the federation_peers table.
+func TestFederationCredentialCLIRouting(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping credential routing test")
+	}
+
+	tests := []struct {
+		name        string
+		serverMode  bool
+		setupRemote bool
+		credsEmpty  bool
+		wantCLI     bool
+	}{
+		{"peer credentials+serverMode+remote", true, true, false, true},
+		{"no peer credentials", true, true, true, false},
+		{"no server mode (embedded)", false, true, false, false},
+		{"no CLI remote for peer", true, false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := setupCredentialTestStore(t, "", "", tt.serverMode, tt.setupRemote)
+
+			var creds *remoteCredentials
+			if !tt.credsEmpty {
+				creds = &remoteCredentials{username: "peeruser", password: "peerpass"}
+			} else {
+				creds = &remoteCredentials{}
+			}
+
+			got := store.shouldUseCLIForPeerCredentials(context.Background(), "origin", creds)
+			if got != tt.wantCLI {
+				t.Errorf("shouldUseCLIForPeerCredentials() = %v, want %v", got, tt.wantCLI)
+			}
+		})
 	}
 }

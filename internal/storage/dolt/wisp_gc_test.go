@@ -28,7 +28,7 @@ func TestFindWispDependentsRecursive(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, parent, "test"); err != nil {
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
 		t.Fatalf("create parent wisp: %v", err)
 	}
 
@@ -47,10 +47,10 @@ func TestFindWispDependentsRecursive(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, child1, "test"); err != nil {
+	if err := store.CreateIssue(ctx, child1, "test"); err != nil {
 		t.Fatalf("create child1: %v", err)
 	}
-	if err := store.createWisp(ctx, child2, "test"); err != nil {
+	if err := store.CreateIssue(ctx, child2, "test"); err != nil {
 		t.Fatalf("create child2: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestFindWispDependentsRecursive(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, grandchild, "test"); err != nil {
+	if err := store.CreateIssue(ctx, grandchild, "test"); err != nil {
 		t.Fatalf("create grandchild: %v", err)
 	}
 
@@ -230,8 +230,8 @@ func createTestWisp(t *testing.T, ctx context.Context, store *DoltStore, title s
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, w, "test"); err != nil {
-		t.Fatalf("createWisp %q: %v", title, err)
+	if err := store.CreateIssue(ctx, w, "test"); err != nil {
+		t.Fatalf("CreateIssue (wisp) %q: %v", title, err)
 	}
 	return w
 }
@@ -279,11 +279,12 @@ func TestRunInTransaction_DoesNotCorruptConfig(t *testing.T) {
 
 	// Set the canonical issue_prefix and create an issue BEFORE corrupting config.
 	// CreateIssue has its own DOLT_COMMIT, so we must set up the issue first.
+	// Use CommitWithConfig since we're intentionally modifying config.
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		t.Fatalf("SetConfig: %v", err)
 	}
-	if err := store.Commit(ctx, "set prefix"); err != nil {
-		t.Fatalf("Commit: %v", err)
+	if err := store.CommitWithConfig(ctx, "set prefix"); err != nil {
+		t.Fatalf("CommitWithConfig: %v", err)
 	}
 
 	issue := &types.Issue{
@@ -340,6 +341,90 @@ func TestRunInTransaction_DoesNotCorruptConfig(t *testing.T) {
 	}
 }
 
+// TestCommit_ExcludesConfig verifies that s.Commit() does NOT stage the config
+// table, preventing stale issue_prefix changes from being swept into commits.
+// This is the core fix for GH#2455: Commit() now stages all dirty tables
+// EXCEPT config. Config is only committed by CommitWithConfig (used by
+// CommitPending for explicit 'bd dolt commit').
+func TestCommit_ExcludesConfig(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Set and commit a known-good prefix via CommitWithConfig
+	if err := store.SetConfig(ctx, "issue_prefix", "correct"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.CommitWithConfig(ctx, "set correct prefix"); err != nil {
+		t.Fatalf("CommitWithConfig: %v", err)
+	}
+
+	// Simulate stale corruption: another operation modified issue_prefix in
+	// the working set without DOLT_COMMIT'ing. The working set now has a
+	// WRONG value while HEAD still has "correct".
+	_, err := store.db.ExecContext(ctx, "UPDATE config SET value = 'WRONG' WHERE `key` = 'issue_prefix'")
+	if err != nil {
+		t.Fatalf("simulate stale config change: %v", err)
+	}
+
+	// Also dirty a real table so Commit() has something to commit.
+	_, err = store.db.ExecContext(ctx, "INSERT INTO metadata (`key`, value) VALUES ('_gh2455_test', 'v') ON DUPLICATE KEY UPDATE value = 'v'")
+	if err != nil {
+		t.Fatalf("insert metadata: %v", err)
+	}
+
+	// Call s.Commit() — the general-purpose path. With the old '-Am'
+	// approach, this would stage ALL dirty tables including config,
+	// committing the "WRONG" value. With the fix, Commit() skips config
+	// entirely, so the committed issue_prefix remains "correct".
+	if err := store.Commit(ctx, "test commit that should skip config"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Verify issue_prefix was NOT corrupted — HEAD should still have "correct".
+	var committedPrefix string
+	err = store.db.QueryRowContext(ctx,
+		"SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'issue_prefix'").Scan(&committedPrefix)
+	if err != nil {
+		t.Fatalf("query HEAD prefix: %v", err)
+	}
+	if committedPrefix != "correct" {
+		t.Errorf("GH#2455 regression: HEAD issue_prefix = %q, want %q", committedPrefix, "correct")
+	}
+}
+
+// TestCommitWithConfig_IncludesConfig verifies that CommitWithConfig DOES
+// commit config changes. This is used by CommitPending (bd dolt commit)
+// when the user intentionally modified config.
+func TestCommitWithConfig_IncludesConfig(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Change issue_prefix and commit with CommitWithConfig (intentional change)
+	if err := store.SetConfig(ctx, "issue_prefix", "newprefix"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.CommitWithConfig(ctx, "intentional prefix change"); err != nil {
+		t.Fatalf("CommitWithConfig: %v", err)
+	}
+
+	// Verify the intentional change was committed
+	var committedPrefix string
+	err := store.db.QueryRowContext(ctx,
+		"SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'issue_prefix'").Scan(&committedPrefix)
+	if err != nil {
+		t.Fatalf("query HEAD prefix: %v", err)
+	}
+	if committedPrefix != "newprefix" {
+		t.Errorf("CommitWithConfig should include config: HEAD issue_prefix = %q, want %q", committedPrefix, "newprefix")
+	}
+}
+
 // TestFindWispDependentsRecursive_NoDependents verifies wisps with no
 // dependents return an empty map.
 func TestFindWispDependentsRecursive_NoDependents(t *testing.T) {
@@ -356,7 +441,7 @@ func TestFindWispDependentsRecursive_NoDependents(t *testing.T) {
 		IssueType: types.TypeTask,
 		Ephemeral: true,
 	}
-	if err := store.createWisp(ctx, wisp, "test"); err != nil {
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
 		t.Fatalf("create wisp: %v", err)
 	}
 
