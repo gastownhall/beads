@@ -55,6 +55,23 @@ func TestCheckLockHealth_BareParentWorktreeFallback(t *testing.T) {
 	}
 }
 
+func TestCheckDoltLocks_BareParentWorktreeFallback(t *testing.T) {
+	bareDir, featureWorktreeDir := setupBareParentWorktreeForDoctorTest(t)
+	bareBeadsDir := filepath.Join(bareDir, ".beads")
+	if err := os.MkdirAll(bareBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bareBeadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "59999")
+	check := CheckDoltLocks(featureWorktreeDir)
+	if check.Message == "N/A (not Dolt backend)" {
+		t.Fatalf("expected fallback to parent beads dir, got %s", check.Message)
+	}
+}
+
 func setupBareParentWorktreeForDoctorTest(t *testing.T) (string, string) {
 	t.Helper()
 

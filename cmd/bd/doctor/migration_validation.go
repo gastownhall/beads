@@ -54,7 +54,7 @@ func CheckMigrationReadiness(path string) (DoctorCheck, MigrationValidationResul
 		SchemaValid: true,
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Check if .beads exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -166,7 +166,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 		SchemaValid: true,
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Check if .beads exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -324,7 +324,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 
 // CheckDoltLocks checks if the Dolt database has any locks or uncommitted changes.
 func CheckDoltLocks(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Only run for Dolt backend
 	if !IsDoltBackend(beadsDir) {
