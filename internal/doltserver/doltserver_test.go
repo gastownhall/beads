@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -641,6 +643,27 @@ func TestKillStaleServersWithoutCanonicalPIDOnlyKillsOwnedDir(t *testing.T) {
 	}
 	if len(killed) != 1 || killed[0] != sameRepoOrphanPID {
 		t.Fatalf("kill callback got %v, want [%d]", killed, sameRepoOrphanPID)
+	}
+}
+
+func TestProcessInspectionTimeoutsReturnSafeDefaults(t *testing.T) {
+	oldRun := runProcessCommand
+	runProcessCommand = func(timeout time.Duration, name string, args ...string) ([]byte, error) {
+		if timeout != processInspectionTimeout {
+			t.Fatalf("timeout = %v, want %v", timeout, processInspectionTimeout)
+		}
+		return nil, context.DeadlineExceeded
+	}
+	t.Cleanup(func() { runProcessCommand = oldRun })
+
+	if pid := findPIDOnPort(3306); pid != 0 {
+		t.Fatalf("findPIDOnPort() = %d, want 0 on timeout", pid)
+	}
+	if got := listDoltProcessPIDs(); len(got) != 0 {
+		t.Fatalf("listDoltProcessPIDs() = %v, want empty on timeout", got)
+	}
+	if isProcessInDir(os.Getpid(), t.TempDir()) {
+		t.Fatal("isProcessInDir() = true, want false on timeout")
 	}
 }
 

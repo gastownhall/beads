@@ -285,7 +285,7 @@ func TestDatabaseVersionWithBdVersion_PreservesRedirectSourceDatabase(t *testing
 		{ID: "rdb-1", Title: "Redirected issue", Status: "open", IssueType: "task", Priority: 2},
 		{ID: "rdb-2", Title: "Redirected bug", Status: "closed", IssueType: "bug", Priority: 1},
 	}
-	writeTestJSONL(t, targetBeadsDir, issues)
+	writeTestJSONL(t, sourceBeadsDir, issues)
 
 	if err := DatabaseVersionWithBdVersion(repoDir, "0.61.0"); err != nil {
 		t.Fatalf("DatabaseVersionWithBdVersion failed: %v", err)
@@ -370,7 +370,7 @@ func TestDatabaseVersionWithBdVersion_CreatesSourceDatabaseWhenSharedDirExists(t
 		{ID: "sdb-1", Title: "Redirected issue", Status: "open", IssueType: "task", Priority: 2},
 		{ID: "sdb-2", Title: "Redirected bug", Status: "closed", IssueType: "bug", Priority: 1},
 	}
-	writeTestJSONL(t, targetBeadsDir, issues)
+	writeTestJSONL(t, sourceBeadsDir, issues)
 
 	rootDB := openRootFixTestDB(t, port)
 	if databaseExistsInRootDB(t, rootDB, sourceDB) {
@@ -465,7 +465,7 @@ func TestFreshCloneImport_CreatesSourceDatabaseWhenSharedDirExists(t *testing.T)
 		{ID: "fci-1", Title: "Fresh clone issue", Status: "open", IssueType: "task", Priority: 2},
 		{ID: "fci-2", Title: "Fresh clone bug", Status: "closed", IssueType: "bug", Priority: 1},
 	}
-	writeTestJSONL(t, targetBeadsDir, issues)
+	writeTestJSONL(t, sourceBeadsDir, issues)
 
 	rootDB := openRootFixTestDB(t, port)
 	if databaseExistsInRootDB(t, rootDB, sourceDB) {

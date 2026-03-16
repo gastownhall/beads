@@ -38,6 +38,10 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 		return fmt.Errorf("failed to resolve repo runtime: %w", err)
 	}
 	beadsDir := info.Runtime.BeadsDir
+	jsonlBeadsDir := beadsDir
+	if info.Runtime.SourceBeadsDir != "" {
+		jsonlBeadsDir = info.Runtime.SourceBeadsDir
+	}
 	cfg := effectiveFixConfig(info.Config)
 
 	// Determine database path
@@ -81,7 +85,7 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 		// Import from JSONL if present (fresh clone with committed issues).
 		// This closes the chicken-and-egg gap where doctor --fix creates an
 		// empty Dolt store and then bd init refuses because the store exists.
-		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		jsonlPath := filepath.Join(jsonlBeadsDir, "issues.jsonl")
 		if _, statErr := os.Stat(jsonlPath); statErr == nil {
 			count, importErr := importJSONLIntoStore(ctx, store, jsonlPath)
 			if importErr != nil {
@@ -148,9 +152,13 @@ func FreshCloneImport(path string, bdVersion string) error {
 		return fmt.Errorf("failed to resolve repo runtime: %w", err)
 	}
 	beadsDir := info.Runtime.BeadsDir
+	jsonlBeadsDir := beadsDir
+	if info.Runtime.SourceBeadsDir != "" {
+		jsonlBeadsDir = info.Runtime.SourceBeadsDir
+	}
 
 	// Check for JSONL file
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	jsonlPath := filepath.Join(jsonlBeadsDir, "issues.jsonl")
 	if _, err := os.Stat(jsonlPath); os.IsNotExist(err) {
 		return fmt.Errorf("no issues.jsonl found")
 	}

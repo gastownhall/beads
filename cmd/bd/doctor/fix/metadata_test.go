@@ -220,6 +220,33 @@ func TestFixMissingMetadataJSON_RegeneratesRedirectSourceMetadataWithoutTouching
 	}
 }
 
+func TestConfigValues_RewritesMalformedMetadataUsingRecoveredDatabase(t *testing.T) {
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	dataDir := filepath.Join(beadsDir, "dolt", "testdb")
+	if err := os.MkdirAll(filepath.Join(dataDir, "noms"), 0o755); err != nil {
+		t.Fatalf("mkdir dolt db marker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("write malformed metadata: %v", err)
+	}
+
+	if err := ConfigValues(dir); err != nil {
+		t.Fatalf("ConfigValues failed: %v", err)
+	}
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("load recovered metadata: %v", err)
+	}
+	if cfg.GetBackend() != configfile.BackendDolt {
+		t.Fatalf("backend = %q, want %q", cfg.GetBackend(), configfile.BackendDolt)
+	}
+	if got := cfg.GetDoltDatabase(); got != "testdb" {
+		t.Fatalf("dolt_database = %q, want %q", got, "testdb")
+	}
+}
+
 // setupGitRepoInDir initializes a git repo in the given directory with a remote.
 func setupGitRepoInDir(t *testing.T, dir string) {
 	t.Helper()

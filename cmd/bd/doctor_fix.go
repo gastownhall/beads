@@ -243,6 +243,11 @@ func applyFixList(path string, fixes []doctorCheck) {
 	for _, check := range fixes {
 		fmt.Printf("\nFixing %s...\n", check.Name)
 
+		if skip, reason := shouldSkipDoctorFix(path, check.Name); skip {
+			fmt.Printf("  → Skipped (already healthy after earlier fixes: %s)\n", reason)
+			continue
+		}
+
 		var err error
 		switch check.Name {
 		case "Metadata Config":
@@ -364,6 +369,18 @@ func applyFixList(path string, fixes []doctorCheck) {
 	if errorCount > 0 {
 		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}
+}
+
+func shouldSkipDoctorFix(path string, checkName string) (bool, string) {
+	switch checkName {
+	case "Database Integrity":
+		live := doctor.CheckDatabaseIntegrity(path)
+		if live.Status == doctor.StatusOK {
+			return true, live.Message
+		}
+	}
+
+	return false, ""
 }
 
 func fixPendingMigrations(path string) error {

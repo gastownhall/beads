@@ -16,11 +16,17 @@ func ConfigValues(path string) error {
 
 	info, err := resolveRuntimeInfoForRepo(path)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		if repairErr := repairMalformedMetadataJSON(path); repairErr != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		return nil
 	}
 	cfg, saveDir := metadataConfigForRepo(info)
 	if cfg == nil {
-		return fmt.Errorf("no metadata.json found")
+		if repairErr := FixMissingMetadataJSON(path); repairErr != nil {
+			return fmt.Errorf("no metadata.json found")
+		}
+		return nil
 	}
 
 	fixed := false

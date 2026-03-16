@@ -3,6 +3,7 @@
 package doltserver
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,16 +22,32 @@ const portConflictHint = "lsof -i :%d"
 // Used in error messages when too many dolt servers are running.
 const processListHint = "pgrep -la 'dolt sql-server'"
 
+const processInspectionTimeout = 1500 * time.Millisecond
+
+var runProcessCommand = processCommandOutput
+
 // procAttrDetached returns SysProcAttr to detach a child process from the parent
 // process group so it survives parent exit.
 func procAttrDetached() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}
 }
 
+func processCommandOutput(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return out, err
+}
+
 // findPIDOnPort returns the PID of the process listening on a TCP port.
 // Uses lsof to look up the listener. Returns 0 if no process found or on error.
 func findPIDOnPort(port int) int {
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is internal int, not user input
+	out, err := runProcessCommand(processInspectionTimeout, "lsof", "-ti", fmt.Sprintf(":%d", port), "-sTCP:LISTEN") //nolint:gosec // G702: port is internal int, not user input
 	if err != nil {
 		return 0
 	}
@@ -47,7 +64,7 @@ func findPIDOnPort(port int) int {
 // Excludes zombies and defunct processes. Callers derive count (len) and
 // membership (linear scan) from the returned slice.
 func listDoltProcessPIDs() []int {
-	out, err := exec.Command("pgrep", "-f", "dolt sql-server").Output()
+	out, err := runProcessCommand(processInspectionTimeout, "pgrep", "-f", "dolt sql-server")
 	if err != nil {
 		return nil
 	}
@@ -58,7 +75,7 @@ func listDoltProcessPIDs() []int {
 			continue
 		}
 		// Exclude zombies: ps -o state= returns Z for zombie, X for dead
-		stateOut, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "state=").Output()
+		stateOut, err := runProcessCommand(processInspectionTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "state=")
 		if err != nil {
 			continue
 		}
@@ -67,7 +84,7 @@ func listDoltProcessPIDs() []int {
 			continue
 		}
 		// Verify command line contains both "dolt" and "sql-server"
-		cmdOut, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+		cmdOut, err := runProcessCommand(processInspectionTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "command=")
 		if err != nil {
 			continue
 		}
@@ -83,7 +100,7 @@ func listDoltProcessPIDs() []int {
 // Uses lsof to look up the CWD, which is more reliable than checking command-line
 // args since dolt sql-server is started with cmd.Dir (not a --data-dir flag).
 func isProcessInDir(pid int, dir string) bool {
-	out, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	out, err := runProcessCommand(processInspectionTimeout, "lsof", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn")
 	if err != nil {
 		return false
 	}
