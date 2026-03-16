@@ -152,6 +152,99 @@ func TestE2E_RuntimeMatrix_RepoLocalCommandsPreserveTrackedServerState(t *testin
 	}
 }
 
+func TestE2E_RuntimeMatrix_MultiRepoRepoLocalServersStayIsolated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow integration test in short mode")
+	}
+	if runtime.GOOS == windowsOS {
+		t.Skip("multi-repo runtime matrix test not supported on windows")
+	}
+
+	bdBinary := buildRuntimeMatrixTestBinary(t)
+	env := runtimeMatrixEnv()
+
+	repoA := setupRuntimeMatrixGitRepo(t)
+	repoB := setupRuntimeMatrixGitRepo(t)
+	runtimeMatrixInitDoltRepo(t, bdBinary, repoA, env, "alpha")
+	runtimeMatrixInitDoltRepo(t, bdBinary, repoB, env, "beta")
+
+	issueA := runtimeMatrixCreateIssue(t, bdBinary, repoA, env, "alpha issue")
+	issueB := runtimeMatrixCreateIssue(t, bdBinary, repoB, env, "beta issue")
+
+	runtimeMatrixEnsureStoppedBaseline(t, bdBinary, repoA, env)
+	runtimeMatrixEnsureStoppedBaseline(t, bdBinary, repoB, env)
+
+	showA, showAErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "show", issueA, "--json")
+	if showAErr != nil {
+		t.Fatalf("bd show in repo A failed: %v\n%s", showAErr, showA)
+	}
+	itemsA := decodeIssueObjects(t, showA)
+	if len(itemsA) != 1 || stringField(itemsA[0], "id") != issueA {
+		t.Fatalf("repo A show returned unexpected payload:\n%s", showA)
+	}
+
+	statusA, statusAErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "dolt", "status")
+	if statusAErr != nil {
+		t.Fatalf("bd dolt status in repo A failed: %v\n%s", statusAErr, statusA)
+	}
+	assertTrackedServerRunning(t, "repo A baseline", statusA)
+	portA := extractStatusPort(t, statusA)
+
+	showB, showBErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "show", issueB, "--json")
+	if showBErr != nil {
+		t.Fatalf("bd show in repo B failed: %v\n%s", showBErr, showB)
+	}
+	itemsB := decodeIssueObjects(t, showB)
+	if len(itemsB) != 1 || stringField(itemsB[0], "id") != issueB {
+		t.Fatalf("repo B show returned unexpected payload:\n%s", showB)
+	}
+
+	statusB, statusBErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "dolt", "status")
+	if statusBErr != nil {
+		t.Fatalf("bd dolt status in repo B failed: %v\n%s", statusBErr, statusB)
+	}
+	assertTrackedServerRunning(t, "repo B baseline", statusB)
+	portB := extractStatusPort(t, statusB)
+
+	if portA == portB {
+		t.Fatalf("expected distinct repo-local ports, got shared port %d", portA)
+	}
+
+	statusAAfter, statusAAfterErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "dolt", "status")
+	if statusAAfterErr != nil {
+		t.Fatalf("bd dolt status in repo A after repo B start failed: %v\n%s", statusAAfterErr, statusAAfter)
+	}
+	assertTrackedServerRunning(t, "repo A after repo B start", statusAAfter)
+	assertStatusContainsPort(t, statusAAfter, portA)
+
+	statusBAfter, statusBAfterErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "dolt", "status")
+	if statusBAfterErr != nil {
+		t.Fatalf("bd dolt status in repo B after isolation check failed: %v\n%s", statusBAfterErr, statusBAfter)
+	}
+	assertTrackedServerRunning(t, "repo B after repo A validation", statusBAfter)
+	assertStatusContainsPort(t, statusBAfter, portB)
+
+	listA, listAErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "list", "--json")
+	if listAErr != nil {
+		t.Fatalf("bd list in repo A failed: %v\n%s", listAErr, listA)
+	}
+	itemsA = decodeIssueObjects(t, listA)
+	if len(itemsA) != 1 {
+		t.Fatalf("repo A list returned %d issues, want 1\n%s", len(itemsA), listA)
+	}
+	assertContainsIssueIDs(t, itemsA, issueA)
+
+	listB, listBErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "list", "--json")
+	if listBErr != nil {
+		t.Fatalf("bd list in repo B failed: %v\n%s", listBErr, listB)
+	}
+	itemsB = decodeIssueObjects(t, listB)
+	if len(itemsB) != 1 {
+		t.Fatalf("repo B list returned %d issues, want 1\n%s", len(itemsB), listB)
+	}
+	assertContainsIssueIDs(t, itemsB, issueB)
+}
+
 func TestE2E_RuntimeMatrix_DoctorDryRunPreservesRedirectSourceDatabase(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow integration test in short mode")
@@ -368,6 +461,19 @@ func setupRuntimeMatrixGitRepo(t *testing.T) string {
 	_ = runCommandInDir(dir, "git", "config", "user.name", "Test User")
 	_ = runCommandInDir(dir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
 	return dir
+}
+
+func runtimeMatrixInitDoltRepo(t *testing.T, bdBinary, repoDir string, env []string, prefix string) {
+	t.Helper()
+
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "init", "--backend", "dolt", "--prefix", prefix, "--quiet")
+	if initErr != nil {
+		lower := strings.ToLower(initOut)
+		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
+			t.Skipf("dolt backend not available: %s", initOut)
+		}
+		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
+	}
 }
 
 func runtimeMatrixCreateIssue(t *testing.T, bdBinary, repoDir string, env []string, title string) string {
@@ -700,6 +806,26 @@ func assertStatusContainsPort(t *testing.T, statusOut string, wantPort int) {
 	if !strings.Contains(statusOut, fmt.Sprintf("Port: %d", wantPort)) {
 		t.Fatalf("status output missing port %d:\n%s", wantPort, statusOut)
 	}
+}
+
+func extractStatusPort(t *testing.T, statusOut string) int {
+	t.Helper()
+
+	for _, line := range strings.Split(statusOut, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "Port:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "Port:"))
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatalf("parse port from status %q: %v\n%s", value, err, statusOut)
+		}
+		return port
+	}
+
+	t.Fatalf("status output missing Port line:\n%s", statusOut)
+	return 0
 }
 
 func assertDoctorCheckStatus(t *testing.T, result runtimeMatrixDoctorResult, name string, wantStatus string) {
