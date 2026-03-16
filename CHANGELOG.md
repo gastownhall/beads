@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.61.0] - 2026-03-15
+
+### Added
+
+- **`--no-history` flag** — `bd create --no-history` stores beads in the wisps table (skipping Dolt commits) without making them GC-eligible, fixing agent identity beads being incorrectly garbage collected. `bd update --no-history`/`--history` toggles the flag. ([GH#2619](https://github.com/steveyegge/beads/issues/2619))
+- **`--claim-next` flag** — `bd close --claim-next` auto-claims the next highest priority available issue after closing
+- **`--skills` and `--context` flags** — `bd create --skills`/`--context` add structured sections to issue descriptions
+- **`--exclude-type` for wisp GC** — `bd mol wisp gc --exclude-type agent,rig` protects specific types from garbage collection
+- **`--type` filter for wisp list** — `bd mol wisp list --type bug` filters by issue type
+- **Auto-detect beads database on git origin** — `bd bootstrap` probes origin for `refs/dolt/data` and auto-clones the database; `bd init` warns when existing data is detected ([GH#2580](https://github.com/steveyegge/beads/issues/2580))
+- **Install checksum verification** — install scripts verify SHA256 checksums before extraction ([GH#1857](https://github.com/steveyegge/beads/issues/1857))
+- **Jira `pull_jql` config** — `jira.pull_jql` config key or `JIRA_PULL_JQL` env var for custom JQL filters during issue fetch
+- **UUID primary keys** — events, comments, and snapshot tables migrated from AUTO_INCREMENT to UUID() primary keys for federation-safe multi-clone operation
+
+### Changed
+
+- **Prime SSOT** — `bd prime` is now the single source of truth for agent instructions. Agent files use versioned hash-based markers with profile support (full/minimal) for staleness detection and automatic upgrades. Symlink safety and profile precedence (full preserved over minimal) ([GH#2139](https://github.com/steveyegge/beads/issues/2139))
+- **Formula extends merges by ID** — child steps with matching IDs override parent steps in-place instead of appending duplicates
+- **Circuit breaker keyed on host:port** — prevents cross-host blocking when servers share a port
+- **Backup scoped by prefix** — backup export and restore filter by current project prefix, preventing cross-project data leakage on shared servers
+
+### Fixed
+
+- **Embedded Dolt CI** — clean stale noms LOCK files before opening embedded store (fixes TestEmbeddedInitConcurrent panic), update stale from_jsonl test, gofmt import.go
+- **Circuit breaker port-0 poisoning** — returns nil breaker for unresolved port 0 during standalone auto-start
+- **KillStaleServers scoped to repo** — only kills orphan Dolt processes belonging to the current repo's data directory
+- **Port resolution chain** — `applyConfigDefaults` consults port file > config.yaml > metadata.json instead of falling through to default 3307
+- **Doctor fingerprint checks** — `bd doctor /path/to/repo` computes fingerprints from the target path, not cwd
+- **Doctor auto-start on cold standalone** — doctor checks now use CLI auto-start policy instead of suppressing on explicit ports
+- **Doctor server-backed runtime detection** — layered detection for server-backed runtime on older metadata.json without `dolt_mode`
+- **Credential key location** — moved from `.beads/dolt/` to `.beads/` to avoid creating ghost directories in shared-server mode
+- **Colons in query values** — unquoted identifiers like `label=gt:merge-request` now work without quoting
+- **Init localhost warning** — warns when server host defaults to localhost for remote Dolt setups
+- **Repo-local Dolt server preservation** — stale cleanup preserves servers from other repos
+- **Backup restore UUID IDs** — accepts UUID-format comment and event IDs during restore
+
 ## [0.60.0] - 2026-03-12
 
 ### Added
