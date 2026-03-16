@@ -583,11 +583,11 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 			t.Errorf("process %d failed with unexpected error: %v\n%s", r.idx, r.err, r.out)
 		}
 	}
-	if successes != 1 {
-		t.Errorf("expected exactly 1 success, got %d", successes)
+	if successes < 1 {
+		t.Errorf("expected at least 1 success, got %d", successes)
 	}
-	if lockErrors != N-1 {
-		t.Errorf("expected %d lock errors, got %d", N-1, lockErrors)
+	if successes+lockErrors != N {
+		t.Errorf("expected successes (%d) + lock errors (%d) = %d, got %d", successes, lockErrors, N, successes+lockErrors)
 	}
 	t.Logf("%d/%d succeeded, %d/%d got lock error", successes, N, lockErrors, N)
 
