@@ -48,7 +48,12 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 
 	ctx := context.Background()
 
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	dbExists, err := databaseExistsForRuntime(ctx, info.Runtime, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to check database existence: %w", err)
+	}
+
+	if !dbExists {
 		// No database - create a new Dolt store
 		fmt.Println("  → No database found, creating Dolt store...")
 
@@ -151,8 +156,11 @@ func FreshCloneImport(path string, bdVersion string) error {
 	}
 
 	// Check if Dolt store exists
-	doltDir := getDatabasePath(beadsDir)
-	if _, err := os.Stat(doltDir); os.IsNotExist(err) {
+	dbExists, err := databaseExistsForRuntime(context.Background(), info.Runtime, info.Config)
+	if err != nil {
+		return fmt.Errorf("failed to check database existence: %w", err)
+	}
+	if !dbExists {
 		// No Dolt store — delegate to Database fix which creates store + imports
 		return DatabaseVersionWithBdVersion(path, bdVersion)
 	}

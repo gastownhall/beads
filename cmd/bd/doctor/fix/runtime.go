@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -88,11 +90,26 @@ func metadataConfigForRepo(info *repoRuntimeInfo) (*configfile.Config, string) {
 	return info.Config, info.Runtime.BeadsDir
 }
 
+func selectedRuntimeDatabase(runtime *beads.RepoRuntime, cfg *configfile.Config) string {
+	if runtime != nil && runtime.Database != "" {
+		return runtime.Database
+	}
+	cfg = effectiveFixConfig(cfg)
+	if database := cfg.GetDoltDatabase(); database != "" {
+		return database
+	}
+	return configfile.DefaultDoltDatabase
+}
+
 func runtimeDatabaseDir(runtime *beads.RepoRuntime) string {
-	if runtime == nil || runtime.DatabasePath == "" || runtime.Database == "" {
+	if runtime == nil || runtime.DatabasePath == "" {
 		return ""
 	}
-	return filepath.Join(runtime.DatabasePath, runtime.Database)
+	database := selectedRuntimeDatabase(runtime, nil)
+	if database == "" {
+		return ""
+	}
+	return filepath.Join(runtime.DatabasePath, database)
 }
 
 func openFixDBForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) (*sql.DB, error) {
@@ -136,6 +153,55 @@ func openFixDBForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) (*s
 	return sql.Open("mysql", connStr)
 }
 
+func openFixAdminDBForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) (*sql.DB, error) {
+	if runtime == nil {
+		return nil, fmt.Errorf("runtime required")
+	}
+	cfg = effectiveFixConfig(cfg)
+
+	host := runtime.Host
+	if host == "" {
+		host = configfile.DefaultDoltServerHost
+	}
+	user := runtime.User
+	if user == "" {
+		user = configfile.DefaultDoltServerUser
+	}
+	port := runtime.Port
+	if port == 0 && runtime.BeadsDir != "" && (host == configfile.DefaultDoltServerHost || host == "localhost") {
+		ensuredPort, err := doltserver.EnsureRunning(runtime.BeadsDir)
+		if err == nil {
+			port = ensuredPort
+		}
+	}
+	if port == 0 && runtime.BeadsDir != "" {
+		port = doltserver.DefaultConfig(runtime.BeadsDir).Port
+	}
+	if port == 0 {
+		return nil, fmt.Errorf("no Dolt server port configured and no server running")
+	}
+
+	password := cfg.GetDoltServerPassword()
+	var connStr string
+	if password != "" {
+		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/?parseTime=true&timeout=5s",
+			user, password, host, port)
+	} else {
+		connStr = fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true&timeout=5s",
+			user, host, port)
+	}
+
+	db, err := sql.Open("mysql", connStr)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
 func openVerifiedFixDBForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) (*sql.DB, error) {
 	db, err := openFixDBForRuntime(runtime, cfg)
 	if err != nil {
@@ -146,6 +212,77 @@ func openVerifiedFixDBForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Con
 		return nil, fmt.Errorf("dolt server not reachable: %w", err)
 	}
 	return db, nil
+}
+
+func databaseExistsForRuntime(ctx context.Context, runtime *beads.RepoRuntime, cfg *configfile.Config) (bool, error) {
+	if runtime == nil {
+		return false, fmt.Errorf("runtime required")
+	}
+
+	adminDB, err := openFixAdminDBForRuntime(runtime, cfg)
+	if err == nil {
+		defer func() { _ = adminDB.Close() }()
+		return fixDatabaseExistsOnServer(ctx, adminDB, selectedRuntimeDatabase(runtime, cfg))
+	}
+
+	dbDir := runtimeDatabaseDir(runtime)
+	if dbDir != "" {
+		if _, statErr := os.Stat(dbDir); statErr == nil {
+			return true, nil
+		} else if !os.IsNotExist(statErr) {
+			return false, statErr
+		}
+	}
+	return false, err
+}
+
+func dropRuntimeDatabase(ctx context.Context, runtime *beads.RepoRuntime, cfg *configfile.Config) error {
+	if runtime == nil {
+		return fmt.Errorf("runtime required")
+	}
+
+	database := selectedRuntimeDatabase(runtime, cfg)
+	if err := dolt.ValidateDatabaseName(database); err != nil {
+		return err
+	}
+
+	adminDB, err := openFixAdminDBForRuntime(runtime, cfg)
+	if err == nil {
+		defer func() { _ = adminDB.Close() }()
+		safeName := strings.ReplaceAll(database, "`", "``")
+		if _, execErr := adminDB.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", safeName)); execErr != nil {
+			return fmt.Errorf("drop database %q: %w", database, execErr)
+		}
+		return nil
+	}
+
+	dbDir := runtimeDatabaseDir(runtime)
+	if dbDir == "" {
+		return err
+	}
+	if rmErr := os.RemoveAll(dbDir); rmErr != nil && !os.IsNotExist(rmErr) {
+		return fmt.Errorf("remove database dir %q: %w", dbDir, rmErr)
+	}
+	return nil
+}
+
+func fixDatabaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var dbName string
+		if err := rows.Scan(&dbName); err != nil {
+			return false, err
+		}
+		if dbName == name {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func openDoltDBForRepoPath(repoPath string) (*sql.DB, error) {
