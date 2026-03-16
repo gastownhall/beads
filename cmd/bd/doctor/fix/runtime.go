@@ -297,24 +297,20 @@ func openDoltDBForRepoPath(repoPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func newDoltStoreForRepoPath(ctx context.Context, repoPath string, createIfMissing bool) (*dolt.DoltStore, error) {
-	info, err := resolveRuntimeInfoForRepo(repoPath)
-	if err != nil {
-		return nil, err
-	}
-	if info.Runtime == nil {
+func newDoltStoreForRuntime(ctx context.Context, runtime *beads.RepoRuntime, cfgFile *configfile.Config, createIfMissing bool) (*dolt.DoltStore, error) {
+	if runtime == nil {
 		return nil, fmt.Errorf("repo runtime unavailable")
 	}
-
+	cfgFile = effectiveFixConfig(cfgFile)
 	cfg := &dolt.Config{
-		Path:            info.Runtime.DatabasePath,
-		BeadsDir:        info.Runtime.BeadsDir,
-		Database:        info.Runtime.Database,
-		ServerHost:      info.Runtime.Host,
-		ServerPort:      info.Runtime.Port,
-		ServerUser:      info.Runtime.User,
-		ServerPassword:  info.Config.GetDoltServerPassword(),
-		ServerTLS:       info.Runtime.TLS,
+		Path:            runtime.DatabasePath,
+		BeadsDir:        runtime.BeadsDir,
+		Database:        selectedRuntimeDatabase(runtime, cfgFile),
+		ServerHost:      runtime.Host,
+		ServerPort:      runtime.Port,
+		ServerUser:      runtime.User,
+		ServerPassword:  cfgFile.GetDoltServerPassword(),
+		ServerTLS:       runtime.TLS,
 		CreateIfMissing: createIfMissing,
 	}
 	if cfg.ServerHost == "" {
@@ -326,7 +322,7 @@ func newDoltStoreForRepoPath(ctx context.Context, repoPath string, createIfMissi
 	if cfg.Database == "" {
 		cfg.Database = configfile.DefaultDoltDatabase
 	}
-	dolt.ApplyCLIAutoStart(info.Runtime.BeadsDir, cfg)
+	dolt.ApplyCLIAutoStart(runtime.BeadsDir, cfg)
 
 	store, err := dolt.New(ctx, cfg)
 	if err != nil {
@@ -335,10 +331,22 @@ func newDoltStoreForRepoPath(ctx context.Context, repoPath string, createIfMissi
 	return store, nil
 }
 
+func newDoltStoreForRepoPath(ctx context.Context, repoPath string, createIfMissing bool) (*dolt.DoltStore, error) {
+	info, err := resolveRuntimeInfoForRepo(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	return newDoltStoreForRuntime(ctx, info.Runtime, info.Config, createIfMissing)
+}
+
 func openDoltStoreForRepoPath(ctx context.Context, repoPath string) (*dolt.DoltStore, error) {
 	return newDoltStoreForRepoPath(ctx, repoPath, false)
 }
 
 func createDoltStoreForRepoPath(ctx context.Context, repoPath string) (*dolt.DoltStore, error) {
 	return newDoltStoreForRepoPath(ctx, repoPath, true)
+}
+
+func createDoltStoreForRuntime(ctx context.Context, runtime *beads.RepoRuntime, cfg *configfile.Config) (*dolt.DoltStore, error) {
+	return newDoltStoreForRuntime(ctx, runtime, cfg, true)
 }

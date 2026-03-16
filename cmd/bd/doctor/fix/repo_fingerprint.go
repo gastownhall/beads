@@ -11,6 +11,14 @@ import (
 )
 
 var repoFingerprintReadLine = readLineUnbuffered
+var repoFingerprintReinitialize = reinitializeRepoFingerprintPlan
+
+type repoFingerprintReinitPlan struct {
+	info         *repoRuntimeInfo
+	database     string
+	deleteTarget string
+	jsonlPath    string
+}
 
 // readLineUnbuffered reads a line from stdin without buffering.
 // This avoids consuming input past the newline, keeping stdin available
@@ -89,6 +97,57 @@ func updateRepoIDInProcess(path string, autoYes bool) error {
 	return nil
 }
 
+func resolveRepoFingerprintReinitPlan(path string) (*repoFingerprintReinitPlan, error) {
+	info, err := resolveRuntimeInfoForRepo(path)
+	if err != nil {
+		info = fallbackRuntimeInfoForRepoReinit(path)
+	}
+	if info == nil || info.Runtime == nil {
+		return nil, fmt.Errorf("repo runtime unavailable")
+	}
+
+	cfg := effectiveFixConfig(info.Config)
+	deleteTarget := runtimeDatabaseDir(info.Runtime)
+	if deleteTarget == "" {
+		deleteTarget = cfg.DatabasePath(info.Runtime.BeadsDir)
+	}
+
+	return &repoFingerprintReinitPlan{
+		info:         info,
+		database:     selectedRuntimeDatabase(info.Runtime, cfg),
+		deleteTarget: deleteTarget,
+		jsonlPath:    filepath.Join(info.Runtime.BeadsDir, "issues.jsonl"),
+	}, nil
+}
+
+func reinitializeRepoFingerprintPlan(ctx context.Context, plan *repoFingerprintReinitPlan) error {
+	if plan == nil || plan.info == nil || plan.info.Runtime == nil {
+		return fmt.Errorf("reinitialize plan missing runtime")
+	}
+
+	cfg := effectiveFixConfig(plan.info.Config)
+	if err := dropRuntimeDatabase(ctx, plan.info.Runtime, cfg); err != nil {
+		return fmt.Errorf("failed to remove Dolt database: %w", err)
+	}
+
+	store, err := createDoltStoreForRuntime(ctx, plan.info.Runtime, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if _, statErr := os.Stat(plan.jsonlPath); statErr == nil {
+		count, importErr := importJSONLIntoStore(ctx, store, plan.jsonlPath)
+		if importErr != nil {
+			fmt.Printf("  Warning: failed to import from JSONL: %v\n", importErr)
+		} else if count > 0 {
+			fmt.Printf("  → Imported %d issues from issues.jsonl\n", count)
+		}
+	}
+
+	return nil
+}
+
 // RepoFingerprint fixes repo fingerprint mismatches by prompting the user
 // for which action to take. This is interactive because the consequences
 // differ significantly between options:
@@ -103,8 +162,6 @@ func RepoFingerprint(path string, autoYes bool) error {
 	if err := validateBeadsWorkspace(path); err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// In --yes mode, auto-select the recommended safe action [1].
 	if autoYes {
@@ -134,21 +191,15 @@ func RepoFingerprint(path string, autoYes bool) error {
 		return updateRepoIDInProcess(path, false)
 
 	case "2":
-		info, err := resolveRuntimeInfoForRepo(path)
+		plan, err := resolveRepoFingerprintReinitPlan(path)
 		if err != nil {
-			return fmt.Errorf("failed to resolve repo runtime: %w", err)
-		}
-		cfg := effectiveFixConfig(info.Config)
-		database := selectedRuntimeDatabase(info.Runtime, cfg)
-		deleteTarget := runtimeDatabaseDir(info.Runtime)
-		if deleteTarget == "" {
-			deleteTarget = cfg.DatabasePath(beadsDir)
+			return fmt.Errorf("failed to prepare database reinitialize plan: %w", err)
 		}
 
 		// Confirm before destructive action
-		fmt.Printf("  ⚠️  This will DELETE Dolt database %q", database)
-		if deleteTarget != "" {
-			fmt.Printf(" in %s", deleteTarget)
+		fmt.Printf("  ⚠️  This will DELETE Dolt database %q", plan.database)
+		if plan.deleteTarget != "" {
+			fmt.Printf(" in %s", plan.deleteTarget)
 		}
 		fmt.Print(". Continue? [y/N]: ")
 		confirm, err := repoFingerprintReadLine()
@@ -162,28 +213,11 @@ func RepoFingerprint(path string, autoYes bool) error {
 		}
 
 		// Remove database and reinitialize in-process
-		fmt.Printf("  → Removing Dolt database %q...\n", database)
+		fmt.Printf("  → Removing Dolt database %q...\n", plan.database)
 		ctx := context.Background()
-		if err := dropRuntimeDatabase(ctx, info.Runtime, cfg); err != nil {
-			return fmt.Errorf("failed to remove Dolt database: %w", err)
-		}
-
-		// Reinitialize and import from JSONL when present.
 		fmt.Println("  → Reinitializing database from JSONL...")
-		store, err := createDoltStoreForRepoPath(ctx, path)
-		if err != nil {
-			return fmt.Errorf("failed to initialize database: %w", err)
-		}
-		defer func() { _ = store.Close() }()
-
-		jsonlPath := filepath.Join(info.Runtime.BeadsDir, "issues.jsonl")
-		if _, statErr := os.Stat(jsonlPath); statErr == nil {
-			count, importErr := importJSONLIntoStore(ctx, store, jsonlPath)
-			if importErr != nil {
-				fmt.Printf("  Warning: failed to import from JSONL: %v\n", importErr)
-			} else if count > 0 {
-				fmt.Printf("  → Imported %d issues from issues.jsonl\n", count)
-			}
+		if err := repoFingerprintReinitialize(ctx, plan); err != nil {
+			return err
 		}
 
 		fmt.Println("  ✓ Database reinitialized")
