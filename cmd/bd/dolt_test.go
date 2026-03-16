@@ -194,6 +194,73 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 	})
 }
 
+func TestDoltShowConfigRedirectPreservesSourceDatabase(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := t.TempDir()
+	sourceBeadsDir := filepath.Join(tmpDir, ".beads")
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	if err := os.MkdirAll(sourceBeadsDir, 0755); err != nil {
+		t.Fatalf("failed to create source .beads dir: %v", err)
+	}
+	if err := os.MkdirAll(targetBeadsDir, 0755); err != nil {
+		t.Fatalf("failed to create target .beads dir: %v", err)
+	}
+
+	sourceCfg := &configfile.Config{
+		Database:     "dolt",
+		DoltDatabase: "source_db",
+	}
+	if err := sourceCfg.Save(sourceBeadsDir); err != nil {
+		t.Fatalf("failed to save source config: %v", err)
+	}
+
+	targetCfg := &configfile.Config{
+		Database:       "dolt",
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3318,
+		DoltServerUser: "redirect-user",
+		DoltDatabase:   "target_db",
+	}
+	if err := targetCfg.Save(targetBeadsDir); err != nil {
+		t.Fatalf("failed to save target config: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sourceBeadsDir, "redirect"), []byte(targetBeadsDir+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write redirect: %v", err)
+	}
+
+	t.Setenv("BEADS_DIR", sourceBeadsDir)
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+
+	origJsonOutput := jsonOutput
+	defer func() { jsonOutput = origJsonOutput }()
+	jsonOutput = true
+
+	output := captureDoltShowOutput(t)
+	if output == "" {
+		t.Skip("output capture failed")
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Skipf("output not pure JSON: %s", output)
+	}
+
+	if result["database"] != "source_db" {
+		t.Fatalf("expected database 'source_db', got %v", result["database"])
+	}
+	if result["host"] != "127.0.0.1" {
+		t.Fatalf("expected host '127.0.0.1', got %v", result["host"])
+	}
+	if port, ok := result["port"].(float64); !ok || int(port) != 3318 {
+		t.Fatalf("expected port 3318, got %v", result["port"])
+	}
+	if result["user"] != "redirect-user" {
+		t.Fatalf("expected user 'redirect-user', got %v", result["user"])
+	}
+}
+
 func TestDoltSetConfigValidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

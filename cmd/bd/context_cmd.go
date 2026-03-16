@@ -8,7 +8,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // ContextInfo contains the effective backend identity and repository context.
@@ -45,13 +44,7 @@ Examples:
   bd context --json    # Output in JSON format
 `,
 	Run: func(cmd *cobra.Command, args []string) {
-		info := ContextInfo{
-			Backend:   configfile.BackendDolt,
-			BdVersion: Version,
-		}
-
-		// Resolve repo context (works without DB open)
-		rc, err := beads.GetRepoContext()
+		info, err := loadContextInfo()
 		if err != nil {
 			if jsonOutput {
 				outputJSON(map[string]string{"error": fmt.Sprintf("cannot resolve repo context: %v", err)})
@@ -61,54 +54,65 @@ Examples:
 			os.Exit(1)
 		}
 
-		info.BeadsDir = rc.BeadsDir
-		info.RepoRoot = rc.RepoRoot
-		info.CWDRepoRoot = rc.CWDRepoRoot
-		info.IsRedirected = rc.IsRedirected
-		info.IsWorktree = rc.IsWorktree
-
-		// Read role from repo context
-		if role, ok := rc.Role(); ok {
-			info.Role = string(role)
-		}
-
-		// Load metadata.json config (does not require DB)
-		cfg, err := configfile.Load(rc.BeadsDir)
-		if err != nil {
-			cfg = configfile.DefaultConfig()
-		}
-		if cfg == nil {
-			cfg = configfile.DefaultConfig()
-		}
-
-		info.DoltMode = cfg.GetDoltMode()
-		info.Database = cfg.GetDoltDatabase()
-		info.ProjectID = cfg.ProjectID
-
-		if cfg.IsDoltServerMode() {
-			info.ServerHost = cfg.GetDoltServerHost()
-			// Use doltserver.DefaultConfig to resolve the actual runtime port
-			// (from port file, env var, etc.) instead of the static config default.
-			// This matches what "bd dolt show" does (GH#2555).
-			dsCfg := doltserver.DefaultConfig(rc.BeadsDir)
-			info.ServerPort = dsCfg.Port
-		}
-
-		if dataDir := cfg.GetDoltDataDir(); dataDir != "" {
-			info.DataDir = dataDir
-		}
-
-		// Read sync.git-remote from config.yaml
-		if remote := config.GetString("sync.git-remote"); remote != "" {
-			info.SyncGitRemote = remote
-		}
-
 		if jsonOutput {
 			outputJSON(info)
 		} else {
 			printContextText(info)
 		}
 	},
+}
+
+func loadContextInfo() (ContextInfo, error) {
+	info := ContextInfo{
+		Backend:   configfile.BackendDolt,
+		BdVersion: Version,
+	}
+
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return info, err
+	}
+
+	info.BeadsDir = rc.BeadsDir
+	info.RepoRoot = rc.RepoRoot
+	info.CWDRepoRoot = rc.CWDRepoRoot
+	info.IsRedirected = rc.IsRedirected
+	info.IsWorktree = rc.IsWorktree
+
+	if role, ok := rc.Role(); ok {
+		info.Role = string(role)
+	}
+
+	if runtimeInfo, runtimeErr := loadCurrentRepoRuntime(); runtimeErr == nil && runtimeInfo != nil {
+		info.Backend = runtimeInfo.Runtime.Backend
+		info.DoltMode = runtimeInfo.Runtime.DoltMode
+		info.Database = runtimeInfo.Runtime.Database
+		info.ProjectID = runtimeInfo.Config.ProjectID
+		if runtimeInfo.Runtime.ServerMode {
+			info.ServerHost = runtimeInfo.Runtime.Host
+			info.ServerPort = runtimeInfo.Runtime.Port
+		}
+		if dataDir := runtimeInfo.Runtime.DoltDataDir; dataDir != "" {
+			info.DataDir = dataDir
+		}
+	} else {
+		cfg, cfgErr := configfile.Load(rc.BeadsDir)
+		if cfgErr != nil {
+			cfg = configfile.DefaultConfig()
+		}
+		if cfg == nil {
+			cfg = configfile.DefaultConfig()
+		}
+		info.DoltMode = cfg.GetDoltMode()
+		info.Database = cfg.GetDoltDatabase()
+		info.ProjectID = cfg.ProjectID
+	}
+
+	if remote := config.GetString("sync.git-remote"); remote != "" {
+		info.SyncGitRemote = remote
+	}
+
+	return info, nil
 }
 
 func printContextText(info ContextInfo) {

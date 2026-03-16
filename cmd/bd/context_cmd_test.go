@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 // TestContextInfo_ServerModeIdentity verifies that loading a server-mode
@@ -292,5 +295,84 @@ func TestContextInfo_SaveStripAbsoluteDataDir(t *testing.T) {
 		if err := json.Unmarshal(raw["dolt_data_dir"], &val); err == nil && val != "" {
 			t.Errorf("absolute DoltDataDir should be stripped from saved JSON, got %q", val)
 		}
+	}
+}
+
+func TestLoadContextInfo_PreservesRedirectSourceDatabase(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+
+	repoDir := t.TempDir()
+	targetRoot := t.TempDir()
+	sourceBeadsDir := filepath.Join(repoDir, ".beads")
+	targetBeadsDir := filepath.Join(targetRoot, ".beads")
+	if err := os.MkdirAll(sourceBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir source beads dir: %v", err)
+	}
+	if err := os.MkdirAll(targetBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir target beads dir: %v", err)
+	}
+
+	if out, err := exec.Command("git", "init", repoDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	sourceCfg := &configfile.Config{
+		Database:     "dolt",
+		DoltDatabase: "source_db",
+	}
+	if err := sourceCfg.Save(sourceBeadsDir); err != nil {
+		t.Fatalf("save source config: %v", err)
+	}
+
+	targetCfg := &configfile.Config{
+		Database:       "dolt",
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3318,
+		DoltServerUser: "redirect-user",
+		DoltDatabase:   "target_db",
+		ProjectID:      "proj-redir",
+	}
+	if err := targetCfg.Save(targetBeadsDir); err != nil {
+		t.Fatalf("save target config: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sourceBeadsDir, beads.RedirectFileName), []byte(targetBeadsDir+"\n"), 0644); err != nil {
+		t.Fatalf("write redirect: %v", err)
+	}
+
+	oldCwd, _ := os.Getwd()
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldCwd) }()
+
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
+
+	info, err := loadContextInfo()
+	if err != nil {
+		t.Fatalf("loadContextInfo() error = %v", err)
+	}
+
+	if info.Database != "source_db" {
+		t.Fatalf("ContextInfo.Database = %q, want %q", info.Database, "source_db")
+	}
+	if info.ServerHost != "127.0.0.1" {
+		t.Fatalf("ContextInfo.ServerHost = %q, want %q", info.ServerHost, "127.0.0.1")
+	}
+	if info.ServerPort != 3318 {
+		t.Fatalf("ContextInfo.ServerPort = %d, want %d", info.ServerPort, 3318)
+	}
+	if info.ProjectID != "proj-redir" {
+		t.Fatalf("ContextInfo.ProjectID = %q, want %q", info.ProjectID, "proj-redir")
 	}
 }

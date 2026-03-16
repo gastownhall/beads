@@ -330,12 +330,12 @@ var doltStatusCmd = &cobra.Command{
 
 Displays whether the server is running, its PID, port, and data directory.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		beadsDir := beads.FindBeadsDir()
-		if beadsDir == "" {
-			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
+		runtimeInfo, err := loadCurrentRepoRuntime()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		serverDir := doltserver.ResolveServerDir(beadsDir)
+		serverDir := doltserver.ResolveServerDir(runtimeInfo.Runtime.BeadsDir)
 
 		state, err := doltserver.IsRunning(serverDir)
 		if err != nil {
@@ -349,9 +349,8 @@ Displays whether the server is running, its PID, port, and data directory.`,
 		}
 
 		if state == nil || !state.Running {
-			cfg := doltserver.DefaultConfig(serverDir)
 			fmt.Println("Dolt server: not running")
-			fmt.Printf("  Expected port: %d\n", cfg.Port)
+			fmt.Printf("  Expected port: %d\n", runtimeInfo.Runtime.Port)
 			return
 		}
 
@@ -891,38 +890,26 @@ func init() {
 }
 
 func showDoltConfig(testConnection bool) {
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
-	}
-
-	cfg, err := configfile.Load(beadsDir)
+	runtimeInfo, err := loadCurrentRepoRuntime()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
 
-	backend := cfg.GetBackend()
-
-	// Resolve actual server port for connection testing
-	showHost := cfg.GetDoltServerHost()
-	dsCfg := doltserver.DefaultConfig(beadsDir)
-	showPort := dsCfg.Port
+	backend := runtimeInfo.Runtime.Backend
+	showHost := runtimeInfo.Runtime.Host
+	showPort := runtimeInfo.Runtime.Port
 
 	if jsonOutput {
 		result := map[string]interface{}{
 			"backend": backend,
 		}
 		if backend == configfile.BackendDolt {
-			result["database"] = cfg.GetDoltDatabase()
+			result["database"] = runtimeInfo.Runtime.Database
 			result["host"] = showHost
 			result["port"] = showPort
-			result["user"] = cfg.GetDoltServerUser()
-			result["shared_server"] = doltserver.IsSharedServerMode()
+			result["user"] = runtimeInfo.Runtime.User
+			result["shared_server"] = runtimeInfo.Runtime.SharedServerMode
 			if testConnection {
 				result["connection_ok"] = testServerConnection(showHost, showPort)
 			}
@@ -938,11 +925,11 @@ func showDoltConfig(testConnection bool) {
 
 	fmt.Println("Dolt Configuration")
 	fmt.Println("==================")
-	fmt.Printf("  Database: %s\n", cfg.GetDoltDatabase())
+	fmt.Printf("  Database: %s\n", runtimeInfo.Runtime.Database)
 	fmt.Printf("  Host:     %s\n", showHost)
 	fmt.Printf("  Port:     %d\n", showPort)
-	fmt.Printf("  User:     %s\n", cfg.GetDoltServerUser())
-	if doltserver.IsSharedServerMode() {
+	fmt.Printf("  User:     %s\n", runtimeInfo.Runtime.User)
+	if runtimeInfo.Runtime.SharedServerMode {
 		fmt.Println("  Mode:     shared server")
 		if sharedDir, err := doltserver.SharedServerDir(); err == nil {
 			fmt.Printf("  Server:   %s\n", sharedDir)
@@ -961,8 +948,8 @@ func showDoltConfig(testConnection bool) {
 	}
 
 	// Show remotes from both surfaces
-	doltDir := doltserver.ResolveDoltDir(beadsDir)
-	dbName := cfg.GetDoltDatabase()
+	doltDir := doltserver.ResolveDoltDir(runtimeInfo.Runtime.BeadsDir)
+	dbName := runtimeInfo.Runtime.Database
 	dbDir := filepath.Join(doltDir, dbName)
 	fmt.Println("\nRemotes:")
 	ctx := context.Background()
@@ -1174,28 +1161,19 @@ func setDoltConfig(key, value string, updateConfig bool) {
 }
 
 func testDoltConnection() {
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
-	}
-
-	cfg, err := configfile.Load(beadsDir)
+	runtimeInfo, err := loadCurrentRepoRuntime()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
 
-	if cfg.GetBackend() != configfile.BackendDolt {
+	if runtimeInfo.Runtime.Backend != configfile.BackendDolt {
 		fmt.Fprintf(os.Stderr, "Error: not using Dolt backend\n")
 		os.Exit(1)
 	}
 
-	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
+	host := runtimeInfo.Runtime.Host
+	port := runtimeInfo.Runtime.Port
 	addr := fmt.Sprintf("%s:%d", host, port)
 
 	if jsonOutput {
@@ -1343,24 +1321,15 @@ func testHTTPConnectivity(url string) bool {
 // initialized for dolt subcommands (beads-9vt). Connects without selecting a
 // database so callers can operate on all databases (SHOW DATABASES, DROP DATABASE).
 func openDoltServerConnection() (*sql.DB, func()) {
-	beadsDir := beads.FindBeadsDir()
-	if beadsDir == "" {
-		fmt.Fprintln(os.Stderr, "Error: not in a beads repository (no .beads directory found)")
-		os.Exit(1)
-	}
-
-	cfg, err := configfile.Load(beadsDir)
+	runtimeInfo, err := loadCurrentRepoRuntime()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
 
-	host := cfg.GetDoltServerHost()
-	port := doltserver.DefaultConfig(beadsDir).Port
-	user := cfg.GetDoltServerUser()
+	host := runtimeInfo.Runtime.Host
+	port := runtimeInfo.Runtime.Port
+	user := runtimeInfo.Runtime.User
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
 	var connStr string
