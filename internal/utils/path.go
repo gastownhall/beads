@@ -131,8 +131,10 @@ func NormalizePathForComparison(path string) string {
 	// Try to resolve symlinks
 	canonical, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		// If symlink resolution fails (e.g., path doesn't exist), use absolute path
-		canonical = absPath
+		// If the final path doesn't exist yet, resolve symlinks on the deepest
+		// existing ancestor and append the missing suffix. This keeps
+		// /var/.../missing and /private/var/.../missing comparable on macOS.
+		canonical = resolveAgainstExistingAncestor(absPath)
 	}
 
 	// On case-insensitive filesystems, lowercase for comparison
@@ -141,6 +143,31 @@ func NormalizePathForComparison(path string) string {
 	}
 
 	return canonical
+}
+
+// resolveAgainstExistingAncestor resolves symlinks on the deepest existing
+// ancestor of absPath, then reattaches any missing suffix.
+func resolveAgainstExistingAncestor(absPath string) string {
+	current := absPath
+	var suffix []string
+
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return absPath
+		}
+
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }
 
 // PathsEqual compares two paths for equality, handling case-insensitive

@@ -205,6 +205,30 @@ func TestNormalizePathForComparison(t *testing.T) {
 		}
 	})
 
+	t.Run("missing leaf keeps existing ancestor symlink resolution", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		realParent := filepath.Join(tmpDir, "real")
+		if err := os.MkdirAll(realParent, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		linkParent := filepath.Join(tmpDir, "link")
+		if err := os.Symlink(realParent, linkParent); err != nil {
+			t.Skipf("symlink creation failed: %v", err)
+		}
+
+		missingViaLink := filepath.Join(linkParent, "missing", "leaf")
+		missingViaReal := filepath.Join(realParent, "missing", "leaf")
+
+		normalizedLink := NormalizePathForComparison(missingViaLink)
+		normalizedReal := NormalizePathForComparison(missingViaReal)
+
+		if normalizedLink != normalizedReal {
+			t.Errorf("missing-leaf paths should normalize to same value: %q vs %q", normalizedLink, normalizedReal)
+		}
+	})
+
 	t.Run("case normalization on case-insensitive systems", func(t *testing.T) {
 		if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 			t.Skip("case normalization only applies to darwin/windows")

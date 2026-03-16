@@ -133,6 +133,11 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return guessedBeadsDir
 	}
 
+	runtime, err := beads.ResolveRepoRuntimeFromDBPath(dbPath)
+	if err == nil && runtime != nil {
+		return runtime.BeadsDir
+	}
+
 	if cfg, err := configfile.Load(guessedBeadsDir); err == nil && cfg != nil {
 		if utils.PathsEqual(cfg.DatabasePath(guessedBeadsDir), dbPath) {
 			return guessedBeadsDir
@@ -539,34 +544,50 @@ var rootCmd = &cobra.Command{
 		// Initialize direct storage access
 		var err error
 
-		// Create Dolt storage config — resolve dolt data dir which may be
-		// on a different filesystem (e.g., ext4 for performance on WSL).
-		doltPath := doltserver.ResolveDoltDir(beadsDir)
+		runtime, runtimeErr := beads.ResolveRepoRuntimeFromBeadsDir(beadsDir)
 		doltCfg := &dolt.Config{
 			ReadOnly: useReadOnly,
-			BeadsDir: beadsDir,
 		}
+		runtimeBeadsDir := beadsDir
 
-		// Load config to get database name and server connection settings
-		cfg, cfgErr := configfile.Load(beadsDir)
-		if cfgErr == nil && cfg != nil {
-			// Always set database name (needed for bootstrap to find
-			// prefix-based databases like "beads_hq"; see #1669)
-			doltCfg.Database = cfg.GetDoltDatabase()
+		// Resolve the repo runtime once so the main CLI path stops rediscovering
+		// beads dir, dolt data dir, database name, and server endpoint
+		// independently from helper/doctor paths.
+		doltPath := doltserver.ResolveDoltDir(beadsDir)
+		if runtimeErr == nil && runtime != nil {
+			runtimeBeadsDir = runtime.BeadsDir
+			doltCfg.BeadsDir = runtime.BeadsDir
+			doltCfg.Database = runtime.Database
+			doltCfg.ServerHost = runtime.Host
+			doltCfg.ServerPort = runtime.Port
+			doltCfg.ServerUser = runtime.User
+			doltCfg.ServerTLS = runtime.TLS
+			doltPath = runtime.DatabasePath
+		} else {
+			doltCfg.BeadsDir = beadsDir
 
-			doltCfg.ServerHost = cfg.GetDoltServerHost()
-			// Use doltserver.DefaultConfig for port resolution (env > port file >
-			// config.yaml). Port 0 is fine here — auto-start will resolve it.
-			doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
-			doltCfg.ServerUser = cfg.GetDoltServerUser()
-			doltCfg.ServerPassword = cfg.GetDoltServerPassword()
-			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
+			// Load config to get database name and server connection settings
+			cfg, cfgErr := configfile.Load(beadsDir)
+			if cfgErr == nil && cfg != nil {
+				// Always set database name (needed for bootstrap to find
+				// prefix-based databases like "beads_hq"; see #1669)
+				doltCfg.Database = cfg.GetDoltDatabase()
+
+				doltCfg.ServerHost = cfg.GetDoltServerHost()
+				// Use doltserver.DefaultConfig for port resolution (env > port file >
+				// config.yaml). Port 0 is fine here — auto-start will resolve it.
+				doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+				doltCfg.ServerUser = cfg.GetDoltServerUser()
+				doltCfg.ServerPassword = cfg.GetDoltServerPassword()
+				doltCfg.ServerTLS = cfg.GetDoltServerTLS()
+			}
 		}
+		doltCfg.ServerPassword = os.Getenv("BEADS_DOLT_PASSWORD")
 		doltCfg.SyncGitRemote = config.GetString("sync.git-remote")
 
 		// Keep standalone CLI auto-start behavior centralized so doctor and
 		// other helper paths stay in lockstep with the main command path.
-		dolt.ApplyCLIAutoStart(beadsDir, doltCfg)
+		dolt.ApplyCLIAutoStart(runtimeBeadsDir, doltCfg)
 
 		// Server mode defaults auto-commit to OFF because the server handles
 		// commits via its own transaction lifecycle; firing DOLT_COMMIT after
@@ -605,7 +626,7 @@ var rootCmd = &cobra.Command{
 		// Validate workspace identity for write commands (GH#2438, GH#2372)
 		// Skip for read-only commands since they can't corrupt data
 		if !useReadOnly && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
-			validateWorkspaceIdentity(rootCtx, beadsDir)
+			validateWorkspaceIdentity(rootCtx, runtimeBeadsDir)
 		}
 
 		// Initialize hook runner
