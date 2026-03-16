@@ -9,7 +9,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 var repoFingerprintReadLine = readLineUnbuffered
@@ -37,7 +36,7 @@ func readLineUnbuffered() (string, error) {
 
 // updateRepoIDInProcess updates the repo_id metadata directly in the Dolt store,
 // avoiding subprocess lock contention. (GH#1805)
-func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
+func updateRepoIDInProcess(path string, autoYes bool) error {
 	ctx := context.Background()
 
 	// Compute new repo ID
@@ -47,7 +46,7 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 	}
 
 	// Open database
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openDoltStoreForRepoPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -111,7 +110,7 @@ func RepoFingerprint(path string, autoYes bool) error {
 	// In --yes mode, auto-select the recommended safe action [1].
 	if autoYes {
 		fmt.Println("  → Auto mode (--yes): updating repo ID in-process...")
-		return updateRepoIDInProcess(path, beadsDir, true)
+		return updateRepoIDInProcess(path, true)
 	}
 
 	// Prompt user for action
@@ -133,7 +132,7 @@ func RepoFingerprint(path string, autoYes bool) error {
 
 	switch response {
 	case "1":
-		return updateRepoIDInProcess(path, beadsDir, false)
+		return updateRepoIDInProcess(path, false)
 
 	case "2":
 		// Detect backend to determine what to remove
@@ -173,7 +172,7 @@ func RepoFingerprint(path string, autoYes bool) error {
 		// Reinitialize by creating a new store (auto-bootstraps from JSONL)
 		fmt.Println("  → Reinitializing database from JSONL...")
 		ctx := context.Background()
-		store, err := dolt.NewFromConfig(ctx, beadsDir)
+		store, err := createDoltStoreForRepoPath(ctx, path)
 		if err != nil {
 			return fmt.Errorf("failed to initialize database: %w", err)
 		}

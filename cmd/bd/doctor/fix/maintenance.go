@@ -3,12 +3,9 @@ package fix
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -22,13 +19,13 @@ func StaleClosedIssues(path string) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	// Load config and check if cleanup is enabled
-	cfg, err := configfile.Load(beadsDir)
+	info, err := resolveRuntimeInfoForRepo(path)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+
+	// Load config and check if cleanup is enabled
+	cfg := info.Config
 
 	// Get threshold; 0 means disabled
 	var thresholdDays int
@@ -43,7 +40,7 @@ func StaleClosedIssues(path string) error {
 
 	// Open database using factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 	ctx := context.Background()
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openDoltStoreForRepoPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -104,11 +101,9 @@ func PatrolPollution(path string) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
 	// Open database using factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 	ctx := context.Background()
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openDoltStoreForRepoPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}

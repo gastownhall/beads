@@ -163,7 +163,7 @@ func openDoltDBForRepoPath(repoPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func openDoltStoreForRepoPath(ctx context.Context, repoPath string) (*dolt.DoltStore, error) {
+func newDoltStoreForRepoPath(ctx context.Context, repoPath string, createIfMissing bool) (*dolt.DoltStore, error) {
 	info, err := resolveRuntimeInfoForRepo(repoPath)
 	if err != nil {
 		return nil, err
@@ -173,14 +173,15 @@ func openDoltStoreForRepoPath(ctx context.Context, repoPath string) (*dolt.DoltS
 	}
 
 	cfg := &dolt.Config{
-		Path:           info.Runtime.DatabasePath,
-		BeadsDir:       info.Runtime.BeadsDir,
-		Database:       info.Runtime.Database,
-		ServerHost:     info.Runtime.Host,
-		ServerPort:     info.Runtime.Port,
-		ServerUser:     info.Runtime.User,
-		ServerPassword: info.Config.GetDoltServerPassword(),
-		ServerTLS:      info.Runtime.TLS,
+		Path:            info.Runtime.DatabasePath,
+		BeadsDir:        info.Runtime.BeadsDir,
+		Database:        info.Runtime.Database,
+		ServerHost:      info.Runtime.Host,
+		ServerPort:      info.Runtime.Port,
+		ServerUser:      info.Runtime.User,
+		ServerPassword:  info.Config.GetDoltServerPassword(),
+		ServerTLS:       info.Runtime.TLS,
+		CreateIfMissing: createIfMissing,
 	}
 	if cfg.ServerHost == "" {
 		cfg.ServerHost = configfile.DefaultDoltServerHost
@@ -198,4 +199,12 @@ func openDoltStoreForRepoPath(ctx context.Context, repoPath string) (*dolt.DoltS
 		return nil, err
 	}
 	return store, nil
+}
+
+func openDoltStoreForRepoPath(ctx context.Context, repoPath string) (*dolt.DoltStore, error) {
+	return newDoltStoreForRepoPath(ctx, repoPath, false)
+}
+
+func createDoltStoreForRepoPath(ctx context.Context, repoPath string) (*dolt.DoltStore, error) {
+	return newDoltStoreForRepoPath(ctx, repoPath, true)
 }

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -35,19 +34,18 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	// Load or create config
-	cfg, err := configfile.Load(beadsDir)
+	info, err := resolveRuntimeInfoForRepo(path)
 	if err != nil {
-		cfg = configfile.DefaultConfig()
+		return fmt.Errorf("failed to resolve repo runtime: %w", err)
 	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
+	beadsDir := info.Runtime.BeadsDir
+	cfg := effectiveFixConfig(info.Config)
 
 	// Determine database path
-	dbPath := cfg.DatabasePath(beadsDir)
+	dbPath := info.Runtime.DatabasePath
+	if dbPath == "" {
+		dbPath = cfg.DatabasePath(beadsDir)
+	}
 
 	ctx := context.Background()
 
@@ -55,7 +53,7 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 		// No database - create a new Dolt store
 		fmt.Println("  → No database found, creating Dolt store...")
 
-		store, err := dolt.NewFromConfig(ctx, beadsDir)
+		store, err := createDoltStoreForRepoPath(ctx, path)
 		if err != nil {
 			return fmt.Errorf("failed to create database: %w", err)
 		}
@@ -95,7 +93,7 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 	// Database exists - update metadata in-process
 	fmt.Println("  → Updating database metadata...")
 
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openDoltStoreForRepoPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -141,7 +139,11 @@ func FreshCloneImport(path string, bdVersion string) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	info, err := resolveRuntimeInfoForRepo(path)
+	if err != nil {
+		return fmt.Errorf("failed to resolve repo runtime: %w", err)
+	}
+	beadsDir := info.Runtime.BeadsDir
 
 	// Check for JSONL file
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
@@ -158,7 +160,7 @@ func FreshCloneImport(path string, bdVersion string) error {
 
 	// Dolt store exists — check if it already has issues
 	ctx := context.Background()
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openDoltStoreForRepoPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}

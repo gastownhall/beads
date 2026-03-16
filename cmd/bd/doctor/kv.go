@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-
-	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // kvPrefix matches the prefix used in cmd/bd/kv.go
@@ -13,10 +11,8 @@ const kvPrefix = "kv."
 
 // CheckKVSyncStatus checks if KV data exists and reports sync status.
 func CheckKVSyncStatus(path string) DoctorCheck {
-	_, beadsDir := getBackendAndBeadsDir(path)
-
 	ctx := context.Background()
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openDoltStoreForRepoPath(ctx, path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "KV Store Sync",

@@ -3,6 +3,7 @@ package fix
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -206,5 +208,93 @@ func TestDatabaseVersionWithBdVersion_ImportsJSONL(t *testing.T) {
 	}
 	if len(stored) != 2 {
 		t.Errorf("store has %d issues, want 2", len(stored))
+	}
+}
+
+func TestDatabaseVersionWithBdVersion_PreservesRedirectSourceDatabase(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	sourceBeadsDir := filepath.Join(repoDir, ".beads")
+	targetRoot := t.TempDir()
+	targetBeadsDir := filepath.Join(targetRoot, ".beads")
+	if err := os.MkdirAll(sourceBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(targetBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	port := fixTestServerPort()
+	if port == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	sourceDB := uniqueDBName(t)
+	targetDB := uniqueDBName(t)
+
+	sourceCfg := &configfile.Config{
+		Backend:      configfile.BackendDolt,
+		Database:     "dolt",
+		DoltDatabase: sourceDB,
+	}
+	if err := sourceCfg.Save(sourceBeadsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	targetCfg := &configfile.Config{
+		Backend:        configfile.BackendDolt,
+		Database:       "dolt",
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: port,
+		DoltDatabase:   targetDB,
+	}
+	if err := targetCfg.Save(targetBeadsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sourceBeadsDir, beads.RedirectFileName), []byte(targetBeadsDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	issues := []types.Issue{
+		{ID: "rdb-1", Title: "Redirected issue", Status: "open", IssueType: "task", Priority: 2},
+		{ID: "rdb-2", Title: "Redirected bug", Status: "closed", IssueType: "bug", Priority: 1},
+	}
+	writeTestJSONL(t, targetBeadsDir, issues)
+
+	if err := DatabaseVersionWithBdVersion(repoDir, "0.61.0"); err != nil {
+		t.Fatalf("DatabaseVersionWithBdVersion failed: %v", err)
+	}
+
+	store, err := openDoltStoreForRepoPath(ctx, repoDir)
+	if err != nil {
+		t.Fatalf("openDoltStoreForRepoPath: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	stored, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues failed: %v", err)
+	}
+	if len(stored) != 2 {
+		t.Fatalf("store has %d issues, want 2", len(stored))
+	}
+
+	rootDB, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/?parseTime=true&timeout=5s", port))
+	if err != nil {
+		t.Fatalf("sql.Open root DB: %v", err)
+	}
+	defer func() { _ = rootDB.Close() }()
+
+	var targetMatches int
+	if err := rootDB.QueryRow("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", targetDB).Scan(&targetMatches); err != nil {
+		t.Fatalf("check target database existence: %v", err)
+	}
+	if targetMatches != 0 {
+		t.Fatalf("target database %q exists; expected redirect-aware create/import to stay on source database %q", targetDB, sourceDB)
 	}
 }
