@@ -240,8 +240,12 @@ func TestListUsesRepoBeadsDirWhenDoltDataDirEscapesDotBeads(t *testing.T) {
 	t.Setenv("BEADS_DOLT_PORT", "")
 
 	binPath := filepath.Join(t.TempDir(), "bd-under-test")
+	packageDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
 	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
-	buildCmd.Dir = "/Users/gary/AI/vendor/beads-upstream/cmd/bd"
+	buildCmd.Dir = packageDir
 	buildOut, err := buildCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go build failed: %v\n%s", err, buildOut)
