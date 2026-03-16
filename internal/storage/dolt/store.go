@@ -410,9 +410,8 @@ func endSpan(span trace.Span, err error) {
 // ErrStoreClosed is returned when an operation is attempted on a closed store.
 var ErrStoreClosed = errors.New("store is closed")
 
-// withReadTx runs fn inside a read-only transaction while holding the store's
-// read-lock. This lets DoltStore operations share issueops functions that
-// require a *sql.Tx without changing the caller's concurrency semantics.
+// withReadTx runs fn inside a transaction while holding the store's read-lock.
+// Used for read operations that need a *sql.Tx to share issueops functions.
 func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.closed.Load() {
 		return ErrStoreClosed
@@ -425,6 +424,24 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	}
 	defer func() { _ = tx.Rollback() }()
 	return fn(tx)
+}
+
+// withWriteTx runs fn inside a transaction, committing on success.
+// Used for write operations that delegate SQL work to issueops functions.
+// The caller's fn should NOT call tx.Commit — withWriteTx handles that.
+func (s *DoltStore) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin write tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // uncommitted implicit transaction that Dolt rolls back on connection close,

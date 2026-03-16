@@ -1329,19 +1329,11 @@ func (s *DoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID stri
 // GetNextChildID returns the next available child ID for a parent.
 // Delegates SQL work to issueops.GetNextChildIDTx.
 func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", fmt.Errorf("get next child ID: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	childID, err := issueops.GetNextChildIDTx(ctx, tx, parentID)
-	if err != nil {
-		return "", err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("get next child ID: commit: %w", err)
-	}
-	return childID, nil
+	var childID string
+	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		childID, err = issueops.GetNextChildIDTx(ctx, tx, parentID)
+		return err
+	})
+	return childID, err
 }

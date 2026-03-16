@@ -11,16 +11,9 @@ import (
 
 // AddLabel adds a label to an issue
 func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+	})
 }
 
 // RemoveLabel removes a label from an issue
