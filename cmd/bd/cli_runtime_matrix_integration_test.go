@@ -410,6 +410,53 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRecoversMalformedMetadata(t *testing.T) {
 	assertDoctorCheckStatus(t, result, "Dolt Connection", "ok")
 }
 
+func TestE2E_RuntimeMatrix_DoctorFixYesRemovesStaleAccessLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow integration test in short mode")
+	}
+	if runtime.GOOS == windowsOS {
+		t.Skip("stale lock runtime matrix test not supported on windows")
+	}
+
+	bdBinary := buildRuntimeMatrixTestBinary(t)
+	repoDir := setupRuntimeMatrixGitRepo(t)
+	env := runtimeMatrixEnv()
+
+	runtimeMatrixInitDoltRepo(t, bdBinary, repoDir, env, "lock")
+	issueID := runtimeMatrixCreateIssue(t, bdBinary, repoDir, env, "stale lock survivor")
+	runtimeMatrixEnsureStoppedBaseline(t, bdBinary, repoDir, env)
+
+	lockPath := filepath.Join(repoDir, ".beads", "dolt-access.lock")
+	if err := os.WriteFile(lockPath, []byte("stale"), 0o600); err != nil {
+		t.Fatalf("write stale dolt-access.lock: %v", err)
+	}
+	oldTime := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(lockPath, oldTime, oldTime); err != nil {
+		t.Fatalf("age stale dolt-access.lock: %v", err)
+	}
+
+	fixOut, fixErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--fix", "--yes")
+	if fixErr != nil {
+		t.Fatalf("bd doctor --fix --yes failed: %v\n%s", fixErr, fixOut)
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale dolt-access.lock to be removed, got err=%v", err)
+	}
+
+	listOut, listErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "list", "--json")
+	if listErr != nil {
+		t.Fatalf("bd list after stale-lock recovery failed: %v\n%s", listErr, listOut)
+	}
+	items := decodeIssueObjects(t, listOut)
+	if len(items) != 1 {
+		t.Fatalf("list returned %d issues after stale-lock recovery, want 1\n%s", len(items), listOut)
+	}
+	assertContainsIssueIDs(t, items, issueID)
+
+	doctorOut, _ := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--dry-run", "--json")
+	assertDoctorCheckStatus(t, decodeDoctorResult(t, doctorOut), "Dolt Connection", "ok")
+}
+
 func runtimeMatrixEnv() []string {
 	return append(os.Environ(),
 		"BEADS_TEST_MODE=",
