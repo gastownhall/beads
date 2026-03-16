@@ -7,21 +7,15 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // SetConfig sets a configuration value
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
-	// Normalize issue_prefix: strip trailing hyphen to prevent double-hyphen IDs (bd-6uly)
-	if key == "issue_prefix" {
-		value = strings.TrimSuffix(value, "-")
-	}
-
-	_, err := s.execContext(ctx, `
-		INSERT INTO config (`+"`key`"+`, value) VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE value = VALUES(value)
-	`, key, value)
-	if err != nil {
-		return fmt.Errorf("failed to set config %s: %w", key, err)
+	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.SetConfigInTx(ctx, tx, key, value)
+	}); err != nil {
+		return err
 	}
 
 	// Invalidate caches for keys that affect cached data
@@ -45,39 +39,23 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 // GetConfig retrieves a configuration value
 func (s *DoltStore) GetConfig(ctx context.Context, key string) (string, error) {
 	var value string
-	var scanErr error
-
-	err := s.withRetry(ctx, func() error {
-		scanErr = s.db.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
-		return scanErr
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		value, err = issueops.GetConfigInTx(ctx, tx, key)
+		return err
 	})
-
-	if err == sql.ErrNoRows || scanErr == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("failed to get config %s: %w", key, err)
-	}
-	return value, nil
+	return value, err
 }
 
 // GetAllConfig retrieves all configuration values
 func (s *DoltStore) GetAllConfig(ctx context.Context) (map[string]string, error) {
-	rows, err := s.queryContext(ctx, "SELECT `key`, value FROM config")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get all config: %w", err)
-	}
-	defer rows.Close()
-
-	config := make(map[string]string)
-	for rows.Next() {
-		var key, value string
-		if err := rows.Scan(&key, &value); err != nil {
-			return nil, fmt.Errorf("failed to scan config: %w", err)
-		}
-		config[key] = value
-	}
-	return config, rows.Err()
+	var result map[string]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetAllConfigInTx(ctx, tx)
+		return err
+	})
+	return result, err
 }
 
 // DeleteConfig removes a configuration value
@@ -91,27 +69,20 @@ func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
 
 // SetMetadata sets a metadata value
 func (s *DoltStore) SetMetadata(ctx context.Context, key, value string) error {
-	_, err := s.execContext(ctx, `
-		INSERT INTO metadata (`+"`key`"+`, value) VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE value = VALUES(value)
-	`, key, value)
-	if err != nil {
-		return fmt.Errorf("failed to set metadata %s: %w", key, err)
-	}
-	return nil
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.SetMetadataInTx(ctx, tx, key, value)
+	})
 }
 
 // GetMetadata retrieves a metadata value
 func (s *DoltStore) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
-	err := s.db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = ?", key).Scan(&value)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("failed to get metadata %s: %w", key, err)
-	}
-	return value, nil
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		value, err = issueops.GetMetadataInTx(ctx, tx, key)
+		return err
+	})
+	return value, err
 }
 
 // GetCustomStatuses returns custom status values from config.

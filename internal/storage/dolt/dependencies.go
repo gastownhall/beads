@@ -35,31 +35,23 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		}
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	opts := issueops.AddDependencyOpts{
-		SourceTable:   "issues",
-		TargetTable:   targetTable,
-		WriteTable:    "dependencies",
-		IsCrossPrefix: isCrossPrefix,
-	}
-	if err := issueops.AddDependencyInTx(ctx, tx, dep, actor, opts); err != nil {
+	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		opts := issueops.AddDependencyOpts{
+			SourceTable:   "issues",
+			TargetTable:   targetTable,
+			WriteTable:    "dependencies",
+			IsCrossPrefix: isCrossPrefix,
+		}
+		if err := issueops.AddDependencyInTx(ctx, tx, dep, actor, opts); err != nil {
+			return err
+		}
+		s.invalidateBlockedIDsCache()
+		return nil
+	}); err != nil {
 		return err
-	}
-
-	s.invalidateBlockedIDsCache()
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sql commit: %w", err)
 	}
 	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	if err := s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID); err != nil {
-		return err
-	}
-	return nil
+	return s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
 }
 
 // RemoveDependency removes a dependency between two issues.
