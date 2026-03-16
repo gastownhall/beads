@@ -212,7 +212,6 @@ func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor s
 	// Clear ephemeral flag for persistent storage
 	issue.Ephemeral = false
 
-	// TODO: this isn't using issueops, why?
 	// Create in issues table (bypasses ephemeral routing since Ephemeral=false)
 	if err := s.CreateIssue(ctx, issue, actor); err != nil {
 		return fmt.Errorf("failed to promote wisp to issues: %w", err)
