@@ -29,41 +29,28 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra types get marked ephemeral (legacy behavior)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// SkipPrefixValidation matches legacy behavior: single-issue path does
-	// not validate prefixes for explicit IDs.
-	bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
-		SkipPrefixValidation: true,
-	})
-	if err != nil {
-		return err
-	}
-	if err := issueops.CreateIssueInTx(ctx, tx, bc, issue, actor); err != nil {
+	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		// SkipPrefixValidation matches legacy behavior: single-issue path does
+		// not validate prefixes for explicit IDs.
+		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
+			SkipPrefixValidation: true,
+		})
+		if err != nil {
+			return err
+		}
+		return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
+	}); err != nil {
 		return err
 	}
 
 	// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT.
 	if !issue.Ephemeral && !issue.NoHistory {
-		// GH#2455: Stage only the tables we modified, then commit without -A
-		// to avoid sweeping up stale config changes from concurrent operations.
-		for _, table := range []string{"issues", "events"} {
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
-				return fmt.Errorf("dolt add %s: %w", table, err)
-			}
-		}
-		commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
+		if err := s.doltAddAndCommit(ctx, []string{"issues", "events"},
+			fmt.Sprintf("bd: create %s", issue.ID)); err != nil {
+			return err
 		}
 	}
-
-	return tx.Commit()
+	return nil
 }
 
 // CreateIssues creates multiple issues in a single transaction
@@ -88,47 +75,29 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			if !issue.NoHistory {
 				issue.Ephemeral = true
 			}
-			tx, err := s.db.BeginTx(ctx, nil)
-			if err != nil {
-				return fmt.Errorf("failed to begin transaction: %w", err)
-			}
-			bc, err := issueops.NewBatchContext(ctx, tx, opts)
-			if err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-			if err := issueops.CreateIssueInTx(ctx, tx, bc, issue, actor); err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-			if err := tx.Commit(); err != nil {
+			if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+				bc, err := issueops.NewBatchContext(ctx, tx, opts)
+				if err != nil {
+					return err
+				}
+				return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
+			}); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts); err != nil {
+	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
+	}); err != nil {
 		return err
 	}
 
 	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events", "labels", "comments", "dependencies", "child_counters"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: create %d issue(s)", len(issues))
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
-
-	return tx.Commit()
+	return s.doltAddAndCommit(ctx,
+		[]string{"issues", "events", "labels", "comments", "dependencies", "child_counters"},
+		fmt.Sprintf("bd: create %d issue(s)", len(issues)))
 }
 
 // GetIssue retrieves an issue by ID.

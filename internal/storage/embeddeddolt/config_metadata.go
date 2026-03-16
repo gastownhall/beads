@@ -5,82 +5,53 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func (s *EmbeddedDoltStore) SetConfig(ctx context.Context, key, value string) error {
-	// Normalize issue_prefix: strip trailing hyphen to avoid double-hyphen IDs,
-	// matching DoltStore behavior.
-	if key == "issue_prefix" {
-		value = strings.TrimSuffix(value, "-")
-	}
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "REPLACE INTO config (`key`, value) VALUES (?, ?)", key, value)
-		return err
+		return issueops.SetConfigInTx(ctx, tx, key, value)
 	})
 }
 
 func (s *EmbeddedDoltStore) GetConfig(ctx context.Context, key string) (string, error) {
 	var value string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
+		var err error
+		value, err = issueops.GetConfigInTx(ctx, tx, key)
+		return err
 	})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
-		}
-		return "", fmt.Errorf("embeddeddolt: get config %q: %w", key, err)
-	}
-	return value, nil
+	return value, err
 }
 
 func (s *EmbeddedDoltStore) GetAllConfig(ctx context.Context) (map[string]string, error) {
-	result := make(map[string]string)
+	var result map[string]string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, "SELECT `key`, value FROM config")
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var k, v string
-			if err := rows.Scan(&k, &v); err != nil {
-				return err
-			}
-			result[k] = v
-		}
-		return rows.Err()
+		var err error
+		result, err = issueops.GetAllConfigInTx(ctx, tx)
+		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
+	return result, err
 }
 
 func (s *EmbeddedDoltStore) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = ?", key).Scan(&value)
+		var err error
+		value, err = issueops.GetMetadataInTx(ctx, tx, key)
+		return err
 	})
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
-		}
-		return "", fmt.Errorf("GetMetadata(%q): %w", key, err)
-	}
-	return value, nil
+	return value, err
 }
 
 func (s *EmbeddedDoltStore) SetMetadata(ctx context.Context, key, value string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value)
-		return err
+		return issueops.SetMetadataInTx(ctx, tx, key, value)
 	})
 }
 
