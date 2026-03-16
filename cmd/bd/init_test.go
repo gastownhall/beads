@@ -1679,6 +1679,50 @@ func buildBDForInitTests(t *testing.T) string {
 	return initTestBD
 }
 
+func setupBareParentInitWorktree(t *testing.T) (string, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "repo.git")
+	mainWorktreeDir := filepath.Join(tmpDir, "main")
+	featureWorktreeDir := filepath.Join(tmpDir, "feature")
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s failed: %v\n%s", args, dir, err, out)
+		}
+	}
+
+	runGit(tmpDir, "init", "--bare", bareDir)
+	runGit(tmpDir, "--git-dir", bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(tmpDir, "--git-dir", bareDir, "config", "user.email", "test@example.com")
+	runGit(tmpDir, "--git-dir", bareDir, "config", "user.name", "Test User")
+	emptyTreeCmd := exec.Command("git", "--git-dir", bareDir, "hash-object", "-t", "tree", "/dev/null")
+	emptyTreeCmd.Dir = tmpDir
+	emptyTreeOut, err := emptyTreeCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git hash-object failed: %v\n%s", err, emptyTreeOut)
+	}
+	emptyTree := strings.TrimSpace(string(emptyTreeOut))
+	commitCmd := exec.Command("git", "--git-dir", bareDir, "commit-tree", "-m", "Initial commit", emptyTree)
+	commitCmd.Dir = tmpDir
+	commitOut, err := commitCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git commit-tree failed: %v\n%s", err, commitOut)
+	}
+	initCommit := strings.TrimSpace(string(commitOut))
+	runGit(tmpDir, "--git-dir", bareDir, "update-ref", "HEAD", initCommit)
+	runGit(tmpDir, "--git-dir", bareDir, "worktree", "add", mainWorktreeDir, "main")
+	runGit(mainWorktreeDir, "branch", "feature")
+	runGit(tmpDir, "--git-dir", bareDir, "worktree", "add", featureWorktreeDir, "feature")
+
+	return bareDir, featureWorktreeDir
+}
+
 // TestInitDatabaseFlag tests the --database flag for bd init.
 // Uses subprocess execution because:
 //   - init manipulates extensive Cobra global state that's difficult to reset
@@ -1716,6 +1760,52 @@ func TestInitDatabaseFlag(t *testing.T) {
 		}
 		if cfg.DoltMode != configfile.DoltModeServer {
 			t.Errorf("Expected DoltMode %q, got %q", configfile.DoltModeServer, cfg.DoltMode)
+		}
+	})
+
+	t.Run("BareParentWorktreeAutoInit", func(t *testing.T) {
+		skipIfNoDolt(t)
+		if runtime.GOOS == "windows" {
+			t.Skip("Skipping worktree test on Windows")
+		}
+
+		origDBPath := dbPath
+		t.Cleanup(func() {
+			dbPath = origDBPath
+			beads.ResetCaches()
+			git.ResetCaches()
+		})
+		dbPath = ""
+		beads.ResetCaches()
+		git.ResetCaches()
+		bd := buildBDForInitTests(t)
+		bareDir, worktreeDir := setupBareParentInitWorktree(t)
+		bareBeadsDir := filepath.Join(bareDir, ".beads")
+
+		cmd := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
+		cmd.Dir = worktreeDir
+		cmd.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd init from bare-parent worktree failed: %v\n%s", err, out)
+		}
+
+		if _, err := os.Stat(filepath.Join(bareBeadsDir, "metadata.json")); err != nil {
+			t.Fatalf("expected bare parent metadata.json to exist: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(worktreeDir, ".beads")); !os.IsNotExist(err) {
+			t.Fatalf("worktree should not get a local .beads directory, stat err=%v", err)
+		}
+
+		retry := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
+		retry.Dir = worktreeDir
+		retry.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+		retryOut, retryErr := retry.CombinedOutput()
+		if retryErr == nil {
+			t.Fatal("expected second bd init to fail against existing bare-parent .beads")
+		}
+		if !strings.Contains(string(retryOut), "already initialized") && !strings.Contains(string(retryOut), "already exists") {
+			t.Fatalf("expected existing-data guard on second init, got:\n%s", retryOut)
 		}
 	})
 
@@ -1858,6 +1948,51 @@ func TestInitDatabaseFlag(t *testing.T) {
 			t.Errorf("Expected error to mention 'invalid database name', got: %s", outStr)
 		}
 	})
+}
+
+func TestBareParentWorktreeCoreCommandsWithoutRedirect(t *testing.T) {
+	skipIfNoDolt(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping worktree test on Windows")
+	}
+
+	bd := buildBDForInitTests(t)
+	bareDir, worktreeDir := setupBareParentInitWorktree(t)
+	bareBeadsDir := filepath.Join(bareDir, ".beads")
+	sharedEnv := append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+
+	initCmd := exec.Command(bd, "init", "--prefix", "bare-core", "--skip-hooks", "--quiet")
+	initCmd.Dir = worktreeDir
+	initCmd.Env = sharedEnv
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd init from bare-parent worktree failed: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(filepath.Join(bareBeadsDir, "metadata.json")); err != nil {
+		t.Fatalf("expected bare parent metadata.json to exist: %v", err)
+	}
+
+	createCmd := exec.Command(bd, "create", "bare fallback issue", "--description", "regression", "--json")
+	createCmd.Dir = worktreeDir
+	createCmd.Env = sharedEnv
+	createOut, err := createCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd create from bare-parent worktree failed: %v\n%s", err, createOut)
+	}
+	if !strings.Contains(string(createOut), "bare fallback issue") {
+		t.Fatalf("bd create output did not include created title:\n%s", createOut)
+	}
+
+	listCmd := exec.Command(bd, "list", "--json")
+	listCmd.Dir = worktreeDir
+	listCmd.Env = sharedEnv
+	listOut, err := listCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd list from bare-parent worktree failed: %v\n%s", err, listOut)
+	}
+	if !strings.Contains(string(listOut), "bare fallback issue") {
+		t.Fatalf("bd list output did not include created issue:\n%s", listOut)
+	}
 }
 
 func TestInitBackendFlag(t *testing.T) {

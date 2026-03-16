@@ -1,9 +1,12 @@
 package setup
 
+import "github.com/steveyegge/beads/internal/templates/agents"
+
 var factoryIntegration = agentsIntegration{
 	name:         "Factory.ai (Droid)",
 	setupCommand: "bd setup factory",
 	readHint:     "Factory Droid will automatically read AGENTS.md on session start.",
+	profile:      agents.ProfileFull,
 }
 
 type factoryEnv = agentsEnv

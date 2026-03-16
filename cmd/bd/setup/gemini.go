@@ -7,12 +7,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/beads/internal/templates/agents"
 )
 
 var (
 	geminiEnvProvider     = defaultGeminiEnv
 	errGeminiHooksMissing = errors.New("gemini hooks not installed")
 )
+
+const geminiInstructionsFile = "GEMINI.md"
+
+var geminiAgentsIntegration = agentsIntegration{
+	name:         "Gemini CLI",
+	setupCommand: "bd setup gemini",
+	profile:      agents.ProfileMinimal,
+}
 
 type geminiEnv struct {
 	stdout     io.Writer
@@ -52,6 +62,14 @@ func geminiProjectSettingsPath(base string) string {
 
 func geminiGlobalSettingsPath(home string) string {
 	return filepath.Join(home, ".gemini", "settings.json")
+}
+
+func geminiAgentsEnv(env geminiEnv) agentsEnv {
+	return agentsEnv{
+		agentsPath: filepath.Join(env.projectDir, geminiInstructionsFile),
+		stdout:     env.stdout,
+		stderr:     env.stderr,
+	}
 }
 
 // InstallGemini installs Gemini CLI hooks
@@ -120,6 +138,13 @@ func installGemini(env geminiEnv, project bool, stealth bool) error {
 		return err
 	}
 
+	// Install minimal beads section in GEMINI.md.
+	// Hooks handle the heavy lifting via bd prime; GEMINI.md just needs a pointer.
+	if err := installAgents(geminiAgentsEnv(env), geminiAgentsIntegration); err != nil {
+		// Non-fatal: hooks are already installed
+		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", geminiInstructionsFile, err)
+	}
+
 	_, _ = fmt.Fprintln(env.stdout, "\n✓ Gemini CLI integration installed")
 	_, _ = fmt.Fprintf(env.stdout, "  Settings: %s\n", settingsPath)
 	_, _ = fmt.Fprintln(env.stdout, "\nRestart Gemini CLI for changes to take effect.")
@@ -146,15 +171,15 @@ func checkGemini(env geminiEnv) error {
 	switch {
 	case hasGeminiBeadsHooks(globalSettings):
 		_, _ = fmt.Fprintf(env.stdout, "✓ Global hooks installed: %s\n", globalSettings)
-		return nil
 	case hasGeminiBeadsHooks(projectSettings):
 		_, _ = fmt.Fprintf(env.stdout, "✓ Project hooks installed: %s\n", projectSettings)
-		return nil
 	default:
 		_, _ = fmt.Fprintln(env.stdout, "✗ No hooks installed")
 		_, _ = fmt.Fprintln(env.stdout, "  Run: bd setup gemini")
 		return errGeminiHooksMissing
 	}
+
+	return checkAgents(geminiAgentsEnv(env), geminiAgentsIntegration)
 }
 
 // RemoveGemini removes Gemini CLI hooks
@@ -183,36 +208,39 @@ func removeGemini(env geminiEnv, project bool) error {
 	data, err := env.readFile(settingsPath)
 	if err != nil {
 		_, _ = fmt.Fprintln(env.stdout, "No settings file found")
-		return nil
+	} else {
+		var settings map[string]interface{}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			_, _ = fmt.Fprintf(env.stderr, "Error: failed to parse settings.json: %v\n", err)
+			return err
+		}
+
+		hooks, ok := settings["hooks"].(map[string]interface{})
+		if !ok {
+			_, _ = fmt.Fprintln(env.stdout, "No hooks found")
+		} else {
+			// Remove both variants from both events
+			removeHookCommand(hooks, "SessionStart", "bd prime")
+			removeHookCommand(hooks, "PreCompress", "bd prime")
+			removeHookCommand(hooks, "SessionStart", "bd prime --stealth")
+			removeHookCommand(hooks, "PreCompress", "bd prime --stealth")
+
+			data, err = json.MarshalIndent(settings, "", "  ")
+			if err != nil {
+				_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
+				return err
+			}
+
+			if err := env.writeFile(settingsPath, data); err != nil {
+				_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
+				return err
+			}
+		}
 	}
 
-	var settings map[string]interface{}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		_, _ = fmt.Fprintf(env.stderr, "Error: failed to parse settings.json: %v\n", err)
-		return err
-	}
-
-	hooks, ok := settings["hooks"].(map[string]interface{})
-	if !ok {
-		_, _ = fmt.Fprintln(env.stdout, "No hooks found")
-		return nil
-	}
-
-	// Remove both variants from both events
-	removeHookCommand(hooks, "SessionStart", "bd prime")
-	removeHookCommand(hooks, "PreCompress", "bd prime")
-	removeHookCommand(hooks, "SessionStart", "bd prime --stealth")
-	removeHookCommand(hooks, "PreCompress", "bd prime --stealth")
-
-	data, err = json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
-		return err
-	}
-
-	if err := env.writeFile(settingsPath, data); err != nil {
-		_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
-		return err
+	if err := removeAgents(geminiAgentsEnv(env), geminiAgentsIntegration); err != nil {
+		// Non-fatal
+		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", geminiInstructionsFile, err)
 	}
 
 	_, _ = fmt.Fprintln(env.stdout, "✓ Gemini CLI hooks removed")

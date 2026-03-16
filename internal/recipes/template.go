@@ -11,20 +11,20 @@ This project uses [Beads (bd)](https://github.com/steveyegge/beads) for issue tr
 - Track ALL work in bd (never use markdown TODOs or comment-based task lists)
 - Use ` + "`bd ready`" + ` to find available work
 - Use ` + "`bd create`" + ` to track new issues/tasks/bugs
-- Use ` + "`bd sync`" + ` at end of session to sync with git remote
-- Git hooks auto-sync on commit/merge
+- Use ` + "`bd dolt push`" + ` at end of session to sync with remote
+- Run ` + "`bd prime`" + ` for complete workflow context (SSOT for operational commands)
 
 ## Quick Reference
 
 ` + "```bash" + `
-bd prime                              # Load complete workflow context
+bd prime                              # Load complete workflow context (SSOT)
 bd ready                              # Show issues ready to work (no blockers)
 bd list --status=open                 # List all open issues
-bd create --title="..." --type=task   # Create new issue
+bd create "title" -t task -p 2        # Create new issue
 bd update <id> --claim                # Claim work atomically
 bd close <id>                         # Mark complete
 bd dep add <issue> <depends-on>       # Add dependency
-bd sync                               # Sync with git remote
+bd dolt push                          # Sync with remote
 ` + "```" + `
 
 ## Workflow
@@ -33,7 +33,7 @@ bd sync                               # Sync with git remote
 2. Claim an issue atomically: ` + "`bd update <id> --claim`" + `
 3. Do the work
 4. Mark complete: ` + "`bd close <id>`" + `
-5. Sync: ` + "`bd sync`" + ` (or let git hooks handle it)
+5. Push changes: ` + "`bd dolt push`" + `
 
 ## Issue Types
 
@@ -54,6 +54,7 @@ bd sync                               # Sync with git remote
 ## Context Loading
 
 Run ` + "`bd prime`" + ` to get complete workflow documentation in AI-optimized format.
+` + "`bd prime`" + ` is the single source of truth for operational commands and session workflow.
 
 For detailed docs: see AGENTS.md, QUICKSTART.md, or run ` + "`bd --help`" + `
 `

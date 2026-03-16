@@ -7,12 +7,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/steveyegge/beads/internal/templates/agents"
 )
 
 var (
 	claudeEnvProvider     = defaultClaudeEnv
 	errClaudeHooksMissing = errors.New("claude hooks not installed")
 )
+
+const claudeInstructionsFile = "CLAUDE.md"
+
+var claudeAgentsIntegration = agentsIntegration{
+	name:         "Claude Code",
+	setupCommand: "bd setup claude",
+	profile:      agents.ProfileMinimal,
+}
 
 type claudeEnv struct {
 	stdout     io.Writer
@@ -52,6 +62,14 @@ func projectSettingsPath(base string) string {
 
 func globalSettingsPath(home string) string {
 	return filepath.Join(home, ".claude", "settings.json")
+}
+
+func claudeAgentsEnv(env claudeEnv) agentsEnv {
+	return agentsEnv{
+		agentsPath: filepath.Join(env.projectDir, claudeInstructionsFile),
+		stdout:     env.stdout,
+		stderr:     env.stderr,
+	}
 }
 
 // InstallClaude installs Claude Code hooks
@@ -127,6 +145,13 @@ func installClaude(env claudeEnv, project bool, stealth bool) error {
 		return err
 	}
 
+	// Install minimal beads section in CLAUDE.md.
+	// Hooks handle the heavy lifting via bd prime; CLAUDE.md just needs a pointer.
+	if err := installAgents(claudeAgentsEnv(env), claudeAgentsIntegration); err != nil {
+		// Non-fatal: hooks are already installed
+		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
+	}
+
 	_, _ = fmt.Fprintln(env.stdout, "\n✓ Claude Code integration installed")
 	_, _ = fmt.Fprintf(env.stdout, "  Settings: %s\n", settingsPath)
 	_, _ = fmt.Fprintln(env.stdout, "\nRestart Claude Code for changes to take effect.")
@@ -153,15 +178,15 @@ func checkClaude(env claudeEnv) error {
 	switch {
 	case hasBeadsHooks(globalSettings):
 		_, _ = fmt.Fprintf(env.stdout, "✓ Global hooks installed: %s\n", globalSettings)
-		return nil
 	case hasBeadsHooks(projectSettings):
 		_, _ = fmt.Fprintf(env.stdout, "✓ Project hooks installed: %s\n", projectSettings)
-		return nil
 	default:
 		_, _ = fmt.Fprintln(env.stdout, "✗ No hooks installed")
 		_, _ = fmt.Fprintln(env.stdout, "  Run: bd setup claude")
 		return errClaudeHooksMissing
 	}
+
+	return checkAgents(claudeAgentsEnv(env), claudeAgentsIntegration)
 }
 
 // RemoveClaude removes Claude Code hooks
@@ -190,35 +215,38 @@ func removeClaude(env claudeEnv, project bool) error {
 	data, err := env.readFile(settingsPath)
 	if err != nil {
 		_, _ = fmt.Fprintln(env.stdout, "No settings file found")
-		return nil
+	} else {
+		var settings map[string]interface{}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			_, _ = fmt.Fprintf(env.stderr, "Error: failed to parse settings.json: %v\n", err)
+			return err
+		}
+
+		hooks, ok := settings["hooks"].(map[string]interface{})
+		if !ok {
+			_, _ = fmt.Fprintln(env.stdout, "No hooks found")
+		} else {
+			removeHookCommand(hooks, "SessionStart", "bd prime")
+			removeHookCommand(hooks, "PreCompact", "bd prime")
+			removeHookCommand(hooks, "SessionStart", "bd prime --stealth")
+			removeHookCommand(hooks, "PreCompact", "bd prime --stealth")
+
+			data, err = json.MarshalIndent(settings, "", "  ")
+			if err != nil {
+				_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
+				return err
+			}
+
+			if err := env.writeFile(settingsPath, data); err != nil {
+				_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
+				return err
+			}
+		}
 	}
 
-	var settings map[string]interface{}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		_, _ = fmt.Fprintf(env.stderr, "Error: failed to parse settings.json: %v\n", err)
-		return err
-	}
-
-	hooks, ok := settings["hooks"].(map[string]interface{})
-	if !ok {
-		_, _ = fmt.Fprintln(env.stdout, "No hooks found")
-		return nil
-	}
-
-	removeHookCommand(hooks, "SessionStart", "bd prime")
-	removeHookCommand(hooks, "PreCompact", "bd prime")
-	removeHookCommand(hooks, "SessionStart", "bd prime --stealth")
-	removeHookCommand(hooks, "PreCompact", "bd prime --stealth")
-
-	data, err = json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
-		return err
-	}
-
-	if err := env.writeFile(settingsPath, data); err != nil {
-		_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
-		return err
+	if err := removeAgents(claudeAgentsEnv(env), claudeAgentsIntegration); err != nil {
+		// Non-fatal
+		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
 	}
 
 	_, _ = fmt.Fprintln(env.stdout, "✓ Claude hooks removed")

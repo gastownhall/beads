@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 )
@@ -65,6 +67,55 @@ func gitHasAnyRemotes() bool {
 		return false
 	}
 	return strings.TrimSpace(string(output)) != ""
+}
+
+// gitRemoteGetURL returns the URL for a named git remote.
+func gitRemoteGetURL(remote string) (string, error) {
+	cmd := exec.Command("git", "remote", "get-url", remote)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// gitLsRemoteHasRef checks if a remote has a specific ref.
+// Returns false on any error (network, no remote, timeout, etc).
+// Uses a 10s timeout since this is a network call used for auto-detection,
+// and suppresses credential prompts to avoid blocking on SSH remotes.
+func gitLsRemoteHasRef(remote, ref string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", remote, ref)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(output)) != ""
+}
+
+// gitURLToDoltRemote converts a git remote URL to dolt's remote format.
+// HTTPS URLs get "git+" prefix: https://... → git+https://...
+// SCP-style SSH URLs are converted: git@host:path → git+ssh://git@host/path
+// SSH URLs get "git+" prefix: ssh://... → git+ssh://...
+// URLs that already have "git+" prefix are returned as-is.
+func gitURLToDoltRemote(url string) string {
+	if strings.HasPrefix(url, "git+") {
+		return url
+	}
+	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://") {
+		return "git+" + url
+	}
+	if strings.HasPrefix(url, "ssh://") {
+		return "git+" + url
+	}
+	// SCP-style: git@github.com:org/repo.git → git+ssh://git@github.com/org/repo.git
+	if idx := strings.Index(url, ":"); idx > 0 && !strings.Contains(url[:idx], "/") {
+		return "git+ssh://" + url[:idx] + "/" + url[idx+1:]
+	}
+	// Fallback: just prepend git+
+	return "git+" + url
 }
 
 // gitBranchHasUpstream checks if a specific branch has an upstream configured.

@@ -2124,6 +2124,85 @@ func TestFixGitignore_RedirectRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFixGitignore_BareParentWorktreeFallback(t *testing.T) {
+	bareDir, featureWorktreeDir := setupBareParentWorktreeForGitignoreTest(t)
+	bareBeadsDir := filepath.Join(bareDir, ".beads")
+	if err := os.MkdirAll(bareBeadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	featureBeadsDir := filepath.Join(featureWorktreeDir, ".beads")
+	if _, err := os.Stat(featureBeadsDir); !os.IsNotExist(err) {
+		t.Fatalf("expected no local .beads in worktree, got err=%v", err)
+	}
+
+	if err := FixGitignore(featureWorktreeDir); err != nil {
+		t.Fatalf("FixGitignore failed: %v", err)
+	}
+
+	targetGitignore := filepath.Join(bareBeadsDir, ".gitignore")
+	content, err := os.ReadFile(targetGitignore)
+	if err != nil {
+		t.Fatalf("expected .gitignore in bare-parent .beads, got error: %v", err)
+	}
+	if string(content) != GitignoreTemplate {
+		t.Errorf("expected canonical template at bare-parent target, got:\n%s", string(content))
+	}
+	if _, err := os.Stat(filepath.Join(featureBeadsDir, ".gitignore")); !os.IsNotExist(err) {
+		t.Errorf("FixGitignore should not create a local worktree .beads/.gitignore")
+	}
+}
+
+func TestCheckGitignore_BareParentWorktreeFallback(t *testing.T) {
+	bareDir, featureWorktreeDir := setupBareParentWorktreeForGitignoreTest(t)
+	bareBeadsDir := filepath.Join(bareDir, ".beads")
+	if err := os.MkdirAll(bareBeadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bareBeadsDir, ".gitignore"), []byte(GitignoreTemplate), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckGitignore(featureWorktreeDir)
+	if check.Status != "ok" {
+		t.Errorf("expected status ok when bare-parent .beads has valid .gitignore, got %s: %s", check.Status, check.Message)
+	}
+}
+
+func setupBareParentWorktreeForGitignoreTest(t *testing.T) (string, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "repo.git")
+	mainWorktreeDir := filepath.Join(tmpDir, "main")
+	featureWorktreeDir := filepath.Join(tmpDir, "feature")
+
+	runGitInDirForGitignoreTest(t, tmpDir, "init", "--bare", bareDir)
+	runGitInDirForGitignoreTest(t, tmpDir, "--git-dir", bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGitInDirForGitignoreTest(t, tmpDir, "--git-dir", bareDir, "config", "user.email", "test@example.com")
+	runGitInDirForGitignoreTest(t, tmpDir, "--git-dir", bareDir, "config", "user.name", "Test User")
+	emptyTree := runGitInDirForGitignoreTest(t, tmpDir, "--git-dir", bareDir, "hash-object", "-t", "tree", "/dev/null")
+	initCommit := runGitInDirForGitignoreTest(t, tmpDir, "--git-dir", bareDir, "commit-tree", "-m", "Initial commit", emptyTree)
+	runGitInDirForGitignoreTest(t, tmpDir, "--git-dir", bareDir, "update-ref", "HEAD", initCommit)
+	runGitInDirForGitignoreTest(t, tmpDir, "--git-dir", bareDir, "worktree", "add", mainWorktreeDir, "main")
+	runGitInDirForGitignoreTest(t, mainWorktreeDir, "branch", "feature")
+	runGitInDirForGitignoreTest(t, tmpDir, "--git-dir", bareDir, "worktree", "add", featureWorktreeDir, "feature")
+
+	return bareDir, featureWorktreeDir
+}
+
+func runGitInDirForGitignoreTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed in %s: %v\n%s", args, dir, err, output)
+	}
+
+	return strings.TrimSpace(string(output))
+}
+
 func TestEnsureProjectGitignore_FilePermissions(t *testing.T) {
 	// Verify that project .gitignore is created with 0644 permissions.
 	// Unlike .beads/.gitignore (0600), the project .gitignore must be

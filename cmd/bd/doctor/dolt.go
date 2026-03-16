@@ -126,7 +126,7 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 // CheckLockHealth before any checks that open embedded Dolt databases,
 // avoiding false positives from doctor's own noms LOCK files (GH#1981).
 func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	if !IsDoltBackend(beadsDir) {
 		return []DoctorCheck{
@@ -199,7 +199,7 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltConnection(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Only run this check for Dolt backend
 	if !IsDoltBackend(beadsDir) {
@@ -463,7 +463,7 @@ func checkStatusWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltStatus(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Only run for Dolt backend
 	if !IsDoltBackend(beadsDir) {
@@ -494,7 +494,7 @@ func CheckDoltStatus(path string) DoctorCheck {
 // It probes for stale noms LOCK files and checks whether the advisory lock
 // is currently held, providing actionable guidance when issues are found.
 func CheckLockHealth(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	if !IsDoltBackend(beadsDir) {
 		return DoctorCheck{

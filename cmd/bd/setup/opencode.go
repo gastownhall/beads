@@ -1,9 +1,12 @@
 package setup
 
+import "github.com/steveyegge/beads/internal/templates/agents"
+
 var opencodeIntegration = agentsIntegration{
 	name:         "OpenCode",
 	setupCommand: "bd setup opencode",
 	readHint:     "OpenCode reads AGENTS.md at the start of each session. Restart OpenCode if it is already running.",
+	profile:      agents.ProfileFull,
 }
 
 var opencodeEnvProvider = defaultAgentsEnv

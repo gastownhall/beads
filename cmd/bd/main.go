@@ -412,6 +412,26 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// Capture redirect info BEFORE FindDatabasePath() follows the redirect.
+		// When .beads/redirect points to a shared directory with a different
+		// dolt_database, the source's database name would be lost. Capture it
+		// early and set BEADS_DOLT_SERVER_DATABASE so all store opens use it.
+		redirectInfo := beads.GetRedirectInfo()
+		var sourceDoltDatabase string
+		if redirectInfo.IsRedirected && redirectInfo.LocalDir != "" {
+			rInfo := beads.ResolveRedirect(redirectInfo.LocalDir)
+			sourceDoltDatabase = rInfo.SourceDatabase
+		}
+		// Set env var early so ALL store opens (main + routed) use the correct
+		// database. Redirects may resolve to a shared .beads dir that serves
+		// multiple databases; the env var ensures the right one is selected.
+		if sourceDoltDatabase != "" && os.Getenv("BEADS_DOLT_SERVER_DATABASE") == "" {
+			_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", sourceDoltDatabase)
+			if os.Getenv("BD_DEBUG_ROUTING") != "" {
+				fmt.Fprintf(os.Stderr, "[routing] Preserved source dolt_database %q across redirect\n", sourceDoltDatabase)
+			}
+		}
+
 		// Initialize database path
 		if dbPath == "" {
 			// Use public API to find database (same logic as extensions)

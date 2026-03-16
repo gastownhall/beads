@@ -414,8 +414,7 @@ func runDiagnostics(path string) doctorResult {
 
 	// Check 1b: Metadata config file (GH#2478)
 	// Must come before database checks since they depend on metadata.json.
-	beadsDir := filepath.Join(path, ".beads")
-	beadsDir = beads.FollowRedirect(beadsDir)
+	beadsDir := doctor.ResolveBeadsDirForRepo(path)
 	configPath := configfile.ConfigPath(beadsDir)
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		metaCheck := doctorCheck{

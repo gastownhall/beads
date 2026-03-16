@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/templates/agents"
 )
 
 const (
@@ -54,6 +56,7 @@ var (
 		setupCommand: "bd setup mux",
 		readHint:     "Mux reads AGENTS.md in workspace and global contexts. Restart the workspace session if it is already running.",
 		docsURL:      muxAgentInstructionsURL,
+		profile:      agents.ProfileFull,
 	}
 
 	muxProjectIntegration = agentsIntegration{
@@ -61,6 +64,7 @@ var (
 		setupCommand: "bd setup mux --project",
 		readHint:     "Mux also supports layered workspace instructions via .mux/AGENTS.md.",
 		docsURL:      muxAgentInstructionsURL,
+		profile:      agents.ProfileFull,
 	}
 
 	muxGlobalIntegration = agentsIntegration{
@@ -68,6 +72,7 @@ var (
 		setupCommand: "bd setup mux --global",
 		readHint:     "Mux global defaults can be stored in ~/.mux/AGENTS.md.",
 		docsURL:      muxAgentInstructionsURL,
+		profile:      agents.ProfileFull,
 	}
 
 	muxEnvProvider     = defaultAgentsEnv

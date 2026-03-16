@@ -180,7 +180,7 @@ Now bd-2 is ready! 🎉
 
 ## Team Sync
 
-Share issues with your team using Dolt remotes. You can even use the same Git repo as your source code — Dolt stores data under `refs/dolt/data`, separate from standard Git refs.
+Share issues with your team using Dolt remotes. Dolt stores data under `refs/dolt/data` on the same Git remote, separate from standard Git refs.
 
 ```bash
 # Add a remote (GitHub example — also supports DoltHub, S3, GCS, local paths)
@@ -192,6 +192,8 @@ bd dolt push
 # Pull teammates' changes
 bd dolt pull
 ```
+
+When a teammate clones the repo, `bd bootstrap` auto-detects the existing database on `refs/dolt/data` and clones it — no manual remote setup needed.
 
 See [DOLT-BACKEND.md](DOLT-BACKEND.md#dolt-remotes) for remote configuration details and [FEDERATION-SETUP.md](../FEDERATION-SETUP.md) for multi-team sync.
 

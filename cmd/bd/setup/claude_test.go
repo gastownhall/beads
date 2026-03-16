@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/templates/agents"
 )
 
 func newClaudeTestEnv(t *testing.T) (claudeEnv, *bytes.Buffer, *bytes.Buffer) {
@@ -567,6 +569,14 @@ func TestInstallClaudeProject(t *testing.T) {
 	if !hasBeadsHooks(projectSettingsPath(env.projectDir)) {
 		t.Fatal("project hooks not detected")
 	}
+	instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	instructions, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", claudeInstructionsFile, err)
+	}
+	if !strings.Contains(string(instructions), "profile:minimal") {
+		t.Fatalf("expected minimal profile in %s", claudeInstructionsFile)
+	}
 	if !strings.Contains(stdout.String(), "project") {
 		t.Error("expected project installation message")
 	}
@@ -586,6 +596,10 @@ func TestInstallClaudeGlobalStealth(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "bd prime --stealth") {
 		t.Error("expected stealth command in settings")
+	}
+	instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if _, err := os.Stat(instructionsPath); err != nil {
+		t.Fatalf("expected %s to be created: %v", claudeInstructionsFile, err)
 	}
 	if !strings.Contains(stdout.String(), "globally") {
 		t.Error("expected global installation message")
@@ -634,6 +648,9 @@ func TestCheckClaudeScenarios(t *testing.T) {
 				},
 			},
 		})
+		if err := os.WriteFile(filepath.Join(env.projectDir, claudeInstructionsFile), []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+			t.Fatalf("write %s: %v", claudeInstructionsFile, err)
+		}
 		if err := checkClaude(env); err != nil {
 			t.Fatalf("checkClaude: %v", err)
 		}
@@ -656,6 +673,9 @@ func TestCheckClaudeScenarios(t *testing.T) {
 				},
 			},
 		})
+		if err := os.WriteFile(filepath.Join(env.projectDir, claudeInstructionsFile), []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+			t.Fatalf("write %s: %v", claudeInstructionsFile, err)
+		}
 		if err := checkClaude(env); err != nil {
 			t.Fatalf("checkClaude: %v", err)
 		}
@@ -671,6 +691,28 @@ func TestCheckClaudeScenarios(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "Run: bd setup claude") {
 			t.Error("expected guidance message")
+		}
+	})
+
+	t.Run("missing instructions", func(t *testing.T) {
+		env, stdout, _ := newClaudeTestEnv(t)
+		writeSettings(t, globalSettingsPath(env.homeDir), map[string]interface{}{
+			"hooks": map[string]interface{}{
+				"SessionStart": []interface{}{
+					map[string]interface{}{
+						"matcher": "",
+						"hooks": []interface{}{
+							map[string]interface{}{"type": "command", "command": "bd prime"},
+						},
+					},
+				},
+			},
+		})
+		if err := checkClaude(env); !errors.Is(err, errAgentsFileMissing) {
+			t.Fatalf("expected errAgentsFileMissing, got %v", err)
+		}
+		if !strings.Contains(stdout.String(), claudeInstructionsFile+" not found") {
+			t.Fatalf("expected missing %s message, got: %s", claudeInstructionsFile, stdout.String())
 		}
 	})
 }
@@ -692,6 +734,10 @@ func TestRemoveClaudeScenarios(t *testing.T) {
 				},
 			},
 		})
+		instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+		if err := os.WriteFile(instructionsPath, []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", claudeInstructionsFile, err)
+		}
 		if err := removeClaude(env, false); err != nil {
 			t.Fatalf("removeClaude: %v", err)
 		}
@@ -701,6 +747,13 @@ func TestRemoveClaudeScenarios(t *testing.T) {
 		}
 		if strings.Contains(string(data), "bd prime") {
 			t.Error("expected bd prime hooks removed")
+		}
+		instructions, err := os.ReadFile(instructionsPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", claudeInstructionsFile, err)
+		}
+		if strings.Contains(string(instructions), "BEGIN BEADS INTEGRATION") {
+			t.Fatalf("expected beads section removed from %s", claudeInstructionsFile)
 		}
 		if !strings.Contains(stdout.String(), "hooks removed") {
 			t.Error("expected success message")

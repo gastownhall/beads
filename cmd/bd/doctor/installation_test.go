@@ -45,6 +45,19 @@ func TestCheckPermissions(t *testing.T) {
 			t.Errorf("expected StatusOK for writable dir, got %s", check.Status)
 		}
 	})
+
+	t.Run("bare parent worktree fallback", func(t *testing.T) {
+		bareDir, worktreeDir := setupDoctorBareParentWorktree(t)
+		bareBeadsDir := filepath.Join(bareDir, ".beads")
+		if err := os.MkdirAll(bareBeadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckPermissions(worktreeDir)
+		if check.Status != StatusOK {
+			t.Fatalf("expected StatusOK for bare-parent fallback, got %s: %s", check.Status, check.Message)
+		}
+	})
 }
 
 func TestCheckPermissions_TempFileUsesSecurePerms(t *testing.T) {

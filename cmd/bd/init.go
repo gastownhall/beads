@@ -212,8 +212,11 @@ environment variable.`,
 		if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
 			beadsDirForInit = utils.CanonicalizePath(envBeadsDir)
 		} else {
-			localBeadsDir := filepath.Join(".", ".beads")
-			beadsDirForInit = beads.FollowRedirect(localBeadsDir)
+			beadsDirForInit = beads.GetWorktreeFallbackBeadsDir()
+			if beadsDirForInit == "" {
+				localBeadsDir := filepath.Join(".", ".beads")
+				beadsDirForInit = beads.FollowRedirect(localBeadsDir)
+			}
 		}
 
 		// Determine storage path.
@@ -233,34 +236,7 @@ environment variable.`,
 			FatalError("failed to get current directory: %v", err)
 		}
 
-		// Check if we're in a git worktree
-		// Guard with isGitRepo() check first - on Windows, git commands may hang
-		// when run outside a git repository (GH#727)
 		hasExplicitBeadsDir := os.Getenv("BEADS_DIR") != ""
-		isWorktree := false
-		if isGitRepo() {
-			isWorktree = git.IsWorktree()
-		}
-
-		// Prevent initialization from within a worktree (unless BEADS_DIR is
-		// explicitly set, which means the caller already knows where to init)
-		if isWorktree && !hasExplicitBeadsDir {
-			mainRepoRoot, err := git.GetMainRepoRoot()
-			if err != nil {
-				FatalError("failed to get main repository root: %v", err)
-			}
-
-			fmt.Fprintf(os.Stderr, "Error: cannot run 'bd init' from within a git worktree\n\n")
-			fmt.Fprintf(os.Stderr, "Git worktrees share the .beads database from the main repository.\n")
-			fmt.Fprintf(os.Stderr, "To fix this:\n\n")
-			fmt.Fprintf(os.Stderr, "  1. Initialize beads in the main repository:\n")
-			fmt.Fprintf(os.Stderr, "     cd %s\n", mainRepoRoot)
-			fmt.Fprintf(os.Stderr, "     bd init\n\n")
-			fmt.Fprintf(os.Stderr, "  2. Then create worktrees with beads support:\n")
-			fmt.Fprintf(os.Stderr, "     bd worktree create <path> --branch <branch-name>\n\n")
-			fmt.Fprintf(os.Stderr, "For more information, see: https://github.com/steveyegge/beads/blob/main/docs/WORKTREES.md\n")
-			os.Exit(1)
-		}
 
 		// Use the beadsDir computed earlier (before any directory creation)
 		// to ensure consistent path representation.
@@ -404,6 +380,16 @@ environment variable.`,
 				bootstrappedFromRemote = true
 				if !quiet {
 					fmt.Printf("  %s Bootstrapped from git remote: %s\n", ui.RenderPass("✓"), gitRemoteURL)
+				}
+			}
+		} else if !force && isGitRepo() && !isBareGitRepo() {
+			// Warn if origin has an existing beads database.
+			// Don't auto-clone here — bd bootstrap handles that.
+			if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
+				if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+					fmt.Fprintf(os.Stderr, "Note: origin has an existing beads database (refs/dolt/data).\n")
+					fmt.Fprintf(os.Stderr, "  Run 'bd bootstrap' instead to clone it.\n")
+					fmt.Fprintf(os.Stderr, "  Continuing with fresh database initialization.\n\n")
 				}
 			}
 		}
@@ -893,6 +879,12 @@ environment variable.`,
 			}
 			fmt.Printf("  Mode: %s\n", ui.RenderAccent("server"))
 			fmt.Printf("  Server: %s\n", ui.RenderAccent(fmt.Sprintf("%s@%s:%d", user, host, port)))
+			// Warn when using the default localhost — this is the #1 misconfiguration
+			// for setups where Dolt runs on a remote machine (e.g., over Tailscale).
+			if serverHost == "" && os.Getenv("BEADS_DOLT_SERVER_HOST") == "" {
+				fmt.Fprintf(os.Stderr, "\n  %s Server host defaulted to %s.\n", ui.RenderWarn("⚠"), configfile.DefaultDoltServerHost)
+				fmt.Fprintf(os.Stderr, "    If your Dolt server is remote, set BEADS_DOLT_SERVER_HOST or pass --server-host.\n")
+			}
 		}
 		fmt.Printf("  Database: %s\n", ui.RenderAccent(dbName))
 		fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(prefix))
@@ -1202,12 +1194,10 @@ func checkExistingBeadsData(prefix string) error {
 	// when run outside a git repository (GH#727)
 	var beadsDir string
 	if isGitRepo() && git.IsWorktree() {
-		// For worktrees, .beads should be in the main repository root
-		mainRepoRoot, err := git.GetMainRepoRoot()
-		if err != nil {
-			return nil // Can't determine main repo root, allow init to proceed
+		beadsDir = beads.GetWorktreeFallbackBeadsDir()
+		if beadsDir == "" {
+			return nil // Can't determine shared fallback, allow init to proceed
 		}
-		beadsDir = filepath.Join(mainRepoRoot, ".beads")
 	} else {
 		// For regular repos (or non-git directories), check current directory
 		beadsDir = filepath.Join(cwd, ".beads")

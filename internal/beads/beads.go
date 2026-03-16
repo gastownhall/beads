@@ -9,6 +9,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,66 @@ const CanonicalDatabaseName = "beads.db"
 
 // RedirectFileName is the name of the file that redirects to another .beads directory
 const RedirectFileName = "redirect"
+
+// SourceDatabaseInfo contains the dolt_database name from a source .beads/metadata.json,
+// preserved across a redirect so that the source directory's database identity is not
+// lost when the redirect target has a different dolt_database.
+//
+// When a .beads/redirect points to a shared .beads directory that serves multiple
+// databases, the source's metadata.json may specify a different dolt_database than
+// the target's. This struct captures the source database name so callers can
+// restore it after redirect resolution.
+type SourceDatabaseInfo struct {
+	// SourceDir is the original .beads directory (before redirect)
+	SourceDir string
+	// TargetDir is the resolved .beads directory (after redirect)
+	TargetDir string
+	// WasRedirected is true if a redirect was followed
+	WasRedirected bool
+	// SourceDatabase is dolt_database from the source metadata.json (raw field,
+	// NOT the env-var-aware GetDoltDatabase()). Empty if no source metadata exists
+	// or the source has no dolt_database configured.
+	SourceDatabase string
+}
+
+// ResolveRedirect follows a .beads/redirect file and captures the source directory's
+// dolt_database from metadata.json BEFORE following the redirect. This preserves
+// the source database identity across redirects.
+//
+// The env var BEADS_DOLT_SERVER_DATABASE still takes highest priority (handled by
+// GetDoltDatabase() in callers). This function only captures the raw config field
+// so callers can use it as an override when the env var is not set.
+//
+// Returns SourceDatabaseInfo with WasRedirected=true if a redirect was followed,
+// and SourceDatabase set to the source's dolt_database (if any).
+func ResolveRedirect(beadsDir string) SourceDatabaseInfo {
+	info := SourceDatabaseInfo{
+		SourceDir: beadsDir,
+		TargetDir: beadsDir,
+	}
+
+	// Read source metadata.json directly (NOT via configfile.Load which may trigger
+	// Dolt connections or recursive FollowRedirect calls causing deadlocks).
+	// We only need the raw dolt_database field.
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	if data, err := os.ReadFile(metadataPath); err == nil {
+		var raw struct {
+			DoltDatabase string `json:"dolt_database"`
+		}
+		if json.Unmarshal(data, &raw) == nil {
+			info.SourceDatabase = raw.DoltDatabase
+		}
+	}
+
+	// Follow redirect
+	resolved := FollowRedirect(beadsDir)
+	if resolved != beadsDir {
+		info.WasRedirected = true
+		info.TargetDir = resolved
+	}
+
+	return info
+}
 
 // FollowRedirect checks if a .beads directory contains a redirect file and follows it.
 // If a redirect file exists, it returns the target .beads directory path.
@@ -327,11 +388,7 @@ func findLocalBeadsDir() string {
 		}
 	}
 
-	// Check for worktree - use main repo's .beads
-	// Note: GetMainRepoRoot() is safe to call outside a git repo - it returns an error
-	mainRepoRoot, err := git.GetMainRepoRoot()
-	if err == nil && mainRepoRoot != "" {
-		beadsDir := filepath.Join(mainRepoRoot, ".beads")
+	if beadsDir := GetWorktreeFallbackBeadsDir(); beadsDir != "" {
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
 		}
@@ -528,20 +585,20 @@ func FindBeadsDir() string {
 			}
 		}
 
-		// 2c. Fall back to main repository's .beads
-		var err error
-		mainRepoRoot, err = git.GetMainRepoRoot()
-		if err == nil && mainRepoRoot != "" {
-			beadsDir := filepath.Join(mainRepoRoot, ".beads")
-			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-				// Follow redirect if present
-				beadsDir = FollowRedirect(beadsDir)
-
-				// Validate directory contains actual project files
-				if hasBeadsProjectFiles(beadsDir) {
-					return beadsDir
+		// 2c. Fall back to the canonical shared .beads for this worktree.
+		if fallbackBeadsDir := GetWorktreeFallbackBeadsDir(); fallbackBeadsDir != "" {
+			if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
+				fallbackBeadsDir = FollowRedirect(fallbackBeadsDir)
+				if hasBeadsProjectFiles(fallbackBeadsDir) {
+					return fallbackBeadsDir
 				}
 			}
+		}
+
+		var err error
+		mainRepoRoot, err = git.GetMainRepoRoot()
+		if err != nil {
+			mainRepoRoot = ""
 		}
 	}
 
@@ -613,6 +670,26 @@ func findGitRoot() string {
 	return git.GetRepoRoot()
 }
 
+// GetWorktreeFallbackBeadsDir returns the canonical shared .beads location for
+// the current git worktree when no local redirect or worktree-local .beads is present.
+func GetWorktreeFallbackBeadsDir() string {
+	if !git.IsWorktree() {
+		return ""
+	}
+
+	commonDir, err := git.GetGitCommonDir()
+	if err != nil || commonDir == "" {
+		return ""
+	}
+
+	commonDir = utils.CanonicalizePath(commonDir)
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Join(filepath.Dir(commonDir), ".beads")
+	}
+
+	return filepath.Join(commonDir, ".beads")
+}
+
 // worktreeRedirectTarget returns the resolved redirect target for the current
 // worktree's .beads/redirect file, or empty string if not in a worktree or no
 // redirect exists. This centralizes the per-worktree redirect override logic
@@ -678,20 +755,19 @@ func findDatabaseInTree() string {
 			}
 		}
 
-		// Fall back: search main repository root
-		var err error
-		mainRepoRoot, err = git.GetMainRepoRoot()
-		if err == nil && mainRepoRoot != "" {
-			beadsDir := filepath.Join(mainRepoRoot, ".beads")
-			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-				// Follow redirect if present
-				beadsDir = FollowRedirect(beadsDir)
-
-				// Use helper to find database (with warnings for auto-discovery)
-				if dbPath := findDatabaseInBeadsDir(beadsDir, true); dbPath != "" {
+		// Fall back: search the canonical shared .beads for this worktree.
+		if fallbackBeadsDir := GetWorktreeFallbackBeadsDir(); fallbackBeadsDir != "" {
+			if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
+				fallbackBeadsDir = FollowRedirect(fallbackBeadsDir)
+				if dbPath := findDatabaseInBeadsDir(fallbackBeadsDir, true); dbPath != "" {
 					return dbPath
 				}
 			}
+		}
+		var err error
+		mainRepoRoot, err = git.GetMainRepoRoot()
+		if err != nil {
+			mainRepoRoot = ""
 		}
 		// If not found in main repo, fall back to worktree search below
 	}

@@ -97,8 +97,7 @@ const localVersionFile = ".local_version"
 // GH#662: This was updated to check .local_version instead of metadata.json:LastBdVersion,
 // which is now deprecated.
 func CheckMetadataVersionTracking(path string, currentVersion string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 	localVersionPath := filepath.Join(beadsDir, localVersionFile)
 
 	// Read .local_version file

@@ -868,7 +868,8 @@ bd dolt push  # Force immediate sync, bypass debounce
 bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md (universal standard)
 bd setup codex    # Codex CLI - creates/updates AGENTS.md
 bd setup mux      # Mux - creates/updates AGENTS.md
-bd setup claude   # Claude Code - installs SessionStart/PreCompact hooks
+bd setup claude   # Claude Code - installs hooks + manages CLAUDE.md (minimal profile)
+bd setup gemini   # Gemini CLI - installs hooks + manages GEMINI.md (minimal profile)
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
 
@@ -877,6 +878,7 @@ bd setup factory --check
 bd setup codex --check
 bd setup mux --check
 bd setup claude --check
+bd setup gemini --check
 bd setup cursor --check
 bd setup aider --check
 
@@ -885,6 +887,7 @@ bd setup factory --remove
 bd setup codex --remove
 bd setup mux --remove
 bd setup claude --remove
+bd setup gemini --remove
 bd setup cursor --remove
 bd setup aider --remove
 ```
@@ -894,17 +897,23 @@ bd setup aider --remove
 bd setup claude              # Install globally (~/.claude/settings.json)
 bd setup claude --project    # Install for this project only
 bd setup claude --stealth    # Use stealth mode (flush only, no git operations)
+bd setup gemini              # Install globally (~/.gemini/settings.json)
+bd setup gemini --project    # Install for this project only
+bd setup gemini --stealth    # Use stealth mode (flush only, no git operations)
 bd setup mux --project       # Also install .mux/AGENTS.md workspace layer
 bd setup mux --global        # Also install ~/.mux/AGENTS.md global layer
 ```
 
 **What each setup does:**
-- **Factory.ai** (`bd setup factory`): Creates or updates AGENTS.md with beads workflow instructions (works with multiple AI tools using the AGENTS.md standard)
-- **Codex CLI** (`bd setup codex`): Creates or updates AGENTS.md with beads workflow instructions for Codex
-- **Mux** (`bd setup mux`): Creates or updates AGENTS.md with beads workflow instructions for Mux workspaces
-- **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events
+- **Factory.ai** (`bd setup factory`): Creates or updates AGENTS.md with beads workflow instructions (full profile — works with multiple AI tools using the AGENTS.md standard)
+- **Codex CLI** (`bd setup codex`): Creates or updates AGENTS.md with beads workflow instructions for Codex (full profile)
+- **Mux** (`bd setup mux`): Creates or updates AGENTS.md with beads workflow instructions for Mux workspaces (full profile)
+- **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events and manages a minimal-profile beads section in `CLAUDE.md`
+- **Gemini CLI** (`bd setup gemini`): Adds hooks to Gemini's settings.json that run `bd prime` on SessionStart and PreCompress events and manages a minimal-profile beads section in `GEMINI.md`
 - **Cursor** (`bd setup cursor`): Creates `.cursor/rules/beads.mdc` with workflow instructions
 - **Aider** (`bd setup aider`): Creates `.aider.conf.yml` with bd workflow instructions
+
+**`--check` behavior:** For section-based integrations (including Claude/Gemini instruction files), reports status as `current` (up to date), `stale` (legacy or hash mismatch — run setup to update), or `missing` (no beads section). Stale and missing return non-zero exit codes.
 
 See also:
 - [INSTALLING.md](INSTALLING.md#ide-and-editor-integrations) - Installation guide
