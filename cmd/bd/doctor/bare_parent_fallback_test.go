@@ -11,6 +11,9 @@ import (
 )
 
 func TestResolveBeadsDirForRepo_BareParentWorktreeFallback(t *testing.T) {
+	clearResolveBeadsDirCache()
+	t.Cleanup(clearResolveBeadsDirCache)
+
 	bareDir, featureWorktreeDir := setupBareParentWorktreeForDoctorTest(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
 	if err := os.MkdirAll(bareBeadsDir, 0o750); err != nil {
@@ -23,7 +26,66 @@ func TestResolveBeadsDirForRepo_BareParentWorktreeFallback(t *testing.T) {
 	}
 }
 
+func TestResolveBeadsDirForRepo_CachesFallbackResult(t *testing.T) {
+	clearResolveBeadsDirCache()
+	t.Cleanup(clearResolveBeadsDirCache)
+
+	tmpDir := t.TempDir()
+	repoPath := filepath.Join(tmpDir, "feature")
+	bareDir := filepath.Join(tmpDir, "repo.git")
+	bareBeadsDir := filepath.Join(bareDir, ".beads")
+	gitBinDir := filepath.Join(tmpDir, "bin")
+	gitLogPath := filepath.Join(tmpDir, "git.log")
+	gitScriptPath := filepath.Join(gitBinDir, "git")
+
+	for _, dir := range []string{repoPath, bareBeadsDir, gitBinDir} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gitScript := strings.Join([]string{
+		"#!/bin/sh",
+		"printf 'called\n' >> \"$FAKE_GIT_LOG\"",
+		"printf '%s\\n%s\\n' \"$FAKE_GIT_DIR\" \"$FAKE_GIT_COMMON_DIR\"",
+		"",
+	}, "\n")
+	if err := os.WriteFile(gitScriptPath, []byte(gitScript), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", gitBinDir)
+	t.Setenv("FAKE_GIT_LOG", gitLogPath)
+	t.Setenv("FAKE_GIT_DIR", filepath.Join(bareDir, "worktrees", "feature"))
+	t.Setenv("FAKE_GIT_COMMON_DIR", bareDir)
+
+	first := ResolveBeadsDirForRepo(repoPath)
+	if first != utils.CanonicalizePath(bareBeadsDir) {
+		t.Fatalf("first ResolveBeadsDirForRepo() = %q, want %q", first, utils.CanonicalizePath(bareBeadsDir))
+	}
+
+	if err := os.Remove(gitScriptPath); err != nil {
+		t.Fatal(err)
+	}
+
+	second := ResolveBeadsDirForRepo(repoPath)
+	if second != first {
+		t.Fatalf("second ResolveBeadsDirForRepo() = %q, want cached %q", second, first)
+	}
+
+	logData, err := os.ReadFile(gitLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := strings.Count(string(logData), "called\n"); calls != 1 {
+		t.Fatalf("git fallback call count = %d, want 1", calls)
+	}
+}
+
 func TestCheckMetadataVersionTracking_BareParentWorktreeFallback(t *testing.T) {
+	clearResolveBeadsDirCache()
+	t.Cleanup(clearResolveBeadsDirCache)
+
 	bareDir, featureWorktreeDir := setupBareParentWorktreeForDoctorTest(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
 	if err := os.MkdirAll(bareBeadsDir, 0o750); err != nil {
@@ -40,6 +102,9 @@ func TestCheckMetadataVersionTracking_BareParentWorktreeFallback(t *testing.T) {
 }
 
 func TestCheckLockHealth_BareParentWorktreeFallback(t *testing.T) {
+	clearResolveBeadsDirCache()
+	t.Cleanup(clearResolveBeadsDirCache)
+
 	bareDir, featureWorktreeDir := setupBareParentWorktreeForDoctorTest(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
 	if err := os.MkdirAll(filepath.Join(bareBeadsDir, "dolt"), 0o750); err != nil {
@@ -56,6 +121,9 @@ func TestCheckLockHealth_BareParentWorktreeFallback(t *testing.T) {
 }
 
 func TestCheckDoltLocks_BareParentWorktreeFallback(t *testing.T) {
+	clearResolveBeadsDirCache()
+	t.Cleanup(clearResolveBeadsDirCache)
+
 	bareDir, featureWorktreeDir := setupBareParentWorktreeForDoctorTest(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
 	if err := os.MkdirAll(bareBeadsDir, 0o750); err != nil {
