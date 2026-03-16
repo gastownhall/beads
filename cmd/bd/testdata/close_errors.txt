@@ -9,3 +9,13 @@ stderr 'no issue found'
 # Close with no args and no last-touched should fail
 ! bd close
 stderr 'no issue ID provided'
+
+# validation.on-close=error should reject terse close reasons
+bd create 'Close validation test' --type chore --description 'Testing close reason validation'
+bd config set validation.on-close error
+exec sh -c 'ID=$(bd list --json | grep -oE "test-[a-z0-9]+" | head -1) && ! bd close "$ID" --reason "done" 2>&1 | grep -q "terse"'
+
+# validation.on-close=warn should warn but still close
+bd config set validation.on-close warn
+bd create 'Close warn test' --type chore --description 'Testing close reason warn mode'
+exec sh -c 'ID=$(bd list --status open --json | grep -oE "test-[a-z0-9]+" | head -1) && bd close "$ID" --reason "done" 2>&1 | grep -q "terse"'

@@ -17,3 +17,15 @@ stderr 'invalid issue type'
 # Create with invalid priority should fail
 ! bd create 'Test' --priority 99
 stderr 'invalid priority'
+
+# --validate should fail without acceptance criteria for task
+! bd create 'Missing acceptance' --type task --description 'No criteria here' --validate
+stderr 'Acceptance Criteria'
+
+# --validate should pass when --acceptance field provides criteria (GH#2468 parity)
+bd create 'Has acceptance' --type task --description 'Do the thing' --acceptance 'It works' --validate
+stdout 'Created issue:'
+
+# --validate + --dry-run should still validate (not bypass)
+! bd create 'Dryrun validate' --type bug --description 'No sections' --validate --dry-run
+stderr 'Steps to Reproduce'

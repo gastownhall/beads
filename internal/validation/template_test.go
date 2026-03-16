@@ -307,3 +307,61 @@ func TestLintIssue(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCloseReason(t *testing.T) {
+	tests := []struct {
+		name    string
+		reason  string
+		wantErr bool
+	}{
+		{
+			name:    "empty reason",
+			reason:  "",
+			wantErr: true,
+		},
+		{
+			name:    "default reason",
+			reason:  "Closed",
+			wantErr: true,
+		},
+		{
+			name:    "default reason case insensitive",
+			reason:  "closed",
+			wantErr: true,
+		},
+		{
+			name:    "terse reason",
+			reason:  "fixed the bug",
+			wantErr: true,
+		},
+		{
+			name:    "adequate reason",
+			reason:  "Fixed the login timeout by increasing session TTL to 24h",
+			wantErr: false,
+		},
+		{
+			name:    "exactly 20 chars",
+			reason:  "12345678901234567890",
+			wantErr: false,
+		},
+		{
+			name:    "whitespace padded but terse",
+			reason:  "   done   ",
+			wantErr: true,
+		},
+		{
+			name:    "whitespace padded but adequate",
+			reason:  "   Fixed the auth flow for SSO users   ",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateCloseReason(tt.reason)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateCloseReason(%q) error = %v, wantErr %v", tt.reason, err, tt.wantErr)
+			}
+		})
+	}
+}

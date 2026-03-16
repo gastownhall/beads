@@ -290,7 +290,7 @@ func showConfigYAMLOverrides(dbConfig map[string]string) {
 		"sync.mode", "sync.git-remote", "no-push", "no-git-ops",
 		"git.author", "git.no-gpg-sign",
 		"create.require-description",
-		"validation.on-create", "validation.on-sync",
+		"validation.on-create", "validation.on-close", "validation.on-sync",
 		"hierarchy.max-depth",
 		"dolt.idle-timeout",
 	}
