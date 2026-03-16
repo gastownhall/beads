@@ -168,9 +168,18 @@ func startDoltContainer() error {
 		return fmt.Errorf("getting mapped port: %w", err)
 	}
 
-	if _, err := strconv.Atoi(p.Port()); err != nil {
+	parsedPort, err := strconv.Atoi(p.Port())
+	if err != nil {
 		_ = testcontainers.TerminateContainer(ctr)
 		return fmt.Errorf("parsing port %q: %w", p.Port(), err)
+	}
+	if !WaitForServer(parsedPort, serverStartTimeout) {
+		_ = testcontainers.TerminateContainer(ctr)
+		return fmt.Errorf("waiting for Dolt server on 127.0.0.1:%d: timed out after %s", parsedPort, serverStartTimeout)
+	}
+	if err := WaitForSQLServer(parsedPort, serverStartTimeout); err != nil {
+		_ = testcontainers.TerminateContainer(ctr)
+		return err
 	}
 
 	doltTestPort = p.Port()
@@ -221,6 +230,16 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	}
 
 	portStr := port.Port()
+	portInt, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parsing mapped port %q: %v", portStr, err)
+	}
+	if !WaitForServer(portInt, serverStartTimeout) {
+		t.Fatalf("waiting for Dolt server on 127.0.0.1:%d timed out after %s", portInt, serverStartTimeout)
+	}
+	if err := WaitForSQLServer(portInt, serverStartTimeout); err != nil {
+		t.Fatalf("%v", err)
+	}
 	t.Setenv("BEADS_DOLT_PORT", portStr)
 	return portStr
 }

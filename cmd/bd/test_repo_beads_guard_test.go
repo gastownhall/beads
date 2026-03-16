@@ -9,11 +9,33 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 // beforeTestsHook is set by CGO-tagged test files to perform setup before tests run
 // (e.g., starting a shared test Dolt server). Returns a cleanup function.
 var beforeTestsHook func() func()
+
+// acquireCmdBDHarnessLock serializes the cmd/bd package across concurrent
+// `go test ./cmd/bd ...` processes. This suite intentionally mutates
+// process-global state (HOME, BEADS_TEST_MODE, stdout/stderr, package globals)
+// and shares external Dolt test harness resources, so cross-process overlap
+// can create harness-only flakes that look like product failures.
+func acquireCmdBDHarnessLock() (func(), error) {
+	lockPath := filepath.Join(os.TempDir(), "beads-cmd-bd-tests.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open harness lock %s: %w", lockPath, err)
+	}
+	if err := lockfile.FlockExclusiveBlocking(f); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock harness file %s: %w", lockPath, err)
+	}
+	return func() {
+		_ = lockfile.FlockUnlock(f)
+		_ = f.Close()
+	}, nil
+}
 
 // Guardrail: ensure the cmd/bd test suite does not touch the real repo .beads state.
 // Disable with BEADS_TEST_GUARD_DISABLE=1 (useful when running tests while actively using beads).
@@ -73,6 +95,13 @@ func testMainInner(m *testing.M) int {
 			os.Setenv("BEADS_DIR", origBeadsDir)
 		}
 	}()
+
+	releaseHarnessLock, err := acquireCmdBDHarnessLock()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to acquire cmd/bd harness lock: %v\n", err)
+		return 1
+	}
+	defer releaseHarnessLock()
 
 	// BD_BRANCH is no longer used (all writers operate on main with transactions).
 

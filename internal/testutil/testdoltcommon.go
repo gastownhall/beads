@@ -1,6 +1,8 @@
 package testutil
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"net"
 	"time"
@@ -34,4 +36,48 @@ func WaitForServer(port int, timeout time.Duration) bool {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return false
+}
+
+// WaitForSQLServer polls until the Dolt SQL server on the given port can
+// complete a root connection and answer SHOW DATABASES. This is stricter than
+// WaitForServer(): Docker can expose the TCP port before the SQL layer is ready,
+// which makes early test connections fail with unexpected EOF / invalid
+// connection even though a raw dial succeeds.
+func WaitForSQLServer(port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/?parseTime=true&timeout=1s&readTimeout=1s&writeTimeout=1s", port)
+	var lastErr error
+	consecutiveSuccesses := 0
+	for time.Now().Before(deadline) {
+		db, err := sql.Open("mysql", dsn)
+		if err == nil {
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(1)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			rows, queryErr := db.QueryContext(ctx, "SHOW DATABASES")
+			cancel()
+			if rows != nil {
+				_ = rows.Close()
+			}
+			_ = db.Close()
+			if queryErr == nil {
+				consecutiveSuccesses++
+				if consecutiveSuccesses >= 3 {
+					return nil
+				}
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			consecutiveSuccesses = 0
+			lastErr = queryErr
+		} else {
+			consecutiveSuccesses = 0
+			lastErr = err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out waiting for SQL readiness")
+	}
+	return fmt.Errorf("waiting for Dolt SQL server on 127.0.0.1:%d: %w", port, lastErr)
 }

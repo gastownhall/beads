@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -33,22 +35,41 @@ func startTestDoltServer() func() {
 	}
 
 	testDoltServerPort = testutil.DoltContainerPortInt()
+	sharedInitRoot, err := os.MkdirTemp("", "beads-cmdbd-shared-init-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: shared init temp dir failed: %v (falling back to per-test DBs)\n", err)
+	}
 
 	// Set up shared database for branch-per-test isolation (bd-xmf).
 	// Instead of CREATE/DROP DATABASE per test, tests branch from this
 	// shared DB, eliminating ~1-2s of overhead per test.
-	testSharedDB = "cmdbd_pkg_shared"
+	testSharedDB = fmt.Sprintf("cmdbd_pkg_shared_%d", os.Getpid())
 	db, err := testutil.SetupSharedTestDB(testDoltServerPort, testSharedDB)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "WARNING: shared DB setup failed: %v (falling back to per-test DBs)\n", err)
 		testSharedDB = ""
 	} else {
 		testSharedConn = db
-		if err := initCmdBDSharedSchema(testDoltServerPort); err != nil {
+		if sharedInitRoot == "" {
+			fmt.Fprintf(os.Stderr, "WARNING: shared schema init skipped: no isolated temp dir (falling back to per-test DBs)\n")
+			testSharedDB = ""
+			db.Close()
+			testSharedConn = nil
+		} else if err := initCmdBDSharedSchema(sharedInitRoot, testDoltServerPort); err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: shared schema init failed: %v (falling back to per-test DBs)\n", err)
 			testSharedDB = ""
 			db.Close()
 			testSharedConn = nil
+		}
+	}
+	if testDoltServerPort != 0 {
+		if err := testutil.WaitForSQLServer(testDoltServerPort, 30*time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: shared Dolt server not stable after cmd/bd harness setup: %v (falling back to per-test DBs)\n", err)
+			if testSharedConn != nil {
+				testSharedConn.Close()
+				testSharedConn = nil
+			}
+			testSharedDB = ""
 		}
 	}
 
@@ -60,16 +81,24 @@ func startTestDoltServer() func() {
 		testSharedDB = ""
 		testDoltServerPort = 0
 		os.Unsetenv("BEADS_DOLT_PORT")
+		if sharedInitRoot != "" {
+			_ = os.RemoveAll(sharedInitRoot)
+		}
 		testutil.TerminateDoltContainer()
 	}
 }
 
 // initCmdBDSharedSchema initializes the schema and config on the shared database
 // and commits to main so branches get a clean snapshot.
-func initCmdBDSharedSchema(port int) error {
+func initCmdBDSharedSchema(sharedInitRoot string, port int) error {
 	ctx := context.Background()
+	beadsDir := filepath.Join(sharedInitRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir shared init beads dir: %w", err)
+	}
 	cfg := &dolt.Config{
-		Path:         "/tmp/cmdbd-shared-init",
+		Path:         filepath.Join(beadsDir, "dolt"),
+		BeadsDir:     beadsDir,
 		ServerHost:   "127.0.0.1",
 		ServerPort:   port,
 		Database:     testSharedDB,
