@@ -233,27 +233,18 @@ func updateBeadsSection(content string) string {
 }
 
 // updateBeadsSectionWithProfile replaces the beads section with the given profile.
-// Handles both legacy markers (exact match) and new-format markers (prefix match with metadata).
+// Delegates to the canonical agents.ReplaceSection. Returns an error string on
+// malformed markers (logged by callers) instead of silently appending.
 func updateBeadsSectionWithProfile(content string, profile agents.Profile) string {
-	beadsSection := agents.RenderSection(profile)
-
-	start := findBeginMarker(content)
-	end := strings.Index(content, agentsEndMarker)
-
-	if start == -1 || end == -1 || start > end {
-		// Markers not found or invalid, append instead
-		return content + "\n\n" + beadsSection
+	replaced, _, err := agents.ReplaceSection(content, profile)
+	if err != nil {
+		// ErrNoSection or ErrMalformedMarkers — return content unchanged.
+		// Callers check containsBeadsMarker() before calling, so ErrNoSection
+		// should not occur in practice. Malformed markers are preserved rather
+		// than silently appending a duplicate section.
+		return content
 	}
-
-	// Replace section between markers (including end marker line)
-	endOfEndMarker := end + len(agentsEndMarker)
-	// Find the next newline after end marker
-	nextNewline := strings.Index(content[endOfEndMarker:], "\n")
-	if nextNewline != -1 {
-		endOfEndMarker += nextNewline + 1
-	}
-
-	return content[:start] + beadsSection + content[endOfEndMarker:]
+	return replaced
 }
 
 // removeBeadsSection removes the beads section from content

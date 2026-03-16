@@ -193,10 +193,12 @@ func ParseHierarchicalID(id string) (parentID string, childNum int, ok bool) {
 	return parentID, num, true
 }
 
-// AllEphemeral returns true if every issue in the slice is ephemeral.
-func AllEphemeral(issues []*types.Issue) bool {
+// AllWisps returns true if every issue in the slice should be routed to the
+// wisps table (i.e., is ephemeral or no-history). Used to gate the fast path
+// that skips Dolt versioning in batch creates.
+func AllWisps(issues []*types.Issue) bool {
 	for _, issue := range issues {
-		if !issue.Ephemeral {
+		if !issue.Ephemeral && !issue.NoHistory {
 			return false
 		}
 	}

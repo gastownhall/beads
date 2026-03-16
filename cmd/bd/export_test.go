@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestExportToFile(t *testing.T) {
@@ -399,5 +400,138 @@ func TestFilterOutPollution(t *testing.T) {
 		if got := isTestIssue(tt.title); got != tt.want {
 			t.Errorf("isTestIssue(%q) = %v, want %v", tt.title, got, tt.want)
 		}
+	}
+}
+
+func TestExportNoHistoryBeadRoundTrip(t *testing.T) {
+	// GH#2619: NoHistory beads are stored in the wisps table. The JSONL export
+	// must include them with no_history=true, and import must preserve the flag.
+	// If no_history is dropped during import, the bead becomes GC-eligible.
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	ensureTestMode(t)
+	saved := saveAndRestoreGlobals(t)
+	_ = saved
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	dbName := uniqueTestDBName(t)
+	testDBPath := filepath.Join(beadsDir, "dolt")
+	writeTestMetadata(t, testDBPath, dbName)
+	s := newTestStore(t, testDBPath)
+	store = s
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	t.Cleanup(func() {
+		store = nil
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	})
+
+	ctx := context.Background()
+	rootCtx = ctx
+
+	// Create a NoHistory bead using the store API (routes to wisps table with no_history=1).
+	noHistoryBead := &types.Issue{
+		Title:     "NoHistory export test bead",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		NoHistory: true,
+	}
+	if err := s.CreateIssue(ctx, noHistoryBead, "test"); err != nil {
+		t.Fatalf("CreateIssue (NoHistory): %v", err)
+	}
+
+	// Also create a regular issue to ensure the export contains both.
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"nohistory-regular-1", "Regular issue", "", "", "", "", "open", 1, "task"); err != nil {
+		t.Fatalf("insert regular issue: %v", err)
+	}
+
+	// Export to file.
+	exportFile := filepath.Join(tmpDir, "nohistory_export.jsonl")
+	exportOutput = exportFile
+	exportAll = true // include everything
+	exportIncludeInfra = false
+	exportScrub = false
+	t.Cleanup(func() {
+		exportOutput = ""
+		exportAll = false
+	})
+
+	if err := runExport(nil, nil); err != nil {
+		t.Fatalf("runExport: %v", err)
+	}
+
+	data, err := os.ReadFile(exportFile)
+	if err != nil {
+		t.Fatalf("read export file: %v", err)
+	}
+
+	// Verify the NoHistory bead appears in the export with no_history=true.
+	lines := splitJSONL(data)
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 lines in export (regular + NoHistory), got %d", len(lines))
+	}
+
+	var noHistoryLine map[string]interface{}
+	for _, line := range lines {
+		var rec map[string]interface{}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("parse exported JSONL: %v", err)
+		}
+		if rec["title"] == "NoHistory export test bead" {
+			noHistoryLine = rec
+			break
+		}
+	}
+	if noHistoryLine == nil {
+		t.Fatal("NoHistory bead not found in exported JSONL — export missed wisps with no_history=true")
+	}
+	if noHistoryLine["no_history"] != true {
+		t.Errorf("exported NoHistory bead has no_history=%v, want true", noHistoryLine["no_history"])
+	}
+
+	// Import the exported JSONL into a fresh store and verify no_history survives.
+	tmpDir2 := t.TempDir()
+	dbPath2 := filepath.Join(tmpDir2, "dolt")
+	store2 := newTestStore(t, dbPath2)
+
+	count, err := importFromLocalJSONL(ctx, store2, exportFile)
+	if err != nil {
+		t.Fatalf("importFromLocalJSONL: %v", err)
+	}
+	if count < 2 {
+		t.Errorf("expected at least 2 issues imported, got %d", count)
+	}
+
+	// Retrieve the NoHistory bead from the new store and check the flag.
+	imported, err := store2.GetIssue(ctx, noHistoryBead.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s) after import: %v", noHistoryBead.ID, err)
+	}
+	if !imported.NoHistory {
+		t.Error("no_history=true was lost during export→import roundtrip: bead is now GC-eligible")
+	}
+	if imported.Ephemeral {
+		t.Error("NoHistory bead must not become ephemeral=true after roundtrip")
 	}
 }

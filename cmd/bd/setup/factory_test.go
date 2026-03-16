@@ -38,9 +38,9 @@ Some content
 More content after`,
 		},
 		{
-			name:     "append when no markers exist",
+			name:     "no markers returns content unchanged",
 			content:  "# My Project\n\nSome content",
-			expected: "# My Project\n\nSome content\n\n" + beadsSection,
+			expected: "# My Project\n\nSome content",
 		},
 		{
 			name: "handle section at end of file",

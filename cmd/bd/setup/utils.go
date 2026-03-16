@@ -11,7 +11,15 @@ import (
 // atomicWriteFile writes data to a file atomically using a unique temporary file.
 // This prevents race conditions when multiple processes write to the same file.
 // If path is a symlink, writes to the resolved target (preserving the symlink).
-func atomicWriteFile(path string, data []byte) error {
+// An optional permissions argument sets the file mode (default 0644).
+//
+//nolint:unparam // perm is intentionally variadic for callers that need non-default permissions
+func atomicWriteFile(path string, data []byte, perm ...os.FileMode) error {
+	mode := os.FileMode(0644)
+	if len(perm) > 0 {
+		mode = perm[0]
+	}
+
 	targetPath, err := utils.ResolveForWrite(path)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
@@ -39,8 +47,7 @@ func atomicWriteFile(path string, data []byte) error {
 		return fmt.Errorf("close temp file: %w", err)
 	}
 
-	// Set permissions to 0600 (owner read/write only)
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := os.Chmod(tmpPath, mode); err != nil {
 		_ = os.Remove(tmpPath) // Best effort cleanup
 		return fmt.Errorf("set permissions: %w", err)
 	}

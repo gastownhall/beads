@@ -147,6 +147,10 @@ var createCmd = &cobra.Command{
 		rigOverride, _ := cmd.Flags().GetString("rig")
 		prefixOverride, _ := cmd.Flags().GetString("prefix")
 		wisp, _ := cmd.Flags().GetBool("ephemeral")
+		noHistory, _ := cmd.Flags().GetBool("no-history")
+		if wisp && noHistory {
+			FatalError("--ephemeral and --no-history are mutually exclusive")
+		}
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		var molType types.MolType
 		if molTypeStr != "" {
@@ -257,6 +261,7 @@ var createCmd = &cobra.Command{
 				Assignee:           assignee,
 				ExternalRef:        externalRefPtr,
 				Ephemeral:          wisp,
+				NoHistory:          noHistory,
 				CreatedBy:          getActorWithGit(),
 				Owner:              getOwner(),
 				MolType:            molType,
@@ -331,7 +336,7 @@ var createCmd = &cobra.Command{
 								// Found a matching route - auto-route to that rig
 								rigName := routing.ExtractProjectFromPath(route.Path)
 								if rigName != "" {
-									createInRig(cmd, rigName, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, specID, wisp)
+									createInRig(cmd, rigName, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, specID, wisp, noHistory)
 									return
 								}
 							}
@@ -351,7 +356,7 @@ var createCmd = &cobra.Command{
 			targetRig = prefixOverride
 		}
 		if targetRig != "" {
-			createInRig(cmd, targetRig, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, specID, wisp)
+			createInRig(cmd, targetRig, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, specID, wisp, noHistory)
 			return
 		}
 
@@ -542,6 +547,7 @@ var createCmd = &cobra.Command{
 			ExternalRef:        externalRefPtr,
 			EstimatedMinutes:   estimatedMinutes,
 			Ephemeral:          wisp,
+			NoHistory:          noHistory,
 			CreatedBy:          getActorWithGit(),
 			Owner:              getOwner(),
 			MolType:            molType,
@@ -826,6 +832,7 @@ func init() {
 	createCmd.Flags().String("prefix", "", "Create issue in rig by prefix (e.g., --prefix bd- or --prefix bd or --prefix beads)")
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (short-lived, subject to TTL compaction)")
+	createCmd.Flags().Bool("no-history", false, "Skip Dolt commit history without making GC-eligible (for permanent agent beads)")
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-polecat), patrol (recurring ops), work (default)")
 	createCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 	createCmd.Flags().Bool("validate", false, "Validate description contains required sections for issue type")
@@ -853,7 +860,7 @@ func init() {
 
 // createInRig creates an issue in a different rig using --rig flag or auto-routing.
 // This directly creates in the target rig's database.
-func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, issueType string, priority int, design, acceptance, notes, assignee string, labels []string, externalRef, specID string, wisp bool) {
+func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, issueType string, priority int, design, acceptance, notes, assignee string, labels []string, externalRef, specID string, wisp, noHistory bool) {
 	ctx := rootCtx
 
 	// Find the town-level beads directory (where routes.jsonl lives)
@@ -970,6 +977,7 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 		Assignee:           assignee,
 		ExternalRef:        externalRefPtr,
 		Ephemeral:          wisp,
+		NoHistory:          noHistory,
 		CreatedBy:          getActorWithGit(),
 		Owner:              getOwner(),
 		// Event fields (bd-xwvo fix)

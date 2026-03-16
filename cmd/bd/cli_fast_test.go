@@ -1324,3 +1324,175 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 		}
 	})
 }
+
+// TestCLI_CreateNoHistory tests that the --no-history CLI flag is wired through
+// to the created issue (GH#2619). A storage-layer test already covers the DB
+// semantics; this test verifies the CLI flag is actually parsed and passed.
+func TestCLI_CreateNoHistory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+
+	t.Run("NoHistoryFlagSetOnCreatedIssue", func(t *testing.T) {
+		tmpDir := setupCLITestDB(t)
+		out := runBDInProcess(t, tmpDir, "create", "No-history agent bead", "-p", "2", "--no-history", "--json")
+
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, out)
+		}
+		if result["no_history"] != true {
+			t.Errorf("Expected no_history=true on created issue, got: %v", result["no_history"])
+		}
+		// Must NOT be ephemeral (mutually exclusive)
+		if result["ephemeral"] == true {
+			t.Errorf("no-history issue must not be ephemeral, but ephemeral=true")
+		}
+	})
+
+	t.Run("NoHistoryPersistedAfterShow", func(t *testing.T) {
+		tmpDir := setupCLITestDB(t)
+		out := runBDInProcess(t, tmpDir, "create", "No-history bead for show test", "-p", "2", "--no-history", "--json")
+
+		var created map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &created); err != nil {
+			t.Fatalf("Failed to parse create output: %v\nOutput: %s", err, out)
+		}
+		id := created["id"].(string)
+
+		showOut := runBDInProcess(t, tmpDir, "show", id, "--json")
+		var issues []map[string]interface{}
+		if err := json.Unmarshal([]byte(showOut), &issues); err != nil {
+			t.Fatalf("Failed to parse show output: %v\nOutput: %s", err, showOut)
+		}
+		if len(issues) == 0 {
+			t.Fatalf("show returned no issues for id %s", id)
+		}
+		if issues[0]["no_history"] != true {
+			t.Errorf("Expected no_history=true after show, got: %v", issues[0]["no_history"])
+		}
+	})
+
+	t.Run("EphemeralAndNoHistoryMutuallyExclusive", func(t *testing.T) {
+		tmpDir := setupCLITestDB(t)
+		_, stderr, err := runBDInProcessAllowError(t, tmpDir, "create", "Should fail", "--ephemeral", "--no-history")
+		if err == nil {
+			t.Error("Expected error when combining --ephemeral and --no-history, got none")
+		}
+		if !strings.Contains(stderr, "mutually exclusive") {
+			t.Errorf("Expected 'mutually exclusive' in stderr, got: %s", stderr)
+		}
+	})
+}
+
+// TestCLI_WispListTypeFilter tests that bd mol wisp list --type filters correctly.
+func TestCLI_WispListTypeFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+
+	tmpDir := setupCLITestDB(t)
+
+	// Create two ephemeral wisps of different built-in types
+	runBDInProcess(t, tmpDir, "create", "Bug wisp", "--ephemeral", "--type", "bug", "-p", "2")
+	runBDInProcess(t, tmpDir, "create", "Task wisp", "--ephemeral", "--type", "task", "-p", "2")
+
+	// --type bug should return only the bug wisp
+	out := runBDInProcess(t, tmpDir, "mol", "wisp", "list", "--type", "bug", "--json")
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, out)
+	}
+	wisps, ok := result["wisps"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected 'wisps' array in JSON output, got: %v", result)
+	}
+	if len(wisps) != 1 {
+		t.Errorf("Expected 1 wisp with type=bug, got %d: %v", len(wisps), wisps)
+	}
+	if len(wisps) == 1 {
+		w := wisps[0].(map[string]interface{})
+		if w["type"] != "bug" {
+			t.Errorf("Expected wisp type=bug, got: %v", w["type"])
+		}
+	}
+
+	// --type task should return only the task wisp
+	out = runBDInProcess(t, tmpDir, "mol", "wisp", "list", "--type", "task", "--json")
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, out)
+	}
+	wisps, ok = result["wisps"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected 'wisps' array, got: %v", result)
+	}
+	if len(wisps) != 1 {
+		t.Errorf("Expected 1 wisp with type=task, got %d", len(wisps))
+	}
+	if len(wisps) == 1 {
+		w := wisps[0].(map[string]interface{})
+		if w["type"] != "task" {
+			t.Errorf("Expected wisp type=task, got: %v", w["type"])
+		}
+	}
+
+	// No --type filter returns both
+	out = runBDInProcess(t, tmpDir, "mol", "wisp", "list", "--json")
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, out)
+	}
+	wisps = result["wisps"].([]interface{})
+	if len(wisps) != 2 {
+		t.Errorf("Expected 2 wisps without type filter, got %d", len(wisps))
+	}
+}
+
+// TestCLI_WispGCExcludeType tests that bd mol wisp gc --exclude-type skips
+// wisps of the excluded type during garbage collection.
+func TestCLI_WispGCExcludeType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+
+	tmpDir := setupCLITestDB(t)
+
+	// Create two ephemeral wisps of different built-in types.
+	// Use --age=0s so that ALL wisps (regardless of actual age) are treated
+	// as abandoned GC candidates.
+	bugOut := runBDInProcess(t, tmpDir, "create", "Bug wisp to keep", "--ephemeral", "--type", "bug", "-p", "2", "--json")
+	taskOut := runBDInProcess(t, tmpDir, "create", "Task wisp to gc", "--ephemeral", "--type", "task", "-p", "2", "--json")
+
+	var bugCreated, taskCreated map[string]interface{}
+	if err := json.Unmarshal([]byte(bugOut), &bugCreated); err != nil {
+		t.Fatalf("Failed to parse bug create output: %v\nOutput: %s", err, bugOut)
+	}
+	if err := json.Unmarshal([]byte(taskOut), &taskCreated); err != nil {
+		t.Fatalf("Failed to parse task create output: %v\nOutput: %s", err, taskOut)
+	}
+	bugID := bugCreated["id"].(string)
+	taskID := taskCreated["id"].(string)
+
+	// Dry-run GC with --exclude-type bug, --age=0s (treats all wisps as abandoned).
+	// The WispGCResult dry-run JSON uses cleaned_ids to list what would be deleted.
+	gcOut := runBDInProcess(t, tmpDir, "mol", "wisp", "gc", "--exclude-type", "bug", "--age", "0s", "--dry-run", "--json")
+	var gcResult map[string]interface{}
+	if err := json.Unmarshal([]byte(gcOut), &gcResult); err != nil {
+		t.Fatalf("Failed to parse gc JSON: %v\nOutput: %s", err, gcOut)
+	}
+
+	// cleaned_ids holds the IDs that would be deleted (dry_run=true).
+	cleanedRaw, _ := gcResult["cleaned_ids"].([]interface{})
+	cleanedIDs := make(map[string]bool, len(cleanedRaw))
+	for _, v := range cleanedRaw {
+		if id, ok := v.(string); ok {
+			cleanedIDs[id] = true
+		}
+	}
+
+	if !cleanedIDs[taskID] {
+		t.Errorf("Expected task wisp %s in GC candidates (not excluded), got cleaned_ids: %v", taskID, cleanedRaw)
+	}
+	if cleanedIDs[bugID] {
+		t.Errorf("Bug wisp %s should be excluded from GC via --exclude-type bug, but appeared in cleaned_ids", bugID)
+	}
+}

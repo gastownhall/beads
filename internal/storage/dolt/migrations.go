@@ -29,6 +29,7 @@ var migrationsList = []Migration{
 	{"wisp_dep_type_index", migrations.MigrateWispDepTypeIndex},
 	{"cleanup_autopush_metadata", migrations.MigrateCleanupAutopushMetadata},
 	{"uuid_primary_keys", migrations.MigrateUUIDPrimaryKeys},
+	{"add_no_history_column", migrations.MigrateAddNoHistoryColumn},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.

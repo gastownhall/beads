@@ -171,6 +171,44 @@ func TestIssueValidation(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "ephemeral and no_history both set",
+			issue: Issue{
+				ID:        "test-1",
+				Title:     "Test",
+				Status:    StatusOpen,
+				Priority:  2,
+				IssueType: TypeFeature,
+				Ephemeral: true,
+				NoHistory: true,
+			},
+			wantErr: true,
+			errMsg:  "ephemeral and no_history are mutually exclusive",
+		},
+		{
+			name: "ephemeral without no_history",
+			issue: Issue{
+				ID:        "test-1",
+				Title:     "Test",
+				Status:    StatusOpen,
+				Priority:  2,
+				IssueType: TypeFeature,
+				Ephemeral: true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "no_history without ephemeral",
+			issue: Issue{
+				ID:        "test-1",
+				Title:     "Test",
+				Status:    StatusOpen,
+				Priority:  2,
+				IssueType: TypeFeature,
+				NoHistory: true,
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

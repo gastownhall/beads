@@ -39,8 +39,8 @@ func TestAtomicWriteFile(t *testing.T) {
 	}
 
 	mode := info.Mode()
-	if !skipPermissionChecks && mode.Perm() != 0600 {
-		t.Errorf("file permissions mismatch: got %o, want %o", mode.Perm(), 0600)
+	if !skipPermissionChecks && mode.Perm() != 0644 {
+		t.Errorf("file permissions mismatch: got %o, want %o", mode.Perm(), 0644)
 	}
 
 	// Test overwriting existing file
@@ -64,6 +64,27 @@ func TestAtomicWriteFile(t *testing.T) {
 	err = atomicWriteFile(badPath, testData)
 	if err == nil {
 		t.Error("expected error when writing to non-existent directory")
+	}
+}
+
+func TestAtomicWriteFile_ExplicitPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping permission test on Windows")
+	}
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "restricted.txt")
+
+	err := atomicWriteFile(testFile, []byte("secret"), 0600)
+	if err != nil {
+		t.Fatalf("atomicWriteFile with explicit perm failed: %v", err)
+	}
+
+	info, err := os.Stat(testFile)
+	if err != nil {
+		t.Fatalf("failed to stat file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("file permissions mismatch: got %o, want %o", info.Mode().Perm(), 0600)
 	}
 }
 

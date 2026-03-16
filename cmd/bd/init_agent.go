@@ -48,7 +48,9 @@ func updateAgentFile(filename string, verbose bool, templatePath string) error {
 		// Ensure the beads section uses versioned markers even in new files.
 		// EmbeddedDefault() may contain legacy markers; upgrade them.
 		if strings.Contains(newContent, "BEGIN BEADS INTEGRATION") && !strings.Contains(newContent, "profile:") {
-			newContent = upgradeBeadsSection(newContent, agents.ProfileFull)
+			if replaced, changed, err := agents.ReplaceSection(newContent, agents.ProfileFull); err == nil && changed {
+				newContent = replaced
+			}
 		}
 
 		// #nosec G306 - markdown needs to be readable
@@ -69,8 +71,11 @@ func updateAgentFile(filename string, verbose bool, templatePath string) error {
 
 	if hasBeads {
 		// Update existing section to latest versioned format (upgrades legacy markers)
-		updated := upgradeBeadsSection(contentStr, agents.ProfileFull)
-		if updated != contentStr {
+		updated, changed, replaceErr := agents.ReplaceSection(contentStr, agents.ProfileFull)
+		if replaceErr != nil {
+			return fmt.Errorf("failed to update beads section in %s: %w", filename, replaceErr)
+		}
+		if changed {
 			// #nosec G306 - markdown needs to be readable
 			if err := os.WriteFile(filename, []byte(updated), 0644); err != nil {
 				return fmt.Errorf("failed to update %s: %w", filename, err)
@@ -100,37 +105,6 @@ func updateAgentFile(filename string, verbose bool, templatePath string) error {
 		fmt.Printf("  %s Added agent instructions to %s\n", ui.RenderPass("✓"), filename)
 	}
 	return nil
-}
-
-// upgradeBeadsSection replaces the beads section markers and content with the
-// latest versioned format for the given profile. This handles both legacy
-// markers (no metadata) and stale versioned markers (wrong hash).
-func upgradeBeadsSection(content string, profile agents.Profile) string {
-	beginIdx := strings.Index(content, "<!-- BEGIN BEADS INTEGRATION")
-	endMarker := "<!-- END BEADS INTEGRATION -->"
-	endIdx := strings.Index(content, endMarker)
-
-	if beginIdx == -1 || endIdx == -1 || beginIdx > endIdx {
-		return content
-	}
-
-	// Check if already current
-	firstLine := content[beginIdx:]
-	if nl := strings.Index(firstLine, "\n"); nl != -1 {
-		firstLine = firstLine[:nl]
-	}
-	meta := agents.ParseMarker(firstLine)
-	if meta != nil && meta.Hash == agents.CurrentHash(profile) && meta.Profile == profile {
-		return content // already up to date
-	}
-
-	// Replace section
-	endOfEndMarker := endIdx + len(endMarker)
-	if endOfEndMarker < len(content) && content[endOfEndMarker] == '\n' {
-		endOfEndMarker++
-	}
-
-	return content[:beginIdx] + agents.RenderSection(profile) + content[endOfEndMarker:]
 }
 
 // setupClaudeSettings creates or updates .claude/settings.local.json with onboard instruction
