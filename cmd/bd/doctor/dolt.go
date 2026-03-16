@@ -12,6 +12,7 @@ import (
 	// MySQL driver for connecting to dolt sql-server
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -20,6 +21,10 @@ import (
 
 // openDoltDB opens a connection to the Dolt SQL server via MySQL protocol.
 func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
+	if runtime, err := beads.ResolveRepoRuntimeFromBeadsDir(beadsDir); err == nil && runtime != nil {
+		return openDoltDBForRuntime(runtime, nil)
+	}
+
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load config: %w", err)
@@ -74,12 +79,72 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	return db, cfg, nil
 }
 
+func openDoltDBForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) (*sql.DB, *configfile.Config, error) {
+	if runtime == nil {
+		return nil, nil, fmt.Errorf("runtime required")
+	}
+	if cfg == nil {
+		var err error
+		cfg, err = configfile.Load(runtime.BeadsDir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load config: %w", err)
+		}
+	}
+
+	host := runtime.Host
+	user := runtime.User
+	database := runtime.Database
+	password := os.Getenv("BEADS_DOLT_PASSWORD")
+	port := runtime.Port
+	if port == 0 {
+		return nil, cfg, fmt.Errorf("no Dolt server port configured and no server running; run any bd command to auto-start")
+	}
+	if host == "" {
+		host = configfile.DefaultDoltServerHost
+	}
+	if user == "" {
+		user = configfile.DefaultDoltServerUser
+	}
+	if database == "" {
+		database = configfile.DefaultDoltDatabase
+	}
+
+	var connStr string
+	if password != "" {
+		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
+			user, password, host, port, database)
+	} else {
+		connStr = fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
+			user, host, port, database)
+	}
+
+	db, err := sql.Open("mysql", connStr)
+	if err != nil {
+		return nil, cfg, fmt.Errorf("failed to open server connection: %w", err)
+	}
+
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(30 * time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, cfg, fmt.Errorf("server not reachable: %w", err)
+	}
+
+	return db, cfg, nil
+}
+
 // doltConn holds an open Dolt connection.
 // Used by doctor checks to coordinate database access.
 type doltConn struct {
-	db   *sql.DB
-	cfg  *configfile.Config // config for server detail (host:port)
-	port int                // resolved port (from doltserver.DefaultConfig, not cfg fallback)
+	db       *sql.DB
+	cfg      *configfile.Config // config for server detail (host:port)
+	port     int                // resolved port (from doltserver.DefaultConfig, not cfg fallback)
+	database string
 }
 
 // Close releases the database connection.
@@ -95,7 +160,32 @@ func openDoltConn(beadsDir string) (*doltConn, error) {
 	}
 
 	port := doltserver.DefaultConfig(beadsDir).Port
-	return &doltConn{db: db, cfg: cfg, port: port}, nil
+	database := configfile.DefaultDoltDatabase
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	return &doltConn{db: db, cfg: cfg, port: port, database: database}, nil
+}
+
+func openDoltConnForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) (*doltConn, error) {
+	db, loadedCfg, err := openDoltDBForRuntime(runtime, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	port := 0
+	database := configfile.DefaultDoltDatabase
+	if runtime != nil {
+		port = runtime.Port
+		if runtime.Database != "" {
+			database = runtime.Database
+		}
+	}
+	if port == 0 && runtime != nil {
+		port = doltserver.DefaultConfig(runtime.BeadsDir).Port
+	}
+
+	return &doltConn{db: db, cfg: loadedCfg, port: port, database: database}, nil
 }
 
 // GetBackend returns the configured backend type from configuration.
@@ -126,7 +216,11 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 // CheckLockHealth before any checks that open embedded Dolt databases,
 // avoiding false positives from doctor's own noms LOCK files (GH#1981).
 func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorCheck {
+	runtimeInfo := resolveRuntimeInfoForRepo(path)
 	beadsDir := ResolveBeadsDirForRepo(path)
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		beadsDir = runtimeInfo.Runtime.BeadsDir
+	}
 
 	if !IsDoltBackend(beadsDir) {
 		return []DoctorCheck{
@@ -140,7 +234,13 @@ func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorChe
 		}
 	}
 
-	conn, err := openDoltConn(beadsDir)
+	var conn *doltConn
+	var err error
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		conn, err = openDoltConnForRuntime(runtimeInfo.Runtime, runtimeInfo.Config)
+	} else {
+		conn, err = openDoltConn(beadsDir)
+	}
 	if err != nil {
 		connErr := err.Error()
 		return []DoctorCheck{
@@ -588,8 +688,8 @@ func checkPhantomDatabases(conn *doltConn) DoctorCheck {
 	defer rows.Close()
 
 	configuredDB := configfile.DefaultDoltDatabase
-	if conn.cfg != nil {
-		configuredDB = conn.cfg.GetDoltDatabase()
+	if conn.database != "" {
+		configuredDB = conn.database
 	}
 
 	var phantoms []string
@@ -649,8 +749,8 @@ func probeForCorrectDatabase(conn *doltConn) string {
 	defer rows.Close()
 
 	configuredDB := configfile.DefaultDoltDatabase
-	if conn.cfg != nil {
-		configuredDB = conn.cfg.GetDoltDatabase()
+	if conn.database != "" {
+		configuredDB = conn.database
 	}
 
 	// System databases to skip

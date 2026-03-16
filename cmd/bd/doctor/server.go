@@ -29,20 +29,20 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 		OverallOK: true,
 	}
 
-	// Load config to check if server mode is configured
-	_, beadsDir := getBackendAndBeadsDir(path)
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil {
+	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	if runtimeInfo == nil || runtimeInfo.Runtime == nil {
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server Config",
 			Status:   StatusError,
 			Message:  "Failed to load config",
-			Detail:   err.Error(),
+			Detail:   "runtime unavailable",
 			Category: CategoryFederation,
 		})
 		result.OverallOK = false
 		return result
 	}
+	cfg := runtimeInfo.Config
+	beadsDir := runtimeInfo.Runtime.BeadsDir
 
 	if cfg == nil {
 		result.Checks = append(result.Checks, DoctorCheck{
@@ -57,11 +57,11 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 	}
 
 	// Check if Dolt backend is configured
-	if cfg.GetBackend() != configfile.BackendDolt {
+	if runtimeInfo.Runtime.Backend != configfile.BackendDolt {
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server Config",
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Backend is '%s', not Dolt", cfg.GetBackend()),
+			Message:  fmt.Sprintf("Backend is '%s', not Dolt", runtimeInfo.Runtime.Backend),
 			Detail:   "Server mode health checks are only relevant for Dolt backend",
 			Fix:      "Set backend: dolt in metadata.json to use Dolt server mode",
 			Category: CategoryFederation,
@@ -71,11 +71,11 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 	}
 
 	// Check if server mode is configured
-	if !cfg.IsDoltServerMode() {
+	if !runtimeInfo.Runtime.ServerMode {
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server Config",
 			Status:   StatusOK,
-			Message:  fmt.Sprintf("Dolt mode is '%s' (embedded is the default)", cfg.GetDoltMode()),
+			Message:  fmt.Sprintf("Dolt mode is '%s' (embedded is the default)", runtimeInfo.Runtime.DoltMode),
 			Detail:   "Server health checks only apply when dolt_mode is explicitly set to 'server'",
 			Category: CategoryFederation,
 		})
@@ -83,10 +83,8 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 	}
 
 	// Server mode is configured - run health checks
-	host := cfg.GetDoltServerHost()
-	// Use doltserver.DefaultConfig for port resolution (env > port file > config.yaml).
-	// Port 0 means server not yet started — report that clearly.
-	port := doltserver.DefaultConfig(beadsDir).Port
+	host := runtimeInfo.Runtime.Host
+	port := runtimeInfo.Runtime.Port
 	if port == 0 {
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server port",
@@ -122,8 +120,7 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 		}
 	}()
 
-	// Get database name from config (uses dolt_database field, default: "beads")
-	database := cfg.GetDoltDatabase()
+	database := runtimeInfo.Runtime.Database
 
 	// Check 3: Database exists and is queryable
 	dbExistsCheck := checkDatabaseExists(db, database)
