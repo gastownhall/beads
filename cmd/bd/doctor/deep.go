@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -34,12 +33,18 @@ func RunDeepValidation(path string) DeepValidationResult {
 		OverallOK: true,
 	}
 
-	// Follow redirect to resolve actual beads directory
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	// Check backend
+	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	beadsDir := ResolveBeadsDirForRepo(path)
 	backend := configfile.BackendDolt
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+	doltPath := getDatabasePath(beadsDir)
+
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		beadsDir = runtimeInfo.Runtime.BeadsDir
+		backend = runtimeInfo.Runtime.Backend
+		if runtimeInfo.Runtime.DatabasePath != "" {
+			doltPath = runtimeInfo.Runtime.DatabasePath
+		}
+	} else if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		backend = cfg.GetBackend()
 	}
 
@@ -56,7 +61,6 @@ func RunDeepValidation(path string) DeepValidationResult {
 	}
 
 	// Check if Dolt directory exists
-	doltPath := getDatabasePath(beadsDir)
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 		check := DoctorCheck{
 			Name:     "Deep Validation",
@@ -69,7 +73,7 @@ func RunDeepValidation(path string) DeepValidationResult {
 	}
 
 	// Open Dolt connection
-	conn, err := openDoltConn(beadsDir)
+	conn, err := openDoltConnForRepoPath(path)
 	if err != nil {
 		check := DoctorCheck{
 			Name:     "Deep Validation",

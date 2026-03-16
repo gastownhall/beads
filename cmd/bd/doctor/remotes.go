@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -15,10 +15,8 @@ import (
 // vs the filesystem CLI config and reports discrepancies.
 // Returns a check with Fix set for cases where --fix can resolve it.
 func CheckRemoteConsistency(repoPath string) DoctorCheck {
-	beadsDir := resolveBeadsDir(repoPath)
-
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt {
+	runtimeInfo := resolveRuntimeInfoForRepo(repoPath)
+	if runtimeInfo == nil || runtimeInfo.Runtime == nil || runtimeInfo.Runtime.Backend != configfile.BackendDolt {
 		return DoctorCheck{
 			Name:     "Remote Consistency",
 			Status:   StatusOK,
@@ -28,7 +26,7 @@ func CheckRemoteConsistency(repoPath string) DoctorCheck {
 	}
 
 	// Get SQL remotes via direct connection
-	sqlRemotes, sqlErr := querySQLRemotes(beadsDir)
+	sqlRemotes, sqlErr := querySQLRemotesForRuntime(runtimeInfo.Runtime, runtimeInfo.Config)
 	if sqlErr != nil {
 		return DoctorCheck{
 			Name:     "Remote Consistency",
@@ -39,9 +37,7 @@ func CheckRemoteConsistency(repoPath string) DoctorCheck {
 	}
 
 	// Get CLI remotes
-	doltDir := doltserver.ResolveDoltDir(beadsDir)
-	dbName := cfg.GetDoltDatabase()
-	dbDir := filepath.Join(doltDir, dbName)
+	dbDir := filepath.Join(runtimeInfo.Runtime.DatabasePath, runtimeInfo.Runtime.Database)
 	cliRemotes, cliErr := doltutil.ListCLIRemotes(dbDir)
 	if cliErr != nil {
 		return DoctorCheck{
@@ -123,6 +119,30 @@ func CheckRemoteConsistency(repoPath string) DoctorCheck {
 // querySQLRemotes gets remotes from the SQL server.
 func querySQLRemotes(beadsDir string) ([]storage.RemoteInfo, error) {
 	db, _, err := openDoltDB(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT name, url FROM dolt_remotes")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var remotes []storage.RemoteInfo
+	for rows.Next() {
+		var r storage.RemoteInfo
+		if err := rows.Scan(&r.Name, &r.URL); err != nil {
+			return nil, err
+		}
+		remotes = append(remotes, r)
+	}
+	return remotes, rows.Err()
+}
+
+func querySQLRemotesForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) ([]storage.RemoteInfo, error) {
+	db, _, err := openDoltDBForRuntime(runtime, cfg)
 	if err != nil {
 		return nil, err
 	}

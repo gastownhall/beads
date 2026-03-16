@@ -6,8 +6,22 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestCheckDoltLocks_PreservesRedirectSourceDatabase(t *testing.T) {
+	repoDir, cleanup := setupRedirectedStandaloneDoctorRepo(t)
+	defer cleanup()
+
+	check := CheckDoltLocks(repoDir)
+	if check.Message != "Uncommitted changes detected" {
+		t.Fatalf("CheckDoltLocks message = %q, want %q (status: %s, detail: %s)", check.Message, "Uncommitted changes detected", check.Status, check.Detail)
+	}
+	if !strings.Contains(check.Detail, "issues: new table") {
+		t.Fatalf("CheckDoltLocks detail = %q, want it to contain %q", check.Detail, "issues: new table")
+	}
+}
 
 func TestValidateJSONLForMigration(t *testing.T) {
 	tests := []struct {

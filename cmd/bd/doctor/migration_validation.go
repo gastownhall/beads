@@ -237,7 +237,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 	result.DoltCount = stats.TotalIssues
 
 	// Check for Dolt locks/uncommitted changes
-	doltLocked, lockDetail, lockErr := checkDoltLocks(beadsDir)
+	doltLocked, lockDetail, lockErr := checkDoltLocks(path)
 	if lockErr != nil {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("Could not check Dolt locks: %v", lockErr))
 	} else {
@@ -337,7 +337,7 @@ func CheckDoltLocks(path string) DoctorCheck {
 		}
 	}
 
-	locked, detail, err := checkDoltLocks(beadsDir)
+	locked, detail, err := checkDoltLocks(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Locks",
@@ -480,11 +480,11 @@ func compareDoltWithJSONL(ctx context.Context, store storage.DoltStorage, jsonlI
 	return missing
 }
 
-// checkDoltLocks checks for uncommitted changes in Dolt.
+// checkDoltLocks checks for uncommitted changes in Dolt for the repo path.
 // Returns (locked, detail, error). A non-nil error means the check could not
 // be performed (e.g. connection failure) and the locked result is meaningless.
-func checkDoltLocks(beadsDir string) (bool, string, error) {
-	conn, err := openDoltConn(beadsDir)
+func checkDoltLocks(repoPath string) (bool, string, error) {
+	conn, err := openDoltConnForRepoPath(repoPath)
 	if err != nil {
 		return false, "", fmt.Errorf("cannot connect to Dolt: %w", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
@@ -15,18 +16,22 @@ import (
 // For one-side-only remotes, it adds the missing side.
 // Conflicts (different URLs) are skipped — they require manual resolution.
 func RemoteConsistency(repoPath string) error {
-	beadsDir := resolveBeadsDir(filepath.Join(repoPath, ".beads"))
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil {
+	info, err := resolveRuntimeInfoForRepo(repoPath)
+	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if info == nil || info.Runtime == nil {
+		return fmt.Errorf("repo runtime unavailable")
+	}
+	cfg := info.Config
 
-	doltDir := doltserver.ResolveDoltDir(beadsDir)
-	dbName := cfg.GetDoltDatabase()
-	dbDir := filepath.Join(doltDir, dbName)
+	dbDir := runtimeDatabaseDir(info.Runtime)
+	if dbDir == "" {
+		dbDir = filepath.Join(info.Runtime.DatabasePath, info.Runtime.Database)
+	}
 
 	// Get SQL remotes
-	db, err := openFixDB(beadsDir, cfg)
+	db, err := openFixDBForRuntime(info.Runtime, cfg)
 	if err != nil {
 		return fmt.Errorf("cannot connect to Dolt server: %w", err)
 	}
@@ -86,21 +91,21 @@ func RemoteConsistency(repoPath string) error {
 }
 
 func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
-	host := cfg.GetDoltServerHost()
-	user := cfg.GetDoltServerUser()
-	database := cfg.GetDoltDatabase()
-	password := cfg.GetDoltServerPassword()
-	port := doltserver.DefaultConfig(beadsDir).Port
-
-	var connStr string
-	if password != "" {
-		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, password, host, port, database)
-	} else {
-		connStr = fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, host, port, database)
+	if runtime, err := beads.ResolveRepoRuntimeFromBeadsDirWithConfig(beadsDir, cfg); err == nil && runtime != nil {
+		return openFixDBForRuntime(runtime, cfg)
 	}
-	return sql.Open("mysql", connStr)
+
+	cfg = effectiveFixConfig(cfg)
+	runtime := &beads.RepoRuntime{
+		BeadsDir:     beadsDir,
+		DatabasePath: cfg.DatabasePath(beadsDir),
+		Database:     cfg.GetDoltDatabase(),
+		Host:         cfg.GetDoltServerHost(),
+		Port:         doltserver.DefaultConfig(beadsDir).Port,
+		User:         cfg.GetDoltServerUser(),
+		TLS:          cfg.GetDoltServerTLS(),
+	}
+	return openFixDBForRuntime(runtime, cfg)
 }
 
 func queryFixRemotes(db *sql.DB) ([]storage.RemoteInfo, error) {

@@ -27,9 +27,7 @@ func OrphanedDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	db, err := openDoltDB(beadsDir)
+	db, err := openDoltDBForRepoPath(path)
 	if err != nil {
 		fmt.Printf("  Orphaned dependencies fix skipped (%v)\n", err)
 		return nil
@@ -112,9 +110,7 @@ func ChildParentDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	db, err := openDoltDB(beadsDir)
+	db, err := openDoltDBForRepoPath(path)
 	if err != nil {
 		fmt.Printf("  Child-parent dependencies fix skipped (%v)\n", err)
 		return nil

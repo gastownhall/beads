@@ -4,12 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // FixMissingMetadata checks and repairs missing metadata fields in a Dolt database.
@@ -22,12 +20,11 @@ func FixMissingMetadata(path string, bdVersion string) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	cfg, err := configfile.Load(beadsDir)
+	info, err := resolveRuntimeInfoForRepo(path)
 	if err != nil {
 		return nil // Can't load config, nothing to fix
 	}
+	cfg := info.Config
 	if cfg == nil {
 		return nil // No config file, nothing to fix
 	}
@@ -37,7 +34,7 @@ func FixMissingMetadata(path string, bdVersion string) error {
 
 	ctx := context.Background()
 
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openDoltStoreForRepoPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to open store: %w", err)
 	}
@@ -99,12 +96,11 @@ func FixProjectIdentity(path string) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	cfg, err := configfile.Load(beadsDir)
+	info, err := resolveRuntimeInfoForRepo(path)
 	if err != nil {
 		return fmt.Errorf("failed to load metadata.json: %w", err)
 	}
+	cfg, saveDir := metadataConfigForRepo(info)
 	if cfg == nil {
 		return fmt.Errorf("no metadata.json found")
 	}
@@ -114,7 +110,7 @@ func FixProjectIdentity(path string) error {
 
 	ctx := context.Background()
 
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := openDoltStoreForRepoPath(ctx, path)
 	if err != nil {
 		return fmt.Errorf("failed to open store: %w", err)
 	}
@@ -143,7 +139,7 @@ func FixProjectIdentity(path string) error {
 	// Backfill metadata.json
 	if !hasLocalID {
 		cfg.ProjectID = projectID
-		if err := cfg.Save(beadsDir); err != nil {
+		if err := cfg.Save(saveDir); err != nil {
 			return fmt.Errorf("failed to save project_id to metadata.json: %w", err)
 		}
 		repaired = append(repaired, "metadata.json")
@@ -171,10 +167,12 @@ func FixMissingDoltDatabase(path string) error {
 		return err
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil {
+	info, err := resolveRuntimeInfoForRepo(path)
+	if err != nil {
+		return nil // No config, nothing to fix
+	}
+	cfg, saveDir := metadataConfigForRepo(info)
+	if cfg == nil {
 		return nil // No config, nothing to fix
 	}
 	if cfg.GetBackend() != configfile.BackendDolt {
@@ -187,7 +185,7 @@ func FixMissingDoltDatabase(path string) error {
 	}
 
 	// Connect to the server and probe for the correct database
-	db, err := openDoltDB(beadsDir)
+	db, err := openDoltDBForRepoPath(path)
 	if err != nil {
 		fmt.Printf("  dolt_database fix skipped (server not reachable: %v)\n", err)
 		return nil
@@ -201,7 +199,7 @@ func FixMissingDoltDatabase(path string) error {
 
 	// Backfill dolt_database in metadata.json
 	cfg.DoltDatabase = correctDB
-	if err := cfg.Save(beadsDir); err != nil {
+	if err := cfg.Save(saveDir); err != nil {
 		return fmt.Errorf("failed to save metadata.json: %w", err)
 	}
 
