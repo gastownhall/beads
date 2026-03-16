@@ -558,6 +558,22 @@ func applyConfigDefaults(cfg *Config) {
 			cfg.ServerPort = p
 		}
 	}
+	// If env var didn't provide a port, consult the full resolution chain:
+	// port file > config.yaml > metadata.json (GH#2590).
+	// Resolve from the owning .beads dir when available; cfg.Path is the Dolt
+	// data path, not the config directory, and using it directly can miss the
+	// repo-local port file or metadata.
+	if cfg.ServerPort == 0 {
+		resolveDir := cfg.BeadsDir
+		if resolveDir == "" && cfg.Path != "" {
+			resolveDir = filepath.Dir(cfg.Path)
+		}
+		if resolveDir != "" {
+			if resolved := doltserver.DefaultConfig(resolveDir); resolved.Port > 0 {
+				cfg.ServerPort = resolved.Port
+			}
+		}
+	}
 	// Port 0 means "not yet resolved" — auto-start (EnsureRunning) will
 	// allocate an ephemeral port. Don't default to 3307 as that caused
 	// cross-project data leakage (GH#2098, GH#2372).
@@ -1843,7 +1859,6 @@ func (s *DoltStore) tryAutoResolveMetadataConflicts(ctx context.Context, tx *sql
 
 	return true, nil
 }
-
 
 // Branch creates a new branch
 func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {

@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // newTestDoltDB creates a temporary database on the test Dolt server.
@@ -345,6 +347,84 @@ func TestApplyConfigDefaults_ProductionFallback(t *testing.T) {
 
 	if cfg.ServerPort != 0 {
 		t.Errorf("expected ServerPort=0 (ephemeral, resolved by auto-start), got %d", cfg.ServerPort)
+	}
+}
+
+func TestApplyConfigDefaults_BeadsDirPortFileFallback(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	os.Unsetenv("BEADS_TEST_MODE")
+	os.Unsetenv("BEADS_DOLT_PORT")
+
+	beadsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("13958\n"), 0o600); err != nil {
+		t.Fatalf("write port file: %v", err)
+	}
+
+	cfg := &Config{
+		BeadsDir: beadsDir,
+		Path:     filepath.Join(beadsDir, "dolt"),
+	}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 13958 {
+		t.Fatalf("ServerPort = %d, want 13958", cfg.ServerPort)
+	}
+}
+
+func TestApplyConfigDefaults_BeadsDirMetadataFallback(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	os.Unsetenv("BEADS_TEST_MODE")
+	os.Unsetenv("BEADS_DOLT_PORT")
+
+	beadsDir := t.TempDir()
+	fileCfg := &configfile.Config{
+		Database:       "dolt",
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltDatabase:   "beads_cfg",
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 13958,
+	}
+	if err := fileCfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	cfg := &Config{
+		BeadsDir: beadsDir,
+		Path:     filepath.Join(beadsDir, "dolt"),
+	}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 13958 {
+		t.Fatalf("ServerPort = %d, want 13958", cfg.ServerPort)
 	}
 }
 

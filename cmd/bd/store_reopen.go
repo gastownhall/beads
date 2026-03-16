@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"slices"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -33,13 +32,30 @@ func openReadOnlyStoreForDBPath(ctx context.Context, dbPath string) (*dolt.DoltS
 // non-default dolt_database names or custom dolt_data_dir locations.
 func resolveBeadsDirForDBPath(dbPath string) string {
 	actualDBPath := utils.CanonicalizePath(dbPath)
-	candidates := []string{utils.CanonicalizePath(filepath.Dir(actualDBPath))}
+	seen := map[string]struct{}{}
+	candidates := make([]string, 0, 4)
+
+	addCandidate := func(path string) {
+		if path == "" {
+			return
+		}
+		key := utils.NormalizePathForComparison(path)
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, path)
+	}
+
+	addCandidate(filepath.Dir(dbPath))
+	addCandidate(filepath.Dir(actualDBPath))
 
 	if found := beads.FindBeadsDir(); found != "" {
-		found = utils.CanonicalizePath(found)
-		if !slices.Contains(candidates, found) {
-			candidates = append(candidates, found)
-		}
+		addCandidate(found)
+		addCandidate(utils.CanonicalizePath(found))
 	}
 
 	for _, beadsDir := range candidates {
@@ -47,7 +63,7 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 		if err != nil || cfg == nil {
 			continue
 		}
-		if utils.CanonicalizePath(cfg.DatabasePath(beadsDir)) == actualDBPath {
+		if utils.PathsEqual(cfg.DatabasePath(beadsDir), dbPath) || utils.PathsEqual(cfg.DatabasePath(beadsDir), actualDBPath) {
 			return beadsDir
 		}
 	}

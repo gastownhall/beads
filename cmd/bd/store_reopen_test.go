@@ -4,12 +4,15 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 func TestWithStorage_ReopensUsingMetadata(t *testing.T) {
@@ -28,6 +31,35 @@ func TestWithStorage_ReopensUsingMetadata(t *testing.T) {
 	}
 	if gotPrefix != "cfg" {
 		t.Fatalf("issue_prefix = %q, want %q", gotPrefix, "cfg")
+	}
+}
+
+func TestResolveBeadsDirForDBPath_UsesRawBeadsDirForSymlinkedDBPath(t *testing.T) {
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	actualDBPath := filepath.Join(repoDir, "external-dolt")
+	linkDBPath := filepath.Join(beadsDir, "dolt")
+
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+	if err := os.MkdirAll(actualDBPath, 0o755); err != nil {
+		t.Fatalf("mkdir external dolt dir: %v", err)
+	}
+	if err := os.Symlink(actualDBPath, linkDBPath); err != nil {
+		t.Fatalf("symlink db path: %v", err)
+	}
+
+	cfg := &configfile.Config{
+		Database: "dolt",
+		Backend:  configfile.BackendDolt,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	if got := resolveBeadsDirForDBPath(linkDBPath); !utils.PathsEqual(got, beadsDir) {
+		t.Fatalf("resolveBeadsDirForDBPath(%q) = %q, want %q", linkDBPath, got, beadsDir)
 	}
 }
 
