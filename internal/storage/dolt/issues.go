@@ -22,6 +22,7 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 	if issue == nil {
 		return fmt.Errorf("issue must not be nil")
 	}
+
 	// Route to wisps table if ephemeral, no-history, or infra type.
 	useWispsTable := issue.Ephemeral || issue.NoHistory || s.IsInfraTypeCtx(ctx, issue.IssueType)
 	if useWispsTable && !issue.NoHistory {
@@ -133,25 +134,13 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 // GetIssue retrieves an issue by ID.
 // Returns storage.ErrNotFound (wrapped) if the issue does not exist.
 func (s *DoltStore) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	// Route ephemeral IDs to wisps table (falls through for promoted wisps)
-	if s.isActiveWisp(ctx, id) {
-		return s.getWisp(ctx, id)
-	}
-
-	s.mu.RLock()
-	issue, err := scanIssue(ctx, s.db, id)
-	if err != nil {
-		s.mu.RUnlock()
-		return nil, err
-	}
-	// Fetch labels
-	labels, err := s.GetLabels(ctx, issue.ID)
-	s.mu.RUnlock()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get labels: %w", err)
-	}
-	issue.Labels = labels
-	return issue, nil
+	var issue *types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		issue, err = issueops.GetIssueInTx(ctx, tx, id)
+		return err
+	})
+	return issue, err
 }
 
 // GetIssueByExternalRef retrieves an issue by external reference.
@@ -870,23 +859,6 @@ func doltBuildSQLInClause(ids []string) (string, []interface{}) {
 // Helper functions
 // =============================================================================
 
-func scanIssue(ctx context.Context, db *sql.DB, id string) (*types.Issue, error) {
-	row := db.QueryRowContext(ctx, `
-		SELECT `+issueSelectColumns+`
-		FROM issues
-		WHERE id = ?
-	`, id)
-
-	issue, err := scanIssueFrom(row)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get issue: %w", err)
-	}
-	return issue, nil
-}
-
 func recordEvent(ctx context.Context, tx *sql.Tx, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO events (issue_id, event_type, actor, old_value, new_value)
@@ -1093,61 +1065,20 @@ func determineEventType(oldIssue *types.Issue, updates map[string]interface{}) t
 	return types.EventStatusChanged
 }
 
-// Helper functions for nullable values
-func nullString(s string) interface{} {
-	if s == "" {
-		return nil
-	}
-	return s
-}
+// Aliases for shared nullable helpers from issueops.
+var (
+	nullString    = issueops.NullString
+	nullStringPtr = issueops.NullStringPtr
+	nullInt       = issueops.NullInt
+	nullIntVal    = issueops.NullIntVal
+)
 
-func nullStringPtr(s *string) interface{} {
-	if s == nil {
-		return nil
-	}
-	return *s
-}
-
-func nullInt(i *int) interface{} {
-	if i == nil {
-		return nil
-	}
-	return *i
-}
-
-func nullIntVal(i int) interface{} {
-	if i == 0 {
-		return nil
-	}
-	return i
-}
-
-// jsonMetadata returns the metadata as a validated JSON string, or "{}" if empty.
-// Dolt's JSON column type requires valid JSON, so we normalize nil/empty to "{}"
-// and validate that non-empty metadata is well-formed JSON.
-func jsonMetadata(m []byte) string {
-	if len(m) == 0 {
-		return "{}"
-	}
-	s := string(m)
-	if !json.Valid(m) {
-		// Fall back to empty object for invalid JSON rather than storing garbage
-		_, _ = fmt.Fprintf(os.Stderr, "Warning: invalid JSON metadata, using empty object\n")
-		return "{}"
-	}
-	return s
-}
-
-func parseJSONStringArray(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var result []string
-	if err := json.Unmarshal([]byte(s), &result); err != nil {
-		return nil
-	}
-	return result
-}
+// Aliases for shared helpers from issueops.
+var (
+	jsonMetadata          = issueops.JSONMetadata
+	parseJSONStringArray  = issueops.ParseJSONStringArray
+	formatJSONStringArray = issueops.FormatJSONStringArray
+)
 
 // DeleteIssuesBySourceRepo permanently removes all issues from a specific source repository.
 // This is used when a repo is removed from the multi-repo configuration.
@@ -1278,15 +1209,4 @@ func (s *DoltStore) SetRepoMtime(ctx context.Context, repoPath, jsonlPath string
 			last_checked = NOW()
 	`, repoPath, jsonlPath, mtimeNs)
 	return wrapExecError("set repo mtime", err)
-}
-
-func formatJSONStringArray(arr []string) string {
-	if len(arr) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(arr)
-	if err != nil {
-		return ""
-	}
-	return string(data)
 }
