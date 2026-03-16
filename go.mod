@@ -9,7 +9,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.26.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/dolthub/driver v0.2.1-0.20260314000741-0fe74e7ee31a
+	github.com/dolthub/driver v0.2.1-0.20260316205151-d1fa7c08c014
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/muesli/termenv v0.16.0
@@ -120,7 +120,7 @@ require (
 	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dolthub/aws-sdk-go-ini-parser v0.0.0-20250305001723-2821c37f6c12 // indirect
-	github.com/dolthub/dolt/go v0.40.5-0.20260313234613-4069302e7692 // indirect
+	github.com/dolthub/dolt/go v0.40.5-0.20260316200056-24e549c548e1 // indirect
 	github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69 // indirect
 	github.com/dolthub/flatbuffers/v23 v23.3.3-dh.2 // indirect
 	github.com/dolthub/fslock v0.0.3 // indirect
