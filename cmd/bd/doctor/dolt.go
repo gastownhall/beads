@@ -188,6 +188,24 @@ func openDoltConnForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) 
 	return &doltConn{db: db, cfg: loadedCfg, port: port, database: database}, nil
 }
 
+func openDoltConnForRepoPath(path string) (*doltConn, error) {
+	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		conn, err := openDoltConnForRuntime(runtimeInfo.Runtime, runtimeInfo.Config)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+	}
+
+	beadsDir := ResolveBeadsDirForRepo(path)
+	conn, err := openDoltConn(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
 // GetBackend returns the configured backend type from configuration.
 // It checks config.yaml first (storage-backend key), then falls back to metadata.json.
 // Returns "dolt" (default) or "sqlite" (legacy).
@@ -299,10 +317,23 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltConnection(path string) DoctorCheck {
+	runtimeInfo := resolveRuntimeInfoForRepo(path)
 	beadsDir := ResolveBeadsDirForRepo(path)
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		beadsDir = runtimeInfo.Runtime.BeadsDir
+	}
 
 	// Only run this check for Dolt backend
-	if !IsDoltBackend(beadsDir) {
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		if runtimeInfo.Runtime.Backend != configfile.BackendDolt {
+			return DoctorCheck{
+				Name:     "Dolt Connection",
+				Status:   StatusOK,
+				Message:  "N/A (not using Dolt backend)",
+				Category: CategoryCore,
+			}
+		}
+	} else if !IsDoltBackend(beadsDir) {
 		return DoctorCheck{
 			Name:     "Dolt Connection",
 			Status:   StatusOK,
@@ -311,7 +342,7 @@ func CheckDoltConnection(path string) DoctorCheck {
 		}
 	}
 
-	conn, err := openDoltConn(beadsDir)
+	conn, err := openDoltConnForRepoPath(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Connection",
@@ -403,10 +434,23 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltSchema(path string) DoctorCheck {
+	runtimeInfo := resolveRuntimeInfoForRepo(path)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		beadsDir = runtimeInfo.Runtime.BeadsDir
+	}
 
 	// Only run for Dolt backend
-	if !IsDoltBackend(beadsDir) {
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		if runtimeInfo.Runtime.Backend != configfile.BackendDolt {
+			return DoctorCheck{
+				Name:     "Dolt Schema",
+				Status:   StatusOK,
+				Message:  "N/A (not using Dolt backend)",
+				Category: CategoryCore,
+			}
+		}
+	} else if !IsDoltBackend(beadsDir) {
 		return DoctorCheck{
 			Name:     "Dolt Schema",
 			Status:   StatusOK,
@@ -415,7 +459,7 @@ func CheckDoltSchema(path string) DoctorCheck {
 		}
 	}
 
-	conn, err := openDoltConn(beadsDir)
+	conn, err := openDoltConnForRepoPath(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Schema",
@@ -458,10 +502,23 @@ func checkIssueCountWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltIssueCount(path string) DoctorCheck {
+	runtimeInfo := resolveRuntimeInfoForRepo(path)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		beadsDir = runtimeInfo.Runtime.BeadsDir
+	}
 
 	// Only run for Dolt backend
-	if !IsDoltBackend(beadsDir) {
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		if runtimeInfo.Runtime.Backend != configfile.BackendDolt {
+			return DoctorCheck{
+				Name:     "Dolt Issue Count",
+				Status:   StatusOK,
+				Message:  "N/A (not using Dolt backend)",
+				Category: CategoryData,
+			}
+		}
+	} else if !IsDoltBackend(beadsDir) {
 		return DoctorCheck{
 			Name:     "Dolt Issue Count",
 			Status:   StatusOK,
@@ -470,7 +527,7 @@ func CheckDoltIssueCount(path string) DoctorCheck {
 		}
 	}
 
-	conn, err := openDoltConn(beadsDir)
+	conn, err := openDoltConnForRepoPath(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Issue Count",
@@ -563,10 +620,23 @@ func checkStatusWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltStatus(path string) DoctorCheck {
+	runtimeInfo := resolveRuntimeInfoForRepo(path)
 	beadsDir := ResolveBeadsDirForRepo(path)
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		beadsDir = runtimeInfo.Runtime.BeadsDir
+	}
 
 	// Only run for Dolt backend
-	if !IsDoltBackend(beadsDir) {
+	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
+		if runtimeInfo.Runtime.Backend != configfile.BackendDolt {
+			return DoctorCheck{
+				Name:     "Dolt Status",
+				Status:   StatusOK,
+				Message:  "N/A (not using Dolt backend)",
+				Category: CategoryData,
+			}
+		}
+	} else if !IsDoltBackend(beadsDir) {
 		return DoctorCheck{
 			Name:     "Dolt Status",
 			Status:   StatusOK,
@@ -575,7 +645,7 @@ func CheckDoltStatus(path string) DoctorCheck {
 		}
 	}
 
-	conn, err := openDoltConn(beadsDir)
+	conn, err := openDoltConnForRepoPath(path)
 	if err != nil {
 		return DoctorCheck{
 			Name:     "Dolt Status",

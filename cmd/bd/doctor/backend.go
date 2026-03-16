@@ -16,46 +16,57 @@ import (
 var resolveBeadsDirCache sync.Map
 
 type repoRuntimeInfo struct {
-	Runtime *beads.RepoRuntime
-	Config  *configfile.Config
+	Runtime       *beads.RepoRuntime
+	Config        *configfile.Config
+	ConfigPresent bool
+	ConfigErr     error
 }
 
 func resolveRuntimeInfoForRepo(repoPath string) *repoRuntimeInfo {
 	runtime, err := beads.ResolveRepoRuntimeFromRepoPath(repoPath)
 	if err == nil && runtime != nil {
 		cfg, cfgErr := configfile.Load(runtime.BeadsDir)
-		if cfgErr != nil || cfg == nil {
-			cfg = configfile.DefaultConfig()
+		return &repoRuntimeInfo{
+			Runtime:       runtime,
+			Config:        effectiveConfig(cfg),
+			ConfigPresent: cfg != nil,
+			ConfigErr:     cfgErr,
 		}
-		return &repoRuntimeInfo{Runtime: runtime, Config: cfg}
 	}
 
 	beadsDir := resolveBeadsDir(filepath.Join(repoPath, ".beads"))
 	cfg, cfgErr := configfile.Load(beadsDir)
-	if cfgErr != nil || cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
+	cfgEffective := effectiveConfig(cfg)
 
 	return &repoRuntimeInfo{
 		Runtime: &beads.RepoRuntime{
 			RepoPath:         repoPath,
 			SourceBeadsDir:   filepath.Join(repoPath, ".beads"),
 			BeadsDir:         beadsDir,
-			Backend:          cfg.GetBackend(),
-			DatabasePath:     cfg.DatabasePath(beadsDir),
-			Database:         cfg.GetDoltDatabase(),
-			DoltDataDir:      cfg.GetDoltDataDir(),
-			DoltMode:         cfg.GetDoltMode(),
-			ServerMode:       cfg.IsDoltServerMode(),
-			Host:             cfg.GetDoltServerHost(),
+			Backend:          cfgEffective.GetBackend(),
+			DatabasePath:     cfgEffective.DatabasePath(beadsDir),
+			Database:         cfgEffective.GetDoltDatabase(),
+			DoltDataDir:      cfgEffective.GetDoltDataDir(),
+			DoltMode:         cfgEffective.GetDoltMode(),
+			ServerMode:       cfgEffective.IsDoltServerMode(),
+			Host:             cfgEffective.GetDoltServerHost(),
 			Port:             doltserver.DefaultConfig(beadsDir).Port,
-			ExplicitPort:     cfg.DoltServerPort > 0,
-			User:             cfg.GetDoltServerUser(),
-			TLS:              cfg.GetDoltServerTLS(),
+			ExplicitPort:     cfgEffective.DoltServerPort > 0,
+			User:             cfgEffective.GetDoltServerUser(),
+			TLS:              cfgEffective.GetDoltServerTLS(),
 			SharedServerMode: doltserver.IsSharedServerMode(),
 		},
-		Config: cfg,
+		Config:        cfgEffective,
+		ConfigPresent: cfg != nil,
+		ConfigErr:     cfgErr,
 	}
+}
+
+func effectiveConfig(cfg *configfile.Config) *configfile.Config {
+	if cfg != nil {
+		return cfg
+	}
+	return configfile.DefaultConfig()
 }
 
 // getBackendAndBeadsDir resolves the effective .beads directory (following redirects)

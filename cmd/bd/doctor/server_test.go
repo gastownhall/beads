@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -129,6 +131,32 @@ func TestServerHealthResult_Structure(t *testing.T) {
 	}
 	if result.OverallOK {
 		t.Error("OverallOK should be false when error check present")
+	}
+}
+
+func TestRunServerHealthChecks_NoMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+
+	result := RunServerHealthChecks(tmpDir)
+	if result.OverallOK {
+		t.Fatal("expected OverallOK=false when metadata is missing")
+	}
+	if len(result.Checks) != 1 {
+		t.Fatalf("expected exactly 1 check, got %d", len(result.Checks))
+	}
+	check := result.Checks[0]
+	if check.Name != "Server Config" {
+		t.Fatalf("check.Name = %q, want %q", check.Name, "Server Config")
+	}
+	if check.Status != StatusError {
+		t.Fatalf("check.Status = %q, want %q", check.Status, StatusError)
+	}
+	if check.Message != "No metadata.json found" {
+		t.Fatalf("check.Message = %q, want %q", check.Message, "No metadata.json found")
 	}
 }
 

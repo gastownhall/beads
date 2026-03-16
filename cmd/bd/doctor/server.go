@@ -41,10 +41,23 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 		result.OverallOK = false
 		return result
 	}
+
+	if runtimeInfo.ConfigErr != nil {
+		result.Checks = append(result.Checks, DoctorCheck{
+			Name:     "Server Config",
+			Status:   StatusError,
+			Message:  "Failed to load config",
+			Detail:   runtimeInfo.ConfigErr.Error(),
+			Category: CategoryFederation,
+		})
+		result.OverallOK = false
+		return result
+	}
+
 	cfg := runtimeInfo.Config
 	beadsDir := runtimeInfo.Runtime.BeadsDir
 
-	if cfg == nil {
+	if !runtimeInfo.ConfigPresent {
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server Config",
 			Status:   StatusError,
