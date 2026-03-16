@@ -165,9 +165,6 @@ jobs:
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
 
-      - name: Build (embedded dolt)
-        run: go build -tags embeddeddolt -v ./cmd/bd
-
       - name: Test (embedded dolt - storage)
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
