@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/subosito/gotenv"
+
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -114,6 +116,17 @@ var readOnlyCommands = map[string]bool{
 // that would trigger file watchers. See GH#804.
 func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
+}
+
+// loadBeadsEnvFile loads .beads/.env into process environment for per-project
+// Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
+// existing shell env vars always take precedence.
+func loadBeadsEnvFile(beadsDir string) {
+	envFile := filepath.Join(beadsDir, ".env")
+	if _, err := os.Stat(envFile); err != nil {
+		return
+	}
+	_ = gotenv.Load(envFile)
 }
 
 // getActorWithGit returns the actor for audit trails with git config fallback.
@@ -494,6 +507,10 @@ var rootCmd = &cobra.Command{
 		// and closes BEFORE the main store is opened. This ensures bd doctor and
 		// read-only commands see the correct version after a CLI upgrade.
 		beadsDir := filepath.Dir(dbPath)
+
+		// Load per-project .beads/.env for Dolt credentials (GH#2520).
+		// Non-overriding: shell env always wins over .env values.
+		loadBeadsEnvFile(beadsDir)
 
 		autoMigrateOnVersionBump(beadsDir)
 
