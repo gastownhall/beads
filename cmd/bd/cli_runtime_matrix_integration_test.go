@@ -245,6 +245,52 @@ func TestE2E_RuntimeMatrix_MultiRepoRepoLocalServersStayIsolated(t *testing.T) {
 	assertContainsIssueIDs(t, itemsB, issueB)
 }
 
+func TestE2E_RuntimeMatrix_ExplicitPortExternalServerPreservesConfiguredRuntime(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow integration test in short mode")
+	}
+	if runtime.GOOS == windowsOS {
+		t.Skip("explicit-port runtime matrix test not supported on windows")
+	}
+
+	bdBinary := buildRuntimeMatrixTestBinary(t)
+	env := runtimeMatrixEnv()
+
+	repo := setupRedirectedRuntimeMatrixRepo(t, true, 1, 2)
+	defer repo.Cleanup()
+
+	statusBefore, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
+	if statusErr != nil {
+		t.Fatalf("bd dolt status before explicit-port command failed: %v\n%s", statusErr, statusBefore)
+	}
+	assertTrackedServerRunning(t, "explicit-port baseline", statusBefore)
+	assertStatusContainsPort(t, statusBefore, repo.Port)
+	pidBefore := extractStatusPID(t, statusBefore)
+
+	listOut, listErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "list", "--json")
+	if listErr != nil {
+		t.Fatalf("bd list against explicit-port external server failed: %v\n%s", listErr, listOut)
+	}
+	items := decodeIssueObjects(t, listOut)
+	if len(items) != 1 {
+		t.Fatalf("list returned %d issues, want 1\n%s", len(items), listOut)
+	}
+	if got := stringField(items[0], "title"); got != "source issue 1" {
+		t.Fatalf("list title = %q, want %q", got, "source issue 1")
+	}
+
+	statusAfter, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
+	if statusErr != nil {
+		t.Fatalf("bd dolt status after explicit-port command failed: %v\n%s", statusErr, statusAfter)
+	}
+	assertTrackedServerRunning(t, "explicit-port command", statusAfter)
+	assertStatusContainsPort(t, statusAfter, repo.Port)
+	pidAfter := extractStatusPID(t, statusAfter)
+	if pidAfter != pidBefore {
+		t.Fatalf("external server PID changed across ordinary command: before=%d after=%d\nbefore:\n%s\nafter:\n%s", pidBefore, pidAfter, statusBefore, statusAfter)
+	}
+}
+
 func TestE2E_RuntimeMatrix_DoctorDryRunPreservesRedirectSourceDatabase(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow integration test in short mode")
@@ -872,6 +918,26 @@ func extractStatusPort(t *testing.T, statusOut string) int {
 	}
 
 	t.Fatalf("status output missing Port line:\n%s", statusOut)
+	return 0
+}
+
+func extractStatusPID(t *testing.T, statusOut string) int {
+	t.Helper()
+
+	for _, line := range strings.Split(statusOut, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "PID:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "PID:"))
+		pid, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatalf("parse pid from status %q: %v\n%s", value, err, statusOut)
+		}
+		return pid
+	}
+
+	t.Fatalf("status output missing PID line:\n%s", statusOut)
 	return 0
 }
 
