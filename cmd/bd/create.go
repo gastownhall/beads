@@ -603,10 +603,10 @@ var createCmd = &cobra.Command{
 			FatalError("%v", err)
 		}
 
-		// Track whether any post-create writes occurred. CreateIssue commits
-		// the issue to Dolt internally, but subsequent AddDependency/AddLabel
-		// calls only write to the working set. A follow-up Dolt commit is
-		// needed to persist them (GH#2009).
+		// Track whether any post-create writes occurred. CreateIssue persists the
+		// issue row to the Dolt working set, but subsequent AddDependency/AddLabel
+		// calls can leave extra metadata unversioned unless the current auto-commit
+		// mode asks for an immediate Dolt commit (GH#2009).
 		postCreateWrites := false
 
 		// If parent was specified, add parent-child dependency
@@ -761,13 +761,15 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Commit to Dolt. In DoltStore mode, CreateIssue commits the issue
-		// row internally, so only post-create metadata (deps, labels) needs
-		// a separate commit. In EmbeddedDoltStore mode, CreateIssue writes
-		// to the working set without a Dolt commit, so we always commit
-		// everything together at the end.
-		if isEmbeddedDolt || postCreateWrites {
+		// Commit immediately only in auto-commit=on. In batch/off, leave both
+		// ordinary post-create metadata and embedded create writes in the working
+		// set so create obeys the same "don't advance HEAD on ordinary writes"
+		// contract as the rest of the runtime-manager tail.
+		if shouldCreateImmediateDoltCommit() && (isEmbeddedDolt || postCreateWrites) {
 			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
+			if !isEmbeddedDolt && postCreateWrites {
+				commitMsg = fmt.Sprintf("bd: create %s (metadata)", issue.ID)
+			}
 			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
 				WarnError("failed to commit: %v", err)
 			}
@@ -777,7 +779,7 @@ var createCmd = &cobra.Command{
 		// Push is NOT done here — periodic sync handles pushes to
 		// DoltHub remotes. Per-create pushes caused 22GB of git-remote-cache
 		// bloat with dozens of agents creating wisps constantly (hq-glw).
-		if repoPath != "." && targetStore != nil {
+		if repoPath != "." && targetStore != nil && shouldCreateImmediateDoltCommit() {
 			if _, err := targetStore.CommitPending(ctx, actor); err != nil {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
 			}

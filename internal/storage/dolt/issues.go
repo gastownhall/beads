@@ -16,6 +16,20 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+func (s *DoltStore) maybeCommitVersionedTablesTx(ctx context.Context, tx *sql.Tx, tables []string, commitMsg string) error {
+	if !shouldImplicitlyVersionCommit(ctx) {
+		return nil
+	}
+	for _, table := range tables {
+		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+		return fmt.Errorf("dolt commit: %w", err)
+	}
+	return nil
+}
+
 // CreateIssue creates a new issue.
 // Delegates SQL work to issueops; handles Dolt versioning for non-ephemeral issues.
 func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
@@ -234,14 +248,9 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
 	commitMsg := fmt.Sprintf("bd: update %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+	if err := s.maybeCommitVersionedTablesTx(ctx, tx, []string{"issues", "events"}, commitMsg); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -315,14 +324,9 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 		return fmt.Errorf("failed to record claim event: %w", err)
 	}
 
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
 	commitMsg := fmt.Sprintf("bd: claim %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+	if err := s.maybeCommitVersionedTablesTx(ctx, tx, []string{"issues", "events"}, commitMsg); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -368,14 +372,9 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
 	commitMsg := fmt.Sprintf("bd: close %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+	if err := s.maybeCommitVersionedTablesTx(ctx, tx, []string{"issues", "events"}, commitMsg); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -430,14 +429,9 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 		return fmt.Errorf("issue not found: %s", id)
 	}
 
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
 	commitMsg := fmt.Sprintf("bd: delete %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+	if err := s.maybeCommitVersionedTablesTx(ctx, tx, []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"}, commitMsg); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -694,16 +688,9 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 	}
 	result.DeletedCount = totalDeleted + wispDeleteCount
 
-	// GH#2455: Stage only the tables this operation modified, then commit
-	// without -A. The old '-Am' approach staged ALL dirty tables in the
-	// working set, sweeping up stale config changes from concurrent operations.
-	for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
 	commitMsg := fmt.Sprintf("bd: delete %d issue(s)", totalDeleted)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return nil, fmt.Errorf("dolt commit: %w", err)
+	if err := s.maybeCommitVersionedTablesTx(ctx, tx, []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"}, commitMsg); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(); err != nil {

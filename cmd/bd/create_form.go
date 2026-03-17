@@ -175,10 +175,10 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 		return nil, fmt.Errorf("failed to create issue: %w", err)
 	}
 
-	// Track whether any post-create writes occurred. CreateIssue commits
-	// the issue to Dolt internally, but subsequent AddDependency/AddLabel
-	// calls only write to the working set. A follow-up Dolt commit is
-	// needed to persist them (GH#2009).
+	// Track whether any post-create writes occurred. CreateIssue persists the
+	// issue row to the Dolt working set, but subsequent AddDependency/AddLabel
+	// calls can leave extra metadata unversioned unless the current auto-commit
+	// mode asks for an immediate Dolt commit (GH#2009).
 	postCreateWrites := false
 
 	// If parent was specified, add parent-child dependency (GH#1983)
@@ -258,12 +258,10 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 		}
 	}
 
-	// Commit post-create metadata (deps, labels) to Dolt. CreateIssue's
-	// internal DOLT_COMMIT only covers the issue row; AddDependency and
-	// AddLabel write to the SQL working set without a Dolt commit. Without
-	// this, the metadata is visible but not durable — it can be lost on
-	// push, sync, or server restart (GH#2009).
-	if postCreateWrites {
+	// Commit post-create metadata immediately only in auto-commit=on.
+	// In batch/off, leave these changes in the working set so the flag's
+	// ordinary-write semantics stay consistent with the main create command.
+	if postCreateWrites && shouldCreateImmediateDoltCommit() {
 		commitMsg := fmt.Sprintf("bd: create %s (metadata)", issue.ID)
 		if err := s.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
 			WarnError("failed to commit post-create metadata: %v", err)

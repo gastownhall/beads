@@ -21,8 +21,6 @@ type repoRuntimeInfo struct {
 	ConfigErr     error
 }
 
-var resolveBeadsDirCache sync.Map
-
 func resolveRuntimeInfoForRepo(repoPath string) *repoRuntimeInfo {
 	runtime, err := beads.ResolveRepoRuntimeFromRepoPath(repoPath)
 	if err == nil && runtime != nil {

@@ -1496,6 +1496,10 @@ func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error 
 // connection. This prevents DOLT_COMMIT('-Am') from sweeping up stale
 // working set changes from concurrent operations (GH#2455).
 func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commitMsg string) error {
+	if !shouldImplicitlyVersionCommit(ctx) {
+		return nil
+	}
+
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to acquire connection: %w", err)

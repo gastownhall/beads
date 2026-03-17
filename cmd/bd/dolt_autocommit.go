@@ -72,6 +72,11 @@ func maybeAutoCommit(ctx context.Context, p doltAutoCommitParams) error {
 	return nil
 }
 
+func shouldCreateImmediateDoltCommit() bool {
+	mode, err := getDoltAutoCommitMode()
+	return err == nil && mode == doltAutoCommitOn
+}
+
 func isDoltNothingToCommit(err error) bool {
 	return issueops.IsNothingToCommitError(err)
 }

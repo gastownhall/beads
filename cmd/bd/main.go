@@ -367,8 +367,10 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Validate Dolt auto-commit mode early so all commands fail fast on invalid config.
-		if _, err := getDoltAutoCommitMode(); err != nil {
+		if mode, err := getDoltAutoCommitMode(); err != nil {
 			FatalError("%v", err)
+		} else {
+			rootCtx = dolt.WithImplicitVersionCommitMode(rootCtx, string(mode))
 		}
 
 		// GH#1093: Check noDbCommands BEFORE expensive operations
