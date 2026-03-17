@@ -65,7 +65,7 @@ func TestE2E_RuntimeMatrix_RepoLocalCommandsPreserveTrackedServerState(t *testin
 	repoDir := setupRuntimeMatrixGitRepo(t)
 	env := runtimeMatrixEnv()
 
-	initOut, initErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	initOut, initErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
 		lower := strings.ToLower(initOut)
 		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
@@ -137,13 +137,13 @@ func TestE2E_RuntimeMatrix_RepoLocalCommandsPreserveTrackedServerState(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			runtimeMatrixEnsureStoppedBaseline(t, bdBinary, repoDir, env)
 
-			output, err := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, tc.args...)
+			output, err := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, tc.args...)
 			if err != nil {
 				t.Fatalf("bd %s failed: %v\n%s", tc.name, err, output)
 			}
 			tc.validate(t, output)
 
-			statusAfter, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "dolt", "status")
+			statusAfter, statusErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "dolt", "status")
 			if statusErr != nil {
 				t.Fatalf("bd dolt status after %s failed: %v\n%s", tc.name, statusErr, statusAfter)
 			}
@@ -174,7 +174,7 @@ func TestE2E_RuntimeMatrix_MultiRepoRepoLocalServersStayIsolated(t *testing.T) {
 	runtimeMatrixEnsureStoppedBaseline(t, bdBinary, repoA, env)
 	runtimeMatrixEnsureStoppedBaseline(t, bdBinary, repoB, env)
 
-	showA, showAErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "show", issueA, "--json")
+	showA, showAErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "show", issueA, "--json")
 	if showAErr != nil {
 		t.Fatalf("bd show in repo A failed: %v\n%s", showAErr, showA)
 	}
@@ -183,14 +183,14 @@ func TestE2E_RuntimeMatrix_MultiRepoRepoLocalServersStayIsolated(t *testing.T) {
 		t.Fatalf("repo A show returned unexpected payload:\n%s", showA)
 	}
 
-	statusA, statusAErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "dolt", "status")
+	statusA, statusAErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "dolt", "status")
 	if statusAErr != nil {
 		t.Fatalf("bd dolt status in repo A failed: %v\n%s", statusAErr, statusA)
 	}
 	assertTrackedServerRunning(t, "repo A baseline", statusA)
 	portA := extractStatusPort(t, statusA)
 
-	showB, showBErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "show", issueB, "--json")
+	showB, showBErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "show", issueB, "--json")
 	if showBErr != nil {
 		t.Fatalf("bd show in repo B failed: %v\n%s", showBErr, showB)
 	}
@@ -199,7 +199,7 @@ func TestE2E_RuntimeMatrix_MultiRepoRepoLocalServersStayIsolated(t *testing.T) {
 		t.Fatalf("repo B show returned unexpected payload:\n%s", showB)
 	}
 
-	statusB, statusBErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "dolt", "status")
+	statusB, statusBErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "dolt", "status")
 	if statusBErr != nil {
 		t.Fatalf("bd dolt status in repo B failed: %v\n%s", statusBErr, statusB)
 	}
@@ -210,21 +210,21 @@ func TestE2E_RuntimeMatrix_MultiRepoRepoLocalServersStayIsolated(t *testing.T) {
 		t.Fatalf("expected distinct repo-local ports, got shared port %d", portA)
 	}
 
-	statusAAfter, statusAAfterErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "dolt", "status")
+	statusAAfter, statusAAfterErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "dolt", "status")
 	if statusAAfterErr != nil {
 		t.Fatalf("bd dolt status in repo A after repo B start failed: %v\n%s", statusAAfterErr, statusAAfter)
 	}
 	assertTrackedServerRunning(t, "repo A after repo B start", statusAAfter)
 	assertStatusContainsPort(t, statusAAfter, portA)
 
-	statusBAfter, statusBAfterErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "dolt", "status")
+	statusBAfter, statusBAfterErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "dolt", "status")
 	if statusBAfterErr != nil {
 		t.Fatalf("bd dolt status in repo B after isolation check failed: %v\n%s", statusBAfterErr, statusBAfter)
 	}
 	assertTrackedServerRunning(t, "repo B after repo A validation", statusBAfter)
 	assertStatusContainsPort(t, statusBAfter, portB)
 
-	listA, listAErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "list", "--json")
+	listA, listAErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoA, env, "list", "--json")
 	if listAErr != nil {
 		t.Fatalf("bd list in repo A failed: %v\n%s", listAErr, listA)
 	}
@@ -234,7 +234,7 @@ func TestE2E_RuntimeMatrix_MultiRepoRepoLocalServersStayIsolated(t *testing.T) {
 	}
 	assertContainsIssueIDs(t, itemsA, issueA)
 
-	listB, listBErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "list", "--json")
+	listB, listBErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoB, env, "list", "--json")
 	if listBErr != nil {
 		t.Fatalf("bd list in repo B failed: %v\n%s", listBErr, listB)
 	}
@@ -260,7 +260,7 @@ func TestE2E_RuntimeMatrix_ExplicitPortExternalServerPreservesConfiguredRuntime(
 	repo := setupRedirectedRuntimeMatrixRepo(t, true, 1, 2)
 	defer repo.Cleanup()
 
-	statusBefore, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
+	statusBefore, statusErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status before explicit-port command failed: %v\n%s", statusErr, statusBefore)
 	}
@@ -268,7 +268,7 @@ func TestE2E_RuntimeMatrix_ExplicitPortExternalServerPreservesConfiguredRuntime(
 	assertStatusContainsPort(t, statusBefore, repo.Port)
 	pidBefore := extractStatusPID(t, statusBefore)
 
-	listOut, listErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "list", "--json")
+	listOut, listErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "list", "--json")
 	if listErr != nil {
 		t.Fatalf("bd list against explicit-port external server failed: %v\n%s", listErr, listOut)
 	}
@@ -280,7 +280,7 @@ func TestE2E_RuntimeMatrix_ExplicitPortExternalServerPreservesConfiguredRuntime(
 		t.Fatalf("list title = %q, want %q", got, "source issue 1")
 	}
 
-	statusAfter, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
+	statusAfter, statusErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status after explicit-port command failed: %v\n%s", statusErr, statusAfter)
 	}
@@ -337,7 +337,7 @@ func TestE2E_RuntimeMatrix_IgnoresParentDoltDatabaseOverride(t *testing.T) {
 	repo := setupRedirectedRuntimeMatrixRepo(t, true, 1, 2)
 	defer repo.Cleanup()
 
-	listOut, listErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "list", "--json")
+	listOut, listErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "list", "--json")
 	if listErr != nil {
 		t.Fatalf("bd list under parent database override failed: %v\n%s", listErr, listOut)
 	}
@@ -365,20 +365,20 @@ func TestE2E_RuntimeMatrix_DoctorDryRunPreservesRedirectSourceDatabase(t *testin
 	repo := setupRedirectedRuntimeMatrixRepo(t, true, 1, 2)
 	defer repo.Cleanup()
 
-	statusBefore, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
+	statusBefore, statusErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status before doctor --dry-run failed: %v\n%s", statusErr, statusBefore)
 	}
 	assertTrackedServerRunning(t, "doctor --dry-run baseline", statusBefore)
 
-	doctorOut, _ := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "doctor", "--dry-run", "--json")
+	doctorOut, _ := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "doctor", "--dry-run", "--json")
 
 	result := decodeDoctorResult(t, doctorOut)
 	assertDoctorCheckStatus(t, result, "Dolt Connection", "ok")
 	assertDoctorCheckStatus(t, result, "Dolt Schema", "ok")
 	assertDoctorCheckMessageContains(t, result, "Dolt Issue Count", "1 issues")
 
-	statusAfter, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
+	statusAfter, statusErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status after doctor --dry-run failed: %v\n%s", statusErr, statusAfter)
 	}
@@ -411,13 +411,13 @@ func TestE2E_RuntimeMatrix_DoctorFixYesCreatesSelectedDatabaseWhenSharedDirExist
 		},
 	})
 
-	statusBefore, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
+	statusBefore, statusErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status before doctor --fix --yes failed: %v\n%s", statusErr, statusBefore)
 	}
 	assertTrackedServerRunning(t, "doctor --fix --yes baseline", statusBefore)
 
-	_, _ = runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "doctor", "--fix", "--yes")
+	_, _ = runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "doctor", "--fix", "--yes")
 
 	cfg, err := configfile.Load(repo.SourceBeadsDir)
 	if err != nil {
@@ -427,7 +427,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesCreatesSelectedDatabaseWhenSharedDirExist
 		t.Fatalf("source metadata dolt_database = %q, want %q", got, repo.SourceDB)
 	}
 
-	listOut, listErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "list", "--json")
+	listOut, listErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "list", "--json")
 	if listErr != nil {
 		t.Fatalf("bd list after doctor --fix --yes failed: %v\n%s", listErr, listOut)
 	}
@@ -439,14 +439,14 @@ func TestE2E_RuntimeMatrix_DoctorFixYesCreatesSelectedDatabaseWhenSharedDirExist
 		t.Fatalf("imported issue title = %q, want %q", got, "imported from jsonl")
 	}
 
-	statusAfter, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
+	statusAfter, statusErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status after doctor --fix --yes failed: %v\n%s", statusErr, statusAfter)
 	}
 	assertTrackedServerRunning(t, "doctor --fix --yes", statusAfter)
 	assertStatusContainsPort(t, statusAfter, repo.Port)
 
-	doctorOut, _ := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "doctor", "--dry-run", "--json")
+	doctorOut, _ := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "doctor", "--dry-run", "--json")
 	assertDoctorCheckStatus(t, decodeDoctorResult(t, doctorOut), "Dolt Connection", "ok")
 }
 
@@ -462,7 +462,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRecoversMalformedMetadata(t *testing.T) {
 	repoDir := setupRuntimeMatrixGitRepo(t)
 	env := runtimeMatrixEnv()
 
-	initOut, initErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	initOut, initErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
 		lower := strings.ToLower(initOut)
 		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
@@ -486,7 +486,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRecoversMalformedMetadata(t *testing.T) {
 		t.Fatalf("write malformed metadata: %v", err)
 	}
 
-	fixOut, _ := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--fix", "--yes")
+	fixOut, _ := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--fix", "--yes")
 	if strings.Contains(fixOut, "failed to reinitialize Dolt database") {
 		t.Fatalf("doctor --fix attempted stale destructive repair after metadata recovery\n%s", fixOut)
 	}
@@ -499,7 +499,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRecoversMalformedMetadata(t *testing.T) {
 		t.Fatalf("recovered dolt_database = %q, want %q", got, expectedDB)
 	}
 
-	listOut, listErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "list", "--json")
+	listOut, listErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "list", "--json")
 	if listErr != nil {
 		t.Fatalf("bd list after malformed-metadata recovery failed: %v\n%s", listErr, listOut)
 	}
@@ -511,7 +511,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRecoversMalformedMetadata(t *testing.T) {
 		t.Fatalf("recovered issue title = %q, want %q", got, "malformed metadata survivor")
 	}
 
-	doctorOut, _ := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--dry-run", "--json")
+	doctorOut, _ := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--dry-run", "--json")
 	result := decodeDoctorResult(t, doctorOut)
 	assertDoctorCheckStatus(t, result, "Config Values", "ok")
 	assertDoctorCheckStatus(t, result, "Dolt Connection", "ok")
@@ -542,7 +542,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRemovesStaleAccessLock(t *testing.T) {
 		t.Fatalf("age stale dolt-access.lock: %v", err)
 	}
 
-	fixOut, fixErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--fix", "--yes")
+	fixOut, fixErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--fix", "--yes")
 	if fixErr != nil {
 		t.Fatalf("bd doctor --fix --yes failed: %v\n%s", fixErr, fixOut)
 	}
@@ -550,7 +550,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRemovesStaleAccessLock(t *testing.T) {
 		t.Fatalf("expected stale dolt-access.lock to be removed, got err=%v", err)
 	}
 
-	listOut, listErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "list", "--json")
+	listOut, listErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "list", "--json")
 	if listErr != nil {
 		t.Fatalf("bd list after stale-lock recovery failed: %v\n%s", listErr, listOut)
 	}
@@ -560,7 +560,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRemovesStaleAccessLock(t *testing.T) {
 	}
 	assertContainsIssueIDs(t, items, issueID)
 
-	doctorOut, _ := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--dry-run", "--json")
+	doctorOut, _ := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "doctor", "--dry-run", "--json")
 	assertDoctorCheckStatus(t, decodeDoctorResult(t, doctorOut), "Dolt Connection", "ok")
 }
 
@@ -676,7 +676,7 @@ func setupRuntimeMatrixGitRepo(t *testing.T) string {
 func runtimeMatrixInitDoltRepo(t *testing.T, bdBinary, repoDir string, env []string, prefix string) {
 	t.Helper()
 
-	initOut, initErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "init", "--backend", "dolt", "--prefix", prefix, "--quiet")
+	initOut, initErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "init", "--backend", "dolt", "--prefix", prefix, "--quiet")
 	if initErr != nil {
 		lower := strings.ToLower(initOut)
 		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
@@ -688,7 +688,7 @@ func runtimeMatrixInitDoltRepo(t *testing.T, bdBinary, repoDir string, env []str
 
 func runtimeMatrixCreateIssue(t *testing.T, bdBinary, repoDir string, env []string, title string) string {
 	t.Helper()
-	out, err := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "create", title, "--json")
+	out, err := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "create", title, "--json")
 	if err != nil {
 		t.Fatalf("bd create %q failed: %v\n%s", title, err, out)
 	}
@@ -706,15 +706,15 @@ func runtimeMatrixCreateIssue(t *testing.T, bdBinary, repoDir string, env []stri
 func runtimeMatrixEnsureStoppedBaseline(t *testing.T, bdBinary, repoDir string, env []string) {
 	t.Helper()
 
-	statusOut, _ := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "dolt", "status")
+	statusOut, _ := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "dolt", "status")
 	if strings.Contains(statusOut, "Dolt server: running") {
-		stopOut, stopErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "dolt", "stop")
+		stopOut, stopErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "dolt", "stop")
 		if stopErr != nil {
 			t.Fatalf("bd dolt stop failed: %v\n%s", stopErr, stopOut)
 		}
 	}
 
-	statusOut, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "dolt", "status")
+	statusOut, statusErr := runBuiltBDExecAllowErrorWithEnv(t, bdBinary, repoDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status baseline failed: %v\n%s", statusErr, statusOut)
 	}
