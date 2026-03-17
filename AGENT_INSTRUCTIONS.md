@@ -109,7 +109,7 @@ bd hooks install
 
 1. **File beads issues for any remaining work** that needs follow-up
 2. **Ensure all quality gates pass** (only if code changes were made):
-   - Run `make lint` or `golangci-lint run ./...` (if pre-commit installed: `pre-commit run --all-files`)
+   - Run `make fmt-check`, then `golangci-lint run ./...` (if pre-commit is installed, `pre-commit run --all-files` is a useful extra check)
    - Run `make test-short` for the default local check, `make test` for the broader non-short lane, and `make test-full-cgo` when CGO-relevant code changed
    - File P0 issues if quality gates are broken
 3. **Update beads issues** - close finished work, update status
@@ -286,8 +286,8 @@ make test
 # Test with the full CGO-enabled validation lane
 make test-full-cgo
 
-# Coverage run
-go test -coverprofile=coverage.out ./...
+# Coverage run that keeps the repo's wrapper / skip logic
+TEST_COVER=1 TEST_COVERPROFILE=coverage.out ./scripts/test.sh ./...
 go tool cover -html=coverage.out
 
 # Verify installed binary
