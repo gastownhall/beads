@@ -22,8 +22,9 @@ else
 INSTALL_DIR := $(HOME)/.local/bin
 endif
 
-# Dolt backend requires CGO for embedded database support.
-# Without CGO, builds will fail with "dolt backend requires CGO".
+# CGO is required for embedded-Dolt support and some test lanes.
+# The main CLI can still be built without CGO (for example, doc/flag validation in CI),
+# but embedded/runtime-sensitive workflows should keep CGO enabled.
 #
 # Windows notes:
 #   - ICU is NOT required. go-icu-regex has a pure-Go fallback (regex_windows.go)

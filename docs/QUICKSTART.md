@@ -5,10 +5,12 @@ Get up and running with Beads in 2 minutes.
 ## Installation
 
 ```bash
-cd ~/src/beads
-go build -o bd ./cmd/bd
-./bd --help
+go install github.com/steveyegge/beads/cmd/bd@latest
+bd --help
 ```
+
+If you're developing inside a clone of the Beads repo, use `make install` from
+that checkout instead of leaving a hand-built `./bd` in the repo root.
 
 ## Initialize
 

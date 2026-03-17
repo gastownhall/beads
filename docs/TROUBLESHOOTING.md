@@ -182,8 +182,7 @@ CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
 # Or if building from source
 git clone https://github.com/steveyegge/beads
 cd beads
-CGO_ENABLED=1 go build -o bd ./cmd/bd
-sudo mv bd /usr/local/bin/
+CGO_ENABLED=1 make install
 ```
 
 If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/steveyegge/beads/issues).
