@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS wisps (
     original_size INT,
     sender VARCHAR(255) DEFAULT '',
     ephemeral TINYINT(1) DEFAULT 0,
-    no_history TINYINT(1) DEFAULT 0,
     wisp_type VARCHAR(32) DEFAULT '',
     pinned TINYINT(1) DEFAULT 0,
     is_template TINYINT(1) DEFAULT 0,
