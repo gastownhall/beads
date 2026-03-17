@@ -9,7 +9,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -35,27 +34,12 @@ func resolveRuntimeInfoForRepo(repoPath string) *repoRuntimeInfo {
 	}
 
 	beadsDir := resolveBeadsDir(filepath.Join(repoPath, ".beads"))
+	sourceBeadsDir := filepath.Join(repoPath, ".beads")
 	cfg, cfgErr := configfile.Load(beadsDir)
 	cfgEffective := effectiveConfig(cfg)
 
 	return &repoRuntimeInfo{
-		Runtime: &beads.RepoRuntime{
-			RepoPath:         repoPath,
-			SourceBeadsDir:   filepath.Join(repoPath, ".beads"),
-			BeadsDir:         beadsDir,
-			Backend:          cfgEffective.GetBackend(),
-			DatabasePath:     cfgEffective.DatabasePath(beadsDir),
-			Database:         cfgEffective.GetDoltDatabase(),
-			DoltDataDir:      cfgEffective.GetDoltDataDir(),
-			DoltMode:         cfgEffective.GetDoltMode(),
-			ServerMode:       cfgEffective.IsDoltServerMode(),
-			Host:             cfgEffective.GetDoltServerHost(),
-			Port:             doltserver.DefaultConfig(beadsDir).Port,
-			ExplicitPort:     cfgEffective.DoltServerPort > 0,
-			User:             cfgEffective.GetDoltServerUser(),
-			TLS:              cfgEffective.GetDoltServerTLS(),
-			SharedServerMode: doltserver.IsSharedServerMode(),
-		},
+		Runtime:       beads.BuildFallbackRepoRuntime(repoPath, sourceBeadsDir, beadsDir, cfgEffective),
 		Config:        cfgEffective,
 		ConfigPresent: cfg != nil,
 		ConfigErr:     cfgErr,

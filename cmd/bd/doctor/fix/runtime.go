@@ -41,22 +41,7 @@ func resolveRuntimeInfoForRepo(repoPath string) (*repoRuntimeInfo, error) {
 	cfgEffective := effectiveFixConfig(cfg)
 
 	return &repoRuntimeInfo{
-		Runtime: &beads.RepoRuntime{
-			RepoPath:         repoPath,
-			SourceBeadsDir:   sourceBeadsDir,
-			BeadsDir:         beadsDir,
-			Backend:          cfgEffective.GetBackend(),
-			DatabasePath:     cfgEffective.DatabasePath(beadsDir),
-			Database:         cfgEffective.GetDoltDatabase(),
-			DoltDataDir:      cfgEffective.GetDoltDataDir(),
-			DoltMode:         cfgEffective.GetDoltMode(),
-			ServerMode:       cfgEffective.IsDoltServerMode(),
-			Host:             cfgEffective.GetDoltServerHost(),
-			Port:             doltserver.DefaultConfig(beadsDir).Port,
-			User:             cfgEffective.GetDoltServerUser(),
-			TLS:              cfgEffective.GetDoltServerTLS(),
-			SharedServerMode: doltserver.IsSharedServerMode(),
-		},
+		Runtime:      beads.BuildFallbackRepoRuntime(repoPath, sourceBeadsDir, beadsDir, cfgEffective),
 		Config:       cfgEffective,
 		SourceConfig: cfg,
 	}, nil
@@ -67,6 +52,18 @@ func effectiveFixConfig(cfg *configfile.Config) *configfile.Config {
 		return cfg
 	}
 	return configfile.DefaultConfig()
+}
+
+func fallbackRuntimeInfoForRepoReinit(repoPath string) *repoRuntimeInfo {
+	sourceBeadsDir := filepath.Join(repoPath, ".beads")
+	beadsDir := resolveBeadsDir(sourceBeadsDir)
+	cfg := configfile.DefaultConfig()
+
+	return &repoRuntimeInfo{
+		Runtime:      beads.BuildFallbackRepoRuntime(repoPath, sourceBeadsDir, beadsDir, cfg),
+		Config:       cfg,
+		SourceConfig: cfg,
+	}
 }
 
 func loadSourceConfig(runtime *beads.RepoRuntime, fallback *configfile.Config) *configfile.Config {

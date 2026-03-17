@@ -182,3 +182,57 @@ func TestResolveRepoRuntimeFromBeadsDir_PreservesSourceDatabaseAcrossRedirect(t 
 		t.Fatalf("Database = %q, want source_db", runtime.Database)
 	}
 }
+
+func TestBuildFallbackRepoRuntime_UsesResolvedPathsAndConfig(t *testing.T) {
+	repoDir := t.TempDir()
+	sourceBeadsDir := filepath.Join(repoDir, ".beads")
+	targetBeadsDir := filepath.Join(repoDir, "shared", ".beads")
+	targetDataDir := filepath.Join(targetBeadsDir, "dolt")
+
+	if err := os.MkdirAll(sourceBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(targetDataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		Database:       "dolt",
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3319,
+		DoltServerUser: "runtime-user",
+		DoltServerTLS:  true,
+		DoltDatabase:   "runtime_db",
+	}
+	if err := os.WriteFile(filepath.Join(targetBeadsDir, "dolt-server.port"), []byte("3319\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime := BuildFallbackRepoRuntime(repoDir, sourceBeadsDir, targetBeadsDir, cfg)
+
+	if !utils.PathsEqual(runtime.SourceBeadsDir, sourceBeadsDir) {
+		t.Fatalf("SourceBeadsDir = %q, want %q", runtime.SourceBeadsDir, sourceBeadsDir)
+	}
+	if !utils.PathsEqual(runtime.BeadsDir, targetBeadsDir) {
+		t.Fatalf("BeadsDir = %q, want %q", runtime.BeadsDir, targetBeadsDir)
+	}
+	if !utils.PathsEqual(runtime.DatabasePath, targetDataDir) {
+		t.Fatalf("DatabasePath = %q, want %q", runtime.DatabasePath, targetDataDir)
+	}
+	if runtime.Database != "runtime_db" {
+		t.Fatalf("Database = %q, want runtime_db", runtime.Database)
+	}
+	if runtime.Port != 3319 {
+		t.Fatalf("Port = %d, want 3319", runtime.Port)
+	}
+	if !runtime.ExplicitPort {
+		t.Fatal("expected ExplicitPort=true")
+	}
+	if !runtime.TLS {
+		t.Fatal("expected TLS=true")
+	}
+	if runtime.OwnershipMode != RuntimeOwnershipRepoManaged {
+		t.Fatalf("OwnershipMode = %q, want %q", runtime.OwnershipMode, RuntimeOwnershipRepoManaged)
+	}
+}

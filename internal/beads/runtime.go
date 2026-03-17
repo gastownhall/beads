@@ -47,6 +47,37 @@ type RepoRuntime struct {
 	OwnershipMode    RuntimeOwnershipMode
 }
 
+// BuildFallbackRepoRuntime constructs a best-effort runtime from already
+// resolved repo/beads/config inputs when redirect-aware resolution cannot be
+// used directly. Callers still own the surrounding config-load policy.
+func BuildFallbackRepoRuntime(repoPath, sourceBeadsDir, beadsDir string, cfg *configfile.Config) *RepoRuntime {
+	if cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+	if sourceBeadsDir == "" {
+		sourceBeadsDir = beadsDir
+	}
+
+	return &RepoRuntime{
+		RepoPath:         repoPath,
+		SourceBeadsDir:   sourceBeadsDir,
+		BeadsDir:         beadsDir,
+		Backend:          cfg.GetBackend(),
+		DatabasePath:     cfg.DatabasePath(beadsDir),
+		Database:         cfg.GetDoltDatabase(),
+		DoltDataDir:      cfg.GetDoltDataDir(),
+		DoltMode:         cfg.GetDoltMode(),
+		ServerMode:       cfg.IsDoltServerMode(),
+		Host:             cfg.GetDoltServerHost(),
+		Port:             doltserver.DefaultConfig(beadsDir).Port,
+		ExplicitPort:     cfg.DoltServerPort > 0,
+		User:             cfg.GetDoltServerUser(),
+		TLS:              cfg.GetDoltServerTLS(),
+		SharedServerMode: doltserver.IsSharedServerMode(),
+		OwnershipMode:    resolveRuntimeOwnershipMode(),
+	}
+}
+
 // ResolveRepoRuntimeFromRepoPath resolves a repo-local runtime from a repo root
 // or worktree path. The returned BeadsDir is redirect-aware and points at the
 // authoritative .beads directory for the repo.
