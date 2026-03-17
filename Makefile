@@ -9,7 +9,7 @@ SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
 endif
 endif
 
-.PHONY: all build test test-full-cgo test-regression bench bench-quick clean install install-force help check-up-to-date fmt fmt-check
+.PHONY: all build test test-short test-full-cgo test-regression bench bench-quick clean install install-force help check-up-to-date fmt fmt-check
 
 # Default target
 all: build
@@ -74,6 +74,11 @@ endif
 test:
 	@echo "Running tests..."
 	@TEST_COVER=1 ./scripts/test.sh
+
+# Run the fast local path (close to PR CI: skip list + -short, no coverage)
+test-short:
+	@echo "Running short tests..."
+	@./scripts/test.sh -short
 
 # Run full CGO-enabled test suite (no skip list).
 # On macOS, auto-configures ICU include/link flags.
@@ -176,7 +181,8 @@ clean:
 help:
 	@echo "Beads Makefile targets:"
 	@echo "  make build        - Build the bd binary"
-	@echo "  make test         - Run all tests"
+	@echo "  make test         - Run the broader local test suite with coverage"
+	@echo "  make test-short   - Run the fast local/PR-like short test suite"
 	@echo "  make test-full-cgo - Run full CGO-enabled test suite"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
 	@echo "  make bench        - Run performance benchmarks (generates CPU profiles)"

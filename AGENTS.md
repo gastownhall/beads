@@ -39,8 +39,11 @@ echo 'Updated text' | bd update <id> --description=-
 
 ## Testing Commands (No Ambiguity)
 
-- Default local test command: `make test` (or `./scripts/test.sh`).
+- Fast local / PR-like test command: `make test-short` (or `./scripts/test.sh -short`).
+- Broader local test command: `make test` (or `./scripts/test.sh` for the same non-short path without the Makefile coverage wrapper).
 - Full CGO-enabled suite: `make test-full-cgo` (or `./scripts/test-cgo.sh ./...`).
+- The runtime-matrix lane is `testing.Short()`-gated, so it mostly shows up in the broader local path, not the default PR path.
+- Some Dolt-backed tests launch the local `dolt` CLI directly; they honor `BEADS_TEST_SKIP=dolt` and otherwise skip if `dolt` is not on `PATH`.
 - On macOS, do **not** run raw `CGO_ENABLED=1 go test ./...` unless ICU flags are set; use the script/Make target above.
 - If you need package- or test-scoped CGO runs:
 ```bash

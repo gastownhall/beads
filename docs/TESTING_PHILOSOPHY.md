@@ -213,8 +213,8 @@ TestPriority(5)  // boundary - first invalid
 | Metric | Target | Current (beads) | Status |
 |--------|--------|-----------------|--------|
 | Test-to-code ratio | 0.5:1 - 1.5:1 | 0.85:1 | Healthy |
-| Fast test suite | < 5 seconds | 3.8 seconds | Good |
-| Integration tests | < 30 seconds | ~15 seconds | Good |
+| Short local / PR-like lane | Stay practical for frequent use | Re-measure periodically | Monitor |
+| Heavier non-short lanes | Targeted, not default | Re-measure periodically | Monitor |
 | Compilation overhead | Minimize | 180 seconds | Bottleneck |
 
 ### Interpretation

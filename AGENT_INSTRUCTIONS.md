@@ -10,7 +10,7 @@ This document contains detailed operational instructions for AI agents working o
 
 - **Go version**: 1.24+
 - **Linting**: `golangci-lint run ./...` (baseline warnings documented in [docs/LINTING.md](docs/LINTING.md))
-- **Testing**: All new features need tests (`make test` for local baseline, `make test-full-cgo` when validating full CGO paths)
+- **Testing**: All new features need tests (`make test-short` for the fast local/PR-like lane, `make test` for the broader local lane, `make test-full-cgo` when validating full CGO paths)
 - **Documentation**: Update relevant .md files
 
 ### File Organization
@@ -65,7 +65,7 @@ into temp repos and produce flaky test behavior.
 
 ### Before Committing
 
-1. **Run tests**: `make test` (or `./scripts/test.sh`)
+1. **Run tests**: `make test-short` for the fast local baseline, then `make test` when you need the broader non-short local lane
    - For full CGO validation: `make test-full-cgo`
 2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
 3. **Update docs**: If you changed behavior, update README.md or other docs
@@ -110,7 +110,7 @@ bd hooks install
 1. **File beads issues for any remaining work** that needs follow-up
 2. **Ensure all quality gates pass** (only if code changes were made):
    - Run `make lint` or `golangci-lint run ./...` (if pre-commit installed: `pre-commit run --all-files`)
-   - Run `make test` (and `make test-full-cgo` when CGO-relevant code changed)
+   - Run `make test-short` for the default local check, `make test` for the broader non-short lane, and `make test-full-cgo` when CGO-relevant code changed
    - File P0 issues if quality gates are broken
 3. **Update beads issues** - close finished work, update status
 4. **PUSH TO REMOTE - NON-NEGOTIABLE** - This step is MANDATORY. Execute ALL commands below:
@@ -277,7 +277,10 @@ This installs:
 # Build and install bd to ~/.local/bin (the canonical location)
 make install
 
-# Test (local baseline)
+# Test (fast local / PR-like lane)
+make test-short
+
+# Test (broader local non-short lane)
 make test
 
 # Test with full CGO-enabled suite (local/CI parity)
@@ -359,7 +362,7 @@ This handles the entire release workflow automatically, including waiting ~5 min
 
 1. Bump version: `./scripts/bump-version.sh <version> --commit`
 2. Update CHANGELOG.md with release notes
-3. Run tests: `make test` (and `make test-full-cgo` for CGO-related changes)
+3. Run tests: `make test-short` for the default local check, `make test` for the broader non-short lane, and `make test-full-cgo` for CGO-related changes
 4. Push version bump: `git push origin main`
 5. Tag release: `git tag v<version> && git push origin v<version>`
 6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)

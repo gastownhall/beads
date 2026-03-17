@@ -35,6 +35,7 @@ TIMEOUT="${TEST_TIMEOUT:-3m}"
 SKIP_PATTERN=$(build_skip_pattern)
 VERBOSE="${TEST_VERBOSE:-}"
 RUN_PATTERN="${TEST_RUN:-}"
+SHORT_MODE="${TEST_SHORT:-}"
 COVERAGE="${TEST_COVER:-}"
 COVERPROFILE="${TEST_COVERPROFILE:-/tmp/beads.coverage.out}"
 COVERPKG="${TEST_COVERPKG:-}"
@@ -54,6 +55,10 @@ while [[ $# -gt 0 ]]; do
         -run)
             RUN_PATTERN="$2"
             shift 2
+            ;;
+        -short|--short)
+            SHORT_MODE=1
+            shift
             ;;
         -skip)
             # Allow additional skip patterns
@@ -139,6 +144,10 @@ fi
 
 if [[ -n "$RUN_PATTERN" ]]; then
     CMD+=(-run "$RUN_PATTERN")
+fi
+
+if [[ -n "$SHORT_MODE" ]]; then
+    CMD+=(-short)
 fi
 
 if [[ -n "$COVERAGE" ]]; then

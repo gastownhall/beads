@@ -2,21 +2,33 @@
 
 ## Overview
 
-The beads project has a comprehensive test suite with **~41,000 lines of code** across **205 files** in `cmd/bd` alone.
+The test surface now has a few distinct lanes. The important thing is to pick the
+right one for the change you are making instead of assuming every path is equally
+cheap.
 
-## Test Performance
+The short version:
+- `make test-short` is the closest local match to PR CI. It uses `.test-skip`
+  and passes `-short`.
+- `make test` is the broader local run. It still uses `.test-skip`, but it does
+  **not** pass `-short`. The `make` target also enables coverage.
+- `make test-full-cgo` is the full CGO-enabled lane for Dolt-sensitive changes.
 
-- **Total test time:** ~3 minutes (excluding broken tests)
-- **Package count:** 20+ packages with tests
-- **Compilation overhead:** ~180 seconds (most of the total time)
-- **Individual test time:** Only ~3.8 seconds combined for all 313 tests in cmd/bd
+Compilation and link time still dominate many runs. The newer runtime-manager
+coverage also means the non-short local path is meaningfully heavier than the
+PR path.
 
 ## Running Tests
 
 ### Quick Start
 
 ```bash
-# Run all tests (auto-skips known broken tests)
+# Fast local path (closest to PR CI)
+make test-short
+
+# Or directly:
+./scripts/test.sh -short
+
+# Broader local path (non-short; `make test` also enables coverage)
 make test
 
 # Or directly:
@@ -24,6 +36,10 @@ make test
 
 # Run full CGO-enabled suite (no skip list)
 make test-full-cgo
+
+# Run embedded-Dolt tagged lanes explicitly
+BEADS_TEST_EMBEDDED_DOLT=1 go test -tags embeddeddolt ./internal/storage/embeddeddolt/...
+BEADS_TEST_EMBEDDED_DOLT=1 go test -tags embeddeddolt -run TestEmbedded ./cmd/bd/...
 
 # Run specific package
 ./scripts/test.sh ./cmd/bd/...
@@ -41,6 +57,9 @@ make test-full-cgo
 # Set custom timeout (default: 3m)
 TEST_TIMEOUT=5m ./scripts/test.sh
 
+# Force short mode via env instead of CLI flag
+TEST_SHORT=1 ./scripts/test.sh
+
 # Enable verbose output
 TEST_VERBOSE=1 ./scripts/test.sh
 
@@ -48,11 +67,14 @@ TEST_VERBOSE=1 ./scripts/test.sh
 TEST_RUN=TestCreate ./scripts/test.sh
 ```
 
-### Docker (Dolt Integration Tests)
+### Dolt-Backed Test Dependencies
 
-Dolt integration tests require Docker with the exact Dolt image cached locally.
-Tests auto-detect the environment and skip gracefully — no manual configuration
-needed.
+The repo uses two different Dolt-backed test styles:
+- Docker-backed Dolt tests that look for the exact cached test image.
+- Host-CLI Dolt tests that launch `dolt sql-server` directly from your local
+  `PATH`.
+
+The Docker-backed tests auto-detect the environment and skip gracefully.
 
 #### Readiness states
 
@@ -80,11 +102,18 @@ BEADS_TEST_SKIP=dolt ./scripts/test.sh
 BEADS_TEST_SKIP=dolt,slow ./scripts/test.sh
 ```
 
+That same `BEADS_TEST_SKIP=dolt` contract now also skips the direct host-`dolt`
+tests. If a test needs the local `dolt` CLI and it is not on `PATH`, it skips
+instead of failing hard.
+
 #### Enabling Dolt tests
 
 ```bash
 # Pull the exact Dolt image to enable integration tests
 docker pull dolthub/dolt-sql-server:1.43.0
+
+# Or make the local dolt CLI available for host-backed runtime tests
+which dolt
 
 # Point tests at an existing Dolt server (skips container startup)
 BEADS_DOLT_PORT=3308 ./scripts/test.sh
@@ -99,11 +128,14 @@ starting a container. Port 3307 is hardcoded as production and always rejected.
 # Skip additional tests beyond .test-skip
 ./scripts/test.sh -skip SomeSlowTest
 
+# Run the wrapper in short mode
+./scripts/test.sh -short
+
 # Run with custom timeout
 ./scripts/test.sh -timeout 5m
 
 # Combine flags
-./scripts/test.sh -v -run TestCreate ./internal/beads/...
+./scripts/test.sh -short -v -run TestCreate ./internal/beads/...
 ```
 
 ## Known Broken Tests
@@ -124,22 +156,27 @@ When running tests during development:
 1. **Use the test script:** Always use `./scripts/test.sh` instead of `go test` directly
    - Automatically skips known broken tests
    - Uses appropriate timeouts
-   - Consistent with CI/CD
+   - Exposes both the short local loop and the broader non-short path
    - For full CGO validation, use `./scripts/test-cgo.sh` (or `make test-full-cgo`)
+   - For PR-like local coverage, prefer `./scripts/test.sh -short` (or `make test-short`)
 
 2. **Target specific tests when possible:**
    ```bash
-   # Instead of running everything:
+   # Fast local check:
+   ./scripts/test.sh -short
+
+   # Broader local check:
    ./scripts/test.sh
 
    # Run just what you changed:
-   ./scripts/test.sh -run TestSpecificFeature ./cmd/bd/...
+   ./scripts/test.sh -short -run TestSpecificFeature ./cmd/bd/...
    ```
 
 3. **Compilation is the bottleneck:**
-   - The 180-second compilation time dominates
-   - Individual tests are fast
-   - Use `-run` to avoid recompiling unnecessarily
+   - CGO compile/link time still dominates many runs
+   - `make test` is heavier than PR CI because it is non-short and enables coverage
+   - The runtime-matrix tests are `testing.Short()`-gated, so they mostly show up in non-short local runs
+   - Use `-short` and `-run` to keep the loop tight when you can
 
 4. **Check for new failures:**
    ```bash
@@ -159,17 +196,24 @@ If you discover a broken test:
    ```
 3. Tests in `.test-skip` support regex patterns
 
-## Test Organization
+## Runtime Matrix and Embedded-Dolt Lanes
 
-### Slowest Tests (>0.05s)
+The runtime-manager rewrite added a black-box CLI matrix in
+`cmd/bd/cli_runtime_matrix_integration_test.go`.
 
-The top slow tests in cmd/bd:
-- `TestDoctorWithBeadsDir` (1.68s) - Only significantly slow test
-- `TestFlushManagerDebouncing` (0.21s)
-- `TestDebouncer_*` tests (0.06-0.12s each) - Intentional sleeps for concurrency testing
-- `TestMultiWorkspaceDeletionSync` (0.12s)
+Important properties:
+- CGO-only
+- `testing.Short()`-gated
+- launches real `bd` binaries and real Dolt server processes
 
-Most tests are <0.01s and very fast.
+That means:
+- PR CI mostly skips the heavy runtime-matrix cases because it runs `-short`
+- local `make test` includes this lane when the package is exercised in non-short mode
+- local `make test-short` skips it
+
+There is also a separate embedded-Dolt lane in CI:
+- `go test -tags embeddeddolt -v -race -count=1 ./internal/storage/embeddeddolt/`
+- `go test -tags embeddeddolt -v -race -count=1 -run TestEmbedded ./cmd/bd/`
 
 ### Package Structure
 
@@ -183,12 +227,13 @@ internal/*/       - Various internal package tests
 
 ## Continuous Integration
 
-The test script is designed to work seamlessly with CI/CD:
+PR CI does **not** run `make test`. It runs `go test -short -race ./...` (with
+coverage on Linux) plus a separate embedded-Dolt tagged job.
 
-```yaml
-# Example GitHub Actions
-- name: Run tests
-  run: make test
+So if you want the closest local reproduction of the default PR lane, use:
+
+```bash
+make test-short
 ```
 
 ## Debugging Test Failures
@@ -205,7 +250,7 @@ The test script is designed to work seamlessly with CI/CD:
 
 ### Check which tests are being skipped
 ```bash
-./scripts/test.sh 2>&1 | head -5
+./scripts/test.sh -short 2>&1 | head -5
 ```
 
 Output shows:

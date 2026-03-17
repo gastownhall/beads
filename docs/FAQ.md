@@ -397,13 +397,20 @@ This makes bd ideal for:
 
 ### What dependencies does bd have?
 
-bd is a single static binary with no runtime dependencies:
+For normal use, `bd` is a single CLI binary. You do **not** need PostgreSQL,
+Redis, or a separate web service.
 
-- **Language**: Go 1.24+
-- **Database**: Dolt (server mode)
-- **Optional**: Git (for version control of project code)
+Common dependencies by scenario:
+- **Go 1.24+** when building from source
+- **Git** for version control of project code
+- **Dolt runtime/server support** for Dolt-backed repos
+- **Docker** only for Docker-backed test lanes
+- **Local `dolt` CLI** only for some host-backed test lanes
+- **ICU headers/libs on macOS** when building or running CGO-backed Dolt code from source
 
-That's it! No PostgreSQL, no Redis, no Docker, no node_modules.
+So the normal product story is still lightweight, but the development and test
+lanes have a few optional prerequisites depending on which backend and test path
+you are exercising.
 
 ### Can I extend bd's database?
 
