@@ -656,21 +656,23 @@ async def test_quickstart_not_found(bd_client):
 async def test_stats(bd_client, mock_process):
     """Test stats method."""
     stats_data = {
-        "total_issues": 10,
-        "open_issues": 5,
-        "in_progress_issues": 2,
-        "closed_issues": 3,
-        "blocked_issues": 1,
-        "ready_issues": 4,
-        "average_lead_time_hours": 24.5,
+        "summary": {
+            "total_issues": 10,
+            "open_issues": 5,
+            "in_progress_issues": 2,
+            "closed_issues": 3,
+            "blocked_issues": 1,
+            "ready_issues": 4,
+            "average_lead_time_hours": 24.5,
+        },
     }
     mock_process.communicate = AsyncMock(return_value=(json.dumps(stats_data).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         result = await bd_client.stats()
 
-    assert result.total_issues == 10
-    assert result.open_issues == 5
+    assert result.summary.total_issues == 10
+    assert result.summary.open_issues == 5
 
 
 @pytest.mark.asyncio
