@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 var (
@@ -71,7 +72,7 @@ Examples:
 
 		// Get total commit count
 		var totalCommits int
-		if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&totalCommits); err != nil {
+		if err := store.(storage.RawDBAccessor).DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&totalCommits); err != nil {
 			FatalError("failed to count commits: %v", err)
 		}
 
@@ -93,7 +94,7 @@ Examples:
 
 		// Count commits before and after cutoff
 		var oldCommits int
-		err := store.DB().QueryRowContext(ctx,
+		err := store.(storage.RawDBAccessor).DB().QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM dolt_log WHERE date < ?", cutoff,
 		).Scan(&oldCommits)
 		if err != nil {
@@ -104,7 +105,7 @@ Examples:
 
 		// Get initial commit hash
 		var initialHash string
-		if err := store.DB().QueryRowContext(ctx,
+		if err := store.(storage.RawDBAccessor).DB().QueryRowContext(ctx,
 			"SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1",
 		).Scan(&initialHash); err != nil {
 			FatalError("failed to find initial commit: %v", err)
@@ -112,7 +113,7 @@ Examples:
 
 		// Find the boundary: most recent commit that is still "old"
 		var boundaryHash string
-		err = store.DB().QueryRowContext(ctx,
+		err = store.(storage.RawDBAccessor).DB().QueryRowContext(ctx,
 			"SELECT commit_hash FROM dolt_log WHERE date < ? ORDER BY date DESC LIMIT 1",
 			cutoff,
 		).Scan(&boundaryHash)
@@ -179,7 +180,7 @@ Examples:
 
 		// Collect recent commit hashes (in chronological order, oldest first)
 		// These are commits we need to cherry-pick after squashing old history
-		rows, err := store.DB().QueryContext(ctx,
+		rows, err := store.(storage.RawDBAccessor).DB().QueryContext(ctx,
 			"SELECT commit_hash FROM dolt_log WHERE date >= ? ORDER BY date ASC",
 			cutoff,
 		)

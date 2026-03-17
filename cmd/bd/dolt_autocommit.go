@@ -7,14 +7,13 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // transact wraps store.RunInTransaction and marks that a transactional
 // DOLT_COMMIT occurred, preventing the redundant maybeAutoCommit in
 // PersistentPostRun. Use this instead of calling store.RunInTransaction
 // directly from command handlers.
-func transact(ctx context.Context, s *dolt.DoltStore, commitMsg string, fn func(tx storage.Transaction) error) error {
+func transact(ctx context.Context, s storage.DoltStorage, commitMsg string, fn func(tx storage.Transaction) error) error {
 	err := s.RunInTransaction(ctx, commitMsg, fn)
 	if err == nil {
 		commandDidExplicitDoltCommit = true
@@ -51,7 +50,10 @@ func maybeAutoCommit(ctx context.Context, p doltAutoCommitParams) error {
 	}
 
 	st := getStore()
-	if st == nil || st.IsClosed() {
+	if st == nil {
+		return nil
+	}
+	if lm, ok := st.(storage.LifecycleManager); ok && lm.IsClosed() {
 		return nil
 	}
 

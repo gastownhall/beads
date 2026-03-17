@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -144,7 +145,7 @@ Examples:
 
 		// Count commits to see if compaction would help
 		var commitCount int
-		if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
+		if err := store.(storage.RawDBAccessor).DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
 			WarnError("could not count Dolt commits: %v", err)
 			commitCount = 0
 		}

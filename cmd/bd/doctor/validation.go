@@ -12,12 +12,13 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // openStoreDB opens the beads database and returns the underlying *sql.DB for
 // raw queries. The caller must close the returned store when done.
-func openStoreDB(beadsDir string) (*sql.DB, *dolt.DoltStore, error) {
+func openStoreDB(beadsDir string) (*sql.DB, storage.DoltStorage, error) {
 	ctx := context.Background()
 	doltPath := getDatabasePath(beadsDir)
 	cfg := doltServerConfig(beadsDir, doltPath)

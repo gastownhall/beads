@@ -13,7 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/compact"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -197,7 +197,7 @@ Examples:
 	},
 }
 
-func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *dolt.DoltStore, issueID string) {
+func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store storage.DoltStorage, issueID string) {
 	start := time.Now()
 
 	if !compactForce {
@@ -285,7 +285,7 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 	fmt.Printf("  Time: %v\n", elapsed)
 }
 
-func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *dolt.DoltStore) {
+func runCompactAll(ctx context.Context, compactor *compact.Compactor, store storage.DoltStorage) {
 	start := time.Now()
 
 	var candidates []string
@@ -406,7 +406,7 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *dol
 	}
 }
 
-func runCompactStats(ctx context.Context, store *dolt.DoltStore) {
+func runCompactStats(ctx context.Context, store storage.DoltStorage) {
 	tier1, err := store.GetTier1Candidates(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to get Tier 1 candidates: %v\n", err)
@@ -460,7 +460,7 @@ func runCompactStats(ctx context.Context, store *dolt.DoltStore) {
 	}
 }
 
-func runCompactAnalyze(ctx context.Context, store *dolt.DoltStore) {
+func runCompactAnalyze(ctx context.Context, store storage.DoltStorage) {
 	type Candidate struct {
 		ID                 string `json:"id"`
 		Title              string `json:"title"`
@@ -565,7 +565,7 @@ func runCompactAnalyze(ctx context.Context, store *dolt.DoltStore) {
 	fmt.Printf("Total: %d candidates\n", len(candidates))
 }
 
-func runCompactApply(ctx context.Context, store *dolt.DoltStore) {
+func runCompactApply(ctx context.Context, store storage.DoltStorage) {
 	start := time.Now()
 
 	// Read summary

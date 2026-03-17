@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // --- Dolt-native backup commands ---
@@ -55,7 +56,7 @@ Under the hood this calls DOLT_BACKUP('add', ...) to register the destination.`,
 		// DoltHub URLs are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
-		db := st.DB()
+		db := st.(storage.RawDBAccessor).DB()
 
 		// Register the backup with Dolt
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('add', ?, ?)",
@@ -113,10 +114,10 @@ Run 'bd backup init <path>' first to configure a destination.`,
 			return fmt.Errorf("no store available")
 		}
 
-		db := st.DB()
+		db := st.(storage.RawDBAccessor).DB()
 
 		// First, commit any pending changes so they're included in the backup
-		committed, err := st.CommitPending(ctx, getActor())
+		committed, err := st.(storage.PendingCommitter).CommitPending(ctx, getActor())
 		if err != nil && !strings.Contains(err.Error(), "nothing to commit") {
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
 		}

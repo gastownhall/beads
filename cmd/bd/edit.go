@@ -157,10 +157,10 @@ Examples:
 		if err != nil {
 			// Connection may have gone stale while the editor was open.
 			// Ping to force the pool to discard dead connections, then retry.
-			if pingErr := store.DB().PingContext(ctx); pingErr != nil {
+			if pingErr := store.(storage.RawDBAccessor).DB().PingContext(ctx); pingErr != nil {
 				// Ping failed — try to force a fresh connection via sql.DB pool reset.
-				store.DB().SetConnMaxIdleTime(0)
-				_ = store.DB().PingContext(ctx)
+				store.(storage.RawDBAccessor).DB().SetConnMaxIdleTime(0)
+				_ = store.(storage.RawDBAccessor).DB().PingContext(ctx)
 			}
 			err = store.UpdateIssue(ctx, id, updates, actor)
 		}
