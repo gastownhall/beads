@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 func doltHeadCommit(t *testing.T, dir string, env []string) string {
@@ -48,31 +50,38 @@ func runCommandInDirCombinedOutput(dir string, name string, args ...string) (str
 func findDoltRepoDir(t *testing.T, dir string) string {
 	t.Helper()
 
-	// Embedded driver may create either:
-	// - a dolt repo directly at .beads/dolt/
-	// - a dolt environment at .beads/dolt/ with a db subdir containing .dolt/
+	beadsDir := filepath.Join(dir, ".beads")
 	base := filepath.Join(dir, ".beads", "dolt")
-	candidates := []string{
-		base,
-		filepath.Join(base, "beads"),
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(filepath.Join(c, ".dolt")); err == nil {
-			return c
+
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		dbDir := filepath.Join(base, cfg.GetDoltDatabase())
+		if _, err := os.Stat(filepath.Join(dbDir, ".dolt")); err == nil {
+			return dbDir
 		}
 	}
 
+	// Fallback for older layouts: prefer the first child repo under .beads/dolt/*
+	// and only fall back to the server root itself if there is no child database.
 	var found string
+	var rootRepo string
 	_ = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() && d.Name() == ".dolt" {
-			found = filepath.Dir(path)
+			repoDir := filepath.Dir(path)
+			if repoDir == base {
+				rootRepo = repoDir
+				return nil
+			}
+			found = repoDir
 			return fs.SkipDir
 		}
 		return nil
 	})
+	if found == "" {
+		found = rootRepo
+	}
 	if found == "" {
 		t.Fatalf("could not find Dolt repo dir under %s", base)
 	}
@@ -107,7 +116,7 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := execBDTestEnv("BEADS_TEST_MODE=1")
+	env := execBDTestEnv()
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
@@ -166,7 +175,7 @@ func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := execBDTestEnv("BEADS_TEST_MODE=1")
+	env := execBDTestEnv()
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
@@ -223,7 +232,7 @@ func TestDoltAutoCommit_Off_DoesNotAdvanceHead(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := execBDTestEnv("BEADS_TEST_MODE=1")
+	env := execBDTestEnv()
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {

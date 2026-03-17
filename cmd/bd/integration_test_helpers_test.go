@@ -67,6 +67,16 @@ func RunServerModeTest(t *testing.T, _ string, testFn func(t *testing.T, env *Du
 	})
 }
 
+<<<<<<< HEAD
+func execBDTestEnv(overrides ...string) []string {
+	env := runtimeMatrixFilterEnv(
+		os.Environ(),
+		[]string{"BEADS_TEST_MODE", "GT_ROOT"},
+		[]string{"BEADS_DOLT_"},
+	)
+	return append(env, overrides...)
+}
+
 func RunDualModeTest(t *testing.T, name string, testFn func(t *testing.T, env *DualModeTestEnv)) {
 	t.Helper()
 	RunServerModeTest(t, name, testFn)
