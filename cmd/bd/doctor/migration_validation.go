@@ -537,7 +537,11 @@ func categorizeDoltExtras(ctx context.Context, store storage.DoltStorage, jsonlI
 	localPrefix, _ := store.GetConfig(ctx, "issue_prefix") // Best effort: empty prefix means no prefix-based validation
 
 	// Query all issue IDs from Dolt
-	db := store.(storage.RawDBAccessor).UnderlyingDB()
+	accessor, ok := store.(storage.RawDBAccessor)
+	if !ok {
+		return 0, nil, 0
+	}
+	db := accessor.UnderlyingDB()
 	if db == nil {
 		return 0, nil, 0
 	}

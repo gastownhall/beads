@@ -144,8 +144,12 @@ Examples:
 		}
 
 		// Count commits to see if compaction would help
+		accessor, ok := store.(storage.RawDBAccessor)
+		if !ok {
+			FatalError("storage backend does not support raw DB access")
+		}
 		var commitCount int
-		if err := store.(storage.RawDBAccessor).DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
+		if err := accessor.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
 			WarnError("could not count Dolt commits: %v", err)
 			commitCount = 0
 		}

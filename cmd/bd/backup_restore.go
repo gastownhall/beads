@@ -119,7 +119,11 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, dr
 	}
 
 	result := &restoreResult{}
-	db := s.(storage.RawDBAccessor).DB()
+	accessor, ok := s.(storage.RawDBAccessor)
+	if !ok {
+		return nil, fmt.Errorf("storage backend does not support raw DB access")
+	}
+	db := accessor.DB()
 
 	// Resolve the project prefix for scoping.
 	// Check YAML config first (authoritative in shared-server mode),
@@ -301,7 +305,11 @@ func restoreIssues(ctx context.Context, s storage.DoltStorage, path string, dryR
 		return count, nil
 	}
 
-	db := s.(storage.RawDBAccessor).DB()
+	accessor, ok := s.(storage.RawDBAccessor)
+	if !ok {
+		return 0, fmt.Errorf("storage backend does not support raw DB access")
+	}
+	db := accessor.DB()
 
 	// Auto-detect prefix from first issue for config
 	var firstRow map[string]interface{}
