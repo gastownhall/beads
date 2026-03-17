@@ -159,6 +159,18 @@ func TestSchemaVersionRunsLatestMigrationsWhenOneVersionBehind(t *testing.T) {
 			t.Fatalf("%s.no_history missing after initSchemaOnDB", table)
 		}
 	}
+
+	// Verify that config is NOT left dirty in dolt_status (GH#2634).
+	// The schema_version write must be committed as part of the migration.
+	var stagedRows int
+	err = store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'").Scan(&stagedRows)
+	if err != nil {
+		t.Fatalf("query dolt_status for config: %v", err)
+	}
+	if stagedRows != 0 {
+		t.Fatalf("config left staged in dolt_status after upgrade from one version behind: %d row(s)", stagedRows)
+	}
 }
 
 // TestSchemaVersionRunsInitWhenMissing verifies that initSchemaOnDB runs
