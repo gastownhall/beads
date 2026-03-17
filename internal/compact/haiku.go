@@ -66,7 +66,7 @@ func newHaikuClient(apiKey string) (*haikuClient, error) {
 
 	return &haikuClient{
 		client:         client,
-		model:          config.DefaultAIModel(),
+		model:          anthropic.Model(config.DefaultAIModel()), //nolint:unconvert // Model is a defined type, not alias
 		tier1Template:  tier1Tmpl,
 		maxRetries:     maxRetries,
 		initialBackoff: initialBackoff,
@@ -87,7 +87,7 @@ func (h *haikuClient) SummarizeTier1(ctx context.Context, issue *types.Issue) (s
 			Kind:     "llm_call",
 			Actor:    h.auditActor,
 			IssueID:  issue.ID,
-			Model:    h.model,
+			Model:    string(h.model), //nolint:unconvert // Model is a defined type
 			Prompt:   prompt,
 			Response: resp,
 		}
@@ -129,7 +129,7 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 	ctx, span := tracer.Start(ctx, "anthropic.messages.new")
 	defer span.End()
 	span.SetAttributes(
-		attribute.String("bd.ai.model", h.model),
+		attribute.String("bd.ai.model", string(h.model)), //nolint:unconvert // Model is a defined type
 		attribute.String("bd.ai.operation", "compact"),
 	)
 
@@ -158,7 +158,7 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 
 		if err == nil {
 			// Record token usage and latency.
-			modelAttr := attribute.String("bd.ai.model", h.model)
+			modelAttr := attribute.String("bd.ai.model", string(h.model)) //nolint:unconvert // Model is a defined type
 			if aiMetrics.inputTokens != nil {
 				aiMetrics.inputTokens.Add(ctx, message.Usage.InputTokens, metric.WithAttributes(modelAttr))
 				aiMetrics.outputTokens.Add(ctx, message.Usage.OutputTokens, metric.WithAttributes(modelAttr))
