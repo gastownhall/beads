@@ -15,7 +15,8 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-// CheckIDFormat checks whether issues use hash-based or sequential IDs
+// CheckIDFormat checks whether issues use hash-based or sequential IDs.
+// Opens its own store; prefer CheckIDFormatWithStore when a shared store is available.
 func CheckIDFormat(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -39,6 +40,25 @@ func CheckIDFormat(path string) DoctorCheck {
 		}
 	}
 	defer func() { _ = store.Close() }()
+
+	return checkIDFormatWithStore(store)
+}
+
+// CheckIDFormatWithStore checks ID format using a shared store (GH#2636).
+func CheckIDFormatWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Issue IDs",
+			Status:  StatusOK,
+			Message: "No issues yet (will use hash-based IDs)",
+		}
+	}
+	return checkIDFormatWithStore(store)
+}
+
+func checkIDFormatWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
 	db := store.UnderlyingDB()
 
 	// Get sample of issues to check ID format (up to 10 for pattern analysis)
@@ -93,7 +113,8 @@ func CheckIDFormat(path string) DoctorCheck {
 	}
 }
 
-// CheckDependencyCycles checks for circular dependencies in the issue graph
+// CheckDependencyCycles checks for circular dependencies in the issue graph.
+// Opens its own store; prefer CheckDependencyCyclesWithStore when a shared store is available.
 func CheckDependencyCycles(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -117,6 +138,24 @@ func CheckDependencyCycles(path string) DoctorCheck {
 		}
 	}
 	defer func() { _ = store.Close() }()
+
+	return checkDependencyCyclesWithStore(store)
+}
+
+// CheckDependencyCyclesWithStore checks for cycles using a shared store (GH#2636).
+func CheckDependencyCyclesWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Dependency Cycles",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+	return checkDependencyCyclesWithStore(store)
+}
+
+func checkDependencyCyclesWithStore(store *dolt.DoltStore) DoctorCheck {
 	db := store.UnderlyingDB()
 
 	// Query for cycles using simplified SQL (CONCAT for Dolt/MySQL compatibility)
@@ -282,6 +321,7 @@ func CheckDeletionsManifest(path string) DoctorCheck {
 // CheckRepoFingerprint validates that the database belongs to this repository.
 // This detects when a .beads directory was copied from another repo or when
 // the git remote URL changed. A mismatch can cause data loss during sync.
+// Opens its own store; prefer CheckRepoFingerprintWithStore when a shared store is available.
 func CheckRepoFingerprint(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -304,6 +344,25 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 		}
 	}
 	defer func() { _ = store.Close() }()
+
+	return checkRepoFingerprintWithStore(store)
+}
+
+// CheckRepoFingerprintWithStore checks repo fingerprint using a shared store (GH#2636).
+func CheckRepoFingerprintWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Repo Fingerprint",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+	return checkRepoFingerprintWithStore(store)
+}
+
+func checkRepoFingerprintWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
 
 	storedRepoID, err := store.GetMetadata(ctx, "repo_id")
 	if err != nil {
