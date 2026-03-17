@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
@@ -327,73 +326,66 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 	ctx := rootCtx
 	createdIssues := []*types.Issue{}
 
-	// Create all issues, labels, and dependencies in a single transaction
-	commitMsg := fmt.Sprintf("bd: create %d issue(s) from %s", len(templates), filepath)
-	txErr := transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
-		for _, template := range templates {
-			issue := &types.Issue{
-				Title:              template.Title,
-				Description:        template.Description,
-				Design:             template.Design,
-				AcceptanceCriteria: template.AcceptanceCriteria,
-				Status:             types.StatusOpen,
-				Priority:           template.Priority,
-				IssueType:          template.IssueType,
-				Assignee:           template.Assignee,
-			}
-
-			if err := tx.CreateIssue(ctx, issue, actor); err != nil {
-				return fmt.Errorf("creating issue '%s': %w", template.Title, err)
-			}
-
-			for _, label := range template.Labels {
-				if err := tx.AddLabel(ctx, issue.ID, label, actor); err != nil {
-					return fmt.Errorf("adding label %s to %s: %w", label, issue.ID, err)
-				}
-			}
-
-			for _, depSpec := range template.Dependencies {
-				depSpec = strings.TrimSpace(depSpec)
-				if depSpec == "" {
-					continue
-				}
-
-				var depType types.DependencyType
-				var dependsOnID string
-
-				if strings.Contains(depSpec, ":") {
-					parts := strings.SplitN(depSpec, ":", 2)
-					if len(parts) != 2 {
-						return fmt.Errorf("invalid dependency format '%s' for %s", depSpec, issue.ID)
-					}
-					depType = types.DependencyType(strings.TrimSpace(parts[0]))
-					dependsOnID = strings.TrimSpace(parts[1])
-				} else {
-					depType = types.DepBlocks
-					dependsOnID = depSpec
-				}
-
-				if !depType.IsValid() {
-					return fmt.Errorf("invalid dependency type '%s' for %s", depType, issue.ID)
-				}
-
-				dep := &types.Dependency{
-					IssueID:     issue.ID,
-					DependsOnID: dependsOnID,
-					Type:        depType,
-				}
-				if err := tx.AddDependency(ctx, dep, actor); err != nil {
-					return fmt.Errorf("adding dependency %s -> %s: %w", issue.ID, dependsOnID, err)
-				}
-			}
-
-			createdIssues = append(createdIssues, issue)
+	// Build issue structs with labels and dependencies populated,
+	// then create them all via CreateIssues (single transaction).
+	var issues []*types.Issue
+	for _, template := range templates {
+		issue := &types.Issue{
+			Title:              template.Title,
+			Description:        template.Description,
+			Design:             template.Design,
+			AcceptanceCriteria: template.AcceptanceCriteria,
+			Status:             types.StatusOpen,
+			Priority:           template.Priority,
+			IssueType:          template.IssueType,
+			Assignee:           template.Assignee,
+			Labels:             template.Labels,
 		}
-		return nil
-	})
-	if txErr != nil {
-		FatalError("creating issues from markdown: %v", txErr)
+
+		for _, depSpec := range template.Dependencies {
+			depSpec = strings.TrimSpace(depSpec)
+			if depSpec == "" {
+				continue
+			}
+
+			var depType types.DependencyType
+			var dependsOnID string
+
+			if strings.Contains(depSpec, ":") {
+				parts := strings.SplitN(depSpec, ":", 2)
+				if len(parts) != 2 {
+					FatalError("invalid dependency format '%s' for issue '%s'", depSpec, template.Title)
+				}
+				depType = types.DependencyType(strings.TrimSpace(parts[0]))
+				dependsOnID = strings.TrimSpace(parts[1])
+			} else {
+				depType = types.DepBlocks
+				dependsOnID = depSpec
+			}
+
+			if !depType.IsValid() {
+				FatalError("invalid dependency type '%s' for issue '%s'", depType, template.Title)
+			}
+
+			// IssueID left empty — PersistDependencies defaults it to issue.ID
+			// after ID generation.
+			issue.Dependencies = append(issue.Dependencies, &types.Dependency{
+				DependsOnID: dependsOnID,
+				Type:        depType,
+			})
+		}
+
+		issues = append(issues, issue)
 	}
+
+	if err := store.CreateIssues(ctx, issues, actor); err != nil {
+		FatalError("creating issues from markdown: %v", err)
+	}
+	commitMsg := fmt.Sprintf("bd: create %d issue(s) from %s", len(templates), filepath)
+	if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+		WarnError("failed to commit: %v", err)
+	}
+	createdIssues = append(createdIssues, issues...)
 
 	if jsonOutput {
 		outputJSON(createdIssues)
