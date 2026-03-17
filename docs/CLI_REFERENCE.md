@@ -724,6 +724,8 @@ bd kv list --json                      # Machine-readable output
 
 ## Issue Statuses
 
+### Built-in Statuses
+
 - `open` - Ready to be worked on
 - `in_progress` - Currently being worked on
 - `blocked` - Cannot proceed (waiting on dependencies)
@@ -733,6 +735,44 @@ bd kv list --json                      # Machine-readable output
 - `pinned` - Stays open indefinitely (used for hooks, anchors)
 
 **Note:** The `pinned` status is used by orchestrators for hook management and persistent work items that should never be auto-closed or cleaned up.
+
+### Custom Statuses
+
+Define custom statuses with optional **categories** that control behavior in `bd ready` and `bd list`:
+
+```bash
+# Simple format (backward compatible — statuses get no category)
+bd config set status.custom "in_review,qa_testing,on_hold"
+
+# Category-annotated format
+bd config set status.custom "in_review:active,qa_testing:wip,on_hold:frozen"
+
+# Mixed format (some with categories, some without)
+bd config set status.custom "in_review:active,legacy_status,archived:done"
+```
+
+**Categories:**
+
+| Category | `bd ready` | Default `bd list` | Icon | Description |
+|----------|-----------|-------------------|------|-------------|
+| `active` | ✓ included | ✓ included | ○ | Ready for work (like `open`) |
+| `wip` | ✗ excluded | ✓ included | ◐ | Work-in-progress (like `in_progress`) |
+| `done` | ✗ excluded | ✗ excluded | ✓ | Terminal state (like `closed`) |
+| `frozen` | ✗ excluded | ✗ excluded | ❄ | On hold (like `deferred`) |
+| *(none)* | ✗ excluded | ✓ included | ◇ | No category — backward compatible default |
+
+**List all statuses** (built-in and custom):
+
+```bash
+bd statuses          # Human-readable table
+bd statuses --json   # JSON output for programmatic use
+```
+
+**Rules:**
+- Status names must match `[a-z][a-z0-9_-]*` (lowercase, letter-first)
+- Cannot collide with built-in status names (case-insensitive)
+- Maximum 50 custom statuses
+- All custom statuses work with `bd list --status <name>`
 
 ## Priorities
 

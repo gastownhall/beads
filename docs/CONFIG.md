@@ -364,6 +364,33 @@ Use these namespaces for external integrations:
 - `ado.*` - Azure DevOps integration settings
 - `custom.*` - Custom integration settings
 
+### Status and Type Customization
+
+- `status.custom` - Custom issue statuses with optional categories (comma-separated)
+- `types.custom` - Custom issue types (comma-separated)
+
+**Custom statuses** support category annotations that control behavior:
+
+```bash
+# Format: name:category (category is optional)
+bd config set status.custom "in_review:active,qa_testing:wip,on_hold:frozen,archived:done"
+
+# Categories: active, wip, done, frozen
+# - active: shows in bd ready, included in default bd list
+# - wip: excluded from bd ready, included in default bd list
+# - done: excluded from bd ready AND default bd list (terminal)
+# - frozen: excluded from bd ready AND default bd list (on hold)
+# - (none): excluded from bd ready, included in default bd list (backward compatible)
+```
+
+**Custom types:**
+
+```bash
+bd config set types.custom "agent,molecule,event"
+```
+
+See `bd statuses` and `bd types` commands to list all configured statuses and types.
+
 ### Example: Sequential Counter IDs (issue_id_mode=counter)
 
 By default, beads generates hash-based IDs (e.g., `bd-a3f2`, `bd-7f3a8`). For projects that prefer

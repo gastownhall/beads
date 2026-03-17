@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // gitSSHRemotePattern matches standard git SSH remote URLs (user@host:path)
@@ -123,6 +124,14 @@ var configSetCmd = &cobra.Command{
 		}
 
 		ctx := rootCtx
+
+		// Validate status.custom config before writing
+		if key == "status.custom" && value != "" {
+			if _, err := types.ParseCustomStatusConfig(value); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid status.custom value: %v\n", err)
+				os.Exit(1)
+			}
+		}
 
 		if err := store.SetConfig(ctx, key, value); err != nil {
 			fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)

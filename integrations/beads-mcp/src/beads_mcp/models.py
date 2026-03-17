@@ -9,8 +9,11 @@ from pydantic import BaseModel, Field, field_validator
 #
 # IssueStatus and IssueType are strings (not Literals) to support custom
 # statuses and types configured via:
-#   bd config set status.custom "awaiting_review,awaiting_testing"
+#   bd config set status.custom "in_review:active,qa_testing:wip,on_hold:frozen"
 #   bd config set types.custom "agent,molecule,event"
+#
+# Custom statuses support optional category annotations (active, wip, done, frozen)
+# that control behavior in bd ready and bd list. See docs/CLI_REFERENCE.md.
 #
 # The CLI handles validation of these values against the configured options.
 # Built-in statuses: open, in_progress, blocked, deferred, closed

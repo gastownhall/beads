@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -597,6 +598,47 @@ func (s *EmbeddedDoltStore) GetCustomStatuses(ctx context.Context) ([]string, er
 		return config.GetCustomStatusesFromYAML(), nil
 	}
 	return result, nil
+}
+
+func (s *EmbeddedDoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error) {
+	value, err := s.GetConfig(ctx, "status.custom")
+	if err != nil {
+		// On database error, try fallback to config.yaml
+		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
+			return parseStatusFallbackEmbedded(yamlStatuses), nil
+		}
+		return nil, err
+	}
+
+	if value != "" {
+		parsed, parseErr := types.ParseCustomStatusConfig(value)
+		if parseErr != nil {
+			// Degraded mode: return empty (CLI remains operable)
+			return nil, nil
+		}
+		return parsed, nil
+	}
+
+	if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
+		return parseStatusFallbackEmbedded(yamlStatuses), nil
+	}
+	return nil, nil
+}
+
+// parseStatusFallbackEmbedded converts legacy []string status names to []CustomStatus.
+func parseStatusFallbackEmbedded(names []string) []types.CustomStatus {
+	joined := strings.Join(names, ",")
+	if parsed, err := types.ParseCustomStatusConfig(joined); err == nil {
+		return parsed
+	}
+	result := make([]types.CustomStatus, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			result = append(result, types.CustomStatus{Name: name, Category: types.CategoryUnspecified})
+		}
+	}
+	return result
 }
 
 func (s *EmbeddedDoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {

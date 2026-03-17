@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestConfigCommands(t *testing.T) {
@@ -452,6 +453,125 @@ func TestFindBeadsRepoRoot(t *testing.T) {
 		got := findBeadsRepoRoot(noRepoDir)
 		if got != "" {
 			t.Errorf("findBeadsRepoRoot(%q) = %q, want empty string", noRepoDir, got)
+		}
+	})
+}
+
+func TestCustomStatusConfig(t *testing.T) {
+	ctx := context.Background()
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	t.Run("categorized format round-trips", func(t *testing.T) {
+		err := store.SetConfig(ctx, "status.custom", "review:active,testing:wip")
+		if err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		detailed, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed failed: %v", err)
+		}
+		if len(detailed) != 2 {
+			t.Fatalf("expected 2 statuses, got %d", len(detailed))
+		}
+		if detailed[0].Name != "review" || detailed[0].Category != types.CategoryActive {
+			t.Errorf("status[0] = {%q, %q}, want {review, active}", detailed[0].Name, detailed[0].Category)
+		}
+		if detailed[1].Name != "testing" || detailed[1].Category != types.CategoryWIP {
+			t.Errorf("status[1] = {%q, %q}, want {testing, wip}", detailed[1].Name, detailed[1].Category)
+		}
+	})
+
+	t.Run("flat format returns CategoryUnspecified", func(t *testing.T) {
+		err := store.SetConfig(ctx, "status.custom", "review,testing")
+		if err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		detailed, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed failed: %v", err)
+		}
+		if len(detailed) != 2 {
+			t.Fatalf("expected 2 statuses, got %d", len(detailed))
+		}
+		for _, s := range detailed {
+			if s.Category != types.CategoryUnspecified {
+				t.Errorf("status %q has category %q, want unspecified", s.Name, s.Category)
+			}
+		}
+	})
+
+	t.Run("mixed format returns both categorized and uncategorized", func(t *testing.T) {
+		err := store.SetConfig(ctx, "status.custom", "review:active,legacy")
+		if err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		detailed, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed failed: %v", err)
+		}
+		if len(detailed) != 2 {
+			t.Fatalf("expected 2 statuses, got %d", len(detailed))
+		}
+		if detailed[0].Category != types.CategoryActive {
+			t.Errorf("review should be active, got %q", detailed[0].Category)
+		}
+		if detailed[1].Category != types.CategoryUnspecified {
+			t.Errorf("legacy should be unspecified, got %q", detailed[1].Category)
+		}
+	})
+
+	t.Run("GetCustomStatuses returns just names (backward compat)", func(t *testing.T) {
+		err := store.SetConfig(ctx, "status.custom", "review:active,testing:wip,qa:done")
+		if err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		names, err := store.GetCustomStatuses(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatuses failed: %v", err)
+		}
+		if len(names) != 3 {
+			t.Fatalf("expected 3 names, got %d", len(names))
+		}
+		want := []string{"review", "testing", "qa"}
+		for i, name := range names {
+			if name != want[i] {
+				t.Errorf("name[%d] = %q, want %q", i, name, want[i])
+			}
+		}
+	})
+
+	t.Run("cache invalidation on SetConfig", func(t *testing.T) {
+		// Set first value
+		err := store.SetConfig(ctx, "status.custom", "alpha:active")
+		if err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		detailed1, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed failed: %v", err)
+		}
+		if len(detailed1) != 1 || detailed1[0].Name != "alpha" {
+			t.Fatalf("expected [alpha], got %+v", detailed1)
+		}
+
+		// Set different value — cache should be invalidated
+		err = store.SetConfig(ctx, "status.custom", "beta:wip,gamma:done")
+		if err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		detailed2, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed failed: %v", err)
+		}
+		if len(detailed2) != 2 {
+			t.Fatalf("expected 2 statuses after cache invalidation, got %d", len(detailed2))
+		}
+		if detailed2[0].Name != "beta" || detailed2[0].Category != types.CategoryWIP {
+			t.Errorf("status[0] = {%q, %q}, want {beta, wip}", detailed2[0].Name, detailed2[0].Category)
+		}
+		if detailed2[1].Name != "gamma" || detailed2[1].Category != types.CategoryDone {
+			t.Errorf("status[1] = {%q, %q}, want {gamma, done}", detailed2[1].Name, detailed2[1].Category)
 		}
 	})
 }

@@ -1,6 +1,8 @@
 package types
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1082,6 +1084,395 @@ func TestSetDefaults(t *testing.T) {
 			}
 			if issue.IssueType != tt.expectedType {
 				t.Errorf("SetDefaults() IssueType = %v, want %v", issue.IssueType, tt.expectedType)
+			}
+		})
+	}
+}
+
+func TestParseCustomStatusConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    []CustomStatus
+		wantErr string
+	}{
+		{
+			name:  "empty string",
+			input: "",
+			want:  nil,
+		},
+		{
+			name:  "whitespace only",
+			input: "   ",
+			want:  nil,
+		},
+		{
+			name:  "single flat status (legacy format)",
+			input: "review",
+			want:  []CustomStatus{{Name: "review", Category: CategoryUnspecified}},
+		},
+		{
+			name:  "multiple flat statuses (legacy format)",
+			input: "review,qa,on-hold",
+			want: []CustomStatus{
+				{Name: "review", Category: CategoryUnspecified},
+				{Name: "qa", Category: CategoryUnspecified},
+				{Name: "on-hold", Category: CategoryUnspecified},
+			},
+		},
+		{
+			name:  "single categorized status",
+			input: "review:active",
+			want:  []CustomStatus{{Name: "review", Category: CategoryActive}},
+		},
+		{
+			name:  "all category types",
+			input: "review:active,testing:wip,done-review:done,on-ice:frozen",
+			want: []CustomStatus{
+				{Name: "review", Category: CategoryActive},
+				{Name: "testing", Category: CategoryWIP},
+				{Name: "done-review", Category: CategoryDone},
+				{Name: "on-ice", Category: CategoryFrozen},
+			},
+		},
+		{
+			name:  "mixed legacy and categorized",
+			input: "review,testing:wip,qa",
+			want: []CustomStatus{
+				{Name: "review", Category: CategoryUnspecified},
+				{Name: "testing", Category: CategoryWIP},
+				{Name: "qa", Category: CategoryUnspecified},
+			},
+		},
+		{
+			name:  "whitespace around entries",
+			input: " review:active , testing:wip , qa ",
+			want: []CustomStatus{
+				{Name: "review", Category: CategoryActive},
+				{Name: "testing", Category: CategoryWIP},
+				{Name: "qa", Category: CategoryUnspecified},
+			},
+		},
+		{
+			name:  "trailing comma ignored",
+			input: "review:active,",
+			want:  []CustomStatus{{Name: "review", Category: CategoryActive}},
+		},
+		{
+			name:    "trailing colon with empty category",
+			input:   "review:",
+			wantErr: "trailing colon with empty category",
+		},
+		{
+			name:    "invalid category",
+			input:   "review:invalid",
+			wantErr: "invalid category",
+		},
+		{
+			name:    "uppercase in name",
+			input:   "Review:active",
+			wantErr: "must match",
+		},
+		{
+			name:    "space in name",
+			input:   "my status:active",
+			wantErr: "must match",
+		},
+		{
+			name:    "digit-first name",
+			input:   "1review:active",
+			wantErr: "must match",
+		},
+		{
+			name:    "hyphen-first name",
+			input:   "-review:active",
+			wantErr: "must match",
+		},
+		{
+			name:  "empty name from leading comma",
+			input: ",review:active",
+			want:  []CustomStatus{{Name: "review", Category: CategoryActive}},
+		},
+		{
+			name:    "collision with built-in open",
+			input:   "open:active",
+			wantErr: "collides with built-in",
+		},
+		{
+			name:    "collision with built-in closed",
+			input:   "closed:done",
+			wantErr: "collides with built-in",
+		},
+		{
+			name:    "collision with built-in in_progress",
+			input:   "in_progress:wip",
+			wantErr: "collides with built-in",
+		},
+		{
+			name:    "duplicate name",
+			input:   "review:active,review:wip",
+			wantErr: "duplicate",
+		},
+		{
+			name:  "name with underscores and hyphens",
+			input: "in-review:active,needs_qa:wip",
+			want: []CustomStatus{
+				{Name: "in-review", Category: CategoryActive},
+				{Name: "needs_qa", Category: CategoryWIP},
+			},
+		},
+		{
+			name:  "name with digits after first letter",
+			input: "stage2:active,qa3-check:wip",
+			want: []CustomStatus{
+				{Name: "stage2", Category: CategoryActive},
+				{Name: "qa3-check", Category: CategoryWIP},
+			},
+		},
+		{
+			name:    "colon in category portion (first-colon split)",
+			input:   "review:active:extra",
+			wantErr: "invalid category",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseCustomStatusConfig(tt.input)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d statuses, want %d", len(got), len(tt.want))
+			}
+			for i, g := range got {
+				if g.Name != tt.want[i].Name || g.Category != tt.want[i].Category {
+					t.Errorf("status[%d] = {%q, %q}, want {%q, %q}",
+						i, g.Name, g.Category, tt.want[i].Name, tt.want[i].Category)
+				}
+			}
+		})
+	}
+}
+
+func TestParseCustomStatusConfigMaxLimit(t *testing.T) {
+	// Build a config string with 51 statuses
+	parts := make([]string, 51)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("s%d", i)
+	}
+	input := strings.Join(parts, ",")
+	_, err := ParseCustomStatusConfig(input)
+	if err == nil {
+		t.Fatal("expected error for >50 custom statuses")
+	}
+	if !contains(err.Error(), "too many") {
+		t.Fatalf("expected 'too many' error, got %q", err.Error())
+	}
+}
+
+func TestCustomStatusNames(t *testing.T) {
+	statuses := []CustomStatus{
+		{Name: "review", Category: CategoryActive},
+		{Name: "testing", Category: CategoryWIP},
+	}
+	names := CustomStatusNames(statuses)
+	if len(names) != 2 || names[0] != "review" || names[1] != "testing" {
+		t.Errorf("got %v, want [review testing]", names)
+	}
+
+	// nil input
+	if got := CustomStatusNames(nil); got != nil {
+		t.Errorf("expected nil for nil input, got %v", got)
+	}
+}
+
+func TestCustomStatusesByCategory(t *testing.T) {
+	statuses := []CustomStatus{
+		{Name: "review", Category: CategoryActive},
+		{Name: "testing", Category: CategoryWIP},
+		{Name: "qa", Category: CategoryActive},
+		{Name: "archived", Category: CategoryDone},
+	}
+
+	active := CustomStatusesByCategory(statuses, CategoryActive)
+	if len(active) != 2 || active[0].Name != "review" || active[1].Name != "qa" {
+		t.Errorf("active = %v, want [review, qa]", active)
+	}
+
+	done := CustomStatusesByCategory(statuses, CategoryDone)
+	if len(done) != 1 || done[0].Name != "archived" {
+		t.Errorf("done = %v, want [archived]", done)
+	}
+
+	frozen := CustomStatusesByCategory(statuses, CategoryFrozen)
+	if len(frozen) != 0 {
+		t.Errorf("frozen = %v, want []", frozen)
+	}
+}
+
+func TestBuiltInStatusCategory(t *testing.T) {
+	tests := []struct {
+		status Status
+		want   StatusCategory
+	}{
+		{StatusOpen, CategoryActive},
+		{StatusInProgress, CategoryWIP},
+		{StatusBlocked, CategoryWIP},
+		{StatusHooked, CategoryWIP},
+		{StatusClosed, CategoryDone},
+		{StatusDeferred, CategoryFrozen},
+		{StatusPinned, CategoryFrozen},
+	}
+	for _, tt := range tests {
+		got := BuiltInStatusCategory(tt.status)
+		if got != tt.want {
+			t.Errorf("BuiltInStatusCategory(%q) = %q, want %q", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestIsValidWithCustomStatuses(t *testing.T) {
+	customs := []CustomStatus{
+		{Name: "review", Category: CategoryActive},
+		{Name: "testing", Category: CategoryWIP},
+	}
+
+	// Built-in status is always valid
+	if !Status("open").IsValidWithCustomStatuses(customs) {
+		t.Error("open should be valid")
+	}
+
+	// Custom status is valid
+	if !Status("review").IsValidWithCustomStatuses(customs) {
+		t.Error("review should be valid")
+	}
+
+	// Unknown status is not valid
+	if Status("unknown").IsValidWithCustomStatuses(customs) {
+		t.Error("unknown should not be valid")
+	}
+}
+
+func TestParseCustomStatusConfigEdgeCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    []CustomStatus
+		wantErr string
+	}{
+		{
+			name:    "trailing colon rejected",
+			input:   "review:",
+			wantErr: "trailing colon with empty category",
+		},
+		{
+			name:    "double colon invalid category",
+			input:   "review::active",
+			wantErr: "invalid category",
+		},
+		{
+			name:  "name with numbers v2-review",
+			input: "v2-review:active",
+			want:  []CustomStatus{{Name: "v2-review", Category: CategoryActive}},
+		},
+		{
+			name:    "name starting with digit",
+			input:   "2review:active",
+			wantErr: "must match",
+		},
+		{
+			name:  "very long valid name",
+			input: "abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnop:active",
+			want:  []CustomStatus{{Name: "abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnop", Category: CategoryActive}},
+		},
+		{
+			name:    "unicode in name rejected",
+			input:   "über:active",
+			wantErr: "must match",
+		},
+		{
+			name:    "emoji in name rejected",
+			input:   "review🔥:active",
+			wantErr: "must match",
+		},
+		{
+			name:  "single char name",
+			input: "r:active",
+			want:  []CustomStatus{{Name: "r", Category: CategoryActive}},
+		},
+		{
+			name:    "underscore-first name rejected",
+			input:   "_review:active",
+			wantErr: "must match",
+		},
+		{
+			name:  "multiple empty entries filtered",
+			input: ",,review:active,,testing:wip,,",
+			want: []CustomStatus{
+				{Name: "review", Category: CategoryActive},
+				{Name: "testing", Category: CategoryWIP},
+			},
+		},
+		{
+			name:    "category unspecified not user-assignable",
+			input:   "review:unspecified",
+			wantErr: "invalid category",
+		},
+		{
+			name:    "all built-in collisions",
+			input:   "blocked:wip",
+			wantErr: "collides with built-in",
+		},
+		{
+			name:    "hooked built-in collision",
+			input:   "hooked:wip",
+			wantErr: "collides with built-in",
+		},
+		{
+			name:    "deferred built-in collision",
+			input:   "deferred:frozen",
+			wantErr: "collides with built-in",
+		},
+		{
+			name:    "pinned built-in collision",
+			input:   "pinned:frozen",
+			wantErr: "collides with built-in",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseCustomStatusConfig(tt.input)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d statuses, want %d", len(got), len(tt.want))
+			}
+			for i, g := range got {
+				if g.Name != tt.want[i].Name || g.Category != tt.want[i].Category {
+					t.Errorf("status[%d] = {%q, %q}, want {%q, %q}",
+						i, g.Name, g.Category, tt.want[i].Name, tt.want[i].Category)
+				}
 			}
 		})
 	}

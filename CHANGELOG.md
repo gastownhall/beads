@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Custom status categories** — `bd config set status.custom "in_review:active,qa_testing:wip,archived:done,on_hold:frozen"` assigns categories to custom statuses that control behavior in `bd ready` (active statuses included) and `bd list` (done/frozen statuses excluded by default). Backward compatible — old flat format `"foo,bar"` still works with no behavior change.
+- **`bd statuses` command** — Lists all built-in and custom statuses with their icons, categories, and descriptions. Supports `--json` for programmatic use.
+
 ## [0.61.0] - 2026-03-15
 
 ### Added

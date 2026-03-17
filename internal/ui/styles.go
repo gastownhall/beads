@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func init() {
@@ -214,14 +215,16 @@ const (
 	StatusIconClosed     = "✓" // completed (checkmark)
 	StatusIconDeferred   = "❄" // scheduled for later (snowflake)
 	StatusIconPinned     = "📌" // elevated priority
+	StatusIconCustom     = "◇" // custom/uncategorized status (diamond)
 )
 
 // Priority icon - small filled circle, colored by priority level
 // IMPORTANT: Use this small circle, NOT emoji blobs (🔴🟠🟡🔵⚪)
 const PriorityIcon = "●"
 
-// RenderStatusIcon returns the appropriate icon for a status with semantic coloring
-// This is the canonical source for status icon rendering - use this everywhere
+// RenderStatusIcon returns the appropriate icon for a status with semantic coloring.
+// This is the canonical source for status icon rendering - use this everywhere.
+// For custom statuses, call RenderStatusIconWithCategory for category-aware rendering.
 func RenderStatusIcon(status string) string {
 	switch status {
 	case "open":
@@ -237,7 +240,40 @@ func RenderStatusIcon(status string) string {
 	case "pinned":
 		return StatusPinnedStyle.Render(StatusIconPinned)
 	default:
-		return "?" // unknown status
+		return StatusIconCustom // custom/unknown status
+	}
+}
+
+// RenderStatusIconWithCategory returns the icon for a status, using category
+// to determine icon/color for custom statuses.
+func RenderStatusIconWithCategory(status string, category types.StatusCategory) string {
+	// Try built-in first
+	switch status {
+	case "open":
+		return StatusIconOpen
+	case "in_progress":
+		return StatusInProgressStyle.Render(StatusIconInProgress)
+	case "blocked":
+		return StatusBlockedStyle.Render(StatusIconBlocked)
+	case "closed":
+		return StatusClosedStyle.Render(StatusIconClosed)
+	case "deferred":
+		return MutedStyle.Render(StatusIconDeferred)
+	case "pinned":
+		return StatusPinnedStyle.Render(StatusIconPinned)
+	}
+	// Custom status — inherit from category
+	switch category {
+	case types.CategoryActive:
+		return StatusIconOpen
+	case types.CategoryWIP:
+		return StatusInProgressStyle.Render(StatusIconInProgress)
+	case types.CategoryDone:
+		return StatusClosedStyle.Render(StatusIconClosed)
+	case types.CategoryFrozen:
+		return MutedStyle.Render(StatusIconDeferred)
+	default:
+		return StatusIconCustom
 	}
 }
 
@@ -258,7 +294,37 @@ func GetStatusIcon(status string) string {
 	case "pinned":
 		return StatusIconPinned
 	default:
-		return "?"
+		return StatusIconCustom
+	}
+}
+
+// GetStatusIconWithCategory returns the icon character for a status using category fallback.
+func GetStatusIconWithCategory(status string, category types.StatusCategory) string {
+	switch status {
+	case "open":
+		return StatusIconOpen
+	case "in_progress":
+		return StatusIconInProgress
+	case "blocked":
+		return StatusIconBlocked
+	case "closed":
+		return StatusIconClosed
+	case "deferred":
+		return StatusIconDeferred
+	case "pinned":
+		return StatusIconPinned
+	}
+	switch category {
+	case types.CategoryActive:
+		return StatusIconOpen
+	case types.CategoryWIP:
+		return StatusIconInProgress
+	case types.CategoryDone:
+		return StatusIconClosed
+	case types.CategoryFrozen:
+		return StatusIconDeferred
+	default:
+		return StatusIconCustom
 	}
 }
 

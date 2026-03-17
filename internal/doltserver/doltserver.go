@@ -841,7 +841,7 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 	}
 
 	// If the server is externally managed, never kill anything.
-	if ResolveServerMode(beadsDir) == ServerModeExternal {
+	if IsAutoStartDisabled() || ResolveServerMode(beadsDir) == ServerModeExternal {
 		return nil, nil
 	}
 

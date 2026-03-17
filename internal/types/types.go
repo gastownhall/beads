@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -354,6 +355,163 @@ func (s Status) IsValidWithCustom(customStatuses []string) bool {
 		}
 	}
 	return false
+}
+
+// IsValidWithCustomStatuses checks if the status is valid, including typed custom statuses.
+func (s Status) IsValidWithCustomStatuses(customStatuses []CustomStatus) bool {
+	if s.IsValid() {
+		return true
+	}
+	for _, cs := range customStatuses {
+		if string(s) == cs.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// StatusCategory defines how a custom status behaves in views and commands.
+type StatusCategory string
+
+const (
+	// CategoryActive statuses appear in bd ready and default bd list.
+	CategoryActive StatusCategory = "active"
+	// CategoryWIP statuses are excluded from bd ready but visible in default bd list.
+	CategoryWIP StatusCategory = "wip"
+	// CategoryDone statuses are excluded from bd ready and default bd list.
+	CategoryDone StatusCategory = "done"
+	// CategoryFrozen statuses are excluded from bd ready and default bd list.
+	CategoryFrozen StatusCategory = "frozen"
+	// CategoryUnspecified is assigned when no category is provided (backward compat).
+	// Behaves like current behavior: valid, visible in default bd list, absent from bd ready.
+	CategoryUnspecified StatusCategory = "unspecified"
+)
+
+// validCategories is the set of user-assignable categories (excludes CategoryUnspecified).
+var validCategories = map[StatusCategory]bool{
+	CategoryActive: true,
+	CategoryWIP:    true,
+	CategoryDone:   true,
+	CategoryFrozen: true,
+}
+
+// CustomStatus represents a user-defined status with its behavioral category.
+type CustomStatus struct {
+	Name     string         `json:"name"`
+	Category StatusCategory `json:"category"`
+}
+
+// statusNameRegexp validates custom status names: letter-first, lowercase alphanumeric with hyphens/underscores.
+var statusNameRegexp = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+
+// maxCustomStatuses is the maximum number of custom statuses allowed.
+const maxCustomStatuses = 50
+
+// builtInStatusNames contains all built-in status names in lowercase for collision detection.
+var builtInStatusNames = map[string]bool{
+	"open": true, "in_progress": true, "blocked": true,
+	"deferred": true, "closed": true, "pinned": true, "hooked": true,
+}
+
+// ParseCustomStatusConfig parses a status.custom config value into typed CustomStatus entries.
+// Supports both legacy flat format ("foo,bar") and category-annotated format ("foo:active,bar:wip").
+// Statuses without a category annotation get CategoryUnspecified (backward compatible).
+func ParseCustomStatusConfig(value string) ([]CustomStatus, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(value, ",")
+	var result []CustomStatus
+	seen := make(map[string]bool)
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		var name string
+		var category StatusCategory
+
+		// Split on first colon only
+		if idx := strings.IndexByte(part, ':'); idx >= 0 {
+			name = part[:idx]
+			catStr := part[idx+1:]
+			if catStr == "" {
+				return nil, fmt.Errorf("invalid custom status %q: trailing colon with empty category", part)
+			}
+			category = StatusCategory(catStr)
+			if !validCategories[category] {
+				return nil, fmt.Errorf("invalid category %q for status %q: must be one of active, wip, done, frozen", catStr, name)
+			}
+		} else {
+			name = part
+			category = CategoryUnspecified
+		}
+
+		if !statusNameRegexp.MatchString(name) {
+			return nil, fmt.Errorf("invalid status name %q: must match [a-z][a-z0-9_-]* (lowercase, letter-first, no spaces)", name)
+		}
+
+		if builtInStatusNames[strings.ToLower(name)] {
+			return nil, fmt.Errorf("custom status %q collides with built-in status", name)
+		}
+
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate custom status name %q", name)
+		}
+		seen[name] = true
+
+		result = append(result, CustomStatus{Name: name, Category: category})
+	}
+
+	if len(result) > maxCustomStatuses {
+		return nil, fmt.Errorf("too many custom statuses (%d): maximum is %d", len(result), maxCustomStatuses)
+	}
+
+	return result, nil
+}
+
+// CustomStatusNames extracts just the name strings from a slice of CustomStatus.
+// Useful for backward-compatible callers that only need names for validation.
+func CustomStatusNames(statuses []CustomStatus) []string {
+	if len(statuses) == 0 {
+		return nil
+	}
+	names := make([]string, len(statuses))
+	for i, s := range statuses {
+		names[i] = s.Name
+	}
+	return names
+}
+
+// CustomStatusesByCategory returns custom statuses filtered by the given category.
+func CustomStatusesByCategory(statuses []CustomStatus, category StatusCategory) []CustomStatus {
+	var result []CustomStatus
+	for _, s := range statuses {
+		if s.Category == category {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// BuiltInStatusCategory returns the category for a built-in status.
+func BuiltInStatusCategory(status Status) StatusCategory {
+	switch status {
+	case StatusOpen:
+		return CategoryActive
+	case StatusInProgress, StatusBlocked, StatusHooked:
+		return CategoryWIP
+	case StatusClosed:
+		return CategoryDone
+	case StatusDeferred, StatusPinned:
+		return CategoryFrozen
+	default:
+		return CategoryUnspecified
+	}
 }
 
 // IssueType categorizes the kind of work
