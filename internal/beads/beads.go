@@ -14,7 +14,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +53,8 @@ type SourceDatabaseInfo struct {
 	SourceDatabase string
 }
 
+var malformedSourceDatabasePattern = regexp.MustCompile(`"dolt_database"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+
 // ResolveRedirect follows a .beads/redirect file and captures the source directory's
 // dolt_database from metadata.json BEFORE following the redirect. This preserves
 // the source database identity across redirects.
@@ -72,12 +76,7 @@ func ResolveRedirect(beadsDir string) SourceDatabaseInfo {
 	// We only need the raw dolt_database field.
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 	if data, err := os.ReadFile(metadataPath); err == nil {
-		var raw struct {
-			DoltDatabase string `json:"dolt_database"`
-		}
-		if json.Unmarshal(data, &raw) == nil {
-			info.SourceDatabase = raw.DoltDatabase
-		}
+		info.SourceDatabase = extractSourceDatabase(data)
 	}
 
 	// Follow redirect
@@ -88,6 +87,26 @@ func ResolveRedirect(beadsDir string) SourceDatabaseInfo {
 	}
 
 	return info
+}
+
+func extractSourceDatabase(data []byte) string {
+	var raw struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if json.Unmarshal(data, &raw) == nil {
+		return raw.DoltDatabase
+	}
+
+	match := malformedSourceDatabasePattern.FindSubmatch(data)
+	if len(match) != 2 {
+		return ""
+	}
+
+	value, err := strconv.Unquote(`"` + string(match[1]) + `"`)
+	if err != nil {
+		return string(match[1])
+	}
+	return value
 }
 
 // FollowRedirect checks if a .beads directory contains a redirect file and follows it.

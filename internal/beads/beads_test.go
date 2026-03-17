@@ -1912,6 +1912,41 @@ func TestResolveRedirect_PreservesSourceDatabase(t *testing.T) {
 	}
 }
 
+func TestResolveRedirect_PreservesSourceDatabaseFromMalformedMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "lola", ".beads")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	malformed := `{"database":"dolt","dolt_database":"lola",`
+	if err := os.WriteFile(filepath.Join(sourceDir, "metadata.json"), []byte(malformed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	targetDir := filepath.Join(tmpDir, "town", ".beads")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, targetDir, &configfile.Config{
+		Database:     "dolt",
+		DoltDatabase: "hq",
+	})
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info := ResolveRedirect(sourceDir)
+	if !info.WasRedirected {
+		t.Fatal("expected WasRedirected=true")
+	}
+	if info.SourceDatabase != "lola" {
+		t.Fatalf("SourceDatabase = %q, want %q", info.SourceDatabase, "lola")
+	}
+}
+
 // TestResolveRedirect_NoRedirect tests that ResolveRedirect works correctly when
 // there is no redirect file (source and target are the same).
 func TestResolveRedirect_NoRedirect(t *testing.T) {

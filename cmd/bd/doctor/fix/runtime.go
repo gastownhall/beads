@@ -18,6 +18,7 @@ type repoRuntimeInfo struct {
 	Runtime      *beads.RepoRuntime
 	Config       *configfile.Config
 	SourceConfig *configfile.Config
+	SourceErr    error
 }
 
 func resolveRuntimeInfoForRepo(repoPath string) (*repoRuntimeInfo, error) {
@@ -27,10 +28,12 @@ func resolveRuntimeInfoForRepo(repoPath string) (*repoRuntimeInfo, error) {
 		if cfgErr != nil {
 			return nil, fmt.Errorf("failed to load config: %w", cfgErr)
 		}
+		sourceCfg, sourceErr := loadSourceConfig(runtime)
 		return &repoRuntimeInfo{
 			Runtime:      runtime,
 			Config:       effectiveFixConfig(cfg),
-			SourceConfig: loadSourceConfig(runtime, cfg),
+			SourceConfig: sourceCfg,
+			SourceErr:    sourceErr,
 		}, nil
 	}
 
@@ -68,26 +71,47 @@ func fallbackRuntimeInfoForRepoReinit(repoPath string) *repoRuntimeInfo {
 	}
 }
 
-func loadSourceConfig(runtime *beads.RepoRuntime, fallback *configfile.Config) *configfile.Config {
+func loadSourceConfig(runtime *beads.RepoRuntime) (*configfile.Config, error) {
 	if runtime == nil || runtime.SourceBeadsDir == "" || runtime.SourceBeadsDir == runtime.BeadsDir {
-		return fallback
+		return nil, nil
 	}
 
-	cfg, err := configfile.Load(runtime.SourceBeadsDir)
-	if err == nil && cfg != nil {
-		return cfg
-	}
-	return fallback
+	return configfile.Load(runtime.SourceBeadsDir)
 }
 
 func metadataConfigForRepo(info *repoRuntimeInfo) (*configfile.Config, string) {
 	if info == nil || info.Runtime == nil {
 		return nil, ""
 	}
-	if info.SourceConfig != nil && info.Runtime.SourceBeadsDir != "" {
-		return info.SourceConfig, info.Runtime.SourceBeadsDir
+	if info.Runtime.SourceBeadsDir != "" && info.Runtime.SourceBeadsDir != info.Runtime.BeadsDir {
+		if info.SourceConfig != nil {
+			return cloneConfig(info.SourceConfig), info.Runtime.SourceBeadsDir
+		}
+		return synthesizeSourceMetadataConfig(info), info.Runtime.SourceBeadsDir
 	}
-	return info.Config, info.Runtime.BeadsDir
+	return cloneConfig(info.Config), info.Runtime.BeadsDir
+}
+
+func cloneConfig(cfg *configfile.Config) *configfile.Config {
+	if cfg == nil {
+		return nil
+	}
+	cloned := *cfg
+	return &cloned
+}
+
+func synthesizeSourceMetadataConfig(info *repoRuntimeInfo) *configfile.Config {
+	cfg := cloneConfig(info.Config)
+	if cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+
+	cfg.Backend = configfile.BackendDolt
+	if info != nil && info.Runtime != nil && info.Runtime.Database != "" {
+		cfg.DoltDatabase = info.Runtime.Database
+	}
+
+	return cfg
 }
 
 func selectedRuntimeDatabase(runtime *beads.RepoRuntime, cfg *configfile.Config) string {

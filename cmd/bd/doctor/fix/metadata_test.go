@@ -157,6 +157,69 @@ func TestFixMissingMetadataJSON_NotBeadsWorkspace(t *testing.T) {
 	}
 }
 
+func TestFixMissingMetadataJSON_RegeneratesRedirectSourceMetadataWithoutTouchingTarget(t *testing.T) {
+	repoDir := t.TempDir()
+	targetRoot := t.TempDir()
+	sourceBeadsDir := filepath.Join(repoDir, ".beads")
+	targetBeadsDir := filepath.Join(targetRoot, ".beads")
+	if err := os.MkdirAll(sourceBeadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir source beads dir: %v", err)
+	}
+	if err := os.MkdirAll(targetBeadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir target beads dir: %v", err)
+	}
+
+	targetCfg := &configfile.Config{
+		Database:       "dolt",
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3318,
+		DoltServerUser: "redirect-user",
+		DoltDatabase:   "target_db",
+		ProjectID:      "target-project-123",
+	}
+	if err := targetCfg.Save(targetBeadsDir); err != nil {
+		t.Fatalf("save target config: %v", err)
+	}
+	targetBefore, err := os.ReadFile(filepath.Join(targetBeadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatalf("read target metadata before: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sourceBeadsDir, "redirect"), []byte(targetBeadsDir+"\n"), 0o644); err != nil {
+		t.Fatalf("write redirect: %v", err)
+	}
+
+	if err := FixMissingMetadataJSON(repoDir); err != nil {
+		t.Fatalf("FixMissingMetadataJSON failed: %v", err)
+	}
+
+	sourceCfg, err := configfile.Load(sourceBeadsDir)
+	if err != nil {
+		t.Fatalf("load regenerated source config: %v", err)
+	}
+	if sourceCfg == nil {
+		t.Fatal("expected regenerated source metadata at source beads dir")
+	}
+	if sourceCfg.DoltDatabase != "target_db" {
+		t.Fatalf("source DoltDatabase = %q, want %q", sourceCfg.DoltDatabase, "target_db")
+	}
+	if sourceCfg.DoltServerHost != "127.0.0.1" {
+		t.Fatalf("source DoltServerHost = %q, want %q", sourceCfg.DoltServerHost, "127.0.0.1")
+	}
+	if sourceCfg.DoltServerPort != 3318 {
+		t.Fatalf("source DoltServerPort = %d, want %d", sourceCfg.DoltServerPort, 3318)
+	}
+
+	targetAfter, err := os.ReadFile(filepath.Join(targetBeadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatalf("read target metadata after: %v", err)
+	}
+	if string(targetAfter) != string(targetBefore) {
+		t.Fatal("target metadata.json was modified while regenerating source metadata")
+	}
+}
+
 // setupGitRepoInDir initializes a git repo in the given directory with a remote.
 func setupGitRepoInDir(t *testing.T, dir string) {
 	t.Helper()

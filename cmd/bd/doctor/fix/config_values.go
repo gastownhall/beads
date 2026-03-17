@@ -2,7 +2,6 @@ package fix
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -15,17 +14,21 @@ func ConfigValues(path string) error {
 		return err
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
-
-	cfg, err := configfile.Load(beadsDir)
+	info, err := resolveRuntimeInfoForRepo(path)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	cfg, saveDir := metadataConfigForRepo(info)
 	if cfg == nil {
 		return fmt.Errorf("no metadata.json found")
 	}
 
 	fixed := false
+
+	if info != nil && info.SourceErr != nil && info.Runtime != nil && info.Runtime.SourceBeadsDir != "" && info.Runtime.SourceBeadsDir != info.Runtime.BeadsDir {
+		fmt.Printf("  Regenerating redirected source metadata.json after parse failure: %v\n", info.SourceErr)
+		fixed = true
+	}
 
 	// Fix database field: when backend is Dolt, database should be "dolt" not "beads.db"
 	if cfg.GetBackend() == configfile.BackendDolt {
@@ -41,7 +44,7 @@ func ConfigValues(path string) error {
 		return nil
 	}
 
-	if err := cfg.Save(beadsDir); err != nil {
+	if err := cfg.Save(saveDir); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
