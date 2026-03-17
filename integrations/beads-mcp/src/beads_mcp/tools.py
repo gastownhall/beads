@@ -358,6 +358,7 @@ async def _get_client() -> BdClientBase:
 async def beads_ready_work(
     limit: Annotated[int, "Maximum number of issues to return (1-100)"] = 10,
     priority: Annotated[int | None, "Filter by priority (0-4, 0=highest)"] = None,
+    issue_type: Annotated[IssueType | None, "Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)"] = None,
     assignee: Annotated[str | None, "Filter by assignee"] = None,
     labels: Annotated[list[str] | None, "Filter by labels (AND: must have ALL)"] = None,
     labels_any: Annotated[list[str] | None, "Filter by labels (OR: must have at least one)"] = None,
@@ -376,6 +377,7 @@ async def beads_ready_work(
     params = ReadyWorkParams(
         limit=limit,
         priority=priority,
+        issue_type=issue_type,
         assignee=assignee,
         labels=labels,
         labels_any=labels_any,

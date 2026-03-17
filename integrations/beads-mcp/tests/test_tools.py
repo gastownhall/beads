@@ -66,6 +66,20 @@ async def test_beads_ready_work(sample_issue):
 
 
 @pytest.mark.asyncio
+async def test_beads_ready_work_with_issue_type(sample_issue):
+    """Test beads_ready_work passes issue_type to params."""
+    mock_client = AsyncMock()
+    mock_client.ready = AsyncMock(return_value=[sample_issue])
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        issues = await beads_ready_work(limit=10, issue_type="bug")
+
+    assert len(issues) == 1
+    params = mock_client.ready.call_args[0][0]
+    assert params.issue_type == "bug"
+
+
+@pytest.mark.asyncio
 async def test_beads_ready_work_no_params():
     """Test beads_ready_work with default parameters."""
     mock_client = AsyncMock()

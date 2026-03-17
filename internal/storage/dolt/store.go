@@ -1155,6 +1155,12 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		"INSERT INTO config (`key`, `value`) VALUES ('schema_version', ?) "+
 			"ON DUPLICATE KEY UPDATE `value` = ?",
 		currentSchemaVersion, currentSchemaVersion)
+	_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('config')")
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: update schema_version')"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+			return fmt.Errorf("failed to commit schema_version update: %w", err)
+		}
+	}
 
 	return nil
 }
