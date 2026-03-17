@@ -121,7 +121,7 @@ When releasing a new version:
 3. Use the version bump script from the parent project:
    ```bash
    cd ../..
-   ./scripts/bump-version.sh 0.9.5 --commit
+   ./scripts/update-versions.sh 0.9.5
    ```
 4. Create a git tag:
    ```bash

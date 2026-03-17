@@ -2,17 +2,25 @@
 
 Quick guide for releasing a new version of beads.
 
-## 🚀 The Easy Way (Recommended)
+## 🚀 The Recommended Way
 
-Use the fully automated release script:
+Create the tracked release workflow:
 
 ```bash
 ./scripts/release.sh 0.9.3
 ```
 
-This does **everything**: version bump, tests, git tag, Homebrew update, and local installation.
+This script is a gateway to the `beads-release` molecule. It creates the
+release workflow and prints the next steps; it does not hide the work inside a
+single batch script.
 
-See [scripts/README.md](../scripts/README.md#releasesh--the-easy-button) for details.
+Equivalent direct command:
+
+```bash
+bd mol wisp beads-release --var version=0.9.3
+```
+
+See [scripts/README.md](../scripts/README.md#releasesh-gateway-to-the-release-molecule) for details.
 
 ---
 
@@ -39,9 +47,11 @@ If you prefer step-by-step control:
 
 2. **Run tests and build**:
    ```bash
-   TMPDIR=/tmp go test ./...
+   make test-short
+   make test
+   make test-full-cgo
    golangci-lint run ./...
-   TMPDIR=/tmp go build -o bd ./cmd/bd
+   make build
    ./bd version  # Verify it shows new version
    ```
 
@@ -64,25 +74,32 @@ If you prefer step-by-step control:
 
 ## Version Bump
 
-Use the automated script to update all version files:
+Use the local version updater for manual version-file edits:
 
 ```bash
-./scripts/bump-version.sh 0.9.X --commit
-git push origin main
+./scripts/update-versions.sh 0.9.X
 ```
 
 This updates:
 - `cmd/bd/version.go`
-- `.claude-plugin/plugin.json`
+- `claude-plugin/.claude-plugin/plugin.json`
 - `.claude-plugin/marketplace.json`
 - `integrations/beads-mcp/pyproject.toml`
 - `integrations/beads-mcp/src/beads_mcp/__init__.py`
+- `npm-package/package.json`
 - `README.md`
-- `PLUGIN.md`
+- `default.nix`
+- `cmd/bd/winres/*`
 
-**IMPORTANT**: After version bump, rebuild the local binary:
+For the full release workflow, prefer the release molecule:
+
 ```bash
-go build -o bd ./cmd/bd
+bd mol wisp beads-release --var version=0.9.X
+```
+
+**IMPORTANT**: After a manual version bump, rebuild the local binary:
+```bash
+make build
 ./bd version  # Should show new version
 ```
 

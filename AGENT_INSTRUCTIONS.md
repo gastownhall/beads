@@ -302,15 +302,14 @@ bd ready
 
 ## Version Management
 
-**IMPORTANT**: When the user asks to "bump the version" or mentions a new version number (e.g., "bump to 0.9.3"), use the version bump script:
+**IMPORTANT**: When the user asks to "bump the version" or mentions a new version number (e.g., "bump to 0.9.3"), use the local version updater for file changes and the release molecule for full releases:
 
 ```bash
-# Preview changes (shows diff, doesn't commit)
-./scripts/bump-version.sh 0.9.3
+# Update version files locally
+./scripts/update-versions.sh 0.9.3
 
-# Auto-commit the version bump
-./scripts/bump-version.sh 0.9.3 --commit
-git push origin main
+# Full release workflow
+bd mol wisp beads-release --var version=0.9.3
 ```
 
 **What it does:**
@@ -319,7 +318,6 @@ git push origin main
 - Validates semantic versioning format
 - Shows diff preview
 - Verifies all versions match after update
-- Creates standardized commit message
 
 **User will typically say:**
 
@@ -330,9 +328,9 @@ git push origin main
 
 **You should:**
 
-1. Run `./scripts/bump-version.sh <version> --commit`
-2. Push to GitHub
-3. Confirm all versions updated correctly
+1. Run `./scripts/update-versions.sh <version>` for local file updates
+2. Or create `bd mol wisp beads-release --var version=<version>` for a real release
+3. Confirm all versions updated correctly before any commit or push
 
 **Files updated automatically:**
 
@@ -340,30 +338,33 @@ git push origin main
 - `claude-plugin/.claude-plugin/plugin.json` - Plugin version
 - `.claude-plugin/marketplace.json` - Marketplace version
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
-- `README.md` - Documentation version
-- `PLUGIN.md` - Version requirements
+- `README.md` - Documentation version badge
+- `default.nix` - Nix package version
+- `cmd/bd/winres/*` - Windows version metadata
 
-**Why this matters:** We had version mismatches (bd-66) when only `version.go` was updated. This script prevents that by updating all components atomically.
+**Why this matters:** We had version mismatches (bd-66) when only `version.go` was updated. `update-versions.sh` keeps the files aligned, and the release molecule carries the full release workflow without hiding it in a batch script.
 
 See `scripts/README.md` for more details.
 
 ## Release Process (Maintainers)
 
-**Automated (Recommended):**
+**Tracked Release Workflow (Recommended):**
 
 ```bash
-# One command to do everything (version bump, tests, tag, Homebrew update, local install)
+# Create the release workflow and follow its steps
 ./scripts/release.sh 0.9.3
 ```
 
-This handles the entire release workflow automatically, including waiting ~5 minutes for GitHub Actions to build release artifacts. See [scripts/README.md](scripts/README.md) for details.
+This creates the `beads-release` molecule and prints the next steps. It does
+not hide the release inside a one-shot batch script. See
+[scripts/README.md](scripts/README.md) for details.
 
 **Manual (Step-by-Step):**
 
-1. Bump version: `./scripts/bump-version.sh <version> --commit`
+1. Update version files: `./scripts/update-versions.sh <version>`
 2. Update CHANGELOG.md with release notes
 3. Run tests: `make test-short` for the default local check, `make test` for the broader non-short lane, and `make test-full-cgo` for CGO-related changes
-4. Push version bump: `git push origin main`
+4. Commit and push the version bump when approved
 5. Tag release: `git tag v<version> && git push origin v<version>`
 6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
 7. Verify: `brew update && brew upgrade beads && bd version`

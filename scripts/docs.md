@@ -14,7 +14,7 @@ Key scripts include version bumping, installation helpers that inject git inform
 
 - **Version Pipeline**: Works alongside the version infrastructure in `@/cmd/bd/version.go` by extracting and passing git information at build time via ldflags.
 
-- **Release Automation**: The `release.sh` and `bump-version.sh` scripts orchestrate the release process documented in `@/RELEASING.md`, ensuring version consistency across all components (CLI, plugin, MCP server, npm package).
+- **Release Automation**: `release.sh` is the gateway to the tracked `beads-release` workflow, while `update-versions.sh` handles local/manual version-file updates documented in `@/RELEASING.md`.
 
 - **CI/CD Integration**: Goreleaser (configured in `@/.goreleaser.yml`) uses the same ldflag patterns established by these scripts, ensuring consistency across all installation methods.
 
@@ -63,11 +63,11 @@ All 5 platform builds (linux-amd64, linux-arm64, darwin-amd64, darwin-arm64, win
 - `-X main.Branch={{.Branch}}` uses goreleaser's detected branch
 - Ensures released binaries have full version info without requiring manual extraction
 
-**Version Bumping** (`bump-version.sh` and `release.sh`):
+**Version Bumping** (`update-versions.sh` and `release.sh`):
 
-- Coordinates version updates across multiple files (CLI version, plugin metadata, MCP server, npm package)
-- Ensures all distribution channels report consistent version numbers
-- Integrates with release process documented in `@/RELEASING.md`
+- `update-versions.sh` coordinates version updates across multiple files (CLI version, plugin metadata, MCP server, npm package)
+- `release.sh` creates the release molecule for the full publish workflow
+- Together they keep distribution channels aligned without hiding the release in an opaque batch script
 
 ### Things to Know
 

@@ -65,7 +65,7 @@ twine --version
 
 Before starting a release:
 
-- [ ] All tests passing (`go test ./...`)
+- [ ] Release test lanes passing (`make test-short`, `make test`, and `make test-full-cgo` as appropriate)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
 - [ ] **CHANGELOG.md updated with release notes** (see format below)
 - [ ] No uncommitted changes
@@ -75,7 +75,7 @@ Before starting a release:
 
 ### Update CHANGELOG.md
 
-**IMPORTANT: Do this FIRST before running bump-version script.**
+**IMPORTANT: Do this FIRST before updating version files or creating the release molecule.**
 
 Add release notes to CHANGELOG.md:
 
@@ -106,28 +106,20 @@ git push origin main
 
 ### Update Version and Create Release Tag
 
-Use the version bump script to update all version references and create the release tag:
+Prefer the release molecule for the full release flow:
 
 ```bash
-# Dry run - shows what will change
-./scripts/bump-version.sh 0.22.0
-
-# Full release with all local installations
-./scripts/bump-version.sh 0.22.0 --commit --tag --push --all
+bd mol wisp beads-release --var version=0.22.0
 ```
 
-**Available flags:**
+That workflow handles the staged release process with ledgered steps, CI gates,
+and resumable progress.
 
-| Flag | Description |
-|------|-------------|
-| `--commit` | Create a git commit with version changes |
-| `--tag` | Create annotated git tag (requires --commit) |
-| `--push` | Push commit and tag to origin (requires --tag) |
-| `--install` | Build and install bd to `~/go/bin` AND `~/.local/bin` |
-| `--mcp-local` | Install beads-mcp from local source via uv/pip |
-| `--upgrade-mcp` | Upgrade beads-mcp from PyPI (after PyPI publish) |
-| `--restart-servers` | Restart all Dolt servers to pick up new version |
-| `--all` | Shorthand for `--install --mcp-local --restart-servers` |
+For a local-only manual version-file update, use:
+
+```bash
+./scripts/update-versions.sh 0.22.0
+```
 
 This updates:
 - `cmd/bd/version.go` - CLI version constant
@@ -136,39 +128,28 @@ This updates:
 - `claude-plugin/.claude-plugin/plugin.json` - Plugin version
 - `.claude-plugin/marketplace.json` - Marketplace version
 - `npm-package/package.json` - npm package version
-- `cmd/bd/templates/hooks/*` - Git hook versions
-- `README.md` - Documentation version
-- `PLUGIN.md` - Version requirements
-- `CHANGELOG.md` - Creates release entry from [Unreleased]
-
-The `--commit --tag --push` flags will:
-1. Create a git commit with all version changes
-2. Create an annotated tag `v0.22.0`
-3. Push both commit and tag to origin
-
-This triggers GitHub Actions to build release artifacts automatically.
+- `README.md` - Documentation version badge
+- `default.nix` - Nix package version
+- `cmd/bd/winres/*` - Windows version metadata
 
 **Recommended workflow:**
 
 ```bash
-# 1. Update CHANGELOG.md and cmd/bd/info.go with release notes (manual step)
-
-# 2. Bump version and install everything locally
-./scripts/bump-version.sh 0.22.0 --commit --all
-
-# 3. Test locally, then tag and push
-git tag -a v0.22.0 -m "Release v0.22.0"
-git push origin main
-git push origin v0.22.0
+# 1. Update CHANGELOG.md and cmd/bd/info.go with release notes
+# 2. Create the release workflow
+bd mol wisp beads-release --var version=0.22.0
+# 3. Work the molecule steps and let the CI gate carry the release
 ```
 
 **Alternative (step-by-step):**
 
 ```bash
-# Just commit
-./scripts/bump-version.sh 0.22.0 --commit
+# 1. Update version files locally
+./scripts/update-versions.sh 0.22.0
 
-# Then manually tag and push
+# 2. Review, commit, tag, and push manually
+git add .
+git commit -m "chore: bump version to 0.22.0"
 git tag -a v0.22.0 -m "Release v0.22.0"
 git push origin main
 git push origin v0.22.0
@@ -339,7 +320,7 @@ npm org ls beads
 # Navigate to npm package
 cd npm-package
 
-# Version should already be updated by bump-version.sh
+# Version should already be updated by update-versions.sh or the release molecule
 cat package.json | grep version
 
 # Run all tests
@@ -459,8 +440,10 @@ git checkout -b hotfix/v0.22.1 v0.22.0
 # Make fixes
 # ... edit files ...
 
-# Bump version to 0.22.1
-./scripts/bump-version.sh 0.22.1 --commit
+# Update version to 0.22.1
+./scripts/update-versions.sh 0.22.1
+git add .
+git commit -m "chore: bump version to 0.22.1"
 
 # Tag and release
 git tag -a v0.22.1 -m "Hotfix release v0.22.1"
@@ -564,13 +547,10 @@ After a successful release:
 
 1. **Upgrade local beads-mcp installation** to the new version:
    ```bash
-   # Option 1: Use the bump-version.sh script (recommended during version bump)
-   ./scripts/bump-version.sh <version> --upgrade-mcp
-
-   # Option 2: Manual upgrade via pip (if installed globally)
+   # Option 1: Manual upgrade via pip (if installed globally)
    pip install --upgrade beads-mcp
 
-   # Option 3: Manual upgrade via uv tool (if installed as a tool)
+   # Option 2: Manual upgrade via uv tool (if installed as a tool)
    uv tool upgrade beads-mcp
 
    # Verify the new version
@@ -580,11 +560,8 @@ After a successful release:
    # The MCP server will load the newly installed version
    ```
 
-   **Note:** The `--upgrade-mcp` flag can be combined with other flags:
-   ```bash
-   # Update versions, commit, install bd binary, and upgrade beads-mcp all at once
-   ./scripts/bump-version.sh 0.24.3 --commit --install --upgrade-mcp
-   ```
+   If you are running a full release, prefer the release molecule to manage the
+   version and publish workflow, then upgrade the local MCP package separately.
 
 2. **Verify the upgraded CLI**:
    ```bash

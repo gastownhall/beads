@@ -17,17 +17,14 @@ Thank you for your interest in contributing to bd! This document provides guidel
 git clone https://github.com/steveyegge/beads
 cd beads
 
-# Build the project
-go build -o bd ./cmd/bd
-
-# Run tests
-go test ./...
-
-# Run with race detection
-go test -race ./...
-
 # Build and install locally
-go install ./cmd/bd
+make install
+
+# Fast local / PR-like test lane
+make test-short
+
+# Broader local lane
+make test
 ```
 
 ## Project Structure
@@ -46,18 +43,24 @@ beads/
 ## Running Tests
 
 ```bash
-# Run all tests
-go test ./...
+# Fast local / PR-like lane
+make test-short
 
-# Run tests with coverage
-go test -v -coverprofile=coverage.out ./...
+# Broader local lane (non-short; `make test` also enables coverage)
+make test
+
+# Full CGO-enabled lane for Dolt-sensitive changes
+make test-full-cgo
+
+# Coverage run that keeps the repo wrapper / skip behavior
+TEST_COVER=1 TEST_COVERPROFILE=coverage.out ./scripts/test.sh ./...
 go tool cover -html=coverage.out
 
 # Run specific package tests
-go test ./internal/storage/dolt/ -v
+./scripts/test.sh -short ./internal/storage/dolt/...
 
-# Run tests with race detection
-go test -race ./...
+# Run a CI-style race check when you specifically need it
+go test -race -short ./...
 ```
 
 ## Code Style
@@ -125,37 +128,43 @@ Add cycle detection for dependency graphs
 
 ### Test Strategy
 
-We use a two-tier testing approach:
+We now use a few practical lanes instead of a simple fast/slow split:
 
-- **Fast tests** (unit tests): Run on every PR via CI with `-short` flag (~2s)
-- **Slow tests** (integration tests): Run nightly with full git operations (~14s)
+- **Fast local / PR-like lane**: `make test-short`
+- **Broader local lane**: `make test`
+- **Full CGO lane**: `make test-full-cgo`
+- **Heavier runtime-manager and integration coverage**: owned by dedicated CI lanes
 
-Slow tests use `testing.Short()` to skip when `-short` flag is present.
+See [docs/TESTING.md](docs/TESTING.md) for the current lane definitions and
+tradeoffs.
 
 ### Running Tests
 
 ```bash
-# Fast tests (recommended for development - skips slow tests)
-# Use this for rapid iteration during development
-go test -short ./...
+# Fast local / PR-like lane (recommended for active development)
+make test-short
 
-# Full test suite (before committing - includes all tests)
-# Run this before pushing to ensure nothing breaks
-go test ./...
+# Broader local lane before opening a pull request
+make test
 
-# With race detection and coverage
-go test -race -coverprofile=coverage.out ./...
+# Full CGO lane when changing Dolt-sensitive code
+make test-full-cgo
+
+# CI-style race check when you specifically need it
+go test -race -short ./...
 ```
 
-**When to use `-short`:**
+**When to use the fast lane (`make test-short`):**
 - During active development for fast feedback loops
 - When making small changes that don't affect integration points
-- When you want to quickly verify unit tests pass
+- When you want the closest local match to the default PR CI path
 
-**When to use full test suite:**
-- Before committing and pushing changes
-- After modifying git operations or multi-clone scenarios
-- When preparing a pull request
+**When to step up to broader lanes:**
+- Use `make test` before opening a pull request or when you want the broader
+  non-short local surface
+- Use `make test-full-cgo` after changing Dolt-sensitive or CGO-relevant code
+- Use `go test -race -short ./...` when you specifically want the CI-style race
+  check
 
 ### Writing Tests
 
@@ -288,7 +297,7 @@ All contributions go through code review:
 
 ```bash
 # Build and test your changes quickly
-go build -o bd ./cmd/bd && ./bd init --prefix test
+make build && ./bd init --prefix test
 
 # Test specific functionality
 ./bd create "Test issue" -p 1 -t bug

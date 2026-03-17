@@ -64,15 +64,27 @@ See `internal/types/types.go`:
 # Build and install bd to ~/.local/bin (canonical location)
 make install
 
-# Test
-go test ./...
-go test -coverprofile=coverage.out ./...
+# Test (fast local / PR-like lane)
+make test-short
+
+# Broader local lane
+make test
+
+# Full CGO-enabled lane for Dolt-sensitive changes
+make test-full-cgo
+
+# Coverage run that preserves the repo wrapper / skip logic
+TEST_COVER=1 TEST_COVERPROFILE=coverage.out ./scripts/test.sh ./...
+go tool cover -html=coverage.out
 
 # Run linter (baseline warnings documented in docs/LINTING.md)
 golangci-lint run ./...
 
-# Version management
-./scripts/bump-version.sh 0.9.3 --commit
+# Version management (local/manual version updates)
+./scripts/update-versions.sh 0.9.3
+
+# Full release workflow
+bd mol wisp beads-release --var version=0.9.3
 
 # Verify installed binary
 bd init --prefix test

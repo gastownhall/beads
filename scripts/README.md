@@ -2,14 +2,14 @@
 
 Utility scripts for maintaining the beads project.
 
-## release.sh (⭐ The Easy Button)
+## release.sh (Gateway to the Release Molecule)
 
-**One-command release** from version bump to local installation.
+Creates the tracked `beads-release` workflow.
 
 ### Usage
 
 ```bash
-# Full release (does everything)
+# Create the release workflow
 ./scripts/release.sh 0.9.3
 
 # Preview what would happen
@@ -18,18 +18,9 @@ Utility scripts for maintaining the beads project.
 
 ### What It Does
 
-This master script automates the **entire release process**:
-
-1. ✅ Stops running Dolt servers (avoids version conflicts)
-2. ✅ Runs tests and linting
-3. ✅ Bumps version in all files
-4. ✅ Commits and pushes version bump
-5. ✅ Creates and pushes git tag
-6. ✅ Updates Homebrew formula
-7. ✅ Upgrades local brew installation
-8. ✅ Verifies everything works
-
-**After this script completes, your system is running the new version!**
+This script does not run the full release itself. It creates a `beads-release`
+molecule (wisp) and shows the next steps. The molecule owns the staged release
+work, ledger entries, and CI gate.
 
 ### Examples
 
@@ -59,29 +50,22 @@ The script provides colorful, step-by-step progress output:
 
 ### What Happens Next
 
-After the script finishes:
-- GitHub Actions builds binaries for all platforms (~5 minutes)
-- PyPI package is published automatically
-- Users can `brew upgrade beads` to get the new version
-- GitHub Release is created with binaries and changelog
+After the script creates the molecule:
+- Work the molecule steps or hand it off
+- Let the CI gate handle the release wait without polling
+- Follow the documented verification steps for GitHub, Homebrew, PyPI, and npm
 
 ---
 
-## bump-version.sh
+## update-versions.sh
 
-Bumps the version number across all beads components in a single command.
+Updates the version number across all beads components for local/manual version-file edits.
 
 ### Usage
 
 ```bash
-# Show usage
-./scripts/bump-version.sh
-
-# Update versions (shows diff, no commit)
-./scripts/bump-version.sh 0.9.3
-
-# Update versions and auto-commit
-./scripts/bump-version.sh 0.9.3 --commit
+# Update versions locally
+./scripts/update-versions.sh 0.9.3
 ```
 
 ### What It Does
@@ -91,27 +75,24 @@ Updates version in all these files:
 - `claude-plugin/.claude-plugin/plugin.json` - Plugin version
 - `.claude-plugin/marketplace.json` - Marketplace plugin version
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
+- `npm-package/package.json` - npm package version
 - `README.md` - Alpha status version
-- `PLUGIN.md` - Version requirements
+- `default.nix` - Nix package version
+- `cmd/bd/winres/*` - Windows version metadata
 
 ### Features
 
 - **Validates** semantic versioning format (MAJOR.MINOR.PATCH)
 - **Verifies** all versions match after update
 - **Shows** git diff of changes
-- **Auto-commits** with standardized message (optional)
 - **Cross-platform** compatible (macOS and Linux)
 
 ### Examples
 
 ```bash
 # Bump to 0.9.3 and review changes
-./scripts/bump-version.sh 0.9.3
-# Review the diff, then manually commit
-
-# Bump to 1.0.0 and auto-commit
-./scripts/bump-version.sh 1.0.0 --commit
-git push origin main
+./scripts/update-versions.sh 0.9.3
+# Review the diff, then manually commit if appropriate
 ```
 
 ### Why This Script Exists
@@ -120,11 +101,15 @@ Previously, version bumps only updated `cmd/bd/version.go`, leaving other compon
 
 ### Safety
 
-- Checks for uncommitted changes before proceeding
-- Refuses to auto-commit if there are existing uncommitted changes
 - Validates version format before making any changes
 - Verifies all versions match after update
-- Shows diff for review before commit
+
+## bump-version.sh
+
+Deprecated shim. It now exits and points at:
+
+- `bd mol wisp beads-release --var version=X.Y.Z` for full releases
+- `./scripts/update-versions.sh X.Y.Z` for local version-file updates
 
 ---
 
