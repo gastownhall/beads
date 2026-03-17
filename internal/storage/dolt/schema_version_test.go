@@ -24,6 +24,15 @@ func TestSchemaVersionSetAfterInit(t *testing.T) {
 	if version != currentSchemaVersion {
 		t.Errorf("schema_version = %d, want %d", version, currentSchemaVersion)
 	}
+
+	var stagedRows int
+	err = store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'").Scan(&stagedRows)
+	if err != nil {
+		t.Fatalf("query dolt_status for config: %v", err)
+	}
+	if stagedRows != 0 {
+		t.Fatalf("config left staged in dolt_status after init: %d row(s)", stagedRows)
+	}
 }
 
 // TestSchemaVersionSkipsReinit verifies that initSchemaOnDB returns early
@@ -102,6 +111,53 @@ func TestSchemaVersionRunsInitWhenStale(t *testing.T) {
 	}
 	if version != currentSchemaVersion {
 		t.Errorf("schema_version = %d after re-init, want %d", version, currentSchemaVersion)
+	}
+}
+
+// TestSchemaVersionRunsLatestMigrationsWhenOneVersionBehind verifies that a
+// database marked one schema version behind re-enters initSchemaOnDB and picks
+// up the latest migration-backed columns.
+func TestSchemaVersionRunsLatestMigrationsWhenOneVersionBehind(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, stmt := range []string{
+		"ALTER TABLE issues DROP COLUMN no_history",
+		"ALTER TABLE wisps DROP COLUMN no_history",
+	} {
+		if _, err := store.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+
+	_, err := store.db.ExecContext(ctx,
+		"UPDATE config SET `value` = ? WHERE `key` = 'schema_version'",
+		currentSchemaVersion-1,
+	)
+	if err != nil {
+		t.Fatalf("failed to set prior schema_version: %v", err)
+	}
+
+	if err := initSchemaOnDB(ctx, store.db); err != nil {
+		t.Fatalf("initSchemaOnDB failed: %v", err)
+	}
+
+	for _, table := range []string{"issues", "wisps"} {
+		var count int
+		err := store.db.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'no_history'",
+			table,
+		).Scan(&count)
+		if err != nil {
+			t.Fatalf("check %s.no_history: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("%s.no_history missing after initSchemaOnDB", table)
+		}
 	}
 }
 
