@@ -31,14 +31,7 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 	_ = runCommandInDir(tmpDir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
 
-	env := append(os.Environ(),
-		"BEADS_TEST_MODE=",
-		"GT_ROOT=",
-		"BEADS_DOLT_AUTO_START=",
-		"BEADS_DOLT_SERVER_PORT=",
-		"BEADS_DOLT_PORT=",
-		"BEADS_DOLT_SHARED_SERVER=",
-	)
+	env := runtimeMatrixEnv()
 
 	initOut, initErr := runLifecycleBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {

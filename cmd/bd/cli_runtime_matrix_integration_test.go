@@ -292,6 +292,64 @@ func TestE2E_RuntimeMatrix_ExplicitPortExternalServerPreservesConfiguredRuntime(
 	}
 }
 
+func TestRuntimeMatrixEnv_StripsInheritedDoltOverrides(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "target_db")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "198.51.100.24")
+	t.Setenv("BEADS_DOLT_DATA_DIR", "/tmp/runtime-matrix-host-leak")
+	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
+	t.Setenv("BEADS_TEST_MODE", "1")
+	t.Setenv("GT_ROOT", "/tmp/gas-town")
+
+	env := runtimeMatrixEnv()
+
+	if envContainsKeyWithValue(env, "BEADS_TEST_MODE", "1") {
+		t.Fatal("runtimeMatrixEnv leaked BEADS_TEST_MODE from parent shell")
+	}
+	if envContainsKeyWithValue(env, "GT_ROOT", "/tmp/gas-town") {
+		t.Fatal("runtimeMatrixEnv leaked GT_ROOT from parent shell")
+	}
+	for _, key := range []string{
+		"BEADS_DOLT_SERVER_DATABASE",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_DATA_DIR",
+		"BEADS_DOLT_SERVER_TLS",
+	} {
+		if envContainsKey(env, key) {
+			t.Fatalf("runtimeMatrixEnv leaked %s from parent shell", key)
+		}
+	}
+}
+
+func TestE2E_RuntimeMatrix_IgnoresParentDoltDatabaseOverride(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow integration test in short mode")
+	}
+	if runtime.GOOS == windowsOS {
+		t.Skip("redirect runtime matrix test not supported on windows")
+	}
+	testutil.RequireDoltCLI(t)
+
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "target_db")
+
+	bdBinary := buildRuntimeMatrixTestBinary(t)
+	env := runtimeMatrixEnv()
+
+	repo := setupRedirectedRuntimeMatrixRepo(t, true, 1, 2)
+	defer repo.Cleanup()
+
+	listOut, listErr := runBDExecAllowErrorWithEnv(t, bdBinary, repo.RepoDir, env, "list", "--json")
+	if listErr != nil {
+		t.Fatalf("bd list under parent database override failed: %v\n%s", listErr, listOut)
+	}
+	items := decodeIssueObjects(t, listOut)
+	if len(items) != 1 {
+		t.Fatalf("list returned %d issues, want 1 under parent override\n%s", len(items), listOut)
+	}
+	if got := stringField(items[0], "title"); got != "source issue 1" {
+		t.Fatalf("list title = %q, want %q under parent override", got, "source issue 1")
+	}
+}
+
 func TestE2E_RuntimeMatrix_DoctorDryRunPreservesRedirectSourceDatabase(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow integration test in short mode")
@@ -507,14 +565,70 @@ func TestE2E_RuntimeMatrix_DoctorFixYesRemovesStaleAccessLock(t *testing.T) {
 }
 
 func runtimeMatrixEnv() []string {
-	return append(os.Environ(),
-		"BEADS_TEST_MODE=",
-		"GT_ROOT=",
-		"BEADS_DOLT_AUTO_START=",
-		"BEADS_DOLT_SERVER_PORT=",
-		"BEADS_DOLT_PORT=",
-		"BEADS_DOLT_SHARED_SERVER=",
+	return runtimeMatrixFilterEnv(
+		os.Environ(),
+		[]string{"BEADS_TEST_MODE", "GT_ROOT"},
+		[]string{"BEADS_DOLT_"},
 	)
+}
+
+func runtimeMatrixFilterEnv(env []string, blankKeys []string, stripPrefixes []string) []string {
+	blank := make(map[string]struct{}, len(blankKeys))
+	for _, key := range blankKeys {
+		blank[key] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(env)+len(blankKeys))
+	for _, entry := range env {
+		key, _, found := strings.Cut(entry, "=")
+		if !found {
+			filtered = append(filtered, entry)
+			continue
+		}
+		if _, ok := blank[key]; ok {
+			continue
+		}
+		if runtimeMatrixKeyHasAnyPrefix(key, stripPrefixes) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+
+	for _, key := range blankKeys {
+		filtered = append(filtered, key+"=")
+	}
+	return filtered
+}
+
+func runtimeMatrixKeyHasAnyPrefix(key string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func envContainsKey(env []string, key string) bool {
+	for _, entry := range env {
+		if strings.HasPrefix(entry, key+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func envContainsKeyWithValue(env []string, key string, value string) bool {
+	return envContainsEntry(env, key+"="+value)
+}
+
+func envContainsEntry(env []string, want string) bool {
+	for _, entry := range env {
+		if entry == want {
+			return true
+		}
+	}
+	return false
 }
 
 func buildRuntimeMatrixTestBinary(t *testing.T) string {
