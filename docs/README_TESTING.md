@@ -90,8 +90,10 @@ There are now two common Dolt-backed test styles:
 - Docker-backed tests that look for the cached Dolt image
 - Host-CLI tests that launch `dolt sql-server` directly
 
-`BEADS_TEST_SKIP=dolt` skips both styles. Host-CLI tests also skip cleanly if
-`dolt` is not on `PATH`.
+`BEADS_TEST_SKIP=dolt` skips the Docker-backed tests and the newer
+runtime-manager host-CLI tests. Some older host-CLI tests still only guard on
+local `dolt` availability. If `dolt` is not on `PATH`, those host-CLI tests
+usually skip rather than failing hard.
 
 ## Adding New Tests
 

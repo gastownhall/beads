@@ -283,7 +283,7 @@ make test-short
 # Test (broader local non-short lane)
 make test
 
-# Test with full CGO-enabled suite (local/CI parity)
+# Test with the full CGO-enabled validation lane
 make test-full-cgo
 
 # Coverage run

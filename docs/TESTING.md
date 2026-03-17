@@ -102,9 +102,10 @@ BEADS_TEST_SKIP=dolt ./scripts/test.sh
 BEADS_TEST_SKIP=dolt,slow ./scripts/test.sh
 ```
 
-That same `BEADS_TEST_SKIP=dolt` contract now also skips the direct host-`dolt`
-tests. If a test needs the local `dolt` CLI and it is not on `PATH`, it skips
-instead of failing hard.
+That same `BEADS_TEST_SKIP=dolt` contract now also covers the newer
+runtime-manager host-`dolt` tests. Some older host-CLI tests still only guard
+on local `dolt` availability. If a host-CLI test needs the local `dolt` binary
+and it is not on `PATH`, it usually skips instead of failing hard.
 
 #### Enabling Dolt tests
 
