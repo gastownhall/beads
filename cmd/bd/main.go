@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/utils"
@@ -34,7 +35,7 @@ import (
 var (
 	dbPath     string
 	actor      string
-	store      *dolt.DoltStore
+	store      storage.DoltStorage
 	jsonOutput bool
 
 	// Signal-aware context for graceful cancellation

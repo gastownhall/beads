@@ -21,6 +21,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -104,7 +105,7 @@ func ensureCleanGlobalState(t *testing.T) {
 // Used by saveAndRestoreGlobals to ensure test isolation.
 type savedGlobals struct {
 	dbPath      string
-	store       *dolt.DoltStore
+	store       storage.DoltStorage
 	storeActive bool
 }
 
