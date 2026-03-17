@@ -21,9 +21,12 @@ import (
 )
 
 // IsWisp returns true if the issue should be routed to the wisps table.
-// Matches the DoltStore check: issue.Ephemeral || issue.NoHistory || ID contains "-wisp-".
+// Routes based on flags only — not the ID pattern. The "-wisp-" ID prefix is
+// a naming convention for generated wisp IDs, but promoted wisps keep their
+// ID while moving to the issues table (Ephemeral=false). Routing on the ID
+// would send promoted wisps back to the wisps table on re-insert.
 func IsWisp(issue *types.Issue) bool {
-	return issue.Ephemeral || issue.NoHistory || strings.Contains(issue.ID, "-wisp-")
+	return issue.Ephemeral || issue.NoHistory
 }
 
 // TableRouting returns the issue and event table names for an issue,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1325,51 +1326,14 @@ func (s *DoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID stri
 	return result, nil
 }
 
-// GetNextChildID returns the next available child ID for a parent
+// GetNextChildID returns the next available child ID for a parent.
+// Delegates SQL work to issueops.GetNextChildIDTx.
 func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", wrapTransactionError("get next child ID: begin", err)
-	}
-	defer tx.Rollback()
-
-	var lastChild int
-	err = tx.QueryRowContext(ctx, "SELECT last_child FROM child_counters WHERE parent_id = ?", parentID).Scan(&lastChild)
-	if err == sql.ErrNoRows {
-		lastChild = 0
-	} else if err != nil {
-		return "", wrapQueryError("get next child ID: read counter", err)
-	}
-
-	// Check existing children to prevent overwrites after JSONL import (GH#2166).
-	// The counter may be stale if issues were imported without reconciling child_counters.
-	var maxExisting sql.NullInt64
-	err = tx.QueryRowContext(ctx, `
-		SELECT MAX(CAST(SUBSTRING_INDEX(id, '.', -1) AS UNSIGNED))
-		FROM issues
-		WHERE id LIKE CONCAT(?, '.%')
-		  AND id NOT LIKE CONCAT(?, '.%.%')
-	`, parentID, parentID).Scan(&maxExisting)
-	if err != nil {
-		return "", wrapQueryError("get next child ID: scan existing children", err)
-	}
-	if maxExisting.Valid && int(maxExisting.Int64) > lastChild {
-		lastChild = int(maxExisting.Int64)
-	}
-
-	nextChild := lastChild + 1
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)
-		ON DUPLICATE KEY UPDATE last_child = ?
-	`, parentID, nextChild, nextChild)
-	if err != nil {
-		return "", wrapExecError("get next child ID: update counter", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return "", wrapTransactionError("get next child ID: commit", err)
-	}
-
-	return fmt.Sprintf("%s.%d", parentID, nextChild), nil
+	var childID string
+	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		childID, err = issueops.GetNextChildIDTx(ctx, tx, parentID)
+		return err
+	})
+	return childID, err
 }
