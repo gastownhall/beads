@@ -48,3 +48,36 @@ jobs:
         with:
           file: ./coverage.out
           fail_ci_if_error: false
+
+  runtime-matrix:
+    name: Runtime Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
+      - name: Install Dolt CLI
+        run: |
+          curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash
+          echo "$HOME/.dolt/bin" >> "$GITHUB_PATH"
+          "$HOME/.dolt/bin/dolt" version
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Runtime-matrix regression lane
+        run: |
+          go test -v -count=1 -timeout=20m ./cmd/bd \
+            -run '^(TestE2E_RuntimeMatrix_.*|TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands)$'

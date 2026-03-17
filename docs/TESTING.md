@@ -211,6 +211,8 @@ That means:
 - PR CI mostly skips the heavy runtime-matrix cases because it runs `-short`
 - local `make test` includes this lane when the package is exercised in non-short mode
 - local `make test-short` skips it
+- the deterministic automated owner is the nightly `Runtime Matrix` workflow job,
+  which explicitly installs the host Dolt CLI before running the matrix/lifecycle subset
 
 There is also a separate embedded-Dolt lane in CI:
 - `go test -tags embeddeddolt -v -race -count=1 ./internal/storage/embeddeddolt/`
