@@ -78,7 +78,6 @@ Examples:
 	},
 }
 
-
 func init() {
 	promoteCmd.Flags().StringP("reason", "r", "", "Reason for promotion")
 	promoteCmd.ValidArgsFunction = issueIDCompletion
