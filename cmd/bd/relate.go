@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var relateCmd = &cobra.Command{
@@ -54,58 +53,47 @@ func runRelate(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	// Resolve partial IDs
-	var id1, id2 string
-	var err error
-	id1, err = utils.ResolvePartialID(ctx, store, args[0])
+	// Resolve partial IDs with cross-rig routing
+	result1, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
+	if result1 != nil {
+		defer result1.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve %s: %w", args[0], err)
 	}
-	id2, err = utils.ResolvePartialID(ctx, store, args[1])
+	result2, err := resolveAndGetIssueWithRouting(ctx, store, args[1])
+	if result2 != nil {
+		defer result2.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve %s: %w", args[1], err)
 	}
+
+	id1 := result1.ResolvedID
+	id2 := result2.ResolvedID
 
 	if id1 == id2 {
 		return fmt.Errorf("cannot relate an issue to itself")
 	}
 
-	// Get both issues
-	var issue1, issue2 *types.Issue
-	issue1, err = store.GetIssue(ctx, id1)
-	if err != nil {
-		return fmt.Errorf("failed to get issue %s: %w", id1, err)
-	}
-	issue2, err = store.GetIssue(ctx, id2)
-	if err != nil {
-		return fmt.Errorf("failed to get issue %s: %w", id2, err)
-	}
-
-	if issue1 == nil {
-		return fmt.Errorf("issue not found: %s", id1)
-	}
-	if issue2 == nil {
-		return fmt.Errorf("issue not found: %s", id2)
-	}
-
 	// Add relates-to dependency: id1 -> id2 (bidirectional, so also id2 -> id1)
 	// Per Decision 004, relates-to links are now stored in dependencies table
-	// Add id1 -> id2
+	// Add id1 -> id2 (in id1's store)
 	dep1 := &types.Dependency{
 		IssueID:     id1,
 		DependsOnID: id2,
 		Type:        types.DepRelatesTo,
 	}
-	if err := store.AddDependency(ctx, dep1, actor); err != nil {
+	if err := result1.Store.AddDependency(ctx, dep1, actor); err != nil {
 		return fmt.Errorf("failed to add relates-to %s -> %s: %w", id1, id2, err)
 	}
-	// Add id2 -> id1 (bidirectional)
+	// Add id2 -> id1 (bidirectional, in id2's store)
 	dep2 := &types.Dependency{
 		IssueID:     id2,
 		DependsOnID: id1,
 		Type:        types.DepRelatesTo,
 	}
-	if err := store.AddDependency(ctx, dep2, actor); err != nil {
+	if err := result2.Store.AddDependency(ctx, dep2, actor); err != nil {
 		return fmt.Errorf("failed to add relates-to %s -> %s: %w", id2, id1, err)
 	}
 
@@ -129,44 +117,33 @@ func runUnrelate(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	// Resolve partial IDs
-	var id1, id2 string
-	var err error
-	id1, err = utils.ResolvePartialID(ctx, store, args[0])
+	// Resolve partial IDs with cross-rig routing
+	result1, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
+	if result1 != nil {
+		defer result1.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve %s: %w", args[0], err)
 	}
-	id2, err = utils.ResolvePartialID(ctx, store, args[1])
+	result2, err := resolveAndGetIssueWithRouting(ctx, store, args[1])
+	if result2 != nil {
+		defer result2.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve %s: %w", args[1], err)
 	}
 
-	// Get both issues
-	var issue1, issue2 *types.Issue
-	issue1, err = store.GetIssue(ctx, id1)
-	if err != nil {
-		return fmt.Errorf("failed to get issue %s: %w", id1, err)
-	}
-	issue2, err = store.GetIssue(ctx, id2)
-	if err != nil {
-		return fmt.Errorf("failed to get issue %s: %w", id2, err)
-	}
-
-	if issue1 == nil {
-		return fmt.Errorf("issue not found: %s", id1)
-	}
-	if issue2 == nil {
-		return fmt.Errorf("issue not found: %s", id2)
-	}
+	id1 := result1.ResolvedID
+	id2 := result2.ResolvedID
 
 	// Remove relates-to dependency in both directions
 	// Per Decision 004, relates-to links are now stored in dependencies table
-	// Remove id1 -> id2
-	if err := store.RemoveDependency(ctx, id1, id2, actor); err != nil {
+	// Remove id1 -> id2 (from id1's store)
+	if err := result1.Store.RemoveDependency(ctx, id1, id2, actor); err != nil {
 		return fmt.Errorf("failed to remove relates-to %s -> %s: %w", id1, id2, err)
 	}
-	// Remove id2 -> id1 (bidirectional)
-	if err := store.RemoveDependency(ctx, id2, id1, actor); err != nil {
+	// Remove id2 -> id1 (bidirectional, from id2's store)
+	if err := result2.Store.RemoveDependency(ctx, id2, id1, actor); err != nil {
 		return fmt.Errorf("failed to remove relates-to %s -> %s: %w", id2, id1, err)
 	}
 

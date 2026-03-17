@@ -12,7 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var labelCmd = &cobra.Command{
@@ -79,18 +78,29 @@ var labelAddCmd = &cobra.Command{
 		if label == "" {
 			FatalErrorRespectJSON("label cannot be empty")
 		}
-		// Resolve partial IDs
+		// Resolve partial IDs with cross-rig routing
 		ctx := rootCtx
 		resolvedIDs := make([]string, 0, len(issueIDs))
 		for _, id := range issueIDs {
-			var fullID string
-			var err error
-			fullID, err = utils.ResolvePartialID(ctx, store, id)
+			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 				continue
 			}
-			resolvedIDs = append(resolvedIDs, fullID)
+			// For routed issues, add label directly via the routed store
+			if result.Routed {
+				if err := result.Store.AddLabel(ctx, result.ResolvedID, label, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Error adding label to %s: %v\n", result.ResolvedID, err)
+				} else if jsonOutput {
+					// handled below
+				} else {
+					fmt.Printf("%s Added label '%s' to %s\n", ui.RenderPass("✓"), label, result.ResolvedID)
+				}
+				result.Close()
+				continue
+			}
+			resolvedIDs = append(resolvedIDs, result.ResolvedID)
+			result.Close()
 		}
 		issueIDs = resolvedIDs
 
@@ -100,10 +110,12 @@ var labelAddCmd = &cobra.Command{
 			FatalErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
 		}
 
-		processBatchLabelOperation(issueIDs, label, "added", jsonOutput,
-			func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
-				return tx.AddLabel(ctx, issueID, lbl, act)
-			})
+		if len(issueIDs) > 0 {
+			processBatchLabelOperation(issueIDs, label, "added", jsonOutput,
+				func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
+					return tx.AddLabel(ctx, issueID, lbl, act)
+				})
+		}
 	},
 }
 
@@ -116,24 +128,35 @@ var labelRemoveCmd = &cobra.Command{
 		CheckReadonly("label remove")
 		// Use global jsonOutput set by PersistentPreRun
 		issueIDs, label := parseLabelArgs(args)
-		// Resolve partial IDs
+		// Resolve partial IDs with cross-rig routing
 		ctx := rootCtx
 		resolvedIDs := make([]string, 0, len(issueIDs))
 		for _, id := range issueIDs {
-			var fullID string
-			var err error
-			fullID, err = utils.ResolvePartialID(ctx, store, id)
+			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 				continue
 			}
-			resolvedIDs = append(resolvedIDs, fullID)
+			// For routed issues, remove label directly via the routed store
+			if result.Routed {
+				if err := result.Store.RemoveLabel(ctx, result.ResolvedID, label, actor); err != nil {
+					fmt.Fprintf(os.Stderr, "Error removing label from %s: %v\n", result.ResolvedID, err)
+				} else if !jsonOutput {
+					fmt.Printf("%s Removed label '%s' from %s\n", ui.RenderPass("✓"), label, result.ResolvedID)
+				}
+				result.Close()
+				continue
+			}
+			resolvedIDs = append(resolvedIDs, result.ResolvedID)
+			result.Close()
 		}
 		issueIDs = resolvedIDs
-		processBatchLabelOperation(issueIDs, label, "removed", jsonOutput,
-			func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
-				return tx.RemoveLabel(ctx, issueID, lbl, act)
-			})
+		if len(issueIDs) > 0 {
+			processBatchLabelOperation(issueIDs, label, "removed", jsonOutput,
+				func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
+					return tx.RemoveLabel(ctx, issueID, lbl, act)
+				})
+		}
 	},
 }
 var labelListCmd = &cobra.Command{
@@ -143,16 +166,17 @@ var labelListCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Use global jsonOutput set by PersistentPreRun
 		ctx := rootCtx
-		// Resolve partial ID first
-		var issueID string
-		var err error
-		issueID, err = utils.ResolvePartialID(ctx, store, args[0])
+		// Resolve partial ID with cross-rig routing
+		result, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
+		if result != nil {
+			defer result.Close()
+		}
 		if err != nil {
 			FatalErrorRespectJSON("resolving %s: %v", args[0], err)
 		}
+		issueID := result.ResolvedID
 		var labels []string
-		// Direct mode
-		labels, err = store.GetLabels(ctx, issueID)
+		labels, err = result.Store.GetLabels(ctx, issueID)
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
@@ -255,10 +279,15 @@ var labelPropagateCmd = &cobra.Command{
 		CheckReadonly("label propagate")
 		ctx := rootCtx
 
-		parentID, err := utils.ResolvePartialID(ctx, store, args[0])
+		parentResult, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
+		if parentResult != nil {
+			defer parentResult.Close()
+		}
 		if err != nil {
 			FatalErrorRespectJSON("resolving parent %s: %v", args[0], err)
 		}
+		parentID := parentResult.ResolvedID
+		parentStore := parentResult.Store
 		label := strings.TrimSpace(args[1])
 		if label == "" {
 			FatalErrorRespectJSON("label cannot be empty")
@@ -270,7 +299,7 @@ var labelPropagateCmd = &cobra.Command{
 		}
 
 		// Find all direct children via parent-child dependency
-		children, err := store.SearchIssues(ctx, "", types.IssueFilter{ParentID: &parentID})
+		children, err := parentStore.SearchIssues(ctx, "", types.IssueFilter{ParentID: &parentID})
 		if err != nil {
 			FatalErrorRespectJSON("searching children of %s: %v", parentID, err)
 		}
@@ -286,7 +315,7 @@ var labelPropagateCmd = &cobra.Command{
 
 		// Add label to each child in a single transaction (AddLabel is idempotent)
 		commitMsg := fmt.Sprintf("bd: propagate label '%s' from %s to %d children", label, parentID, len(children))
-		err = transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
+		err = transact(ctx, parentStore, commitMsg, func(tx storage.Transaction) error {
 			for _, child := range children {
 				if err := tx.AddLabel(ctx, child.ID, label, actor); err != nil {
 					return fmt.Errorf("add label '%s' on %s: %w", label, child.ID, err)

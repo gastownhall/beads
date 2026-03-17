@@ -11,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var stateCmd = &cobra.Command{
@@ -37,17 +36,19 @@ Examples:
 		issueID := args[0]
 		dimension := args[1]
 
-		// Resolve partial ID
-		var fullID string
-		var err error
-		fullID, err = utils.ResolvePartialID(ctx, store, issueID)
+		// Resolve partial ID with cross-rig routing
+		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		if result != nil {
+			defer result.Close()
+		}
 		if err != nil {
 			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
+		fullID := result.ResolvedID
 
 		// Get labels for the issue
 		var labels []string
-		labels, err = store.GetLabels(ctx, fullID)
+		labels, err = result.Store.GetLabels(ctx, fullID)
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
@@ -122,17 +123,20 @@ The --reason flag provides context for the event bead (recommended).`,
 
 		reason, _ := cmd.Flags().GetString("reason")
 
-		// Resolve partial ID
-		var fullID string
-		var err error
-		fullID, err = utils.ResolvePartialID(ctx, store, issueID)
+		// Resolve partial ID with cross-rig routing
+		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		if result != nil {
+			defer result.Close()
+		}
 		if err != nil {
 			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
+		fullID := result.ResolvedID
+		issueStore := result.Store
 
 		// Get current labels to find existing dimension value
 		var labels []string
-		labels, err = store.GetLabels(ctx, fullID)
+		labels, err = issueStore.GetLabels(ctx, fullID)
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
@@ -180,7 +184,7 @@ The --reason flag provides context for the event bead (recommended).`,
 
 		var eventID string
 		// Get next child ID for the event
-		childID, err := store.GetNextChildID(ctx, fullID)
+		childID, err := issueStore.GetNextChildID(ctx, fullID)
 		if err != nil {
 			FatalErrorRespectJSON("generating child ID: %v", err)
 		}
@@ -194,7 +198,7 @@ The --reason flag provides context for the event bead (recommended).`,
 			IssueType:   types.TypeEvent,
 			CreatedBy:   getActorWithGit(),
 		}
-		if err := store.CreateIssue(ctx, event, actor); err != nil {
+		if err := issueStore.CreateIssue(ctx, event, actor); err != nil {
 			FatalErrorRespectJSON("creating event: %v", err)
 		}
 
@@ -204,7 +208,7 @@ The --reason flag provides context for the event bead (recommended).`,
 			DependsOnID: fullID,
 			Type:        types.DepParentChild,
 		}
-		if err := store.AddDependency(ctx, dep, actor); err != nil {
+		if err := issueStore.AddDependency(ctx, dep, actor); err != nil {
 			WarnError("failed to add parent-child dependency: %v", err)
 		}
 
@@ -212,18 +216,18 @@ The --reason flag provides context for the event bead (recommended).`,
 
 		// 2. Remove old label if exists
 		if oldLabel != "" {
-			if err := store.RemoveLabel(ctx, fullID, oldLabel, actor); err != nil {
+			if err := issueStore.RemoveLabel(ctx, fullID, oldLabel, actor); err != nil {
 				WarnError("failed to remove old label %s: %v", oldLabel, err)
 			}
 		}
 
 		// 3. Add new label
-		if err := store.AddLabel(ctx, fullID, newLabel, actor); err != nil {
+		if err := issueStore.AddLabel(ctx, fullID, newLabel, actor); err != nil {
 			FatalErrorRespectJSON("adding label: %v", err)
 		}
 
 		if jsonOutput {
-			result := map[string]interface{}{
+			output := map[string]interface{}{
 				"issue_id":  fullID,
 				"dimension": dimension,
 				"old_value": oldValue,
@@ -232,9 +236,9 @@ The --reason flag provides context for the event bead (recommended).`,
 				"changed":   true,
 			}
 			if oldValue == "" {
-				result["old_value"] = nil
+				output["old_value"] = nil
 			}
-			outputJSON(result)
+			outputJSON(output)
 			return
 		}
 
@@ -265,17 +269,19 @@ Example:
 		ctx := rootCtx
 		issueID := args[0]
 
-		// Resolve partial ID
-		var fullID string
-		var err error
-		fullID, err = utils.ResolvePartialID(ctx, store, issueID)
+		// Resolve partial ID with cross-rig routing
+		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		if result != nil {
+			defer result.Close()
+		}
 		if err != nil {
 			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
+		fullID := result.ResolvedID
 
 		// Get labels for the issue
 		var labels []string
-		labels, err = store.GetLabels(ctx, fullID)
+		labels, err = result.Store.GetLabels(ctx, fullID)
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
@@ -291,11 +297,11 @@ Example:
 		}
 
 		if jsonOutput {
-			result := map[string]interface{}{
+			output := map[string]interface{}{
 				"issue_id": fullID,
 				"states":   states,
 			}
-			outputJSON(result)
+			outputJSON(output)
 			return
 		}
 

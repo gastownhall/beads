@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var duplicateCmd = &cobra.Command{
@@ -63,36 +62,36 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	// Resolve partial IDs
-	var duplicateID, canonicalID string
-	var err error
-	duplicateID, err = utils.ResolvePartialID(ctx, store, args[0])
+	// Resolve partial IDs with cross-rig routing
+	dupResult, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
+	if dupResult != nil {
+		defer dupResult.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve %s: %w", args[0], err)
 	}
-	canonicalID, err = utils.ResolvePartialID(ctx, store, duplicateOf)
+	canonResult, err := resolveAndGetIssueWithRouting(ctx, store, duplicateOf)
+	if canonResult != nil {
+		defer canonResult.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve %s: %w", duplicateOf, err)
 	}
+
+	duplicateID := dupResult.ResolvedID
+	canonicalID := canonResult.ResolvedID
 
 	if duplicateID == canonicalID {
 		return fmt.Errorf("cannot mark an issue as duplicate of itself")
 	}
 
-	// Verify canonical issue exists
-	var canonical *types.Issue
-	canonical, err = store.GetIssue(ctx, canonicalID)
-	if err != nil || canonical == nil {
-		return fmt.Errorf("canonical issue not found: %s", canonicalID)
-	}
-
-	// Add a "duplicates" dependency edge (duplicate → canonical)
+	// Add a "duplicates" dependency edge (duplicate → canonical) in duplicate's store
 	dep := &types.Dependency{
 		IssueID:     duplicateID,
 		DependsOnID: canonicalID,
 		Type:        types.DepDuplicates,
 	}
-	if err := store.AddDependency(ctx, dep, actor); err != nil {
+	if err := dupResult.Store.AddDependency(ctx, dep, actor); err != nil {
 		return fmt.Errorf("failed to add duplicate link: %w", err)
 	}
 
@@ -101,7 +100,7 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 	updates := map[string]interface{}{
 		"status": closedStatus,
 	}
-	if err := store.UpdateIssue(ctx, duplicateID, updates, actor); err != nil {
+	if err := dupResult.Store.UpdateIssue(ctx, duplicateID, updates, actor); err != nil {
 		return fmt.Errorf("failed to close duplicate: %w", err)
 	}
 
@@ -125,36 +124,36 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	// Resolve partial IDs
-	var oldID, newID string
-	var err error
-	oldID, err = utils.ResolvePartialID(ctx, store, args[0])
+	// Resolve partial IDs with cross-rig routing
+	oldResult, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
+	if oldResult != nil {
+		defer oldResult.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve %s: %w", args[0], err)
 	}
-	newID, err = utils.ResolvePartialID(ctx, store, supersededWith)
+	newResult, err := resolveAndGetIssueWithRouting(ctx, store, supersededWith)
+	if newResult != nil {
+		defer newResult.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to resolve %s: %w", supersededWith, err)
 	}
+
+	oldID := oldResult.ResolvedID
+	newID := newResult.ResolvedID
 
 	if oldID == newID {
 		return fmt.Errorf("cannot mark an issue as superseded by itself")
 	}
 
-	// Verify new issue exists
-	var newIssue *types.Issue
-	newIssue, err = store.GetIssue(ctx, newID)
-	if err != nil || newIssue == nil {
-		return fmt.Errorf("replacement issue not found: %s", newID)
-	}
-
-	// Add a "supersedes" dependency edge (old → new)
+	// Add a "supersedes" dependency edge (old → new) in old's store
 	dep := &types.Dependency{
 		IssueID:     oldID,
 		DependsOnID: newID,
 		Type:        types.DepSupersedes,
 	}
-	if err := store.AddDependency(ctx, dep, actor); err != nil {
+	if err := oldResult.Store.AddDependency(ctx, dep, actor); err != nil {
 		return fmt.Errorf("failed to add supersede link: %w", err)
 	}
 
@@ -163,7 +162,7 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 	updates := map[string]interface{}{
 		"status": closedStatus,
 	}
-	if err := store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
+	if err := oldResult.Store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
 		return fmt.Errorf("failed to close superseded issue: %w", err)
 	}
 

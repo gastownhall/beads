@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var undeferCmd = &cobra.Command{
@@ -27,12 +26,6 @@ Examples:
 
 		ctx := rootCtx
 
-		// Resolve partial IDs
-		_, err := utils.ResolvePartialIDs(ctx, store, args)
-		if err != nil {
-			FatalError("%v", err)
-		}
-
 		undeferredIssues := []*types.Issue{}
 
 		// Direct storage access
@@ -42,19 +35,18 @@ Examples:
 		}
 
 		for _, id := range args {
-			fullID, err := utils.ResolvePartialID(ctx, store, id)
+			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 				continue
 			}
+			fullID := result.ResolvedID
+			issueStore := result.Store
+			issue := result.Issue
 
 			// Skip if not deferred — avoid false "Undeferred" message
-			issue, err := store.GetIssue(ctx, fullID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", fullID, err)
-				continue
-			}
 			if issue.Status != types.StatusDeferred {
+				result.Close()
 				fmt.Fprintf(os.Stderr, "%s is not deferred (status: %s)\n", fullID, string(issue.Status))
 				continue
 			}
@@ -64,19 +56,21 @@ Examples:
 				"defer_until": nil, // Clear defer_until timestamp (GH#820)
 			}
 
-			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+			if err := issueStore.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+				result.Close()
 				fmt.Fprintf(os.Stderr, "Error undeferring %s: %v\n", fullID, err)
 				continue
 			}
 
 			if jsonOutput {
-				issue, _ := store.GetIssue(ctx, fullID)
-				if issue != nil {
-					undeferredIssues = append(undeferredIssues, issue)
+				updated, _ := issueStore.GetIssue(ctx, fullID)
+				if updated != nil {
+					undeferredIssues = append(undeferredIssues, updated)
 				}
 			} else {
 				fmt.Printf("%s Undeferred %s (now open)\n", ui.RenderPass("*"), fullID)
 			}
+			result.Close()
 		}
 
 		if jsonOutput && len(undeferredIssues) > 0 {

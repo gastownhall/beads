@@ -1,16 +1,13 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var editCmd = &cobra.Command{
@@ -33,12 +30,16 @@ Examples:
 		id := args[0]
 		ctx := rootCtx
 
-		// Resolve partial ID
-		fullID, err := utils.ResolvePartialID(ctx, store, id)
+		// Resolve partial ID with cross-rig routing
+		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		if result != nil {
+			defer result.Close()
+		}
 		if err != nil {
 			FatalErrorRespectJSON("resolving %s: %v", id, err)
 		}
-		id = fullID
+		id = result.ResolvedID
+		issueStore := result.Store
 
 		// Determine which field to edit
 		fieldToEdit := "description"
@@ -70,14 +71,8 @@ Examples:
 			FatalErrorRespectJSON("no editor found. Set $EDITOR or $VISUAL environment variable")
 		}
 
-		// Get the current issue
-		issue, err := store.GetIssue(ctx, id)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				FatalErrorRespectJSON("issue %s not found", id)
-			}
-			FatalErrorRespectJSON("fetching issue %s: %v", id, err)
-		}
+		// Issue already fetched by routing
+		issue := result.Issue
 
 		// Get the current field value
 		var currentValue string
@@ -153,16 +148,16 @@ Examples:
 			fieldToEdit: newValue,
 		}
 
-		err = store.UpdateIssue(ctx, id, updates, actor)
+		err = issueStore.UpdateIssue(ctx, id, updates, actor)
 		if err != nil {
 			// Connection may have gone stale while the editor was open.
 			// Ping to force the pool to discard dead connections, then retry.
-			if pingErr := store.DB().PingContext(ctx); pingErr != nil {
+			if pingErr := issueStore.DB().PingContext(ctx); pingErr != nil {
 				// Ping failed — try to force a fresh connection via sql.DB pool reset.
-				store.DB().SetConnMaxIdleTime(0)
-				_ = store.DB().PingContext(ctx)
+				issueStore.DB().SetConnMaxIdleTime(0)
+				_ = issueStore.DB().PingContext(ctx)
 			}
-			err = store.UpdateIssue(ctx, id, updates, actor)
+			err = issueStore.UpdateIssue(ctx, id, updates, actor)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Your edits are preserved in: %s\n", tmpPath)
