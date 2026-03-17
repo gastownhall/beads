@@ -261,6 +261,96 @@ func TestDoltShowConfigRedirectPreservesSourceDatabase(t *testing.T) {
 	}
 }
 
+func TestDoltSetDatabaseRedirectWritesSourceMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := t.TempDir()
+	sourceBeadsDir := filepath.Join(tmpDir, ".beads")
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	if err := os.MkdirAll(sourceBeadsDir, 0755); err != nil {
+		t.Fatalf("failed to create source .beads dir: %v", err)
+	}
+	if err := os.MkdirAll(targetBeadsDir, 0755); err != nil {
+		t.Fatalf("failed to create target .beads dir: %v", err)
+	}
+
+	sourceCfg := &configfile.Config{
+		Database:     "dolt",
+		DoltDatabase: "source_db",
+	}
+	if err := sourceCfg.Save(sourceBeadsDir); err != nil {
+		t.Fatalf("failed to save source config: %v", err)
+	}
+
+	targetCfg := &configfile.Config{
+		Database:       "dolt",
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3318,
+		DoltServerUser: "redirect-user",
+		DoltDatabase:   "target_db",
+	}
+	if err := targetCfg.Save(targetBeadsDir); err != nil {
+		t.Fatalf("failed to save target config: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sourceBeadsDir, "redirect"), []byte(targetBeadsDir+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write redirect: %v", err)
+	}
+
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+
+	oldCwd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldCwd) }()
+
+	setDoltConfig("database", "renamed_source_db", false)
+
+	loadedSourceCfg, err := configfile.Load(sourceBeadsDir)
+	if err != nil {
+		t.Fatalf("failed to load source config: %v", err)
+	}
+	if loadedSourceCfg.DoltDatabase != "renamed_source_db" {
+		t.Fatalf("source dolt_database = %q, want %q", loadedSourceCfg.DoltDatabase, "renamed_source_db")
+	}
+
+	loadedTargetCfg, err := configfile.Load(targetBeadsDir)
+	if err != nil {
+		t.Fatalf("failed to load target config: %v", err)
+	}
+	if loadedTargetCfg.DoltDatabase != "target_db" {
+		t.Fatalf("target dolt_database = %q, want %q", loadedTargetCfg.DoltDatabase, "target_db")
+	}
+
+	origJsonOutput := jsonOutput
+	defer func() { jsonOutput = origJsonOutput }()
+	jsonOutput = true
+
+	output := captureDoltShowOutput(t)
+	if output == "" {
+		t.Skip("output capture failed")
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Skipf("output not pure JSON: %s", output)
+	}
+
+	if result["database"] != "renamed_source_db" {
+		t.Fatalf("expected database 'renamed_source_db', got %v", result["database"])
+	}
+	if result["host"] != "127.0.0.1" {
+		t.Fatalf("expected host '127.0.0.1', got %v", result["host"])
+	}
+	if port, ok := result["port"].(float64); !ok || int(port) != 3318 {
+		t.Fatalf("expected port 3318, got %v", result["port"])
+	}
+	if result["user"] != "redirect-user" {
+		t.Fatalf("expected user 'redirect-user', got %v", result["user"])
+	}
+}
+
 func TestDoltSetConfigValidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

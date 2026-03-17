@@ -92,6 +92,8 @@ Keys:
   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
 
 Use --update-config to also write to config.yaml for team-wide defaults.
+In redirected repos, the database key updates the source repo's metadata so
+the selected Dolt database stays attached to the source repo identity.
 
 Examples:
   bd dolt set database myproject
@@ -998,7 +1000,7 @@ func showDoltConfig(testConnection bool) {
 }
 
 func setDoltConfig(key, value string, updateConfig bool) {
-	beadsDir := beads.FindBeadsDir()
+	beadsDir := metadataBeadsDirForDoltKey(key)
 	if beadsDir == "" {
 		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
 		os.Exit(1)
@@ -1158,6 +1160,19 @@ func setDoltConfig(key, value string, updateConfig bool) {
 			fmt.Printf("Set %s = %s (in config.yaml)\n", yamlKey, value)
 		}
 	}
+}
+
+func metadataBeadsDirForDoltKey(key string) string {
+	if key == "database" {
+		if redirect := beads.GetRedirectInfo(); redirect.IsRedirected && redirect.LocalDir != "" {
+			return redirect.LocalDir
+		}
+		if sourceBeadsDir := currentSourceBeadsDir(); sourceBeadsDir != "" {
+			return sourceBeadsDir
+		}
+	}
+
+	return beads.FindBeadsDir()
 }
 
 func testDoltConnection() {
