@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -315,7 +316,32 @@ func (s *EmbeddedDoltStore) ListBranches(ctx context.Context) ([]string, error) 
 }
 
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
-	panic("embeddeddolt: CommitPending not implemented")
+	var count int
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM dolt_status s
+			WHERE NOT EXISTS (
+				SELECT 1 FROM dolt_ignore di
+				WHERE di.ignored = 1
+				AND s.table_name LIKE di.pattern
+			)`).Scan(&count)
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to check status: %w", err)
+	}
+	if count == 0 {
+		return false, nil
+	}
+
+	msg := fmt.Sprintf("bd: commit pending changes (%s)", actor)
+	if err := s.Commit(ctx, msg); err != nil {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "nothing to commit") || strings.Contains(errLower, "no changes") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string) (bool, error) {

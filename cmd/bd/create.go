@@ -777,8 +777,7 @@ var createCmd = &cobra.Command{
 		// Push is NOT done here — periodic sync handles pushes to
 		// DoltHub remotes. Per-create pushes caused 22GB of git-remote-cache
 		// bloat with dozens of agents creating wisps constantly (hq-glw).
-		if repoPath != "." && targetStore != nil && !isEmbeddedDolt {
-			// TODO(embeddeddolt): CommitPending not yet implemented for EmbeddedDoltStore
+		if repoPath != "." && targetStore != nil {
 			if _, err := targetStore.CommitPending(ctx, actor); err != nil {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
 			}
@@ -1085,8 +1084,16 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	if sourceStore != nil {
 		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
 		if err == nil && sourcePrefix != "" {
-			// Open target store temporarily to set prefix
-			tempStore, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+			// Open target store temporarily to set prefix.
+			// In embedded mode, New() creates the database automatically.
+			// In server mode, CreateIfMissing is needed for first-time init.
+			var tempStore storage.DoltStorage
+			var err error
+			if isEmbeddedDolt {
+				tempStore, err = newDoltStoreFromConfig(ctx, beadsDir)
+			} else {
+				tempStore, err = dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+			}
 			if err != nil {
 				return fmt.Errorf("failed to initialize target database: %w", err)
 			}

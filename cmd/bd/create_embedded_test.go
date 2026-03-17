@@ -641,6 +641,100 @@ A new feature
 	})
 }
 
+// TestEmbeddedCreateCommitPending verifies that CommitPending works on EmbeddedDoltStore:
+// no-op when clean, commits when there are pending changes.
+func TestEmbeddedCreateCommitPending(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("no_pending_changes", func(t *testing.T) {
+		_, beadsDir, _ := bdInit(t, bd, "--prefix", "cp1")
+		store := openStore(t, beadsDir, "cp1")
+		committed, err := store.CommitPending(t.Context(), "test")
+		if err != nil {
+			t.Fatalf("CommitPending: %v", err)
+		}
+		if committed {
+			t.Error("expected no commit on clean store")
+		}
+	})
+
+	t.Run("with_pending_changes", func(t *testing.T) {
+		_, beadsDir, _ := bdInit(t, bd, "--prefix", "cp2")
+		store := openStore(t, beadsDir, "cp2")
+		ctx := t.Context()
+
+		// Create an issue (writes to working set, no dolt commit in embedded mode)
+		issue := &types.Issue{
+			Title:     "Pending issue",
+			Priority:  2,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+
+		committed, err := store.CommitPending(ctx, "test")
+		if err != nil {
+			t.Fatalf("CommitPending: %v", err)
+		}
+		if !committed {
+			t.Error("expected commit with pending changes")
+		}
+
+		// Second call should be no-op
+		committed2, err := store.CommitPending(ctx, "test")
+		if err != nil {
+			t.Fatalf("CommitPending (second): %v", err)
+		}
+		if committed2 {
+			t.Error("expected no commit after already committed")
+		}
+	})
+}
+
+// TestEmbeddedCreateCrossRepo verifies that bd create --repo routes to a different
+// repo's embedded dolt store, creates the issue there, and commits it.
+func TestEmbeddedCreateCrossRepo(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+
+	// Set up primary repo
+	dir, _, _ := bdInit(t, bd, "--prefix", "cr")
+
+	// Set up target repo in a subdirectory
+	targetDir := filepath.Join(dir, "target-repo")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	runBDInit(t, bd, targetDir, "--prefix", "tgt")
+
+	// Create issue routed to target repo
+	issue := bdCreate(t, bd, dir, "Cross-repo issue", "--repo", targetDir)
+	if issue.ID == "" {
+		t.Fatal("expected issue ID")
+	}
+
+	// Verify issue exists in the TARGET store, not the source
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	tgtStore := openStore(t, targetBeadsDir, "tgt")
+	got, err := tgtStore.GetIssue(t.Context(), issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue in target: %v", err)
+	}
+	if got.Title != "Cross-repo issue" {
+		t.Errorf("title in target: got %q, want %q", got.Title, "Cross-repo issue")
+	}
+}
+
 // TestEmbeddedCreateConcurrent verifies that 20 concurrent bd create processes
 // can each create 10 issues without data loss or corruption.
 func TestEmbeddedCreateConcurrent(t *testing.T) {
