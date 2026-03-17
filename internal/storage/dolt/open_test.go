@@ -16,6 +16,7 @@ func TestResolveAutoStart(t *testing.T) {
 	tests := []struct {
 		name             string
 		testMode         string // BEADS_TEST_MODE to set; "" leaves it unset/empty
+		gtRoot           string // GT_ROOT to set; "" leaves it unset/empty
 		autoStartEnv     string // BEADS_DOLT_AUTO_START to set; "" leaves it unset/empty
 		doltAutoStartCfg string // raw value of "dolt.auto-start" from config.yaml
 		currentValue     bool   // AutoStart value supplied by caller
@@ -28,6 +29,17 @@ func TestResolveAutoStart(t *testing.T) {
 		{
 			name:          "disabled when BEADS_TEST_MODE=1",
 			testMode:      "1",
+			wantAutoStart: false,
+		},
+		{
+			name:          "disabled under Gas Town (GT_ROOT set)",
+			gtRoot:        "/home/dan/gt",
+			wantAutoStart: false,
+		},
+		{
+			name:          "GT_ROOT wins over caller true",
+			gtRoot:        "/home/dan/gt",
+			currentValue:  true,
 			wantAutoStart: false,
 		},
 		{
@@ -90,6 +102,7 @@ func TestResolveAutoStart(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("BEADS_TEST_MODE", tc.testMode)
+			t.Setenv("GT_ROOT", tc.gtRoot)
 			t.Setenv("BEADS_DOLT_AUTO_START", tc.autoStartEnv)
 
 			got := resolveAutoStart(tc.currentValue, tc.doltAutoStartCfg, false)
