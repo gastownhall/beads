@@ -107,9 +107,7 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := []string{
-		"BEADS_TEST_MODE=1",
-	}
+	env := execBDTestEnv("BEADS_TEST_MODE=1")
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
@@ -168,9 +166,7 @@ func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := []string{
-		"BEADS_TEST_MODE=1",
-	}
+	env := execBDTestEnv("BEADS_TEST_MODE=1")
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
@@ -227,9 +223,7 @@ func TestDoltAutoCommit_Off_DoesNotAdvanceHead(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := []string{
-		"BEADS_TEST_MODE=1",
-	}
+	env := execBDTestEnv("BEADS_TEST_MODE=1")
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {

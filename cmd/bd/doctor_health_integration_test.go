@@ -26,9 +26,7 @@ func TestDoctorCheckHealthReportsVersionMismatchOnRepoLocalPort(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.email", "test@example.com")
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 
-	env := []string{
-		"BEADS_TEST_MODE=1",
-	}
+	env := execBDTestEnv("BEADS_TEST_MODE=1")
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
