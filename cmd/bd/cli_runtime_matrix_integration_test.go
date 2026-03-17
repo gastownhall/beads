@@ -252,6 +252,7 @@ func TestE2E_RuntimeMatrix_ExplicitPortExternalServerPreservesConfiguredRuntime(
 	if runtime.GOOS == windowsOS {
 		t.Skip("explicit-port runtime matrix test not supported on windows")
 	}
+	testutil.RequireDoltCLI(t)
 
 	bdBinary := buildRuntimeMatrixTestBinary(t)
 	env := runtimeMatrixEnv()
@@ -298,6 +299,7 @@ func TestE2E_RuntimeMatrix_DoctorDryRunPreservesRedirectSourceDatabase(t *testin
 	if runtime.GOOS == windowsOS {
 		t.Skip("redirect runtime matrix test not supported on windows")
 	}
+	testutil.RequireDoltCLI(t)
 
 	bdBinary := buildRuntimeMatrixTestBinary(t)
 	env := runtimeMatrixEnv()
@@ -333,6 +335,7 @@ func TestE2E_RuntimeMatrix_DoctorFixYesCreatesSelectedDatabaseWhenSharedDirExist
 	if runtime.GOOS == windowsOS {
 		t.Skip("doctor --fix shared-dir matrix test not supported on windows")
 	}
+	testutil.RequireDoltCLI(t)
 
 	bdBinary := buildRuntimeMatrixTestBinary(t)
 	env := runtimeMatrixEnv()

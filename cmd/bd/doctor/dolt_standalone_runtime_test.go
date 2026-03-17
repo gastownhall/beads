@@ -19,6 +19,8 @@ import (
 )
 
 func TestStandaloneDoctorChecks_PreserveRedirectSourceDatabase(t *testing.T) {
+	testutil.RequireDoltCLI(t)
+
 	repoDir, cleanup := setupRedirectedStandaloneDoctorRepo(t)
 	defer cleanup()
 
