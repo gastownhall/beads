@@ -289,6 +289,9 @@ var blockedCmd = &cobra.Command{
 		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 		ctx := rootCtx
 		parentID, _ := cmd.Flags().GetString("parent")
+		limit, _ := cmd.Flags().GetInt("limit")
+		filterPri, _ := cmd.Flags().GetInt("priority")
+		filterAssignee, _ := cmd.Flags().GetString("assignee")
 		var blockedFilter types.WorkFilter
 		if parentID != "" {
 			blockedFilter.ParentID = &parentID
@@ -296,6 +299,24 @@ var blockedCmd = &cobra.Command{
 		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
+		}
+		// Apply client-side filters
+		if filterPri >= 0 || filterAssignee != "" {
+			var filtered []*types.BlockedIssue
+			for _, b := range blocked {
+				if filterPri >= 0 && b.Priority != filterPri {
+					continue
+				}
+				if filterAssignee != "" && !strings.EqualFold(b.Assignee, filterAssignee) {
+					continue
+				}
+				filtered = append(filtered, b)
+			}
+			blocked = filtered
+		}
+		// Apply limit
+		if limit > 0 && len(blocked) > limit {
+			blocked = blocked[:limit]
 		}
 		if jsonOutput {
 			// Always output array, even if empty
@@ -546,5 +567,8 @@ func init() {
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
+	blockedCmd.Flags().IntP("limit", "n", 0, "Maximum issues to show (0 = all)")
+	blockedCmd.Flags().IntP("priority", "p", -1, "Filter by priority")
+	blockedCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	rootCmd.AddCommand(blockedCmd)
 }
