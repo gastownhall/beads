@@ -1059,6 +1059,11 @@ type WorkFilter struct {
 	// Set to true to include them (e.g., for merge-request processing).
 	IncludeEphemeral bool
 
+	// Type exclusion: exclude issues with these types from results.
+	// Appended to the default exclusion list (merge-request, gate, molecule, etc.).
+	// When Type is set, ExcludeTypes is ignored (explicit type inclusion wins).
+	ExcludeTypes []IssueType
+
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)

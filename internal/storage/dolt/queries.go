@@ -151,6 +151,10 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		// - role: agent role definitions (reference metadata)
 		// - rig: rig identity beads (reference metadata)
 		excludeTypes := []string{"merge-request", "gate", "molecule", "message", "agent", "role", "rig"}
+		// Append caller-supplied exclusions (e.g., from --exclude-type flag).
+		for _, t := range filter.ExcludeTypes {
+			excludeTypes = append(excludeTypes, string(t))
+		}
 		placeholders := make([]string, len(excludeTypes))
 		for i, t := range excludeTypes {
 			placeholders[i] = "?"

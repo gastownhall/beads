@@ -310,6 +310,9 @@ var listCmd = &cobra.Command{
 		// Infra type filtering: exclude agent/rig/role/message by default
 		includeInfra, _ := cmd.Flags().GetBool("include-infra")
 
+		// Explicit type exclusion (--exclude-type)
+		excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
+
 		// Parent filtering (--filter-parent is alias for --parent)
 		parentID, _ := cmd.Flags().GetString("parent")
 		if parentID == "" {
@@ -632,6 +635,16 @@ var listCmd = &cobra.Command{
 		if !includeInfra && !isInfra(issueType) {
 			for _, t := range infraTypes {
 				filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(t))
+			}
+		}
+
+		// Explicit type exclusion from --exclude-type flag.
+		for _, raw := range excludeTypeStrs {
+			for _, t := range strings.Split(raw, ",") {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(utils.NormalizeIssueType(t)))
+				}
 			}
 		}
 
@@ -967,6 +980,9 @@ func init() {
 
 	// Infra type filtering: exclude agent/rig/role/message by default
 	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/rig/role/message) in output")
+
+	// Explicit type exclusion
+	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 
 	// Parent filtering: filter children by parent issue
 	listCmd.Flags().String("parent", "", "Filter by parent issue ID (shows children of specified issue)")
