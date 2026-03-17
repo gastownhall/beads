@@ -31,6 +31,8 @@ var validCustomStatusRegex = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // CheckConfigValues validates configuration values in config.yaml and metadata.json
 // Returns issues found, or OK if all values are valid
+// CheckConfigValues validates configuration values across config.yaml, metadata.json, and the database.
+// Opens its own store; prefer CheckConfigValuesWithStore when a shared store is available.
 func CheckConfigValues(repoPath string) DoctorCheck {
 	var issues []string
 
@@ -46,6 +48,32 @@ func CheckConfigValues(repoPath string) DoctorCheck {
 	dbIssues := checkDatabaseConfigValues(repoPath)
 	issues = append(issues, dbIssues...)
 
+	return formatConfigValuesResult(issues)
+}
+
+// CheckConfigValuesWithStore validates config values using a shared store (GH#2636).
+func CheckConfigValuesWithStore(repoPath string, ss *SharedStore) DoctorCheck {
+	var issues []string
+
+	// Check config.yaml values
+	yamlIssues := checkYAMLConfigValues(repoPath)
+	issues = append(issues, yamlIssues...)
+
+	// Check metadata.json values
+	metadataIssues := checkMetadataConfigValues(repoPath)
+	issues = append(issues, metadataIssues...)
+
+	// Check database config values using shared store
+	store := ss.Store()
+	if store != nil {
+		dbIssues := checkDatabaseConfigValuesWithStore(store)
+		issues = append(issues, dbIssues...)
+	}
+
+	return formatConfigValuesResult(issues)
+}
+
+func formatConfigValuesResult(issues []string) DoctorCheck {
 	if len(issues) == 0 {
 		return DoctorCheck{
 			Name:    "Config Values",
@@ -369,6 +397,13 @@ func checkDatabaseConfigValues(repoPath string) []string {
 		return issues
 	}
 	defer func() { _ = store.Close() }()
+
+	return checkDatabaseConfigValuesWithStore(store)
+}
+
+func checkDatabaseConfigValuesWithStore(store *dolt.DoltStore) []string {
+	var issues []string
+	ctx := context.Background()
 
 	// Check status.custom - custom status names should be lowercase alphanumeric with underscores
 	statusCustom, err := store.GetConfig(ctx, "status.custom")

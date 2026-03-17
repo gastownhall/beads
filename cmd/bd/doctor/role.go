@@ -14,6 +14,7 @@ import (
 // database config for users who ran "bd config set role maintainer"
 // (without the "beads." prefix) or "bd config set beads.role maintainer"
 // before GH#1531 moved storage to git config.
+// Opens its own store; prefer CheckBeadsRoleWithStore when a shared store is available.
 func CheckBeadsRole(path string) DoctorCheck {
 	// Read beads.role from git config (canonical location)
 	cmd := exec.Command("git", "config", "--get", "beads.role")
@@ -34,6 +35,32 @@ func CheckBeadsRole(path string) DoctorCheck {
 		return validateRole(role)
 	}
 
+	return checkBeadsRoleNotInGit(path)
+}
+
+// CheckBeadsRoleWithStore verifies beads.role using a shared store (GH#2636).
+func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
+	// Read beads.role from git config (canonical location)
+	cmd := exec.Command("git", "config", "--get", "beads.role")
+	if path != "" {
+		cmd.Dir = path
+	}
+	output, err := cmd.Output()
+
+	if err == nil {
+		role := strings.TrimSpace(string(output))
+		return validateRole(role)
+	}
+
+	// Git config not set — check database config via shared store
+	if role := getRoleFromStore(ss.Store()); role != "" {
+		return validateRole(role)
+	}
+
+	return checkBeadsRoleNotInGit(path)
+}
+
+func checkBeadsRoleNotInGit(path string) DoctorCheck {
 	// Check if we're even in a git repository. If not, skip the check rather
 	// than warn about missing config that may be correctly set in a worktree
 	// (e.g., rig roots use .repo.git instead of .git).
@@ -102,6 +129,16 @@ func getRoleFromDatabase(path string) string {
 	}
 	defer func() { _ = store.Close() }()
 
+	return getRoleFromStore(store)
+}
+
+// getRoleFromStore checks for role in the database config using a provided store.
+func getRoleFromStore(store *dolt.DoltStore) string {
+	if store == nil {
+		return ""
+	}
+
+	ctx := context.Background()
 	// Check "beads.role" first, then "role"
 	for _, key := range []string{"beads.role", "role"} {
 		if val, err := store.GetConfig(ctx, key); err == nil && val != "" {
