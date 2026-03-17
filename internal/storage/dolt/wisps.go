@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -18,67 +19,9 @@ import (
 // wisp_events, wisp_comments) to avoid Dolt history bloat. All operations use the
 // same Dolt SQL connection — no separate store or transaction routing needed.
 
-// insertIssueIntoTable inserts an issue into the specified table,
-// using ON DUPLICATE KEY UPDATE to handle pre-existing records gracefully (GH#2061).
-// The table must be either "issues" or "wisps" (same schema).
-//
-//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+// insertIssueIntoTable delegates to the shared issueops.InsertIssueIntoTable.
 func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (
-			id, content_hash, title, description, design, acceptance_criteria, notes,
-			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
-			compaction_level, compacted_at, compacted_at_commit, original_size,
-			sender, ephemeral, no_history, wisp_type, pinned, is_template, crystallizes,
-			mol_type, work_type, quality_score, source_system, source_repo, close_reason,
-			event_kind, actor, target, payload,
-			await_type, await_id, timeout_ns, waiters,
-			hook_bead, role_bead, agent_state, last_activity, role_type, rig,
-			due_at, defer_until, metadata
-		) VALUES (
-			?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?,
-			?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?,
-			?, ?, ?
-		)
-		ON DUPLICATE KEY UPDATE
-			content_hash = VALUES(content_hash),
-			title = VALUES(title),
-			description = VALUES(description),
-			design = VALUES(design),
-			acceptance_criteria = VALUES(acceptance_criteria),
-			notes = VALUES(notes),
-			status = VALUES(status),
-			priority = VALUES(priority),
-			issue_type = VALUES(issue_type),
-			assignee = VALUES(assignee),
-			estimated_minutes = VALUES(estimated_minutes),
-			updated_at = VALUES(updated_at),
-			closed_at = VALUES(closed_at),
-			external_ref = VALUES(external_ref),
-			source_repo = VALUES(source_repo),
-			close_reason = VALUES(close_reason),
-			metadata = VALUES(metadata)
-	`, table),
-		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
-		issue.Status, issue.Priority, issue.IssueType, nullString(issue.Assignee), nullInt(issue.EstimatedMinutes),
-		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.ClosedAt, nullStringPtr(issue.ExternalRef), issue.SpecID,
-		issue.CompactionLevel, issue.CompactedAt, nullStringPtr(issue.CompactedAtCommit), nullIntVal(issue.OriginalSize),
-		issue.Sender, issue.Ephemeral, issue.NoHistory, issue.WispType, issue.Pinned, issue.IsTemplate, issue.Crystallizes,
-		issue.MolType, issue.WorkType, issue.QualityScore, issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
-		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
-		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
-		issue.HookBead, issue.RoleBead, issue.AgentState, issue.LastActivity, issue.RoleType, issue.Rig,
-		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
-	)
-	return wrapExecError("insert issue into table", err)
+	return issueops.InsertIssueIntoTable(ctx, tx, table, issue)
 }
 
 // scanIssueFromTable scans a single issue from the specified table.
@@ -99,17 +42,6 @@ func scanIssueFromTable(ctx context.Context, db *sql.DB, table, id string) (*typ
 		return nil, fmt.Errorf("failed to get issue from %s: %w", table, err)
 	}
 	return issue, nil
-}
-
-// recordEventInTable records an event in the specified events table.
-//
-//nolint:gosec,unparam // G201: table is a hardcoded constant; unparam: table is always "wisp_events" currently but kept for API symmetry with insertIssueIntoTable
-func recordEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, eventType types.EventType, actor, newValue string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?)
-	`, table), issueID, eventType, actor, "", newValue)
-	return wrapExecError("record event in table", err)
 }
 
 // generateIssueIDInTable generates a unique ID, checking for collisions
@@ -329,7 +261,7 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 		return fmt.Errorf("wisp not found: %s", id)
 	}
 
-	if err := recordEventInTable(ctx, tx, "wisp_events", id, types.EventClosed, actor, reason); err != nil {
+	if err := issueops.RecordEventInTable(ctx, tx, "wisp_events", id, types.EventClosed, actor, reason); err != nil {
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
@@ -496,7 +428,7 @@ func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) erro
 		return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, currentAssignee)
 	}
 
-	if err := recordEventInTable(ctx, tx, "wisp_events", id, "claimed", actor, ""); err != nil {
+	if err := issueops.RecordEventInTable(ctx, tx, "wisp_events", id, "claimed", actor, ""); err != nil {
 		return fmt.Errorf("failed to record claim event: %w", err)
 	}
 
@@ -934,7 +866,7 @@ func (s *DoltStore) addWispLabel(ctx context.Context, issueID, label, actor stri
 		return fmt.Errorf("failed to add wisp label: %w", err)
 	}
 
-	if err := recordEventInTable(ctx, tx, "wisp_events", issueID, types.EventLabelAdded, actor, "Added label: "+label); err != nil {
+	if err := issueops.RecordEventInTable(ctx, tx, "wisp_events", issueID, types.EventLabelAdded, actor, "Added label: "+label); err != nil {
 		return fmt.Errorf("failed to record wisp label event: %w", err)
 	}
 
@@ -956,7 +888,7 @@ func (s *DoltStore) removeWispLabel(ctx context.Context, issueID, label, actor s
 		return fmt.Errorf("failed to remove wisp label: %w", err)
 	}
 
-	if err := recordEventInTable(ctx, tx, "wisp_events", issueID, types.EventLabelRemoved, actor, "Removed label: "+label); err != nil {
+	if err := issueops.RecordEventInTable(ctx, tx, "wisp_events", issueID, types.EventLabelRemoved, actor, "Removed label: "+label); err != nil {
 		return fmt.Errorf("failed to record wisp label event: %w", err)
 	}
 
