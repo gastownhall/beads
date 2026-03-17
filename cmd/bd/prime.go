@@ -461,6 +461,38 @@ git push                    # Push to remote
 ### Project Health
 - ` + "`bd stats`" + ` - Project statistics (open/closed/blocked counts)
 - ` + "`bd doctor`" + ` - Check for issues (sync problems, missing hooks)
+- ` + "`bd doctor --check=conventions`" + ` - Check for convention drift (lint, stale, orphans)
+
+### Quality Tools
+- ` + "`bd create --validate`" + ` - Check description has required sections
+- ` + "`bd create --acceptance=\"criteria\"`" + ` - Set acceptance criteria (checked by --validate)
+- ` + "`bd create --design=\"decisions\"`" + ` - Record design decisions
+- ` + "`bd create --notes=\"context\"`" + ` - Add supplementary notes
+- ` + "`bd config set validation.on-create warn`" + ` - Auto-validate on every create
+- ` + "`bd lint`" + ` - Check existing issues for missing sections
+
+### Lifecycle & Hygiene
+- ` + "`bd defer <id> --until=\"date\"`" + ` - Defer work to a future date
+- ` + "`bd supersede <id> --by=<new-id>`" + ` - Mark issue as superseded
+- ` + "`bd close <id> --suggest-next`" + ` - Show newly unblocked issues after closing
+- ` + "`bd stale`" + ` - Find issues with no recent activity
+- ` + "`bd orphans`" + ` - Find issues with broken dependencies
+- ` + "`bd preflight`" + ` - Pre-PR checks (lint, stale, orphans)
+- ` + "`bd human <id>`" + ` - Flag for human decision (list/respond/dismiss)
+
+### Structured Workflows
+- ` + "`bd formula list`" + ` - See available workflow templates
+- ` + "`bd mol pour <name>`" + ` - Start structured workflow from formula
+
+## Close Reason Format
+When closing non-trivial work, structure the reason:
+` + "```" + `
+Summary: [one line - what was done]
+Change: [what changed and why]
+Files: [key files modified]
+Discovery: [what was learned that wasn't known at start]
+` + "```" + `
+Minimum: Summary + Change + Files. Discovery for non-trivial work.
 
 ## Common Workflows
 

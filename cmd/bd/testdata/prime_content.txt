@@ -1,0 +1,16 @@
+# Test bd prime --full includes new sections
+bd init --prefix test
+bd prime --full
+stdout 'Close Reason Format'
+stdout 'Quality Tools'
+stdout 'bd lint'
+stdout 'bd formula list'
+stdout 'bd human'
+stdout 'Lifecycle & Hygiene'
+stdout 'Structured Workflows'
+stdout 'bd defer'
+stdout 'bd supersede'
+stdout 'bd stale'
+stdout 'bd orphans'
+stdout 'bd preflight'
+stdout 'conventions'
