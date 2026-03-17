@@ -21,6 +21,8 @@ type repoRuntimeInfo struct {
 	ConfigErr     error
 }
 
+var resolveBeadsDirCache sync.Map
+
 func resolveRuntimeInfoForRepo(repoPath string) *repoRuntimeInfo {
 	runtime, err := beads.ResolveRepoRuntimeFromRepoPath(repoPath)
 	if err == nil && runtime != nil {
@@ -33,7 +35,7 @@ func resolveRuntimeInfoForRepo(repoPath string) *repoRuntimeInfo {
 		}
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(repoPath, ".beads"))
+	beadsDir := resolveFallbackBeadsDirForRepo(repoPath)
 	sourceBeadsDir := filepath.Join(repoPath, ".beads")
 	cfg, cfgErr := configfile.Load(beadsDir)
 	cfgEffective := effectiveConfig(cfg)
@@ -79,6 +81,15 @@ func ResolveBeadsDirForRepo(repoPath string) string {
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		resolveBeadsDirCache.Store(cacheKey, runtimeInfo.Runtime.BeadsDir)
 		return runtimeInfo.Runtime.BeadsDir
+	}
+
+	return resolveFallbackBeadsDirForRepo(repoPath)
+}
+
+func resolveFallbackBeadsDirForRepo(repoPath string) string {
+	cacheKey := utils.CanonicalizePath(repoPath)
+	if resolved, ok := resolveBeadsDirCache.Load(cacheKey); ok {
+		return resolved.(string)
 	}
 
 	resolved := resolveBeadsDirForRepoUncached(repoPath)
