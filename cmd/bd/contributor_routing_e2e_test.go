@@ -844,9 +844,9 @@ func TestExplicitRoleOverride(t *testing.T) {
 	}
 }
 
-// TestRoutingWithAllSyncModes is a table-driven test covering all sync mode combinations
-func TestRoutingWithAllSyncModes(t *testing.T) {
-	syncModes := []struct {
+// TestRoutingWithAllOperationalModes is a table-driven test covering all operational mode combinations
+func TestRoutingWithAllOperationalModes(t *testing.T) {
+	operationalModes := []struct {
 		name       string
 		mode       string
 		configKey  string
@@ -885,20 +885,20 @@ func TestRoutingWithAllSyncModes(t *testing.T) {
 		},
 	}
 
-	for _, sm := range syncModes {
+	for _, om := range operationalModes {
 		t.Run(sm.name, func(t *testing.T) {
 			env := setupContributorRoutingEnv(t)
 			defer env.cleanup()
 
-			projectStore := env.initProjectStore(sm.mode)
+			projectStore := env.initProjectStore(om.mode)
 			defer projectStore.Close()
 
 			planningStore := env.initPlanningStore()
 			defer planningStore.Close()
 
 			// Run extra check if provided
-			if sm.extraCheck != nil {
-				sm.extraCheck(t, projectStore, env.ctx)
+			if om.extraCheck != nil {
+				om.extraCheck(t, projectStore, env.ctx)
 			}
 
 			// Build routing config
@@ -914,15 +914,15 @@ func TestRoutingWithAllSyncModes(t *testing.T) {
 			// Verify contributor routing
 			targetRepo := routing.DetermineTargetRepo(routingConfig, routing.Contributor, ".")
 			if targetRepo != env.planningDir {
-				t.Errorf("sync mode %s: contributor target = %q, want %q",
-					sm.name, targetRepo, env.planningDir)
+				t.Errorf("operational mode %s: contributor target = %q, want %q",
+					om.name, targetRepo, env.planningDir)
 			}
 
 			// Verify maintainer routing
 			targetRepo = routing.DetermineTargetRepo(routingConfig, routing.Maintainer, ".")
 			if targetRepo != "." {
-				t.Errorf("sync mode %s: maintainer target = %q, want %q",
-					sm.name, targetRepo, ".")
+				t.Errorf("operational mode %s: maintainer target = %q, want %q",
+					om.name, targetRepo, ".")
 			}
 		})
 	}
