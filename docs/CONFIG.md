@@ -361,6 +361,7 @@ Use these namespaces for external integrations:
 - `jira.*` - Jira integration settings
 - `linear.*` - Linear integration settings
 - `github.*` - GitHub integration settings
+- `ado.*` - Azure DevOps integration settings
 - `custom.*` - Custom integration settings
 
 ### Example: Sequential Counter IDs (issue_id_mode=counter)
@@ -731,6 +732,134 @@ bd config set github.token "YOUR_TOKEN"
 bd config set github.label_map.bug "bug"
 bd config set github.label_map.feature "enhancement"
 ```
+
+### Example: Azure DevOps (ADO) Integration
+
+Azure DevOps integration provides bidirectional sync between bd and ADO work items.
+
+**Required configuration:**
+
+```bash
+# Personal access token (can also use AZURE_DEVOPS_PAT environment variable)
+bd config set ado.pat "YOUR_PAT"
+
+# Organization name (can also use AZURE_DEVOPS_ORG environment variable)
+bd config set ado.org "myorg"
+
+# Project name (can also use AZURE_DEVOPS_PROJECT environment variable)
+bd config set ado.project "MyProject"
+```
+
+**Optional configuration:**
+
+```bash
+# Custom base URL for Azure DevOps Server (on-prem) instances
+# (can also use AZURE_DEVOPS_URL environment variable)
+# When set, ado.org is not required — the URL replaces the default dev.azure.com base.
+bd config set ado.url "https://ado.internal.example.com/DefaultCollection"
+```
+
+**Getting your Azure DevOps PAT:**
+
+1. Go to Azure DevOps → User Settings (top-right icon) → Personal access tokens
+2. Click "New Token"
+3. Select the organization and set an expiration
+4. Grant **Work Items: Read & Write** scope (minimum for sync)
+5. Copy the token — it is only shown once
+
+**State mapping (ADO Agile template defaults → Beads statuses):**
+
+ADO uses process-template-specific states (Agile, Scrum, CMMI). The defaults
+use the Agile template. Override with `ado.state_map.*` for your process:
+
+```bash
+# Default Agile mapping (built-in, no config needed):
+#   New      → open
+#   Active   → in_progress
+#   Resolved → closed
+#   Closed   → closed
+#   Removed  → deferred
+
+# Override for Scrum template:
+bd config set ado.state_map.open "New"
+bd config set ado.state_map.in_progress "Committed"
+bd config set ado.state_map.blocked "Committed"
+bd config set ado.state_map.deferred "Removed"
+bd config set ado.state_map.closed "Done"
+```
+
+**Type mapping (ADO work item types ↔ Beads issue types):**
+
+```bash
+# Default mapping (built-in, no config needed):
+#   Bug               → bug
+#   User Story        → feature
+#   Product Backlog Item → feature
+#   Task              → task
+#   Epic              → epic
+
+# Override for your process template:
+bd config set ado.type_map.bug "Bug"
+bd config set ado.type_map.feature "Feature"
+bd config set ado.type_map.task "Task"
+bd config set ado.type_map.epic "Epic"
+bd config set ado.type_map.chore "Task"
+```
+
+**Priority mapping (ADO 1-4 → Beads 0-4):**
+
+ADO uses a 1-4 scale; Beads uses 0-4. The mapping is:
+- ADO 1 (Critical) → Beads 0 (Critical)
+- ADO 2 (High) → Beads 1 (High)
+- ADO 3 (Medium) → Beads 2 (Medium)
+- ADO 4 (Low) → Beads 3 (Low)
+- Beads 4 (Backlog) → ADO 4 (lossy: backlog collapses to low)
+
+Priority mapping is not configurable — it is handled automatically.
+
+**Environment variables:**
+
+All ADO config keys have environment variable equivalents:
+
+| Config Key    | Environment Variable     |
+|---------------|--------------------------|
+| `ado.pat`     | `AZURE_DEVOPS_PAT`       |
+| `ado.org`     | `AZURE_DEVOPS_ORG`       |
+| `ado.project` | `AZURE_DEVOPS_PROJECT`   |
+| `ado.url`     | `AZURE_DEVOPS_URL`       |
+
+Environment variables take effect when the corresponding `bd config` key is not set.
+
+**Sync commands:**
+
+```bash
+# Bidirectional sync (pull then push, with conflict resolution)
+bd ado sync
+
+# Pull only (import from Azure DevOps)
+bd ado sync --pull-only
+
+# Push only (export to Azure DevOps)
+bd ado sync --push-only
+
+# Dry run (preview without changes)
+bd ado sync --dry-run
+
+# Conflict resolution options
+bd ado sync --prefer-local    # Local version wins on conflicts
+bd ado sync --prefer-ado      # Azure DevOps version wins on conflicts
+bd ado sync --prefer-newer    # Most recent version wins (default)
+
+# Check sync status and configuration
+bd ado status
+
+# List accessible projects (useful for finding your project name)
+bd ado projects --json
+```
+
+**Automatic sync tracking:**
+
+The `ado.last_sync` config key is automatically updated after each sync, enabling incremental sync (only fetch work items updated since last sync).
 
 ## Use in Scripts
 
