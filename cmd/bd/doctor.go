@@ -488,7 +488,7 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check 2b: Repo fingerprint (detects wrong database or URL change)
-	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprintWithStore(sharedStore), doctor.CategoryCore)
+	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprintWithStore(sharedStore, path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, fingerprintCheck)
 	if fingerprintCheck.Status == statusError {
 		result.OverallOK = false
