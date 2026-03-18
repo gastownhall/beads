@@ -49,91 +49,16 @@ func (s *DoltStore) GetLabels(ctx context.Context, issueID string) ([]string, er
 	return labels, err
 }
 
-// GetLabelsForIssues retrieves labels for multiple issues, batching queries
-// to avoid oversized IN-clauses that cause slow queries on large databases.
+// GetLabelsForIssues retrieves labels for multiple issues.
+// Delegates to issueops.GetLabelsForIssuesInTx for shared query logic.
 func (s *DoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error) {
-	if len(issueIDs) == 0 {
-		return make(map[string][]string), nil
-	}
-
-	// Partition into wisp and dolt IDs
-	ephIDs, doltIDs := s.partitionByWispStatus(ctx, issueIDs)
-
-	result := make(map[string][]string)
-
-	// Fetch wisp labels in batches (replaces N+1 single-ID queries).
-	for start := 0; start < len(ephIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(ephIDs) {
-			end = len(ephIDs)
-		}
-		batch := ephIDs[start:end]
-		placeholders, args := doltBuildSQLInClause(batch)
-
-		//nolint:gosec // G201: placeholders contains only ? markers
-		query := fmt.Sprintf(`
-			SELECT issue_id, label FROM wisp_labels
-			WHERE issue_id IN (%s)
-			ORDER BY issue_id, label
-		`, placeholders)
-
-		rows, err := s.queryContext(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get wisp labels: %w", err)
-		}
-
-		for rows.Next() {
-			var issueID, label string
-			if err := rows.Scan(&issueID, &label); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("failed to scan wisp label: %w", err)
-			}
-			result[issueID] = append(result[issueID], label)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, wrapQueryError("iterate wisp labels for issues", err)
-		}
-		_ = rows.Close()
-	}
-
-	// Fetch dolt labels in batches.
-	for start := 0; start < len(doltIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(doltIDs) {
-			end = len(doltIDs)
-		}
-		batch := doltIDs[start:end]
-		placeholders, args := doltBuildSQLInClause(batch)
-
-		//nolint:gosec // G201: placeholders contains only ? markers
-		query := fmt.Sprintf(`
-			SELECT issue_id, label FROM labels
-			WHERE issue_id IN (%s)
-			ORDER BY issue_id, label
-		`, placeholders)
-
-		rows, err := s.queryContext(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get labels for issues: %w", err)
-		}
-
-		for rows.Next() {
-			var issueID, label string
-			if err := rows.Scan(&issueID, &label); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("failed to scan label: %w", err)
-			}
-			result[issueID] = append(result[issueID], label)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, wrapQueryError("iterate labels for issues", err)
-		}
-		_ = rows.Close()
-	}
-
-	return result, nil
+	var result map[string][]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetLabelsForIssuesInTx(ctx, tx, issueIDs)
+		return err
+	})
+	return result, err
 }
 
 // GetIssuesByLabel retrieves all issues with a specific label

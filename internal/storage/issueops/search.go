@@ -16,12 +16,13 @@ func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter type
 	// Route ephemeral-only queries to wisps table.
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		results, err := searchTableInTx(ctx, tx, query, filter, WispsFilterTables)
-		if err != nil {
+		if err != nil && !isTableNotExistError(err) {
 			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(results) > 0 {
 			return results, nil
 		}
+		// Fall through: wisps table doesn't exist or returned no results
 	}
 
 	results, err := searchTableInTx(ctx, tx, query, filter, IssuesFilterTables)
@@ -33,7 +34,7 @@ func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter type
 	// table and merge results.
 	if filter.Ephemeral == nil {
 		wispResults, wispErr := searchTableInTx(ctx, tx, query, filter, WispsFilterTables)
-		if wispErr != nil {
+		if wispErr != nil && !isTableNotExistError(wispErr) {
 			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
 		}
 		if len(wispResults) > 0 {
