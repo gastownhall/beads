@@ -549,7 +549,10 @@ var rootCmd = &cobra.Command{
 
 		// Load config to get database name and server connection settings
 		cfg, cfgErr := configfile.Load(beadsDir)
-		if cfgErr == nil && cfg != nil {
+		if cfgErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to load beads config from %s: %v\n", beadsDir, cfgErr)
+		}
+		if cfg != nil {
 			// Always set database name (needed for bootstrap to find
 			// prefix-based databases like "beads_hq"; see #1669)
 			doltCfg.Database = cfg.GetDoltDatabase()
@@ -561,6 +564,10 @@ var rootCmd = &cobra.Command{
 			doltCfg.ServerUser = cfg.GetDoltServerUser()
 			doltCfg.ServerPassword = cfg.GetDoltServerPassword()
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
+		} else if cfgErr == nil {
+			// Load returned (nil, nil) — no config file found.
+			// Log so silent fallback to default DB is visible.
+			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; database name may default incorrectly\n", beadsDir)
 		}
 		doltCfg.SyncGitRemote = config.GetString("sync.git-remote")
 

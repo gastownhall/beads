@@ -553,6 +553,7 @@ func applyConfigDefaults(cfg *Config) {
 			_, _ = h.Write([]byte(cfg.Path)) // hash.Hash.Write never returns an error
 			cfg.Database = fmt.Sprintf("testdb_%x", h.Sum64())
 		} else {
+			fmt.Fprintf(os.Stderr, "warning: no database name configured; falling back to default %q\n", configfile.DefaultDoltDatabase)
 			cfg.Database = configfile.DefaultDoltDatabase
 		}
 	}
