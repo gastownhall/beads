@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // transact wraps store.RunInTransaction and marks that a transactional
@@ -72,19 +73,7 @@ func maybeAutoCommit(ctx context.Context, p doltAutoCommitParams) error {
 }
 
 func isDoltNothingToCommit(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := strings.ToLower(err.Error())
-	// Dolt commonly reports "nothing to commit".
-	if strings.Contains(s, "nothing to commit") {
-		return true
-	}
-	// Some versions/paths may report "no changes".
-	if strings.Contains(s, "no changes") && strings.Contains(s, "commit") {
-		return true
-	}
-	return false
+	return issueops.IsNothingToCommitError(err)
 }
 
 func formatDoltAutoCommitMessage(cmd string, actor string, issueIDs []string) string {

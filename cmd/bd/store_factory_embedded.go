@@ -28,13 +28,6 @@ func acquireEmbeddedLock(beadsDir string) (*embeddeddolt.Lock, error) {
 	return embeddeddolt.TryLock(dataDir)
 }
 
-// newDoltStoreCreateIfMissing creates an embedded Dolt storage backend.
-// The embedded engine creates the database automatically if it doesn't exist,
-// so this just forwards the database name to New().
-func newDoltStoreCreateIfMissing(ctx context.Context, beadsDir, database string) (storage.DoltStorage, error) {
-	return embeddeddolt.New(ctx, beadsDir, database, "main")
-}
-
 // newDoltStoreFromConfig creates an embedded Dolt storage backend from the
 // beads directory's persisted metadata.json configuration.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {

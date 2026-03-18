@@ -7,11 +7,15 @@ import (
 	"strings"
 )
 
+// SQLQuerier is the subset of *sql.Tx / *sql.DB needed by the commit helpers.
+type SQLQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // HasPendingChanges checks whether there are any committable changes in the
 // Dolt working set, excluding tables matched by dolt_ignore.
-func HasPendingChanges(ctx context.Context, db interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}) (bool, error) {
+func HasPendingChanges(ctx context.Context, db SQLQuerier) (bool, error) {
 	var count int
 	err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM dolt_status s
@@ -30,13 +34,11 @@ func HasPendingChanges(ctx context.Context, db interface {
 // what changed since the last commit by querying dolt_diff against HEAD.
 // It reports issue-level create/update/delete counts and lists any other
 // tables (labels, comments, events, etc.) that have uncommitted changes.
-func BuildBatchCommitMessage(ctx context.Context, db interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}, actor string) string {
+func BuildBatchCommitMessage(ctx context.Context, db SQLQuerier, actor string) string {
 	if actor == "" {
 		actor = "bd"
 	}
-	// Count issue-level changes by diff type
+
 	var added, modified, removed int
 	rows, err := db.QueryContext(ctx, `
 		SELECT diff_type, COUNT(*) as cnt
@@ -59,10 +61,9 @@ func BuildBatchCommitMessage(ctx context.Context, db interface {
 				}
 			}
 		}
-		_ = rows.Err() // Best effort
+		_ = rows.Err()
 	}
 
-	// Check which other tables have uncommitted changes beyond issues.
 	var otherTables []string
 	statusRows, statusErr := db.QueryContext(ctx, `
 		SELECT table_name FROM dolt_status s
@@ -80,10 +81,10 @@ func BuildBatchCommitMessage(ctx context.Context, db interface {
 				otherTables = append(otherTables, table)
 			}
 		}
-		_ = statusRows.Err() // Best effort
+		_ = statusRows.Err()
 	}
 
-	// Build descriptive message
+	msg := fmt.Sprintf("bd: batch commit by %s", actor)
 	var parts []string
 	if added > 0 {
 		parts = append(parts, fmt.Sprintf("%d created", added))
@@ -94,12 +95,6 @@ func BuildBatchCommitMessage(ctx context.Context, db interface {
 	if removed > 0 {
 		parts = append(parts, fmt.Sprintf("%d deleted", removed))
 	}
-
-	if len(parts) == 0 && len(otherTables) == 0 {
-		return fmt.Sprintf("bd: batch commit by %s", actor)
-	}
-
-	msg := fmt.Sprintf("bd: batch commit by %s", actor)
 	if len(parts) > 0 {
 		msg += " — " + strings.Join(parts, ", ")
 	}
@@ -115,6 +110,12 @@ func IsNothingToCommitError(err error) bool {
 	if err == nil {
 		return false
 	}
-	errLower := strings.ToLower(err.Error())
-	return strings.Contains(errLower, "nothing to commit") || strings.Contains(errLower, "no changes")
+	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "nothing to commit") {
+		return true
+	}
+	if strings.Contains(s, "no changes") && strings.Contains(s, "commit") {
+		return true
+	}
+	return false
 }
