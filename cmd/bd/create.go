@@ -16,7 +16,6 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -1085,15 +1084,9 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
 		if err == nil && sourcePrefix != "" {
 			// Open target store temporarily to set prefix.
-			// In embedded mode, New() creates the database automatically.
-			// In server mode, CreateIfMissing is needed for first-time init.
-			var tempStore storage.DoltStorage
-			var err error
-			if isEmbeddedDolt {
-				tempStore, err = newDoltStoreFromConfig(ctx, beadsDir)
-			} else {
-				tempStore, err = dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
-			}
+			// CreateIfMissing is needed because the target .beads directory
+			// was just created and has no metadata.json or database yet.
+			tempStore, err := newDoltStoreCreateIfMissing(ctx, beadsDir, sourcePrefix)
 			if err != nil {
 				return fmt.Errorf("failed to initialize target database: %w", err)
 			}

@@ -33,6 +33,9 @@ func HasPendingChanges(ctx context.Context, db interface {
 func BuildBatchCommitMessage(ctx context.Context, db interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }, actor string) string {
+	if actor == "" {
+		actor = "bd"
+	}
 	// Count issue-level changes by diff type
 	var added, modified, removed int
 	rows, err := db.QueryContext(ctx, `

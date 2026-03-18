@@ -35,9 +35,38 @@ type EmbeddedDoltStore struct {
 // errClosed is returned when a method is called after Close.
 var errClosed = errors.New("embeddeddolt: store is closed")
 
+// Options configures optional behavior for New.
+type Options struct {
+	// CreateIfMissing writes a minimal metadata.json when the beads directory
+	// has no existing configuration, using database as the DoltDatabase value.
+	// Without this, opening a brand-new .beads directory fails because the
+	// database name cannot be derived from the missing metadata.json.
+	CreateIfMissing bool
+}
+
 // New creates an EmbeddedDoltStore using the embedded Dolt engine.
 // beadsDir is the .beads/ root; the data directory is derived as <beadsDir>/embeddeddolt/.
 func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return NewWithOptions(ctx, beadsDir, database, branch, nil)
+}
+
+// NewWithOptions creates an EmbeddedDoltStore with optional configuration.
+func NewWithOptions(ctx context.Context, beadsDir, database, branch string, opts *Options) (*EmbeddedDoltStore, error) {
+	if opts == nil {
+		opts = &Options{}
+	}
+	if opts.CreateIfMissing && database != "" {
+		metadataPath := filepath.Join(beadsDir, "metadata.json")
+		if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
+			if mkErr := os.MkdirAll(beadsDir, 0750); mkErr != nil {
+				return nil, fmt.Errorf("embeddeddolt: creating beads dir: %w", mkErr)
+			}
+			content := fmt.Sprintf(`{"backend":"dolt","dolt_database":"%s"}`, database)
+			if wErr := os.WriteFile(metadataPath, []byte(content), 0644); wErr != nil {
+				return nil, fmt.Errorf("embeddeddolt: writing metadata.json: %w", wErr)
+			}
+		}
+	}
 	// Resolve to absolute path — the embedded dolt driver resolves file://
 	// DSN paths relative to its data directory, so relative paths cause
 	// doubled-path errors on subsequent opens.
