@@ -466,36 +466,43 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// GH#2636: Open a single shared store for all database checks.
+	// This prevents the infinite Dolt server restart loop that occurred when each
+	// check opened and closed its own store (each close kills the server, each
+	// open restarts it). The shared store stays alive for the entire doctor run.
+	sharedStore := doctor.NewSharedStore(path)
+	defer sharedStore.Close()
+
 	// Check 2: Database version
-	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	dbCheck := convertWithCategory(doctor.CheckDatabaseVersionWithStore(sharedStore, Version), doctor.CategoryCore)
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2a: Schema compatibility
-	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibilityWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2b: Repo fingerprint (detects wrong database or URL change)
-	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprint(path), doctor.CategoryCore)
+	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprintWithStore(sharedStore, path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, fingerprintCheck)
 	if fingerprintCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2c: Database integrity
-	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrity(path), doctor.CategoryCore)
+	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrityWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, integrityCheck)
 	if integrityCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 3: ID format (hash vs sequential)
-	idCheck := convertWithCategory(doctor.CheckIDFormat(path), doctor.CategoryCore)
+	idCheck := convertWithCategory(doctor.CheckIDFormatWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, idCheck)
 	if idCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -519,12 +526,12 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check 7a: Configuration value validation
-	configValuesCheck := convertWithCategory(doctor.CheckConfigValues(path), doctor.CategoryData)
+	configValuesCheck := convertWithCategory(doctor.CheckConfigValuesWithStore(path, sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
 
 	// Check 7a1: Project identity (GH#2372 backfill)
-	projectIDCheck := convertWithCategory(doctor.CheckProjectIdentity(path), doctor.CategoryData)
+	projectIDCheck := convertWithCategory(doctor.CheckProjectIdentityWithStore(sharedStore, path), doctor.CategoryData)
 	result.Checks = append(result.Checks, projectIDCheck)
 	if projectIDCheck.Status == statusWarning || projectIDCheck.Status == statusError {
 		result.OverallOK = false
@@ -536,7 +543,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for multi-repo types, just informational
 
 	// Check 7c: Role configuration (beads.role)
-	roleCheck := convertDoctorCheck(doctor.CheckBeadsRole(path))
+	roleCheck := convertDoctorCheck(doctor.CheckBeadsRoleWithStore(path, sharedStore))
 	result.Checks = append(result.Checks, roleCheck)
 	// Don't fail overall check for role config, just warn - URL heuristic fallback still works
 
@@ -585,14 +592,14 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, doltModeCheck)
 
 	// Check 9: Permissions
-	permCheck := convertWithCategory(doctor.CheckPermissions(path), doctor.CategoryCore)
+	permCheck := convertWithCategory(doctor.CheckPermissionsWithStore(path, sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, permCheck)
 	if permCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 10: Dependency cycles
-	cycleCheck := convertWithCategory(doctor.CheckDependencyCycles(path), doctor.CategoryMetadata)
+	cycleCheck := convertWithCategory(doctor.CheckDependencyCyclesWithStore(sharedStore), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, cycleCheck)
 	if cycleCheck.Status == statusError || cycleCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -764,7 +771,7 @@ func runDiagnostics(path string) doctorResult {
 
 	// Check 29: Database size (pruning suggestion)
 	// Note: This check has no auto-fix - pruning is destructive and user-controlled
-	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSize(path))
+	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSizeWithStore(sharedStore))
 	result.Checks = append(result.Checks, sizeCheck)
 	// Don't fail overall check for size warning, just inform
 
@@ -797,7 +804,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall — this is a recommendation, not a broken state
 
 	// GH#1095: Filter out suppressed checks (doctor.suppress.<slug> = true)
-	suppressed := doctor.GetSuppressedChecks(path)
+	suppressed := doctor.GetSuppressedChecksWithStore(sharedStore)
 	if len(suppressed) > 0 {
 		var suppressedCount int
 		var filtered []doctorCheck
