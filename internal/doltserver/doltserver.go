@@ -506,7 +506,6 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	return s.Port, true, nil
 }
 
-
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
