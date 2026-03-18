@@ -68,7 +68,7 @@ func CheckChildParentDependenciesWithStore(_ *SharedStore) DoctorCheck {
 	return DoctorCheck{Name: "Child-Parent Dependencies", Status: StatusWarning, Message: "Skipped: requires CGO"}
 }
 
-func CheckStaleClosedIssuesWithStore(_ *SharedStore) DoctorCheck {
+func CheckStaleClosedIssuesWithStore(_ string, _ *SharedStore) DoctorCheck {
 	return DoctorCheck{Name: "Stale Closed Issues", Status: StatusWarning, Message: "Skipped: requires CGO"}
 }
 
