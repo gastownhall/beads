@@ -51,9 +51,10 @@ func updateAgentFile(filename string, verbose bool, templatePath string, profile
 			newContent = agents.EmbeddedDefault()
 		}
 
-		// Ensure the beads section uses versioned markers even in new files.
-		// EmbeddedDefault() may contain legacy markers; upgrade them.
-		if strings.Contains(newContent, "BEGIN BEADS INTEGRATION") && !strings.Contains(newContent, "profile:") {
+		// Replace the beads section with the requested profile.
+		// EmbeddedDefault() ships with profile:full; swap to the requested profile
+		// (which defaults to minimal). Also handles legacy markers without profile metadata.
+		if strings.Contains(newContent, "BEGIN BEADS INTEGRATION") {
 			if replaced, changed, err := agents.ReplaceSection(newContent, profile); err == nil && changed {
 				newContent = replaced
 			}
