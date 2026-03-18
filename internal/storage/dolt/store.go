@@ -190,8 +190,10 @@ type Config struct {
 	// automatically if one isn't running. Disabled under Gas Town (GT_ROOT set).
 	AutoStart bool
 
-	// MaxOpenConns overrides the connection pool size (0 = default 10).
-	// Set to 1 for branch isolation in tests (DOLT_CHECKOUT is session-level).
+	// MaxOpenConns overrides the connection pool size (0 = default 3).
+	// Configurable via BEADS_DOLT_MAX_OPEN_CONNS env var or dolt.max-open-conns
+	// in config.yaml. Set to 1 for branch isolation in tests (DOLT_CHECKOUT is
+	// session-level).
 	MaxOpenConns int
 }
 
@@ -946,13 +948,16 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 		return nil, "", fmt.Errorf("failed to open Dolt server connection: %w", err)
 	}
 
-	// Server mode supports multi-writer, configure reasonable pool size
-	maxOpen := 10
+	// Server mode supports multi-writer, configure reasonable pool size.
+	// Default reduced from 10→3 to prevent Dolt server overload under
+	// multi-agent fleet usage (37+ agents × 10 conns = 370 connections).
+	// Most bd commands only use 1-2 concurrent queries.
+	maxOpen := 3
 	if cfg.MaxOpenConns > 0 {
 		maxOpen = cfg.MaxOpenConns
 	}
 	db.SetMaxOpenConns(maxOpen)
-	db.SetMaxIdleConns(min(5, maxOpen))
+	db.SetMaxIdleConns(min(2, maxOpen))
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	// Ensure database exists (may need to create it)

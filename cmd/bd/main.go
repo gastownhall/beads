@@ -10,6 +10,7 @@ import (
 	"runtime/pprof"
 	"runtime/trace"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -523,6 +524,19 @@ var rootCmd = &cobra.Command{
 			doltCfg.ServerPassword = cfg.GetDoltServerPassword()
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 		}
+
+		// Connection pool tuning: env var > config.yaml > default (10).
+		// Reduces Dolt server load under multi-agent fleet usage.
+		if v := os.Getenv("BEADS_DOLT_MAX_OPEN_CONNS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				doltCfg.MaxOpenConns = n
+			}
+		} else if v := config.GetYamlConfig("dolt.max-open-conns"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				doltCfg.MaxOpenConns = n
+			}
+		}
+
 		doltCfg.SyncGitRemote = config.GetString("sync.git-remote")
 
 		// Keep standalone CLI auto-start behavior centralized so doctor and
