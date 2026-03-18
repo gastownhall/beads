@@ -410,45 +410,45 @@ func TestCreateGuard_ErrorMessage(t *testing.T) {
 
 // --- Auto-start guard tests ---
 
-// TestAutoStart_DisabledWithExplicitPort verifies that auto-start is disabled
-// when the config file specifies an explicit server port. This prevents
-// bd from launching a different server when the configured one is down.
-func TestAutoStart_DisabledWithExplicitPort(t *testing.T) {
+// TestAutoStart_DisabledWithExternalMode verifies that auto-start is disabled
+// when the server mode is External (e.g. explicit server port configured).
+// This prevents bd from launching a different server when the configured one is down.
+func TestAutoStart_DisabledWithExternalMode(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("BEADS_TEST_MODE", "")
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "")
 
-	got := resolveAutoStart(false, "", true)
+	got := resolveAutoStart(false, "", ServerModeExternal)
 	if got != false {
-		t.Error("resolveAutoStart should return false when explicit port is configured")
+		t.Error("resolveAutoStart should return false when server mode is External")
 	}
 }
 
-// TestAutoStart_ExplicitPort_CallerOverrideIgnored verifies that even a caller
-// requesting AutoStart=true is overridden when an explicit port is configured.
-func TestAutoStart_ExplicitPort_CallerOverrideIgnored(t *testing.T) {
+// TestAutoStart_ExternalMode_CallerOverrideIgnored verifies that even a caller
+// requesting AutoStart=true is overridden when the server is externally managed.
+func TestAutoStart_ExternalMode_CallerOverrideIgnored(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("BEADS_TEST_MODE", "")
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "")
 
-	got := resolveAutoStart(true, "", true)
+	got := resolveAutoStart(true, "", ServerModeExternal)
 	if got != false {
-		t.Error("resolveAutoStart should return false with explicit port even when caller requests true")
+		t.Error("resolveAutoStart should return false with External mode even when caller requests true")
 	}
 }
 
-// TestAutoStart_ExplicitPort_EnvOverrideStillWins verifies that BEADS_DOLT_AUTO_START=0
-// still takes precedence even without explicit port (defense-in-depth).
-func TestAutoStart_ExplicitPort_EnvOverrideStillWins(t *testing.T) {
+// TestAutoStart_EnvOverrideStillWins verifies that BEADS_DOLT_AUTO_START=0
+// still takes precedence even in Owned mode (defense-in-depth).
+func TestAutoStart_EnvOverrideStillWins(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("BEADS_TEST_MODE", "")
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
 
-	got := resolveAutoStart(true, "", false) // no explicit port, but env says no
+	got := resolveAutoStart(true, "", ServerModeOwned) // owned mode, but env says no
 	if got != false {
-		t.Error("BEADS_DOLT_AUTO_START=0 should still disable auto-start without explicit port")
+		t.Error("BEADS_DOLT_AUTO_START=0 should still disable auto-start in Owned mode")
 	}
 }

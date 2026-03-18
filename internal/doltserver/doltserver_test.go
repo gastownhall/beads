@@ -1018,3 +1018,110 @@ func TestDefaultConfig_SharedModeBeadsDir(t *testing.T) {
 		t.Errorf("DefaultConfig.BeadsDir = %q, want %q", cfg.BeadsDir, expected)
 	}
 }
+
+// --- ServerMode tests ---
+
+func TestResolveServerMode_Default(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeOwned {
+		t.Errorf("expected ServerModeOwned for empty dir, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_SharedServer(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+
+	dir := t.TempDir()
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with shared server, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_ExplicitPort(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	// Write metadata.json with explicit port
+	metaCfg := &configfile.Config{
+		DoltServerPort: 3307,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with explicit port, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_ServerModeEnv(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with BEADS_DOLT_SERVER_MODE=1, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_EmbeddedMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	// Write metadata.json with embedded mode
+	metaCfg := &configfile.Config{
+		DoltMode: "embedded",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeEmbedded {
+		t.Errorf("expected ServerModeEmbedded with dolt_mode=embedded, got %v", mode)
+	}
+}
+
+func TestServerMode_String(t *testing.T) {
+	tests := []struct {
+		mode ServerMode
+		want string
+	}{
+		{ServerModeOwned, "owned"},
+		{ServerModeExternal, "external"},
+		{ServerModeEmbedded, "embedded"},
+		{ServerMode(99), "ServerMode(99)"},
+	}
+	for _, tc := range tests {
+		if got := tc.mode.String(); got != tc.want {
+			t.Errorf("ServerMode(%d).String() = %q, want %q", int(tc.mode), got, tc.want)
+		}
+	}
+}
+
+func TestDefaultConfig_IncludesMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	cfg := DefaultConfig(dir)
+	if cfg.Mode != ServerModeOwned {
+		t.Errorf("expected DefaultConfig.Mode = Owned for empty dir, got %v", cfg.Mode)
+	}
+}

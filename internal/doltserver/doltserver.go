@@ -144,9 +144,10 @@ func ResolveDoltDir(beadsDir string) string {
 
 // Config holds the server configuration.
 type Config struct {
-	BeadsDir string // Path to .beads/ directory
-	Port     int    // MySQL protocol port (0 = allocate ephemeral port on Start)
-	Host     string // Bind address (default: 127.0.0.1)
+	BeadsDir string     // Path to .beads/ directory
+	Port     int        // MySQL protocol port (0 = allocate ephemeral port on Start)
+	Host     string     // Bind address (default: 127.0.0.1)
+	Mode     ServerMode // Server ownership mode (Owned, External, Embedded)
 }
 
 // State holds runtime information about a managed server.
@@ -314,6 +315,7 @@ func DefaultConfig(beadsDir string) *Config {
 	cfg := &Config{
 		BeadsDir: beadsDir,
 		Host:     "127.0.0.1",
+		Mode:     ResolveServerMode(beadsDir),
 	}
 
 	// Check env var override first (used by tests and manual overrides)
@@ -468,10 +470,11 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	}
 
 	// Check whether the server is externally managed before starting.
-	// If metadata.json has an explicit dolt_server_port, the user has
-	// configured a shared/external server (e.g. systemd-managed). Do not
-	// start a per-project server — it would conflict with the external one.
-	if hasExplicitPort(beadsDir) {
+	// If the server mode is External (explicit port in metadata.json,
+	// shared server mode, etc.), do not start a per-project server —
+	// it would conflict with the external one.
+	mode := ResolveServerMode(beadsDir)
+	if mode == ServerModeExternal {
 		cfg := DefaultConfig(beadsDir)
 		return 0, false, fmt.Errorf("Dolt server is not running on port %d, and auto-start is suppressed "+
 			"because an explicit server port is configured (external/shared server).\n\n"+
@@ -487,19 +490,6 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	return s.Port, true, nil
 }
 
-// hasExplicitPort returns true if beadsDir's metadata.json has an explicit
-// dolt_server_port configured, indicating the server is externally managed.
-func hasExplicitPort(beadsDir string) bool {
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if _, err := os.Stat(metadataPath); err != nil {
-		return false
-	}
-	fileCfg, err := configfile.Load(beadsDir)
-	if err != nil || fileCfg == nil {
-		return false
-	}
-	return fileCfg.DoltServerPort > 0
-}
 
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
