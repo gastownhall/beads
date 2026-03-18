@@ -440,11 +440,11 @@ func TestEmbeddedList(t *testing.T) {
 				t.Error("issue title should not be empty in JSON output")
 			}
 		}
-		// Verify blocked epic has dependency count
+		// Verify task with blocking dep has dependency count
 		for _, issue := range issues {
-			if issue.ID == seed.epic {
+			if issue.ID == seed.task {
 				if issue.DependencyCount == 0 {
-					t.Error("blocked epic should have dependency_count > 0")
+					t.Error("task blocked by openBug should have dependency_count > 0")
 				}
 			}
 		}
@@ -570,11 +570,12 @@ func seedTestData(t *testing.T, bd, dir string) testSeedData {
 		"--defer", "+7d")
 	s.chore = issue.ID
 
-	// 5. Epic, P1, labels: planning (has blocking dep on openBug)
+	// 5. Epic, P1, labels: planning
 	issue = bdCreate(t, bd, dir, "Epic with deps", "--type", "epic", "--priority", "1",
 		"--label", "planning")
 	s.epic = issue.ID
-	bdRun(t, bd, dir, "dep", "add", s.epic, s.openBug, "--type", "blocks")
+	// Add blocking dep: task (above) is blocked by openBug (epic can't block non-epics)
+	bdRun(t, bd, dir, "dep", "add", s.task, s.openBug, "--type", "blocks")
 
 	// 6. Decision, P4, labels: pinned-ref
 	issue = bdCreate(t, bd, dir, "Architecture decision", "--type", "decision", "--priority", "4",
