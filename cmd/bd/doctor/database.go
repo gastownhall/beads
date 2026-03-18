@@ -232,6 +232,14 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	ctx := context.Background()
 	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
+		if manualDetail := serverModeIntegrityManualRecoveryDetail(beadsDir); manualDetail != "" {
+			return DoctorCheck{
+				Name:    "Database Integrity",
+				Status:  StatusError,
+				Message: "Failed to open configured server-mode database",
+				Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v\n\n%s", err, manualDetail),
+			}
+		}
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusError,
@@ -284,6 +292,24 @@ func checkDatabaseIntegrityWithStore(store *dolt.DoltStore) DoctorCheck {
 		Message: "Basic query check passed",
 		Detail:  "Storage: Dolt",
 	}
+}
+
+func serverModeIntegrityManualRecoveryDetail(beadsDir string) string {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil || !cfg.IsDoltServerMode() {
+		return ""
+	}
+
+	dbName := cfg.GetDoltDatabase()
+	if dbName == "" {
+		dbName = configfile.DefaultDoltDatabase
+	}
+
+	return fmt.Sprintf(
+		"Automatic integrity recovery is disabled for server-mode repos because it can replace the wrong Dolt root.\nPreserve the Dolt root at %s and verify the configured database %q manually before any reinitialization.",
+		getDatabasePath(beadsDir),
+		dbName,
+	)
 }
 
 // CheckProjectIdentity detects missing project_id in metadata.json and/or

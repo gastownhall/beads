@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 // DatabaseIntegrity attempts to recover from database corruption by:
@@ -26,6 +28,10 @@ func DatabaseIntegrity(path string) error {
 
 // doltIntegrityRecovery backs up the corrupted Dolt database and reinitializes.
 func doltIntegrityRecovery(path, beadsDir string) error {
+	if err := serverModeIntegrityRecoveryGuard(beadsDir); err != nil {
+		return err
+	}
+
 	doltPath := getDatabasePath(beadsDir)
 
 	// Check if dolt directory exists
@@ -68,4 +74,22 @@ func doltIntegrityRecovery(path, beadsDir string) error {
 	fmt.Printf("  Recovered Dolt database\n")
 	fmt.Printf("  Corrupted database preserved at: %s\n", filepath.Base(backupPath))
 	return nil
+}
+
+func serverModeIntegrityRecoveryGuard(beadsDir string) error {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil || !cfg.IsDoltServerMode() {
+		return nil
+	}
+
+	dbName := cfg.GetDoltDatabase()
+	if dbName == "" {
+		dbName = configfile.DefaultDoltDatabase
+	}
+
+	return fmt.Errorf(
+		"automatic integrity recovery is disabled for server-mode repos because it can replace the wrong Dolt root; preserve %s and verify the configured database %q manually before reinitializing",
+		getDatabasePath(beadsDir),
+		dbName,
+	)
 }
