@@ -1,7 +1,7 @@
 package migrations
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 )
 
@@ -11,8 +11,8 @@ import (
 // perform a full table scan of potentially 30K+ rows.
 //
 // Idempotent: checks for existing indices before creating.
-func MigrateWispDepTypeIndex(db *sql.DB) error {
-	exists, err := tableExists(db, "wisp_dependencies")
+func MigrateWispDepTypeIndex(ctx context.Context, db Runner) error {
+	exists, err := tableExists(ctx, db, "wisp_dependencies")
 	if err != nil {
 		return fmt.Errorf("checking wisp_dependencies table: %w", err)
 	}
@@ -35,10 +35,10 @@ func MigrateWispDepTypeIndex(db *sql.DB) error {
 	}
 
 	for _, idx := range indices {
-		if indexExists(db, "wisp_dependencies", idx.name) {
+		if indexExists(ctx, db, "wisp_dependencies", idx.name) {
 			continue
 		}
-		if _, err := db.Exec(idx.ddl); err != nil {
+		if _, err := execContext(ctx, db, idx.ddl); err != nil {
 			return fmt.Errorf("creating index %s: %w", idx.name, err)
 		}
 	}

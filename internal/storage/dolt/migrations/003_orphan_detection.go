@@ -1,7 +1,7 @@
 package migrations
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -15,7 +15,7 @@ import (
 // This migration is non-destructive: it only logs orphans for the user to
 // review. Users can then decide to delete orphans or convert them to
 // top-level issues using 'bd doctor --fix'.
-func DetectOrphanedChildren(db *sql.DB) error {
+func DetectOrphanedChildren(ctx context.Context, db Runner) error {
 	// Find child issues (IDs containing a dot) whose parent doesn't exist.
 	// SUBSTRING_INDEX(id, '.', -1) gives the last segment after the final dot.
 	// Removing that (plus the dot) gives us the parent ID.
@@ -29,7 +29,7 @@ func DetectOrphanedChildren(db *sql.DB) error {
 			AND parent.id IS NULL
 		ORDER BY child.id`
 
-	rows, err := db.Query(query)
+	rows, err := queryContext(ctx, db, query)
 	if err != nil {
 		// If the query fails (e.g., older Dolt version), log and continue.
 		// This is a diagnostic migration, not a schema change.

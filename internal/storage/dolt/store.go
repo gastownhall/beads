@@ -1120,7 +1120,7 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	if err == nil && version >= currentSchemaVersion {
 		// Wisps tables are dolt_ignore'd (not persisted in commit history),
 		// so they must be recreated on every server session. (GH#2271)
-		return createIgnoredTables(db)
+		return createIgnoredTablesContext(ctx, db)
 	}
 
 	// Acquire an advisory lock to serialize schema initialization across concurrent processes.
@@ -1147,7 +1147,7 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	// Double-check: another process may have completed initialization while we waited.
 	var versionAfterLock int
 	if err := conn.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&versionAfterLock); err == nil && versionAfterLock >= currentSchemaVersion {
-		return createIgnoredTables(db)
+		return createIgnoredTablesContext(ctx, conn)
 	}
 
 	// Execute schema creation - split into individual statements
@@ -1161,7 +1161,7 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		if isOnlyComments(stmt) {
 			continue
 		}
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to create schema: %w\nStatement: %s", err, truncateForError(stmt))
 		}
 	}
@@ -1175,7 +1175,7 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		if isOnlyComments(stmt) {
 			continue
 		}
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("failed to insert default config: %w", err)
 		}
 	}
@@ -1186,7 +1186,7 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		"CREATE INDEX idx_issues_issue_type ON issues(issue_type)",
 	}
 	for _, migration := range indexMigrations {
-		_, err := db.ExecContext(ctx, migration)
+		_, err := conn.ExecContext(ctx, migration)
 		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate") &&
 			!strings.Contains(strings.ToLower(err.Error()), "already exists") {
 			return fmt.Errorf("failed to apply index migration: %w", err)
@@ -1195,12 +1195,12 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 
 	// Remove FK constraint on depends_on_id to allow external references.
 	// This is idempotent - DROP FOREIGN KEY fails silently if constraint doesn't exist.
-	_, err = db.ExecContext(ctx, "ALTER TABLE dependencies DROP FOREIGN KEY fk_dep_depends_on")
+	_, err = conn.ExecContext(ctx, "ALTER TABLE dependencies DROP FOREIGN KEY fk_dep_depends_on")
 	if err == nil {
 		// DDL change succeeded - commit it so it persists (required for Dolt server mode)
 		// GH#2455: Stage only the affected table, not all dirty tables.
-		_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('dependencies')")
-		_, _ = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'migration: remove fk_dep_depends_on for external references')") // Best effort: migration commit is advisory; schema change already applied
+		_, _ = conn.ExecContext(ctx, "CALL DOLT_ADD('dependencies')")
+		_, _ = conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'migration: remove fk_dep_depends_on for external references')") // Best effort: migration commit is advisory; schema change already applied
 	} else if !strings.Contains(strings.ToLower(err.Error()), "can't drop") &&
 		!strings.Contains(strings.ToLower(err.Error()), "doesn't exist") &&
 		!strings.Contains(strings.ToLower(err.Error()), "check that it exists") &&
@@ -1209,25 +1209,25 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	}
 
 	// Create views
-	if _, err := db.ExecContext(ctx, readyIssuesView); err != nil {
+	if _, err := conn.ExecContext(ctx, readyIssuesView); err != nil {
 		return fmt.Errorf("failed to create ready_issues view: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, blockedIssuesView); err != nil {
+	if _, err := conn.ExecContext(ctx, blockedIssuesView); err != nil {
 		return fmt.Errorf("failed to create blocked_issues view: %w", err)
 	}
 
 	// Run schema migrations for existing databases (bd-ijw)
-	if err := RunMigrations(db); err != nil {
+	if err := runMigrationsContext(ctx, conn); err != nil {
 		return fmt.Errorf("failed to run dolt migrations: %w", err)
 	}
 
 	// Mark schema as current so subsequent invocations skip initialization
-	_, _ = db.ExecContext(ctx,
+	_, _ = conn.ExecContext(ctx,
 		"INSERT INTO config (`key`, `value`) VALUES ('schema_version', ?) "+
 			"ON DUPLICATE KEY UPDATE `value` = ?",
 		currentSchemaVersion, currentSchemaVersion)
-	_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('config')")
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: update schema_version')"); err != nil {
+	_, _ = conn.ExecContext(ctx, "CALL DOLT_ADD('config')")
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: update schema_version')"); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 			return fmt.Errorf("failed to commit schema_version update: %w", err)
 		}

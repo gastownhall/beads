@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -8,6 +9,26 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 )
+
+// Runner is the minimal query/exec surface used by migration helpers.
+// Both *sql.DB and *sql.Conn satisfy it.
+type Runner interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func execContext(ctx context.Context, db Runner, query string, args ...any) (sql.Result, error) {
+	return db.ExecContext(ctx, query, args...)
+}
+
+func queryContext(ctx context.Context, db Runner, query string) (*sql.Rows, error) {
+	return db.QueryContext(ctx, query)
+}
+
+func queryRowContext(ctx context.Context, db Runner, query string, args ...any) *sql.Row {
+	return db.QueryRowContext(ctx, query, args...)
+}
 
 // isTableNotFoundError checks if the error is a MySQL/Dolt "table not found"
 // error (Error 1146). Dolt returns: Error 1146 (HY000): table not found: tablename
@@ -28,12 +49,12 @@ func isTableNotFoundError(err error) bool {
 // crashes when the Dolt server catalog contains stale database entries
 // from cleaned-up worktrees (GH#2051). SHOW COLUMNS is inherently scoped
 // to the current database, so it also avoids cross-database false positives.
-func columnExists(db *sql.DB, table, column string) (bool, error) {
+func columnExists(ctx context.Context, db Runner, table, column string) (bool, error) {
 	// Use string interpolation instead of parameterized query because Dolt
 	// doesn't support prepared-statement parameters for SHOW commands.
 	// Table/column names come from internal constants, not user input.
 	// #nosec G202 -- table and column names come from internal constants, not user input.
-	rows, err := db.Query("SHOW COLUMNS FROM `" + table + "` LIKE '" + column + "'") //nolint:gosec // G202: table/column are internal constants, not user input
+	rows, err := queryContext(ctx, db, "SHOW COLUMNS FROM `"+table+"` LIKE '"+column+"'") //nolint:gosec // G202: table/column are internal constants, not user input
 	if err != nil {
 		if isTableNotFoundError(err) {
 			return false, nil
@@ -46,12 +67,12 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 
 // indexExists checks if an index exists on a table using SHOW INDEX.
 // Returns false if the table doesn't exist or the index is not found.
-func indexExists(db *sql.DB, table, indexName string) bool {
+func indexExists(ctx context.Context, db Runner, table, indexName string) bool {
 	// Use SHOW INDEX FROM ... WHERE Key_name = '...' to check.
 	// Dolt doesn't support prepared-statement parameters for SHOW commands.
 	// Table/index names come from internal constants, not user input.
 	// #nosec G202 -- table and index names come from internal constants, not user input.
-	rows, err := db.Query("SHOW INDEX FROM `" + table + "` WHERE Key_name = '" + indexName + "'") //nolint:gosec // G202
+	rows, err := queryContext(ctx, db, "SHOW INDEX FROM `"+table+"` WHERE Key_name = '"+indexName+"'") //nolint:gosec // G202
 	if err != nil {
 		return false
 	}
@@ -64,12 +85,12 @@ func indexExists(db *sql.DB, table, indexName string) bool {
 // when the Dolt server catalog contains stale database entries from
 // cleaned-up worktrees (GH#2051). SHOW TABLES is inherently scoped
 // to the current database.
-func tableExists(db *sql.DB, table string) (bool, error) {
+func tableExists(ctx context.Context, db Runner, table string) (bool, error) {
 	// Use string interpolation instead of parameterized query because Dolt
 	// doesn't support prepared-statement parameters for SHOW commands.
 	// Table names come from internal constants, not user input.
 	// #nosec G202 -- table names come from internal constants, not user input.
-	rows, err := db.Query("SHOW TABLES LIKE '" + table + "'") //nolint:gosec // G202: table name is an internal constant, not user input
+	rows, err := queryContext(ctx, db, "SHOW TABLES LIKE '"+table+"'") //nolint:gosec // G202: table name is an internal constant, not user input
 	if err != nil {
 		return false, fmt.Errorf("failed to check table %s: %w", table, err)
 	}

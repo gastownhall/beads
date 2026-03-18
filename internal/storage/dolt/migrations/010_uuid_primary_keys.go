@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -12,7 +13,7 @@ import (
 // push/pull), where independent AUTO_INCREMENT counters produce conflicting IDs.
 //
 // Idempotent: checks column type before migrating.
-func MigrateUUIDPrimaryKeys(db *sql.DB) error {
+func MigrateUUIDPrimaryKeys(ctx context.Context, db Runner) error {
 	tables := []string{
 		"events",
 		"comments",
@@ -23,7 +24,7 @@ func MigrateUUIDPrimaryKeys(db *sql.DB) error {
 	}
 
 	for _, table := range tables {
-		if err := migrateTableToUUID(db, table); err != nil {
+		if err := migrateTableToUUID(ctx, db, table); err != nil {
 			return fmt.Errorf("migrate %s to UUID PK: %w", table, err)
 		}
 	}
@@ -34,9 +35,9 @@ func MigrateUUIDPrimaryKeys(db *sql.DB) error {
 // migrateTableToUUID converts a single table's id column from BIGINT AUTO_INCREMENT
 // to CHAR(36) with UUID default. Uses add-column/copy/drop/rename pattern since
 // Dolt doesn't support ALTER COLUMN to change a PK's type in place.
-func migrateTableToUUID(db *sql.DB, table string) error {
+func migrateTableToUUID(ctx context.Context, db Runner, table string) error {
 	// Check if table exists
-	exists, err := tableExists(db, table)
+	exists, err := tableExists(ctx, db, table)
 	if err != nil {
 		return fmt.Errorf("check table existence: %w", err)
 	}
@@ -46,7 +47,7 @@ func migrateTableToUUID(db *sql.DB, table string) error {
 
 	// Check if already migrated (column type is already CHAR)
 	var colType string
-	err = db.QueryRow(
+	err = queryRowContext(ctx, db,
 		"SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_NAME = ? AND COLUMN_NAME = 'id' AND TABLE_SCHEMA = DATABASE()",
 		table,
 	).Scan(&colType)
@@ -66,13 +67,13 @@ func migrateTableToUUID(db *sql.DB, table string) error {
 
 	// Step 1: Add new UUID column
 	//nolint:gosec // G201: table is from hardcoded list
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN `uuid_id` CHAR(36) NOT NULL DEFAULT (UUID())", table)); err != nil {
+	if _, err := execContext(ctx, db, fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN `uuid_id` CHAR(36) NOT NULL DEFAULT (UUID())", table)); err != nil {
 		return fmt.Errorf("add uuid_id column: %w", err)
 	}
 
 	// Step 2: Backfill existing rows with UUIDs
 	//nolint:gosec // G201: table is from hardcoded list
-	if _, err := db.Exec(fmt.Sprintf("UPDATE `%s` SET `uuid_id` = UUID() WHERE `uuid_id` = '' OR `uuid_id` IS NULL", table)); err != nil {
+	if _, err := execContext(ctx, db, fmt.Sprintf("UPDATE `%s` SET `uuid_id` = UUID() WHERE `uuid_id` = '' OR `uuid_id` IS NULL", table)); err != nil {
 		return fmt.Errorf("backfill uuid_id: %w", err)
 	}
 
@@ -80,25 +81,25 @@ func migrateTableToUUID(db *sql.DB, table string) error {
 	// Dolt requires removing AUTO_INCREMENT before dropping a PK,
 	// so we MODIFY the column to plain BIGINT first.
 	//nolint:gosec // G201: table is from hardcoded list
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` MODIFY `id` BIGINT NOT NULL", table)); err != nil {
+	if _, err := execContext(ctx, db, fmt.Sprintf("ALTER TABLE `%s` MODIFY `id` BIGINT NOT NULL", table)); err != nil {
 		return fmt.Errorf("remove auto_increment: %w", err)
 	}
 	//nolint:gosec // G201: table is from hardcoded list
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` DROP PRIMARY KEY", table)); err != nil {
+	if _, err := execContext(ctx, db, fmt.Sprintf("ALTER TABLE `%s` DROP PRIMARY KEY", table)); err != nil {
 		return fmt.Errorf("drop primary key: %w", err)
 	}
 	//nolint:gosec // G201: table is from hardcoded list
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` DROP COLUMN `id`", table)); err != nil {
+	if _, err := execContext(ctx, db, fmt.Sprintf("ALTER TABLE `%s` DROP COLUMN `id`", table)); err != nil {
 		return fmt.Errorf("drop old id column: %w", err)
 	}
 
 	// Step 4: Rename uuid_id to id and make it the primary key
 	//nolint:gosec // G201: table is from hardcoded list
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` RENAME COLUMN `uuid_id` TO `id`", table)); err != nil {
+	if _, err := execContext(ctx, db, fmt.Sprintf("ALTER TABLE `%s` RENAME COLUMN `uuid_id` TO `id`", table)); err != nil {
 		return fmt.Errorf("rename uuid_id to id: %w", err)
 	}
 	//nolint:gosec // G201: table is from hardcoded list
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE `%s` ADD PRIMARY KEY (`id`)", table)); err != nil {
+	if _, err := execContext(ctx, db, fmt.Sprintf("ALTER TABLE `%s` ADD PRIMARY KEY (`id`)", table)); err != nil {
 		return fmt.Errorf("add primary key: %w", err)
 	}
 

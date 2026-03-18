@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -12,7 +13,7 @@ import (
 // Migration represents a single schema migration for Dolt.
 type Migration struct {
 	Name string
-	Func func(*sql.DB) error
+	Func func(context.Context, migrations.Runner) error
 }
 
 // migrationsList is the ordered list of all Dolt schema migrations.
@@ -35,9 +36,9 @@ var migrationsList = []Migration{
 // RunMigrations executes all registered Dolt migrations in order.
 // Each migration is idempotent and checks whether its changes have
 // already been applied before making modifications.
-func RunMigrations(db *sql.DB) error {
+func runMigrationsContext(ctx context.Context, db migrations.Runner) error {
 	for _, m := range migrationsList {
-		if err := m.Func(db); err != nil {
+		if err := m.Func(ctx, db); err != nil {
 			return fmt.Errorf("dolt migration %q failed: %w", m.Name, err)
 		}
 	}
@@ -53,9 +54,9 @@ func RunMigrations(db *sql.DB) error {
 		"dolt_ignore",
 	}
 	for _, table := range migrationTables {
-		_, _ = db.Exec("CALL DOLT_ADD(?)", table)
+		_, _ = db.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
-	_, err := db.Exec("CALL DOLT_COMMIT('-m', 'schema: auto-migrate')")
+	_, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: auto-migrate')")
 	if err != nil {
 		// "nothing to commit" is expected when migrations were already applied
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
@@ -66,20 +67,28 @@ func RunMigrations(db *sql.DB) error {
 	return nil
 }
 
+func RunMigrations(db *sql.DB) error {
+	return runMigrationsContext(context.Background(), db)
+}
+
 // CreateIgnoredTables re-creates dolt_ignore'd tables (wisps, wisp_*)
 // on the current branch. These tables only exist in the working set and
 // are not inherited when branching. Safe to call repeatedly (idempotent).
 // Exported for use by test helpers in other packages.
 func CreateIgnoredTables(db *sql.DB) error {
-	return createIgnoredTables(db)
+	return createIgnoredTablesContext(context.Background(), db)
 }
 
 // createIgnoredTables is the internal implementation.
 func createIgnoredTables(db *sql.DB) error {
-	if err := migrations.MigrateWispsTable(db); err != nil {
+	return createIgnoredTablesContext(context.Background(), db)
+}
+
+func createIgnoredTablesContext(ctx context.Context, db migrations.Runner) error {
+	if err := migrations.MigrateWispsTable(ctx, db); err != nil {
 		return fmt.Errorf("wisps table: %w", err)
 	}
-	if err := migrations.MigrateWispAuxiliaryTables(db); err != nil {
+	if err := migrations.MigrateWispAuxiliaryTables(ctx, db); err != nil {
 		return fmt.Errorf("wisp auxiliary tables: %w", err)
 	}
 	return nil

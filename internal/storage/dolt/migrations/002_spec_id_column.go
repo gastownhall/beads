@@ -1,7 +1,7 @@
 package migrations
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 )
 
@@ -9,8 +9,8 @@ import (
 // This stores a path or identifier to an external specification document.
 // New databases already have this column from the schema definition;
 // this migration handles databases created before it was added.
-func MigrateSpecIDColumn(db *sql.DB) error {
-	exists, err := columnExists(db, "issues", "spec_id")
+func MigrateSpecIDColumn(ctx context.Context, db Runner) error {
+	exists, err := columnExists(ctx, db, "issues", "spec_id")
 	if err != nil {
 		return fmt.Errorf("failed to check spec_id column: %w", err)
 	}
@@ -18,13 +18,13 @@ func MigrateSpecIDColumn(db *sql.DB) error {
 		return nil
 	}
 
-	_, err = db.Exec(`ALTER TABLE issues ADD COLUMN spec_id VARCHAR(1024)`)
+	_, err = execContext(ctx, db, `ALTER TABLE issues ADD COLUMN spec_id VARCHAR(1024)`)
 	if err != nil {
 		return fmt.Errorf("failed to add spec_id column: %w", err)
 	}
 
 	// Add index for spec_id lookups
-	_, err = db.Exec(`CREATE INDEX idx_issues_spec_id ON issues(spec_id)`)
+	_, err = execContext(ctx, db, `CREATE INDEX idx_issues_spec_id ON issues(spec_id)`)
 	if err != nil {
 		return fmt.Errorf("failed to create spec_id index: %w", err)
 	}

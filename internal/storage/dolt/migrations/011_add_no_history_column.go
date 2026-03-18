@@ -1,7 +1,7 @@
 package migrations
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 )
 
@@ -10,9 +10,9 @@ import (
 // (as opposed to ephemeral wisps which are GC-eligible). Part of gh-2619.
 //
 // Idempotent: checks for column existence before ALTER.
-func MigrateAddNoHistoryColumn(db *sql.DB) error {
+func MigrateAddNoHistoryColumn(ctx context.Context, db Runner) error {
 	for _, table := range []string{"issues", "wisps"} {
-		exists, err := columnExists(db, table, "no_history")
+		exists, err := columnExists(ctx, db, table, "no_history")
 		if err != nil {
 			return fmt.Errorf("failed to check no_history column on %s: %w", table, err)
 		}
@@ -21,7 +21,7 @@ func MigrateAddNoHistoryColumn(db *sql.DB) error {
 		}
 
 		//nolint:gosec // G201: table is from hardcoded list
-		_, err = db.Exec(fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN no_history TINYINT(1) DEFAULT 0", table))
+		_, err = execContext(ctx, db, fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN no_history TINYINT(1) DEFAULT 0", table))
 		if err != nil {
 			return fmt.Errorf("failed to add no_history column to %s: %w", table, err)
 		}

@@ -1,7 +1,7 @@
 package migrations
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"strings"
 )
@@ -13,28 +13,28 @@ import (
 //
 // The wisps table has the same schema as the issues table — it stores ephemeral
 // "wisp" beads that should not be version-tracked in Dolt history.
-func MigrateWispsTable(db *sql.DB) error {
+func MigrateWispsTable(ctx context.Context, db Runner) error {
 	// Step 1: Add dolt_ignore patterns BEFORE creating the table.
 	// Use REPLACE to be idempotent (dolt_ignore has pattern as PK).
 	for _, pattern := range []string{"wisps", "wisp_%"} {
-		_, err := db.Exec("REPLACE INTO dolt_ignore VALUES (?, true)", pattern)
+		_, err := execContext(ctx, db, "REPLACE INTO dolt_ignore VALUES (?, true)", pattern)
 		if err != nil {
 			return fmt.Errorf("failed to add %q to dolt_ignore: %w", pattern, err)
 		}
 	}
 
 	// Explicitly stage dolt_ignore and commit so the ignore is active before table creation.
-	_, err := db.Exec("CALL DOLT_ADD('dolt_ignore')")
+	_, err := execContext(ctx, db, "CALL DOLT_ADD('dolt_ignore')")
 	if err != nil {
 		return fmt.Errorf("failed to stage dolt_ignore: %w", err)
 	}
-	_, err = db.Exec("CALL DOLT_COMMIT('-m', 'chore: add wisps patterns to dolt_ignore')")
+	_, err = execContext(ctx, db, "CALL DOLT_COMMIT('-m', 'chore: add wisps patterns to dolt_ignore')")
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 		return fmt.Errorf("failed to commit dolt_ignore changes: %w", err)
 	}
 
 	// Step 2: Check if wisps table already exists.
-	exists, err := tableExists(db, "wisps")
+	exists, err := tableExists(ctx, db, "wisps")
 	if err != nil {
 		return fmt.Errorf("failed to check wisps table existence: %w", err)
 	}
@@ -43,7 +43,7 @@ func MigrateWispsTable(db *sql.DB) error {
 	}
 
 	// Step 3: Create wisps table with same schema as issues.
-	_, err = db.Exec(wispsTableSchema)
+	_, err = execContext(ctx, db, wispsTableSchema)
 	if err != nil {
 		return fmt.Errorf("failed to create wisps table: %w", err)
 	}

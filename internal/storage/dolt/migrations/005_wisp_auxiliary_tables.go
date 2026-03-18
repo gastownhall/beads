@@ -1,7 +1,7 @@
 package migrations
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 )
 
@@ -9,7 +9,7 @@ import (
 // dependencies, events, and comments. These mirror the corresponding main
 // tables but reference the wisps table instead of issues. They are covered
 // by the dolt_ignore pattern "wisp_%" added in migration 004.
-func MigrateWispAuxiliaryTables(db *sql.DB) error {
+func MigrateWispAuxiliaryTables(ctx context.Context, db Runner) error {
 	tables := map[string]string{
 		"wisp_labels":       wispLabelsSchema,
 		"wisp_dependencies": wispDependenciesSchema,
@@ -18,14 +18,14 @@ func MigrateWispAuxiliaryTables(db *sql.DB) error {
 	}
 
 	for name, schema := range tables {
-		exists, err := tableExists(db, name)
+		exists, err := tableExists(ctx, db, name)
 		if err != nil {
 			return fmt.Errorf("failed to check %s existence: %w", name, err)
 		}
 		if exists {
 			continue
 		}
-		if _, err := db.Exec(schema); err != nil {
+		if _, err := execContext(ctx, db, schema); err != nil {
 			return fmt.Errorf("failed to create %s table: %w", name, err)
 		}
 	}
