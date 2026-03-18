@@ -735,6 +735,31 @@ func TestEmbeddedCreateCrossRepo(t *testing.T) {
 	}
 }
 
+// TestEmbeddedCreateWithGitRemote verifies bd create works end-to-end when a
+// git remote exists (which enables auto-backup in PersistentPostRun). This
+// catches panics from unimplemented methods called after the create succeeds.
+func TestEmbeddedCreateWithGitRemote(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gr")
+
+	// Add a fake git remote so isBackupAutoEnabled returns true
+	cmd := exec.Command("git", "remote", "add", "origin", "https://example.com/fake.git")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add failed: %v\n%s", err, out)
+	}
+
+	// bd create should succeed without panicking in PersistentPostRun
+	issue := bdCreate(t, bd, dir, "Issue with git remote")
+	if issue.ID == "" {
+		t.Fatal("expected issue ID")
+	}
+}
+
 // TestEmbeddedCreateConcurrent verifies that 20 concurrent bd create processes
 // can each create 10 issues without data loss or corruption.
 func TestEmbeddedCreateConcurrent(t *testing.T) {
