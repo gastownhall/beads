@@ -478,3 +478,92 @@ func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
 		Category: CategoryMetadata,
 	}
 }
+
+// WithStore variants for validation checks.
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+
+// CheckOrphanedDependenciesWithStore uses a shared store.
+func CheckOrphanedDependenciesWithStore(ss *SharedStore) DoctorCheck {
+	db := ss.DB()
+	if db == nil {
+		return DoctorCheck{
+			Name:    "Orphaned Dependencies",
+			Status:  "ok",
+			Message: "N/A (no database)",
+		}
+	}
+	return checkOrphanedDependenciesDB(db)
+}
+
+// CheckDuplicateIssuesWithStore uses a shared store.
+func CheckDuplicateIssuesWithStore(ss *SharedStore, gastownMode bool, gastownThreshold int) DoctorCheck {
+	db := ss.DB()
+	if db == nil {
+		return DoctorCheck{
+			Name:    "Duplicate Issues",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+	return checkDuplicateIssuesDB(db, gastownMode, gastownThreshold)
+}
+
+// CheckTestPollutionWithStore uses a shared store.
+func CheckTestPollutionWithStore(ss *SharedStore) DoctorCheck {
+	db := ss.DB()
+	if db == nil {
+		return DoctorCheck{
+			Name:    "Test Pollution",
+			Status:  "ok",
+			Message: "N/A (no database)",
+		}
+	}
+
+	// Look for common test patterns in titles
+	query := `
+		SELECT COUNT(*) FROM issues
+		WHERE (
+			title LIKE 'test-%' OR
+			title LIKE 'Test Issue%' OR
+			title LIKE '%test issue%' OR
+			id LIKE 'test-%'
+		)
+	`
+	var count int
+	if err := db.QueryRow(query).Scan(&count); err != nil {
+		return DoctorCheck{
+			Name:    "Test Pollution",
+			Status:  StatusWarning,
+			Message: "N/A (query failed)",
+		}
+	}
+
+	if count == 0 {
+		return DoctorCheck{
+			Name:    "Test Pollution",
+			Status:  "ok",
+			Message: "No test pollution detected",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Test Pollution",
+		Status:  "warning",
+		Message: fmt.Sprintf("%d potential test issue(s) detected", count),
+		Detail:  "Test issues may have leaked into production database",
+		Fix:     "Run 'bd doctor --check=pollution' to review and clean test issues",
+	}
+}
+
+// CheckChildParentDependenciesWithStore uses a shared store.
+func CheckChildParentDependenciesWithStore(ss *SharedStore) DoctorCheck {
+	db := ss.DB()
+	if db == nil {
+		return DoctorCheck{
+			Name:    "Child-Parent Dependencies",
+			Status:  "ok",
+			Message: "N/A (no database)",
+		}
+	}
+	return checkChildParentDependenciesDB(db)
+}

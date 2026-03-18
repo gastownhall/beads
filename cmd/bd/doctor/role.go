@@ -102,6 +102,11 @@ func getRoleFromDatabase(path string) string {
 	}
 	defer func() { _ = store.Close() }()
 
+	return getRoleFromStore(store)
+}
+
+func getRoleFromStore(store *dolt.DoltStore) string {
+	ctx := context.Background()
 	// Check "beads.role" first, then "role"
 	for _, key := range []string{"beads.role", "role"} {
 		if val, err := store.GetConfig(ctx, key); err == nil && val != "" {
@@ -110,4 +115,47 @@ func getRoleFromDatabase(path string) string {
 	}
 
 	return ""
+}
+
+// CheckBeadsRoleWithStore checks role configuration using a shared store.
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
+	// Read beads.role from git config (canonical location)
+	cmd := exec.Command("git", "config", "--get", "beads.role")
+	if path != "" {
+		cmd.Dir = path
+	}
+	output, err := cmd.Output()
+
+	if err == nil {
+		role := strings.TrimSpace(string(output))
+		return validateRole(role)
+	}
+
+	// Git config not set — check database config using shared store
+	store := ss.Store()
+	if store != nil {
+		if role := getRoleFromStore(store); role != "" {
+			return validateRole(role)
+		}
+	}
+
+	// Check if we're even in a git repository
+	if !isGitRepo(path) {
+		return DoctorCheck{
+			Name:     "Role Configuration",
+			Status:   StatusOK,
+			Message:  "N/A (not a git repository)",
+			Category: CategoryData,
+		}
+	}
+
+	return DoctorCheck{
+		Name:     "Role Configuration",
+		Status:   StatusWarning,
+		Message:  "beads.role not configured",
+		Detail:   "Run 'bd init' to configure your role (maintainer or contributor).",
+		Fix:      "bd config set beads.role maintainer",
+		Category: CategoryData,
+	}
 }

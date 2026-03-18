@@ -63,6 +63,40 @@ func CheckConfigValues(repoPath string) DoctorCheck {
 	}
 }
 
+// CheckConfigValuesWithStore checks config values using a shared store.
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+func CheckConfigValuesWithStore(repoPath string, ss *SharedStore) DoctorCheck {
+	var issues []string
+
+	// Check config.yaml values
+	yamlIssues := checkYAMLConfigValues(repoPath)
+	issues = append(issues, yamlIssues...)
+
+	// Check metadata.json values
+	metadataIssues := checkMetadataConfigValues(repoPath)
+	issues = append(issues, metadataIssues...)
+
+	// Check database config values using shared store
+	dbIssues := checkDatabaseConfigValuesWithStoreWrapper(repoPath, ss)
+	issues = append(issues, dbIssues...)
+
+	if len(issues) == 0 {
+		return DoctorCheck{
+			Name:    "Config Values",
+			Status:  "ok",
+			Message: "All configuration values are valid",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Config Values",
+		Status:  "warning",
+		Message: fmt.Sprintf("Found %d configuration issue(s)", len(issues)),
+		Detail:  strings.Join(issues, "\n"),
+		Fix:     "Edit config files to fix invalid values. Run 'bd config' to view current settings.",
+	}
+}
+
 // findConfigPath locates config.yaml in standard locations.
 func findConfigPath(repoPath string) string {
 	configPath := filepath.Join(repoPath, ".beads", "config.yaml")
@@ -369,6 +403,24 @@ func checkDatabaseConfigValues(repoPath string) []string {
 		return issues
 	}
 	defer func() { _ = store.Close() }()
+
+	return checkDatabaseConfigValuesWithStore(store, issues)
+}
+
+// checkDatabaseConfigValuesWithStoreWrapper runs database config value checks using a SharedStore.
+func checkDatabaseConfigValuesWithStoreWrapper(repoPath string, ss *SharedStore) []string {
+	var issues []string
+
+	store := ss.Store()
+	if store == nil {
+		return checkDatabaseConfigValues(repoPath)
+	}
+
+	return checkDatabaseConfigValuesWithStore(store, issues)
+}
+
+func checkDatabaseConfigValuesWithStore(store *dolt.DoltStore, issues []string) []string {
+	ctx := context.Background()
 
 	// Check status.custom - custom status names should be lowercase alphanumeric with underscores
 	statusCustom, err := store.GetConfig(ctx, "status.custom")

@@ -57,7 +57,9 @@ func CheckDoltFormat(path string) DoctorCheck {
 	}
 }
 
-// CheckDatabaseVersion checks the database version and migration status
+// CheckDatabaseVersion checks the database version and migration status.
+// This is the standalone entry point; CheckDatabaseVersionWithStore is preferred
+// when a SharedStore is available to avoid redundant server restarts.
 func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -85,6 +87,21 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkDatabaseVersionWithStore(store, cliVersion)
+}
+
+// CheckDatabaseVersionWithStore checks the database version using a shared store.
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+func CheckDatabaseVersionWithStore(ss *SharedStore, path string, cliVersion string) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return CheckDatabaseVersion(path, cliVersion)
+	}
+	return checkDatabaseVersionWithStore(store, cliVersion)
+}
+
+func checkDatabaseVersionWithStore(store *dolt.DoltStore, cliVersion string) DoctorCheck {
+	ctx := context.Background()
 	dbVersion, err := store.GetMetadata(ctx, "bd_version")
 	if err != nil {
 		return DoctorCheck{
@@ -123,7 +140,9 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 	}
 }
 
-// CheckSchemaCompatibility checks if all required tables and columns are present
+// CheckSchemaCompatibility checks if all required tables and columns are present.
+// This is the standalone entry point; CheckSchemaCompatibilityWithStore is preferred
+// when a SharedStore is available.
 func CheckSchemaCompatibility(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -147,6 +166,27 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkSchemaCompatibilityWithStore(store)
+}
+
+// CheckSchemaCompatibilityWithStore checks schema compatibility using a shared store.
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+func CheckSchemaCompatibilityWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Schema Compatibility",
+			Status:  StatusError,
+			Message: "Failed to open database",
+			Detail:  "Storage: Dolt (shared store unavailable)",
+		}
+	}
+	return checkSchemaCompatibilityWithStore(store)
+}
+
+func checkSchemaCompatibilityWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
+
 	// Exercise core tables/views.
 	if _, err := store.GetStatistics(ctx); err != nil {
 		return DoctorCheck{
@@ -166,7 +206,9 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 	}
 }
 
-// CheckDatabaseIntegrity runs a basic integrity check on the database
+// CheckDatabaseIntegrity runs a basic integrity check on the database.
+// This is the standalone entry point; CheckDatabaseIntegrityWithStore is preferred
+// when a SharedStore is available.
 func CheckDatabaseIntegrity(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -190,6 +232,27 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 		}
 	}
 	defer func() { _ = store.Close() }()
+
+	return checkDatabaseIntegrityWithStore(store)
+}
+
+// CheckDatabaseIntegrityWithStore checks database integrity using a shared store.
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+func CheckDatabaseIntegrityWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Database Integrity",
+			Status:  StatusError,
+			Message: "Failed to open database",
+			Detail:  "Storage: Dolt (shared store unavailable)",
+		}
+	}
+	return checkDatabaseIntegrityWithStore(store)
+}
+
+func checkDatabaseIntegrityWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
 
 	// Minimal checks: metadata + statistics. If these work, the store is at least readable.
 	if _, err := store.GetMetadata(ctx, "bd_version"); err != nil {
@@ -220,6 +283,8 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 // CheckProjectIdentity detects missing project_id in metadata.json and/or
 // _project_id in the database. Projects initialized before GH#2372 lack these
 // fields and are unprotected against cross-project data leakage.
+// This is the standalone entry point; CheckProjectIdentityWithStore is preferred
+// when a SharedStore is available.
 func CheckProjectIdentity(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -267,6 +332,70 @@ func CheckProjectIdentity(path string) DoctorCheck {
 		}
 	}
 	defer func() { _ = store.Close() }()
+
+	dbID, err := store.GetMetadata(ctx, "_project_id")
+	hasDBID := err == nil && dbID != ""
+
+	if hasLocalID && hasDBID {
+		if cfg.ProjectID != dbID {
+			return DoctorCheck{
+				Name:     "Project Identity",
+				Status:   StatusError,
+				Message:  fmt.Sprintf("Project ID mismatch: metadata.json=%s, database=%s", cfg.ProjectID, dbID),
+				Detail:   "This may indicate cross-project data leakage (GH#2372)",
+				Fix:      "Run 'bd dolt status' to diagnose. Do NOT run 'bd init'",
+				Category: CategoryData,
+			}
+		}
+		return DoctorCheck{
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("project_id: %s", cfg.ProjectID),
+			Category: CategoryData,
+		}
+	}
+
+	// At least one is missing
+	var missing []string
+	if !hasLocalID {
+		missing = append(missing, "metadata.json")
+	}
+	if !hasDBID {
+		missing = append(missing, "database")
+	}
+
+	return DoctorCheck{
+		Name:     "Project Identity",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("Missing project_id in: %s (pre-GH#2372 project)", strings.Join(missing, ", ")),
+		Detail:   "Without project identity, cross-project data leakage cannot be detected",
+		Fix:      "Run 'bd doctor --fix' to generate and backfill project identity",
+		Category: CategoryData,
+	}
+}
+
+// CheckProjectIdentityWithStore checks project identity using a shared store.
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+func CheckProjectIdentityWithStore(ss *SharedStore, path string) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return DoctorCheck{
+			Name:     "Project Identity",
+			Status:   StatusOK,
+			Message:  "N/A (no metadata.json)",
+			Category: CategoryData,
+		}
+	}
+
+	store := ss.Store()
+	if store == nil {
+		return CheckProjectIdentity(path)
+	}
+
+	hasLocalID := cfg.ProjectID != ""
+	ctx := context.Background()
 
 	dbID, err := store.GetMetadata(ctx, "_project_id")
 	hasDBID := err == nil && dbID != ""

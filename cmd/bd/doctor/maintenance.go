@@ -634,3 +634,123 @@ func classifyPatrolIssue(title string) patrolIssueKind {
 		return patrolIssueNone
 	}
 }
+
+// WithStore variants for maintenance checks.
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+
+// CheckStaleClosedIssuesWithStore uses a shared store.
+func CheckStaleClosedIssuesWithStore(path string, ss *SharedStore) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Stale Closed Issues",
+			Status:   StatusOK,
+			Message:  "N/A (config error)",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	var thresholdDays int
+	if cfg != nil {
+		thresholdDays = cfg.GetStaleClosedIssuesDays()
+	}
+
+	db := ss.DB()
+	if db == nil {
+		return DoctorCheck{
+			Name:     "Stale Closed Issues",
+			Status:   StatusOK,
+			Message:  "N/A (unable to open database)",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	return checkStaleClosedIssuesDB(db, thresholdDays)
+}
+
+// CheckStaleMoleculesWithStore uses a shared store.
+func CheckStaleMoleculesWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:     "Stale Molecules",
+			Status:   StatusOK,
+			Message:  "N/A (unable to open database)",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	ctx := context.Background()
+	epicStatuses, err := store.GetEpicsEligibleForClosure(ctx)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Stale Molecules",
+			Status:   StatusOK,
+			Message:  "N/A (query failed)",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	var staleCount int
+	var staleIDs []string
+	for _, es := range epicStatuses {
+		if es.EligibleForClose && es.TotalChildren > 0 {
+			staleCount++
+			if len(staleIDs) < 3 {
+				staleIDs = append(staleIDs, es.Epic.ID)
+			}
+		}
+	}
+
+	if staleCount == 0 {
+		return DoctorCheck{
+			Name:     "Stale Molecules",
+			Status:   StatusOK,
+			Message:  "No stale molecules",
+			Category: CategoryMaintenance,
+		}
+	}
+
+	detail := fmt.Sprintf("Example: %v", staleIDs)
+	if staleCount > 3 {
+		detail += fmt.Sprintf(" (+%d more)", staleCount-3)
+	}
+
+	return DoctorCheck{
+		Name:     "Stale Molecules",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("%d complete-but-unclosed molecule(s)", staleCount),
+		Detail:   detail,
+		Fix:      "Run 'bd mol stale' to review, then 'bd close <id>' for each",
+		Category: CategoryMaintenance,
+	}
+}
+
+// CheckPersistentMolIssuesWithStore uses a shared store.
+func CheckPersistentMolIssuesWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:     "Persistent Mol Issues",
+			Status:   StatusOK,
+			Message:  maintenanceIssuesUnavailableMessage,
+			Category: CategoryMaintenance,
+		}
+	}
+
+	ctx := context.Background()
+	ephemeral := false
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Ephemeral: &ephemeral})
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Persistent Mol Issues",
+			Status:   StatusOK,
+			Message:  maintenanceIssuesUnavailableMessage,
+			Category: CategoryMaintenance,
+		}
+	}
+
+	return checkPersistentMolIssuesForIssues(issues)
+}

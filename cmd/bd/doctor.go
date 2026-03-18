@@ -261,8 +261,10 @@ Examples:
 			return
 		}
 
-		// Run diagnostics
-		result := runDiagnostics(absPath)
+		// Run diagnostics with a safety timeout to prevent infinite loops (GH#2636).
+		// The timeout is generous (120s) to allow slow checks to complete normally;
+		// its purpose is to catch pathological restart loops, not to rush.
+		result := runDiagnosticsWithTimeout(absPath, 120*time.Second)
 
 		// Preview fixes (dry-run) or apply fixes if requested
 		if doctorDryRun {
@@ -357,6 +359,37 @@ func releaseDiagnosticLocks(path string) {
 		nomsLock := filepath.Join(doltPath, entry.Name(), ".dolt", "noms", "LOCK")
 		if _, err := os.Stat(nomsLock); err == nil {
 			_ = os.Remove(nomsLock)
+		}
+	}
+}
+
+// runDiagnosticsWithTimeout runs diagnostics with a safety timeout.
+// GH#2636: Prevents infinite loops from server restart cycles.
+func runDiagnosticsWithTimeout(path string, timeout time.Duration) doctorResult {
+	type resultCh struct {
+		result doctorResult
+	}
+	ch := make(chan resultCh, 1)
+	go func() {
+		ch <- resultCh{result: runDiagnostics(path)}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.result
+	case <-time.After(timeout):
+		return doctorResult{
+			Path:       path,
+			CLIVersion: Version,
+			OverallOK:  false,
+			Checks: []doctorCheck{
+				{
+					Name:    "Doctor Timeout",
+					Status:  statusError,
+					Message: fmt.Sprintf("Doctor checks timed out after %s", timeout),
+					Fix:     "This may indicate a server restart loop (GH#2636). Try 'bd dolt stop' then re-run.",
+				},
+			},
 		}
 	}
 }
@@ -466,36 +499,72 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// GH#2636: Open ONE shared store for all database checks. Previously each
+	// check opened and closed its own store, triggering server start/stop cycles
+	// (668 restarts and 60+ zombie processes reported). The shared store is opened
+	// once here and closed at the end of runDiagnostics.
+	ss, ssErr := doctor.OpenSharedStore(beadsDir)
+	if ss != nil {
+		defer ss.Close()
+	}
+	// ssErr is non-fatal: individual checks will fall back to standalone mode.
+	_ = ssErr
+
 	// Check 2: Database version
-	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	var dbCheck doctorCheck
+	if ss != nil {
+		dbCheck = convertWithCategory(doctor.CheckDatabaseVersionWithStore(ss, path, Version), doctor.CategoryCore)
+	} else {
+		dbCheck = convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	}
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2a: Schema compatibility
-	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	var schemaCheck doctorCheck
+	if ss != nil {
+		schemaCheck = convertWithCategory(doctor.CheckSchemaCompatibilityWithStore(ss), doctor.CategoryCore)
+	} else {
+		schemaCheck = convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	}
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2b: Repo fingerprint (detects wrong database or URL change)
-	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprint(path), doctor.CategoryCore)
+	var fingerprintCheck doctorCheck
+	if ss != nil {
+		fingerprintCheck = convertWithCategory(doctor.CheckRepoFingerprintWithStore(ss, path), doctor.CategoryCore)
+	} else {
+		fingerprintCheck = convertWithCategory(doctor.CheckRepoFingerprint(path), doctor.CategoryCore)
+	}
 	result.Checks = append(result.Checks, fingerprintCheck)
 	if fingerprintCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2c: Database integrity
-	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrity(path), doctor.CategoryCore)
+	var integrityCheck doctorCheck
+	if ss != nil {
+		integrityCheck = convertWithCategory(doctor.CheckDatabaseIntegrityWithStore(ss), doctor.CategoryCore)
+	} else {
+		integrityCheck = convertWithCategory(doctor.CheckDatabaseIntegrity(path), doctor.CategoryCore)
+	}
 	result.Checks = append(result.Checks, integrityCheck)
 	if integrityCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 3: ID format (hash vs sequential)
-	idCheck := convertWithCategory(doctor.CheckIDFormat(path), doctor.CategoryCore)
+	var idCheck doctorCheck
+	if ss != nil {
+		idCheck = convertWithCategory(doctor.CheckIDFormatWithStore(ss), doctor.CategoryCore)
+	} else {
+		idCheck = convertWithCategory(doctor.CheckIDFormat(path), doctor.CategoryCore)
+	}
 	result.Checks = append(result.Checks, idCheck)
 	if idCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -519,12 +588,22 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check 7a: Configuration value validation
-	configValuesCheck := convertWithCategory(doctor.CheckConfigValues(path), doctor.CategoryData)
+	var configValuesCheck doctorCheck
+	if ss != nil {
+		configValuesCheck = convertWithCategory(doctor.CheckConfigValuesWithStore(path, ss), doctor.CategoryData)
+	} else {
+		configValuesCheck = convertWithCategory(doctor.CheckConfigValues(path), doctor.CategoryData)
+	}
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
 
 	// Check 7a1: Project identity (GH#2372 backfill)
-	projectIDCheck := convertWithCategory(doctor.CheckProjectIdentity(path), doctor.CategoryData)
+	var projectIDCheck doctorCheck
+	if ss != nil {
+		projectIDCheck = convertWithCategory(doctor.CheckProjectIdentityWithStore(ss, path), doctor.CategoryData)
+	} else {
+		projectIDCheck = convertWithCategory(doctor.CheckProjectIdentity(path), doctor.CategoryData)
+	}
 	result.Checks = append(result.Checks, projectIDCheck)
 	if projectIDCheck.Status == statusWarning || projectIDCheck.Status == statusError {
 		result.OverallOK = false
@@ -536,7 +615,12 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for multi-repo types, just informational
 
 	// Check 7c: Role configuration (beads.role)
-	roleCheck := convertDoctorCheck(doctor.CheckBeadsRole(path))
+	var roleCheck doctorCheck
+	if ss != nil {
+		roleCheck = convertDoctorCheck(doctor.CheckBeadsRoleWithStore(path, ss))
+	} else {
+		roleCheck = convertDoctorCheck(doctor.CheckBeadsRole(path))
+	}
 	result.Checks = append(result.Checks, roleCheck)
 	// Don't fail overall check for role config, just warn - URL heuristic fallback still works
 
@@ -592,7 +676,12 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check 10: Dependency cycles
-	cycleCheck := convertWithCategory(doctor.CheckDependencyCycles(path), doctor.CategoryMetadata)
+	var cycleCheck doctorCheck
+	if ss != nil {
+		cycleCheck = convertWithCategory(doctor.CheckDependencyCyclesWithStore(ss), doctor.CategoryMetadata)
+	} else {
+		cycleCheck = convertWithCategory(doctor.CheckDependencyCycles(path), doctor.CategoryMetadata)
+	}
 	result.Checks = append(result.Checks, cycleCheck)
 	if cycleCheck.Status == statusError || cycleCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -718,37 +807,72 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for untracked files, just warn
 
 	// Check 21: Orphaned dependencies (from bd repair-deps, bd validate)
-	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
+	var orphanedDepsCheck doctorCheck
+	if ss != nil {
+		orphanedDepsCheck = convertDoctorCheck(doctor.CheckOrphanedDependenciesWithStore(ss))
+	} else {
+		orphanedDepsCheck = convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
+	}
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
 
 	// Check 22a: Child→parent dependencies (anti-pattern)
-	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
+	var childParentDepsCheck doctorCheck
+	if ss != nil {
+		childParentDepsCheck = convertDoctorCheck(doctor.CheckChildParentDependenciesWithStore(ss))
+	} else {
+		childParentDepsCheck = convertDoctorCheck(doctor.CheckChildParentDependencies(path))
+	}
 	result.Checks = append(result.Checks, childParentDepsCheck)
 	// Don't fail overall check for child→parent deps, just warn
 
 	// Check 23: Duplicate issues (from bd validate)
-	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorGastown, gastownDuplicatesThreshold))
+	var duplicatesCheck doctorCheck
+	if ss != nil {
+		duplicatesCheck = convertDoctorCheck(doctor.CheckDuplicateIssuesWithStore(ss, doctorGastown, gastownDuplicatesThreshold))
+	} else {
+		duplicatesCheck = convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorGastown, gastownDuplicatesThreshold))
+	}
 	result.Checks = append(result.Checks, duplicatesCheck)
 	// Don't fail overall check for duplicates, just warn
 
 	// Check 24: Test pollution (from bd validate)
-	pollutionCheck := convertDoctorCheck(doctor.CheckTestPollution(path))
+	var pollutionCheck doctorCheck
+	if ss != nil {
+		pollutionCheck = convertDoctorCheck(doctor.CheckTestPollutionWithStore(ss))
+	} else {
+		pollutionCheck = convertDoctorCheck(doctor.CheckTestPollution(path))
+	}
 	result.Checks = append(result.Checks, pollutionCheck)
 	// Don't fail overall check for test pollution, just warn
 
 	// Check 26: Stale closed issues (maintenance)
-	staleClosedCheck := convertDoctorCheck(doctor.CheckStaleClosedIssues(path))
+	var staleClosedCheck doctorCheck
+	if ss != nil {
+		staleClosedCheck = convertDoctorCheck(doctor.CheckStaleClosedIssuesWithStore(path, ss))
+	} else {
+		staleClosedCheck = convertDoctorCheck(doctor.CheckStaleClosedIssues(path))
+	}
 	result.Checks = append(result.Checks, staleClosedCheck)
 	// Don't fail overall check for stale issues, just warn
 
 	// Check 26a: Stale molecules (complete but unclosed)
-	staleMoleculesCheck := convertDoctorCheck(doctor.CheckStaleMolecules(path))
+	var staleMoleculesCheck doctorCheck
+	if ss != nil {
+		staleMoleculesCheck = convertDoctorCheck(doctor.CheckStaleMoleculesWithStore(ss))
+	} else {
+		staleMoleculesCheck = convertDoctorCheck(doctor.CheckStaleMolecules(path))
+	}
 	result.Checks = append(result.Checks, staleMoleculesCheck)
 	// Don't fail overall check for stale molecules, just warn
 
 	// Check 26b: Persistent mol- issues (should have been ephemeral)
-	persistentMolCheck := convertDoctorCheck(doctor.CheckPersistentMolIssues(path))
+	var persistentMolCheck doctorCheck
+	if ss != nil {
+		persistentMolCheck = convertDoctorCheck(doctor.CheckPersistentMolIssuesWithStore(ss))
+	} else {
+		persistentMolCheck = convertDoctorCheck(doctor.CheckPersistentMolIssues(path))
+	}
 	result.Checks = append(result.Checks, persistentMolCheck)
 	// Don't fail overall check for persistent mol issues, just warn
 

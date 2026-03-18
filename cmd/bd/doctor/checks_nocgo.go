@@ -48,3 +48,34 @@ func CheckPatrolPollution(_ string) DoctorCheck {
 func FixStaleMQFiles(_ string) error {
 	return nil
 }
+
+// WithStore variants (nocgo stubs).
+// GH#2636: Prevents redundant server start/stop cycles during doctor checks.
+
+func CheckOrphanedDependenciesWithStore(_ *SharedStore) DoctorCheck {
+	return DoctorCheck{Name: "Orphaned Dependencies", Status: StatusWarning, Message: "Skipped: requires CGO"}
+}
+
+func CheckDuplicateIssuesWithStore(_ *SharedStore, _ bool, _ int) DoctorCheck {
+	return DoctorCheck{Name: "Duplicate Issues", Status: StatusWarning, Message: "Skipped: requires CGO"}
+}
+
+func CheckTestPollutionWithStore(_ *SharedStore) DoctorCheck {
+	return DoctorCheck{Name: "Test Pollution", Status: StatusWarning, Message: "Skipped: requires CGO"}
+}
+
+func CheckChildParentDependenciesWithStore(_ *SharedStore) DoctorCheck {
+	return DoctorCheck{Name: "Child-Parent Dependencies", Status: StatusWarning, Message: "Skipped: requires CGO"}
+}
+
+func CheckStaleClosedIssuesWithStore(_ *SharedStore) DoctorCheck {
+	return DoctorCheck{Name: "Stale Closed Issues", Status: StatusWarning, Message: "Skipped: requires CGO"}
+}
+
+func CheckStaleMoleculesWithStore(_ *SharedStore) DoctorCheck {
+	return DoctorCheck{Name: "Stale Molecules", Status: StatusWarning, Message: "Skipped: requires CGO"}
+}
+
+func CheckPersistentMolIssuesWithStore(_ *SharedStore) DoctorCheck {
+	return DoctorCheck{Name: "Persistent Mol Issues", Status: StatusWarning, Message: "Skipped: requires CGO"}
+}
