@@ -25,10 +25,10 @@ func TestIsCrewActor(t *testing.T) {
 		{"gastown/polecats/nux", false},
 		{"hal", false},
 		{"", false},
-		{"crew", false},           // no slash
-		{"a/crew", false},         // crew as last segment, not second-to-last
-		{"a/crew/b/c", false},     // crew not in second-to-last position
-		{"a/crew/b", true},        // canonical form
+		{"crew", false},       // no slash
+		{"a/crew", false},     // crew as last segment, not second-to-last
+		{"a/crew/b/c", false}, // crew not in second-to-last position
+		{"a/crew/b", true},    // canonical form
 	}
 	for _, tt := range tests {
 		got := isCrewActor(tt.actor)
