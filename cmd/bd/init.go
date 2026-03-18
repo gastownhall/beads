@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -801,12 +802,14 @@ environment variable.`,
 		// Skip in stealth mode (user wants invisible setup) or when explicitly skipped
 		if !stealth && !skipAgents {
 			agentsTemplate, _ := cmd.Flags().GetString("agents-template")
+			agentsProfileStr, _ := cmd.Flags().GetString("agents-profile")
+			agentsProfile := agents.Profile(agentsProfileStr)
 			if isBareGitRepo() {
 				if !quiet {
 					fmt.Printf("  Skipping AGENTS.md generation in bare repository\n")
 				}
 			} else {
-				addAgentsInstructions(!quiet, agentsTemplate)
+				addAgentsInstructions(!quiet, agentsTemplate, agentsProfile)
 			}
 		}
 
@@ -940,6 +943,7 @@ func init() {
 	initCmd.Flags().Bool("from-jsonl", false, "Import issues from .beads/issues.jsonl instead of git history")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")
+	initCmd.Flags().String("agents-profile", "", "AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)")
 
 	// Backend selection (dolt is the only supported backend; sqlite accepted for deprecation notice)
 	initCmd.Flags().String("backend", "", "Storage backend (default: dolt). --backend=sqlite prints deprecation notice.")
