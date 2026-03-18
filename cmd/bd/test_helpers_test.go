@@ -76,7 +76,7 @@ const windowsOS = "windows"
 // main.go's init() calls config.Initialize() which picks up the real .beads/config.yaml.
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
 // This helper ensures viper is reset after the test completes, preventing state pollution
-// (e.g., sync.mode=dolt-native leaking into JSONL export tests).
+// (e.g., repo config values leaking into JSONL export tests).
 func initConfigForTest(t *testing.T) {
 	t.Helper()
 	config.ResetForTesting()

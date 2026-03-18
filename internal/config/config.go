@@ -59,7 +59,7 @@ func Initialize() error {
 	// 1. Project: walk up from CWD to find .beads/config.yaml
 	cwd, err := os.Getwd()
 	if err == nil {
-		// In the beads repo, `.beads/config.yaml` is tracked and may set sync.mode=dolt-native.
+		// In the beads repo, `.beads/config.yaml` is tracked and may set non-default config values.
 		// In `go test` (especially for `cmd/bd`), we want to avoid unintentionally picking up
 		// the repo-local config, while still allowing tests to load config.yaml from temp repos.
 		//
@@ -420,7 +420,7 @@ func SaveConfigValue(key string, value interface{}, beadsDir string) error {
 		_ = yaml.Unmarshal(data, &existing)
 	}
 
-	// Set the single key using dot-path splitting for nested keys (e.g. "sync.mode").
+	// Set the single key using dot-path splitting for nested keys (e.g. "routing.mode").
 	setNestedKey(existing, key, value)
 
 	out, err := yaml.Marshal(existing)
