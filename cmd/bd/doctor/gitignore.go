@@ -32,6 +32,9 @@ push-state.json
 # Lock files (various runtime locks)
 *.lock
 
+# Credential key (encryption key for federation peer auth — never commit)
+.beads-credential-key
+
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
 
@@ -109,6 +112,7 @@ var requiredPatterns = []string{
 	"interactions.jsonl",
 	"*.lock",
 	"*.corrupt.backup/",
+	".beads-credential-key",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
