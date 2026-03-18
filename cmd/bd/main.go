@@ -578,7 +578,6 @@ var rootCmd = &cobra.Command{
 				// config.yaml). Port 0 is fine here — auto-start will resolve it.
 				doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 				doltCfg.ServerUser = cfg.GetDoltServerUser()
-				doltCfg.ServerPassword = cfg.GetDoltServerPassword()
 				doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 			}
 		}
