@@ -815,25 +815,56 @@ func LogPath(beadsDir string) string {
 	return logPath(beadsDir)
 }
 
+// isAutoStartDisabled returns true when the user has opted out of beads
+// auto-starting dolt servers (e.g. because a systemd unit manages the server).
+func isAutoStartDisabled() bool {
+	v := os.Getenv("BEADS_DOLT_AUTO_START")
+	return v == "0" || strings.EqualFold(v, "false")
+}
+
 // killStaleServersForDir finds and kills orphan dolt sql-server processes for
 // the current repo's Dolt data directory that are not tracked by the canonical
-// PID file. Servers owned by other repos are preserved.
+// PID file. Only processes that beads started (tracked via the PID file) are
+// eligible for cleanup. Externally-managed servers are never killed.
+//
+// A process is considered "external" (never kill) when any of:
+//   - hasExplicitPort() returns true (metadata.json has explicit port config)
+//   - BEADS_DOLT_AUTO_START=0 is set
+//   - No PID file exists (beads has no record of starting a server)
 func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, string) bool, kill func(int) error) ([]int, error) {
 	if len(allPIDs) == 0 {
 		return nil, nil
 	}
 
-	// Collect canonical PIDs (ones we should NOT kill).
-	canonicalPIDs := make(map[int]bool)
-	serverDir := resolveServerDir(beadsDir)
-	if serverDir != "" {
-		if data, readErr := os.ReadFile(pidPath(serverDir)); readErr == nil {
-			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
-				canonicalPIDs[pid] = true
-			}
-		}
+	// If the server is externally managed, never kill anything.
+	if hasExplicitPort(beadsDir) {
+		return nil, nil
+	}
+	if isAutoStartDisabled() {
+		return nil, nil
 	}
 
+	serverDir := resolveServerDir(beadsDir)
+
+	// Read the canonical PID from the PID file. If there is no PID file,
+	// beads has no record of having started a server for this directory,
+	// so there is nothing stale to clean up. This prevents killing
+	// externally-started servers (systemd, other repos sharing a data dir).
+	var canonicalPID int
+	if data, readErr := os.ReadFile(pidPath(serverDir)); readErr == nil {
+		if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
+			canonicalPID = pid
+		}
+	}
+	if canonicalPID == 0 {
+		// No valid PID file → no beads-owned server to compare against.
+		// Nothing is stale from our perspective.
+		return nil, nil
+	}
+
+	// The canonical PID itself is alive and tracked — never kill it.
+	// Only kill OTHER dolt processes in our data dir (orphans from a
+	// previous beads-started server that lost its PID file tracking).
 	ownedDoltDir := ResolveDoltDir(serverDir)
 
 	var killed []int
@@ -841,7 +872,7 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 		if pid == os.Getpid() {
 			continue
 		}
-		if canonicalPIDs[pid] {
+		if pid == canonicalPID {
 			continue // preserve canonical server
 		}
 		if !inDir(pid, ownedDoltDir) {
