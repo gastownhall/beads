@@ -13,94 +13,16 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// SearchIssues finds issues matching query and filters
+// SearchIssues finds issues matching query and filters.
+// Delegates to issueops.SearchIssuesInTx for shared query logic.
 func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	// Route ephemeral-only queries to wisps table, falling through to
-	// issues table if wisps table doesn't exist (pre-migration databases).
-	if filter.Ephemeral != nil && *filter.Ephemeral {
-		results, err := s.searchWisps(ctx, query, filter)
-		if err != nil && !isTableNotExistError(err) {
-			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
-		}
-		if len(results) > 0 {
-			return results, nil
-		}
-		// Fall through: wisps table doesn't exist or returned no results
-	}
-
-	// If searching by IDs that are all ephemeral, try wisps table first,
-	// falling through to the issues table if not found (handles pre-migration
-	// databases where ephemeral rows live in issues with ephemeral=1).
-	if len(filter.IDs) > 0 && allEphemeral(filter.IDs) {
-		results, err := s.searchWisps(ctx, query, filter)
-		if err != nil && !isTableNotExistError(err) {
-			return nil, fmt.Errorf("search wisps (ephemeral IDs): %w", err)
-		}
-		if len(results) > 0 {
-			return results, nil
-		}
-		// Fall through: wisps table doesn't exist or IDs may be in issues table
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	whereClauses, args, err := buildIssueFilterClauses(query, filter, issuesFilterTables)
-	if err != nil {
-		return nil, err
-	}
-
-	whereSQL := ""
-	if len(whereClauses) > 0 {
-		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
-	}
-
-	limitSQL := ""
-	if filter.Limit > 0 {
-		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
-	}
-
-	// nolint:gosec // G201: whereSQL contains column comparisons with ?, limitSQL is a safe integer
-	querySQL := fmt.Sprintf(`
-		SELECT id FROM issues
-		%s
-		ORDER BY priority ASC, created_at DESC, id ASC
-		%s
-	`, whereSQL, limitSQL)
-
-	rows, err := s.queryContext(ctx, querySQL, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to search issues: %w", err)
-	}
-	defer rows.Close()
-
-	doltResults, err := s.scanIssueIDs(ctx, rows)
-	if err != nil {
-		return nil, err
-	}
-
-	// When filter.Ephemeral is nil (search everything), also search the wisps
-	// table and merge results. This ensures ephemeral beads appear in queries.
-	if filter.Ephemeral == nil {
-		wispResults, wispErr := s.searchWisps(ctx, query, filter)
-		if wispErr != nil && !isTableNotExistError(wispErr) {
-			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
-		}
-		if len(wispResults) > 0 {
-			// Deduplicate by ID (prefer Dolt version if exists in both)
-			seen := make(map[string]bool, len(doltResults))
-			for _, issue := range doltResults {
-				seen[issue.ID] = true
-			}
-			for _, issue := range wispResults {
-				if !seen[issue.ID] {
-					doltResults = append(doltResults, issue)
-				}
-			}
-		}
-	}
-
-	return doltResults, nil
+	var result []*types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssuesInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
 }
 
 // GetReadyWork returns issues that are ready to work on (not blocked).
