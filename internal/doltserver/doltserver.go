@@ -57,6 +57,23 @@ func IsSharedServerMode() bool {
 	return config.GetBool("dolt.shared-server")
 }
 
+// IsAutoStartDisabled returns true if the dolt server should NOT be
+// auto-started or managed by bd. When true, KillStaleServers and
+// auto-start are suppressed — the server is externally managed (e.g.,
+// by systemd). Checks (in priority order):
+//  1. BEADS_DOLT_AUTO_START=0 env var → always disabled
+//  2. dolt.auto-start config value "false"/"0"/"off" → disabled
+//
+// This is used by KillStaleServers and Start to avoid killing or
+// interfering with externally-managed dolt processes (GH#2641).
+func IsAutoStartDisabled() bool {
+	if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
+		return true
+	}
+	v := config.GetString("dolt.auto-start")
+	return v == "false" || v == "0" || v == "off"
+}
+
 // SharedServerDir returns the directory for shared server state files.
 // Returns ~/.beads/shared-server/ (created on first use).
 func SharedServerDir() (string, error) {
@@ -468,14 +485,16 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	}
 
 	// Check whether the server is externally managed before starting.
-	// If metadata.json has an explicit dolt_server_port, the user has
-	// configured a shared/external server (e.g. systemd-managed). Do not
-	// start a per-project server — it would conflict with the external one.
-	if hasExplicitPort(beadsDir) {
+	// Auto-start is suppressed when:
+	//   1. BEADS_DOLT_AUTO_START=0 or dolt.auto-start: false (GH#2641)
+	//   2. metadata.json has an explicit dolt_server_port (GH#2554)
+	// In both cases, the dolt server is externally managed (e.g., systemd).
+	// Do not start a per-project server — it would conflict with the external one.
+	if IsAutoStartDisabled() || hasExplicitPort(beadsDir) {
 		cfg := DefaultConfig(beadsDir)
 		return 0, false, fmt.Errorf("Dolt server is not running on port %d, and auto-start is suppressed "+
-			"because an explicit server port is configured (external/shared server).\n\n"+
-			"Start the external server, or remove the explicit port configuration to allow auto-start.\n"+
+			"because the server is externally managed (dolt.auto-start: false or explicit port configured).\n\n"+
+			"Start the external server, or enable auto-start to allow bd to manage the server.\n"+
 			"  To start manually: bd dolt start\n"+
 			"  To check status: bd dolt status", cfg.Port)
 	}
@@ -857,7 +876,14 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 // KillStaleServers finds and kills orphan dolt sql-server processes for the
 // current repo's Dolt data directory that are not tracked by the canonical PID
 // file. Returns the PIDs of killed processes.
+//
+// When auto-start is disabled (BEADS_DOLT_AUTO_START=0 or dolt.auto-start:
+// false), this function is a no-op — the dolt server is externally managed
+// and must not be killed by bd (GH#2641).
 func KillStaleServers(beadsDir string) ([]int, error) {
+	if IsAutoStartDisabled() {
+		return nil, nil
+	}
 	allPIDs := listDoltProcessPIDs()
 	return killStaleServersForDir(
 		beadsDir,
