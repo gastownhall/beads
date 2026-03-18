@@ -31,6 +31,7 @@ var migrationsList = []Migration{
 	{"uuid_primary_keys", migrations.MigrateUUIDPrimaryKeys},
 	{"add_no_history_column", migrations.MigrateAddNoHistoryColumn},
 	{"issues_type_status_index", migrations.MigrateIssuesTypeStatusIndex},
+	{"sync_wisps_schema", migrations.MigrateSyncWispsSchema},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.
