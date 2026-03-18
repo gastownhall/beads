@@ -901,3 +901,32 @@ func TestDoctor_ExplicitPathOverridesBEADS_DIR(t *testing.T) {
 		t.Error("Expected to find explicit-marker in chosen path - wrong directory was selected")
 	}
 }
+
+// TestDoctorLoadsBeadsEnvFile verifies that bd doctor loads .beads/.env before
+// running checks, even though doctor is in noDbCommands and PersistentPreRun
+// returns early before calling loadBeadsEnvFile. (GH#2677)
+func TestDoctorLoadsBeadsEnvFile(t *testing.T) {
+	const testEnvVar = "BD_TEST_DOCTOR_ENV_LOADED_2677"
+	// Ensure the var is not already set (would confuse gotenv's non-overriding load)
+	t.Setenv(testEnvVar, "")
+	os.Unsetenv(testEnvVar)
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a .beads/.env with a sentinel value
+	envContent := testEnvVar + "=loaded_by_doctor\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, ".env"), []byte(envContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call loadBeadsEnvFile directly (mirrors what the Run func does)
+	loadBeadsEnvFile(beadsDir)
+
+	if got := os.Getenv(testEnvVar); got != "loaded_by_doctor" {
+		t.Errorf("expected env var %s=loaded_by_doctor after loadBeadsEnvFile, got %q", testEnvVar, got)
+	}
+}

@@ -202,6 +202,12 @@ Examples:
 			FatalError("failed to resolve path: %v", err)
 		}
 
+		// GH#2677: Load .beads/.env before any database checks.
+		// doctor is in noDbCommands so PersistentPreRun returns early before
+		// loadBeadsEnvFile runs. Resolve the effective beads dir (follows
+		// redirects) and load it here so all doctor sub-paths get credentials.
+		loadBeadsEnvFile(doctor.ResolveBeadsDirForRepo(absPath))
+
 		// Guardrail: never run mutating bd doctor fix from Gas Town town root.
 		// Town-level repair must go through `gt doctor --fix` because town roots
 		// have additional invariants beyond beads-only repos.
