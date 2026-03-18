@@ -61,9 +61,6 @@ func (s *DoltStore) GetEvents(ctx context.Context, issueID string, limit int) ([
 // GetAllEventsSince returns all events created after the given time, ordered by creation time.
 // Queries both events and wisp_events tables. Uses created_at for filtering because
 // event IDs are UUIDs (not sequential integers) and cannot be used as high-water marks.
-// Note: ORDER BY uses only created_at (not id) because Dolt's query planner attempts to
-// cast UUID char(36) ids to double for sorting in UNION ALL queries, which fails with
-// "+Inf is not a valid value for double".
 func (s *DoltStore) GetAllEventsSince(ctx context.Context, since time.Time) ([]*types.Event, error) {
 	rows, err := s.queryContext(ctx, `
 		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
