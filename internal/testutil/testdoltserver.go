@@ -94,6 +94,18 @@ func hasTestSkip(service string) bool {
 	return false
 }
 
+// RequireDoltCLI skips the test when the host dolt CLI is unavailable or the
+// shared Dolt test skip contract is active via BEADS_TEST_SKIP=dolt.
+func RequireDoltCLI(t *testing.T) {
+	t.Helper()
+	if hasTestSkip("dolt") {
+		t.Skip("skipping test: Dolt tests skipped (BEADS_TEST_SKIP=dolt)")
+	}
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("skipping test: dolt CLI not found on PATH")
+	}
+}
+
 // checkDolt returns the readiness state for Dolt integration tests.
 // It composes hasTestSkip, isDockerAvailable, isDoltImageCached, and
 // isDoltRepoImageCached, caching the result.

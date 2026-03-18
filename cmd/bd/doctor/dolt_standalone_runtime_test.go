@@ -43,6 +43,7 @@ func TestStandaloneDoctorChecks_PreserveRedirectSourceDatabase(t *testing.T) {
 
 func setupRedirectedStandaloneDoctorRepo(t *testing.T) (string, func()) {
 	t.Helper()
+	testutil.RequireDoltCLI(t)
 
 	port, err := testutil.FindFreePort()
 	if err != nil {
