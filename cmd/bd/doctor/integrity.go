@@ -345,11 +345,11 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	return checkRepoFingerprintWithStore(store)
+	return checkRepoFingerprintWithStore(store, path)
 }
 
 // CheckRepoFingerprintWithStore checks repo fingerprint using a shared store (GH#2636).
-func CheckRepoFingerprintWithStore(ss *SharedStore) DoctorCheck {
+func CheckRepoFingerprintWithStore(ss *SharedStore, path string) DoctorCheck {
 	store := ss.Store()
 	if store == nil {
 		return DoctorCheck{
@@ -358,10 +358,10 @@ func CheckRepoFingerprintWithStore(ss *SharedStore) DoctorCheck {
 			Message: "N/A (no database)",
 		}
 	}
-	return checkRepoFingerprintWithStore(store)
+	return checkRepoFingerprintWithStore(store, path)
 }
 
-func checkRepoFingerprintWithStore(store *dolt.DoltStore) DoctorCheck {
+func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorCheck {
 	ctx := context.Background()
 
 	storedRepoID, err := store.GetMetadata(ctx, "repo_id")

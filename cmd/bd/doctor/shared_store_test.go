@@ -72,7 +72,7 @@ func TestSharedStore_WithStoreChecks_NoDatabase(t *testing.T) {
 		{"DatabaseIntegrity", CheckDatabaseIntegrityWithStore(ss)},
 		{"IDFormat", CheckIDFormatWithStore(ss)},
 		{"DependencyCycles", CheckDependencyCyclesWithStore(ss)},
-		{"RepoFingerprint", CheckRepoFingerprintWithStore(ss)},
+		{"RepoFingerprint", CheckRepoFingerprintWithStore(ss, tmpDir)},
 		{"DatabaseSize", CheckDatabaseSizeWithStore(ss)},
 	}
 
