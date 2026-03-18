@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/gitlab"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -197,7 +196,7 @@ func getGitLabConfigValue(ctx context.Context, key string) string {
 			return value
 		}
 	} else if dbPath != "" {
-		tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+		tempStore, err := openReadOnlyStoreForDBPath(ctx, dbPath)
 		if err == nil {
 			defer func() { _ = tempStore.Close() }()
 			value, _ := tempStore.GetConfig(ctx, key)

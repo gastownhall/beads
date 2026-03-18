@@ -604,11 +604,18 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	// If env var didn't provide a port, consult the full resolution chain:
 	// port file > config.yaml > metadata.json (GH#2590).
-	// Previously, port 0 fell through to the MySQL driver default (3307),
-	// causing cross-project connections when another Dolt sat on 3307.
-	if cfg.ServerPort == 0 && cfg.Path != "" {
-		if resolved := doltserver.DefaultConfig(cfg.Path); resolved.Port > 0 {
-			cfg.ServerPort = resolved.Port
+	// Resolve from the owning .beads dir when available; cfg.Path is the Dolt
+	// data path, not the config directory, and using it directly can miss the
+	// repo-local port file or metadata.
+	if cfg.ServerPort == 0 {
+		resolveDir := cfg.BeadsDir
+		if resolveDir == "" && cfg.Path != "" {
+			resolveDir = filepath.Dir(cfg.Path)
+		}
+		if resolveDir != "" {
+			if resolved := doltserver.DefaultConfig(resolveDir); resolved.Port > 0 {
+				cfg.ServerPort = resolved.Port
+			}
 		}
 	}
 	// Port 0 means "not yet resolved" — auto-start (EnsureRunning) will

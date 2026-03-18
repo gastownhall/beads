@@ -12,7 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/linear"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -524,7 +523,7 @@ func getLinearConfig(ctx context.Context, key string) (value string, source stri
 			return value, "project config (bd config)"
 		}
 	} else if dbPath != "" {
-		tempStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+		tempStore, err := openReadOnlyStoreForDBPath(ctx, dbPath)
 		if err == nil {
 			defer func() { _ = tempStore.Close() }()
 			value, _ = tempStore.GetConfig(ctx, key) // Best effort: empty value is valid fallback

@@ -29,8 +29,9 @@ func withStorage(ctx context.Context, store storage.DoltStorage, dbPath string, 
 	if store != nil {
 		return fn(store)
 	} else if dbPath != "" {
-		// Open read-only connection
-		roStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath, ReadOnly: true})
+		// Open read-only connection using repo metadata when available so
+		// helper paths keep the correct Dolt database and server endpoint.
+		roStore, err := openReadOnlyStoreForDBPath(ctx, dbPath)
 		if err != nil {
 			return err
 		}
