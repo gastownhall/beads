@@ -62,6 +62,9 @@ dolt-server.port
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Per-project environment file (Dolt connection config, GH#2520)
+.env
+
 # Legacy files (from pre-Dolt versions)
 *.db
 *.db?*
@@ -89,6 +92,7 @@ const projectGitignoreComment = "# Dolt database files (added by bd init)"
 // requiredPatterns are patterns that MUST be in .beads/.gitignore
 var requiredPatterns = []string{
 	"*.db?*",
+	".env",
 	"redirect",
 	"last-touched",
 	"bd.sock.startlock",

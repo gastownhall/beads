@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/subosito/gotenv"
+
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -115,6 +117,17 @@ var readOnlyCommands = map[string]bool{
 // that would trigger file watchers. See GH#804.
 func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
+}
+
+// loadBeadsEnvFile loads .beads/.env into process environment for per-project
+// Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
+// existing shell env vars always take precedence.
+func loadBeadsEnvFile(beadsDir string) {
+	envFile := filepath.Join(beadsDir, ".env")
+	if _, err := os.Stat(envFile); err != nil {
+		return
+	}
+	_ = gotenv.Load(envFile)
 }
 
 // resolveCommandBeadsDir maps a discovered Dolt data path back to the owning
@@ -364,6 +377,14 @@ var rootCmd = &cobra.Command{
 		// Validate Dolt auto-commit mode early so all commands fail fast on invalid config.
 		if _, err := getDoltAutoCommitMode(); err != nil {
 			FatalError("%v", err)
+		}
+
+		// GH#2677: Load .beads/.env before the noDbCommands early return so that
+		// commands like "bd doctor --server" pick up per-project Dolt credentials.
+		// FindBeadsDir is lightweight (no git subprocesses) and beadsDir resolution
+		// only needs the filesystem walk that has already been cached.
+		if earlyBeadsDir := beads.FindBeadsDir(); earlyBeadsDir != "" {
+			loadBeadsEnvFile(earlyBeadsDir)
 		}
 
 		// GH#1093: Check noDbCommands BEFORE expensive operations
