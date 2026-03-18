@@ -13,8 +13,8 @@ import (
 
 // openReadOnlyStoreForDBPath reopens a read-only store from an existing dbPath
 // while preserving repo-local metadata such as dolt_database and the resolved
-// Dolt server port. Falls back to a raw path-only open when no matching
-// metadata.json can be found.
+// Dolt server port. Falls back to deriving the beads directory from the dbPath
+// parent when no matching metadata.json can be found.
 func openReadOnlyStoreForDBPath(ctx context.Context, dbPath string) (storage.DoltStorage, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("no database path available")
