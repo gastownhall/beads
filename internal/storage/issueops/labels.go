@@ -34,6 +34,75 @@ func GetLabelsInTx(ctx context.Context, tx *sql.Tx, table, issueID string) ([]st
 	return labels, rows.Err()
 }
 
+// GetLabelsForIssuesInTx fetches labels for multiple issues in a single transaction.
+// Routes each ID to labels or wisp_labels based on wisp status.
+func GetLabelsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]string, error) {
+	if len(issueIDs) == 0 {
+		return make(map[string][]string), nil
+	}
+
+	result := make(map[string][]string)
+
+	var wispIDs, permIDs []string
+	for _, id := range issueIDs {
+		if IsActiveWispInTx(ctx, tx, id) {
+			wispIDs = append(wispIDs, id)
+		} else {
+			permIDs = append(permIDs, id)
+		}
+	}
+
+	for _, pair := range []struct {
+		table string
+		ids   []string
+	}{
+		{"wisp_labels", wispIDs},
+		{"labels", permIDs},
+	} {
+		if len(pair.ids) == 0 {
+			continue
+		}
+		placeholders := make([]string, len(pair.ids))
+		args := make([]any, len(pair.ids))
+		for i, id := range pair.ids {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		//nolint:gosec // G201: pair.table is hardcoded
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label`,
+			pair.table, joinPlaceholders(placeholders)), args...)
+		if err != nil {
+			return nil, fmt.Errorf("get labels for issues from %s: %w", pair.table, err)
+		}
+		for rows.Next() {
+			var issueID, label string
+			if err := rows.Scan(&issueID, &label); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get labels for issues: scan: %w", err)
+			}
+			result[issueID] = append(result[issueID], label)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get labels for issues: rows: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+func joinPlaceholders(p []string) string {
+	result := ""
+	for i, s := range p {
+		if i > 0 {
+			result += ","
+		}
+		result += s
+	}
+	return result
+}
+
 // AddLabelInTx adds a label to an issue and records an event within an existing
 // transaction. Automatically routes to wisp tables if the ID is an active wisp.
 // Uses INSERT IGNORE for idempotency.
