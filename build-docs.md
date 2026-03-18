@@ -4,7 +4,7 @@ Path: @/ (root level - Makefile, .goreleaser.yml)
 
 ### Overview
 
-The beads project uses a coordinated build and version reporting system that ensures all installation methods (direct `go install`, `make install`, GitHub releases, Homebrew, npm) produce binaries with complete version information including git commit hash and branch name.
+The beads project uses a coordinated build and version reporting system that keeps the supported installation methods (`make install`, user-facing `go install ...@latest`, GitHub releases, Homebrew, npm, and the install scripts) reporting enough version/build information to identify what was installed.
 
 This infrastructure is critical for debugging, auditing, and user support - it allows anyone to identify exactly what code their binary was built from.
 
@@ -18,38 +18,25 @@ This infrastructure is critical for debugging, auditing, and user support - it a
   - Runtime: Resolve functions in version.go retrieve and display the info
 
 - **Installation Methods**: The build configuration enables multiple installation paths while maintaining version consistency:
-  - `make install` - Used by developers building from source
-  - `go install ./cmd/bd` - Direct Go installation with embedded ldflag injection
+  - `make install` - Used by developers building from a local checkout; it builds first, then copies the result into `~/.local/bin`
+  - `go install github.com/steveyegge/beads/cmd/bd@latest` - End-user direct Go installation path
   - GitHub releases - Goreleaser-built binaries for all platforms
   - Homebrew - Pre-built binaries installed via `brew install beads`
   - npm - Node.js package that downloads pre-built binaries via postinstall hook
-  - `./scripts/install.sh` - User-friendly build-from-source helper
+  - `./scripts/install.sh` - User-friendly installer that prefers the end-user install/build path rather than clone-local maintainer workflow
 
 - **Release Automation**: Goreleaser configuration integrates with GitHub Actions and the release process documented in `@/RELEASING.md`, ensuring released binaries have full version info.
 
 ### Core Implementation
 
-**Makefile** (`@/Makefile`, lines 37-41 - `install` target):
+**Makefile** (`@/Makefile`, `build` / `install` targets):
 
-The `install` target is the primary development build mechanism:
+The current maintainer path is `make install`, which works in two stages:
 
-```makefile
-install:
-	@echo "Installing bd to $$(go env GOPATH)/bin..."
-	@bash -c 'commit=$$(git rev-parse HEAD 2>/dev/null || echo ""); \
-		branch=$$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ""); \
-		go install -ldflags="-X main.Commit=$$commit -X main.Branch=$$branch" ./cmd/bd'
-```
+1. `make build` compiles `./cmd/bd` with `go build`, sets `main.Build` from the short git hash, and relies on Go's embedded VCS metadata for commit and branch details.
+2. `make install` copies that built binary into `~/.local/bin`, creates the `beads` alias, and runs the up-to-date guard unless `make install-force` is used.
 
-How it works:
-1. Uses bash subshell to extract git information at install time
-2. `git rev-parse HEAD` gets the full commit hash
-3. `git rev-parse --abbrev-ref HEAD` gets the current branch name
-4. Passes both as ldflags to `go install` using the `-X` flag (variable assignment)
-5. The ldflags set `main.Commit` and `main.Branch` package variables
-6. These variables are then retrieved by functions in `@/cmd/bd/version.go` at runtime
-
-Key implementation detail: The original target depended on `build`, but this was removed because `go install` is sufficient and handles compilation itself.
+That means clone-local maintainers should use `make install`, not raw `go build -o bd ./cmd/bd`, when they want their checkout to become the active CLI on the machine.
 
 **Goreleaser Configuration** (`@/.goreleaser.yml`, lines 11-95):
 
@@ -86,9 +73,9 @@ Goreleaser template variables:
 
 **Installation Script** (`@/scripts/install.sh`):
 
-Provides a user-friendly way to build from source with full version info:
-- Extracts git commit and branch
-- Calls `go install` with the same ldflags pattern as Makefile
+Provides a user-friendly way to install beads outside a maintainer checkout:
+- Prefers `go install github.com/steveyegge/beads/cmd/bd@latest` when Go is available
+- Falls back to source builds when necessary
 - Immediately verifies installation by running `bd version`
 
 **Version Resolution Chain** (`@/cmd/bd/version.go`, lines 116-163):
@@ -117,9 +104,9 @@ The Go toolchain (as of 1.18+) can automatically embed VCS information when comp
 - `go build ./cmd/bd` → automatically embeds vcs.revision and vcs.branch
 - `go install ./cmd/bd` → does NOT embed VCS info automatically
 
-The solution is to explicitly pass git information as ldflags in all build configurations. This ensures:
-- Users who run `make install` get full version info
-- Users who run `go install ./cmd/bd` need to explicitly set ldflags (via Makefile or script)
+The solution is to ensure each installation path injects or preserves the right metadata for its mechanism. In practice this means:
+- Users who run `make install` get the repo's `go build` VCS metadata plus the short-build marker from the Makefile
+- Users who run plain `go install ./cmd/bd` from a checkout still need explicit ldflags if they want local branch/commit detail in the binary
 - Released binaries from goreleaser have full version info (handled by goreleaser templates)
 - The version command is consistent regardless of installation method
 

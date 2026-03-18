@@ -31,7 +31,7 @@ Use the command that matches your install method.
 | go install | macOS, Linux, FreeBSD, Windows | `go install github.com/steveyegge/beads/cmd/bd@latest` |
 | npm | macOS, Linux, Windows | `npm update -g @beads/bd` |
 | bun | macOS, Linux, Windows | `bun install -g --trust @beads/bd` |
-| From source (Unix shell) | macOS, Linux, FreeBSD | `git pull && go build -o bd ./cmd/bd` |
+| From source checkout (Unix shell) | macOS, Linux, FreeBSD | `git pull && make install` |
 
 ### Quick install script (macOS/Linux/FreeBSD)
 
@@ -57,14 +57,18 @@ brew upgrade beads
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-### From Source
+### From Source Checkout
 
 ```bash
 cd beads
 git pull
-go build -o bd ./cmd/bd
-sudo mv bd /usr/local/bin/
+make install
+bd version
 ```
+
+If you maintain Beads from a source checkout, `make install` is the supported
+upgrade path. It rebuilds the CLI using the repo's current build settings and
+refreshes the canonical install under `~/.local/bin`.
 
 ## After Upgrading
 

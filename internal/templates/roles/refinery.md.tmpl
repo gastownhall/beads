@@ -236,9 +236,11 @@ git rebase origin/main
 ```
 If conflicts unresolvable: reopen source issue, notify witness (MERGE_FAILED), close MR, skip to loop-check.
 
-**run-tests**: Run the test suite
+**run-tests**: Run the sanctioned test lanes
 ```bash
-go test ./...
+make test-short
+# If the branch touches Dolt-sensitive or CGO-relevant code, also run:
+make test-full-cgo
 ```
 
 **handle-failures**: **VERIFICATION GATE**

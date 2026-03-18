@@ -34,6 +34,10 @@ The installer will:
 - Fall back to building from source if needed
 - Guide you through PATH setup if necessary
 
+If you're actively developing inside a clone of the Beads repo itself, prefer
+`make install` from that checkout instead of leaving a hand-built `./bd` in the
+repo root.
+
 ## Build Dependencies (go install / from source)
 
 If you install via `go install` or build from source, you need system dependencies for CGO:
@@ -73,12 +77,12 @@ brew install beads
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-**From source**:
+**From source / maintainer checkout**:
 ```bash
 git clone https://github.com/steveyegge/beads
 cd beads
-go build -o bd ./cmd/bd
-sudo mv bd /usr/local/bin/
+make install
+bd version
 ```
 
 ### Linux

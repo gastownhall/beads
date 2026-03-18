@@ -18,7 +18,7 @@
 Traditional issue trackers (Jira, GitHub Issues) weren't designed for AI agents. Beads was built from the ground up for:
 
 - **AI-native workflows** - Hash-based IDs prevent collisions when multiple agents work concurrently
-- **Dolt-backed storage** - Version-controlled SQL database with cell-level merge and native sync
+- **Dolt-backed storage** - Issues stored in a version-controlled SQL database, enabling collaboration via Dolt-native replication
 - **Dependency-aware execution** - `bd ready` shows only unblocked work
 - **Formula system** - Declarative templates for repeatable workflows
 - **Multi-agent coordination** - Routing, gates, and molecules for complex workflows
@@ -67,8 +67,8 @@ bd show bd-42 --json
 bd create "Found bug in auth" --description="Details..." \
   --deps discovered-from:bd-100 --json
 
-# Sync at end of session
-bd sync
+# Push changes at end of session
+bd dolt push
 ```
 
 See the [Claude Code integration](/integrations/claude-code) for detailed agent instructions.
@@ -76,14 +76,14 @@ See the [Claude Code integration](/integrations/claude-code) for detailed agent 
 ## Architecture
 
 ```
-SQLite DB (.beads/beads.db, gitignored)
-    ↕ auto-sync (5s debounce)
-JSONL (.beads/issues.jsonl, git-tracked)
-    ↕ git push/pull
-Remote JSONL (shared across machines)
+Dolt DB (.beads/dolt/, gitignored)
+    ↕ dolt commit
+Local Dolt history
+    ↕ dolt push/pull
+Remote Dolt repository (shared across machines)
 ```
 
-The magic is automatic synchronization between a local SQLite database and git-tracked JSONL files.
+The magic is automatic synchronization via Dolt's version-controlled database with built-in replication.
 
 ## Next Steps
 
@@ -112,7 +112,7 @@ bd setup claude
 
 This installs:
 - **SessionStart hook** - Runs `bd prime` when Claude Code starts
-- **PreCompact hook** - Ensures `bd sync` before context compaction
+- **PreCompact hook** - Ensures `bd dolt push` before context compaction
 
 **How it works:**
 1. SessionStart hook runs `bd prime` automatically
@@ -133,7 +133,7 @@ If you prefer manual configuration, add to your Claude Code hooks:
 {
   "hooks": {
     "SessionStart": ["bd prime"],
-    "PreCompact": ["bd sync"]
+    "PreCompact": ["bd dolt push"]
   }
 }
 ```
@@ -331,6 +331,10 @@ The installer will:
 - Fall back to building from source if needed
 - Guide you through PATH setup if necessary
 
+If you're actively developing inside a clone of the Beads repo itself, prefer
+`make install` from that checkout instead of leaving a hand-built `./bd` in the
+repo root.
+
 ## Build Dependencies (go install / from source)
 
 If you install via `go install` or build from source, you need system dependencies for CGO:
@@ -370,12 +374,12 @@ brew install beads
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-**From source**:
+**From source / maintainer checkout**:
 ```bash
 git clone https://github.com/steveyegge/beads
 cd beads
-go build -o bd ./cmd/bd
-sudo mv bd /usr/local/bin/
+make install
+bd version
 ```
 
 ### Linux
@@ -571,11 +575,8 @@ Get up and running with Beads in 2 minutes.
 First time in a repository:
 
 ```bash
-# Basic setup
+# Basic setup (uses Dolt backend)
 bd init
-
-# Dolt backend (version-controlled SQL database)
-bd init --backend dolt
 
 # For AI agents (non-interactive)
 bd init --quiet
@@ -587,7 +588,8 @@ bd init --contributor
 bd init --team
 
 # Protected main branch (GitHub/GitLab)
-bd init --branch beads-sync
+# Note: Dolt stores data under refs/dolt/data, separate from
+# Git refs, so no --branch flag is needed.
 ```
 
 The wizard will:
@@ -597,9 +599,8 @@ The wizard will:
 - Prompt to configure git merge driver (recommended)
 
 Notes:
-- SQLite backend stores data in `.beads/beads.db`.
-- Dolt backend stores data in `.beads/dolt/` and records `"database": "dolt"` in `.beads/metadata.json`.
-- Dolt backend uses a Dolt server for database access (`bd dolt start/stop`).
+- Dolt stores data in `.beads/dolt/` and records `"database": "dolt"` in `.beads/metadata.json`.
+- The Dolt server handles database access (`bd dolt start/stop`).
 
 ## Your First Issues
 
@@ -707,9 +708,7 @@ bd stats
 
 ## Database Location
 
-By default, the database is in `.beads/beads.db` (gitignored).
-
-The JSONL file `.beads/issues.jsonl` is git-tracked and syncs automatically.
+By default, the Dolt database is in `.beads/dolt/` (gitignored). Sync is handled via Dolt-native replication.
 
 ## Next Steps
 
@@ -751,7 +750,7 @@ Use the command that matches your install method.
 | go install | macOS, Linux, FreeBSD, Windows | `go install github.com/steveyegge/beads/cmd/bd@latest` |
 | npm | macOS, Linux, Windows | `npm update -g @beads/bd` |
 | bun | macOS, Linux, Windows | `bun install -g --trust @beads/bd` |
-| From source (Unix shell) | macOS, Linux, FreeBSD | `git pull && go build -o bd ./cmd/bd` |
+| From source checkout (Unix shell) | macOS, Linux, FreeBSD | `git pull && make install` |
 
 ### Quick install script (macOS/Linux/FreeBSD)
 
@@ -777,14 +776,18 @@ brew upgrade beads
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-### From Source
+### From Source Checkout
 
 ```bash
 cd beads
 git pull
-go build -o bd ./cmd/bd
-sudo mv bd /usr/local/bin/
+make install
+bd version
 ```
+
+If you maintain Beads from a source checkout, `make install` is the supported
+upgrade path. It rebuilds the CLI using the repo's current build settings and
+refreshes the canonical install under `~/.local/bin`.
 
 ## After Upgrading
 
@@ -839,13 +842,22 @@ bd migrate --dry-run
 bd migrate
 ```
 
-### Import errors after upgrade
+### Recovery after upgrade
 
-Check the import configuration:
+If you need to restore from a JSONL backup:
 
 ```bash
-bd config get import.orphan_handling
-bd import -i .beads/issues.jsonl --orphan-handling allow
+bd init
+bd backup restore
+
+# Or fetch the latest snapshot from a backup git branch
+bd backup fetch-git
+```
+
+Or pull from a Dolt remote:
+
+```bash
+bd dolt pull
 ```
 
 </document>
@@ -861,9 +873,9 @@ Understanding the fundamental concepts behind beads.
 
 Beads was built with these principles:
 
-1. **Git as source of truth** - Issues sync via JSONL files, enabling collaboration across branches
+1. **Dolt as source of truth** - Issues stored in a version-controlled SQL database (Dolt), enabling collaboration via Dolt-native replication
 2. **AI-native workflows** - Hash-based IDs, JSON output, dependency-aware execution
-3. **Local-first operation** - SQLite database for fast queries, background sync
+3. **Local-first operation** - Dolt database for fast queries, background sync
 4. **Declarative workflows** - Formulas define repeatable patterns
 
 ## Key Components
@@ -897,16 +909,16 @@ Dolt provides the database backend for beads:
 - Logs available at `.beads/dolt/sql-server.log`
 - Check health with `bd doctor`
 
-### JSONL Sync
+### Dolt Sync
 
 The synchronization mechanism:
 
 ```
-SQLite DB (.beads/beads.db)
-    ↕ auto-sync
-JSONL (.beads/issues.jsonl)
-    ↕ git
-Remote repository
+Dolt DB (.beads/dolt/)
+    ↕ dolt commit
+Local Dolt history
+    ↕ dolt push/pull
+Remote Dolt repository
 ```
 
 ### Formulas
@@ -921,7 +933,7 @@ Declarative workflow templates:
 
 - [Issues & Dependencies](/core-concepts/issues)
 - [Dolt Server Mode](/core-concepts/dolt-server)
-- [JSONL Sync](/core-concepts/jsonl-sync)
+- [Dolt Sync](/core-concepts/dolt-sync)
 - [Hash-based IDs](/core-concepts/hash-ids)
 
 </document>
@@ -1039,8 +1051,8 @@ bd list --full-ids
 If migrating from a system with sequential IDs:
 
 ```bash
-# Import preserves original IDs in metadata
-bd import -i old-issues.json
+# Bootstrap from a JSONL export (preserves original IDs in metadata)
+bd init --from-jsonl old-issues.jsonl
 
 # View original ID
 bd show bd-new --json | jq '.original_id'
@@ -1243,137 +1255,70 @@ bd list --status open --priority 1 --type bug --json
 
 # Architecture Overview
 
-This document explains how Beads' three-layer architecture works: Git, JSONL, and SQLite.
+This document explains how Beads' architecture works with Dolt as its storage backend.
 
-## The Three Layers
+## Architecture
 
-Beads uses a layered architecture where each layer serves a specific purpose:
+Beads uses **Dolt** as its sole storage backend -- a version-controlled SQL database that provides git-like semantics (branch, merge, diff, push, pull) natively at the database level.
 
 ```mermaid
 flowchart TD
-    subgraph GIT["🗂️ Layer 1: Git Repository"]
-        G[(".beads/*.jsonl<br/><i>Historical Source of Truth</i>")]
+    subgraph DOLT["🗄️ Dolt Database"]
+        D[(".beads/dolt/<br/><i>Version-Controlled SQL</i>")]
     end
 
-    subgraph JSONL["📄 Layer 2: JSONL Files"]
-        J[("issues.jsonl<br/><i>Operational Source of Truth</i>")]
+    subgraph REMOTE["🌐 Dolt Remotes"]
+        R[("DoltHub / S3 / GCS<br/><i>Sync & Backup</i>")]
     end
 
-    subgraph SQL["⚡ Layer 3: SQLite"]
-        D[("beads.db<br/><i>Fast Queries / Derived State</i>")]
-    end
+    D <-->|"bd dolt push/pull"| R
 
-    G <-->|"bd sync"| J
-    J -->|"rebuild"| D
-    D -->|"append"| J
-
-    U((👤 User)) -->|"bd create<br/>bd update"| D
+    U((User)) -->|"bd create<br/>bd update"| D
     D -->|"bd list<br/>bd show"| U
 
-    style GIT fill:#2d5a27,stroke:#4a9c3e,color:#fff
-    style JSONL fill:#1a4a6e,stroke:#3a8ac4,color:#fff
-    style SQL fill:#6b3a6b,stroke:#a45ea4,color:#fff
+    style DOLT fill:#2d5a27,stroke:#4a9c3e,color:#fff
+    style REMOTE fill:#1a4a6e,stroke:#3a8ac4,color:#fff
 ```
 
-:::info Historical vs Operational Truth
-**Git** is the *historical* source of truth—commits preserve the full history of your issues and can be recovered from any point in time.
+:::info Source of Truth
+**Dolt** is the source of truth. Every write auto-commits to Dolt history, providing full version control, branching, and merge capabilities at the database level.
 
-**JSONL** is the *operational* source of truth—when recovering from database corruption, Beads rebuilds SQLite from JSONL files, not directly from Git commits.
-
-This layered model enables recovery: if SQLite is corrupted but JSONL is intact, run `bd sync --import-only` to rebuild. If JSONL is corrupted, recover it from Git history first.
+Recovery is straightforward: pull from a Dolt remote with `bd dolt pull`, restore a local JSONL backup snapshot with `bd backup restore`, or fetch one from a git branch with `bd backup fetch-git`.
 :::
 
-### Layer 1: Git Repository
+### Why Dolt?
 
-Git is the *historical* source of truth. All issue data lives in the repository alongside your code, with full history preserved in commits.
-
-**Why Git?**
-- Issues travel with the code
-- No external service dependency
-- Full history via Git log (recover any point in time)
-- Works offline
-- Enables multi-machine and multi-agent workflows
-
-### Layer 2: JSONL Files
-
-JSONL (JSON Lines) files store issue data in an append-only format. This is the *operational* source of truth—SQLite databases are rebuilt from JSONL.
-
-**Location:** `.beads/*.jsonl`
-
-**Why JSONL?**
-- Human-readable and inspectable
-- Git-mergeable (append-only reduces conflicts)
-- Portable across systems
-- Can be recovered from Git history
-- **Recovery source**: `bd sync --import-only` rebuilds SQLite from JSONL
-
-### Layer 3: SQLite Database
-
-SQLite provides fast local queries without network latency. This is *derived state*—it can always be rebuilt from JSONL.
-
-**Location:** `.beads/beads.db`
-
-**Why SQLite?**
-- Instant queries (no network)
-- Complex filtering and sorting
-- Derived from JSONL (always rebuildable)
-- Safe to delete and rebuild: `rm .beads/beads.db* && bd sync --import-only`
+- **Version-controlled SQL**: Full SQL queries with native version control
+- **Cell-level merge**: Concurrent changes merge automatically at the field level
+- **Multi-writer**: Server mode supports concurrent agents
+- **Native branching**: Dolt branches independent of git branches
+- **Works offline**: All queries run against local database
+- **Portable**: `bd export` produces JSONL for migration and interoperability
 
 ## Data Flow
 
 ### Write Path
 ```text
 User runs bd create
-    → SQLite updated
-    → JSONL appended
-    → Git commit (on sync)
+    → Dolt database updated
+    → Auto-committed to Dolt history
 ```
 
 ### Read Path
 ```text
 User runs bd list
-    → SQLite queried
+    → Dolt SQL query
     → Results returned immediately
 ```
 
 ### Sync Path
 ```text
-User runs bd sync
-    → Git pull
-    → JSONL merged
-    → SQLite rebuilt if needed
-    → Git push
+User runs bd dolt push
+    → Commits pushed to Dolt remote
+
+User runs bd dolt pull
+    → Remote commits fetched and merged
 ```
-
-### Sync Modes
-
-Beads provides specialized sync modes for different recovery scenarios:
-
-#### Standard Sync
-```bash
-bd sync
-```
-Normal bidirectional sync: pulls remote changes, merges JSONL, rebuilds SQLite if needed, pushes local changes.
-
-#### Import-Only Mode
-```bash
-bd sync --import-only
-```
-Rebuilds the SQLite database from JSONL without pushing changes. Use this when:
-- SQLite is corrupted or missing
-- Recovering from a fresh clone
-- Rebuilding after database migration issues
-
-This is the safest recovery option when JSONL is intact.
-
-#### Force Rebuild Mode
-```bash
-bd sync --force-rebuild
-```
-Forces complete SQLite rebuild from JSONL, discarding any SQLite-only state. Use with caution:
-- More aggressive than `--import-only`
-- May lose any uncommitted database state
-- Recommended when standard sync fails repeatedly
 
 ### Multi-Machine Sync Considerations
 
@@ -1381,16 +1326,16 @@ When working across multiple machines or clones:
 
 1. **Always sync before switching machines**
    ```bash
-   bd sync  # Push changes before leaving
+   bd dolt push  # Push changes before leaving
    ```
 
 2. **Pull before creating new issues**
    ```bash
-   bd sync  # Pull changes first on new machine
+   bd dolt pull  # Pull changes first on new machine
    bd create "New issue"
    ```
 
-3. **Avoid parallel edits** - If two machines create issues simultaneously without syncing, conflicts may occur
+3. **Avoid parallel edits** - If two machines create issues simultaneously without syncing, Dolt's cell-level merge handles most conflicts automatically
 
 See [Sync Failures Recovery](/recovery/sync-failures) for data loss prevention in multi-machine workflows (Pattern A5/C3).
 
@@ -1400,7 +1345,7 @@ The Dolt server handles background synchronization and database operations:
 
 - Manages the Dolt database backend
 - Handles auto-commit for change tracking
-- Keeps SQLite in sync with JSONL
+- Provides concurrent access for multiple agents
 - Logs available at `.beads/dolt/sql-server.log`
 
 :::tip
@@ -1413,7 +1358,7 @@ For CI/CD pipelines, containers, and single-use scenarios, no server is needed. 
 
 ```bash
 bd create "CI-generated issue"
-bd sync
+bd dolt push
 ```
 
 **When embedded mode is appropriate:**
@@ -1440,69 +1385,59 @@ See [Sync Failures Recovery](/recovery/sync-failures) for sync race condition tr
 
 ## Recovery Model
 
-The three-layer architecture makes recovery straightforward because each layer can rebuild from the one above it:
+Dolt's version control makes recovery straightforward:
 
-1. **Lost SQLite?** → Rebuild from JSONL: `bd sync --import-only`
-2. **Lost JSONL?** → Recover from Git history: `git checkout HEAD~1 -- .beads/issues.jsonl`
-3. **Conflicts?** → Git merge, then rebuild
+1. **Lost database?** → Pull from Dolt remote: `bd dolt pull`
+2. **Have a JSONL backup snapshot?** → Restore it: `bd backup restore`
+3. **Merge conflicts?** → Dolt handles cell-level merge natively
 
 ### Universal Recovery Sequence
 
-The following sequence demonstrates how the architecture enables quick recovery. For detailed procedures, see [Recovery Runbooks](/recovery).
-
-This sequence resolves the majority of reported issues:
+The following sequence resolves the majority of reported issues. For detailed procedures, see [Recovery Runbooks](/recovery).
 
 ```bash
 bd dolt stop                 # Stop Dolt server (prevents race conditions)
 git worktree prune           # Clean orphaned worktrees
-rm .beads/beads.db*          # Remove potentially corrupted database
-bd sync --import-only        # Rebuild from JSONL source of truth
+bd dolt pull                 # Pull from Dolt remote
+bd dolt start                # Restart server
 ```
 
-:::danger Never Use `bd doctor --fix`
-Analysis of 54 GitHub issues revealed that `bd doctor --fix` frequently causes **more damage** than the original problem:
+:::warning Use `bd doctor --fix` With Care
+Always back up and preview before running `bd doctor --fix`:
 
-- Deletes "circular" dependencies that are actually valid parent-child relationships
-- False positive detection removes legitimate issue links
-- Recovery after `--fix` is harder than recovery from the original issue
+1. **Back up first:** `cp -r .beads .beads.backup`
+2. **Preview changes:** `bd doctor --dry-run` — shows what would be fixed without making changes
+3. **Review diagnostics:** `bd doctor` (no flags) — diagnostic only, no changes made
+4. **Then fix:** `bd doctor --fix` — or `bd doctor --fix -i` to confirm each fix individually
 
-**Safe alternatives:**
-- `bd doctor` — Diagnostic only, no changes made
-- `bd blocked` — Check which issues are blocked and why
-- `bd show <issue-id>` — Inspect a specific issue's state
+**Why caution?** The `--fix` flag may remove dependencies it flags as circular, including valid parent-child relationships. Use `--fix-child-parent` only if you're certain the flagged deps are invalid.
 
-If `bd doctor` reports problems, investigate each one manually before taking any action.
+**Other diagnostic tools:**
+- `bd blocked` — check which issues are blocked and why
+- `bd show <issue-id>` — inspect a specific issue's state
 :::
 
-See [Recovery](/recovery) for specific procedures and [Database Corruption Recovery](/recovery/database-corruption) for `bd doctor --fix` recovery (Pattern D4).
+See [Recovery](/recovery) for specific procedures and [Database Corruption Recovery](/recovery/database-corruption) for Dolt recovery steps.
 
 ## Design Decisions
 
-### Why not just SQLite?
+### Why Dolt?
 
-SQLite alone doesn't travel with Git or merge well across branches. Binary database files create merge conflicts that are nearly impossible to resolve.
+Dolt is a version-controlled SQL database that provides git-like semantics natively. Unlike plain SQLite (binary merge conflicts) or JSONL (slow queries), Dolt gives you both fast SQL queries and proper merge semantics.
 
-### Why not just JSONL?
+### Why not a cloud server?
 
-JSONL is slow for complex queries. Scanning thousands of lines for filtering and sorting is inefficient. SQLite provides indexed lookups in milliseconds.
-
-### Why append-only JSONL?
-
-Append-only format minimizes Git merge conflicts. When two branches add issues, Git can cleanly merge by concatenating the additions. Edit operations append new records rather than modifying existing lines.
-
-### Why not a server?
-
-Beads is designed for offline-first, local-first development. No server means no downtime, no latency, no vendor lock-in, and full functionality on airplanes or in restricted networks.
+Beads is designed for offline-first, local-first development. The Dolt server runs locally -- no cloud dependency, no downtime, no vendor lock-in, and full functionality on airplanes or in restricted networks.
 
 ### Trade-offs
 
 | Benefit | Trade-off |
 |---------|-----------|
 | Works offline | No real-time collaboration |
-| Git-native history | Requires Git knowledge |
-| No server dependency | No web UI or mobile app |
-| Local-first speed | Manual sync required |
-| Append-only merging | JSONL files grow over time |
+| Version-controlled database | Requires Dolt server |
+| Cell-level merge | Requires initial setup |
+| Local-first speed | Manual sync to remotes |
+| SQL queries | Dolt binary dependency |
 
 ### When NOT to use Beads
 
@@ -1562,7 +1497,8 @@ Most frequently used:
 | `bd update` | Update issue fields |
 | `bd close` | Close an issue |
 | `bd ready` | Show unblocked work |
-| `bd sync` | Force sync to git |
+| `bd dolt push` | Push changes to Dolt remote |
+| `bd dolt pull` | Pull changes from Dolt remote |
 
 ### Issue Management
 
@@ -1600,9 +1536,9 @@ Most frequently used:
 
 | Command | Description |
 |---------|-------------|
-| `bd sync` | Full sync cycle |
-| `bd export` | Export to JSONL |
-| `bd import` | Import from JSONL |
+| `bd dolt push` | Push changes to Dolt remote |
+| `bd dolt pull` | Pull changes from Dolt remote |
+| `bd export` | Export data to JSONL |
 | `bd migrate` | Migrate database schema |
 
 ### System
@@ -1688,14 +1624,14 @@ bd blocked
 ### Syncing
 
 ```bash
-# Full sync (export + commit + push)
-bd sync
+# Push changes to Dolt remote
+bd dolt push
 
-# Force export
-bd export
+# Pull changes from Dolt remote
+bd dolt pull
 
-# Import from file
-bd import -i .beads/issues.jsonl
+# Export to file
+bd export -o backup.jsonl
 ```
 
 ## See Also
@@ -2105,24 +2041,34 @@ bd blocked
 bd blocked --json
 ```
 
-## bd sync
+## bd dolt push
 
-Force immediate sync to git.
+Push changes to a Dolt remote.
 
 ```bash
-bd sync [flags]
+bd dolt push [flags]
 ```
 
 Performs:
-1. Export database to JSONL
-2. Git add `.beads/issues.jsonl`
-3. Git commit
-4. Git push
+1. Dolt commit (snapshot current database state)
+2. Push to Dolt remote
 
 **Examples:**
 ```bash
-bd sync
-bd sync --json
+bd dolt push
+```
+
+## bd dolt pull
+
+Pull changes from a Dolt remote.
+
+```bash
+bd dolt pull [flags]
+```
+
+**Examples:**
+```bash
+bd dolt pull
 ```
 
 ## bd info
@@ -2334,7 +2280,7 @@ bd delete bd-42
 bd delete bd-42 -f --json
 ```
 
-**Note:** Deletions are tracked in `.beads/deletions.jsonl` for sync.
+**Note:** Deletions are tracked in the Dolt database for sync.
 
 ## bd search
 
@@ -2533,42 +2479,55 @@ bd list --status open --type bug --json | \
 
 # Sync & Export Commands
 
-Commands for synchronizing with git.
+Commands for synchronizing with Dolt.
 
-## bd sync
+## bd dolt push
 
-Full sync cycle: export, commit, push.
+Push changes to a Dolt remote.
 
 ```bash
-bd sync [flags]
+bd dolt push [flags]
 ```
 
 **What it does:**
-1. Exports database to `.beads/issues.jsonl`
-2. Stages the JSONL file
-3. Commits with auto-generated message
-4. Pushes to remote
-
-**Flags:**
-```bash
---json     JSON output
---dry-run  Preview without changes
-```
+1. Dolt commit (snapshot current database state)
+2. Push commits to Dolt remote
 
 **Examples:**
 ```bash
-bd sync
-bd sync --json
+bd dolt push
 ```
 
 **When to use:**
 - End of work session
-- Before switching branches
+- Before switching machines
 - After significant changes
+
+## bd dolt pull
+
+Pull changes from a Dolt remote.
+
+```bash
+bd dolt pull [flags]
+```
+
+**What it does:**
+1. Fetches commits from Dolt remote
+2. Merges into local database
+
+**Examples:**
+```bash
+bd dolt pull
+```
+
+**When to use:**
+- Start of work session
+- After switching machines
+- Before creating new issues (to avoid duplicates)
 
 ## bd export
 
-Export database to JSONL.
+Export database to JSONL format (for backup and migration).
 
 ```bash
 bd export [flags]
@@ -2576,7 +2535,7 @@ bd export [flags]
 
 **Flags:**
 ```bash
---output, -o    Output file (default: .beads/issues.jsonl)
+--output, -o    Output file (default: stdout)
 --dry-run       Preview without writing
 --json          JSON output
 ```
@@ -2588,38 +2547,7 @@ bd export -o backup.jsonl
 bd export --dry-run
 ```
 
-## bd import
-
-Import from JSONL file.
-
-```bash
-bd import -i <file> [flags]
-```
-
-**Flags:**
-```bash
---input, -i           Input file (required)
---dry-run             Preview without changes
---orphan-handling     How to handle missing parents
---dedupe-after        Run duplicate detection after import
---json                JSON output
-```
-
-**Orphan handling modes:**
-| Mode | Behavior |
-|------|----------|
-| `allow` | Import orphans without validation (default) |
-| `resurrect` | Restore deleted parents as tombstones |
-| `skip` | Skip orphaned children with warning |
-| `strict` | Fail if parent missing |
-
-**Examples:**
-```bash
-bd import -i .beads/issues.jsonl
-bd import -i backup.jsonl --dry-run
-bd import -i issues.jsonl --orphan-handling resurrect
-bd import -i issues.jsonl --dedupe-after --json
-```
+**When to use:** `bd export` is for backup and data migration, not day-to-day sync. Dolt handles sync natively via `bd dolt push`/`bd dolt pull`.
 
 ## bd migrate
 
@@ -2674,8 +2602,7 @@ bd hooks uninstall
 
 When the Dolt server is running, sync is handled automatically:
 - Dolt auto-commit tracks changes
-- JSONL export happens after changes (5s debounce)
-- Imports from JSONL when newer
+- Dolt-native replication handles remote sync
 
 Start the Dolt server with `bd dolt start`.
 
@@ -2683,40 +2610,27 @@ Start the Dolt server with `bd dolt start`.
 
 In CI/CD pipelines and ephemeral environments, no server is needed:
 - Changes written directly to the database
-- Must manually export/sync
+- Must manually push to remote
 
 ```bash
 bd create "CI-generated task"
-bd export  # Manual export needed
+bd dolt push  # Manual push needed
 ```
 
 ## Conflict Resolution
 
-### Merge Driver (Recommended)
-
-Install the beads merge driver:
-
-```bash
-bd init  # Prompts for merge driver setup
-```
-
-The driver automatically:
-- Merges non-conflicting changes
-- Preserves both sides for real conflicts
-- Uses latest timestamp for same-issue edits
-
-### Manual Resolution
+Dolt handles conflict resolution at the database level using its built-in
+merge capabilities. When conflicts arise during `bd dolt pull`, Dolt identifies
+conflicting rows and allows resolution through SQL.
 
 ```bash
-# After merge conflict
-git checkout --ours .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
-bd sync
+# Check for conflicts after pull
+bd doctor --fix
 ```
 
 ## Deletion Tracking
 
-Deletions sync via `.beads/deletions.jsonl`:
+Deletions are tracked in the Dolt database:
 
 ```bash
 # Delete issue
@@ -2726,15 +2640,15 @@ bd delete bd-42
 bd deleted
 bd deleted --since=30d
 
-# Deletions propagate via git
-git pull  # Imports deletions from remote
+# Deletions propagate via Dolt push
+bd dolt push
 ```
 
 ## Best Practices
 
-1. **Always sync at session end** - `bd sync`
-2. **Install git hooks** - `bd hooks install`
-3. **Use merge driver** - Avoids manual conflict resolution
+1. **Always push at session end** - `bd dolt push`
+2. **Always pull at session start** - `bd dolt pull`
+3. **Install git hooks** - `bd hooks install`
 4. **Check sync status** - `bd info` shows sync state
 
 </document>
@@ -3969,11 +3883,7 @@ bd setup aider --check
 The setup adds to `.aider.conf.yml`:
 
 ```yaml
-# Beads integration
-read:
-  - .beads/issues.jsonl
-
-# Optional: Auto-run bd prime
+# Beads integration — bd prime provides issue context
 auto-commits: false
 ```
 
@@ -4003,13 +3913,13 @@ bd ready
 ### End Session
 
 ```bash
-bd sync
+bd dolt push
 ```
 
 ## Best Practices
 
-1. **Keep issues visible** - Aider reads `.beads/issues.jsonl`
-2. **Sync regularly** - Run `bd sync` after significant changes
+1. **Keep issues visible** - Use `bd prime` to inject issue context
+2. **Push regularly** - Run `bd dolt push` after significant changes
 3. **Use discovered-from** - Track issues found during work
 4. **Document context** - Include descriptions in issues
 
@@ -4027,9 +3937,9 @@ aider --message "Working on bd-42: Fix auth bug"
 # 4. Create discovered issues
 bd create "Found related bug" --deps discovered-from:bd-42 --json
 
-# 5. Complete and sync
+# 5. Complete and push
 bd close bd-42 --reason "Fixed"
-bd sync
+bd dolt push
 ```
 
 ## Troubleshooting
@@ -4047,11 +3957,11 @@ bd setup aider
 ### Issues not visible
 
 ```bash
-# Check JSONL exists
-ls -la .beads/issues.jsonl
+# Use bd prime to inject issue context
+bd prime | aider --message-file -
 
-# Export if missing
-bd export
+# Or check database health
+bd doctor
 ```
 
 ## See Also
@@ -4078,7 +3988,7 @@ bd setup claude
 
 This installs:
 - **SessionStart hook** - Runs `bd prime` on session start
-- **PreCompact hook** - Runs `bd sync` before context compaction
+- **PreCompact hook** - Runs `bd dolt push` before context compaction
 
 ### Manual Setup
 
@@ -4088,7 +3998,7 @@ Add to your Claude Code hooks configuration:
 {
   "hooks": {
     "SessionStart": ["bd prime"],
-    "PreCompact": ["bd sync"]
+    "PreCompact": ["bd dolt push"]
   }
 }
 ```
@@ -4103,7 +4013,7 @@ bd setup claude --check
 
 1. **Session starts** → `bd prime` injects ~1-2k tokens of context
 2. **You work** → Use `bd` CLI commands directly
-3. **Session compacts** → `bd sync` saves work to git
+3. **Session compacts** → `bd dolt push` saves work to Dolt remote
 4. **Session ends** → Changes synced via git
 
 ## Essential Commands for Agents
@@ -4152,7 +4062,7 @@ bd blocked --json
 
 ```bash
 # ALWAYS run at session end
-bd sync
+bd dolt push
 ```
 
 ## Best Practices
@@ -4185,11 +4095,11 @@ bd create "Found related bug" \
   --deps discovered-from:bd-current --json
 ```
 
-### Sync Before Session End
+### Push Before Session End
 
 ```bash
 # ALWAYS run before ending
-bd sync
+bd dolt push
 ```
 
 ## Plugin (Optional)
@@ -4225,8 +4135,8 @@ bd prime
 ### Changes not syncing
 
 ```bash
-# Force sync
-bd sync
+# Force push
+bd dolt push
 
 # Check system health
 bd doctor
@@ -4327,7 +4237,7 @@ Copilot: Closed bd-42
 | `beads_show` | Show issue details |
 | `beads_update` | Update issue |
 | `beads_close` | Close issue |
-| `beads_sync` | Sync to git |
+| `beads_dolt_push` | Push to Dolt remote |
 | `beads_dep_add` | Add dependency |
 | `beads_dep_tree` | Show dependency tree |
 
@@ -4345,7 +4255,7 @@ Quick reference:
 - `bd ready` - Find unblocked work
 - `bd create "Title" --type task --priority 2` - Create issue
 - `bd close <id>` - Complete work
-- `bd sync` - Sync with git
+- `bd dolt push` - Push changes to Dolt remote
 ```
 
 ## Troubleshooting
@@ -4381,7 +4291,7 @@ bd init --quiet
 
 ### What about git hooks?
 
-Git hooks are optional. They auto-sync issues but you can skip them during `bd init` and manually run `bd sync` instead.
+Git hooks are optional. They auto-sync issues but you can skip them during `bd init` and manually run `bd dolt push` / `bd dolt pull` instead.
 
 ## See Also
 
@@ -4421,7 +4331,7 @@ bd setup junie --check
 1. **Session starts** → Junie reads `.junie/guidelines.md` for workflow context
 2. **MCP tools available** → Junie can use beads MCP tools directly
 3. **You work** → Use `bd` CLI commands or MCP tools
-4. **Session ends** → Run `bd sync` to save work to git
+4. **Session ends** → Run `bd dolt push` to push changes to Dolt remote
 
 ## Configuration Files
 
@@ -4512,7 +4422,7 @@ bd blocked --json
 
 ```bash
 # ALWAYS run at session end
-bd sync
+bd dolt push
 ```
 
 ## Best Practices
@@ -4545,11 +4455,11 @@ bd create "Found related bug" \
   --deps discovered-from:bd-current --json
 ```
 
-### Sync Before Session End
+### Push Before Session End
 
 ```bash
 # ALWAYS run before ending
-bd sync
+bd dolt push
 ```
 
 ## Troubleshooting
@@ -4577,8 +4487,8 @@ bd mcp --help
 ### Changes not syncing
 
 ```bash
-# Force sync
-bd sync
+# Force push
+bd dolt push
 
 # Check system health
 bd doctor
@@ -4808,9 +4718,9 @@ This section provides step-by-step recovery procedures for common Beads issues. 
 | Issue | Symptoms | Runbook |
 |-------|----------|---------|
 | Database Corruption | SQLite errors, missing data | [Database Corruption](/recovery/database-corruption) |
-| Merge Conflicts | JSONL conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |
+| Merge Conflicts | Dolt conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |
 | Circular Dependencies | Cycle detection errors | [Circular Dependencies](/recovery/circular-dependencies) |
-| Sync Failures | `bd sync` errors | [Sync Failures](/recovery/sync-failures) |
+| Sync Failures | `bd dolt push`/`bd dolt pull` errors | [Sync Failures](/recovery/sync-failures) |
 
 ## Quick Diagnostic
 
@@ -4908,32 +4818,26 @@ bd ready
 
 # Database Corruption Recovery
 
-This runbook helps you recover from SQLite database corruption in Beads.
+This runbook helps you recover from database corruption in Beads.
 
 ## Symptoms
 
-- SQLite error messages during `bd` commands
+- Error messages during `bd` commands
 - "database is locked" errors that persist
 - Missing issues that should exist
-- Inconsistent state between JSONL and database
+- Inconsistent database state
 
 ## Diagnosis
 
 ```bash
 # Check database integrity
-bd status
+bd doctor
 
-# Look for corruption indicators
-ls -la .beads/beads.db*
+# Check Dolt server health
+bd dolt show
 ```
 
-If you see `-wal` or `-shm` files alongside `beads.db`, a transaction may have been interrupted.
-
 ## Solution
-
-:::warning
-Back up your `.beads/` directory before proceeding.
-:::
 
 **Step 1:** Stop the Dolt server
 ```bash
@@ -4945,27 +4849,32 @@ bd dolt stop
 cp -r .beads .beads.backup
 ```
 
-**Step 3:** Rebuild from JSONL (source of truth)
+**Step 3:** Preview what doctor would fix
+```bash
+bd doctor --dry-run
+```
+
+**Step 4:** Rebuild database
 ```bash
 bd doctor --fix
 ```
 
-**Step 4:** Verify recovery
+**Step 5:** Verify recovery
 ```bash
-bd status
+bd doctor
 bd list
 ```
 
-**Step 5:** Restart the Dolt server
+**Step 6:** Restart the Dolt server
 ```bash
-bd dolt start
+dolt sql-server
 ```
 
 ## Prevention
 
-- Avoid interrupting `bd sync` operations
 - Let the Dolt server handle synchronization
 - Use `bd dolt stop` before system shutdown
+- Run `bd doctor` periodically to catch issues early
 
 </document>
 
@@ -4974,43 +4883,36 @@ bd dolt start
 
 # Merge Conflicts Recovery
 
-This runbook helps you resolve JSONL merge conflicts that occur during Git operations.
+This runbook helps you resolve merge conflicts that occur during Dolt sync operations.
 
 ## Symptoms
 
-- Git merge conflicts in `.beads/*.jsonl` files
-- `bd sync` fails with conflict errors
+- `bd dolt pull` fails with conflict errors
 - Different issue states between clones
 
 ## Diagnosis
 
 ```bash
-# Check for conflicted files
-git status
+# Check database health
+bd doctor
 
-# Look for conflict markers
-grep -l "<<<<<<" .beads/*.jsonl
+# Preview what fixes would be applied
+bd doctor --dry-run
 ```
 
 ## Solution
 
-:::warning
-JSONL files are append-only logs. Manual editing requires care.
-:::
-
-**Step 1:** Identify conflicted files
+**Step 1:** Back up current state
 ```bash
-git diff --name-only --diff-filter=U
+cp -r .beads .beads.backup
 ```
 
-**Step 2:** For each conflicted JSONL file, keep both versions
+**Step 2:** Check for conflicts
 ```bash
-# Accept both changes (append-only is safe)
-git checkout --ours .beads/issues.jsonl
-git add .beads/issues.jsonl
+bd doctor
 ```
 
-**Step 3:** Force rebuild to reconcile
+**Step 3:** Fix to reconcile
 ```bash
 bd doctor --fix
 ```
@@ -5018,19 +4920,18 @@ bd doctor --fix
 **Step 4:** Verify state
 ```bash
 bd list
-bd status
+bd stats
 ```
 
-**Step 5:** Complete the merge
+**Step 5:** Push resolved state
 ```bash
-git commit -m "Resolved beads merge conflicts"
+bd dolt push
 ```
 
 ## Prevention
 
-- Sync before and after Git operations
-- Use `bd sync` regularly
-- Avoid concurrent modifications from multiple clones
+- Sync before and after work sessions using `bd dolt pull` / `bd dolt push`
+- Avoid concurrent modifications from multiple clones without the Dolt server running
 
 </document>
 
@@ -5039,11 +4940,11 @@ git commit -m "Resolved beads merge conflicts"
 
 # Sync Failures Recovery
 
-This runbook helps you recover from `bd sync` failures.
+This runbook helps you recover from Dolt sync failures.
 
 ## Symptoms
 
-- `bd sync` hangs or times out
+- `bd dolt push` or `bd dolt pull` hangs or times out
 - Network-related error messages
 - "failed to push" or "failed to pull" errors
 - Dolt server not responding
@@ -5053,9 +4954,7 @@ This runbook helps you recover from `bd sync` failures.
 ```bash
 # Check Dolt server health
 bd doctor
-
-# Check sync state
-bd status
+bd dolt show
 
 # View Dolt server logs
 tail -50 .beads/dolt/sql-server.log
@@ -5075,20 +4974,26 @@ ls -la .beads/*.lock
 rm -f .beads/*.lock
 ```
 
-**Step 3:** Force a fresh sync
+**Step 3:** Back up and preview fixes
+```bash
+cp -r .beads .beads.backup
+bd doctor --dry-run
+```
+
+**Step 4:** Apply fixes if needed
 ```bash
 bd doctor --fix
 ```
 
-**Step 4:** Restart the Dolt server
+**Step 5:** Restart the Dolt server
 ```bash
-bd dolt start
+dolt sql-server
 ```
 
-**Step 5:** Verify sync works
+**Step 6:** Verify sync works
 ```bash
-bd sync
-bd status
+bd dolt push
+bd doctor
 ```
 
 ## Common Causes
@@ -5097,8 +5002,8 @@ bd status
 |-------|----------|
 | Network timeout | Retry with better connection |
 | Stale lock file | Remove lock after stopping Dolt server |
-| Corrupted state | Use `bd doctor --fix` |
-| Git conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
+| Corrupted state | Back up, then `bd doctor --fix` |
+| Merge conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
 
 ## Prevention
 
@@ -5222,7 +5127,8 @@ Events:
 ### Create Multiple
 
 ```bash
-cat issues.jsonl | bd import -i -
+# Bootstrap a new database from JSONL
+bd init --from-jsonl issues.jsonl
 ```
 
 ### Update Multiple
@@ -5337,6 +5243,24 @@ prefix = "bd"                 # Issue ID prefix
 hash_length = 4               # Hash length in IDs
 ```
 
+**Issue ID mode** controls whether new issues get hash-based or sequential IDs:
+
+```bash
+# Use sequential IDs: bd-1, bd-2, bd-3, ...
+bd config set issue_id_mode counter
+
+# Use hash-based IDs (default): bd-a3f2, bd-7f3a8, ...
+bd config set issue_id_mode hash
+```
+
+| Mode | Example ID | Best for |
+|------|-----------|----------|
+| `hash` (default) | `bd-a3f2` | Multi-agent, multi-branch workflows |
+| `counter` | `bd-1` | Single-writer, project-management UIs |
+
+Counter IDs are sequential and human-friendly. Hash IDs are collision-free across concurrent
+branches. See [docs/CONFIG.md](/docs/CONFIG.md) for migration guidance and full details.
+
 ### Import
 
 ```toml
@@ -5356,9 +5280,7 @@ dedupe_on_import = false      # Run duplicate detection after import
 
 ```toml
 [export]
-path = ".beads/issues.jsonl"  # Export file location
-auto_export = true            # Auto-export on changes
-debounce_seconds = 5          # Debounce interval
+path = ".beads/issues.jsonl"  # Default export file path (for bd export command)
 ```
 
 ### Git
@@ -5367,7 +5289,7 @@ debounce_seconds = 5          # Debounce interval
 [git]
 auto_commit = true            # Auto-commit on sync
 auto_push = true              # Auto-push on sync
-commit_message = "bd sync"    # Default commit message
+commit_message = "bd: auto-commit"  # Default commit message
 ```
 
 ### Hooks
@@ -5456,11 +5378,11 @@ Yes, beads is used in production for AI-assisted development. The API is stable 
 
 ## Architecture
 
-### Why SQLite + JSONL instead of just one?
+### Why Dolt instead of plain SQLite?
 
-- **SQLite** for fast local queries and complex filtering
-- **JSONL** for git-friendly versioning and sync
-- Auto-sync keeps them aligned
+- **Dolt** provides a version-controlled SQL database with built-in replication
+- Git-like branching, diffing, and merging at the database level
+- No need for a separate sync format -- Dolt handles it natively
 
 ### Why hash-based IDs instead of sequential?
 
@@ -5482,21 +5404,23 @@ In CI/CD or single-agent environments, beads uses embedded mode automatically (n
 
 ## Usage
 
-### How do I sync issues to git?
+### How do I sync issues?
 
 ```bash
-# Manual sync:
-bd sync
+# Push changes to Dolt remote:
+bd dolt push
+
+# Pull changes from Dolt remote:
+bd dolt pull
 ```
 
 ### How do I handle merge conflicts?
 
-Install the beads merge driver:
+Dolt handles merge conflicts at the database level. If conflicts arise during pull:
 ```bash
-bd init  # Prompts for merge driver
+bd doctor --fix
+bd dolt push
 ```
-
-Or manually resolve and reimport.
 
 ### Can multiple agents work on the same repo?
 
@@ -5551,10 +5475,7 @@ bd setup aider    # Aider
 
 ### Can beads import from GitHub Issues?
 
-Yes:
-```bash
-bd import --from github --repo owner/repo
-```
+Yes — see the [GitHub integration documentation](https://github.com/steveyegge/beads/blob/main/docs/GITHUB_IMPORT.md) for details.
 
 ## Troubleshooting
 
@@ -5575,8 +5496,8 @@ bd dolt start
 ### Why aren't my changes syncing?
 
 ```bash
-# Force sync
-bd sync
+# Force push to Dolt remote
+bd dolt push
 
 # Check hooks
 bd hooks status
@@ -5600,20 +5521,18 @@ How beads integrates with git.
 ## Overview
 
 Beads uses git for:
-- **JSONL sync** - Issues stored in `.beads/issues.jsonl`
-- **Deletion tracking** - `.beads/deletions.jsonl`
-- **Conflict resolution** - Custom merge driver
+- **Project hosting** - Your code repository also hosts beads configuration
 - **Hooks** - Auto-sync on git operations
+
+Data storage and sync are handled by Dolt (a version-controlled SQL database).
 
 ## File Structure
 
 ```
 .beads/
-├── beads.db           # SQLite database (gitignored)
-├── issues.jsonl       # Issue data (git-tracked)
-├── deletions.jsonl    # Deletion manifest (git-tracked)
 ├── config.toml        # Project config (git-tracked)
-└── dolt/              # Dolt server data (gitignored)
+├── metadata.json      # Backend metadata (git-tracked)
+└── dolt/              # Dolt database and server data (gitignored)
 ```
 
 ## Git Hooks
@@ -5625,9 +5544,9 @@ bd hooks install
 ```
 
 Installs:
-- **pre-commit** - Exports database to JSONL
-- **post-merge** - Imports from JSONL after pull
-- **pre-push** - Ensures sync before push
+- **pre-commit** - Triggers Dolt commit
+- **post-merge** - Triggers Dolt sync after pull
+- **pre-push** - Ensures Dolt sync before push
 
 ### Status
 
@@ -5641,48 +5560,20 @@ bd hooks status
 bd hooks uninstall
 ```
 
-## Merge Driver
+## Conflict Resolution
 
-### Purpose
-
-The beads merge driver handles JSONL conflicts automatically:
-- Merges non-conflicting changes
-- Uses latest timestamp for same-issue edits
-- Preserves both sides for real conflicts
-
-### Installation
+Dolt handles merge conflicts at the database level using its built-in
+merge capabilities. When conflicts arise during sync, Dolt identifies
+conflicting rows and allows resolution through SQL.
 
 ```bash
-bd init  # Prompts for merge driver setup
-```
-
-Or manually add to `.gitattributes`:
-
-```gitattributes
-.beads/issues.jsonl merge=beads
-.beads/deletions.jsonl merge=beads
-```
-
-And `.git/config`:
-
-```ini
-[merge "beads"]
-    name = Beads JSONL merge driver
-    driver = bd merge-driver %O %A %B
+# Check for and fix conflicts
+bd doctor --fix
 ```
 
 ## Protected Branches
 
-For protected main branches:
-
-```bash
-bd init --branch beads-sync
-```
-
-This:
-- Creates a separate `beads-sync` branch
-- Syncs issues to that branch
-- Avoids direct commits to main
+Dolt stores data under `refs/dolt/data`, separate from Git refs. This means beads data doesn't conflict with protected Git branches — no special branch flag is needed.
 
 ## Git Worktrees
 
@@ -5702,7 +5593,7 @@ bd list
 git checkout -b feature-x
 bd create "Feature X" -t feature
 # Work...
-bd sync
+bd dolt push
 git push
 ```
 
@@ -5712,37 +5603,21 @@ git push
 # In fork
 bd init --contributor
 # Work in separate planning repo...
-bd sync
+bd dolt push
 ```
 
 ### Team Workflow
 
 ```bash
 bd init --team
-# All team members share issues.jsonl
-git pull  # Auto-imports via hook
-```
-
-## Conflict Resolution
-
-### With Merge Driver
-
-Automatic - driver handles most conflicts.
-
-### Manual Resolution
-
-```bash
-# After conflict
-git checkout --ours .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
-bd sync
-git add .beads/
-git commit
+# All team members share the Dolt database
+bd dolt pull   # Pull latest changes from Dolt remote
+bd dolt push   # Push your changes to Dolt remote
 ```
 
 ### Duplicate Detection
 
-After merge:
+After merging branches:
 
 ```bash
 bd duplicates --auto-merge
@@ -5751,10 +5626,9 @@ bd duplicates --auto-merge
 ## Best Practices
 
 1. **Install hooks** - `bd hooks install`
-2. **Use merge driver** - Avoid manual conflict resolution
-3. **Sync regularly** - `bd sync` at session end
-4. **Pull before work** - Get latest issues
-5. **Worktrees use embedded mode automatically**
+2. **Push regularly** - `bd dolt push` at session end
+3. **Pull before work** - `bd dolt pull` to get latest issues
+4. **Worktrees use embedded mode automatically**
 
 </document>
 
@@ -5820,9 +5694,17 @@ bd list
 ### Corrupted database
 
 ```bash
-# Restore from JSONL
-rm .beads/beads.db
-bd import -i .beads/issues.jsonl
+# Check and fix database
+bd doctor --fix
+
+# Or pull from Dolt remote
+bd dolt pull
+
+# Or restore from a local JSONL backup snapshot
+bd backup restore
+
+# Or fetch the latest snapshot from a backup git branch
+bd backup fetch-git
 ```
 
 ## Dolt Server Issues
@@ -5855,33 +5737,34 @@ bd dolt start
 ### Changes not syncing
 
 ```bash
-# Force sync
-bd sync
+# Force push to Dolt remote
+bd dolt push
 
 # Check hooks
 bd hooks status
 ```
 
-### Import errors
+### Recovery from backup
 
 ```bash
-# Allow orphans
-bd import -i .beads/issues.jsonl --orphan-handling allow
+# Restore from a local JSONL backup snapshot
+bd backup restore
 
-# Check for duplicates after
-bd duplicates
+# Or fetch the latest snapshot from a backup git branch
+bd backup fetch-git
+
+# Or pull from Dolt remote
+bd dolt pull
 ```
 
 ### Merge conflicts
 
 ```bash
-# Use merge driver
-bd init  # Setup merge driver
+# Check for and fix Dolt conflicts
+bd doctor --fix
 
-# Or manual resolution
-git checkout --ours .beads/issues.jsonl
-bd import -i .beads/issues.jsonl
-bd sync
+# Re-push
+bd dolt push
 ```
 
 ## Git Hook Issues
