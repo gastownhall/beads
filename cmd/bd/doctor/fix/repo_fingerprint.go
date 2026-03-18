@@ -14,7 +14,7 @@ var repoFingerprintReadLine = readLineUnbuffered
 var repoFingerprintReinitialize = reinitializeRepoFingerprintPlan
 
 type repoFingerprintReinitPlan struct {
-	info         *repoRuntimeInfo
+	info         *fixRepoRuntimeInfo
 	database     string
 	deleteTarget string
 	jsonlPath    string
@@ -98,7 +98,7 @@ func updateRepoIDInProcess(path string, autoYes bool) error {
 }
 
 func resolveRepoFingerprintReinitPlan(path string) (*repoFingerprintReinitPlan, error) {
-	info, err := resolveRuntimeInfoForRepo(path)
+	info, err := resolveFixRuntimeInfoForRepo(path)
 	if err != nil {
 		info = fallbackRuntimeInfoForRepoReinit(path)
 	}

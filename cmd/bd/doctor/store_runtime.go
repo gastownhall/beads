@@ -9,7 +9,7 @@ import (
 )
 
 func openDoltStoreForRepoPath(ctx context.Context, path string) (*dolt.DoltStore, error) {
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	if runtimeInfo == nil || runtimeInfo.Runtime == nil {
 		return nil, fmt.Errorf("repo runtime unavailable")
 	}

@@ -137,7 +137,10 @@ The script installs a prebuilt Windows release if available. Go is only required
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-If you see `unicode/uregex.h` missing while building, use the PowerShell install script instead.
+ICU headers are not part of the supported Windows path. If you see
+`unicode/uregex.h` while building from source, switch back to the documented
+PowerShell installer, `go install`, or `make build` flow rather than trying to
+add ICU manually.
 
 ## IDE and Editor Integrations
 

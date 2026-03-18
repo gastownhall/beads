@@ -15,7 +15,7 @@ import (
 // processes). Recommends switching to server mode for multi-agent workflows.
 // Addresses GH#2086.
 func CheckEmbeddedModeConcurrency(path string) DoctorCheck {
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	if runtimeInfo == nil || runtimeInfo.Runtime == nil {
 		return DoctorCheck{
 			Name:     "Embedded Mode Concurrency",

@@ -353,7 +353,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	ctx := context.Background()
+	ctx := getRootContext()
 
 	// Create and initialize the GitLab tracker
 	gt := &gitlab.Tracker{}

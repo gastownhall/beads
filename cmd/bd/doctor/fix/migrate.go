@@ -33,7 +33,7 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 		return err
 	}
 
-	info, err := resolveRuntimeInfoForRepo(path)
+	info, err := resolveFixRuntimeInfoForRepo(path)
 	if err != nil {
 		return fmt.Errorf("failed to resolve repo runtime: %w", err)
 	}
@@ -147,7 +147,7 @@ func FreshCloneImport(path string, bdVersion string) error {
 		return err
 	}
 
-	info, err := resolveRuntimeInfoForRepo(path)
+	info, err := resolveFixRuntimeInfoForRepo(path)
 	if err != nil {
 		return fmt.Errorf("failed to resolve repo runtime: %w", err)
 	}

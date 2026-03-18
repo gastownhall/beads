@@ -42,7 +42,7 @@ func regenerateMetadataJSON(path string, overwriteExisting bool) error {
 		}
 	}
 
-	info, err := resolveRuntimeInfoForRepo(path)
+	info, err := resolveFixRuntimeInfoForRepo(path)
 	var cfg *configfile.Config
 	saveDir := sourceBeadsDir
 	if err == nil {

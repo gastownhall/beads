@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 )
@@ -103,6 +106,26 @@ func doltHeadAuthor(t *testing.T, dir string) string {
 	}
 	t.Fatalf("missing Author in dolt log output:\n%s", out)
 	return ""
+}
+
+func createIssueIDFromOutput(t *testing.T, output string) string {
+	t.Helper()
+
+	var m map[string]any
+	if err := json.Unmarshal([]byte(output), &m); err != nil {
+		if idx := strings.Index(output, "{"); idx >= 0 {
+			if err2 := json.Unmarshal([]byte(output[idx:]), &m); err2 != nil {
+				t.Fatalf("failed to parse create JSON: %v\n%s", err2, output)
+			}
+		} else {
+			t.Fatalf("failed to parse create JSON: %v\n%s", err, output)
+		}
+	}
+	id, _ := m["id"].(string)
+	if id == "" {
+		t.Fatalf("missing id in create output:\n%s", output)
+	}
+	return id
 }
 
 func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
@@ -253,5 +276,200 @@ func TestDoltAutoCommit_Off_DoesNotAdvanceHead(t *testing.T) {
 	after := doltHeadCommit(t, tmpDir, env)
 	if after != before {
 		t.Fatalf("expected Dolt HEAD unchanged with auto-commit off; before=%s after=%s", before, after)
+	}
+}
+
+func TestDoltAutoCommit_Off_GitHubSyncDoesNotAdvanceHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow integration test in short mode")
+	}
+	if runtime.GOOS == windowsOS {
+		t.Skip("dolt integration test not supported on windows")
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":         101,
+				"number":     7,
+				"title":      "Imported from GitHub",
+				"body":       "sync me locally",
+				"state":      "open",
+				"created_at": now,
+				"updated_at": now,
+				"html_url":   "https://github.com/test/repo/issues/7",
+				"labels": []map[string]any{
+					{"name": "type::task"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	tmpDir := createTempDirWithCleanup(t)
+	setupGitRepoForIntegration(t, tmpDir)
+
+	env := execBDTestEnv(
+		"GITHUB_TOKEN=test-token",
+		"GITHUB_OWNER=test",
+		"GITHUB_REPO=repo",
+		"GITHUB_API_URL="+server.URL,
+	)
+
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	if initErr != nil {
+		if isDoltBackendUnavailable(initOut) {
+			t.Skipf("dolt backend not available: %s", initOut)
+		}
+		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
+	}
+
+	before := doltHeadCommit(t, tmpDir, env)
+
+	out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "off", "github", "sync", "--pull-only")
+	if err != nil {
+		t.Fatalf("bd github sync failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Pulled 1 issues") {
+		t.Fatalf("expected sync output to report one pull:\n%s", out)
+	}
+
+	after := doltHeadCommit(t, tmpDir, env)
+	if after != before {
+		t.Fatalf("expected Dolt HEAD unchanged in off mode after github sync; before=%s after=%s", before, after)
+	}
+
+	listOut, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "list")
+	if err != nil {
+		t.Fatalf("bd list failed: %v\n%s", err, listOut)
+	}
+	if !strings.Contains(listOut, "Imported from GitHub") {
+		t.Fatalf("expected imported GitHub issue in list output:\n%s", listOut)
+	}
+}
+
+func TestDoltAutoCommit_Batch_GitLabSyncDoesNotAdvanceHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow integration test in short mode")
+	}
+	if runtime.GOOS == windowsOS {
+		t.Skip("dolt integration test not supported on windows")
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":          100,
+				"iid":         1,
+				"project_id":  123,
+				"title":       "Imported from GitLab",
+				"description": "sync me locally",
+				"state":       "opened",
+				"created_at":  now,
+				"updated_at":  now,
+				"web_url":     "https://gitlab.example.com/project/-/issues/1",
+				"labels":      []string{"type::task"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	tmpDir := createTempDirWithCleanup(t)
+	setupGitRepoForIntegration(t, tmpDir)
+
+	env := execBDTestEnv(
+		"GITLAB_URL="+server.URL,
+		"GITLAB_TOKEN=test-token",
+		"GITLAB_PROJECT_ID=123",
+	)
+
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	if initErr != nil {
+		if isDoltBackendUnavailable(initOut) {
+			t.Skipf("dolt backend not available: %s", initOut)
+		}
+		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
+	}
+
+	before := doltHeadCommit(t, tmpDir, env)
+
+	out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "batch", "gitlab", "sync", "--pull-only")
+	if err != nil {
+		t.Fatalf("bd gitlab sync failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Pulled 1 issues") {
+		t.Fatalf("expected sync output to report one pull:\n%s", out)
+	}
+
+	after := doltHeadCommit(t, tmpDir, env)
+	if after != before {
+		t.Fatalf("expected Dolt HEAD unchanged in batch mode after gitlab sync; before=%s after=%s", before, after)
+	}
+
+	listOut, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "list")
+	if err != nil {
+		t.Fatalf("bd list failed: %v\n%s", err, listOut)
+	}
+	if !strings.Contains(listOut, "Imported from GitLab") {
+		t.Fatalf("expected imported GitLab issue in list output:\n%s", listOut)
+	}
+}
+
+func TestDoltAutoCommit_Batch_RenameDoesNotAdvanceHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow integration test in short mode")
+	}
+	if runtime.GOOS == windowsOS {
+		t.Skip("dolt integration test not supported on windows")
+	}
+
+	tmpDir := createTempDirWithCleanup(t)
+	setupGitRepoForIntegration(t, tmpDir)
+
+	env := execBDTestEnv()
+
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	if initErr != nil {
+		if isDoltBackendUnavailable(initOut) {
+			t.Skipf("dolt backend not available: %s", initOut)
+		}
+		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
+	}
+
+	createOut, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "batch", "create", "Rename target", "--json")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\n%s", err, createOut)
+	}
+	oldID := createIssueIDFromOutput(t, createOut)
+
+	before := doltHeadCommit(t, tmpDir, env)
+
+	newID := oldID + "-renamed"
+	renameOut, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "batch", "rename", oldID, newID)
+	if err != nil {
+		t.Fatalf("bd rename failed: %v\n%s", err, renameOut)
+	}
+
+	after := doltHeadCommit(t, tmpDir, env)
+	if after != before {
+		t.Fatalf("expected Dolt HEAD unchanged in batch mode after rename; before=%s after=%s", before, after)
+	}
+
+	showOut, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "show", newID)
+	if err != nil {
+		t.Fatalf("bd show failed for renamed issue: %v\n%s", err, showOut)
+	}
+	if !strings.Contains(showOut, "Rename target") {
+		t.Fatalf("expected renamed issue to remain readable:\n%s", showOut)
 	}
 }

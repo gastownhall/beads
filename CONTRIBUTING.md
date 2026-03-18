@@ -176,14 +176,14 @@ go test -race -short ./...
 
 ### Dual-Mode Testing Pattern
 
-**IMPORTANT**: bd supports two execution modes: *embedded mode* (direct Dolt database access) and *server mode* (RPC via Dolt server). Commands must work identically in both modes. To prevent bugs like GH#719, GH#751, and bd-fu83, use the dual-mode test framework for testing commands.
+**IMPORTANT**: bd still has product requirements around embedded and server behavior, but the current CGO integration helper only exercises the server-backed path. Do not describe it as embedded+server parity coverage unless the helper actually runs both again.
 
 ```go
-// cmd/bd/dual_mode_test.go provides the framework
+// cmd/bd/integration_test_helpers_test.go provides the current server-backed harness
 
 func TestMyCommand(t *testing.T) {
-    // This test runs TWICE: once in embedded mode, once with a live Dolt server
-    RunDualModeTest(t, "my_test", func(t *testing.T, env *DualModeTestEnv) {
+    // This helper currently runs the shared server-backed integration path.
+    RunServerModeTest(t, "my_test", func(t *testing.T, env *DualModeTestEnv) {
         // Create test data using mode-agnostic helpers
         issue := &types.Issue{
             Title:     "Test issue",
@@ -216,13 +216,17 @@ Available `DualModeTestEnv` helper methods:
 - `ListIssues(filter)` - List issues matching filter
 - `GetReadyWork()` - Get issues ready for work
 - `AddLabel(id, label)` - Add a label to an issue
-- `Mode()` - Returns "embedded" or "server" for error messages
+- `Mode()` - Returns the active harness mode (`"server"` today)
 
-Run dual-mode tests:
+Run the current server-backed helper:
 ```bash
-# Run dual-mode tests (requires integration tag)
-go test -v -tags integration -run "TestDualMode" ./cmd/bd/
+# Run server-backed integration helper tests (requires integration tag)
+go test -v -tags integration -run "TestMyCommand" ./cmd/bd/
 ```
+
+`RunDualModeTest` still exists as a legacy wrapper for older tests, but it is
+currently just an alias for the server-backed helper. If we restore true
+embedded+server coverage later, update this section at the same time.
 
 Example:
 

@@ -15,7 +15,7 @@ import (
 // vs the filesystem CLI config and reports discrepancies.
 // Returns a check with Fix set for cases where --fix can resolve it.
 func CheckRemoteConsistency(repoPath string) DoctorCheck {
-	runtimeInfo := resolveRuntimeInfoForRepo(repoPath)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(repoPath)
 	if runtimeInfo == nil || runtimeInfo.Runtime == nil || runtimeInfo.Runtime.Backend != configfile.BackendDolt {
 		return DoctorCheck{
 			Name:     "Remote Consistency",

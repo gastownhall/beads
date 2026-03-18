@@ -14,14 +14,16 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
-type repoRuntimeInfo struct {
+// fixRepoRuntimeInfo carries the effective runtime plus any source-side config
+// needed when repair flows must rewrite metadata at the original repo path.
+type fixRepoRuntimeInfo struct {
 	Runtime      *beads.RepoRuntime
 	Config       *configfile.Config
 	SourceConfig *configfile.Config
 	SourceErr    error
 }
 
-func resolveRuntimeInfoForRepo(repoPath string) (*repoRuntimeInfo, error) {
+func resolveFixRuntimeInfoForRepo(repoPath string) (*fixRepoRuntimeInfo, error) {
 	runtime, err := beads.ResolveRepoRuntimeFromRepoPath(repoPath)
 	if err == nil && runtime != nil {
 		cfg, cfgErr := configfile.Load(runtime.BeadsDir)
@@ -29,7 +31,7 @@ func resolveRuntimeInfoForRepo(repoPath string) (*repoRuntimeInfo, error) {
 			return nil, fmt.Errorf("failed to load config: %w", cfgErr)
 		}
 		sourceCfg, sourceErr := loadSourceConfig(runtime)
-		return &repoRuntimeInfo{
+		return &fixRepoRuntimeInfo{
 			Runtime:      runtime,
 			Config:       effectiveFixConfig(cfg),
 			SourceConfig: sourceCfg,
@@ -45,7 +47,7 @@ func resolveRuntimeInfoForRepo(repoPath string) (*repoRuntimeInfo, error) {
 	}
 	cfgEffective := effectiveFixConfig(cfg)
 
-	return &repoRuntimeInfo{
+	return &fixRepoRuntimeInfo{
 		Runtime:      beads.BuildFallbackRepoRuntime(repoPath, sourceBeadsDir, beadsDir, cfgEffective),
 		Config:       cfgEffective,
 		SourceConfig: cfg,
@@ -59,12 +61,12 @@ func effectiveFixConfig(cfg *configfile.Config) *configfile.Config {
 	return configfile.DefaultConfig()
 }
 
-func fallbackRuntimeInfoForRepoReinit(repoPath string) *repoRuntimeInfo {
+func fallbackRuntimeInfoForRepoReinit(repoPath string) *fixRepoRuntimeInfo {
 	sourceBeadsDir := filepath.Join(repoPath, ".beads")
 	beadsDir := resolveBeadsDir(sourceBeadsDir)
 	cfg := configfile.DefaultConfig()
 
-	return &repoRuntimeInfo{
+	return &fixRepoRuntimeInfo{
 		Runtime:      beads.BuildFallbackRepoRuntime(repoPath, sourceBeadsDir, beadsDir, cfg),
 		Config:       cfg,
 		SourceConfig: cfg,
@@ -79,7 +81,7 @@ func loadSourceConfig(runtime *beads.RepoRuntime) (*configfile.Config, error) {
 	return configfile.Load(runtime.SourceBeadsDir)
 }
 
-func metadataConfigForRepo(info *repoRuntimeInfo) (*configfile.Config, string) {
+func metadataConfigForRepo(info *fixRepoRuntimeInfo) (*configfile.Config, string) {
 	if info == nil || info.Runtime == nil {
 		return nil, ""
 	}
@@ -100,7 +102,7 @@ func cloneConfig(cfg *configfile.Config) *configfile.Config {
 	return &cloned
 }
 
-func synthesizeSourceMetadataConfig(info *repoRuntimeInfo) *configfile.Config {
+func synthesizeSourceMetadataConfig(info *fixRepoRuntimeInfo) *configfile.Config {
 	cfg := cloneConfig(info.Config)
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -310,7 +312,7 @@ func fixDatabaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bo
 }
 
 func openDoltDBForRepoPath(repoPath string) (*sql.DB, error) {
-	info, err := resolveRuntimeInfoForRepo(repoPath)
+	info, err := resolveFixRuntimeInfoForRepo(repoPath)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +358,7 @@ func newDoltStoreForRuntime(ctx context.Context, runtime *beads.RepoRuntime, cfg
 }
 
 func newDoltStoreForRepoPath(ctx context.Context, repoPath string, createIfMissing bool) (*dolt.DoltStore, error) {
-	info, err := resolveRuntimeInfoForRepo(repoPath)
+	info, err := resolveFixRuntimeInfoForRepo(repoPath)
 	if err != nil {
 		return nil, err
 	}

@@ -84,10 +84,12 @@ Key facts:
 That means the matrix mostly affects non-short local runs, not the default PR
 CI path.
 
-The deterministic automated owner for this lane is the nightly
-`Runtime Matrix` workflow job. That job explicitly installs the host Dolt CLI
-before running the matrix/lifecycle subset, so it does not depend on whatever
-happens to be on the runner image that day.
+The scheduled automated owner for this lane is the nightly `Runtime Matrix`
+workflow job. That job explicitly installs the host Dolt CLI before running the
+matrix/lifecycle subset, and it is the repo's main automated check for this
+heavy surface. It is not a perfectly pinned reproduction lane: it
+intentionally tracks the latest released Dolt CLI and skips `-race` so the job
+stays bounded enough to finish reliably.
 
 ## Dolt Test Prerequisites
 

@@ -33,7 +33,7 @@ func RunDeepValidation(path string) DeepValidationResult {
 		OverallOK: true,
 	}
 
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	beadsDir := ResolveBeadsDirForRepo(path)
 	backend := configfile.BackendDolt
 	doltPath := getDatabasePath(beadsDir)

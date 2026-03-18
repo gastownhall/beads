@@ -14,18 +14,20 @@ import (
 
 var resolveBeadsDirCache sync.Map
 
-type repoRuntimeInfo struct {
+// doctorRepoRuntimeInfo captures the effective runtime/config view used by
+// read-only doctor checks.
+type doctorRepoRuntimeInfo struct {
 	Runtime       *beads.RepoRuntime
 	Config        *configfile.Config
 	ConfigPresent bool
 	ConfigErr     error
 }
 
-func resolveRuntimeInfoForRepo(repoPath string) *repoRuntimeInfo {
+func resolveDoctorRuntimeInfoForRepo(repoPath string) *doctorRepoRuntimeInfo {
 	runtime, err := beads.ResolveRepoRuntimeFromRepoPath(repoPath)
 	if err == nil && runtime != nil {
 		cfg, cfgErr := configfile.Load(runtime.BeadsDir)
-		return &repoRuntimeInfo{
+		return &doctorRepoRuntimeInfo{
 			Runtime:       runtime,
 			Config:        effectiveConfig(cfg),
 			ConfigPresent: cfg != nil,
@@ -38,7 +40,7 @@ func resolveRuntimeInfoForRepo(repoPath string) *repoRuntimeInfo {
 	cfg, cfgErr := configfile.Load(beadsDir)
 	cfgEffective := effectiveConfig(cfg)
 
-	return &repoRuntimeInfo{
+	return &doctorRepoRuntimeInfo{
 		Runtime:       beads.BuildFallbackRepoRuntime(repoPath, sourceBeadsDir, beadsDir, cfgEffective),
 		Config:        cfgEffective,
 		ConfigPresent: cfg != nil,
@@ -56,7 +58,7 @@ func effectiveConfig(cfg *configfile.Config) *configfile.Config {
 // getBackendAndBeadsDir resolves the effective .beads directory (following redirects)
 // and returns the configured storage backend ("dolt" by default).
 func getBackendAndBeadsDir(repoPath string) (backend string, beadsDir string) {
-	runtimeInfo := resolveRuntimeInfoForRepo(repoPath)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(repoPath)
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		return runtimeInfo.Runtime.Backend, runtimeInfo.Runtime.BeadsDir
 	}
@@ -75,7 +77,7 @@ func ResolveBeadsDirForRepo(repoPath string) string {
 		return resolved.(string)
 	}
 
-	runtimeInfo := resolveRuntimeInfoForRepo(repoPath)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(repoPath)
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		resolveBeadsDirCache.Store(cacheKey, runtimeInfo.Runtime.BeadsDir)
 		return runtimeInfo.Runtime.BeadsDir

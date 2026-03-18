@@ -21,7 +21,10 @@ import (
 type TestMode string
 
 const (
+	// ServerMode is the current integration-helper mode. These tests run against
+	// the shared server-backed Dolt harness.
 	ServerMode TestMode = "server"
+	// DirectMode is a legacy alias kept so older assertions keep compiling.
 	DirectMode TestMode = ServerMode
 )
 
@@ -31,9 +34,17 @@ type DualModeTestEnv struct {
 	store *dolt.DoltStore
 }
 
-func (e *DualModeTestEnv) Mode() TestMode           { return e.mode }
-func (e *DualModeTestEnv) Context() context.Context { return e.ctx }
-func (e *DualModeTestEnv) Store() *dolt.DoltStore   { return e.store }
+func (e *DualModeTestEnv) Mode() TestMode {
+	return e.mode
+}
+
+func (e *DualModeTestEnv) Context() context.Context {
+	return e.ctx
+}
+
+func (e *DualModeTestEnv) Store() *dolt.DoltStore {
+	return e.store
+}
 
 func (e *DualModeTestEnv) CreateIssue(issue *types.Issue) error {
 	return e.store.CreateIssue(e.ctx, issue, "test")
@@ -54,8 +65,8 @@ func RunServerModeTest(t *testing.T, _ string, testFn func(t *testing.T, env *Du
 		tmpDir := t.TempDir()
 		setupGitRepoForIntegration(t, tmpDir)
 
-		testDBPath := filepath.Join(tmpDir, ".beads", "beads.db")
-		testStore := newTestStore(t, testDBPath)
+		dbPath := filepath.Join(tmpDir, ".beads", "beads.db")
+		testStore := newTestStore(t, dbPath)
 		t.Cleanup(func() { _ = testStore.Close() })
 
 		env := &DualModeTestEnv{
@@ -67,7 +78,14 @@ func RunServerModeTest(t *testing.T, _ string, testFn func(t *testing.T, env *Du
 	})
 }
 
-<<<<<<< HEAD
+// RunDualModeTest is a legacy compatibility wrapper. The current CGO
+// integration helper only exercises the server-backed path, so new tests
+// should prefer RunServerModeTest.
+func RunDualModeTest(t *testing.T, name string, testFn func(t *testing.T, env *DualModeTestEnv)) {
+	t.Helper()
+	RunServerModeTest(t, name, testFn)
+}
+
 func execBDTestEnv(overrides ...string) []string {
 	env := runtimeMatrixFilterEnv(
 		os.Environ(),
@@ -75,11 +93,6 @@ func execBDTestEnv(overrides ...string) []string {
 		[]string{"BEADS_DOLT_"},
 	)
 	return append(env, overrides...)
-}
-
-func RunDualModeTest(t *testing.T, name string, testFn func(t *testing.T, env *DualModeTestEnv)) {
-	t.Helper()
-	RunServerModeTest(t, name, testFn)
 }
 
 func setupGitRepoForIntegration(t *testing.T, dir string) {

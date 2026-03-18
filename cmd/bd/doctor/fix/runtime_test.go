@@ -54,7 +54,7 @@ func TestResolveRuntimeInfoForRepo_PreservesRedirectSourceDatabase(t *testing.T)
 	beads.ResetCaches()
 	t.Cleanup(beads.ResetCaches)
 
-	info, err := resolveRuntimeInfoForRepo(repoDir)
+	info, err := resolveFixRuntimeInfoForRepo(repoDir)
 	if err != nil {
 		t.Fatalf("resolve runtime info: %v", err)
 	}

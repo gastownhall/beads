@@ -189,7 +189,7 @@ func openDoltConnForRuntime(runtime *beads.RepoRuntime, cfg *configfile.Config) 
 }
 
 func openDoltConnForRepoPath(path string) (*doltConn, error) {
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		conn, err := openDoltConnForRuntime(runtimeInfo.Runtime, runtimeInfo.Config)
 		if err != nil {
@@ -234,7 +234,7 @@ func RunDoltHealthChecks(path string) []DoctorCheck {
 // CheckLockHealth before any checks that open embedded Dolt databases,
 // avoiding false positives from doctor's own noms LOCK files (GH#1981).
 func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorCheck {
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	beadsDir := ResolveBeadsDirForRepo(path)
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		beadsDir = runtimeInfo.Runtime.BeadsDir
@@ -317,7 +317,7 @@ func checkConnectionWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltConnection(path string) DoctorCheck {
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	beadsDir := ResolveBeadsDirForRepo(path)
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		beadsDir = runtimeInfo.Runtime.BeadsDir
@@ -434,7 +434,7 @@ func checkSchemaWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltSchema(path string) DoctorCheck {
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		beadsDir = runtimeInfo.Runtime.BeadsDir
@@ -502,7 +502,7 @@ func checkIssueCountWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltIssueCount(path string) DoctorCheck {
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		beadsDir = runtimeInfo.Runtime.BeadsDir
@@ -620,7 +620,7 @@ func checkStatusWithDB(conn *doltConn) DoctorCheck {
 // This is the standalone entry point; RunDoltHealthChecks is preferred
 // for coordinated access.
 func CheckDoltStatus(path string) DoctorCheck {
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	beadsDir := ResolveBeadsDirForRepo(path)
 	if runtimeInfo != nil && runtimeInfo.Runtime != nil {
 		beadsDir = runtimeInfo.Runtime.BeadsDir

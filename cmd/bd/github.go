@@ -355,7 +355,7 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	ctx := context.Background()
+	ctx := getRootContext()
 
 	// Create and initialize the GitHub tracker
 	gt := &github.Tracker{}

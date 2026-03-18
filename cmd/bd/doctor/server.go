@@ -29,7 +29,7 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 		OverallOK: true,
 	}
 
-	runtimeInfo := resolveRuntimeInfoForRepo(path)
+	runtimeInfo := resolveDoctorRuntimeInfoForRepo(path)
 	if runtimeInfo == nil || runtimeInfo.Runtime == nil {
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server Config",

@@ -70,7 +70,7 @@ func TestResolveRuntimeInfoForRepo_PreservesRedirectSourceDatabase(t *testing.T)
 		git.ResetCaches()
 	})
 
-	info := resolveRuntimeInfoForRepo(repoDir)
+	info := resolveDoctorRuntimeInfoForRepo(repoDir)
 	if info.Runtime.Database != "source_db" {
 		t.Fatalf("Runtime.Database = %q, want %q", info.Runtime.Database, "source_db")
 	}

@@ -16,7 +16,7 @@ import (
 // For one-side-only remotes, it adds the missing side.
 // Conflicts (different URLs) are skipped — they require manual resolution.
 func RemoteConsistency(repoPath string) error {
-	info, err := resolveRuntimeInfoForRepo(repoPath)
+	info, err := resolveFixRuntimeInfoForRepo(repoPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}

@@ -14,7 +14,7 @@ func ConfigValues(path string) error {
 		return err
 	}
 
-	info, err := resolveRuntimeInfoForRepo(path)
+	info, err := resolveFixRuntimeInfoForRepo(path)
 	if err != nil {
 		if repairErr := repairMalformedMetadataJSON(path); repairErr != nil {
 			return fmt.Errorf("failed to load config: %w", err)

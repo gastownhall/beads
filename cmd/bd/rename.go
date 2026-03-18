@@ -51,7 +51,7 @@ func runRename(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid new ID format %q: must be prefix-suffix (e.g., bd-dolt)", newID)
 	}
 
-	ctx := context.Background()
+	ctx := getRootContext()
 	if err := ensureStoreActive(); err != nil {
 		return fmt.Errorf("failed to get storage: %w", err)
 	}

@@ -216,6 +216,9 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ICU is **not required** on Windows. The regex backend uses pure Go automatically.
+If you see `unicode/uregex.h` in the supported Windows path, you are on a stale
+or unsupported build flow; switch back to `make build`, `go install`, or the
+PowerShell installer instead of chasing ICU headers.
 
 **From source**:
 ```pwsh

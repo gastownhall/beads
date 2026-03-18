@@ -19,7 +19,7 @@ func StaleClosedIssues(path string) error {
 		return err
 	}
 
-	info, err := resolveRuntimeInfoForRepo(path)
+	info, err := resolveFixRuntimeInfoForRepo(path)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}

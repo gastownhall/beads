@@ -125,7 +125,7 @@ The automation requires this secret to be configured:
 1. Generate token at https://pypi.org/manage/account/token/
 2. Add to GitHub at https://github.com/steveyegge/beads/settings/secrets/actions
 3. Name: `PYPI_API_TOKEN`
-4. Value: `pypi-...` (your full token)
+4. Value: your full token (do not paste it into shell history or docs)
 
 ### 3. Manual PyPI Publish (If Needed)
 
@@ -139,7 +139,8 @@ rm -rf dist/ build/ src/*.egg-info
 uv build
 
 # Upload to PyPI
-TWINE_USERNAME=__token__ TWINE_PASSWORD=pypi-... uv tool run twine upload dist/*
+# Expect TWINE_PASSWORD to already be available in your environment.
+TWINE_USERNAME=__token__ uv tool run twine upload dist/*
 ```
 
 See [integrations/beads-mcp/PYPI.md](../integrations/beads-mcp/PYPI.md) for detailed PyPI instructions.

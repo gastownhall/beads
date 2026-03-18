@@ -18,6 +18,11 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"
@@ -68,6 +73,8 @@ jobs:
 
       - name: Install Dolt CLI
         run: |
+          # Intentionally tracks the latest released CLI as an upstream
+          # compatibility canary, not as a fully pinned reproduction lane.
           curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash
           echo "$HOME/.dolt/bin" >> "$GITHUB_PATH"
           "$HOME/.dolt/bin/dolt" version
@@ -79,5 +86,7 @@ jobs:
 
       - name: Runtime-matrix regression lane
         run: |
+          # Keep this focused on the heavy runtime surface. The nightly full-test
+          # job already provides broader race-enabled coverage.
           go test -v -count=1 -timeout=20m ./cmd/bd \
             -run '^(TestE2E_RuntimeMatrix_.*|TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands)$'
