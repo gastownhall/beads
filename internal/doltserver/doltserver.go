@@ -296,13 +296,18 @@ func ReadPortFile(beadsDir string) int {
 }
 
 // DefaultConfig returns config with sensible defaults.
-// Priority: env var > port file > config.yaml / global config > metadata.json.
+// Priority: env var > explicit remote config (config.yaml host+port) >
+// port file > config.yaml port-only > metadata.json.
 // Returns port 0 when no source provides a port, meaning Start() should
 // allocate an ephemeral port from the OS.
 //
 // The port file (dolt-server.port) is written by Start() with the actual port
 // the server is listening on. Consulting it here ensures that commands
 // connecting to an already-running server use the correct port.
+//
+// When config.yaml has an explicit dolt.host (non-local), it indicates
+// intentional remote server configuration and takes precedence over the
+// port file, which only tracks locally auto-discovered servers.
 func DefaultConfig(beadsDir string) *Config {
 	// In shared mode, use the shared server directory for port resolution
 	if IsSharedServerMode() {
@@ -324,10 +329,30 @@ func DefaultConfig(beadsDir string) *Config {
 		}
 	}
 
+	// Check config.yaml for explicit remote server configuration.
+	// When dolt.host is set to a non-local address, the user has intentionally
+	// configured a remote server. In this case, config.yaml dolt.port MUST
+	// take precedence over the port file, which only tracks locally
+	// auto-discovered servers and would be wrong for remote connections.
+	// This fixes the systemic port drift bug where local auto-discovery
+	// overwrites intentional remote server config (aegis-6ig7c2).
+	yamlHost := config.GetYamlConfig("dolt.host")
+	yamlPort := config.GetYamlConfig("dolt.port")
+	if yamlHost != "" && yamlHost != "127.0.0.1" && yamlHost != "localhost" {
+		cfg.Host = yamlHost
+		if yamlPort != "" {
+			if port, err := strconv.Atoi(yamlPort); err == nil && port > 0 {
+				cfg.Port = port
+				return cfg
+			}
+		}
+	}
+
 	// Check the port file (gitignored, local-only) — this is the primary
-	// persistent source. Start() writes the actual listening port here.
-	// Elevated to top priority (after env var) to prevent git-tracked values
-	// from causing cross-project data leakage (GH#2372).
+	// persistent source for LOCAL servers. Start() writes the actual
+	// listening port here. Elevated to top priority (after env var and
+	// explicit remote config) to prevent git-tracked values from causing
+	// cross-project data leakage (GH#2372).
 	if p := readPortFile(beadsDir); 0 < p {
 		cfg.Port = p
 		return cfg
@@ -335,12 +360,11 @@ func DefaultConfig(beadsDir string) *Config {
 
 	// Check config.yaml / global config (~/.config/bd/config.yaml) (GH#2073)
 	// Note: project-level config.yaml dolt.port is git-tracked and could
-	// propagate to collaborators. Prefer the gitignored port file above.
-	if cfg.Port == 0 {
-		if p := config.GetYamlConfig("dolt.port"); p != "" {
-			if port, err := strconv.Atoi(p); err == nil && port > 0 {
-				cfg.Port = port
-			}
+	// propagate to collaborators. Prefer the gitignored port file above
+	// for local server scenarios.
+	if cfg.Port == 0 && yamlPort != "" {
+		if port, err := strconv.Atoi(yamlPort); err == nil && port > 0 {
+			cfg.Port = port
 		}
 	}
 

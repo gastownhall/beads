@@ -305,6 +305,74 @@ func TestDefaultConfig(t *testing.T) {
 			t.Errorf("expected port file port 14000, got %d", cfg.Port)
 		}
 	})
+
+	t.Run("explicit_remote_host_overrides_port_file", func(t *testing.T) {
+		// When config.yaml has dolt.host set to a non-local address
+		// (indicating intentional remote server config), config.yaml
+		// dolt.port should take precedence over the port file.
+		// This prevents local auto-discovery from overriding remote
+		// server configuration (aegis-6ig7c2).
+		t.Setenv("GT_ROOT", "")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+		// Create config.yaml with explicit remote host and port
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml, []byte("dolt.host: \"dolt.lan\"\ndolt.port: 3306\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		// Create a port file with a DIFFERENT port (simulating local
+		// auto-discovery writing a stale/wrong port)
+		freshDir := t.TempDir()
+		if err := writePortFile(freshDir, 3307); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := DefaultConfig(freshDir)
+
+		if cfg.Host != "dolt.lan" {
+			t.Errorf("expected host dolt.lan from config.yaml, got %s", cfg.Host)
+		}
+		if cfg.Port != 3306 {
+			t.Errorf("expected port 3306 from config.yaml (overriding port file 3307), got %d", cfg.Port)
+		}
+	})
+
+	t.Run("localhost_host_does_not_override_port_file", func(t *testing.T) {
+		// When config.yaml has dolt.host=127.0.0.1 (local), the port file
+		// should still take precedence (for local server auto-discovery).
+		t.Setenv("GT_ROOT", "")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml, []byte("dolt.host: \"127.0.0.1\"\ndolt.port: 3306\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		freshDir := t.TempDir()
+		if err := writePortFile(freshDir, 3307); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := DefaultConfig(freshDir)
+
+		// Port file should win for local addresses
+		if cfg.Port != 3307 {
+			t.Errorf("expected port 3307 from port file (localhost host doesn't override), got %d", cfg.Port)
+		}
+	})
 }
 
 func TestEnsurePortFile(t *testing.T) {
