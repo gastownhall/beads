@@ -668,10 +668,10 @@ func TestEmbeddedListConcurrent(t *testing.T) {
 	)
 
 	type workerResult struct {
-		worker    int
-		createIDs []string
+		worker     int
+		createIDs  []string
 		listCounts []int // number of issues returned by each list call
-		err       error
+		err        error
 	}
 
 	results := make([]workerResult, numWorkers)
