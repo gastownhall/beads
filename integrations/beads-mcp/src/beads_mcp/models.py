@@ -219,6 +219,7 @@ class ReadyWorkParams(BaseModel):
 
     limit: int = Field(default=10, ge=1, le=100)
     priority: int | None = Field(default=None, ge=0, le=4)
+    issue_type: str | None = None
     assignee: str | None = None
     labels: list[str] | None = None  # AND: must have ALL labels
     labels_any: list[str] | None = None  # OR: must have at least one

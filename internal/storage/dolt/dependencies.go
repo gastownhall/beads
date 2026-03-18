@@ -3,10 +3,10 @@ package dolt
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -17,152 +17,41 @@ func isCrossPrefixDep(sourceID, targetID string) bool {
 }
 
 // AddDependency adds a dependency between two issues.
-// Uses an explicit transaction so writes persist when @@autocommit is OFF
-// (e.g. Dolt server started with --no-auto-commit).
+// Delegates SQL work to issueops.AddDependencyInTx; handles Dolt versioning
+// and cache invalidation.
 func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	// Route to wisp_dependencies if the issue is an active wisp
+	// Route to wisp_dependencies if the source is an active wisp.
 	if s.isActiveWisp(ctx, dep.IssueID) {
 		return s.addWispDependency(ctx, dep, actor)
 	}
 
 	// Pre-transaction: check if target is a wisp (must be done before opening tx
-	// to avoid connection pool deadlock with embedded dolt — bd-w2w)
-	// Skip wisp check for cross-prefix references (target lives in another rig's database)
-	targetIsWisp := false
+	// to avoid connection pool deadlock with embedded dolt — bd-w2w).
 	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	targetTable := "issues"
 	if !strings.HasPrefix(dep.DependsOnID, "external:") && !isCrossPrefix {
-		targetIsWisp = s.isActiveWisp(ctx, dep.DependsOnID)
-	}
-
-	metadata := dep.Metadata
-	if metadata == "" {
-		metadata = "{}"
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Validate that the source issue exists (fetch issue_type for cross-type check)
-	var sourceType string
-	if err := tx.QueryRowContext(ctx, `SELECT issue_type FROM issues WHERE id = ?`, dep.IssueID).Scan(&sourceType); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("issue %s not found", dep.IssueID)
-		}
-		return fmt.Errorf("failed to check issue existence: %w", err)
-	}
-
-	// Validate that the target issue exists (skip for external cross-rig references
-	// and cross-prefix references where the target lives in a different rig's database)
-	// Check wisps table if target is an active wisp (bd-w2w)
-	// Fetch issue_type for cross-type blocking check below.
-	var targetType string
-	if !strings.HasPrefix(dep.DependsOnID, "external:") && !isCrossPrefix {
-		targetTable := "issues"
-		if targetIsWisp {
+		if s.isActiveWisp(ctx, dep.DependsOnID) {
 			targetTable = "wisps"
 		}
-		//nolint:gosec // G201: targetTable is hardcoded to "issues" or "wisps"
-		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, targetTable), dep.DependsOnID).Scan(&targetType); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("issue %s not found", dep.DependsOnID)
-			}
-			return fmt.Errorf("failed to check target issue existence: %w", err)
-		}
 	}
 
-	// Cross-type blocking validation: tasks can only block tasks, epics can only
-	// block epics. Prevents nonsensical task<->epic blocking that causes deadlocks
-	// in ready work computation (GH#1495).
-	if dep.Type == types.DepBlocks && targetType != "" {
-		sourceIsEpic := sourceType == string(types.TypeEpic)
-		targetIsEpic := targetType == string(types.TypeEpic)
-		if sourceIsEpic != targetIsEpic {
-			if sourceIsEpic {
-				return fmt.Errorf("epics can only block other epics, not tasks")
-			}
-			return fmt.Errorf("tasks can only block other tasks, not epics")
+	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		opts := issueops.AddDependencyOpts{
+			SourceTable:   "issues",
+			TargetTable:   targetTable,
+			WriteTable:    "dependencies",
+			IsCrossPrefix: isCrossPrefix,
 		}
-	}
-
-	// Cycle detection for blocking dependency types: check if adding this edge
-	// would create a cycle by seeing if depends_on_id can already reach issue_id.
-	// UNIONs both dependencies and wisp_dependencies to detect cross-table cycles
-	// (e.g., permanent A -> wisp B -> permanent A). (bd-xe27)
-	if dep.Type == types.DepBlocks {
-		var reachable int
-		if err := tx.QueryRowContext(ctx, `
-			WITH RECURSIVE reachable AS (
-				SELECT ? AS node, 0 AS depth
-				UNION ALL
-				SELECT d.depends_on_id, r.depth + 1
-				FROM reachable r
-				JOIN (
-					SELECT issue_id, depends_on_id FROM dependencies WHERE type = 'blocks'
-					UNION ALL
-					SELECT issue_id, depends_on_id FROM wisp_dependencies WHERE type = 'blocks'
-				) d ON d.issue_id = r.node
-				WHERE r.depth < 100
-			)
-			SELECT COUNT(*) FROM reachable WHERE node = ?
-		`, dep.DependsOnID, dep.IssueID).Scan(&reachable); err != nil {
-			return fmt.Errorf("failed to check for dependency cycle: %w", err)
+		if err := issueops.AddDependencyInTx(ctx, tx, dep, actor, opts); err != nil {
+			return err
 		}
-		if reachable > 0 {
-			return fmt.Errorf("adding dependency would create a cycle")
-		}
-	}
-
-	// Check for existing dependency between the same pair with a different type.
-	// Previously this was an upsert (ON DUPLICATE KEY UPDATE type = VALUES(type))
-	// which silently changed e.g. "blocks" to "caused-by", removing the blocking
-	// relationship without warning.
-	var existingType string
-	err = tx.QueryRowContext(ctx, `
-		SELECT type FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
-	`, dep.IssueID, dep.DependsOnID).Scan(&existingType)
-	if err == nil {
-		// Row exists
-		if existingType == string(dep.Type) {
-			// Same type — idempotent; update metadata in case it changed
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE dependencies SET metadata = ? WHERE issue_id = ? AND depends_on_id = ?
-			`, metadata, dep.IssueID, dep.DependsOnID); err != nil {
-				return fmt.Errorf("failed to update dependency metadata: %w", err)
-			}
-			if err := tx.Commit(); err != nil {
-				return fmt.Errorf("sql commit: %w", err)
-			}
-			// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-			if err := s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: update metadata "+dep.IssueID+" -> "+dep.DependsOnID); err != nil {
-				return err
-			}
-			return nil
-		}
-		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
-			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("failed to check existing dependency: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)
-		VALUES (?, ?, ?, NOW(), ?, ?, ?)
-	`, dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
-		return fmt.Errorf("failed to add dependency: %w", err)
-	}
-
-	s.invalidateBlockedIDsCache()
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sql commit: %w", err)
-	}
-	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	if err := s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID); err != nil {
+		s.invalidateBlockedIDsCache()
+		return nil
+	}); err != nil {
 		return err
 	}
-	return nil
+	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
+	return s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
 }
 
 // RemoveDependency removes a dependency between two issues.

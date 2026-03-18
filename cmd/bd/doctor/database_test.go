@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 func TestCheckDatabaseIntegrity(t *testing.T) {
@@ -52,6 +54,40 @@ func TestCheckDatabaseIntegrity(t *testing.T) {
 				t.Errorf("expected message %q, got %q", tt.expectMessage, check.Message)
 			}
 		})
+	}
+}
+
+func TestServerModeIntegrityManualRecoveryDetail(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 1,
+		DoltDatabase:   "doctest_missing_server_db",
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	detail := serverModeIntegrityManualRecoveryDetail(beadsDir)
+	if detail == "" {
+		t.Fatal("expected server-mode manual recovery detail")
+	}
+	if !strings.Contains(detail, "Automatic integrity recovery is disabled for server-mode repos") {
+		t.Fatalf("detail missing manual recovery guidance:\n%s", detail)
+	}
+	if !strings.Contains(detail, "doctest_missing_server_db") {
+		t.Fatalf("detail missing configured database name:\n%s", detail)
+	}
+	if !strings.Contains(detail, doltDir) {
+		t.Fatalf("detail missing dolt root path:\n%s", detail)
 	}
 }
 

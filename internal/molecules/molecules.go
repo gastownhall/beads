@@ -31,7 +31,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -48,11 +47,11 @@ type LoadResult struct {
 
 // Loader handles loading molecule catalogs from hierarchical locations.
 type Loader struct {
-	store *dolt.DoltStore
+	store storage.DoltStorage
 }
 
 // NewLoader creates a new molecule loader for the given storage.
-func NewLoader(store *dolt.DoltStore) *Loader {
+func NewLoader(store storage.DoltStorage) *Loader {
 	return &Loader{store: store}
 }
 

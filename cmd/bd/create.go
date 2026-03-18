@@ -434,7 +434,7 @@ var createCmd = &cobra.Command{
 
 		// Switch to target repo for multi-repo support (bd-6x6g)
 		// When routing to a different repo, we use direct storage access
-		var targetStore *dolt.DoltStore
+		var targetStore storage.DoltStorage
 		if repoPath != "." {
 			targetBeadsDir := routing.ExpandPath(repoPath)
 			debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
@@ -447,7 +447,7 @@ var createCmd = &cobra.Command{
 			// Open new store for target repo using factory to respect backend config
 			targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
 			var err error
-			targetStore, err = dolt.NewFromConfig(rootCtx, targetBeadsDirPath)
+			targetStore, err = newDoltStoreFromConfig(rootCtx, targetBeadsDirPath)
 			if err != nil {
 				FatalError("failed to open target store: %v", err)
 			}
@@ -761,15 +761,15 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Commit post-create metadata (deps, labels) to Dolt. CreateIssue's
-		// internal DOLT_COMMIT only covers the issue row; AddDependency and
-		// AddLabel write to the SQL working set without a Dolt commit. Without
-		// this, the metadata is visible but not durable — it can be lost on
-		// push, sync, or server restart (GH#2009).
-		if postCreateWrites {
-			commitMsg := fmt.Sprintf("bd: create %s (metadata)", issue.ID)
+		// Commit to Dolt. In DoltStore mode, CreateIssue commits the issue
+		// row internally, so only post-create metadata (deps, labels) needs
+		// a separate commit. In EmbeddedDoltStore mode, CreateIssue writes
+		// to the working set without a Dolt commit, so we always commit
+		// everything together at the end.
+		if isEmbeddedDolt || postCreateWrites {
+			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
 			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-				WarnError("failed to commit post-create metadata: %v", err)
+				WarnError("failed to commit: %v", err)
 			}
 		}
 
@@ -876,7 +876,7 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 	}
 
 	// Open storage for the target rig using factory to respect backend config
-	targetStore, err := dolt.NewFromConfig(ctx, targetBeadsDir)
+	targetStore, err := newDoltStoreFromConfig(ctx, targetBeadsDir)
 	if err != nil {
 		FatalError("failed to open rig %q database: %v", rigName, err)
 	}
@@ -1064,7 +1064,7 @@ func formatTimeForRPC(t *time.Time) string {
 // ensureBeadsDirForPath ensures a beads directory exists at the target path.
 // If the .beads directory doesn't exist, it creates it and initializes with
 // the same prefix as the source store (T010, T012: prefix inheritance).
-func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore *dolt.DoltStore) error {
+func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage) error {
 	beadsDir := filepath.Join(targetPath, ".beads")
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 
@@ -1084,8 +1084,14 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore *
 	if sourceStore != nil {
 		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
 		if err == nil && sourcePrefix != "" {
-			// Open target store temporarily to set prefix
-			tempStore, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+			// Open target store temporarily to set prefix.
+			// Use newDoltStore with explicit config since the target .beads
+			// directory was just created and has no metadata.json yet.
+			tempStore, err := newDoltStore(ctx, &dolt.Config{
+				BeadsDir:        beadsDir,
+				Database:        sourcePrefix,
+				CreateIfMissing: true,
+			})
 			if err != nil {
 				return fmt.Errorf("failed to initialize target database: %w", err)
 			}

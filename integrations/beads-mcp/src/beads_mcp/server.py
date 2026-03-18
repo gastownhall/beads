@@ -355,6 +355,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "parameters": {
                 "limit": "int (1-100, default 10) - Max issues to return",
                 "priority": "int (0-4, optional) - Filter by priority",
+                "issue_type": "str (optional) - Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)",
                 "assignee": "str (optional) - Filter by assignee",
                 "labels": "list[str] (optional) - AND filter: must have ALL labels",
                 "labels_any": "list[str] (optional) - OR filter: must have at least one",
@@ -771,6 +772,7 @@ def _truncate_description(issue: Issue, max_length: int) -> Issue:
 async def ready_work(
     limit: int = 10,
     priority: int | None = None,
+    issue_type: str | None = None,
     assignee: str | None = None,
     labels: list[str] | None = None,
     labels_any: list[str] | None = None,
@@ -786,6 +788,7 @@ async def ready_work(
     Args:
         limit: Maximum issues to return (1-100, default 10)
         priority: Filter by priority level (0-4)
+        issue_type: Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)
         assignee: Filter by assignee
         labels: Filter by labels (AND: must have ALL specified labels)
         labels_any: Filter by labels (OR: must have at least one)
@@ -802,6 +805,7 @@ async def ready_work(
     issues = await beads_ready_work(
         limit=limit,
         priority=priority,
+        issue_type=issue_type,
         assignee=assignee,
         labels=labels,
         labels_any=labels_any,

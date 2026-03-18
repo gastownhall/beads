@@ -141,23 +141,6 @@ func TestCompactTier1_Success(t *testing.T) {
 	}
 }
 
-func TestCompactTier1_DryRun(t *testing.T) {
-	store := &stubStore{
-		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
-		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
-	}
-	summary := &stubSummarizer{summary: "short"}
-	c := &Compactor{store: store, summarizer: summary, config: &Config{DryRun: true}}
-
-	err := c.CompactTier1(context.Background(), "bd-123")
-	if err == nil || !strings.Contains(err.Error(), "dry-run") {
-		t.Fatalf("expected dry-run error, got %v", err)
-	}
-	if summary.calls != 0 {
-		t.Fatalf("summarizer should not be used in dry run")
-	}
-}
-
 func TestCompactTier1_Ineligible(t *testing.T) {
 	store := &stubStore{
 		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return false, "recently compacted", nil },

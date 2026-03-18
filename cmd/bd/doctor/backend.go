@@ -5,10 +5,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/utils"
 )
+
+var resolveBeadsDirCache sync.Map
 
 // getBackendAndBeadsDir resolves the effective .beads directory (following redirects)
 // and returns the configured storage backend ("dolt" by default).
@@ -23,10 +26,17 @@ func getBackendAndBeadsDir(repoPath string) (backend string, beadsDir string) {
 }
 
 func ResolveBeadsDirForRepo(repoPath string) string {
-	return resolveDoctorBeadsDir(repoPath)
+	cacheKey := utils.CanonicalizePath(repoPath)
+	if resolved, ok := resolveBeadsDirCache.Load(cacheKey); ok {
+		return resolved.(string)
+	}
+
+	resolved := resolveBeadsDirForRepoUncached(repoPath)
+	resolveBeadsDirCache.Store(cacheKey, resolved)
+	return resolved
 }
 
-func resolveDoctorBeadsDir(repoPath string) string {
+func resolveBeadsDirForRepoUncached(repoPath string) string {
 	localBeadsDir := filepath.Join(repoPath, ".beads")
 	if info, err := os.Stat(localBeadsDir); err == nil && info.IsDir() {
 		return resolveBeadsDir(localBeadsDir)
@@ -37,6 +47,10 @@ func resolveDoctorBeadsDir(repoPath string) string {
 	}
 
 	return resolveBeadsDir(localBeadsDir)
+}
+
+func clearResolveBeadsDirCache() {
+	resolveBeadsDirCache = sync.Map{}
 }
 
 func worktreeFallbackBeadsDir(repoPath string) string {

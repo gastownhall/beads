@@ -11,7 +11,6 @@ import (
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -97,7 +96,7 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 // It returns the created issue and any error that occurred.
 // This function handles parent-child relationships, labels, dependencies,
 // and source_repo inheritance.
-func CreateIssueFromFormValues(ctx context.Context, s *dolt.DoltStore, fv *createFormValues, actor string) (*types.Issue, error) {
+func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *createFormValues, actor string) (*types.Issue, error) {
 	// If parent is specified, validate it exists and generate child ID
 	var explicitID string
 	var inheritedLabels []string

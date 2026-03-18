@@ -2,31 +2,18 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // AddLabel adds a label to an issue
 func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	if s.isActiveWisp(ctx, issueID) {
-		return s.addWispLabel(ctx, issueID, label, actor)
-	}
-	_, err := s.execContext(ctx, `
-		INSERT IGNORE INTO labels (issue_id, label) VALUES (?, ?)
-	`, issueID, label)
-	if err != nil {
-		return fmt.Errorf("failed to add label: %w", err)
-	}
-	comment := "Added label: " + label
-	_, err = s.execContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, issueID, types.EventLabelAdded, actor, comment)
-	if err != nil {
-		return fmt.Errorf("failed to record label event: %w", err)
-	}
-	return nil
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+	})
 }
 
 // RemoveLabel removes a label from an issue
@@ -53,26 +40,13 @@ func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor strin
 
 // GetLabels retrieves all labels for an issue
 func (s *DoltStore) GetLabels(ctx context.Context, issueID string) ([]string, error) {
-	if s.isActiveWisp(ctx, issueID) {
-		return s.getWispLabels(ctx, issueID)
-	}
-	rows, err := s.queryContext(ctx, `
-		SELECT label FROM labels WHERE issue_id = ? ORDER BY label
-	`, issueID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get labels: %w", err)
-	}
-	defer rows.Close()
-
 	var labels []string
-	for rows.Next() {
-		var label string
-		if err := rows.Scan(&label); err != nil {
-			return nil, fmt.Errorf("failed to scan label: %w", err)
-		}
-		labels = append(labels, label)
-	}
-	return labels, rows.Err()
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		labels, err = issueops.GetLabelsInTx(ctx, tx, "", issueID)
+		return err
+	})
+	return labels, err
 }
 
 // GetLabelsForIssues retrieves labels for multiple issues, batching queries

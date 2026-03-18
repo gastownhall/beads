@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/routing"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -28,7 +29,7 @@ func getBeadsDir() string {
 // If the issue routes to a different database, a routed store is returned
 // and must be closed by the caller via the returned cleanup function.
 // If the issue is in the local store, cleanup is a no-op.
-func resolveIDWithRouting(ctx context.Context, localStore *dolt.DoltStore, id string) (resolvedID string, targetStore *dolt.DoltStore, cleanup func(), err error) {
+func resolveIDWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (resolvedID string, targetStore storage.DoltStorage, cleanup func(), err error) {
 	result, err := resolveAndGetIssueWithRouting(ctx, localStore, id)
 	if err != nil {
 		return "", nil, func() {}, fmt.Errorf("resolving issue ID %s: %w", id, err)
@@ -61,7 +62,7 @@ func isChildOf(childID, parentID string) bool {
 }
 
 // warnIfCyclesExist checks for dependency cycles and prints a warning if found.
-func warnIfCyclesExist(s *dolt.DoltStore) {
+func warnIfCyclesExist(s storage.DoltStorage) {
 	if s == nil {
 		return // Skip cycle check if store is not available
 	}
@@ -345,7 +346,7 @@ Examples:
 
 		// Resolve partial ID with cross-rig routing support
 		var fullID string
-		var depStore *dolt.DoltStore // store to query dependencies from
+		var depStore storage.DoltStorage // store to query dependencies from
 		var routedResult *RoutedResult
 		defer func() {
 			if routedResult != nil {
@@ -1044,7 +1045,7 @@ func ParseExternalRef(ref string) (project, capability string) {
 
 // resolveExternalDependencies fetches issue metadata for external (cross-rig) dependencies.
 // It queries raw dependency records, finds external refs, and resolves them via routing.
-func resolveExternalDependencies(ctx context.Context, depStore *dolt.DoltStore, issueID string, typeFilter string) []*types.IssueWithDependencyMetadata {
+func resolveExternalDependencies(ctx context.Context, depStore storage.DoltStorage, issueID string, typeFilter string) []*types.IssueWithDependencyMetadata {
 	if depStore == nil {
 		return nil
 	}

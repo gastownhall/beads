@@ -181,7 +181,7 @@ func FreshCloneImport(path string, bdVersion string) error {
 
 // importJSONLIntoStore reads a JSONL file and imports all issues into the Dolt store.
 // Used by both the Database fix (new store creation) and Fresh Clone fix (empty store).
-func importJSONLIntoStore(ctx context.Context, store *dolt.DoltStore, jsonlPath string) (int, error) {
+func importJSONLIntoStore(ctx context.Context, store storage.DoltStorage, jsonlPath string) (int, error) {
 	f, err := os.Open(jsonlPath) // #nosec G304 - workspace-controlled path
 	if err != nil {
 		return 0, fmt.Errorf("failed to open JSONL file: %w", err)

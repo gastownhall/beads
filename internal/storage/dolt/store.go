@@ -102,8 +102,12 @@ func autoStartRelease(serverDir string) error {
 	return nil
 }
 
-// Compile-time interface check.
+// Compile-time interface checks.
 var _ storage.DoltStorage = (*DoltStore)(nil)
+var _ storage.RawDBAccessor = (*DoltStore)(nil)
+var _ storage.StoreLocator = (*DoltStore)(nil)
+var _ storage.LifecycleManager = (*DoltStore)(nil)
+var _ storage.PendingCommitter = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -410,6 +414,40 @@ func endSpan(span trace.Span, err error) {
 // ErrStoreClosed is returned when an operation is attempted on a closed store.
 var ErrStoreClosed = errors.New("store is closed")
 
+// withReadTx runs fn inside a transaction while holding the store's read-lock.
+// Used for read operations that need a *sql.Tx to share issueops functions.
+func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin read tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	return fn(tx)
+}
+
+// withWriteTx runs fn inside a transaction, committing on success.
+// Used for write operations that delegate SQL work to issueops functions.
+// The caller's fn should NOT call tx.Commit — withWriteTx handles that.
+func (s *DoltStore) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin write tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // uncommitted implicit transaction that Dolt rolls back on connection close,
 // causing silent data loss for callers that do not use db.BeginTx themselves.
 func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -507,7 +545,11 @@ func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) err
 // applyConfigDefaults fills in default values for unset Config fields.
 func applyConfigDefaults(cfg *Config) {
 	if cfg.Database == "" {
-		if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.Path != "" {
+		// Check env var first — this is the highest-priority override and
+		// must be consulted even when no config file was loaded.
+		if d := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); d != "" {
+			cfg.Database = d
+		} else if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.Path != "" {
 			// Test mode: derive unique database name from path for isolation.
 			// Each test creates a unique temp directory, so hashing the path
 			// gives each test its own database on the shared test server.
@@ -515,6 +557,7 @@ func applyConfigDefaults(cfg *Config) {
 			_, _ = h.Write([]byte(cfg.Path)) // hash.Hash.Write never returns an error
 			cfg.Database = fmt.Sprintf("testdb_%x", h.Sum64())
 		} else {
+			fmt.Fprintf(os.Stderr, "warning: no database name configured; falling back to default %q\n", configfile.DefaultDoltDatabase)
 			cfg.Database = configfile.DefaultDoltDatabase
 		}
 	}
@@ -1045,6 +1088,33 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		return createIgnoredTables(db)
 	}
 
+	// Acquire an advisory lock to serialize schema initialization across concurrent processes.
+	// On a fresh database, all processes fail the fast path and race to execute ~20 DDL
+	// statements simultaneously, corrupting the Dolt journal. GET_LOCK serializes entry
+	// to the slow path. The lock is connection-scoped: we hold a dedicated connection so
+	// the lock persists across the DDL sequence and is released on conn.Close().
+	const schemaInitLock = "bd_schema_init"
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection for schema init lock: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	var locked int
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 30)", schemaInitLock).Scan(&locked); err != nil {
+		return fmt.Errorf("failed to acquire schema init lock: %w", err)
+	}
+	if locked != 1 {
+		return fmt.Errorf("failed to acquire schema init lock: timeout after 30s (another process holds it)")
+	}
+	defer conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", schemaInitLock) //nolint:errcheck
+
+	// Double-check: another process may have completed initialization while we waited.
+	var versionAfterLock int
+	if err := conn.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&versionAfterLock); err == nil && versionAfterLock >= currentSchemaVersion {
+		return createIgnoredTables(db)
+	}
+
 	// Execute schema creation - split into individual statements
 	// because MySQL/Dolt doesn't support multiple statements in one Exec
 	for _, stmt := range splitStatements(schema) {
@@ -1121,6 +1191,12 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		"INSERT INTO config (`key`, `value`) VALUES ('schema_version', ?) "+
 			"ON DUPLICATE KEY UPDATE `value` = ?",
 		currentSchemaVersion, currentSchemaVersion)
+	_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('config')")
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: update schema_version')"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+			return fmt.Errorf("failed to commit schema_version update: %w", err)
+		}
+	}
 
 	return nil
 }

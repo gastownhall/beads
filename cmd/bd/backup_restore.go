@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -113,13 +113,17 @@ type restoreResult struct {
 // Order matters: config first (sets prefix), then issues, then related tables.
 // When a project prefix is configured, only entries belonging to this project
 // are imported. This prevents cross-project contamination on shared Dolt servers.
-func runBackupRestore(ctx context.Context, s *dolt.DoltStore, dir string, dryRun bool) (*restoreResult, error) {
+func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, dryRun bool) (*restoreResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("database is not initialized. Run 'bd init' first")
 	}
 
 	result := &restoreResult{}
-	db := s.DB()
+	accessor, ok := s.(storage.RawDBAccessor)
+	if !ok {
+		return nil, fmt.Errorf("storage backend does not support raw DB access")
+	}
+	db := accessor.DB()
 
 	// Resolve the project prefix for scoping.
 	// Check YAML config first (authoritative in shared-server mode),
@@ -228,7 +232,7 @@ func issueIDMatchesPrefix(issueID, prefix string) bool {
 }
 
 // restoreConfig reads config.jsonl and sets each key-value pair.
-func restoreConfig(ctx context.Context, s *dolt.DoltStore, path string, dryRun bool) (int, int, error) {
+func restoreConfig(ctx context.Context, s storage.DoltStorage, path string, dryRun bool) (int, int, error) {
 	type configEntry struct {
 		Key   string `json:"key"`
 		Value string `json:"value"`
@@ -273,7 +277,7 @@ func restoreConfig(ctx context.Context, s *dolt.DoltStore, path string, dryRun b
 //
 // The JSONL may contain denormalized data from `bd export` (labels, dependencies,
 // comment counts). These are extracted and inserted into their proper tables.
-func restoreIssues(ctx context.Context, s *dolt.DoltStore, path string, dryRun bool, prefix string) (int, error) {
+func restoreIssues(ctx context.Context, s storage.DoltStorage, path string, dryRun bool, prefix string) (int, error) {
 	lines, err := readJSONLFile(path)
 	if err != nil {
 		return 0, err
@@ -301,7 +305,11 @@ func restoreIssues(ctx context.Context, s *dolt.DoltStore, path string, dryRun b
 		return count, nil
 	}
 
-	db := s.DB()
+	accessor, ok := s.(storage.RawDBAccessor)
+	if !ok {
+		return 0, fmt.Errorf("storage backend does not support raw DB access")
+	}
+	db := accessor.DB()
 
 	// Auto-detect prefix from first issue for config
 	var firstRow map[string]interface{}

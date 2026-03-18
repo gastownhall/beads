@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -174,7 +174,7 @@ func init() {
 
 // loadGraphSubgraph loads an issue and its subgraph for visualization
 // Unlike template loading, this includes ALL dependency types (not just parent-child)
-func loadGraphSubgraph(ctx context.Context, s *dolt.DoltStore, issueID string) (*TemplateSubgraph, error) {
+func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID string) (*TemplateSubgraph, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -275,7 +275,7 @@ func loadGraphSubgraph(ctx context.Context, s *dolt.DoltStore, issueID string) (
 
 // loadAllGraphSubgraphs loads all open issues and groups them by connected component
 // Each component is a subgraph of issues that share dependencies
-func loadAllGraphSubgraphs(ctx context.Context, s *dolt.DoltStore) ([]*TemplateSubgraph, error) {
+func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*TemplateSubgraph, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
