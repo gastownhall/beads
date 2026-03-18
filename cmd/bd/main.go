@@ -117,6 +117,35 @@ func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
 }
 
+// resolveCommandBeadsDir maps a discovered Dolt data path back to the owning
+// .beads directory. filepath.Dir(dbPath) only works when the Dolt data lives
+// under .beads/dolt; custom dolt_data_dir values can place it elsewhere.
+func resolveCommandBeadsDir(dbPath string) string {
+	if dbPath == "" {
+		return ""
+	}
+
+	guessedBeadsDir := filepath.Dir(dbPath)
+
+	// BEADS_DB is an explicit database override, so preserve its legacy
+	// filepath.Dir behavior instead of trying to rediscover a repo-local .beads.
+	if os.Getenv("BEADS_DB") != "" {
+		return guessedBeadsDir
+	}
+
+	if cfg, err := configfile.Load(guessedBeadsDir); err == nil && cfg != nil {
+		if utils.PathsEqual(cfg.DatabasePath(guessedBeadsDir), dbPath) {
+			return guessedBeadsDir
+		}
+	}
+
+	if discoveredBeadsDir := beads.FindBeadsDir(); discoveredBeadsDir != "" {
+		return discoveredBeadsDir
+	}
+
+	return guessedBeadsDir
+}
+
 // getActorWithGit returns the actor for audit trails with git config fallback.
 // Priority: --actor flag > BD_ACTOR env > BEADS_ACTOR env > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless
@@ -503,7 +532,7 @@ var rootCmd = &cobra.Command{
 		// opens its own store connection, writes the version metadata, commits it,
 		// and closes BEFORE the main store is opened. This ensures bd doctor and
 		// read-only commands see the correct version after a CLI upgrade.
-		beadsDir := filepath.Dir(dbPath)
+		beadsDir := resolveCommandBeadsDir(dbPath)
 
 		autoMigrateOnVersionBump(beadsDir)
 
