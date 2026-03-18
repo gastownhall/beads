@@ -443,7 +443,11 @@ environment variable.`,
 		// Clean stale noms LOCK files from previously crashed processes
 		// before opening the embedded store. Without this, a crashed init
 		// leaves LOCK files that cause nil pointer dereference in DoltDB.
-		dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
+		// NOTE: Intentionally skipped for embedded mode. Embedded dolt has its
+		// own locking model and we don't want init to mutate embedded data dirs.
+		if !isEmbeddedDolt {
+			dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
+		}
 
 		store, err := newDoltStore(ctx, doltCfg)
 		if err != nil {
@@ -557,8 +561,12 @@ environment variable.`,
 					cfg.DoltDatabase = strings.ReplaceAll(prefix, "-", "_")
 				}
 
-				// Server mode for now; embedded mode returning soon
-				cfg.DoltMode = configfile.DoltModeServer
+				// Persist the connection mode matching this build.
+				if isEmbeddedDolt {
+					cfg.DoltMode = configfile.DoltModeEmbedded
+				} else {
+					cfg.DoltMode = configfile.DoltModeServer
+				}
 				if serverHost != "" {
 					cfg.DoltServerHost = serverHost
 				}
@@ -723,7 +731,10 @@ environment variable.`,
 		}
 
 		// Clean up 0-byte noms LOCK files left behind by the store open/close cycle.
-		dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
+		// NOTE: Intentionally skipped for embedded mode. See earlier note.
+		if !isEmbeddedDolt {
+			dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
+		}
 
 		// Fork detection: offer to configure .git/info/exclude (GH#742)
 		setupExclude, _ := cmd.Flags().GetBool("setup-exclude")
@@ -836,7 +847,10 @@ environment variable.`,
 				}
 				// Clean up LOCK files again — the pre-commit hook may have
 				// reopened the database and left a new LOCK behind.
-				dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
+				// NOTE: Intentionally skipped for embedded mode. See earlier note.
+				if !isEmbeddedDolt {
+					dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
+				}
 			}
 		}
 
@@ -1025,6 +1039,39 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 
 	// Check for existing Dolt database
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
+		// Embedded mode stores databases under `.beads/embeddeddolt/<db>/`.
+		// Treat any present embedded DB as "already initialized" (guard against
+		// accidental re-init / data loss).
+		if isEmbeddedDolt {
+			embeddedRoot := filepath.Join(beadsDir, "embeddeddolt")
+			entries, err := os.ReadDir(embeddedRoot)
+			if err != nil {
+				return nil // No embedded root -> fresh clone, safe to init
+			}
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				if info, statErr := os.Stat(filepath.Join(embeddedRoot, entry.Name(), ".dolt")); statErr == nil && info.IsDir() {
+					location := filepath.Join(embeddedRoot, entry.Name())
+					return fmt.Errorf(`
+%s Found existing Dolt database: %s
+
+This workspace is already initialized.
+
+To use the existing database:
+  Just run bd commands normally (e.g., %s)
+
+If the database is genuinely corrupt and unrecoverable:
+  bd export > backup.jsonl              # Back up first!
+  bd init --force --prefix %s           # Then reinitialize
+
+Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
+				}
+			}
+			return nil
+		}
+
 		// Check both the local directory AND server mode config.
 		// In server mode the local dolt/ directory may be empty — the database
 		// lives on the Dolt sql-server. Checking only the directory would miss

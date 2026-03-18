@@ -624,8 +624,11 @@ var rootCmd = &cobra.Command{
 		// Pre-flight: clean stale noms LOCK files left by crashed Dolt processes.
 		// These prevent the Dolt server from opening databases (SIGSEGV or
 		// "database is locked"). Safe because we haven't connected yet.
-		if removed, _ := dolt.CleanStaleNomsLocks(doltPath); removed > 0 {
-			debug.Logf("cleaned %d stale noms LOCK file(s) from %s", removed, doltPath)
+		// NOTE: Intentionally skipped for embedded mode.
+		if !isEmbeddedDolt {
+			if removed, _ := dolt.CleanStaleNomsLocks(doltPath); removed > 0 {
+				debug.Logf("cleaned %d stale noms LOCK file(s) from %s", removed, doltPath)
+			}
 		}
 
 		store, err = newDoltStore(rootCtx, doltCfg)
