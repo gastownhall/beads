@@ -360,7 +360,7 @@ func CheckProjectIdentityWithStore(ss *SharedStore, path string) DoctorCheck {
 	return checkProjectIdentityWithStore(store, cfg)
 }
 
-func checkProjectIdentityNoStore(cfg *configfile.Config, hasLocalID bool) DoctorCheck {
+func checkProjectIdentityNoStore(_ *configfile.Config, hasLocalID bool) DoctorCheck {
 	if !hasLocalID {
 		return DoctorCheck{
 			Name:     "Project Identity",
