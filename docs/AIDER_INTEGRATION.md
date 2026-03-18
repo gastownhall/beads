@@ -25,6 +25,9 @@ cd your-project
 bd init --quiet
 ```
 
+If you're developing inside a clone of the Beads repo itself, use `make install`
+from that checkout instead of leaving a hand-built repo-local binary around.
+
 ### 2. Setup Aider Integration
 
 ```bash

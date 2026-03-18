@@ -9,8 +9,8 @@ if git log --name-only -1 origin/main..HEAD 2>/dev/null | grep -q '\.go$' || \
    git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q '\.go$'; then
     echo ""
     echo "Go files changed, rebuilding bd CLI..."
-    go install ./cmd/bd
-    echo "✓ bd CLI installed successfully"
+    make install-force
+    echo "✓ bd CLI installed via make install-force"
     echo ""
 fi
 
