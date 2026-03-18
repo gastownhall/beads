@@ -379,7 +379,11 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 }
 
 func (s *EmbeddedDoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
-	panic("embeddeddolt: GetCurrentCommit not implemented")
+	var hash string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&hash)
+	})
+	return hash, err
 }
 
 func (s *EmbeddedDoltStore) Status(ctx context.Context) (*storage.Status, error) {
