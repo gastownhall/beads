@@ -265,6 +265,39 @@ func TestCredentialKeyNoGhostDir(t *testing.T) {
 	}
 }
 
+// TestCredentialKeyCreatesBeadsDir verifies that initCredentialKey creates the
+// .beads/ directory if it doesn't exist. This is needed for external server
+// setups where bd connects to a pre-existing dolt server without bd init (GH#2641).
+func TestCredentialKeyCreatesBeadsDir(t *testing.T) {
+	parentDir := t.TempDir()
+	beadsDir := filepath.Join(parentDir, ".beads") // does not exist yet
+
+	store := &DoltStore{dbPath: "", beadsDir: beadsDir}
+	if err := store.initCredentialKey(t.Context()); err != nil {
+		t.Fatalf("initCredentialKey failed when beadsDir doesn't exist: %v", err)
+	}
+
+	// Key should be generated
+	if len(store.credentialKey) != 32 {
+		t.Fatalf("credentialKey length = %d, want 32", len(store.credentialKey))
+	}
+
+	// .beads/ directory should have been created
+	info, err := os.Stat(beadsDir)
+	if err != nil {
+		t.Fatalf(".beads/ directory should have been created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal(".beads/ should be a directory")
+	}
+
+	// Key file should exist in the newly created directory
+	keyPath := filepath.Join(beadsDir, credentialKeyFile)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key file should exist in newly created .beads/: %v", err)
+	}
+}
+
 // setupCredentialTestStore creates a DoltStore with a dolt-initialized CLI directory
 // and "origin" remote for credential routing tests. Requires dolt CLI.
 func setupCredentialTestStore(t *testing.T, remoteUser, remotePassword string, serverMode, setupRemote bool) *DoltStore {
