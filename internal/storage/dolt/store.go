@@ -545,7 +545,11 @@ func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) err
 // applyConfigDefaults fills in default values for unset Config fields.
 func applyConfigDefaults(cfg *Config) {
 	if cfg.Database == "" {
-		if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.Path != "" {
+		// Check env var first — this is the highest-priority override and
+		// must be consulted even when no config file was loaded.
+		if d := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); d != "" {
+			cfg.Database = d
+		} else if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.Path != "" {
 			// Test mode: derive unique database name from path for isolation.
 			// Each test creates a unique temp directory, so hashing the path
 			// gives each test its own database on the shared test server.
@@ -553,6 +557,7 @@ func applyConfigDefaults(cfg *Config) {
 			_, _ = h.Write([]byte(cfg.Path)) // hash.Hash.Write never returns an error
 			cfg.Database = fmt.Sprintf("testdb_%x", h.Sum64())
 		} else {
+			fmt.Fprintf(os.Stderr, "warning: no database name configured; falling back to default %q\n", configfile.DefaultDoltDatabase)
 			cfg.Database = configfile.DefaultDoltDatabase
 		}
 	}
