@@ -584,7 +584,7 @@ var rootCmd = &cobra.Command{
 			debug.Logf("cleaned %d stale noms LOCK file(s) from %s", removed, doltPath)
 		}
 
-		store, err = dolt.New(rootCtx, doltCfg)
+		store, err = newDoltStore(rootCtx, doltCfg)
 
 		// Track final read-only state for staleness checks (GH#1089)
 		storeIsReadOnly = doltCfg.ReadOnly
