@@ -379,7 +379,7 @@ func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold floa
 		}
 		batch := candidates[i:end]
 
-		results := analyzeWithAI(ctx, client, anthropic.Model(model), batch)
+		results := analyzeWithAI(ctx, client, model, batch)
 		for _, r := range results {
 			if r.Similarity >= threshold {
 				pairs = append(pairs, r)
@@ -431,7 +431,7 @@ func analyzeWithAI(ctx context.Context, client anthropic.Client, model anthropic
 	tracer := telemetry.Tracer("github.com/steveyegge/beads/ai")
 	aiCtx, aiSpan := tracer.Start(ctx, "anthropic.messages.new")
 	aiSpan.SetAttributes(
-		attribute.String("bd.ai.model", string(model)),
+		attribute.String("bd.ai.model", model),
 		attribute.String("bd.ai.operation", "find_duplicates"),
 		attribute.Int("bd.ai.batch_size", len(candidates)),
 	)
