@@ -616,7 +616,10 @@ func TestKillStaleServersPreservesOtherRepoServers(t *testing.T) {
 	}
 }
 
-func TestKillStaleServersWithoutCanonicalPIDOnlyKillsOwnedDir(t *testing.T) {
+func TestKillStaleServersWithoutCanonicalPIDIsNoop(t *testing.T) {
+	// Without a PID file, beads has no record of starting a server.
+	// killStaleServersForDir should be a no-op to avoid killing
+	// externally-managed servers (systemd, other repos, etc).
 	dir := t.TempDir()
 	sameRepoOrphanPID := 222
 	otherRepoPID := 333
@@ -636,11 +639,101 @@ func TestKillStaleServersWithoutCanonicalPIDOnlyKillsOwnedDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("killStaleServersForDir error: %v", err)
 	}
-	if len(got) != 1 || got[0] != sameRepoOrphanPID {
-		t.Fatalf("killed=%v, want [%d]", got, sameRepoOrphanPID)
+	if len(got) != 0 {
+		t.Fatalf("killed=%v, want [] (no PID file means nothing is stale)", got)
 	}
-	if len(killed) != 1 || killed[0] != sameRepoOrphanPID {
-		t.Fatalf("kill callback got %v, want [%d]", killed, sameRepoOrphanPID)
+	if len(killed) != 0 {
+		t.Fatalf("kill callback got %v, want [] (no PID file means nothing is stale)", killed)
+	}
+}
+
+func TestKillStaleServersSkipsExplicitPort(t *testing.T) {
+	// When metadata.json has an explicit port, the server is externally
+	// managed and killStaleServersForDir should be a complete no-op.
+	dir := t.TempDir()
+
+	// Write a metadata.json with an explicit port
+	metadataPath := filepath.Join(dir, "metadata.json")
+	if err := os.WriteFile(metadataPath, []byte(`{"dolt_server_port": 3307}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a PID file (would normally trigger stale cleanup)
+	canonicalPID := 111
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(canonicalPID)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	orphanPID := 222
+	var killed []int
+	got, err := killStaleServersForDir(
+		dir,
+		[]int{canonicalPID, orphanPID},
+		func(pid int, _ string) bool { return true },
+		func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("killStaleServersForDir error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("killed=%v, want [] (explicit port = externally managed)", got)
+	}
+}
+
+func TestKillStaleServersSkipsAutoStartDisabled(t *testing.T) {
+	// When BEADS_DOLT_AUTO_START=0, the server is externally managed
+	// and killStaleServersForDir should be a complete no-op.
+	dir := t.TempDir()
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+
+	// Write a PID file
+	canonicalPID := 111
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(canonicalPID)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	orphanPID := 222
+	var killed []int
+	got, err := killStaleServersForDir(
+		dir,
+		[]int{canonicalPID, orphanPID},
+		func(pid int, _ string) bool { return true },
+		func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("killStaleServersForDir error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("killed=%v, want [] (auto-start disabled = externally managed)", got)
+	}
+}
+
+func TestIsAutoStartDisabled(t *testing.T) {
+	tests := []struct {
+		envVal string
+		want   bool
+	}{
+		{"0", true},
+		{"false", true},
+		{"FALSE", true},
+		{"False", true},
+		{"1", false},
+		{"true", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run("env="+tt.envVal, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_AUTO_START", tt.envVal)
+			if got := isAutoStartDisabled(); got != tt.want {
+				t.Errorf("isAutoStartDisabled() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
