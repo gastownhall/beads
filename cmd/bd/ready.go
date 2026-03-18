@@ -46,6 +46,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return
 		}
 
+		allowConcurrent, _ := cmd.Flags().GetBool("allow-concurrent")
 		limit, _ := cmd.Flags().GetInt("limit")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		unassigned, _ := cmd.Flags().GetBool("unassigned")
@@ -162,6 +163,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				activeStore = routedStore
 			}
 		}
+
+		// Concurrent-work guard: warn polecats, hard-block crew (gt-m40j)
+		applyReadyGuard(ctx, activeStore, actor, allowConcurrent)
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)
 		if err != nil {
@@ -543,6 +547,7 @@ func init() {
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
+	readyCmd.Flags().Bool("allow-concurrent", false, "Bypass concurrent-work guard (for intentional parallel work)")
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
 	rootCmd.AddCommand(blockedCmd)

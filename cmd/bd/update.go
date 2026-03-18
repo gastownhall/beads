@@ -280,6 +280,7 @@ create, update, show, or close operation).`,
 
 		// Get claim flag
 		claimFlag, _ := cmd.Flags().GetBool("claim")
+		allowConcurrent, _ := cmd.Flags().GetBool("allow-concurrent")
 
 		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
@@ -318,6 +319,12 @@ create, update, show, or close operation).`,
 
 			// Handle claim operation atomically using compare-and-swap semantics
 			if claimFlag {
+				// Concurrent-work guard: warn polecats, hard-block crew (gt-m40j)
+				if guardMsg := applyClaimGuard(ctx, issueStore, actor, allowConcurrent); guardMsg != "" {
+					fmt.Fprintf(os.Stderr, "Error claiming %s: %s\n", id, guardMsg)
+					result.Close()
+					continue
+				}
 				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
 					result.Close()
@@ -587,6 +594,7 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; fails if already claimed)")
+	updateCmd.Flags().Bool("allow-concurrent", false, "Bypass concurrent-work guard (for intentional parallel work)")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:
