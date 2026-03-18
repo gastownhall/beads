@@ -2327,15 +2327,42 @@ func TestGitignoreTemplate_NoSensitivePatterns(t *testing.T) {
 		"password",
 		"secret",
 		"token",
-		"credential",
 		"private_key",
 		"api_key",
 	}
 
+	// .beads-credential-key is intentionally in the template to prevent the
+	// encryption key from being committed. Strip it before checking for
+	// accidental credential-related patterns.
+	stripped := strings.ReplaceAll(strings.ToLower(GitignoreTemplate), ".beads-credential-key", "")
+
 	for _, keyword := range sensitiveKeywords {
-		if strings.Contains(strings.ToLower(GitignoreTemplate), keyword) {
+		if strings.Contains(stripped, keyword) {
 			t.Errorf("GitignoreTemplate contains sensitive keyword %q — review for information leakage", keyword)
 		}
+	}
+}
+
+// TestGitignoreTemplate_ContainsCredentialKey verifies that the .beads/.gitignore template
+// includes .beads-credential-key to prevent the encryption key from being committed.
+func TestGitignoreTemplate_ContainsCredentialKey(t *testing.T) {
+	if !strings.Contains(GitignoreTemplate, ".beads-credential-key") {
+		t.Error("GitignoreTemplate should contain '.beads-credential-key' pattern")
+	}
+}
+
+// TestRequiredPatterns_ContainsCredentialKey verifies that bd doctor validates
+// the presence of the .beads-credential-key pattern in .beads/.gitignore.
+func TestRequiredPatterns_ContainsCredentialKey(t *testing.T) {
+	found := false
+	for _, pattern := range requiredPatterns {
+		if pattern == ".beads-credential-key" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("requiredPatterns should include '.beads-credential-key'")
 	}
 }
 
