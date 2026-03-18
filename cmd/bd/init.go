@@ -441,10 +441,9 @@ environment variable.`,
 		defer initLock.Unlock()
 
 		// Clean stale noms LOCK files from previously crashed processes
-		// before opening the embedded store. Without this, a crashed init
+		// before opening the Dolt server store. Without this, a crashed init
 		// leaves LOCK files that cause nil pointer dereference in DoltDB.
-		// NOTE: Intentionally skipped for embedded mode. Embedded dolt has its
-		// own locking model and we don't want init to mutate embedded data dirs.
+		// Skipped for embedded mode — embedded dolt has its own locking model.
 		if !isEmbeddedDolt {
 			dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
 		}
@@ -1046,7 +1045,10 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 			embeddedRoot := filepath.Join(beadsDir, "embeddeddolt")
 			entries, err := os.ReadDir(embeddedRoot)
 			if err != nil {
-				return nil // No embedded root -> fresh clone, safe to init
+				if os.IsNotExist(err) {
+					return nil // No embedded root -> fresh clone, safe to init
+				}
+				return fmt.Errorf("failed to read embedded dolt directory %s: %w", embeddedRoot, err)
 			}
 			for _, entry := range entries {
 				if !entry.IsDir() {

@@ -133,6 +133,9 @@ func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string)
 		}
 	}
 	_ = depRows.Close()
+	if err := depRows.Err(); err != nil {
+		return nil, fmt.Errorf("get dependency counts: blocker rows: %w", err)
+	}
 
 	// Dependents: issues blocked by the given IDs
 	//nolint:gosec // G201: inClause contains only ? placeholders
@@ -157,6 +160,9 @@ func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string)
 		}
 	}
 	_ = blockingRows.Close()
+	if err := blockingRows.Err(); err != nil {
+		return nil, fmt.Errorf("get dependency counts: dependent rows: %w", err)
+	}
 
 	return result, nil
 }

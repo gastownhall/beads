@@ -33,7 +33,10 @@ func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter type
 	// table and merge results.
 	if filter.Ephemeral == nil {
 		wispResults, wispErr := searchTableInTx(ctx, tx, query, filter, WispsFilterTables)
-		if wispErr == nil && len(wispResults) > 0 {
+		if wispErr != nil {
+			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
+		}
+		if len(wispResults) > 0 {
 			seen := make(map[string]bool, len(results))
 			for _, issue := range results {
 				seen[issue.ID] = true
@@ -74,25 +77,36 @@ func searchTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types
 	if err != nil {
 		return nil, fmt.Errorf("search %s: %w", tables.Main, err)
 	}
-	defer rows.Close()
 
 	var issues []*types.Issue
 	for rows.Next() {
 		issue, scanErr := ScanIssueFrom(rows)
 		if scanErr != nil {
+			_ = rows.Close()
 			return nil, fmt.Errorf("search %s: scan: %w", tables.Main, scanErr)
 		}
 		issues = append(issues, issue)
 	}
+	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("search %s: rows: %w", tables.Main, err)
 	}
 
-	// Hydrate labels for each issue.
-	for _, issue := range issues {
-		labels, labelErr := GetLabelsInTx(ctx, tx, tables.Labels, issue.ID)
-		if labelErr == nil {
-			issue.Labels = labels
+	// Hydrate labels in bulk after closing the result set, so we don't hold
+	// multiple active result sets on the same connection.
+	if len(issues) > 0 {
+		ids := make([]string, len(issues))
+		for i, issue := range issues {
+			ids[i] = issue.ID
+		}
+		labelMap, labelErr := GetLabelsForIssuesInTx(ctx, tx, ids)
+		if labelErr != nil {
+			return nil, fmt.Errorf("search %s: hydrate labels: %w", tables.Main, labelErr)
+		}
+		for _, issue := range issues {
+			if labels, ok := labelMap[issue.ID]; ok {
+				issue.Labels = labels
+			}
 		}
 	}
 
