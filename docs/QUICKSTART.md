@@ -73,12 +73,12 @@ git config --get beads.role
 
 ```bash
 # Create a few issues
-./bd create "Set up database" -p 1 -t task
-./bd create "Create API" -p 2 -t feature
-./bd create "Add authentication" -p 2 -t feature
+bd create "Set up database" -p 1 -t task
+bd create "Create API" -p 2 -t feature
+bd create "Add authentication" -p 2 -t feature
 
 # List them
-./bd list
+bd list
 ```
 
 **Note:** Issue IDs are hash-based (e.g., `bd-a1b2`, `bd-f14c`) to prevent collisions when multiple agents/branches work concurrently.
@@ -89,16 +89,16 @@ For large features, use hierarchical IDs to organize work:
 
 ```bash
 # Create epic (generates parent hash ID)
-./bd create "Auth System" -t epic -p 1
+bd create "Auth System" -t epic -p 1
 # Returns: bd-a3f8e9
 
 # Create child tasks (automatically get .1, .2, .3 suffixes)
-./bd create "Design login UI" -p 1 --parent bd-a3f8e9       # bd-a3f8e9.1
-./bd create "Backend validation" -p 1 --parent bd-a3f8e9    # bd-a3f8e9.2
-./bd create "Integration tests" -p 1 --parent bd-a3f8e9     # bd-a3f8e9.3
+bd create "Design login UI" -p 1 --parent bd-a3f8e9       # bd-a3f8e9.1
+bd create "Backend validation" -p 1 --parent bd-a3f8e9    # bd-a3f8e9.2
+bd create "Integration tests" -p 1 --parent bd-a3f8e9     # bd-a3f8e9.3
 
 # View hierarchy
-./bd dep tree bd-a3f8e9
+bd dep tree bd-a3f8e9
 ```
 
 Output:
@@ -115,13 +115,13 @@ Output:
 
 ```bash
 # API depends on database
-./bd dep add bd-2 bd-1
+bd dep add bd-2 bd-1
 
 # Auth depends on API
-./bd dep add bd-3 bd-2
+bd dep add bd-3 bd-2
 
 # View the tree
-./bd dep tree bd-3
+bd dep tree bd-3
 ```
 
 Output:
@@ -143,7 +143,7 @@ Output:
 ## Find Ready Work
 
 ```bash
-./bd ready
+bd ready
 ```
 
 Output:
@@ -159,13 +159,13 @@ Only bd-1 is ready because bd-2 and bd-3 are blocked!
 
 ```bash
 # Start working on bd-1
-./bd update bd-1 --claim
+bd update bd-1 --claim
 
 # Complete it
-./bd close bd-1 --reason "Database setup complete"
+bd close bd-1 --reason "Database setup complete"
 
 # Check ready work again
-./bd ready
+bd ready
 ```
 
 Now bd-2 is ready! 🎉
@@ -174,10 +174,10 @@ Now bd-2 is ready! 🎉
 
 ```bash
 # See blocked issues
-./bd blocked
+bd blocked
 
 # View statistics
-./bd stats
+bd stats
 ```
 
 ## Team Sync
@@ -209,19 +209,19 @@ After upgrading bd, use `bd migrate` to check for and migrate old database files
 
 ```bash
 # Inspect migration plan (AI agents)
-./bd migrate --inspect --json
+bd migrate --inspect --json
 
 # Check schema and config
-./bd info --schema --json
+bd info --schema --json
 
 # Preview migration changes
-./bd migrate --dry-run
+bd migrate --dry-run
 
 # Migrate old databases to beads.db
-./bd migrate
+bd migrate
 
 # Migrate and clean up old files
-./bd migrate --cleanup --yes
+bd migrate --cleanup --yes
 ```
 
 **AI agents:** Use `--inspect` to analyze migration safety before running. The system verifies required config keys and data integrity invariants.
@@ -253,10 +253,10 @@ bd admin cleanup --force
 
 ## Next Steps
 
-- Add labels: `./bd create "Task" -l "backend,urgent"`
-- Filter ready work: `./bd ready --priority 1`
-- Search issues: `./bd list --status open`
-- Detect cycles: `./bd dep cycles`
+- Add labels: `bd create "Task" -l "backend,urgent"`
+- Filter ready work: `bd ready --priority 1`
+- Search issues: `bd list --status open`
+- Detect cycles: `bd dep cycles`
 - Use gates for PR/CI sync: See [DEPENDENCIES.md](DEPENDENCIES.md)
 
 See [README.md](../README.md) for full documentation.
