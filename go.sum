@@ -435,8 +435,12 @@ github.com/dolthub/dolt-mcp v0.3.4 h1:AyG5cw+fNWXDHXujtQnqUPZrpWtPg6FN6yYtjv1pP4
 github.com/dolthub/dolt-mcp v0.3.4/go.mod h1:bCZ7KHvDYs+M0e+ySgmGiNvLhcwsN7bbf5YCyillLrk=
 github.com/dolthub/dolt/go v0.40.5-0.20260316200056-24e549c548e1 h1:dCEG+v2yaZUSyqkbG1YeHxsgt+l4fpc6+X6pmlJHXSU=
 github.com/dolthub/dolt/go v0.40.5-0.20260316200056-24e549c548e1/go.mod h1:x0TL0LQX70EdjIcj+RdIxYqGAVRpZk3IXDrHG6NW9B8=
+github.com/dolthub/dolt/go v0.40.5-0.20260318002019-4dfa5337e7e3 h1:qR7STUxKaFCYbgC4vJbcuhLymsDdgwzOjeNmxXi9nXA=
+github.com/dolthub/dolt/go v0.40.5-0.20260318002019-4dfa5337e7e3/go.mod h1:x0TL0LQX70EdjIcj+RdIxYqGAVRpZk3IXDrHG6NW9B8=
 github.com/dolthub/driver v0.2.1-0.20260316205151-d1fa7c08c014 h1:6AY9eYL2BxriaTAisiPRYqEMxIe7xVPWmcSTy3msMUM=
 github.com/dolthub/driver v0.2.1-0.20260316205151-d1fa7c08c014/go.mod h1:u0gSLiJYv0qPTu56p/zgXc6pzWo0hfk+X4PL7uU3pS8=
+github.com/dolthub/driver v0.2.1-0.20260318015159-1f974241c62b h1:Zx7fGDSDJs9S/75MJpJLonXB6O8vegw4/ZM7CcB0dnM=
+github.com/dolthub/driver v0.2.1-0.20260318015159-1f974241c62b/go.mod h1:Tt6mRicRJnBO7R9OxpGWi7IAv18fyF/cQo6Jl9IPs4I=
 github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69 h1:JShhbqMw26nKx3pqqu/cFxOpzBkN+4elVhzuUfgDw2k=
 github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69/go.mod h1:SSLraQS/jGLYFgff3vuZ+JbVUct6vyEeMzjLBqWqoyM=
 github.com/dolthub/flatbuffers/v23 v23.3.3-dh.2 h1:u3PMzfF8RkKd3lB9pZ2bfn0qEG+1Gms9599cr0REMww=
