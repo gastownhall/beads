@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -87,7 +86,7 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.DoltS
 	// to the routed store. Checking the local store first would risk finding
 	// phantom/duplicate copies in the wrong database (bd-7vk).
 	if routesDifferently {
-		routedStore, err := dolt.NewFromConfig(ctx, targetDir)
+		routedStore, err := newDoltStoreFromConfig(ctx, targetDir)
 		if err != nil {
 			return nil, fmt.Errorf("opening routed store at %s: %w", targetDir, err)
 		}
@@ -173,7 +172,7 @@ func openStoreForRig(ctx context.Context, rigOrPrefix string) (storage.DoltStora
 		return nil, err
 	}
 
-	targetStore, err := dolt.NewFromConfigWithOptions(ctx, targetBeadsDir, &dolt.Config{ReadOnly: true})
+	targetStore, err := newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open rig %q database: %v", rigOrPrefix, err)
 	}
@@ -213,7 +212,7 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 	routesDifferently := routeErr == nil && routed && (targetDir != beadsDir || os.Getenv("BEADS_DOLT_SERVER_DATABASE") != "")
 
 	if routesDifferently {
-		routedStore, err := dolt.NewFromConfig(ctx, targetDir)
+		routedStore, err := newDoltStoreFromConfig(ctx, targetDir)
 		if err != nil {
 			return nil, fmt.Errorf("opening routed store at %s: %w", targetDir, err)
 		}

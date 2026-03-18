@@ -29,3 +29,9 @@ func acquireEmbeddedLock(_ string) (*embeddeddolt.Lock, error) {
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	return dolt.NewFromConfig(ctx, beadsDir)
 }
+
+// newReadOnlyStoreFromConfig creates a read-only storage backend from the beads
+// directory's persisted metadata.json configuration.
+func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+}

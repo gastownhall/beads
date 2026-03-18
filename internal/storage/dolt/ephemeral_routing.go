@@ -17,32 +17,16 @@ func IsEphemeralID(id string) bool {
 	return strings.Contains(id, "-wisp-")
 }
 
-// defaultInfraTypes are the built-in infrastructure types routed to the wisps table.
-// Override via DB config "types.infra" or config.yaml types.infra.
-// Unexported to prevent external mutation; use DefaultInfraTypes() for a safe copy.
-var defaultInfraTypes = []string{"agent", "rig", "role", "message"}
-
 // DefaultInfraTypes returns a copy of the built-in infrastructure types.
+// Delegates to storage.DefaultInfraTypes.
 func DefaultInfraTypes() []string {
-	out := make([]string, len(defaultInfraTypes))
-	copy(out, defaultInfraTypes)
-	return out
+	return storage.DefaultInfraTypes()
 }
 
-// defaultInfraSet is the set form of defaultInfraTypes for IsInfraType lookups.
-var defaultInfraSet = func() map[string]bool {
-	m := make(map[string]bool, len(defaultInfraTypes))
-	for _, t := range defaultInfraTypes {
-		m[t] = true
-	}
-	return m
-}()
-
 // IsInfraType returns true if the issue type is infrastructure.
-// Uses the hardcoded defaults (agent, rig, role, message).
-// Prefer IsInfraTypeCtx when a DoltStore is available for config-driven behavior.
+// Delegates to storage.IsInfraType.
 func IsInfraType(t types.IssueType) bool {
-	return defaultInfraSet[string(t)]
+	return storage.IsInfraType(t)
 }
 
 // IsInfraTypeCtx returns true if the issue type is infrastructure, using the

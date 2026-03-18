@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
@@ -193,7 +194,7 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	}
 
 	if len(types) == 0 {
-		types = defaultInfraTypes
+		types = storage.DefaultInfraTypes()
 	}
 
 	result := make(map[string]bool, len(types))
