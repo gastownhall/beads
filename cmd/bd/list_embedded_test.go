@@ -71,19 +71,6 @@ func bdListFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-// bdRun is a generic helper that runs a bd subcommand. Fatals on failure.
-func bdRun(t *testing.T, bd, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command(bd, args...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return string(out)
-}
-
 // issueIDs extracts issue IDs from a list result.
 func listIssueIDs(issues []*types.IssueWithCounts) []string {
 	ids := make([]string, len(issues))
@@ -440,11 +427,11 @@ func TestEmbeddedList(t *testing.T) {
 				t.Error("issue title should not be empty in JSON output")
 			}
 		}
-		// Verify task with blocking dep has dependency count
+		// Verify child has parent-child dependency count
 		for _, issue := range issues {
-			if issue.ID == seed.task {
+			if issue.ID == seed.childTaskA {
 				if issue.DependencyCount == 0 {
-					t.Error("task blocked by openBug should have dependency_count > 0")
+					t.Error("child task A should have dependency_count > 0 (parent-child dep)")
 				}
 			}
 		}
@@ -571,11 +558,11 @@ func seedTestData(t *testing.T, bd, dir string) testSeedData {
 	s.chore = issue.ID
 
 	// 5. Epic, P1, labels: planning
+	// Note: no blocking deps via `bd dep add` — DetectCycles is not implemented
+	// on EmbeddedDoltStore. Parent-child deps are created via --parent on create.
 	issue = bdCreate(t, bd, dir, "Epic with deps", "--type", "epic", "--priority", "1",
 		"--label", "planning")
 	s.epic = issue.ID
-	// Add blocking dep: task (above) is blocked by openBug (epic can't block non-epics)
-	bdRun(t, bd, dir, "dep", "add", s.task, s.openBug, "--type", "blocks")
 
 	// 6. Decision, P4, labels: pinned-ref
 	issue = bdCreate(t, bd, dir, "Architecture decision", "--type", "decision", "--priority", "4",
