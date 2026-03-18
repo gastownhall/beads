@@ -1112,95 +1112,109 @@ func TestDefaultConfig_SharedModeBeadsDir(t *testing.T) {
 	}
 }
 
-// --- External server lifecycle tests (GH#2641) ---
+// --- ServerMode tests ---
 
-func TestIsAutoStartDisabled_Default(t *testing.T) {
-	t.Setenv("BEADS_DOLT_AUTO_START", "")
-	config.ResetForTesting()
-	if IsAutoStartDisabled() {
-		t.Error("expected auto-start to be enabled by default")
-	}
-}
-
-func TestIsAutoStartDisabled_EnvVar0(t *testing.T) {
-	t.Setenv("BEADS_DOLT_AUTO_START", "0")
-	if !IsAutoStartDisabled() {
-		t.Error("expected auto-start to be disabled when BEADS_DOLT_AUTO_START=0")
-	}
-}
-
-func TestIsAutoStartDisabled_EnvVar1(t *testing.T) {
-	t.Setenv("BEADS_DOLT_AUTO_START", "1")
-	config.ResetForTesting()
-	if IsAutoStartDisabled() {
-		t.Error("expected auto-start to be enabled when BEADS_DOLT_AUTO_START=1")
-	}
-}
-
-func TestIsAutoStartDisabled_ConfigFalse(t *testing.T) {
-	t.Setenv("BEADS_DOLT_AUTO_START", "")
-	// Set up a config.yaml with dolt.auto-start: false
-	configDir := t.TempDir()
-	configYaml := filepath.Join(configDir, "config.yaml")
-	if err := os.WriteFile(configYaml, []byte("dolt:\n  auto-start: \"false\"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BEADS_DIR", configDir)
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
-	t.Cleanup(config.ResetForTesting)
-
-	if !IsAutoStartDisabled() {
-		t.Error("expected auto-start to be disabled when config has dolt.auto-start: false")
-	}
-}
-
-func TestKillStaleServers_SkippedWhenAutoStartDisabled(t *testing.T) {
-	t.Setenv("BEADS_DOLT_AUTO_START", "0")
-	dir := t.TempDir()
-
-	// Even if there were dolt processes, KillStaleServers should be a no-op
-	killed, err := KillStaleServers(dir)
-	if err != nil {
-		t.Fatalf("KillStaleServers error: %v", err)
-	}
-	if len(killed) != 0 {
-		t.Errorf("expected no kills when auto-start disabled, got %v", killed)
-	}
-}
-
-func TestKillStaleServersForDir_SkippedWhenAutoStartDisabled(t *testing.T) {
-	// Verify that even with dolt processes present, KillStaleServers returns
-	// nil when auto-start is disabled (externally-managed server).
-	t.Setenv("BEADS_DOLT_AUTO_START", "0")
-	dir := t.TempDir()
-
-	// Write a PID file to simulate a tracked server
-	if err := os.WriteFile(pidPath(dir), []byte("12345"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	killed, err := KillStaleServers(dir)
-	if err != nil {
-		t.Fatalf("KillStaleServers error: %v", err)
-	}
-	if len(killed) != 0 {
-		t.Errorf("expected no kills when auto-start disabled, got %v", killed)
-	}
-}
-
-func TestEnsureRunningDetailed_ExternalServer_AutoStartDisabled(t *testing.T) {
-	t.Setenv("BEADS_DOLT_AUTO_START", "0")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "13579")
+func TestResolveServerMode_Default(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
 
 	dir := t.TempDir()
-	_, _, err := EnsureRunningDetailed(dir)
-	if err == nil {
-		t.Fatal("expected error when auto-start is disabled and no server running")
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeOwned {
+		t.Errorf("expected ServerModeOwned for empty dir, got %v", mode)
 	}
-	if !strings.Contains(err.Error(), "externally managed") {
-		t.Errorf("error should mention externally managed server, got: %v", err)
+}
+
+func TestResolveServerMode_SharedServer(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+
+	dir := t.TempDir()
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with shared server, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_ExplicitPort(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	// Write metadata.json with explicit port
+	metaCfg := &configfile.Config{
+		DoltServerPort: 3307,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with explicit port, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_ServerModeEnv(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with BEADS_DOLT_SERVER_MODE=1, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_EmbeddedMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	// Write metadata.json with embedded mode
+	metaCfg := &configfile.Config{
+		DoltMode: "embedded",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeEmbedded {
+		t.Errorf("expected ServerModeEmbedded with dolt_mode=embedded, got %v", mode)
+	}
+}
+
+func TestServerMode_String(t *testing.T) {
+	tests := []struct {
+		mode ServerMode
+		want string
+	}{
+		{ServerModeOwned, "owned"},
+		{ServerModeExternal, "external"},
+		{ServerModeEmbedded, "embedded"},
+		{ServerMode(99), "ServerMode(99)"},
+	}
+	for _, tc := range tests {
+		if got := tc.mode.String(); got != tc.want {
+			t.Errorf("ServerMode(%d).String() = %q, want %q", int(tc.mode), got, tc.want)
+		}
+	}
+}
+
+func TestDefaultConfig_IncludesMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	cfg := DefaultConfig(dir)
+	if cfg.Mode != ServerModeOwned {
+		t.Errorf("expected DefaultConfig.Mode = Owned for empty dir, got %v", cfg.Mode)
 	}
 }

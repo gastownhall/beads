@@ -10,6 +10,16 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 )
 
+// ServerMode is re-exported from doltserver for convenience.
+type ServerMode = doltserver.ServerMode
+
+// Re-export ServerMode constants for callers that import storage/dolt.
+const (
+	ServerModeOwned    = doltserver.ServerModeOwned
+	ServerModeExternal = doltserver.ServerModeExternal
+	ServerModeEmbedded = doltserver.ServerModeEmbedded
+)
+
 // ApplyCLIAutoStart sets the same standalone auto-start policy used by the
 // normal CLI path. This intentionally ignores metadata.json explicit-port
 // suppression so doctor and other CLI helper paths behave the same way as
@@ -19,7 +29,9 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 	if autoStartCfg == "" {
 		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
 	}
-	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, false)
+	// Pass ServerModeOwned to avoid external-mode suppression — this path
+	// intentionally behaves like a standalone owned-server setup.
+	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, ServerModeOwned)
 }
 
 // NewFromConfig creates a DoltStore based on the metadata.json configuration.
@@ -83,12 +95,12 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if autoStartCfg == "" {
 		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
 	}
-	// When metadata.json specifies an explicit server port (raw field, not the
-	// getter which falls back to DefaultDoltServerPort), suppress auto-start.
-	// This prevents bd from launching a different server when the user's configured
-	// server is temporarily unreachable — the root cause of the shadow database bug.
-	explicitPort := fileCfg.DoltServerPort > 0
-	cfg.AutoStart = resolveAutoStart(cfg.AutoStart, autoStartCfg, explicitPort)
+	// When the server is externally managed (explicit port in metadata.json,
+	// shared server mode, etc.), suppress auto-start. This prevents bd from
+	// launching a different server when the user's configured server is
+	// temporarily unreachable — the root cause of the shadow database bug.
+	mode := doltserver.ResolveServerMode(beadsDir)
+	cfg.AutoStart = resolveAutoStart(cfg.AutoStart, autoStartCfg, mode)
 
 	return New(ctx, cfg)
 }
@@ -99,7 +111,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 // Priority (highest to lowest):
 //  1. BEADS_TEST_MODE=1                    → always false (tests own the server lifecycle)
 //  2. BEADS_DOLT_AUTO_START=0              → always false (explicit env opt-out)
-//  3. explicitPort == true                 → always false (metadata.json has explicit port;
+//  3. mode == ServerModeExternal           → always false (server is externally managed;
 //     auto-starting a different server would create shadow databases)
 //  4. current == true                      → true  (caller option wins over config file,
 //     per NewFromConfigWithOptions contract)
@@ -113,17 +125,17 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 // distinguished from an explicit "opt-out" by the caller.  Callers that need
 // to suppress auto-start should use one of the environment-variable or
 // config-file overrides above.
-func resolveAutoStart(current bool, doltAutoStartCfg string, explicitPort bool) bool {
+func resolveAutoStart(current bool, doltAutoStartCfg string, mode ServerMode) bool {
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		return false
 	}
 	if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
 		return false
 	}
-	// When metadata.json specifies an explicit server port, never auto-start.
+	// When the server is externally managed, never auto-start.
 	// The user has configured a specific server — if it's down, error out
 	// rather than silently starting a different server from .beads/dolt/.
-	if explicitPort {
+	if mode == ServerModeExternal {
 		return false
 	}
 	// Caller option wins over config.yaml (NewFromConfigWithOptions contract).

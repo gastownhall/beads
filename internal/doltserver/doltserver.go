@@ -161,9 +161,10 @@ func ResolveDoltDir(beadsDir string) string {
 
 // Config holds the server configuration.
 type Config struct {
-	BeadsDir string // Path to .beads/ directory
-	Port     int    // MySQL protocol port (0 = allocate ephemeral port on Start)
-	Host     string // Bind address (default: 127.0.0.1)
+	BeadsDir string     // Path to .beads/ directory
+	Port     int        // MySQL protocol port (0 = allocate ephemeral port on Start)
+	Host     string     // Bind address (default: 127.0.0.1)
+	Mode     ServerMode // Server ownership mode (Owned, External, Embedded)
 }
 
 // State holds runtime information about a managed server.
@@ -331,6 +332,7 @@ func DefaultConfig(beadsDir string) *Config {
 	cfg := &Config{
 		BeadsDir: beadsDir,
 		Host:     "127.0.0.1",
+		Mode:     ResolveServerMode(beadsDir),
 	}
 
 	// Check env var override first (used by tests and manual overrides)
@@ -484,13 +486,11 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return state.Port, false, nil
 	}
 
-	// Check whether the server is externally managed before starting.
-	// Auto-start is suppressed when:
-	//   1. BEADS_DOLT_AUTO_START=0 or dolt.auto-start: false (GH#2641)
-	//   2. metadata.json has an explicit dolt_server_port (GH#2554)
-	// In both cases, the dolt server is externally managed (e.g., systemd).
-	// Do not start a per-project server — it would conflict with the external one.
-	if IsAutoStartDisabled() || hasExplicitPort(beadsDir) {
+	// If the server mode is External (explicit port in metadata.json,
+	// shared server mode, etc.), do not start a per-project server —
+	// it would conflict with the external one.
+	mode := ResolveServerMode(beadsDir)
+	if mode == ServerModeExternal {
 		cfg := DefaultConfig(beadsDir)
 		return 0, false, fmt.Errorf("Dolt server is not running on port %d, and auto-start is suppressed "+
 			"because the server is externally managed (dolt.auto-start: false or explicit port configured).\n\n"+
@@ -506,19 +506,6 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	return s.Port, true, nil
 }
 
-// hasExplicitPort returns true if beadsDir's metadata.json has an explicit
-// dolt_server_port configured, indicating the server is externally managed.
-func hasExplicitPort(beadsDir string) bool {
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if _, err := os.Stat(metadataPath); err != nil {
-		return false
-	}
-	fileCfg, err := configfile.Load(beadsDir)
-	if err != nil || fileCfg == nil {
-		return false
-	}
-	return fileCfg.DoltServerPort > 0
-}
 
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
@@ -847,8 +834,7 @@ func isAutoStartDisabled() bool {
 // eligible for cleanup. Externally-managed servers are never killed.
 //
 // A process is considered "external" (never kill) when any of:
-//   - hasExplicitPort() returns true (metadata.json has explicit port config)
-//   - BEADS_DOLT_AUTO_START=0 is set
+//   - ResolveServerMode() returns ServerModeExternal (explicit port, shared server, etc.)
 //   - No PID file exists (beads has no record of starting a server)
 func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, string) bool, kill func(int) error) ([]int, error) {
 	if len(allPIDs) == 0 {
@@ -856,10 +842,7 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 	}
 
 	// If the server is externally managed, never kill anything.
-	if hasExplicitPort(beadsDir) {
-		return nil, nil
-	}
-	if isAutoStartDisabled() {
+	if ResolveServerMode(beadsDir) == ServerModeExternal {
 		return nil, nil
 	}
 
