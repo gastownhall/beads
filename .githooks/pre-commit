@@ -9,40 +9,16 @@ set -euo pipefail
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
 [ -z "$staged_go_files" ] && exit 0
 
-# Require golangci-lint
-if ! command -v golangci-lint &>/dev/null; then
-    echo "pre-commit: golangci-lint not found."
-    echo "  Install: brew install golangci-lint"
-    echo "  Or: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
-    exit 1
-fi
-
-# Check for Go version mismatch that causes golangci-lint panics.
-# When golangci-lint is built with an older Go than the project requires,
-# its internal go/types package can panic on newer syntax/types.
-lint_go_ver=$(golangci-lint version 2>&1 | sed -n 's/.*built with go\([0-9]*\.[0-9]*\).*/\1/p')
-proj_go_ver=$(sed -n 's/^go \([0-9]*\.[0-9]*\).*/\1/p' go.mod)
-if [ -n "$lint_go_ver" ] && [ -n "$proj_go_ver" ]; then
-    lint_major=${lint_go_ver%%.*}
-    lint_minor=${lint_go_ver#*.}
-    proj_major=${proj_go_ver%%.*}
-    proj_minor=${proj_go_ver#*.}
-    if [ "$lint_major" -lt "$proj_major" ] 2>/dev/null || \
-       { [ "$lint_major" -eq "$proj_major" ] && [ "$lint_minor" -lt "$proj_minor" ]; } 2>/dev/null; then
-        echo "pre-commit: golangci-lint was built with go${lint_go_ver} but project requires go${proj_go_ver}."
-        echo "  This version mismatch causes panics during type checking."
-        echo "  Fix: brew upgrade golangci-lint"
-        echo "  Or:  go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
-        exit 1
-    fi
-fi
+# Use go run so golangci-lint is always built with the project's Go
+# toolchain, avoiding version-mismatch panics from a stale global binary.
+GOLANGCI_LINT="go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1"
 
 # Auto-format and re-stage
 echo "$staged_go_files" | xargs gofmt -w
 echo "$staged_go_files" | xargs git add
 
 # Lint changed code with auto-fix; block on remaining issues
-golangci-lint run --new-from-rev=HEAD --fix || exit 1
+$GOLANGCI_LINT run --new-from-rev=HEAD --fix || exit 1
 
 # Re-stage any auto-fixes from the linter
 echo "$staged_go_files" | xargs git add

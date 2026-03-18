@@ -14,11 +14,12 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // dbQuerier abstracts query execution so callers can use a retry-wrapped
 // DoltStore.QueryContext instead of a raw *sql.DB.  Both *sql.DB and
-// *dolt.DoltStore satisfy this interface.
+// *sql.DB satisfies this interface.
 type dbQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
@@ -181,15 +182,22 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	prefix := getBackupPrefix(ctx)
 	prefixFilter := prefix + "-" // e.g. "Prosa-"
 
+	// Extract raw DB handle once for all table exports.
+	accessor, ok := store.(storage.RawDBAccessor)
+	if !ok {
+		return nil, fmt.Errorf("storage backend does not support raw DB access")
+	}
+	db := accessor.DB()
+
 	var n int
 
 	// Export issues only — wisps are ephemeral and excluded from backup.
 	// They can be regenerated from the database if needed for disaster recovery.
 	if prefix != "" {
-		n, err = exportTable(ctx, store, dir, "issues.jsonl",
+		n, err = exportTable(ctx, db, dir, "issues.jsonl",
 			"SELECT * FROM issues WHERE id LIKE ? ORDER BY id", prefixFilter+"%")
 	} else {
-		n, err = exportTable(ctx, store, dir, "issues.jsonl",
+		n, err = exportTable(ctx, db, dir, "issues.jsonl",
 			"SELECT * FROM issues ORDER BY id")
 	}
 	if err != nil {
@@ -198,11 +206,11 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	state.Counts.Issues = n
 
 	if prefix != "" {
-		n, err = exportTable(ctx, store, dir, "events.jsonl",
+		n, err = exportTable(ctx, db, dir, "events.jsonl",
 			"SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at FROM events WHERE issue_id LIKE ? ORDER BY created_at ASC, id ASC",
 			prefixFilter+"%")
 	} else {
-		n, err = exportTable(ctx, store, dir, "events.jsonl",
+		n, err = exportTable(ctx, db, dir, "events.jsonl",
 			"SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at FROM events ORDER BY created_at ASC, id ASC")
 	}
 	if err != nil {
@@ -211,11 +219,11 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	state.Counts.Events = n
 
 	if prefix != "" {
-		n, err = exportTable(ctx, store, dir, "comments.jsonl",
+		n, err = exportTable(ctx, db, dir, "comments.jsonl",
 			"SELECT id, issue_id, author, text, created_at FROM comments WHERE issue_id LIKE ? ORDER BY id",
 			prefixFilter+"%")
 	} else {
-		n, err = exportTable(ctx, store, dir, "comments.jsonl",
+		n, err = exportTable(ctx, db, dir, "comments.jsonl",
 			"SELECT id, issue_id, author, text, created_at FROM comments ORDER BY id")
 	}
 	if err != nil {
@@ -226,11 +234,11 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	if prefix != "" {
 		// For dependencies, both issue_id and depends_on_id should belong to this project.
 		// We filter on issue_id (the dependent) having our prefix.
-		n, err = exportTable(ctx, store, dir, "dependencies.jsonl",
+		n, err = exportTable(ctx, db, dir, "dependencies.jsonl",
 			"SELECT issue_id, depends_on_id, type, created_at, created_by, metadata FROM dependencies WHERE issue_id LIKE ? ORDER BY issue_id, depends_on_id",
 			prefixFilter+"%")
 	} else {
-		n, err = exportTable(ctx, store, dir, "dependencies.jsonl",
+		n, err = exportTable(ctx, db, dir, "dependencies.jsonl",
 			"SELECT issue_id, depends_on_id, type, created_at, created_by, metadata FROM dependencies ORDER BY issue_id, depends_on_id")
 	}
 	if err != nil {
@@ -239,11 +247,11 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	state.Counts.Dependencies = n
 
 	if prefix != "" {
-		n, err = exportTable(ctx, store, dir, "labels.jsonl",
+		n, err = exportTable(ctx, db, dir, "labels.jsonl",
 			"SELECT issue_id, label FROM labels WHERE issue_id LIKE ? ORDER BY issue_id, label",
 			prefixFilter+"%")
 	} else {
-		n, err = exportTable(ctx, store, dir, "labels.jsonl",
+		n, err = exportTable(ctx, db, dir, "labels.jsonl",
 			"SELECT issue_id, label FROM labels ORDER BY issue_id, label")
 	}
 	if err != nil {
@@ -251,7 +259,7 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	}
 	state.Counts.Labels = n
 
-	n, err = exportTable(ctx, store, dir, "config.jsonl",
+	n, err = exportTable(ctx, db, dir, "config.jsonl",
 		"SELECT `key`, value FROM config ORDER BY `key`")
 	if err != nil {
 		return nil, fmt.Errorf("backup config: %w", err)

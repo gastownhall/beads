@@ -332,6 +332,11 @@ func PersistDependencies(ctx context.Context, tx *sql.Tx, issues []*types.Issue,
 			lookupTable = "wisps"
 		}
 		for _, dep := range issue.Dependencies {
+			// Default IssueID to the owning issue when not pre-set (e.g.,
+			// markdown bulk create where the ID is auto-generated).
+			if dep.IssueID == "" {
+				dep.IssueID = issue.ID
+			}
 			// Skip if target doesn't exist.
 			var exists int
 			//nolint:gosec // G201: table is determined by isWisp flag

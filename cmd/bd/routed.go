@@ -39,10 +39,10 @@ func beadsDirOverride() bool {
 // RoutedResult contains the result of a routed issue lookup
 type RoutedResult struct {
 	Issue      *types.Issue
-	Store      *dolt.DoltStore // The store that contains this issue (may be routed)
-	Routed     bool            // true if the issue was found via routing
-	ResolvedID string          // The resolved (full) issue ID
-	closeFn    func()          // Function to close routed storage (if any)
+	Store      storage.DoltStorage // The store that contains this issue (may be routed)
+	Routed     bool                // true if the issue was found via routing
+	ResolvedID string              // The resolved (full) issue ID
+	closeFn    func()              // Function to close routed storage (if any)
 }
 
 // Close closes any routed storage. Safe to call if Routed is false.
@@ -64,7 +64,7 @@ func (r *RoutedResult) Close() {
 //
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
-func resolveAndGetIssueWithRouting(ctx context.Context, localStore *dolt.DoltStore, id string) (*RoutedResult, error) {
+func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	if dbPath == "" {
 		// No routing without a database path - use local store
 		return resolveAndGetFromStore(ctx, localStore, id, false)
@@ -120,7 +120,7 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore *dolt.DoltSto
 }
 
 // resolveAndGetFromStore resolves a partial ID and gets the issue from a specific store.
-func resolveAndGetFromStore(ctx context.Context, s *dolt.DoltStore, id string, routed bool) (*RoutedResult, error) {
+func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id string, routed bool) (*RoutedResult, error) {
 	// First, resolve the partial ID
 	resolvedID, err := utils.ResolvePartialID(ctx, s, id)
 	if err != nil {
@@ -144,7 +144,7 @@ func resolveAndGetFromStore(ctx context.Context, s *dolt.DoltStore, id string, r
 // resolveViaAutoRouting attempts to find an issue using contributor auto-routing.
 // This is the fallback when prefix-based routing and local store both fail (GH#2345).
 // Returns a RoutedResult if the issue is found in the auto-routed store.
-func resolveViaAutoRouting(ctx context.Context, localStore *dolt.DoltStore, id string) (*RoutedResult, error) {
+func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	routedStore, routed, err := openRoutedReadStore(ctx, localStore)
 	if err != nil || !routed {
 		return nil, fmt.Errorf("no auto-routed store available")
@@ -162,7 +162,7 @@ func resolveViaAutoRouting(ctx context.Context, localStore *dolt.DoltStore, id s
 // openStoreForRig opens a read-only storage connection to a different rig's database.
 // The rigOrPrefix parameter accepts any format: "beads", "bd-", "bd", etc.
 // Returns the opened storage (caller must close) or an error.
-func openStoreForRig(ctx context.Context, rigOrPrefix string) (*dolt.DoltStore, error) {
+func openStoreForRig(ctx context.Context, rigOrPrefix string) (storage.DoltStorage, error) {
 	townBeadsDir, err := findTownBeadsDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve rig: %v", err)
@@ -189,7 +189,7 @@ func openStoreForRig(ctx context.Context, rigOrPrefix string) (*dolt.DoltStore, 
 //
 // Returns a RoutedResult containing the issue and the store to use for related queries.
 // The caller MUST call result.Close() when done to release any routed storage.
-func getIssueWithRouting(ctx context.Context, localStore *dolt.DoltStore, id string) (*RoutedResult, error) {
+func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	if dbPath == "" || beadsDirOverride() {
 		// No routing without a database path, or BEADS_DIR explicitly set (GH#663)
 		issue, err := localStore.GetIssue(ctx, id)
@@ -265,7 +265,7 @@ func getRoutedStoreForID(ctx context.Context, id string) (*routing.RoutedStorage
 
 	beadsDir := filepath.Dir(dbPath)
 	// Use GetRoutedStorageWithOpener with dolt to respect backend configuration (bd-m2jr)
-	return routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, dolt.NewFromConfig)
+	return routing.GetRoutedStorageWithOpener(ctx, id, beadsDir, newDoltStoreFromConfig)
 }
 
 // needsRouting checks if an ID would be routed to a different beads directory.
@@ -297,7 +297,7 @@ func needsRouting(id string) bool {
 // 4. Using routing to look up the issue in the target database
 //
 // Returns a slice of IssueWithDependencyMetadata for resolved external deps.
-func resolveExternalDepsViaRouting(ctx context.Context, issueStore *dolt.DoltStore, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+func resolveExternalDepsViaRouting(ctx context.Context, issueStore storage.DoltStorage, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	// Get raw dependency records to find external refs
 	deps, err := issueStore.GetDependencyRecords(ctx, issueID)
 	if err != nil {

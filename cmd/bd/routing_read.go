@@ -9,13 +9,14 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/routing"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // getRoutingConfigValue resolves routing config from YAML/env first, then DB config.
 // Only uses the YAML value if it was explicitly set (not a Viper default), so that
 // DB-stored values aren't shadowed by defaults like "~/.beads-planning".
-func getRoutingConfigValue(ctx context.Context, store *dolt.DoltStore, key string) string {
+func getRoutingConfigValue(ctx context.Context, store storage.DoltStorage, key string) string {
 	// Only trust YAML/env values that were explicitly set, not Viper defaults.
 	if src := config.GetValueSource(key); src != config.SourceDefault {
 		value := strings.TrimSpace(config.GetString(key))
@@ -38,7 +39,7 @@ func getRoutingConfigValue(ctx context.Context, store *dolt.DoltStore, key strin
 
 // determineAutoRoutedRepoPath returns the repository path that should be used for
 // issue reads when contributor auto-routing is enabled.
-func determineAutoRoutedRepoPath(ctx context.Context, store *dolt.DoltStore) string {
+func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage) string {
 	userRole, err := routing.DetectUserRole(".")
 	if err != nil {
 		debug.Logf("Warning: failed to detect user role: %v\n", err)
@@ -71,7 +72,7 @@ func determineAutoRoutedRepoPath(ctx context.Context, store *dolt.DoltStore) str
 
 // openRoutedReadStore opens the auto-routed target store for read commands.
 // Returns routed=false when reads should stay in the current store.
-func openRoutedReadStore(ctx context.Context, store *dolt.DoltStore) (*dolt.DoltStore, bool, error) {
+func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, error) {
 	repoPath := determineAutoRoutedRepoPath(ctx, store)
 	if repoPath == "" || repoPath == "." {
 		return nil, false, nil

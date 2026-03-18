@@ -102,8 +102,12 @@ func autoStartRelease(serverDir string) error {
 	return nil
 }
 
-// Compile-time interface check.
+// Compile-time interface checks.
 var _ storage.DoltStorage = (*DoltStore)(nil)
+var _ storage.RawDBAccessor = (*DoltStore)(nil)
+var _ storage.StoreLocator = (*DoltStore)(nil)
+var _ storage.LifecycleManager = (*DoltStore)(nil)
+var _ storage.PendingCommitter = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -541,7 +545,11 @@ func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) err
 // applyConfigDefaults fills in default values for unset Config fields.
 func applyConfigDefaults(cfg *Config) {
 	if cfg.Database == "" {
-		if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.Path != "" {
+		// Check env var first — this is the highest-priority override and
+		// must be consulted even when no config file was loaded.
+		if d := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); d != "" {
+			cfg.Database = d
+		} else if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.Path != "" {
 			// Test mode: derive unique database name from path for isolation.
 			// Each test creates a unique temp directory, so hashing the path
 			// gives each test its own database on the shared test server.
@@ -549,6 +557,7 @@ func applyConfigDefaults(cfg *Config) {
 			_, _ = h.Write([]byte(cfg.Path)) // hash.Hash.Write never returns an error
 			cfg.Database = fmt.Sprintf("testdb_%x", h.Sum64())
 		} else {
+			fmt.Fprintf(os.Stderr, "warning: no database name configured; falling back to default %q\n", configfile.DefaultDoltDatabase)
 			cfg.Database = configfile.DefaultDoltDatabase
 		}
 	}
@@ -595,11 +604,18 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	// If env var didn't provide a port, consult the full resolution chain:
 	// port file > config.yaml > metadata.json (GH#2590).
-	// Previously, port 0 fell through to the MySQL driver default (3307),
-	// causing cross-project connections when another Dolt sat on 3307.
-	if cfg.ServerPort == 0 && cfg.Path != "" {
-		if resolved := doltserver.DefaultConfig(cfg.Path); resolved.Port > 0 {
-			cfg.ServerPort = resolved.Port
+	// Resolve from the owning .beads dir when available; cfg.Path is the Dolt
+	// data path, not the config directory, and using it directly can miss the
+	// repo-local port file or metadata.
+	if cfg.ServerPort == 0 {
+		resolveDir := cfg.BeadsDir
+		if resolveDir == "" && cfg.Path != "" {
+			resolveDir = filepath.Dir(cfg.Path)
+		}
+		if resolveDir != "" {
+			if resolved := doltserver.DefaultConfig(resolveDir); resolved.Port > 0 {
+				cfg.ServerPort = resolved.Port
+			}
 		}
 	}
 	// Port 0 means "not yet resolved" — auto-start (EnsureRunning) will
@@ -1076,6 +1092,33 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	if err == nil && version >= currentSchemaVersion {
 		// Wisps tables are dolt_ignore'd (not persisted in commit history),
 		// so they must be recreated on every server session. (GH#2271)
+		return createIgnoredTables(db)
+	}
+
+	// Acquire an advisory lock to serialize schema initialization across concurrent processes.
+	// On a fresh database, all processes fail the fast path and race to execute ~20 DDL
+	// statements simultaneously, corrupting the Dolt journal. GET_LOCK serializes entry
+	// to the slow path. The lock is connection-scoped: we hold a dedicated connection so
+	// the lock persists across the DDL sequence and is released on conn.Close().
+	const schemaInitLock = "bd_schema_init"
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection for schema init lock: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	var locked int
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 30)", schemaInitLock).Scan(&locked); err != nil {
+		return fmt.Errorf("failed to acquire schema init lock: %w", err)
+	}
+	if locked != 1 {
+		return fmt.Errorf("failed to acquire schema init lock: timeout after 30s (another process holds it)")
+	}
+	defer conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", schemaInitLock) //nolint:errcheck
+
+	// Double-check: another process may have completed initialization while we waited.
+	var versionAfterLock int
+	if err := conn.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&versionAfterLock); err == nil && versionAfterLock >= currentSchemaVersion {
 		return createIgnoredTables(db)
 	}
 

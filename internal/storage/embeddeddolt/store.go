@@ -12,7 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -36,6 +38,7 @@ var errClosed = errors.New("embeddeddolt: store is closed")
 
 // New creates an EmbeddedDoltStore using the embedded Dolt engine.
 // beadsDir is the .beads/ root; the data directory is derived as <beadsDir>/embeddeddolt/.
+// The database is created automatically if it doesn't exist (initSchema handles this).
 func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
 	// Resolve to absolute path — the embedded dolt driver resolves file://
 	// DSN paths relative to its data directory, so relative paths cause
@@ -209,10 +212,6 @@ func (s *EmbeddedDoltStore) DeleteIssue(ctx context.Context, id string) error {
 	panic("embeddeddolt: DeleteIssue not implemented")
 }
 
-func (s *EmbeddedDoltStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	panic("embeddeddolt: SearchIssues not implemented")
-}
-
 // AddDependency is implemented in dependencies.go.
 
 func (s *EmbeddedDoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
@@ -315,7 +314,33 @@ func (s *EmbeddedDoltStore) ListBranches(ctx context.Context) ([]string, error) 
 }
 
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
-	panic("embeddeddolt: CommitPending not implemented")
+	var hasPending bool
+	var msg string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		hasPending, err = issueops.HasPendingChanges(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if hasPending {
+			msg = issueops.BuildBatchCommitMessage(ctx, tx, actor)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !hasPending {
+		return false, nil
+	}
+
+	if err := s.Commit(ctx, msg); err != nil {
+		if issueops.IsNothingToCommitError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string) (bool, error) {
@@ -323,7 +348,11 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 }
 
 func (s *EmbeddedDoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
-	panic("embeddeddolt: GetCurrentCommit not implemented")
+	var hash string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&hash)
+	})
+	return hash, err
 }
 
 func (s *EmbeddedDoltStore) Status(ctx context.Context) (*storage.Status, error) {
@@ -470,22 +499,6 @@ func (s *EmbeddedDoltStore) GetDependencyRecords(ctx context.Context, issueID st
 	panic("embeddeddolt: GetDependencyRecords not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
-	panic("embeddeddolt: GetDependencyRecordsForIssues not implemented")
-}
-
-func (s *EmbeddedDoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
-	panic("embeddeddolt: GetAllDependencyRecords not implemented")
-}
-
-func (s *EmbeddedDoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error) {
-	panic("embeddeddolt: GetDependencyCounts not implemented")
-}
-
-func (s *EmbeddedDoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []string) (blockedByMap map[string][]string, blocksMap map[string][]string, parentMap map[string]string, err error) {
-	panic("embeddeddolt: GetBlockingInfoForIssues not implemented")
-}
-
 func (s *EmbeddedDoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	panic("embeddeddolt: IsBlocked not implemented")
 }
@@ -518,16 +531,8 @@ func (s *EmbeddedDoltStore) ImportIssueComment(ctx context.Context, issueID, aut
 	panic("embeddeddolt: ImportIssueComment not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetCommentCounts(ctx context.Context, issueIDs []string) (map[string]int, error) {
-	panic("embeddeddolt: GetCommentCounts not implemented")
-}
-
 func (s *EmbeddedDoltStore) GetCommentsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Comment, error) {
 	panic("embeddeddolt: GetCommentsForIssues not implemented")
-}
-
-func (s *EmbeddedDoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error) {
-	panic("embeddeddolt: GetLabelsForIssues not implemented")
 }
 
 // ---------------------------------------------------------------------------
@@ -539,11 +544,29 @@ func (s *EmbeddedDoltStore) DeleteConfig(ctx context.Context, key string) error 
 }
 
 func (s *EmbeddedDoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {
-	panic("embeddeddolt: GetCustomStatuses not implemented")
+	var result []string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetCustomStatusesTx(ctx, tx)
+		return err
+	})
+	if err != nil || len(result) == 0 {
+		return config.GetCustomStatusesFromYAML(), nil
+	}
+	return result, nil
 }
 
 func (s *EmbeddedDoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
-	panic("embeddeddolt: GetCustomTypes not implemented")
+	var result []string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetCustomTypesTx(ctx, tx)
+		return err
+	})
+	if err != nil || len(result) == 0 {
+		return config.GetCustomTypesFromYAML(), nil
+	}
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------

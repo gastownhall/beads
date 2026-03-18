@@ -32,6 +32,9 @@ push-state.json
 # Lock files (various runtime locks)
 *.lock
 
+# Credential key (encryption key for federation peer auth — never commit)
+.beads-credential-key
+
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
 
@@ -62,6 +65,9 @@ dolt-server.port
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Per-project environment file (Dolt connection config, GH#2520)
+.env
+
 # Legacy files (from pre-Dolt versions)
 *.db
 *.db?*
@@ -89,6 +95,7 @@ const projectGitignoreComment = "# Dolt database files (added by bd init)"
 // requiredPatterns are patterns that MUST be in .beads/.gitignore
 var requiredPatterns = []string{
 	"*.db?*",
+	".env",
 	"redirect",
 	"last-touched",
 	"bd.sock.startlock",
@@ -105,6 +112,7 @@ var requiredPatterns = []string{
 	"interactions.jsonl",
 	"*.lock",
 	"*.corrupt.backup/",
+	".beads-credential-key",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.

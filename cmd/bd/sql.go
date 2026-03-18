@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 var sqlCmd = &cobra.Command{
@@ -37,7 +38,11 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 			FatalErrorRespectJSON("no database connection available (run 'bd doctor' to diagnose, or 'bd init' to create a new database)")
 		}
 
-		db := store.UnderlyingDB()
+		accessor, ok := store.(storage.RawDBAccessor)
+		if !ok {
+			FatalErrorRespectJSON("storage backend does not support raw DB access")
+		}
+		db := accessor.UnderlyingDB()
 		if db == nil {
 			FatalErrorRespectJSON("underlying database not available")
 		}

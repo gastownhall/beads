@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // ensureDirectMode makes sure the CLI is operating in direct-storage mode.
@@ -29,9 +28,9 @@ func ensureStoreActive() error {
 			"Hint: run 'bd init' to create a database in the current directory")
 	}
 
-	// Use dolt.NewFromConfig to create the appropriate backend
-	// based on metadata.json configuration
-	store, err := dolt.NewFromConfig(getRootContext(), beadsDir)
+	// Use the factory to create the appropriate backend
+	// based on metadata.json configuration and build tags
+	store, err := newDoltStoreFromConfig(getRootContext(), beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w\n"+
 			"Hint: run 'bd init' to create a database or 'bd doctor --fix' to diagnose", err)
