@@ -28,7 +28,7 @@ func testMainInner(m *testing.M) int {
 	// Isolate config discovery from the repo's tracked `.beads/config.yaml`.
 	// Many tests expect default config values; running from within this repo would
 	// cause config.Initialize() to walk up from CWD and load `.beads/config.yaml`,
-	// which sets sync.mode=dolt-native and makes tests assert the wrong behavior.
+	// which may set non-default config values and makes tests assert the wrong behavior.
 	tmp, err := os.MkdirTemp("", "beads-bd-tests-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
