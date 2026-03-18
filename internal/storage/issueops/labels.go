@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -36,6 +37,7 @@ func GetLabelsInTx(ctx context.Context, tx *sql.Tx, table, issueID string) ([]st
 
 // GetLabelsForIssuesInTx fetches labels for multiple issues in a single transaction.
 // Routes each ID to labels or wisp_labels based on wisp status.
+// Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
 func GetLabelsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]string, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]string), nil
@@ -62,45 +64,41 @@ func GetLabelsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) 
 		if len(pair.ids) == 0 {
 			continue
 		}
-		placeholders := make([]string, len(pair.ids))
-		args := make([]any, len(pair.ids))
-		for i, id := range pair.ids {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		//nolint:gosec // G201: pair.table is hardcoded
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label`,
-			pair.table, joinPlaceholders(placeholders)), args...)
-		if err != nil {
-			return nil, fmt.Errorf("get labels for issues from %s: %w", pair.table, err)
-		}
-		for rows.Next() {
-			var issueID, label string
-			if err := rows.Scan(&issueID, &label); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get labels for issues: scan: %w", err)
+		for start := 0; start < len(pair.ids); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(pair.ids) {
+				end = len(pair.ids)
 			}
-			result[issueID] = append(result[issueID], label)
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get labels for issues: rows: %w", err)
+			batch := pair.ids[start:end]
+			placeholders := make([]string, len(batch))
+			args := make([]any, len(batch))
+			for i, id := range batch {
+				placeholders[i] = "?"
+				args[i] = id
+			}
+			//nolint:gosec // G201: pair.table is hardcoded
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label`,
+				pair.table, strings.Join(placeholders, ",")), args...)
+			if err != nil {
+				return nil, fmt.Errorf("get labels for issues from %s: %w", pair.table, err)
+			}
+			for rows.Next() {
+				var issueID, label string
+				if err := rows.Scan(&issueID, &label); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("get labels for issues: scan: %w", err)
+				}
+				result[issueID] = append(result[issueID], label)
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("get labels for issues: rows: %w", err)
+			}
 		}
 	}
 
 	return result, nil
-}
-
-func joinPlaceholders(p []string) string {
-	result := ""
-	for i, s := range p {
-		if i > 0 {
-			result += ","
-		}
-		result += s
-	}
-	return result
 }
 
 // AddLabelInTx adds a label to an issue and records an event within an existing
