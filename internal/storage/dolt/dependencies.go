@@ -284,335 +284,56 @@ func (s *DoltStore) GetDependencyRecords(ctx context.Context, issueID string) ([
 	return scanDependencyRows(rows)
 }
 
-// GetAllDependencyRecords returns all dependency records
+// GetAllDependencyRecords returns all dependency records.
+// Delegates to issueops.GetAllDependencyRecordsInTx for shared query logic.
 func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
-	rows, err := s.queryContext(ctx, `
-		SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
-		FROM dependencies
-		ORDER BY issue_id
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get all dependency records: %w", err)
-	}
-	defer rows.Close()
-
-	result := make(map[string][]*types.Dependency)
-	for rows.Next() {
-		dep, err := scanDependencyRow(rows)
-		if err != nil {
-			return nil, fmt.Errorf("get all dependency records: %w", err)
-		}
-		result[dep.IssueID] = append(result[dep.IssueID], dep)
-	}
-	return result, rows.Err()
+	var result map[string][]*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetAllDependencyRecordsInTx(ctx, tx)
+		return err
+	})
+	return result, err
 }
 
-// GetDependencyRecordsForIssues returns dependency records for specific issues
+// GetDependencyRecordsForIssues returns dependency records for specific issues.
+// Delegates to issueops.GetDependencyRecordsForIssuesInTx for shared query logic.
 func (s *DoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
-	if len(issueIDs) == 0 {
-		return make(map[string][]*types.Dependency), nil
-	}
-
-	// Partition and merge from wisps and issues tables
-	ephIDs, doltIDs := s.partitionByWispStatus(ctx, issueIDs)
-	if len(ephIDs) > 0 {
-		result := make(map[string][]*types.Dependency)
-		for _, id := range ephIDs {
-			deps, err := s.getWispDependencyRecords(ctx, id)
-			if err != nil {
-				return nil, fmt.Errorf("get dependency records: wisp %s: %w", id, err)
-			}
-			if len(deps) > 0 {
-				result[id] = deps
-			}
-		}
-		if len(doltIDs) > 0 {
-			doltResult, err := s.getDependencyRecordsForIssuesDolt(ctx, doltIDs)
-			if err != nil {
-				return nil, fmt.Errorf("get dependency records: dolt: %w", err)
-			}
-			for k, v := range doltResult {
-				result[k] = v
-			}
-		}
-		return result, nil
-	}
-
-	return s.getDependencyRecordsForIssuesDolt(ctx, issueIDs)
-}
-
-func (s *DoltStore) getDependencyRecordsForIssuesDolt(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
-	result := make(map[string][]*types.Dependency)
-
-	// Batch IN clauses to avoid Dolt query-planner spikes with large ID sets.
-	for start := 0; start < len(issueIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(issueIDs) {
-			end = len(issueIDs)
-		}
-		batch := issueIDs[start:end]
-
-		placeholders := make([]string, len(batch))
-		args := make([]interface{}, len(batch))
-		for i, id := range batch {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		inClause := strings.Join(placeholders, ",")
-
-		// nolint:gosec // G201: inClause contains only ? placeholders, actual values passed via args
-		query := fmt.Sprintf(`
-			SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
-			FROM dependencies
-			WHERE issue_id IN (%s)
-			ORDER BY issue_id
-		`, inClause)
-
-		rows, err := s.queryContext(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get dependency records for issues: %w", err)
-		}
-
-		for rows.Next() {
-			dep, err := scanDependencyRow(rows)
-			if err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dependency records for issues: %w", err)
-			}
-			result[dep.IssueID] = append(result[dep.IssueID], dep)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		_ = rows.Close()
-	}
-
-	return result, nil
+	var result map[string][]*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependencyRecordsForIssuesInTx(ctx, tx, issueIDs)
+		return err
+	})
+	return result, err
 }
 
 // GetBlockingInfoForIssues returns blocking dependency records relevant to a set of issue IDs.
-// It fetches both directions:
-//   - Dependencies where issue_id is in the set ("this issue is blocked by X")
-//   - Dependencies where depends_on_id is in the set ("this issue blocks Y")
-//
-// Parent-child dependencies are separated into parentMap (childID -> parentID) so callers
-// can display them distinctly from blocking deps. (bd-hcxu)
-//
-// This replaces the expensive pattern of GetAllDependencyRecords + getClosedBlockerIDs
-// which loaded the entire dependency table and did N+1 issue lookups. (bd-7di)
+// Delegates to issueops.GetBlockingInfoForIssuesInTx for shared query logic.
 func (s *DoltStore) GetBlockingInfoForIssues(ctx context.Context, issueIDs []string) (
-	blockedByMap map[string][]string, // issueID -> list of IDs blocking it
-	blocksMap map[string][]string, // issueID -> list of IDs it blocks
-	parentMap map[string]string, // childID -> parentID (parent-child deps)
+	blockedByMap map[string][]string,
+	blocksMap map[string][]string,
+	parentMap map[string]string,
 	err error,
 ) {
-	blockedByMap = make(map[string][]string)
-	blocksMap = make(map[string][]string)
-	parentMap = make(map[string]string)
-
-	if len(issueIDs) == 0 {
-		return blockedByMap, blocksMap, parentMap, nil
-	}
-
-	// Partition and merge wisp and dolt IDs
-	ephIDs, doltIDs := s.partitionByWispStatus(ctx, issueIDs)
-	if len(ephIDs) > 0 {
-		// For wisp IDs, query wisp_dependencies
-		for _, ephID := range ephIDs {
-			deps, depErr := s.getWispDependencyRecords(ctx, ephID)
-			if depErr != nil {
-				return nil, nil, nil, depErr
-			}
-			for _, dep := range deps {
-				if dep.Type == types.DepParentChild {
-					parentMap[ephID] = dep.DependsOnID
-				} else if dep.Type == types.DepBlocks {
-					blockedByMap[ephID] = append(blockedByMap[ephID], dep.DependsOnID)
-				}
-			}
-		}
-		if len(doltIDs) == 0 {
-			return blockedByMap, blocksMap, parentMap, nil
-		}
-		issueIDs = doltIDs
-	}
-
-	// Batch IN clauses to avoid Dolt query-planner spikes with large ID sets.
-	for start := 0; start < len(issueIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(issueIDs) {
-			end = len(issueIDs)
-		}
-		batch := issueIDs[start:end]
-
-		placeholders := make([]string, len(batch))
-		args := make([]interface{}, len(batch))
-		for i, id := range batch {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		inClause := strings.Join(placeholders, ",")
-
-		// Query 1: Get "blocked by" relationships — deps where issue_id is in our set
-		// and the dependency type affects ready work (blocks, parent-child).
-		// nolint:gosec // G201: inClause contains only ? placeholders, actual values passed via args
-		blockedByQuery := fmt.Sprintf(`
-			SELECT d.issue_id, d.depends_on_id, d.type, COALESCE(i.status, '') AS blocker_status
-			FROM dependencies d
-			LEFT JOIN issues i ON i.id = d.depends_on_id
-			WHERE d.issue_id IN (%s) AND d.type IN ('blocks', 'parent-child')
-		`, inClause)
-
-		rows, qErr := s.queryContext(ctx, blockedByQuery, args...)
-		if qErr != nil {
-			return nil, nil, nil, fmt.Errorf("failed to get blocked-by info: %w", qErr)
-		}
-		for rows.Next() {
-			var issueID, blockerID, depType, blockerStatus string
-			if scanErr := rows.Scan(&issueID, &blockerID, &depType, &blockerStatus); scanErr != nil {
-				_ = rows.Close()
-				return nil, nil, nil, wrapScanError("get blocking info: scan blocked-by", scanErr)
-			}
-			// Skip closed blockers — the dependency record is preserved, but a
-			// closed blocker no longer blocks work.
-			if types.Status(blockerStatus) == types.StatusClosed {
-				continue
-			}
-			// Separate parent-child from blocking deps (bd-hcxu)
-			if depType == "parent-child" {
-				parentMap[issueID] = blockerID
-			} else {
-				blockedByMap[issueID] = append(blockedByMap[issueID], blockerID)
-			}
-		}
-		_ = rows.Close()
-		if rowErr := rows.Err(); rowErr != nil {
-			return nil, nil, nil, wrapQueryError("get blocking info: blocked-by rows", rowErr)
-		}
-
-		// Query 2: Get "blocks" relationships — deps where depends_on_id is in our set
-		// (shows what the displayed issues block).
-		// nolint:gosec // G201: inClause contains only ? placeholders, actual values passed via args
-		blocksQuery := fmt.Sprintf(`
-			SELECT d.depends_on_id, d.issue_id, d.type, COALESCE(i.status, '') AS blocker_status
-			FROM dependencies d
-			LEFT JOIN issues i ON i.id = d.depends_on_id
-			WHERE d.depends_on_id IN (%s) AND d.type IN ('blocks', 'parent-child')
-		`, inClause)
-
-		rows2, qErr2 := s.queryContext(ctx, blocksQuery, args...)
-		if qErr2 != nil {
-			return nil, nil, nil, fmt.Errorf("failed to get blocks info: %w", qErr2)
-		}
-		for rows2.Next() {
-			var blockerID, blockedID, depType, blockerStatus string
-			if scanErr := rows2.Scan(&blockerID, &blockedID, &depType, &blockerStatus); scanErr != nil {
-				_ = rows2.Close()
-				return nil, nil, nil, wrapScanError("get blocking info: scan blocks", scanErr)
-			}
-			// Skip if the blocker (our displayed issue) is closed
-			if types.Status(blockerStatus) == types.StatusClosed {
-				continue
-			}
-			// Skip parent-child in "blocks" map (those are structural, not blocking)
-			if depType == "parent-child" {
-				continue
-			}
-			blocksMap[blockerID] = append(blocksMap[blockerID], blockedID)
-		}
-		_ = rows2.Close()
-		if rowErr2 := rows2.Err(); rowErr2 != nil {
-			return nil, nil, nil, wrapQueryError("get blocking info: blocks rows", rowErr2)
-		}
-	}
-
-	return blockedByMap, blocksMap, parentMap, nil
+	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var txErr error
+		blockedByMap, blocksMap, parentMap, txErr = issueops.GetBlockingInfoForIssuesInTx(ctx, tx, issueIDs)
+		return txErr
+	})
+	return
 }
 
-// GetDependencyCounts returns dependency counts for multiple issues
+// GetDependencyCounts returns dependency counts for multiple issues.
+// Delegates to issueops.GetDependencyCountsInTx for shared query logic.
 func (s *DoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error) {
-	if len(issueIDs) == 0 {
-		return make(map[string]*types.DependencyCounts), nil
-	}
-
-	result := make(map[string]*types.DependencyCounts)
-	for _, id := range issueIDs {
-		result[id] = &types.DependencyCounts{}
-	}
-
-	// Batch IN clauses to avoid Dolt query-planner spikes with large ID sets.
-	for start := 0; start < len(issueIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(issueIDs) {
-			end = len(issueIDs)
-		}
-		batch := issueIDs[start:end]
-
-		placeholders := make([]string, len(batch))
-		args := make([]interface{}, len(batch))
-		for i, id := range batch {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		inClause := strings.Join(placeholders, ",")
-
-		// Query for dependencies (blockers)
-		// nolint:gosec // G201: inClause contains only ? placeholders, actual values passed via args
-		depQuery := fmt.Sprintf(`
-			SELECT issue_id, COUNT(*) as cnt
-			FROM dependencies
-			WHERE issue_id IN (%s) AND type = 'blocks'
-			GROUP BY issue_id
-		`, inClause)
-
-		depRows, err := s.queryContext(ctx, depQuery, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get dependency counts: %w", err)
-		}
-
-		for depRows.Next() {
-			var id string
-			var cnt int
-			if err := depRows.Scan(&id, &cnt); err != nil {
-				_ = depRows.Close()
-				return nil, fmt.Errorf("failed to scan dep count: %w", err)
-			}
-			if c, ok := result[id]; ok {
-				c.DependencyCount = cnt
-			}
-		}
-		_ = depRows.Close()
-
-		// Query for dependents (blocking)
-		// nolint:gosec // G201: inClause contains only ? placeholders, actual values passed via args
-		blockingQuery := fmt.Sprintf(`
-			SELECT depends_on_id, COUNT(*) as cnt
-			FROM dependencies
-			WHERE depends_on_id IN (%s) AND type = 'blocks'
-			GROUP BY depends_on_id
-		`, inClause)
-
-		blockingRows, err := s.queryContext(ctx, blockingQuery, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get blocking counts: %w", err)
-		}
-
-		for blockingRows.Next() {
-			var id string
-			var cnt int
-			if err := blockingRows.Scan(&id, &cnt); err != nil {
-				_ = blockingRows.Close()
-				return nil, fmt.Errorf("failed to scan blocking count: %w", err)
-			}
-			if c, ok := result[id]; ok {
-				c.DependentCount = cnt
-			}
-		}
-		_ = blockingRows.Close()
-	}
-
-	return result, nil
+	var result map[string]*types.DependencyCounts
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependencyCountsInTx(ctx, tx, issueIDs)
+		return err
+	})
+	return result, err
 }
 
 // GetDependencyTree returns a dependency tree for visualization
