@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -36,6 +37,7 @@ var errClosed = errors.New("embeddeddolt: store is closed")
 
 // New creates an EmbeddedDoltStore using the embedded Dolt engine.
 // beadsDir is the .beads/ root; the data directory is derived as <beadsDir>/embeddeddolt/.
+// The database is created automatically if it doesn't exist (initSchema handles this).
 func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
 	// Resolve to absolute path — the embedded dolt driver resolves file://
 	// DSN paths relative to its data directory, so relative paths cause
@@ -315,7 +317,33 @@ func (s *EmbeddedDoltStore) ListBranches(ctx context.Context) ([]string, error) 
 }
 
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
-	panic("embeddeddolt: CommitPending not implemented")
+	var hasPending bool
+	var msg string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		hasPending, err = issueops.HasPendingChanges(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if hasPending {
+			msg = issueops.BuildBatchCommitMessage(ctx, tx, actor)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !hasPending {
+		return false, nil
+	}
+
+	if err := s.Commit(ctx, msg); err != nil {
+		if issueops.IsNothingToCommitError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string) (bool, error) {
@@ -323,7 +351,11 @@ func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string)
 }
 
 func (s *EmbeddedDoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
-	panic("embeddeddolt: GetCurrentCommit not implemented")
+	var hash string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&hash)
+	})
+	return hash, err
 }
 
 func (s *EmbeddedDoltStore) Status(ctx context.Context) (*storage.Status, error) {

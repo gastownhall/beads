@@ -644,6 +644,13 @@ func TestClosePromotedWisp(t *testing.T) {
 	if err := store.CreateIssue(ctx, wisp, "tester"); err != nil {
 		t.Fatalf("CreateIssue (wisp) failed: %v", err)
 	}
+	got, err := store.GetIssue(ctx, wisp.ID)
+	if err != nil {
+		t.Fatalf("GetIssue failed for promoted wisp: %v", err)
+	}
+	if got.ID != wisp.ID {
+		t.Fatalf("GetIssue returned wrong ID: %q vs %q", got.ID, wisp.ID)
+	}
 	if !IsEphemeralID(wisp.ID) {
 		t.Fatalf("expected wisp ID to match ephemeral pattern, got %q", wisp.ID)
 	}
@@ -657,7 +664,7 @@ func TestClosePromotedWisp(t *testing.T) {
 	if store.isActiveWisp(ctx, wisp.ID) {
 		t.Fatal("promoted wisp should not be active in wisps table")
 	}
-	got, err := store.GetIssue(ctx, wisp.ID)
+	got, err = store.GetIssue(ctx, wisp.ID)
 	if err != nil {
 		t.Fatalf("GetIssue failed for promoted wisp: %v", err)
 	}

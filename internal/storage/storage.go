@@ -7,6 +7,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -99,6 +100,31 @@ type DoltStorage interface {
 	ConfigMetadataStore
 	CompactionStore
 	AdvancedQueryStore
+}
+
+// RawDBAccessor provides raw *sql.DB access for diagnostics and migrations.
+// Callers that need raw SQL should type-assert to this interface.
+type RawDBAccessor interface {
+	DB() *sql.DB
+	UnderlyingDB() *sql.DB
+}
+
+// StoreLocator provides filesystem path information for the store.
+// Callers that need the store's on-disk location should type-assert to this interface.
+type StoreLocator interface {
+	Path() string
+	CLIDir() string
+}
+
+// LifecycleManager provides lifecycle inspection beyond Close().
+type LifecycleManager interface {
+	IsClosed() bool
+}
+
+// PendingCommitter provides the ability to commit pending (dirty) changes.
+// Used by auto-commit and auto-push flows.
+type PendingCommitter interface {
+	CommitPending(ctx context.Context, actor string) (bool, error)
 }
 
 // Transaction provides atomic multi-operation support within a single database transaction.

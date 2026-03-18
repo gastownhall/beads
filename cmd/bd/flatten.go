@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 var (
@@ -64,14 +65,18 @@ Examples:
 		}
 
 		// Count commits
+		accessor, ok := store.(storage.RawDBAccessor)
+		if !ok {
+			FatalError("storage backend does not support raw DB access")
+		}
 		var commitCount int
-		if err := store.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
+		if err := accessor.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
 			FatalError("failed to count commits: %v", err)
 		}
 
 		// Get initial commit hash (oldest ancestor)
 		var initialHash string
-		if err := store.DB().QueryRowContext(ctx,
+		if err := accessor.DB().QueryRowContext(ctx,
 			"SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1",
 		).Scan(&initialHash); err != nil {
 			FatalError("failed to find initial commit: %v", err)

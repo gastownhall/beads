@@ -57,7 +57,8 @@ func CheckDoltFormat(path string) DoctorCheck {
 	}
 }
 
-// CheckDatabaseVersion checks the database version and migration status
+// CheckDatabaseVersion checks the database version and migration status.
+// Opens its own store; prefer CheckDatabaseVersionWithStore when a shared store is available.
 func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -85,6 +86,36 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkDatabaseVersionWithStore(store, cliVersion)
+}
+
+// CheckDatabaseVersionWithStore checks the database version using a shared store (GH#2636).
+func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		doltPath := getDatabasePath(ss.BeadsDir())
+		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+			return DoctorCheck{
+				Name:    "Database",
+				Status:  StatusError,
+				Message: "No dolt database found",
+				Detail:  "Storage: Dolt",
+				Fix:     "Run 'bd init' to create database (will clone from remote if configured)",
+			}
+		}
+		return DoctorCheck{
+			Name:    "Database",
+			Status:  StatusError,
+			Message: "Unable to open database",
+			Detail:  "Storage: Dolt",
+			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues",
+		}
+	}
+	return checkDatabaseVersionWithStore(store, cliVersion)
+}
+
+func checkDatabaseVersionWithStore(store *dolt.DoltStore, cliVersion string) DoctorCheck {
+	ctx := context.Background()
 	dbVersion, err := store.GetMetadata(ctx, "bd_version")
 	if err != nil {
 		return DoctorCheck{
@@ -123,7 +154,8 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 	}
 }
 
-// CheckSchemaCompatibility checks if all required tables and columns are present
+// CheckSchemaCompatibility checks if all required tables and columns are present.
+// Opens its own store; prefer CheckSchemaCompatibilityWithStore when a shared store is available.
 func CheckSchemaCompatibility(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -147,6 +179,24 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkSchemaCompatibilityWithStore(store)
+}
+
+// CheckSchemaCompatibilityWithStore checks schema compatibility using a shared store (GH#2636).
+func CheckSchemaCompatibilityWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Schema Compatibility",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+	return checkSchemaCompatibilityWithStore(store)
+}
+
+func checkSchemaCompatibilityWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
 	// Exercise core tables/views.
 	if _, err := store.GetStatistics(ctx); err != nil {
 		return DoctorCheck{
@@ -166,7 +216,8 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 	}
 }
 
-// CheckDatabaseIntegrity runs a basic integrity check on the database
+// CheckDatabaseIntegrity runs a basic integrity check on the database.
+// Opens its own store; prefer CheckDatabaseIntegrityWithStore when a shared store is available.
 func CheckDatabaseIntegrity(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -181,6 +232,14 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	ctx := context.Background()
 	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
+		if manualDetail := serverModeIntegrityManualRecoveryDetail(beadsDir); manualDetail != "" {
+			return DoctorCheck{
+				Name:    "Database Integrity",
+				Status:  StatusError,
+				Message: "Failed to open configured server-mode database",
+				Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v\n\n%s", err, manualDetail),
+			}
+		}
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusError,
@@ -191,6 +250,24 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	return checkDatabaseIntegrityWithStore(store)
+}
+
+// CheckDatabaseIntegrityWithStore checks database integrity using a shared store (GH#2636).
+func CheckDatabaseIntegrityWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Database Integrity",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+	return checkDatabaseIntegrityWithStore(store)
+}
+
+func checkDatabaseIntegrityWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
 	// Minimal checks: metadata + statistics. If these work, the store is at least readable.
 	if _, err := store.GetMetadata(ctx, "bd_version"); err != nil {
 		return DoctorCheck{
@@ -217,9 +294,28 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 	}
 }
 
+func serverModeIntegrityManualRecoveryDetail(beadsDir string) string {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil || !cfg.IsDoltServerMode() {
+		return ""
+	}
+
+	dbName := cfg.GetDoltDatabase()
+	if dbName == "" {
+		dbName = configfile.DefaultDoltDatabase
+	}
+
+	return fmt.Sprintf(
+		"Automatic integrity recovery is disabled for server-mode repos because it can replace the wrong Dolt root.\nPreserve the Dolt root at %s and verify the configured database %q manually before any reinitialization.",
+		getDatabasePath(beadsDir),
+		dbName,
+	)
+}
+
 // CheckProjectIdentity detects missing project_id in metadata.json and/or
 // _project_id in the database. Projects initialized before GH#2372 lack these
 // fields and are unprotected against cross-project data leakage.
+// Opens its own store; prefer CheckProjectIdentityWithStore when a shared store is available.
 func CheckProjectIdentity(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -250,23 +346,67 @@ func CheckProjectIdentity(path string) DoctorCheck {
 	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	if err != nil {
 		// Can't open DB — report based on metadata.json alone
-		if !hasLocalID {
-			return DoctorCheck{
-				Name:     "Project Identity",
-				Status:   StatusWarning,
-				Message:  "Missing project_id in metadata.json (unable to check database)",
-				Fix:      "Run 'bd doctor --fix' to generate and backfill project identity",
-				Category: CategoryData,
-			}
-		}
+		return checkProjectIdentityNoStore(cfg, hasLocalID)
+	}
+	defer func() { _ = store.Close() }()
+
+	return checkProjectIdentityWithStore(store, cfg)
+}
+
+// CheckProjectIdentityWithStore checks project identity using a shared store (GH#2636).
+func CheckProjectIdentityWithStore(ss *SharedStore, path string) DoctorCheck {
+	_, beadsDir := getBackendAndBeadsDir(path)
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
 		return DoctorCheck{
 			Name:     "Project Identity",
 			Status:   StatusOK,
-			Message:  "metadata.json has project_id (unable to verify database)",
+			Message:  "N/A (no metadata.json)",
 			Category: CategoryData,
 		}
 	}
-	defer func() { _ = store.Close() }()
+
+	hasLocalID := cfg.ProjectID != ""
+
+	store := ss.Store()
+	if store == nil {
+		doltPath := getDatabasePath(beadsDir)
+		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+			return DoctorCheck{
+				Name:     "Project Identity",
+				Status:   StatusOK,
+				Message:  "N/A (no database)",
+				Category: CategoryData,
+			}
+		}
+		return checkProjectIdentityNoStore(cfg, hasLocalID)
+	}
+
+	return checkProjectIdentityWithStore(store, cfg)
+}
+
+func checkProjectIdentityNoStore(_ *configfile.Config, hasLocalID bool) DoctorCheck {
+	if !hasLocalID {
+		return DoctorCheck{
+			Name:     "Project Identity",
+			Status:   StatusWarning,
+			Message:  "Missing project_id in metadata.json (unable to check database)",
+			Fix:      "Run 'bd doctor --fix' to generate and backfill project identity",
+			Category: CategoryData,
+		}
+	}
+	return DoctorCheck{
+		Name:     "Project Identity",
+		Status:   StatusOK,
+		Message:  "metadata.json has project_id (unable to verify database)",
+		Category: CategoryData,
+	}
+}
+
+func checkProjectIdentityWithStore(store *dolt.DoltStore, cfg *configfile.Config) DoctorCheck {
+	hasLocalID := cfg.ProjectID != ""
+	ctx := context.Background()
 
 	dbID, err := store.GetMetadata(ctx, "_project_id")
 	hasDBID := err == nil && dbID != ""
@@ -354,6 +494,8 @@ func isNoDbModeConfigured(beadsDir string) bool {
 // checks that fix configuration or sync issues, pruning is destructive and
 // irreversible. The user must make an explicit decision to delete their
 // closed issue history. We only provide guidance, never action.
+// CheckDatabaseSize warns when the database has accumulated many closed issues.
+// Opens its own store; prefer CheckDatabaseSizeWithStore when a shared store is available.
 func CheckDatabaseSize(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
@@ -376,6 +518,25 @@ func CheckDatabaseSize(path string) DoctorCheck {
 		}
 	}
 	defer func() { _ = store.Close() }()
+
+	return checkDatabaseSizeWithStore(store)
+}
+
+// CheckDatabaseSizeWithStore checks database size using a shared store (GH#2636).
+func CheckDatabaseSizeWithStore(ss *SharedStore) DoctorCheck {
+	store := ss.Store()
+	if store == nil {
+		return DoctorCheck{
+			Name:    "Large Database",
+			Status:  StatusOK,
+			Message: "N/A (no database)",
+		}
+	}
+	return checkDatabaseSizeWithStore(store)
+}
+
+func checkDatabaseSizeWithStore(store *dolt.DoltStore) DoctorCheck {
+	ctx := context.Background()
 
 	// Read threshold from config (default 5000, 0 = disabled)
 	threshold := 5000

@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // isBackupAutoEnabled returns whether backup should run.
@@ -55,7 +56,10 @@ func maybeAutoBackup(ctx context.Context) {
 	if !isBackupAutoEnabled() {
 		return
 	}
-	if store == nil || store.IsClosed() {
+	if store == nil {
+		return
+	}
+	if lm, ok := store.(storage.LifecycleManager); ok && lm.IsClosed() {
 		return
 	}
 

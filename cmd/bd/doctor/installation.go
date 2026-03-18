@@ -37,7 +37,8 @@ func CheckInstallation(path string) DoctorCheck {
 	}
 }
 
-// CheckPermissions verifies that .beads directory and database are readable/writable
+// CheckPermissions verifies that .beads directory and database are readable/writable.
+// Opens its own store; prefer CheckPermissionsWithStore when a shared store is available.
 func CheckPermissions(path string) DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(path)
 
@@ -79,6 +80,56 @@ func CheckPermissions(path string) DoctorCheck {
 				}
 			}
 			_ = store.Close()
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Permissions",
+		Status:  StatusOK,
+		Message: "All permissions OK",
+	}
+}
+
+// CheckPermissionsWithStore verifies permissions using a shared store (GH#2636).
+// If the shared store was opened successfully, the database is accessible.
+func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+
+	// Check if .beads/ is writable
+	testFile := filepath.Join(beadsDir, ".doctor-test-write")
+	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
+		return DoctorCheck{
+			Name:    "Permissions",
+			Status:  StatusError,
+			Message: ".beads/ directory is not writable",
+			Fix:     "Run 'bd doctor --fix' to fix permissions",
+		}
+	}
+	_ = os.Remove(testFile)
+
+	// Check Dolt database directory permissions
+	cfg, err := configfile.Load(beadsDir)
+	if err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
+		doltPath := getDatabasePath(beadsDir)
+		if info, err := os.Stat(doltPath); err == nil {
+			if !info.IsDir() {
+				return DoctorCheck{
+					Name:    "Permissions",
+					Status:  StatusError,
+					Message: "dolt/ is not a directory",
+					Fix:     "Run 'bd doctor --fix' to fix permissions",
+				}
+			}
+			// If shared store is nil, the database could not be opened
+			if ss.Store() == nil {
+				return DoctorCheck{
+					Name:    "Permissions",
+					Status:  StatusError,
+					Message: "Dolt database exists but cannot be opened",
+					Fix:     "Run 'bd doctor --fix' to fix permissions",
+				}
+			}
+			// Shared store was opened successfully — database is accessible
 		}
 	}
 

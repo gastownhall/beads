@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -412,7 +412,7 @@ func checkGateSatisfaction(issue *types.Issue) error {
 // autoCloseCompletedMolecule checks if closing a step completed a parent molecule,
 // and if so, auto-closes the molecule root. This prevents stale wisps that are
 // complete but never explicitly closed (e.g., deacon patrol wisps).
-func autoCloseCompletedMolecule(ctx context.Context, s *dolt.DoltStore, closedStepID, actorName, session string) {
+func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) {
 	moleculeID := findParentMolecule(ctx, s, closedStepID)
 	if moleculeID == "" {
 		return // Not part of a molecule

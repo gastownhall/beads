@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -786,7 +785,7 @@ func cookFormulaToSubgraphWithVars(f *formula.Formula, protoID string, vars map[
 
 // cookFormula creates a proto bead from a resolved formula.
 // protoID is the final ID for the proto (may include a prefix).
-func cookFormula(ctx context.Context, s *dolt.DoltStore, f *formula.Formula, protoID string) (*cookFormulaResult, error) {
+func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula, protoID string) (*cookFormulaResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -944,7 +943,7 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 }
 
 // deleteProtoSubgraph deletes a proto and all its children.
-func deleteProtoSubgraph(ctx context.Context, s *dolt.DoltStore, protoID string) error {
+func deleteProtoSubgraph(ctx context.Context, s storage.DoltStorage, protoID string) error {
 	// Load the subgraph
 	subgraph, err := loadTemplateSubgraph(ctx, s, protoID)
 	if err != nil {

@@ -24,10 +24,13 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load config: %w", err)
 	}
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("no beads configuration found in %s", beadsDir)
+	}
 
-	host := configfile.DefaultDoltServerHost
-	user := configfile.DefaultDoltServerUser
-	database := configfile.DefaultDoltDatabase
+	host := cfg.GetDoltServerHost()
+	user := cfg.GetDoltServerUser()
+	database := cfg.GetDoltDatabase()
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
 	// Use doltserver.DefaultConfig for port resolution (env > port file > config.yaml).
@@ -36,12 +39,6 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	port := dsCfg.Port
 	if port == 0 {
 		return nil, nil, fmt.Errorf("no Dolt server port configured and no server running; run any bd command to auto-start")
-	}
-
-	if cfg != nil {
-		host = cfg.GetDoltServerHost()
-		user = cfg.GetDoltServerUser()
-		database = cfg.GetDoltDatabase()
 	}
 
 	var connStr string

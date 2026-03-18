@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -384,7 +384,7 @@ func findTownRoutes(currentBeadsDir string) ([]Route, string) {
 // RoutedStorage represents a storage connection that may have been routed
 // to a different beads directory than the local one.
 type RoutedStorage struct {
-	Storage  *dolt.DoltStore
+	Storage  storage.DoltStorage
 	BeadsDir string
 	Routed   bool // true if this is a routed (non-local) storage
 }
@@ -399,7 +399,7 @@ func (rs *RoutedStorage) Close() error {
 
 // StorageOpener is a function that opens storage for a given beads directory.
 // This allows callers to provide custom storage opening logic (e.g., using factory).
-type StorageOpener func(ctx context.Context, beadsDir string) (*dolt.DoltStore, error)
+type StorageOpener func(ctx context.Context, beadsDir string) (storage.DoltStorage, error)
 
 // GetRoutedStorageForID returns a storage connection for the given issue ID.
 // If the ID matches a route, it opens a connection to the routed database.
