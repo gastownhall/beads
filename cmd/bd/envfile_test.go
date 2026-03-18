@@ -21,6 +21,7 @@ func TestLoadBeadsEnvFile(t *testing.T) {
 		if got := os.Getenv("BEADS_TEST_LOAD_VAR"); got != "hello_from_env" {
 			t.Errorf("expected BEADS_TEST_LOAD_VAR=hello_from_env, got %q", got)
 		}
+		os.Unsetenv("BEADS_TEST_LOAD_VAR")
 	})
 
 	t.Run("shell env takes precedence over .env", func(t *testing.T) {
@@ -42,5 +43,10 @@ func TestLoadBeadsEnvFile(t *testing.T) {
 		dir := t.TempDir()
 		// Should not panic or error
 		loadBeadsEnvFile(dir)
+	})
+
+	t.Run("no-op when beadsDir is empty", func(t *testing.T) {
+		// Should not panic or error
+		loadBeadsEnvFile("")
 	})
 }
