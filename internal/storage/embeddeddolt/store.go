@@ -196,17 +196,11 @@ func (s *EmbeddedDoltStore) GetIssueByExternalRef(ctx context.Context, externalR
 	panic("embeddeddolt: GetIssueByExternalRef not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	panic("embeddeddolt: GetIssuesByIDs not implemented")
-}
+// GetIssuesByIDs is implemented in dependencies.go.
 
-func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	panic("embeddeddolt: UpdateIssue not implemented")
-}
+// UpdateIssue is implemented in issues.go.
 
-func (s *EmbeddedDoltStore) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	panic("embeddeddolt: CloseIssue not implemented")
-}
+// CloseIssue is implemented in issues.go.
 
 func (s *EmbeddedDoltStore) DeleteIssue(ctx context.Context, id string) error {
 	panic("embeddeddolt: DeleteIssue not implemented")
@@ -214,9 +208,7 @@ func (s *EmbeddedDoltStore) DeleteIssue(ctx context.Context, id string) error {
 
 // AddDependency is implemented in dependencies.go.
 
-func (s *EmbeddedDoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	panic("embeddeddolt: RemoveDependency not implemented")
-}
+// RemoveDependency is implemented in dependencies.go.
 
 func (s *EmbeddedDoltStore) GetDependencies(ctx context.Context, issueID string) ([]*types.Issue, error) {
 	panic("embeddeddolt: GetDependencies not implemented")
@@ -226,13 +218,9 @@ func (s *EmbeddedDoltStore) GetDependents(ctx context.Context, issueID string) (
 	panic("embeddeddolt: GetDependents not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	panic("embeddeddolt: GetDependenciesWithMetadata not implemented")
-}
+// GetDependenciesWithMetadata is implemented in dependencies.go.
 
-func (s *EmbeddedDoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	panic("embeddeddolt: GetDependentsWithMetadata not implemented")
-}
+// GetDependentsWithMetadata is implemented in dependencies.go.
 
 func (s *EmbeddedDoltStore) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
 	panic("embeddeddolt: GetDependencyTree not implemented")
@@ -240,9 +228,7 @@ func (s *EmbeddedDoltStore) GetDependencyTree(ctx context.Context, issueID strin
 
 // AddLabel is implemented in labels.go.
 
-func (s *EmbeddedDoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	panic("embeddeddolt: RemoveLabel not implemented")
-}
+// RemoveLabel is implemented in labels.go.
 
 // GetLabels is implemented in labels.go.
 
@@ -250,9 +236,7 @@ func (s *EmbeddedDoltStore) GetIssuesByLabel(ctx context.Context, label string) 
 	panic("embeddeddolt: GetIssuesByLabel not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
-	panic("embeddeddolt: GetReadyWork not implemented")
-}
+// GetReadyWork is implemented in queries.go.
 
 func (s *EmbeddedDoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	panic("embeddeddolt: GetBlockedIssues not implemented")
@@ -267,7 +251,13 @@ func (s *EmbeddedDoltStore) AddIssueComment(ctx context.Context, issueID, author
 }
 
 func (s *EmbeddedDoltStore) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
-	panic("embeddeddolt: GetIssueComments not implemented")
+	var result []*types.Comment
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetIssueCommentsInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
 }
 
 func (s *EmbeddedDoltStore) GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error) {
@@ -278,9 +268,7 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 	panic("embeddeddolt: GetAllEventsSince not implemented")
 }
 
-func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
-	panic("embeddeddolt: RunInTransaction not implemented")
-}
+// RunInTransaction is implemented in transaction.go.
 
 // Close marks the store as closed. Subsequent method calls will return errClosed.
 // It is safe to call multiple times.
@@ -477,9 +465,7 @@ func (s *EmbeddedDoltStore) UpdateIssueID(ctx context.Context, oldID, newID stri
 	panic("embeddeddolt: UpdateIssueID not implemented")
 }
 
-func (s *EmbeddedDoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
-	panic("embeddeddolt: ClaimIssue not implemented")
-}
+// ClaimIssue is implemented in issues.go.
 
 func (s *EmbeddedDoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor string) error {
 	panic("embeddeddolt: PromoteFromEphemeral not implemented")
@@ -508,17 +494,11 @@ func (s *EmbeddedDoltStore) GetDependencyRecords(ctx context.Context, issueID st
 	return result, err
 }
 
-func (s *EmbeddedDoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
-	panic("embeddeddolt: IsBlocked not implemented")
-}
+// IsBlocked is implemented in issues.go.
 
-func (s *EmbeddedDoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
-	panic("embeddeddolt: GetNewlyUnblockedByClose not implemented")
-}
+// GetNewlyUnblockedByClose is implemented in issues.go.
 
-func (s *EmbeddedDoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {
-	panic("embeddeddolt: DetectCycles not implemented")
-}
+// DetectCycles is implemented in dependencies.go.
 
 func (s *EmbeddedDoltStore) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
 	panic("embeddeddolt: FindWispDependentsRecursive not implemented")
@@ -614,9 +594,7 @@ func (s *EmbeddedDoltStore) ClearRepoMtime(ctx context.Context, repoPath string)
 	panic("embeddeddolt: ClearRepoMtime not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error) {
-	panic("embeddeddolt: GetMoleculeProgress not implemented")
-}
+// GetMoleculeProgress is implemented in queries.go.
 
 func (s *EmbeddedDoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID string) (*types.MoleculeLastActivity, error) {
 	panic("embeddeddolt: GetMoleculeLastActivity not implemented")

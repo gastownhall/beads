@@ -461,6 +461,14 @@ create, update, show, or close operation).`,
 			result.Close()
 		}
 
+		// Embedded mode: flush Dolt version commit. DoltStore commits
+		// inline during UpdateIssue so this is only needed for EmbeddedDoltStore.
+		if isEmbeddedDolt && firstUpdatedID != "" && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
+
 		// Set last touched after all updates complete
 		if firstUpdatedID != "" {
 			SetLastTouchedID(firstUpdatedID)

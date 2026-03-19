@@ -16,26 +16,12 @@ func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) 
 	})
 }
 
-// RemoveLabel removes a label from an issue
+// RemoveLabel removes a label from an issue.
+// Delegates SQL work to issueops.RemoveLabelInTx which handles wisp routing.
 func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	if s.isActiveWisp(ctx, issueID) {
-		return s.removeWispLabel(ctx, issueID, label, actor)
-	}
-	_, err := s.execContext(ctx, `
-		DELETE FROM labels WHERE issue_id = ? AND label = ?
-	`, issueID, label)
-	if err != nil {
-		return fmt.Errorf("failed to remove label: %w", err)
-	}
-	comment := "Removed label: " + label
-	_, err = s.execContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, issueID, types.EventLabelRemoved, actor, comment)
-	if err != nil {
-		return fmt.Errorf("failed to record label event: %w", err)
-	}
-	return nil
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
+	})
 }
 
 // GetLabels retrieves all labels for an issue

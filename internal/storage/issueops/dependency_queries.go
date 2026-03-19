@@ -324,6 +324,192 @@ func queryBlockingInfo(
 	return nil
 }
 
+// GetNewlyUnblockedByCloseInTx finds issues that become unblocked when the
+// given issue is closed. Works within an existing transaction.
+// Returns full issue objects for the newly-unblocked issues.
+// Uses separate single-table queries (no JOINs) to avoid Dolt's mergeJoinKvIter
+// panic when joining across tables with different tuple formats.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID string) ([]*types.Issue, error) {
+	// Step 1: Find issue IDs that depend on the closed issue via "blocks" deps.
+	// Query both dep tables to cover cross-table dependencies.
+	candidateSet := make(map[string]bool)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT issue_id FROM %s
+			WHERE depends_on_id = ? AND type = 'blocks'
+		`, depTable), closedIssueID)
+		if err != nil {
+			return nil, fmt.Errorf("find blocked candidates from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan candidate from %s: %w", depTable, err)
+			}
+			candidateSet[id] = true
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("candidate rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(candidateSet) == 0 {
+		return nil, nil
+	}
+
+	// Filter to only open/active candidates (check both tables, no JOINs).
+	var candidateIDs []string
+	for id := range candidateSet {
+		var status string
+		found := false
+		for _, table := range []string{"issues", "wisps"} {
+			err := tx.QueryRowContext(ctx, fmt.Sprintf(
+				`SELECT status FROM %s WHERE id = ?`, table), id).Scan(&status)
+			if err == nil {
+				found = true
+				break
+			}
+		}
+		if !found || status == "closed" || status == "pinned" {
+			continue
+		}
+		candidateIDs = append(candidateIDs, id)
+	}
+
+	if len(candidateIDs) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: Filter out candidates that still have other open blockers.
+	// For each candidate, get all its blocking deps (excluding the closed issue),
+	// then check if any of those blockers are still active.
+	stillBlocked := make(map[string]bool)
+	for _, candidateID := range candidateIDs {
+		// Determine which dep table this candidate uses.
+		isWisp := IsActiveWispInTx(ctx, tx, candidateID)
+		_, _, _, depTable := WispTableRouting(isWisp)
+
+		//nolint:gosec // G201: depTable from WispTableRouting (hardcoded)
+		depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT depends_on_id FROM %s
+			WHERE issue_id = ? AND type = 'blocks' AND depends_on_id != ?
+		`, depTable), candidateID, closedIssueID)
+		if err != nil {
+			return nil, fmt.Errorf("check remaining blockers for %s: %w", candidateID, err)
+		}
+		for depRows.Next() {
+			var blockerID string
+			if err := depRows.Scan(&blockerID); err != nil {
+				_ = depRows.Close()
+				return nil, fmt.Errorf("scan remaining blocker: %w", err)
+			}
+			// Check if this blocker is still active (in either table).
+			var blockerStatus string
+			for _, table := range []string{"issues", "wisps"} {
+				err := tx.QueryRowContext(ctx, fmt.Sprintf(
+					`SELECT status FROM %s WHERE id = ?`, table), blockerID).Scan(&blockerStatus)
+				if err == nil {
+					break
+				}
+			}
+			if blockerStatus != "" && blockerStatus != "closed" && blockerStatus != "pinned" {
+				stillBlocked[candidateID] = true
+				break
+			}
+		}
+		_ = depRows.Close()
+	}
+
+	// Step 3: Collect unblocked issues.
+	var unblocked []*types.Issue
+	for _, id := range candidateIDs {
+		if stillBlocked[id] {
+			continue
+		}
+		issue, err := GetIssueInTx(ctx, tx, id)
+		if err != nil {
+			continue
+		}
+		unblocked = append(unblocked, issue)
+	}
+
+	return unblocked, nil
+}
+
+// IsBlockedInTx checks if an issue is blocked by active dependencies within
+// an existing transaction. Returns whether the issue is blocked and, if so,
+// a list of blocker descriptions for display.
+// Uses separate single-table queries (no JOINs) to avoid Dolt's mergeJoinKvIter
+// panic when joining across tables with different tuple formats.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []string, error) {
+	isWisp := IsActiveWispInTx(ctx, tx, issueID)
+	_, _, _, depTable := WispTableRouting(isWisp)
+
+	// Step 1: Get all blocking dependency targets from the dep table.
+	type depEdge struct {
+		dependsOnID, depType string
+	}
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT depends_on_id, type FROM %s
+		WHERE issue_id = ? AND type IN ('blocks', 'waits-for', 'conditional-blocks')
+	`, depTable), issueID)
+	if err != nil {
+		return false, nil, fmt.Errorf("check blockers: %w", err)
+	}
+	var edges []depEdge
+	for rows.Next() {
+		var e depEdge
+		if err := rows.Scan(&e.dependsOnID, &e.depType); err != nil {
+			_ = rows.Close()
+			return false, nil, fmt.Errorf("scan blocker edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, nil, fmt.Errorf("blocker edge rows: %w", err)
+	}
+
+	if len(edges) == 0 {
+		return false, nil, nil
+	}
+
+	// Step 2: Check each blocker's status in both issues and wisps tables.
+	// Uses single-row queries to avoid cross-table JOINs.
+	var blockers []string
+	for _, e := range edges {
+		var status string
+		found := false
+		for _, table := range []string{"issues", "wisps"} {
+			err := tx.QueryRowContext(ctx, fmt.Sprintf(
+				`SELECT status FROM %s WHERE id = ?`, table), e.dependsOnID).Scan(&status)
+			if err == nil {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue // Blocker not found in either table
+		}
+		if status == "closed" || status == "pinned" {
+			continue // Not an active blocker
+		}
+		if e.depType != "blocks" {
+			blockers = append(blockers, e.dependsOnID+" ("+e.depType+")")
+		} else {
+			blockers = append(blockers, e.dependsOnID)
+		}
+	}
+
+	return len(blockers) > 0, blockers, nil
+}
+
 // scanDependencyRow scans a single dependency row from a *sql.Rows.
 func scanDependencyRow(rows *sql.Rows) (*types.Dependency, error) {
 	var dep types.Dependency
