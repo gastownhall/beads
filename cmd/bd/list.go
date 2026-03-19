@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -616,7 +615,7 @@ var listCmd = &cobra.Command{
 		// Infra type filtering: exclude configured infra types by default.
 		// These types live in the wisps table after migration 007.
 		// Use --include-infra or --type=agent to show infra beads.
-		infraTypes := dolt.DefaultInfraTypes()
+		infraTypes := storage.DefaultInfraTypes()
 		if store != nil {
 			infraSet := store.GetInfraTypes(rootCtx)
 			infraTypes = make([]string, 0, len(infraSet))
@@ -628,7 +627,7 @@ var listCmd = &cobra.Command{
 			if store != nil {
 				return store.IsInfraTypeCtx(rootCtx, types.IssueType(t))
 			}
-			return dolt.IsInfraType(types.IssueType(t))
+			return storage.IsInfraType(types.IssueType(t))
 		}
 		if !includeInfra && !isInfra(issueType) {
 			for _, t := range infraTypes {
