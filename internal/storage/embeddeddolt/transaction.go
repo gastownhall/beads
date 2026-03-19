@@ -56,7 +56,7 @@ func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason 
 }
 
 func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error {
-	return fmt.Errorf("embeddedTransaction: DeleteIssue not implemented")
+	return issueops.DeleteIssueInTx(ctx, t.tx, id)
 }
 
 func (t *embeddedTransaction) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
