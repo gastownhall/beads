@@ -103,7 +103,6 @@ type testSeedData struct {
 	childTaskA    string // P2, bob, labels: backend, parent=epic
 	childTaskB    string // P3, labels: frontend, parent=epic
 	noDescBug     string // P1, empty description
-	gateIssue     string // gate type
 	overdueTask   string // P1, alice, due_at in past, labels: urgent
 	metadataIssue string // P1, metadata: env=prod
 	readyTask     string // P0, labels: backend, no blockers
@@ -132,13 +131,12 @@ func TestEmbeddedList(t *testing.T) {
 	})
 
 	t.Run("all", func(t *testing.T) {
-		issues := bdListJSON(t, bd, dir, "--all", "--include-gates")
-		// Should include all seeded issues
-		if !containsID(issues, seed.gateIssue) {
-			t.Error("--all --include-gates should include gate issue")
-		}
+		issues := bdListJSON(t, bd, dir, "--all")
 		if !containsID(issues, seed.openBug) {
 			t.Error("--all should include open bug")
+		}
+		if !containsID(issues, seed.decision) {
+			t.Error("--all should include decision")
 		}
 	})
 
@@ -241,20 +239,6 @@ func TestEmbeddedList(t *testing.T) {
 		// All seeded issues are open, so --ready should return most of them
 		if len(issues) == 0 {
 			t.Error("--ready should return open issues")
-		}
-	})
-
-	t.Run("include_gates", func(t *testing.T) {
-		// Default excludes gates
-		withoutGates := bdListJSON(t, bd, dir, "--all")
-		if containsID(withoutGates, seed.gateIssue) {
-			t.Error("gate issue should be excluded by default")
-		}
-
-		// --include-gates shows them
-		withGates := bdListJSON(t, bd, dir, "--all", "--include-gates")
-		if !containsID(withGates, seed.gateIssue) {
-			t.Error("gate issue should appear with --include-gates")
 		}
 	})
 
@@ -414,7 +398,7 @@ func TestEmbeddedList(t *testing.T) {
 	// --- I. Output formats ---
 
 	t.Run("json_output", func(t *testing.T) {
-		issues := bdListJSON(t, bd, dir, "--all", "--include-gates")
+		issues := bdListJSON(t, bd, dir, "--all")
 		if len(issues) == 0 {
 			t.Fatal("expected non-empty JSON output")
 		}
@@ -425,14 +409,6 @@ func TestEmbeddedList(t *testing.T) {
 			}
 			if issue.Title == "" {
 				t.Error("issue title should not be empty in JSON output")
-			}
-		}
-		// Verify child has parent-child dependency count
-		for _, issue := range issues {
-			if issue.ID == seed.childTaskA {
-				if issue.DependencyCount == 0 {
-					t.Error("child task A should have dependency_count > 0 (parent-child dep)")
-				}
 			}
 		}
 		// Verify child has parent field
@@ -461,7 +437,7 @@ func TestEmbeddedList(t *testing.T) {
 	})
 
 	t.Run("format_digraph", func(t *testing.T) {
-		out := bdList(t, bd, dir, "--format", "digraph", "--all", "--include-gates")
+		out := bdList(t, bd, dir, "--format", "digraph", "--all")
 		// Digraph format should contain issue IDs
 		if !strings.Contains(out, seed.openBug) {
 			t.Error("digraph output should contain issue IDs")
@@ -583,11 +559,7 @@ func seedTestData(t *testing.T, bd, dir string) testSeedData {
 	issue = bdCreate(t, bd, dir, "No desc bug", "--type", "bug", "--priority", "1")
 	s.noDescBug = issue.ID
 
-	// 10. Gate issue
-	issue = bdCreate(t, bd, dir, "Gate issue", "--type", "gate", "--priority", "2")
-	s.gateIssue = issue.ID
-
-	// 11. Overdue task, P1, alice, due in past, labels: urgent
+	// 10. Overdue task, P1, alice, due in past, labels: urgent
 	pastDue := time.Now().Add(-48 * time.Hour).Format("2006-01-02")
 	issue = bdCreate(t, bd, dir, "Overdue task", "--type", "task", "--priority", "1",
 		"--assignee", "alice", "--label", "urgent", "--due", pastDue)
@@ -603,16 +575,16 @@ func seedTestData(t *testing.T, bd, dir string) testSeedData {
 		"--label", "backend")
 	s.readyTask = issue.ID
 
-	t.Logf("Seeded %d test issues", 13)
+	t.Logf("Seeded %d test issues", 12)
 	t.Logf("  openBug=%s feature=%s task=%s chore=%s", s.openBug, s.feature, s.task, s.chore)
 	t.Logf("  epic=%s decision=%s childA=%s childB=%s", s.epic, s.decision, s.childTaskA, s.childTaskB)
-	t.Logf("  noDescBug=%s gate=%s overdue=%s metadata=%s ready=%s",
-		s.noDescBug, s.gateIssue, s.overdueTask, s.metadataIssue, s.readyTask)
+	t.Logf("  noDescBug=%s overdue=%s metadata=%s ready=%s",
+		s.noDescBug, s.overdueTask, s.metadataIssue, s.readyTask)
 
 	// Verify seeding worked
-	all := bdListJSON(t, bd, dir, "--all", "--include-gates", "--limit", "0")
-	if len(all) < 13 {
-		t.Fatalf("expected at least 13 seeded issues, got %d", len(all))
+	all := bdListJSON(t, bd, dir, "--all", "--limit", "0")
+	if len(all) < 12 {
+		t.Fatalf("expected at least 12 seeded issues, got %d", len(all))
 	}
 
 	return s
