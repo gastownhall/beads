@@ -130,7 +130,9 @@ func (s *DoltStore) GetIssueByExternalRef(ctx context.Context, externalRef strin
 	return s.GetIssue(ctx, id)
 }
 
-// UpdateIssue updates fields on an issue
+// UpdateIssue updates fields on an issue.
+// Delegates SQL work to issueops.UpdateIssueInTx; handles Dolt-specific concerns
+// (metadata validation, DemoteToWisp, DOLT_ADD/COMMIT, cache invalidation).
 func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	// Validate metadata against schema before wisp routing (GH#1416 Phase 2)
 	if rawMeta, ok := updates["metadata"]; ok {
@@ -143,7 +145,8 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 		}
 	}
 
-	// Route ephemeral IDs to wisps table (falls through for promoted wisps)
+	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
+	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
 	if s.isActiveWisp(ctx, id) {
 		return s.updateWisp(ctx, id, updates, actor)
 	}
@@ -161,79 +164,14 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() // No-op after successful commit
+	defer func() { _ = tx.Rollback() }()
 
-	// Read inside transaction to avoid TOCTOU race
-	oldIssue, err := scanIssueTxFromTable(ctx, tx, "issues", id)
+	result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
 	if err != nil {
-		return fmt.Errorf("failed to get issue for update: %w", err)
+		return err
 	}
 
-	// Build update query
-	setClauses := []string{"updated_at = ?"}
-	args := []interface{}{time.Now().UTC()}
-
-	for key, value := range updates {
-		if !isAllowedUpdateField(key) {
-			return fmt.Errorf("invalid field for update: %s", key)
-		}
-
-		columnName := key
-		if key == "wisp" {
-			columnName = "ephemeral"
-		}
-		setClauses = append(setClauses, fmt.Sprintf("`%s` = ?", columnName))
-
-		// Handle JSON serialization for array fields stored as TEXT
-		if key == "waiters" {
-			waitersJSON, _ := json.Marshal(value)
-			args = append(args, string(waitersJSON))
-		} else if key == "metadata" {
-			// GH#1417: Normalize metadata to string, accepting string/[]byte/json.RawMessage
-			// Schema validation already ran in the pre-routing block above.
-			metadataStr, err := storage.NormalizeMetadataValue(value)
-			if err != nil {
-				return fmt.Errorf("invalid metadata: %w", err)
-			}
-			args = append(args, metadataStr)
-		} else {
-			args = append(args, value)
-		}
-	}
-
-	// Auto-clear pinned column when status transitions away from "pinned".
-	// The legacy pinned=1 column can cause beads to be invisible to bd list
-	// when combined with non-pinned statuses (e.g., hooked). Clear it on
-	// any status transition away from pinned to prevent stale flag issues.
-	if newStatus, ok := updates["status"]; ok {
-		if oldIssue.Pinned && newStatus != "pinned" {
-			if _, alreadySet := updates["pinned"]; !alreadySet {
-				setClauses = append(setClauses, "`pinned` = ?")
-				args = append(args, false)
-			}
-		}
-	}
-
-	// Auto-manage closed_at
-	setClauses, args = manageClosedAt(oldIssue, updates, setClauses, args)
-
-	args = append(args, id)
-
-	// nolint:gosec // G201: setClauses contains only column names (e.g. "status = ?"), actual values passed via args
-	query := fmt.Sprintf("UPDATE issues SET %s WHERE id = ?", strings.Join(setClauses, ", "))
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-		return fmt.Errorf("failed to update issue: %w", err)
-	}
-
-	// Record event
-	oldData, _ := json.Marshal(oldIssue)
-	newData, _ := json.Marshal(updates)
-	eventType := determineEventType(oldIssue, updates)
-
-	if err := recordEvent(ctx, tx, id, eventType, actor, string(oldData), string(newData)); err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
-	}
-
+	// Dolt versioning for permanent issues.
 	// GH#2455: Stage only the tables we modified, then commit without -A.
 	for _, table := range []string{"issues", "events"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
@@ -251,6 +189,7 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	if _, hasStatus := updates["status"]; hasStatus {
 		s.invalidateBlockedIDsCache()
 	}
+	_ = result // OldIssue available if needed for future cache invalidation
 	return nil
 }
 
@@ -333,41 +272,27 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 	return nil
 }
 
-// CloseIssue closes an issue with a reason
+// CloseIssue closes an issue with a reason.
+// Delegates SQL work to issueops.CloseIssueInTx; handles Dolt-specific concerns
+// (wisp routing, DOLT_ADD/COMMIT, cache invalidation).
 func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	// Route ephemeral IDs to wisps table (falls through for promoted wisps)
+	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
+	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
 	if s.isActiveWisp(ctx, id) {
 		return s.closeWisp(ctx, id, reason, actor, session)
 	}
-
-	now := time.Now().UTC()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() // No-op after successful commit
+	defer func() { _ = tx.Rollback() }()
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE issues SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by_session = ?
-		WHERE id = ?
-	`, types.StatusClosed, now, now, reason, session, id)
-	if err != nil {
-		return fmt.Errorf("failed to close issue: %w", err)
+	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
+		return err
 	}
 
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("issue not found: %s", id)
-	}
-
-	if err := recordEvent(ctx, tx, id, types.EventClosed, actor, "", reason); err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
-	}
-
+	// Dolt versioning for permanent issues.
 	// GH#2455: Stage only the tables we modified, then commit without -A.
 	for _, table := range []string{"issues", "events"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
@@ -968,71 +893,12 @@ func generateHashID(prefix, title, description, creator string, timestamp time.T
 	return idgen.GenerateHashID(prefix, title, description, creator, timestamp, length, nonce)
 }
 
-func isAllowedUpdateField(key string) bool {
-	allowed := map[string]bool{
-		"status": true, "priority": true, "title": true, "assignee": true,
-		"description": true, "design": true, "acceptance_criteria": true, "notes": true,
-		"issue_type": true, "estimated_minutes": true, "external_ref": true, "spec_id": true,
-		"closed_at": true, "close_reason": true, "closed_by_session": true,
-		"source_repo": true,
-		"sender":      true, "wisp": true, "wisp_type": true, "no_history": true, "pinned": true,
-		"hook_bead": true, "role_bead": true, "agent_state": true, "last_activity": true,
-		"role_type": true, "rig": true, "mol_type": true, "holder": true,
-		"event_category": true, "event_actor": true, "event_target": true, "event_payload": true,
-		"due_at": true, "defer_until": true, "await_id": true, "waiters": true,
-		"metadata": true,
-	}
-	return allowed[key]
-}
-
-func manageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
-	statusVal, hasStatus := updates["status"]
-	_, hasExplicitClosedAt := updates["closed_at"]
-	if hasExplicitClosedAt || !hasStatus {
-		return setClauses, args
-	}
-
-	var newStatus string
-	switch v := statusVal.(type) {
-	case string:
-		newStatus = v
-	case types.Status:
-		newStatus = string(v)
-	default:
-		return setClauses, args
-	}
-
-	if newStatus == string(types.StatusClosed) {
-		now := time.Now().UTC()
-		setClauses = append(setClauses, "closed_at = ?")
-		args = append(args, now)
-	} else if oldIssue.Status == types.StatusClosed {
-		setClauses = append(setClauses, "closed_at = ?", "close_reason = ?")
-		args = append(args, nil, "")
-	}
-
-	return setClauses, args
-}
-
-func determineEventType(oldIssue *types.Issue, updates map[string]interface{}) types.EventType {
-	statusVal, hasStatus := updates["status"]
-	if !hasStatus {
-		return types.EventUpdated
-	}
-
-	newStatus, ok := statusVal.(string)
-	if !ok {
-		return types.EventUpdated
-	}
-
-	if newStatus == string(types.StatusClosed) {
-		return types.EventClosed
-	}
-	if oldIssue.Status == types.StatusClosed {
-		return types.EventReopened
-	}
-	return types.EventStatusChanged
-}
+// Thin wrappers around exported issueops functions, kept for internal callers.
+var (
+	isAllowedUpdateField = issueops.IsAllowedUpdateField
+	manageClosedAt       = issueops.ManageClosedAt
+	determineEventType   = issueops.DetermineEventType
+)
 
 // Aliases for shared nullable helpers from issueops.
 var (

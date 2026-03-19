@@ -324,6 +324,187 @@ func queryBlockingInfo(
 	return nil
 }
 
+// GetNewlyUnblockedByCloseInTx finds issues that become unblocked when the
+// given issue is closed. Works within an existing transaction.
+// Returns full issue objects for the newly-unblocked issues.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID string) ([]*types.Issue, error) {
+	// Step 1: Find open issues that depend on the closed issue via "blocks" deps.
+	// Check both tables to handle cross-table dependencies.
+	var candidateIDs []string
+	for _, pair := range []struct{ depTable, issueTable string }{
+		{"dependencies", "issues"},
+		{"wisp_dependencies", "wisps"},
+	} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT d.issue_id
+			FROM %s d
+			JOIN %s i ON d.issue_id = i.id
+			WHERE d.depends_on_id = ?
+			  AND d.type = 'blocks'
+			  AND i.status NOT IN ('closed', 'pinned')
+		`, pair.depTable, pair.issueTable), closedIssueID)
+		if err != nil {
+			return nil, fmt.Errorf("find blocked candidates from %s: %w", pair.depTable, err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan candidate from %s: %w", pair.depTable, err)
+			}
+			candidateIDs = append(candidateIDs, id)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("candidate rows from %s: %w", pair.depTable, err)
+		}
+	}
+
+	if len(candidateIDs) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: Filter out candidates that still have other open blockers.
+	stillBlocked := make(map[string]bool)
+	for start := 0; start < len(candidateIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(candidateIDs) {
+			end = len(candidateIDs)
+		}
+		batch := candidateIDs[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		inClause := strings.Join(placeholders, ",")
+		args = append(args, closedIssueID)
+
+		for _, pair := range []struct{ depTable, issueTable string }{
+			{"dependencies", "issues"},
+			{"wisp_dependencies", "wisps"},
+		} {
+			//nolint:gosec // G201: inClause contains only ? placeholders
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+				SELECT DISTINCT d2.issue_id
+				FROM %s d2
+				JOIN %s blocker ON d2.depends_on_id = blocker.id
+				WHERE d2.issue_id IN (%s)
+				  AND d2.type = 'blocks'
+				  AND d2.depends_on_id != ?
+				  AND blocker.status NOT IN ('closed', 'pinned')
+			`, pair.depTable, pair.issueTable, inClause), args...)
+			if err != nil {
+				return nil, fmt.Errorf("check remaining blockers from %s: %w", pair.depTable, err)
+			}
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("scan still-blocked from %s: %w", pair.depTable, err)
+				}
+				stillBlocked[id] = true
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("still-blocked rows from %s: %w", pair.depTable, err)
+			}
+		}
+	}
+
+	// Step 3: Collect unblocked issues.
+	var unblocked []*types.Issue
+	for _, id := range candidateIDs {
+		if stillBlocked[id] {
+			continue
+		}
+		issue, err := GetIssueInTx(ctx, tx, id)
+		if err != nil {
+			continue // Issue may have been deleted concurrently.
+		}
+		unblocked = append(unblocked, issue)
+	}
+
+	return unblocked, nil
+}
+
+// IsBlockedInTx checks if an issue is blocked by active dependencies within
+// an existing transaction. Returns whether the issue is blocked and, if so,
+// a list of blocker descriptions for display.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []string, error) {
+	isWisp := IsActiveWispInTx(ctx, tx, issueID)
+	_, _, _, depTable := WispTableRouting(isWisp)
+	issueTable := "issues"
+	if isWisp {
+		issueTable = "wisps"
+	}
+
+	// Query active blockers.
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT d.depends_on_id, d.type
+		FROM %s d
+		JOIN %s i ON d.depends_on_id = i.id
+		WHERE d.issue_id = ?
+		  AND d.type IN ('blocks', 'waits-for', 'conditional-blocks')
+		  AND i.status NOT IN ('closed', 'pinned')
+	`, depTable, issueTable), issueID)
+	if err != nil {
+		return false, nil, fmt.Errorf("check blockers: %w", err)
+	}
+
+	var blockers []string
+	for rows.Next() {
+		var id, depType string
+		if err := rows.Scan(&id, &depType); err != nil {
+			_ = rows.Close()
+			return false, nil, fmt.Errorf("scan blocker: %w", err)
+		}
+		if depType != "blocks" {
+			blockers = append(blockers, id+" ("+depType+")")
+		} else {
+			blockers = append(blockers, id)
+		}
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, nil, fmt.Errorf("blocker rows: %w", err)
+	}
+
+	// Also check cross-table blockers (e.g., wisp blocked by permanent issue).
+	if isWisp {
+		crossRows, err := tx.QueryContext(ctx, `
+			SELECT d.depends_on_id, d.type
+			FROM wisp_dependencies d
+			JOIN issues i ON d.depends_on_id = i.id
+			WHERE d.issue_id = ?
+			  AND d.type IN ('blocks', 'waits-for', 'conditional-blocks')
+			  AND i.status NOT IN ('closed', 'pinned')
+		`, issueID)
+		if err == nil {
+			for crossRows.Next() {
+				var id, depType string
+				if err := crossRows.Scan(&id, &depType); err != nil {
+					_ = crossRows.Close()
+					break
+				}
+				if depType != "blocks" {
+					blockers = append(blockers, id+" ("+depType+")")
+				} else {
+					blockers = append(blockers, id)
+				}
+			}
+			_ = crossRows.Close()
+		}
+	}
+
+	return len(blockers) > 0, blockers, nil
+}
+
 // scanDependencyRow scans a single dependency row from a *sql.Rows.
 func scanDependencyRow(rows *sql.Rows) (*types.Dependency, error) {
 	var dep types.Dependency
