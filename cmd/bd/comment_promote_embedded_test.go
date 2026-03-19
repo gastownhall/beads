@@ -106,8 +106,8 @@ func TestEmbeddedPromote(t *testing.T) {
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pm")
 
 	t.Run("promote_wisp", func(t *testing.T) {
-		// Create a wisp (gate type is infra by default).
-		issue := bdCreate(t, bd, dir, "Promote me", "--type", "gate")
+		// Create an ephemeral issue (routes to wisps table).
+		issue := bdCreate(t, bd, dir, "Promote me", "--ephemeral")
 
 		store := openStore(t, beadsDir, "pm")
 

@@ -80,15 +80,20 @@ func TestEmbeddedDelete(t *testing.T) {
 		}
 	})
 
-	t.Run("delete_with_dependents_requires_force_or_cascade", func(t *testing.T) {
+	t.Run("delete_without_force_shows_preview", func(t *testing.T) {
 		parent := bdCreate(t, bd, dir, "Parent strict", "--type", "task")
 		child := bdCreate(t, bd, dir, "Child strict", "--type", "task")
 		bdDepAdd(t, bd, dir, child.ID, parent.ID)
 
-		// Should fail without --force or --cascade.
-		out := bdDeleteFail(t, bd, dir, parent.ID)
-		if !strings.Contains(out, "dependents") && !strings.Contains(out, "cascade") && !strings.Contains(out, "force") {
-			t.Logf("expected error about dependents: %s", out)
+		// Without --force, bd delete shows a preview (exits 0) but does not delete.
+		out := bdDelete(t, bd, dir, parent.ID)
+		if !strings.Contains(out, "PREVIEW") && !strings.Contains(out, "preview") {
+			t.Logf("expected preview output: %s", out)
+		}
+		// Parent should still exist.
+		got := bdShow(t, bd, dir, parent.ID)
+		if got.ID != parent.ID {
+			t.Errorf("expected parent to still exist after preview")
 		}
 	})
 
