@@ -6,9 +6,13 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
+	"github.com/steveyegge/beads/internal/storage"
+	itracker "github.com/steveyegge/beads/internal/tracker"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 type fakeNotionStatusService struct {
@@ -21,6 +25,42 @@ func (f *fakeNotionStatusService) Status(_ context.Context, req notion.StatusReq
 	f.req = req
 	return f.resp, f.err
 }
+
+type fakeNotionSyncEngine struct {
+	result *itracker.SyncResult
+	err    error
+	opts   itracker.SyncOptions
+}
+
+func (f *fakeNotionSyncEngine) Sync(_ context.Context, opts itracker.SyncOptions) (*itracker.SyncResult, error) {
+	f.opts = opts
+	return f.result, f.err
+}
+
+type fakeNotionTracker struct{}
+
+func (f *fakeNotionTracker) Name() string                                { return "notion" }
+func (f *fakeNotionTracker) DisplayName() string                         { return "Notion" }
+func (f *fakeNotionTracker) ConfigPrefix() string                        { return "notion" }
+func (f *fakeNotionTracker) Init(context.Context, storage.Storage) error { return nil }
+func (f *fakeNotionTracker) Validate() error                             { return nil }
+func (f *fakeNotionTracker) Close() error                                { return nil }
+func (f *fakeNotionTracker) FetchIssues(context.Context, itracker.FetchOptions) ([]itracker.TrackerIssue, error) {
+	return nil, nil
+}
+func (f *fakeNotionTracker) FetchIssue(context.Context, string) (*itracker.TrackerIssue, error) {
+	return nil, nil
+}
+func (f *fakeNotionTracker) CreateIssue(context.Context, *types.Issue) (*itracker.TrackerIssue, error) {
+	return nil, nil
+}
+func (f *fakeNotionTracker) UpdateIssue(context.Context, string, *types.Issue) (*itracker.TrackerIssue, error) {
+	return nil, nil
+}
+func (f *fakeNotionTracker) FieldMapper() itracker.FieldMapper              { return nil }
+func (f *fakeNotionTracker) IsExternalRef(string) bool                      { return false }
+func (f *fakeNotionTracker) ExtractIdentifier(string) string                { return "" }
+func (f *fakeNotionTracker) BuildExternalRef(*itracker.TrackerIssue) string { return "" }
 
 func TestNotionStatusFlagsRegistered(t *testing.T) {
 	t.Parallel()
@@ -52,9 +92,7 @@ func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
 		notionViewURL = originalView
 	})
 
-	fake := &fakeNotionStatusService{
-		resp: &notion.StatusResponse{Ready: true},
-	}
+	fake := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
 	newNotionStatusClient = func(binaryPath string) notionStatusClient {
 		if binaryPath != "/tmp/ncli" {
 			t.Fatalf("binary path = %q, want /tmp/ncli", binaryPath)
@@ -128,4 +166,137 @@ func TestRenderNotionStatusIncludesArchiveWarning(t *testing.T) {
 	if !strings.Contains(output, "Archive Reason: live MCP does not expose archive") {
 		t.Fatalf("output = %q", output)
 	}
+}
+
+func TestBuildNotionSyncOptions(t *testing.T) {
+	t.Parallel()
+
+	originalPull := notionSyncPull
+	originalPush := notionSyncPush
+	originalDryRun := notionSyncDryRun
+	originalCreateOnly := notionCreateOnly
+	originalState := notionSyncState
+	originalPreferLocal := notionPreferLocal
+	originalPreferNotion := notionPreferNotion
+	t.Cleanup(func() {
+		notionSyncPull = originalPull
+		notionSyncPush = originalPush
+		notionSyncDryRun = originalDryRun
+		notionCreateOnly = originalCreateOnly
+		notionSyncState = originalState
+		notionPreferLocal = originalPreferLocal
+		notionPreferNotion = originalPreferNotion
+	})
+
+	notionSyncPull = true
+	notionSyncPush = true
+	notionSyncDryRun = true
+	notionCreateOnly = true
+	notionSyncState = "open"
+	notionPreferNotion = true
+
+	opts := buildNotionSyncOptions()
+	if !opts.Pull || !opts.Push || !opts.DryRun || !opts.CreateOnly {
+		t.Fatalf("unexpected sync opts: %#v", opts)
+	}
+	if opts.State != "open" {
+		t.Fatalf("state = %q, want open", opts.State)
+	}
+	if opts.ConflictResolution != itracker.ConflictExternal {
+		t.Fatalf("conflict resolution = %q, want external", opts.ConflictResolution)
+	}
+}
+
+func TestRunNotionSyncUsesEngine(t *testing.T) {
+	t.Parallel()
+
+	originalStatusFactory := newNotionStatusClient
+	originalTrackerFactory := newNotionTracker
+	originalEngineFactory := newNotionSyncEngine
+	originalEnsure := ensureNotionStoreActive
+	originalReadonly := checkNotionReadonly
+	originalJSON := jsonOutput
+	originalPull := notionSyncPull
+	originalPush := notionSyncPush
+	originalDryRun := notionSyncDryRun
+	originalCreateOnly := notionCreateOnly
+	originalState := notionSyncState
+	originalPreferLocal := notionPreferLocal
+	originalPreferNotion := notionPreferNotion
+	t.Cleanup(func() {
+		newNotionStatusClient = originalStatusFactory
+		newNotionTracker = originalTrackerFactory
+		newNotionSyncEngine = originalEngineFactory
+		ensureNotionStoreActive = originalEnsure
+		checkNotionReadonly = originalReadonly
+		jsonOutput = originalJSON
+		notionSyncPull = originalPull
+		notionSyncPush = originalPush
+		notionSyncDryRun = originalDryRun
+		notionCreateOnly = originalCreateOnly
+		notionSyncState = originalState
+		notionPreferLocal = originalPreferLocal
+		notionPreferNotion = originalPreferNotion
+	})
+
+	newNotionStatusClient = func(string) notionStatusClient {
+		return &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
+	}
+	newNotionTracker = func() itracker.IssueTracker { return &fakeNotionTracker{} }
+	fakeEngine := &fakeNotionSyncEngine{
+		result: &itracker.SyncResult{
+			Success: true,
+			Stats:   itracker.SyncStats{Pulled: 1, Created: 1},
+		},
+	}
+	newNotionSyncEngine = func(itracker.IssueTracker) notionSyncEngine { return fakeEngine }
+	ensureNotionStoreActive = func() error { return nil }
+	checkNotionReadonly = func(string) {}
+	jsonOutput = false
+	notionSyncPull = true
+	notionSyncPush = false
+	notionSyncDryRun = true
+	notionSyncState = "all"
+
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetContext(context.Background())
+
+	if err := runNotionSync(cmd, nil); err != nil {
+		t.Fatalf("runNotionSync returned error: %v", err)
+	}
+	if !fakeEngine.opts.Pull || fakeEngine.opts.Push {
+		t.Fatalf("unexpected sync opts: %#v", fakeEngine.opts)
+	}
+	if !strings.Contains(stdout.String(), "Dry run complete") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestPreflightNotionSyncRequiresReadyStatus(t *testing.T) {
+	t.Parallel()
+
+	originalFactory := newNotionStatusClient
+	t.Cleanup(func() { newNotionStatusClient = originalFactory })
+
+	newNotionStatusClient = func(string) notionStatusClient {
+		return &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: false}}
+	}
+
+	err := preflightNotionSync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Notion sync is not ready") {
+		t.Fatalf("error = %q", err.Error())
+	}
+}
+
+func TestFakeTrackerSatisfiesInterface(t *testing.T) {
+	t.Parallel()
+
+	var _ itracker.IssueTracker = (*fakeNotionTracker)(nil)
+	_ = time.Second
 }
