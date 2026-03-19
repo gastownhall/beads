@@ -200,13 +200,9 @@ func (s *EmbeddedDoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([
 	panic("embeddeddolt: GetIssuesByIDs not implemented")
 }
 
-func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	panic("embeddeddolt: UpdateIssue not implemented")
-}
+// UpdateIssue is implemented in update_close.go.
 
-func (s *EmbeddedDoltStore) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	panic("embeddeddolt: CloseIssue not implemented")
-}
+// CloseIssue is implemented in update_close.go.
 
 func (s *EmbeddedDoltStore) DeleteIssue(ctx context.Context, id string) error {
 	panic("embeddeddolt: DeleteIssue not implemented")
@@ -508,13 +504,9 @@ func (s *EmbeddedDoltStore) GetDependencyRecords(ctx context.Context, issueID st
 	return result, err
 }
 
-func (s *EmbeddedDoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
-	panic("embeddeddolt: IsBlocked not implemented")
-}
+// IsBlocked is implemented in update_close.go.
 
-func (s *EmbeddedDoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
-	panic("embeddeddolt: GetNewlyUnblockedByClose not implemented")
-}
+// GetNewlyUnblockedByClose is implemented in update_close.go.
 
 func (s *EmbeddedDoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {
 	panic("embeddeddolt: DetectCycles not implemented")

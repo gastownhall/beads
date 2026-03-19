@@ -3,7 +3,6 @@ package dolt
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -185,84 +184,34 @@ func (s *DoltStore) getWispLabels(ctx context.Context, issueID string) ([]string
 }
 
 // updateWisp updates fields on a wisp in the wisps table.
-func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, _ string) error {
-	// Get old wisp for closed_at auto-management
-	oldWisp, err := s.getWisp(ctx, id)
-	if err != nil {
-		return fmt.Errorf("failed to get wisp for update: %w", err)
-	}
-
-	setClauses := []string{"updated_at = ?"}
-	args := []interface{}{time.Now().UTC()}
-
-	for key, value := range updates {
-		if !isAllowedUpdateField(key) {
-			return fmt.Errorf("invalid field for update: %s", key)
-		}
-		columnName := key
-		if key == "wisp" {
-			columnName = "ephemeral"
-		}
-		setClauses = append(setClauses, fmt.Sprintf("`%s` = ?", columnName))
-		if key == "waiters" {
-			waitersJSON, err := json.Marshal(value)
-			if err != nil {
-				return fmt.Errorf("invalid waiters: %w", err)
-			}
-			args = append(args, string(waitersJSON))
-		} else if key == "metadata" {
-			metadataStr, err := storage.NormalizeMetadataValue(value)
-			if err != nil {
-				return fmt.Errorf("invalid metadata: %w", err)
-			}
-			args = append(args, metadataStr)
-		} else {
-			args = append(args, value)
-		}
-	}
-
-	// Auto-manage closed_at (set on close, clear on reopen)
-	setClauses, args = manageClosedAt(oldWisp, updates, setClauses, args)
-
-	args = append(args, id)
-
-	// nolint:gosec // G201: setClauses contains only column names
-	query := fmt.Sprintf("UPDATE wisps SET %s WHERE id = ?", strings.Join(setClauses, ", "))
-	_, err = s.execContext(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to update wisp: %w", err)
-	}
-	return nil
-}
-
-// closeWisp closes a wisp in the wisps table.
-func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, actor string, session string) error {
-	now := time.Now().UTC()
-
+// Delegates SQL work to issueops.UpdateIssueInTx; no Dolt versioning needed
+// since wisps live in dolt_ignored tables.
+func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE wisps SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by_session = ?
-		WHERE id = ?
-	`, types.StatusClosed, now, now, reason, session, id)
-	if err != nil {
-		return fmt.Errorf("failed to close wisp: %w", err)
+	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+		return err
 	}
 
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("wisp not found: %s", id)
-	}
+	return wrapTransactionError("commit update wisp", tx.Commit())
+}
 
-	if err := issueops.RecordEventInTable(ctx, tx, "wisp_events", id, types.EventClosed, actor, reason); err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
+// closeWisp closes a wisp in the wisps table.
+// Delegates SQL work to issueops.CloseIssueInTx; no Dolt versioning needed
+// since wisps live in dolt_ignored tables.
+func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, actor string, session string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
+		return err
 	}
 
 	return wrapTransactionError("commit close wisp", tx.Commit())
