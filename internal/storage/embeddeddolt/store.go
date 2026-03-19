@@ -496,7 +496,16 @@ func (s *EmbeddedDoltStore) RenameCounterPrefix(ctx context.Context, oldPrefix, 
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
-	panic("embeddeddolt: GetDependencyRecords not implemented")
+	var result []*types.Dependency
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		m, err := issueops.GetDependencyRecordsForIssuesInTx(ctx, tx, []string{issueID})
+		if err != nil {
+			return err
+		}
+		result = m[issueID]
+		return nil
+	})
+	return result, err
 }
 
 func (s *EmbeddedDoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {

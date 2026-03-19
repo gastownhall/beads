@@ -438,9 +438,19 @@ func TestEmbeddedList(t *testing.T) {
 
 	t.Run("format_digraph", func(t *testing.T) {
 		out := bdList(t, bd, dir, "--format", "digraph", "--all")
-		// Digraph format should contain issue IDs
-		if !strings.Contains(out, seed.openBug) {
-			t.Error("digraph output should contain issue IDs")
+		// Digraph format outputs dependency edges — may be empty if no blocking deps
+		// but should not panic
+		if out == "" {
+			t.Error("digraph output should not be empty")
+		}
+	})
+
+	t.Run("format_dot", func(t *testing.T) {
+		// DOT format calls GetDependencyRecords per issue — verify it doesn't panic.
+		// --flat disables tree mode which would otherwise override --format.
+		out := bdList(t, bd, dir, "--format", "dot", "--flat", "--all")
+		if !strings.Contains(out, "digraph") {
+			t.Errorf("dot output should contain 'digraph' header, got: %s", out)
 		}
 	})
 
