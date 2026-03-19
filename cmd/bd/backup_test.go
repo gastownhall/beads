@@ -286,11 +286,11 @@ func TestBackupIncremental(t *testing.T) {
 
 	// Create an issue and event
 	if _, err := s.DB().ExecContext(ctx, `INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"inc-1", "Inc Issue", "desc", "", "", "", "open", 2, "task"); err != nil {
+		"test-inc-1", "Inc Issue", "desc", "", "", "", "open", 2, "task"); err != nil {
 		t.Fatalf("insert issue: %v", err)
 	}
 	if _, err := s.DB().ExecContext(ctx, `INSERT INTO events (issue_id, event_type, actor) VALUES (?, ?, ?)`,
-		"inc-1", "created", "tester"); err != nil {
+		"test-inc-1", "created", "tester"); err != nil {
 		t.Fatalf("insert event: %v", err)
 	}
 	if _, err := s.DB().ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'initial')"); err != nil {
@@ -308,7 +308,7 @@ func TestBackupIncremental(t *testing.T) {
 
 	// Add another event
 	if _, err := s.DB().ExecContext(ctx, `INSERT INTO events (issue_id, event_type, actor) VALUES (?, ?, ?)`,
-		"inc-1", "status_changed", "tester"); err != nil {
+		"test-inc-1", "status_changed", "tester"); err != nil {
 		t.Fatalf("insert event 2: %v", err)
 	}
 	if _, err := s.DB().ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'second event')"); err != nil {

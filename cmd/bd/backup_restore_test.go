@@ -263,17 +263,17 @@ func TestBackupRestoreAcceptsUUIDCommentAndEventIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	issuesData := `{"id":"uuid-1","title":"UUID Restore","status":"open","priority":2,"issue_type":"task"}` + "\n"
+	issuesData := `{"id":"test-uuid-1","title":"UUID Restore","status":"open","priority":2,"issue_type":"task"}` + "\n"
 	if err := os.WriteFile(filepath.Join(backupPath, "issues.jsonl"), []byte(issuesData), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	commentsData := `{"id":"c6b39fb0-a0fa-4f4a-8cd2-2d5f3f3d8b73","issue_id":"uuid-1","author":"tester","text":"comment restored","created_at":"2026-03-14T18:00:00Z"}` + "\n"
+	commentsData := `{"id":"c6b39fb0-a0fa-4f4a-8cd2-2d5f3f3d8b73","issue_id":"test-uuid-1","author":"tester","text":"comment restored","created_at":"2026-03-14T18:00:00Z"}` + "\n"
 	if err := os.WriteFile(filepath.Join(backupPath, "comments.jsonl"), []byte(commentsData), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	eventsData := `{"id":"ec2dd5f8-8e1a-4aa9-9c27-3fda5d7406fc","issue_id":"uuid-1","event_type":"created","actor":"tester","created_at":"2026-03-14T18:00:00Z"}` + "\n"
+	eventsData := `{"id":"ec2dd5f8-8e1a-4aa9-9c27-3fda5d7406fc","issue_id":"test-uuid-1","event_type":"created","actor":"tester","created_at":"2026-03-14T18:00:00Z"}` + "\n"
 	if err := os.WriteFile(filepath.Join(backupPath, "events.jsonl"), []byte(eventsData), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestBackupRestoreAcceptsUUIDCommentAndEventIDs(t *testing.T) {
 	}
 
 	var commentCount int
-	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM comments WHERE issue_id = ?`, "uuid-1").Scan(&commentCount); err != nil {
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM comments WHERE issue_id = ?`, "test-uuid-1").Scan(&commentCount); err != nil {
 		t.Fatalf("count restored comments: %v", err)
 	}
 	if commentCount != 1 {
@@ -326,7 +326,7 @@ func TestBackupRestoreAcceptsUUIDCommentAndEventIDs(t *testing.T) {
 	}
 
 	var eventCount int
-	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE issue_id = ?`, "uuid-1").Scan(&eventCount); err != nil {
+	if err := s.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE issue_id = ?`, "test-uuid-1").Scan(&eventCount); err != nil {
 		t.Fatalf("count restored events: %v", err)
 	}
 	if eventCount != 1 {

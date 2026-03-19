@@ -87,6 +87,11 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 	if strings.HasPrefix(input, prefixWithHyphen) {
 		// Already has configured prefix with hyphen: "bd-a3f8e9"
 		normalizedID = input
+	} else if strings.HasPrefix(input, types.IDPrefixWisp+"-") {
+		// Ephemeral IDs are stored as "<repo-prefix>-wisp-<hash>", so a bare
+		// "wisp-<hash>" input should resolve within the current repo prefix
+		// instead of being treated as a foreign issue prefix.
+		normalizedID = prefixWithHyphen + input
 	} else if hasKnownPrefix(input, knownPrefixes) {
 		// Starts with a known/allowed prefix (e.g., "hacker-news-ko4" when allowed_prefixes includes "hacker-news")
 		normalizedID = input

@@ -12,7 +12,7 @@ import (
 
 func TestBackupFetchGitRestoresSnapshotFromRemoteBranch(t *testing.T) {
 	source := setupBackupExportGitHarness(t)
-	insertBackupExportGitIssue(t, source.ctx, "fetch-1", "Fetch Git Issue")
+	insertBackupExportGitIssue(t, source.ctx, "test-fetch-1", "Fetch Git Issue")
 
 	if _, err := runBackupExportGit(source.ctx, backupExportGitOptions{}); err != nil {
 		t.Fatalf("runBackupExportGit: %v", err)
@@ -39,9 +39,9 @@ func TestBackupFetchGitRestoresSnapshotFromRemoteBranch(t *testing.T) {
 	}
 	assertCurrentBranch(t, targetRepo, "main")
 
-	issue, err := targetStore.GetIssue(context.Background(), "fetch-1")
+	issue, err := targetStore.GetIssue(context.Background(), "test-fetch-1")
 	if err != nil {
-		t.Fatalf("GetIssue fetch-1: %v", err)
+		t.Fatalf("GetIssue test-fetch-1: %v", err)
 	}
 	if issue.Title != "Fetch Git Issue" {
 		t.Fatalf("issue title = %q, want %q", issue.Title, "Fetch Git Issue")
@@ -50,7 +50,7 @@ func TestBackupFetchGitRestoresSnapshotFromRemoteBranch(t *testing.T) {
 
 func TestBackupFetchGitDryRunHasNoSideEffects(t *testing.T) {
 	source := setupBackupExportGitHarness(t)
-	insertBackupExportGitIssue(t, source.ctx, "fetch-dry-1", "Fetch dry run issue")
+	insertBackupExportGitIssue(t, source.ctx, "test-fetch-dry-1", "Fetch dry run issue")
 
 	if _, err := runBackupExportGit(source.ctx, backupExportGitOptions{}); err != nil {
 		t.Fatalf("runBackupExportGit: %v", err)
@@ -74,7 +74,7 @@ func TestBackupFetchGitDryRunHasNoSideEffects(t *testing.T) {
 	}
 	assertCurrentBranch(t, targetRepo, "main")
 
-	if _, err := targetStore.GetIssue(context.Background(), "fetch-dry-1"); err == nil {
+	if _, err := targetStore.GetIssue(context.Background(), "test-fetch-dry-1"); err == nil {
 		t.Fatal("dry-run should not restore issues")
 	}
 }

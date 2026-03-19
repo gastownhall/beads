@@ -324,12 +324,12 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 
 		// Verify comments were NOT duplicated
-		issue, err := store.GetIssue(ctx, "test-cmt1")
+		comments, err := store.GetIssueComments(ctx, "test-cmt1")
 		if err != nil {
-			t.Fatalf("Failed to get issue: %v", err)
+			t.Fatalf("Failed to get issue comments: %v", err)
 		}
-		if len(issue.Comments) != 2 {
-			t.Errorf("Expected 2 comments after re-import, got %d (duplicates!)", len(issue.Comments))
+		if len(comments) != 2 {
+			t.Errorf("Expected 2 comments after re-import, got %d (duplicates!)", len(comments))
 		}
 	})
 

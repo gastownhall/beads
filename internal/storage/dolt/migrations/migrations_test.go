@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os/exec"
@@ -45,9 +46,10 @@ func openTestDoltBranch(t *testing.T) *sql.DB {
 
 func TestMigrateWispTypeColumn(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
 	// Verify column doesn't exist yet
-	exists, err := columnExists(db, "issues", "wisp_type")
+	exists, err := columnExists(ctx, db, "issues", "wisp_type")
 	if err != nil {
 		t.Fatalf("failed to check column: %v", err)
 	}
@@ -56,12 +58,12 @@ func TestMigrateWispTypeColumn(t *testing.T) {
 	}
 
 	// Run migration
-	if err := MigrateWispTypeColumn(db); err != nil {
+	if err := MigrateWispTypeColumn(ctx, db); err != nil {
 		t.Fatalf("migration failed: %v", err)
 	}
 
 	// Verify column now exists
-	exists, err = columnExists(db, "issues", "wisp_type")
+	exists, err = columnExists(ctx, db, "issues", "wisp_type")
 	if err != nil {
 		t.Fatalf("failed to check column: %v", err)
 	}
@@ -70,15 +72,16 @@ func TestMigrateWispTypeColumn(t *testing.T) {
 	}
 
 	// Run migration again (idempotent)
-	if err := MigrateWispTypeColumn(db); err != nil {
+	if err := MigrateWispTypeColumn(ctx, db); err != nil {
 		t.Fatalf("re-running migration should be idempotent: %v", err)
 	}
 }
 
 func TestColumnExists(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
-	exists, err := columnExists(db, "issues", "id")
+	exists, err := columnExists(ctx, db, "issues", "id")
 	if err != nil {
 		t.Fatalf("failed to check column: %v", err)
 	}
@@ -86,7 +89,7 @@ func TestColumnExists(t *testing.T) {
 		t.Fatal("id column should exist")
 	}
 
-	exists, err = columnExists(db, "issues", "nonexistent")
+	exists, err = columnExists(ctx, db, "issues", "nonexistent")
 	if err != nil {
 		t.Fatalf("failed to check column: %v", err)
 	}
@@ -97,8 +100,9 @@ func TestColumnExists(t *testing.T) {
 
 func TestTableExists(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
-	exists, err := tableExists(db, "issues")
+	exists, err := tableExists(ctx, db, "issues")
 	if err != nil {
 		t.Fatalf("failed to check table: %v", err)
 	}
@@ -106,7 +110,7 @@ func TestTableExists(t *testing.T) {
 		t.Fatal("issues table should exist")
 	}
 
-	exists, err = tableExists(db, "nonexistent")
+	exists, err = tableExists(ctx, db, "nonexistent")
 	if err != nil {
 		t.Fatalf("failed to check table: %v", err)
 	}
@@ -117,9 +121,10 @@ func TestTableExists(t *testing.T) {
 
 func TestDetectOrphanedChildren(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
 	// No orphans in empty database
-	if err := DetectOrphanedChildren(db); err != nil {
+	if err := DetectOrphanedChildren(ctx, db); err != nil {
 		t.Fatalf("orphan detection failed on empty db: %v", err)
 	}
 
@@ -133,7 +138,7 @@ func TestDetectOrphanedChildren(t *testing.T) {
 		t.Fatalf("failed to insert child: %v", err)
 	}
 
-	if err := DetectOrphanedChildren(db); err != nil {
+	if err := DetectOrphanedChildren(ctx, db); err != nil {
 		t.Fatalf("orphan detection failed with valid parent-child: %v", err)
 	}
 
@@ -144,7 +149,7 @@ func TestDetectOrphanedChildren(t *testing.T) {
 	}
 
 	// Should succeed (logs orphans but doesn't error)
-	if err := DetectOrphanedChildren(db); err != nil {
+	if err := DetectOrphanedChildren(ctx, db); err != nil {
 		t.Fatalf("orphan detection should not error on orphans: %v", err)
 	}
 
@@ -154,21 +159,22 @@ func TestDetectOrphanedChildren(t *testing.T) {
 		t.Fatalf("failed to insert deep orphan: %v", err)
 	}
 
-	if err := DetectOrphanedChildren(db); err != nil {
+	if err := DetectOrphanedChildren(ctx, db); err != nil {
 		t.Fatalf("orphan detection should not error on deep orphans: %v", err)
 	}
 
 	// Idempotent — running again should be fine
-	if err := DetectOrphanedChildren(db); err != nil {
+	if err := DetectOrphanedChildren(ctx, db); err != nil {
 		t.Fatalf("orphan detection should be idempotent: %v", err)
 	}
 }
 
 func TestMigrateWispsTable(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
 	// Verify wisps table doesn't exist yet
-	exists, err := tableExists(db, "wisps")
+	exists, err := tableExists(ctx, db, "wisps")
 	if err != nil {
 		t.Fatalf("failed to check table: %v", err)
 	}
@@ -177,12 +183,12 @@ func TestMigrateWispsTable(t *testing.T) {
 	}
 
 	// Run migration
-	if err := MigrateWispsTable(db); err != nil {
+	if err := MigrateWispsTable(ctx, db); err != nil {
 		t.Fatalf("migration failed: %v", err)
 	}
 
 	// Verify wisps table now exists
-	exists, err = tableExists(db, "wisps")
+	exists, err = tableExists(ctx, db, "wisps")
 	if err != nil {
 		t.Fatalf("failed to check table after migration: %v", err)
 	}
@@ -214,7 +220,7 @@ func TestMigrateWispsTable(t *testing.T) {
 	}
 
 	// Run migration again (idempotent)
-	if err := MigrateWispsTable(db); err != nil {
+	if err := MigrateWispsTable(ctx, db); err != nil {
 		t.Fatalf("re-running migration should be idempotent: %v", err)
 	}
 
@@ -237,9 +243,10 @@ func TestMigrateWispsTable(t *testing.T) {
 
 func TestMigrateIssueCounterTable(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
 	// Verify issue_counter table does not exist yet
-	exists, err := tableExists(db, "issue_counter")
+	exists, err := tableExists(ctx, db, "issue_counter")
 	if err != nil {
 		t.Fatalf("failed to check table: %v", err)
 	}
@@ -248,12 +255,12 @@ func TestMigrateIssueCounterTable(t *testing.T) {
 	}
 
 	// Run migration
-	if err := MigrateIssueCounterTable(db); err != nil {
+	if err := MigrateIssueCounterTable(ctx, db); err != nil {
 		t.Fatalf("migration failed: %v", err)
 	}
 
 	// Verify issue_counter table now exists
-	exists, err = tableExists(db, "issue_counter")
+	exists, err = tableExists(ctx, db, "issue_counter")
 	if err != nil {
 		t.Fatalf("failed to check table after migration: %v", err)
 	}
@@ -262,7 +269,7 @@ func TestMigrateIssueCounterTable(t *testing.T) {
 	}
 
 	// Run migration again (idempotent)
-	if err := MigrateIssueCounterTable(db); err != nil {
+	if err := MigrateIssueCounterTable(ctx, db); err != nil {
 		t.Fatalf("re-running migration should be idempotent: %v", err)
 	}
 
@@ -284,10 +291,11 @@ func TestMigrateIssueCounterTable(t *testing.T) {
 
 func TestColumnExistsNoTable(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
 	// columnExists on a nonexistent table should return (false, nil),
 	// not propagate the Error 1146 from SHOW COLUMNS.
-	exists, err := columnExists(db, "nonexistent_table", "id")
+	exists, err := columnExists(ctx, db, "nonexistent_table", "id")
 	if err != nil {
 		t.Fatalf("columnExists on nonexistent table should not error, got: %v", err)
 	}
@@ -298,6 +306,7 @@ func TestColumnExistsNoTable(t *testing.T) {
 
 func TestColumnExistsWithPhantom(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
 	// Create a phantom-like database entry (simulates naming convention phantom).
 	// This is a server-level operation; cleaned up after the test.
@@ -311,7 +320,7 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 	})
 
 	// Positive: still finds columns in primary database
-	exists, err := columnExists(db, "issues", "id")
+	exists, err := columnExists(ctx, db, "issues", "id")
 	if err != nil {
 		t.Fatalf("columnExists failed with phantom present: %v", err)
 	}
@@ -320,7 +329,7 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 	}
 
 	// Positive: still finds tables
-	exists, err = tableExists(db, "issues")
+	exists, err = tableExists(ctx, db, "issues")
 	if err != nil {
 		t.Fatalf("tableExists failed with phantom present: %v", err)
 	}
@@ -329,7 +338,7 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 	}
 
 	// Negative: missing column still returns false
-	exists, err = columnExists(db, "issues", "nonexistent")
+	exists, err = columnExists(ctx, db, "issues", "nonexistent")
 	if err != nil {
 		t.Fatalf("should not error for missing column: %v", err)
 	}
@@ -338,7 +347,7 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 	}
 
 	// Negative: missing table still returns (false, nil)
-	exists, err = tableExists(db, "nonexistent_table")
+	exists, err = tableExists(ctx, db, "nonexistent_table")
 	if err != nil {
 		t.Fatalf("should not error for missing table: %v", err)
 	}
@@ -347,7 +356,7 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 	}
 
 	// Negative: nonexistent table + column returns (false, nil)
-	exists, err = columnExists(db, "nonexistent_table", "id")
+	exists, err = columnExists(ctx, db, "nonexistent_table", "id")
 	if err != nil {
 		t.Fatalf("should not error with phantom database present: %v", err)
 	}
@@ -358,6 +367,7 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 
 func TestMigrateInfraToWisps_SchemaEvolution(t *testing.T) {
 	db := openTestDoltBranch(t)
+	ctx := context.Background()
 
 	// 1. Create older issues table WITH a column that wisps won't have (deleted_at)
 	// and WITHOUT a column that wisps will have (metadata).
@@ -415,15 +425,15 @@ func TestMigrateInfraToWisps_SchemaEvolution(t *testing.T) {
 	}
 
 	// 4. Run migration 004 to create wisps table and 005 for auxiliary tables
-	if err := MigrateWispsTable(db); err != nil {
+	if err := MigrateWispsTable(ctx, db); err != nil {
 		t.Fatalf("Failed to run migration 004: %v", err)
 	}
-	if err := MigrateWispAuxiliaryTables(db); err != nil {
+	if err := MigrateWispAuxiliaryTables(ctx, db); err != nil {
 		t.Fatalf("Failed to run migration 005: %v", err)
 	}
 
 	// 5. Run migration 007 - it should gracefully map columns instead of crashing
-	if err := MigrateInfraToWisps(db); err != nil {
+	if err := MigrateInfraToWisps(ctx, db); err != nil {
 		t.Fatalf("Migration 007 failed: %v", err)
 	}
 

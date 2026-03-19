@@ -105,7 +105,7 @@ func TestBackupExportGitNoChangesSkipsCommitAndPush(t *testing.T) {
 
 func TestBackupExportGitWritesManifest(t *testing.T) {
 	h := setupBackupExportGitHarness(t)
-	insertBackupExportGitIssue(t, h.ctx, "manifest-1", "Manifest issue")
+	insertBackupExportGitIssue(t, h.ctx, "test-manifest-1", "Manifest issue")
 
 	result, err := runBackupExportGit(h.ctx, backupExportGitOptions{})
 	if err != nil {
