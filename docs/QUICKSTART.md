@@ -282,6 +282,12 @@ bd notion sync --dry-run
 bd notion sync
 ```
 
+By default, `bd notion sync` only updates issues that already have a Notion `external_ref`. If you want local-only beads issues to be created in Notion, opt in with:
+
+```bash
+bd config set notion.push_prefix "beads"
+```
+
 ### Override ncli Inputs
 
 If you do not want to rely on the saved `ncli` config, pass the inputs explicitly:
