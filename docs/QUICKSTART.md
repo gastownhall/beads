@@ -258,3 +258,64 @@ bd admin cleanup --force
 - Use gates for PR/CI sync: See [DEPENDENCIES.md](DEPENDENCIES.md)
 
 See [README.md](../README.md) for full documentation.
+
+## Notion Sync Quickstart
+
+The `bd notion` commands use the local `ncli beads` workflow. They do not configure Notion for you.
+
+### Before You Run `bd notion`
+
+```bash
+# One-time setup in ncli
+ncli beads init --parent <page-id>
+ncli beads config show
+ncli beads status
+```
+
+You should only continue once `ncli beads status` reports `ready: true`.
+
+### Minimal bd Flow
+
+```bash
+bd notion status
+bd notion sync --dry-run
+bd notion sync
+```
+
+### Override ncli Inputs
+
+If you do not want to rely on the saved `ncli` config, pass the inputs explicitly:
+
+```bash
+bd notion status --ncli-bin /path/to/ncli --database-id <database-id> --view-url <view-url>
+bd notion sync --dry-run --database-id <database-id> --view-url <view-url>
+```
+
+### If Something Looks Wrong
+
+Check the lower-level `ncli` diagnostics first:
+
+```bash
+ncli beads status
+ncli beads state doctor
+```
+
+### Acceptance Smoke
+
+Use this exact sequence for a reproducible smoke test:
+
+```bash
+ncli beads status
+bd notion status
+bd notion sync --dry-run
+bd notion sync
+bd notion status
+```
+
+Expected result:
+
+- `ncli beads status` returns `ready: true`
+- `bd notion status` shows the selected database and archive support visibility
+- `bd notion sync --dry-run` completes without mutating data
+- `bd notion sync` completes through the shared tracker engine
+- archive/delete behavior is still unsupported and should not be assumed

@@ -119,3 +119,41 @@ For daemon mode without git, use `bd daemon start --local`
 
 * [Installing](docs/INSTALLING.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot Setup](docs/COPILOT_INTEGRATION.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [Troubleshooting](docs/TROUBLESHOOTING.md) | [FAQ](docs/FAQ.md)
 * [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/steveyegge/beads)
+
+## 🔌 Notion Sync via ncli
+
+Beads can sync with Notion through the local `ncli` command. This integration does **not** call the Notion public API directly from `bd`; it delegates to the dedicated `ncli beads` workflow.
+
+### Prerequisites
+
+- `ncli` is installed and available on `PATH`
+- `ncli beads init` and `ncli beads config` have already been run for the target Notion database
+- `ncli beads status` reports `ready: true`
+- Real archive execution is **not** supported yet; use dry-run output when you need to inspect archive candidates
+
+### Minimal Flow
+
+```bash
+bd notion status
+bd notion sync
+```
+
+Optional overrides:
+
+```bash
+bd notion status --ncli-bin /path/to/ncli --database-id <database-id> --view-url <view-url>
+bd notion sync --dry-run --database-id <database-id> --view-url <view-url>
+```
+
+### Troubleshooting
+
+If `bd notion status` or `bd notion sync` reports that Notion is not ready, check the lower-level `ncli` health first:
+
+```bash
+ncli beads status
+ncli beads state doctor
+```
+
+### Archive Limitation
+
+The current live Notion MCP surface does not expose a real archive operation to `ncli`, so `bd notion sync` only supports pull and push. Archive or delete semantics remain out of scope until that capability exists.
