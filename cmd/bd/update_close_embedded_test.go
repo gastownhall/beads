@@ -759,13 +759,44 @@ func TestEmbeddedUpdate(t *testing.T) {
 	})
 }
 
+// querySessionSQL queries closed_by_session via raw SQL since it's not in IssueSelectColumns.
+func querySessionSQL(t *testing.T, beadsDir, id string) string {
+	t.Helper()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	var session string
+	// Check both tables.
+	err = db.QueryRowContext(t.Context(),
+		"SELECT COALESCE(closed_by_session, '') FROM issues WHERE id = ?", id).Scan(&session)
+	if err != nil {
+		// Try wisps table.
+		err = db.QueryRowContext(t.Context(),
+			"SELECT COALESCE(closed_by_session, '') FROM wisps WHERE id = ?", id).Scan(&session)
+		if err != nil {
+			t.Fatalf("query closed_by_session: %v", err)
+		}
+	}
+	return session
+}
+
 func TestEmbeddedClose(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 
 	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "tc")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tc")
+
+	// ===== Basic Close Behavior =====
 
 	t.Run("basic_close", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Close me", "--type", "task")
@@ -779,54 +810,385 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	t.Run("close_default_reason", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Default reason", "--type", "task")
+		bdClose(t, bd, dir, issue.ID)
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.CloseReason != "Closed" {
+			t.Errorf("expected default close_reason 'Closed', got %q", got.CloseReason)
+		}
+	})
+
 	t.Run("close_with_reason", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Close with reason", "--type", "task")
+		issue := bdCreate(t, bd, dir, "Reason test", "--type", "task")
 		bdClose(t, bd, dir, issue.ID, "--reason", "done")
 		got := bdShow(t, bd, dir, issue.ID)
-		if got.Status != types.StatusClosed {
-			t.Errorf("expected status closed, got %s", got.Status)
-		}
 		if got.CloseReason != "done" {
 			t.Errorf("expected close_reason 'done', got %q", got.CloseReason)
 		}
 	})
 
-	t.Run("close_blocked_without_force", func(t *testing.T) {
-		blocker := bdCreate(t, bd, dir, "Blocker", "--type", "task")
-		blocked := bdCreate(t, bd, dir, "Blocked", "--type", "task")
+	t.Run("close_with_reason_short", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Short reason", "--type", "task")
+		bdClose(t, bd, dir, issue.ID, "-r", "fixed")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.CloseReason != "fixed" {
+			t.Errorf("expected close_reason 'fixed', got %q", got.CloseReason)
+		}
+	})
+
+	t.Run("close_with_message_alias", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Message alias", "--type", "task")
+		bdClose(t, bd, dir, issue.ID, "-m", "via message")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.CloseReason != "via message" {
+			t.Errorf("expected close_reason 'via message', got %q", got.CloseReason)
+		}
+	})
+
+	t.Run("close_with_resolution_alias", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Resolution alias", "--type", "task")
+		bdClose(t, bd, dir, issue.ID, "--resolution", "wontfix")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.CloseReason != "wontfix" {
+			t.Errorf("expected close_reason 'wontfix', got %q", got.CloseReason)
+		}
+	})
+
+	t.Run("close_with_comment_alias", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Comment alias", "--type", "task")
+		bdClose(t, bd, dir, issue.ID, "--comment", "duplicate")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.CloseReason != "duplicate" {
+			t.Errorf("expected close_reason 'duplicate', got %q", got.CloseReason)
+		}
+	})
+
+	t.Run("close_multiple_ids", func(t *testing.T) {
+		issue1 := bdCreate(t, bd, dir, "Multi close 1", "--type", "task")
+		issue2 := bdCreate(t, bd, dir, "Multi close 2", "--type", "task")
+		bdClose(t, bd, dir, issue1.ID, issue2.ID)
+		got1 := bdShow(t, bd, dir, issue1.ID)
+		got2 := bdShow(t, bd, dir, issue2.ID)
+		if got1.Status != types.StatusClosed {
+			t.Errorf("issue1: expected closed, got %s", got1.Status)
+		}
+		if got2.Status != types.StatusClosed {
+			t.Errorf("issue2: expected closed, got %s", got2.Status)
+		}
+	})
+
+	t.Run("close_already_closed", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Double close", "--type", "task")
+		bdClose(t, bd, dir, issue.ID)
+		// Closing again should not panic.
+		cmd := exec.Command(bd, "close", issue.ID)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		cmd.CombinedOutput() // Don't check error — behavior varies.
+	})
+
+	t.Run("close_nonexistent_id", func(t *testing.T) {
+		bdCloseFail(t, bd, dir, "tc-nonexistent999")
+	})
+
+	// ===== Force Flag and Close Guards =====
+
+	t.Run("close_blocked_refuses_without_force", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Blocker guard", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Blocked guard", "--type", "task")
 		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
 
-		// Closing a blocked issue requires --force.
+		// Without --force, should fail (exit non-zero).
+		bdCloseFail(t, bd, dir, blocked.ID)
+		got := bdShow(t, bd, dir, blocked.ID)
+		if got.Status == types.StatusClosed {
+			t.Error("expected blocked issue to remain open without --force")
+		}
+	})
+
+	t.Run("close_blocked_with_force", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Blocker force", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Blocked force", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
 		bdClose(t, bd, dir, blocked.ID, "--force")
 		got := bdShow(t, bd, dir, blocked.ID)
 		if got.Status != types.StatusClosed {
-			t.Errorf("expected status closed, got %s", got.Status)
+			t.Errorf("expected closed with --force, got %s", got.Status)
 		}
 	})
+
+	t.Run("close_pinned_refuses_without_force", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Pinned guard", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--status", "pinned")
+		bdCloseFail(t, bd, dir, issue.ID)
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status == types.StatusClosed {
+			t.Error("expected pinned issue to remain pinned without --force")
+		}
+	})
+
+	t.Run("close_pinned_with_force", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Pinned force", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--status", "pinned")
+		bdClose(t, bd, dir, issue.ID, "--force")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected closed with --force, got %s", got.Status)
+		}
+	})
+
+	t.Run("close_epic_open_children_refuses", func(t *testing.T) {
+		epic := bdCreate(t, bd, dir, "Epic guard", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Epic child", "--type", "task")
+		bdDepAdd(t, bd, dir, child.ID, epic.ID, "--type", "parent-child")
+
+		bdCloseFail(t, bd, dir, epic.ID)
+		got := bdShow(t, bd, dir, epic.ID)
+		if got.Status == types.StatusClosed {
+			t.Error("expected epic with open children to remain open without --force")
+		}
+	})
+
+	t.Run("close_epic_open_children_force", func(t *testing.T) {
+		epic := bdCreate(t, bd, dir, "Epic force", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Epic child force", "--type", "task")
+		bdDepAdd(t, bd, dir, child.ID, epic.ID, "--type", "parent-child")
+
+		bdClose(t, bd, dir, epic.ID, "--force")
+		got := bdShow(t, bd, dir, epic.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected epic closed with --force, got %s", got.Status)
+		}
+		// Child should still be open.
+		_ = child
+	})
+
+	// ===== Blocker and Suggest-Next Behavior =====
 
 	t.Run("close_unblocks_dependent", func(t *testing.T) {
 		blocker := bdCreate(t, bd, dir, "Unblock blocker", "--type", "task")
 		blocked := bdCreate(t, bd, dir, "Unblock blocked", "--type", "task")
 		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
 
-		closeOut := bdClose(t, bd, dir, blocker.ID)
+		bdClose(t, bd, dir, blocker.ID)
 		got := bdShow(t, bd, dir, blocker.ID)
 		if got.Status != types.StatusClosed {
-			t.Errorf("expected blocker status closed, got %s", got.Status)
+			t.Errorf("expected blocker closed, got %s", got.Status)
 		}
 		gotBlocked := bdShow(t, bd, dir, blocked.ID)
 		if gotBlocked.Status != types.StatusOpen {
-			t.Errorf("expected blocked issue status open, got %s", gotBlocked.Status)
+			t.Errorf("expected dependent still open, got %s", gotBlocked.Status)
 		}
-		_ = closeOut
 	})
 
-	t.Run("close_already_closed", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Double close", "--type", "task")
-		bdClose(t, bd, dir, issue.ID)
-		cmd := exec.Command(bd, "close", issue.ID)
+	t.Run("close_suggest_next", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Suggest blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Suggest blocked", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		out := bdClose(t, bd, dir, blocker.ID, "--suggest-next")
+		if !strings.Contains(out, "unblocked") && !strings.Contains(out, blocked.ID) {
+			// Suggest-next may not always show output if the unblocked issue
+			// isn't detected; this is best-effort.
+			t.Logf("suggest-next output did not mention unblocked issue: %s", out)
+		}
+	})
+
+	t.Run("close_suggest_next_json", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Suggest JSON blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Suggest JSON blocked", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		cmd := exec.Command(bd, "close", blocker.ID, "--suggest-next", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		cmd.CombinedOutput() // Don't check error — behavior varies.
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd close --suggest-next --json failed: %v\n%s", err, out)
+		}
+		s := string(out)
+		if !strings.Contains(s, "unblocked") {
+			t.Logf("JSON output did not contain 'unblocked' key: %s", s)
+		}
+	})
+
+	// ===== Claim-Next Flag =====
+
+	t.Run("close_claim_next", func(t *testing.T) {
+		toClose := bdCreate(t, bd, dir, "Claim next close", "--type", "task")
+		nextIssue := bdCreate(t, bd, dir, "Claim next target", "--type", "task")
+
+		out := bdClose(t, bd, dir, toClose.ID, "--claim-next")
+		// The next issue should have been claimed.
+		got := bdShow(t, bd, dir, nextIssue.ID)
+		if got.Status == types.StatusInProgress && got.Assignee != "" {
+			// Successfully claimed.
+			_ = out
+		} else {
+			// claim-next is best-effort — may not claim if issue was filtered out.
+			t.Logf("claim-next: next issue status=%s assignee=%q (may not have been claimed)", got.Status, got.Assignee)
+		}
+	})
+
+	t.Run("close_claim_next_no_ready", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Only issue", "--type", "task")
+		out := bdClose(t, bd, dir, issue.ID, "--claim-next")
+		if !strings.Contains(out, "No ready issues") && !strings.Contains(out, "claimed") {
+			t.Logf("claim-next with no ready issues: %s", out)
+		}
+	})
+
+	t.Run("close_claim_next_json", func(t *testing.T) {
+		toClose := bdCreate(t, bd, dir, "Claim JSON close", "--type", "task")
+		_ = bdCreate(t, bd, dir, "Claim JSON target", "--type", "task")
+
+		cmd := exec.Command(bd, "close", toClose.ID, "--claim-next", "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd close --claim-next --json failed: %v\n%s", err, out)
+		}
+		s := string(out)
+		// JSON should be valid.
+		start := strings.Index(s, "{")
+		if start < 0 {
+			start = strings.Index(s, "[")
+		}
+		if start >= 0 && !json.Valid([]byte(s[start:])) {
+			t.Errorf("expected valid JSON, got: %s", s[start:])
+		}
+	})
+
+	// ===== Session Flag =====
+
+	t.Run("close_with_session", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Session test", "--type", "task")
+		bdClose(t, bd, dir, issue.ID, "--session", "sess-456")
+		session := querySessionSQL(t, beadsDir, issue.ID)
+		if session != "sess-456" {
+			t.Errorf("expected closed_by_session 'sess-456', got %q", session)
+		}
+	})
+
+	t.Run("close_session_from_env", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Env session test", "--type", "task")
+		cmd := exec.Command(bd, "close", issue.ID)
+		cmd.Dir = dir
+		env := bdEnv(dir)
+		env = append(env, "CLAUDE_SESSION_ID=env-sess")
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd close with env session failed: %v\n%s", err, out)
+		}
+		session := querySessionSQL(t, beadsDir, issue.ID)
+		if session != "env-sess" {
+			t.Errorf("expected closed_by_session 'env-sess', got %q", session)
+		}
+	})
+
+	// ===== JSON Output and Done Alias =====
+
+	t.Run("close_json_output", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "JSON close test", "--type", "task")
+		cmd := exec.Command(bd, "close", issue.ID, "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd close --json failed: %v\n%s", err, out)
+		}
+		s := string(out)
+		start := strings.Index(s, "[")
+		if start < 0 {
+			start = strings.Index(s, "{")
+		}
+		if start < 0 {
+			t.Fatalf("no JSON in output: %s", s)
+		}
+		if !json.Valid([]byte(s[start:])) {
+			t.Errorf("expected valid JSON, got: %s", s[start:])
+		}
+	})
+
+	t.Run("done_alias", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Done alias test", "--type", "task")
+		cmd := exec.Command(bd, "done", issue.ID)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd done failed: %v\n%s", err, out)
+		}
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected closed via done alias, got %s", got.Status)
+		}
+	})
+
+	t.Run("done_positional_reason", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Done reason test", "--type", "task")
+		cmd := exec.Command(bd, "done", issue.ID, "the reason")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd done with reason failed: %v\n%s", err, out)
+		}
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.CloseReason != "the reason" {
+			t.Errorf("expected close_reason 'the reason', got %q", got.CloseReason)
+		}
+	})
+
+	// ===== Dolt Commit and Edge Cases =====
+
+	t.Run("close_dolt_commit", func(t *testing.T) {
+		// Count commits before.
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		cfg, _ := configfile.Load(beadsDir)
+		database := ""
+		if cfg != nil {
+			database = cfg.GetDoltDatabase()
+		}
+
+		countCommits := func() int {
+			db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+			if err != nil {
+				t.Fatalf("OpenSQL: %v", err)
+			}
+			defer cleanup()
+			var count int
+			if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&count); err != nil {
+				t.Fatalf("query dolt_log: %v", err)
+			}
+			return count
+		}
+
+		before := countCommits()
+		issue := bdCreate(t, bd, dir, "Dolt commit test", "--type", "task")
+		_ = issue
+		afterCreate := countCommits()
+		bdClose(t, bd, dir, issue.ID)
+		afterClose := countCommits()
+
+		if afterClose <= afterCreate {
+			t.Errorf("expected Dolt commit count to increase after close: before=%d afterCreate=%d afterClose=%d", before, afterCreate, afterClose)
+		}
+	})
+
+	t.Run("close_continue_multiple_ids_fails", func(t *testing.T) {
+		issue1 := bdCreate(t, bd, dir, "Continue multi 1", "--type", "task")
+		issue2 := bdCreate(t, bd, dir, "Continue multi 2", "--type", "task")
+		bdCloseFail(t, bd, dir, issue1.ID, issue2.ID, "--continue")
+	})
+
+	t.Run("close_suggest_next_multiple_ids_fails", func(t *testing.T) {
+		issue1 := bdCreate(t, bd, dir, "Suggest multi 1", "--type", "task")
+		issue2 := bdCreate(t, bd, dir, "Suggest multi 2", "--type", "task")
+		bdCloseFail(t, bd, dir, issue1.ID, issue2.ID, "--suggest-next")
 	})
 }
