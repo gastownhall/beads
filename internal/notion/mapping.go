@@ -82,16 +82,20 @@ func BeadsIssueFromPullIssue(issue PulledIssue, config *MappingConfig) (*types.I
 	if err != nil {
 		return nil, err
 	}
-	issueType, err := typeToBeads(issue.IssueType, config)
+	issueTypeRaw := issue.IssueType
+	if strings.TrimSpace(issueTypeRaw) == "" {
+		issueTypeRaw = issue.Type
+	}
+	issueType, err := typeToBeads(issueTypeRaw, config)
 	if err != nil {
 		return nil, err
 	}
 
-	createdAt, err := parseMappingTimestamp(issue.CreatedAt)
+	createdAt, err := parseMappingTimestamp(string(issue.CreatedAt))
 	if err != nil {
 		return nil, fmt.Errorf("parse created_at: %w", err)
 	}
-	updatedAt, err := parseMappingTimestamp(issue.UpdatedAt)
+	updatedAt, err := parseMappingTimestamp(string(issue.UpdatedAt))
 	if err != nil {
 		return nil, fmt.Errorf("parse updated_at: %w", err)
 	}
@@ -127,6 +131,9 @@ func TrackerIssueFromPullIssue(issue PulledIssue, config *MappingConfig) (*track
 	var url string
 	if canonical, ok := CanonicalizeNotionExternalRef(issue.ExternalRef); ok && strings.HasPrefix(canonical, "https://") {
 		url = canonical
+	}
+	if url == "" {
+		url = strings.TrimSpace(issue.URL)
 	}
 
 	trackerIssue := &tracker.TrackerIssue{

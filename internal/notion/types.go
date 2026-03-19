@@ -2,6 +2,7 @@ package notion
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -67,19 +68,30 @@ func (r PushRequest) args() []string {
 type StatusResponse struct {
 	Ready         bool               `json:"ready"`
 	DataSourceID  string             `json:"data_source_id,omitempty"`
+	ViewURL       string             `json:"view_url,omitempty"`
+	SchemaVersion string             `json:"schema_version,omitempty"`
+	Configured    bool               `json:"configured,omitempty"`
+	ConfigSource  string             `json:"config_source,omitempty"`
 	Auth          *StatusAuth        `json:"auth,omitempty"`
 	Database      *StatusDatabase    `json:"database,omitempty"`
 	Views         []StatusView       `json:"views,omitempty"`
 	Schema        *StatusSchema      `json:"schema,omitempty"`
 	Archive       *ArchiveCapability `json:"archive,omitempty"`
-	DoctorSummary *DoctorSummary     `json:"doctor_summary,omitempty"`
+	State         *StatusState       `json:"state,omitempty"`
 }
 
 // StatusAuth describes authentication state.
 type StatusAuth struct {
-	Ready  bool   `json:"ready,omitempty"`
-	UserID string `json:"user_id,omitempty"`
-	Email  string `json:"email,omitempty"`
+	OK   bool        `json:"ok"`
+	User *StatusUser `json:"user,omitempty"`
+}
+
+// StatusUser describes the authenticated Notion user.
+type StatusUser struct {
+	ID    string `json:"id,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email,omitempty"`
+	Type  string `json:"type,omitempty"`
 }
 
 // StatusDatabase describes the selected Notion database.
@@ -91,37 +103,54 @@ type StatusDatabase struct {
 
 // StatusView describes a database view.
 type StatusView struct {
-	ID   string `json:"id,omitempty"`
-	Name string `json:"name,omitempty"`
-	URL  string `json:"url,omitempty"`
-	Type string `json:"type,omitempty"`
+	ID   string  `json:"id,omitempty"`
+	Name *string `json:"name,omitempty"`
+	URL  string  `json:"url,omitempty"`
+	Type *string `json:"type,omitempty"`
 }
 
 // StatusSchema describes schema validation state.
 type StatusSchema struct {
-	Version         string   `json:"version,omitempty"`
+	Checked         bool     `json:"checked,omitempty"`
 	Required        []string `json:"required,omitempty"`
+	Optional        []string `json:"optional,omitempty"`
+	Detected        []string `json:"detected,omitempty"`
 	Missing         []string `json:"missing,omitempty"`
 	OptionalMissing []string `json:"optional_missing,omitempty"`
 }
 
 // ArchiveCapability describes archive support visibility.
 type ArchiveCapability struct {
-	Supported bool   `json:"supported"`
-	Reason    string `json:"reason,omitempty"`
+	Supported         bool     `json:"supported"`
+	Mode              string   `json:"mode,omitempty"`
+	Reason            string   `json:"reason,omitempty"`
+	SupportedCommands []string `json:"supported_commands,omitempty"`
+}
+
+// StatusState captures local ncli state information.
+type StatusState struct {
+	Path           string         `json:"path,omitempty"`
+	Present        bool           `json:"present,omitempty"`
+	ManagedCount   int            `json:"managed_count,omitempty"`
+	ViewConfigured bool           `json:"view_configured,omitempty"`
+	DoctorSummary  *DoctorSummary `json:"doctor_summary,omitempty"`
 }
 
 // DoctorSummary captures machine-readable state health.
 type DoctorSummary struct {
-	OK               bool     `json:"ok"`
-	MissingPages     []string `json:"missing_pages,omitempty"`
-	BeadsIDDrift     []string `json:"beads_id_drift,omitempty"`
-	PropertyMismatch []string `json:"property_mismatch,omitempty"`
+	OK                    bool `json:"ok"`
+	TotalCount            int  `json:"total_count,omitempty"`
+	OKCount               int  `json:"ok_count,omitempty"`
+	MissingPageCount      int  `json:"missing_page_count,omitempty"`
+	IDDriftCount          int  `json:"id_drift_count,omitempty"`
+	PropertyMismatchCount int  `json:"property_mismatch_count,omitempty"`
 }
 
 // PullResponse is the machine-readable output from `ncli beads pull --json`.
 type PullResponse struct {
-	Issues []PulledIssue `json:"issues"`
+	Issues  []PulledIssue      `json:"issues"`
+	Archive *ArchiveCapability `json:"archive,omitempty"`
+	State   *StatusState       `json:"state,omitempty"`
 }
 
 // PulledIssue is the normalized issue record returned by ncli beads pull.
@@ -129,15 +158,17 @@ type PulledIssue struct {
 	ID           string          `json:"id,omitempty"`
 	Title        string          `json:"title,omitempty"`
 	Description  string          `json:"description,omitempty"`
+	URL          string          `json:"url,omitempty"`
 	Status       string          `json:"status,omitempty"`
 	Priority     string          `json:"priority,omitempty"`
+	Type         string          `json:"type,omitempty"`
 	IssueType    string          `json:"issue_type,omitempty"`
 	Assignee     string          `json:"assignee,omitempty"`
 	Labels       []string        `json:"labels,omitempty"`
 	ExternalRef  string          `json:"external_ref,omitempty"`
 	NotionPageID string          `json:"notion_page_id,omitempty"`
-	CreatedAt    string          `json:"created_at,omitempty"`
-	UpdatedAt    string          `json:"updated_at,omitempty"`
+	CreatedAt    NullableString  `json:"created_at,omitempty"`
+	UpdatedAt    NullableString  `json:"updated_at,omitempty"`
 	Archived     bool            `json:"archived,omitempty"`
 	Body         string          `json:"body,omitempty"`
 	Comments     []PulledComment `json:"comments,omitempty"`
@@ -145,10 +176,31 @@ type PulledIssue struct {
 
 // PulledComment is a normalized comment record returned by ncli beads pull.
 type PulledComment struct {
-	CommentID string `json:"comment_id,omitempty"`
-	Body      string `json:"body,omitempty"`
-	Author    string `json:"author,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
+	CommentID    string         `json:"comment_id,omitempty"`
+	DiscussionID string         `json:"discussion_id,omitempty"`
+	Body         string         `json:"body,omitempty"`
+	Author       string         `json:"author,omitempty"`
+	URL          string         `json:"url,omitempty"`
+	CreatedAt    NullableString `json:"created_at,omitempty"`
+}
+
+// NullableString accepts either a JSON string or null and normalizes null to the zero value.
+type NullableString string
+
+// UnmarshalJSON decodes a string or null into the nullable string.
+func (s *NullableString) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*s = ""
+		return nil
+	}
+
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+
+	*s = NullableString(value)
+	return nil
 }
 
 // PushResponse is the machine-readable output from `ncli beads push --json`.

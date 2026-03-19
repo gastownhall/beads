@@ -175,7 +175,10 @@ func newCommandError(operation, binaryPath string, args []string, stderr []byte,
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) {
 		commandErr.ExitCode = exitErr.ExitCode()
+		return commandErr
 	}
+
+	commandErr.ExitCode = -1
 
 	return commandErr
 }

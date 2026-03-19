@@ -70,8 +70,8 @@ func TestBeadsIssueFromPullIssueRejectsUnsupportedEnums(t *testing.T) {
 		Status:    "mystery",
 		Priority:  "high",
 		IssueType: "task",
-		CreatedAt: time.Now().Format(time.RFC3339),
-		UpdatedAt: time.Now().Format(time.RFC3339),
+		CreatedAt: NullableString(time.Now().Format(time.RFC3339)),
+		UpdatedAt: NullableString(time.Now().Format(time.RFC3339)),
 	}, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")

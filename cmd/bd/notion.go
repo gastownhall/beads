@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
 	itracker "github.com/steveyegge/beads/internal/tracker"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 type notionStatusClient interface {
@@ -151,8 +152,13 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 
 	engine := newNotionSyncEngine(tr)
 	if concrete, ok := engine.(*itracker.Engine); ok {
-		concrete.OnMessage = func(msg string) { fmt.Fprintln(cmd.OutOrStdout(), "  "+msg) }
+		if jsonOutput {
+			concrete.OnMessage = func(msg string) { fmt.Fprintln(cmd.ErrOrStderr(), "  "+msg) }
+		} else {
+			concrete.OnMessage = func(msg string) { fmt.Fprintln(cmd.OutOrStdout(), "  "+msg) }
+		}
 		concrete.OnWarning = func(msg string) { fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", msg) }
+		concrete.PushHooks = buildNotionPushHooks(cmd.Context(), tr)
 	}
 
 	result, err := engine.Sync(cmd.Context(), buildNotionSyncOptions())
@@ -198,6 +204,39 @@ func buildNotionSyncOptions() itracker.SyncOptions {
 		opts.ConflictResolution = itracker.ConflictTimestamp
 	}
 	return opts
+}
+
+func buildNotionPushHooks(ctx context.Context, tr itracker.IssueTracker) *itracker.PushHooks {
+	return &itracker.PushHooks{
+		ShouldPush: func(issue *types.Issue) bool {
+			pushPrefix, _ := store.GetConfig(ctx, "notion.push_prefix")
+			return shouldPushNotionIssue(issue, tr, pushPrefix)
+		},
+	}
+}
+
+func shouldPushNotionIssue(issue *types.Issue, tr itracker.IssueTracker, pushPrefix string) bool {
+	if issue == nil || tr == nil {
+		return false
+	}
+
+	if issue.ExternalRef != nil && strings.TrimSpace(*issue.ExternalRef) != "" {
+		return tr.IsExternalRef(*issue.ExternalRef)
+	}
+
+	if strings.TrimSpace(pushPrefix) == "" {
+		return false
+	}
+
+	for _, prefix := range strings.Split(pushPrefix, ",") {
+		prefix = strings.TrimSpace(prefix)
+		prefix = strings.TrimSuffix(prefix, "-")
+		if prefix != "" && strings.HasPrefix(issue.ID, prefix+"-") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func renderNotionStatus(cmd *cobra.Command, resp *notion.StatusResponse) {

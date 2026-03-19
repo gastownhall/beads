@@ -63,7 +63,6 @@ func (f *fakeNotionTracker) ExtractIdentifier(string) string                { re
 func (f *fakeNotionTracker) BuildExternalRef(*itracker.TrackerIssue) string { return "" }
 
 func TestNotionStatusFlagsRegistered(t *testing.T) {
-	t.Parallel()
 
 	if notionStatusCmd.Flags().Lookup("ncli-bin") == nil {
 		t.Fatal("missing --ncli-bin")
@@ -77,7 +76,6 @@ func TestNotionStatusFlagsRegistered(t *testing.T) {
 }
 
 func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
-	t.Parallel()
 
 	originalFactory := newNotionStatusClient
 	originalJSON := jsonOutput
@@ -124,7 +122,6 @@ func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
 }
 
 func TestRunNotionStatusReturnsClientError(t *testing.T) {
-	t.Parallel()
 
 	originalFactory := newNotionStatusClient
 	t.Cleanup(func() { newNotionStatusClient = originalFactory })
@@ -144,7 +141,6 @@ func TestRunNotionStatusReturnsClientError(t *testing.T) {
 }
 
 func TestRenderNotionStatusIncludesArchiveWarning(t *testing.T) {
-	t.Parallel()
 
 	cmd := &cobra.Command{}
 	var stdout bytes.Buffer
@@ -169,7 +165,6 @@ func TestRenderNotionStatusIncludesArchiveWarning(t *testing.T) {
 }
 
 func TestBuildNotionSyncOptions(t *testing.T) {
-	t.Parallel()
 
 	originalPull := notionSyncPull
 	originalPush := notionSyncPush
@@ -208,7 +203,6 @@ func TestBuildNotionSyncOptions(t *testing.T) {
 }
 
 func TestRunNotionSyncUsesEngine(t *testing.T) {
-	t.Parallel()
 
 	originalStatusFactory := newNotionStatusClient
 	originalTrackerFactory := newNotionTracker
@@ -276,7 +270,6 @@ func TestRunNotionSyncUsesEngine(t *testing.T) {
 }
 
 func TestPreflightNotionSyncRequiresReadyStatus(t *testing.T) {
-	t.Parallel()
 
 	originalFactory := newNotionStatusClient
 	t.Cleanup(func() { newNotionStatusClient = originalFactory })
@@ -294,8 +287,66 @@ func TestPreflightNotionSyncRequiresReadyStatus(t *testing.T) {
 	}
 }
 
+func TestShouldPushNotionIssueRequiresOptInForUnlinkedIssues(t *testing.T) {
+	tests := []struct {
+		name       string
+		issue      *types.Issue
+		pushPrefix string
+		want       bool
+	}{
+		{
+			name: "existing notion ref is allowed",
+			issue: func() *types.Issue {
+				extRef := "https://www.notion.so/Test-0123456789abcdef0123456789abcdef"
+				return &types.Issue{ID: "beads-1", ExternalRef: &extRef}
+			}(),
+			want: true,
+		},
+		{
+			name: "other tracker ref is rejected",
+			issue: func() *types.Issue {
+				extRef := "https://github.com/example/repo/issues/1"
+				return &types.Issue{ID: "beads-1", ExternalRef: &extRef}
+			}(),
+			want: false,
+		},
+		{
+			name: "unlinked issue needs configured prefix",
+			issue: &types.Issue{
+				ID: "beads-1",
+			},
+			want: false,
+		},
+		{
+			name: "configured prefix opts issue in",
+			issue: &types.Issue{
+				ID: "beads-1",
+			},
+			pushPrefix: "beads",
+			want:       true,
+		},
+		{
+			name: "different prefix stays out",
+			issue: &types.Issue{
+				ID: "beads-1",
+			},
+			pushPrefix: "proj",
+			want:       false,
+		},
+	}
+
+	tracker := notion.NewTracker()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldPushNotionIssue(tt.issue, tracker, tt.pushPrefix)
+			if got != tt.want {
+				t.Fatalf("shouldPushNotionIssue() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFakeTrackerSatisfiesInterface(t *testing.T) {
-	t.Parallel()
 
 	var _ itracker.IssueTracker = (*fakeNotionTracker)(nil)
 	_ = time.Second
