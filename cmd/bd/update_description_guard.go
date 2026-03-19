@@ -44,5 +44,5 @@ func validateDescriptionUpdate(cmd *cobra.Command, description string, descChang
 		return nil
 	}
 
-	return fmt.Errorf("empty description from stdin/file requires --allow-empty-description (or use --description \"\" for an explicit inline clear)")
+	return fmt.Errorf("empty description from stdin/file requires --allow-empty-description (or use an explicit inline empty value like --description \"\")")
 }
