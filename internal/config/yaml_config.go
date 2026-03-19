@@ -50,6 +50,7 @@ var YamlOnlyKeys = map[string]bool{
 	// Validation settings (bd-t7jq)
 	// Values: "warn" | "error" | "none"
 	"validation.on-create": true,
+	"validation.on-close":  true,
 	"validation.on-sync":   true,
 
 	// Hierarchy settings (GH#995)

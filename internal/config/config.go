@@ -158,6 +158,7 @@ func Initialize() error {
 	// - "warn": validate and print warnings but proceed
 	// - "error": validate and fail on missing sections
 	v.SetDefault("validation.on-create", "none")
+	v.SetDefault("validation.on-close", "none")
 	v.SetDefault("validation.on-sync", "none")
 
 	// Metadata schema validation (GH#1416 Phase 2)

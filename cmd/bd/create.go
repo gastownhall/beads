@@ -240,6 +240,25 @@ var createCmd = &cobra.Command{
 			metadata = json.RawMessage(metadataJSON)
 		}
 
+		// Validate template based on --validate flag or config
+		// Uses LintIssue for field-aware validation: checks --acceptance field too (GH#2468 parity)
+		validateTemplate, _ := cmd.Flags().GetBool("validate")
+		validationMode := config.GetString("validation.on-create")
+		if validateTemplate || validationMode == "error" || validationMode == "warn" {
+			lintIssue := &types.Issue{
+				IssueType:          types.IssueType(issueType).Normalize(),
+				Description:        description,
+				AcceptanceCriteria: acceptance,
+			}
+			if err := validation.LintIssue(lintIssue); err != nil {
+				if validateTemplate || validationMode == "error" {
+					FatalError("%v", err)
+				}
+				// warn mode: print warning but proceed
+				fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
+			}
+		}
+
 		// Handle --dry-run flag (before --rig to ensure it works with cross-rig creation)
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		if dryRun {
@@ -368,28 +387,6 @@ var createCmd = &cobra.Command{
 				FatalError("estimate must be a non-negative number of minutes")
 			}
 			estimatedMinutes = &est
-		}
-
-		// Validate template based on --validate flag or config
-		validateTemplate, _ := cmd.Flags().GetBool("validate")
-		if validateTemplate {
-			// Explicit --validate flag: fail on error
-			if err := validation.ValidateTemplate(types.IssueType(issueType), description); err != nil {
-				FatalError("%v", err)
-			}
-		} else {
-			// Check validation.on-create config (bd-t7jq)
-			validationMode := config.GetString("validation.on-create")
-			if validationMode == "error" || validationMode == "warn" {
-				if err := validation.ValidateTemplate(types.IssueType(issueType), description); err != nil {
-					if validationMode == "error" {
-						FatalError("%v", err)
-					} else {
-						// warn mode: print warning but proceed
-						fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
-					}
-				}
-			}
 		}
 
 		// Use global jsonOutput set by PersistentPreRun

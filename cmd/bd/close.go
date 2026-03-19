@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 var closeCmd = &cobra.Command{
@@ -60,6 +62,19 @@ create, update, show, or close operation).`,
 		if reason == "" {
 			reason = "Closed"
 		}
+
+		// Validate close reason if configured
+		closeValidation := config.GetString("validation.on-close")
+		if closeValidation == "error" || closeValidation == "warn" {
+			if err := validation.ValidateCloseReason(reason); err != nil {
+				if closeValidation == "error" {
+					FatalErrorRespectJSON("%v", err)
+				}
+				// warn mode: print warning but proceed
+				fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
+			}
+		}
+
 		force, _ := cmd.Flags().GetBool("force")
 		continueFlag, _ := cmd.Flags().GetBool("continue")
 		noAuto, _ := cmd.Flags().GetBool("no-auto")
