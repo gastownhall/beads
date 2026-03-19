@@ -240,3 +240,21 @@ type PullService interface {
 type PushService interface {
 	Push(ctx context.Context, req PushRequest) (*PushResponse, error)
 }
+
+// PushPayload is the ncli beads push input shape.
+type PushPayload struct {
+	Issues []PushIssue `json:"issues"`
+}
+
+// PushIssue is one issue entry in the ncli beads push payload.
+type PushIssue struct {
+	ID          string   `json:"id,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Status      string   `json:"status,omitempty"`
+	Priority    string   `json:"priority,omitempty"`
+	IssueType   string   `json:"issue_type,omitempty"`
+	Assignee    string   `json:"assignee,omitempty"`
+	Labels      []string `json:"labels,omitempty"`
+	ExternalRef string   `json:"external_ref,omitempty"`
+}
