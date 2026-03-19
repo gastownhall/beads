@@ -92,6 +92,9 @@ create, update, show, or close operation).`,
 		}
 		description, descChanged := getDescriptionFlag(cmd)
 		if descChanged {
+			if err := validateDescriptionUpdate(cmd, description, descChanged); err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
 			updates["description"] = description
 		}
 		design, designChanged := getDesignFlag(cmd)
@@ -578,6 +581,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision); custom types require types.custom config")
 	registerCommonIssueFlags(updateCmd)
+	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
