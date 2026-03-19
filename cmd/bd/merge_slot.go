@@ -163,6 +163,13 @@ func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: failed to add gt:slot label: %v\n", err)
 	}
 
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			return fmt.Errorf("failed to commit: %w", err)
+		}
+	}
+
 	if jsonOutput {
 		result := map[string]interface{}{
 			"id":     slotID,
@@ -282,6 +289,13 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 				}
 			}
 
+			// Embedded mode: flush Dolt commit.
+			if isEmbeddedDolt && store != nil {
+				if _, err := store.CommitPending(ctx, actor); err != nil {
+					return fmt.Errorf("failed to commit: %w", err)
+				}
+			}
+
 			if jsonOutput {
 				result := map[string]interface{}{
 					"id":       slot.ID,
@@ -323,6 +337,13 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 	}
 	if err := store.UpdateIssue(ctx, slot.ID, updates, actor); err != nil {
 		return fmt.Errorf("failed to acquire slot: %w", err)
+	}
+
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			return fmt.Errorf("failed to commit: %w", err)
+		}
 	}
 
 	if jsonOutput {
@@ -385,6 +406,13 @@ func runMergeSlotRelease(cmd *cobra.Command, args []string) error {
 	}
 	if err := store.UpdateIssue(ctx, slot.ID, updates, actor); err != nil {
 		return fmt.Errorf("failed to release slot: %w", err)
+	}
+
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			return fmt.Errorf("failed to commit: %w", err)
+		}
 	}
 
 	if jsonOutput {

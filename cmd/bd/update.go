@@ -461,7 +461,7 @@ create, update, show, or close operation).`,
 			result.Close()
 		}
 
-		// Embedded mode: flush Dolt version commit. DoltStore commits
+		// Embedded mode: flush Dolt commit. DoltStore commits
 		// inline during UpdateIssue so this is only needed for EmbeddedDoltStore.
 		if isEmbeddedDolt && firstUpdatedID != "" && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {

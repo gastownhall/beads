@@ -38,6 +38,13 @@ func processBatchLabelOperation(issueIDs []string, label string, operation strin
 	if err != nil {
 		FatalErrorRespectJSON("label %s: %v", operation, err)
 	}
+	// Embedded mode: flush Dolt commit. transact() only commits the SQL
+	// transaction; a Dolt commit is needed separately.
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
+	}
 	if jsonOut {
 		results := make([]map[string]interface{}, 0, len(issueIDs))
 		for _, issueID := range issueIDs {

@@ -211,6 +211,13 @@ This is used by 'gt done --phase-complete' to register for gate wake notificatio
 			FatalError("updating gate: %v", err)
 		}
 
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalError("failed to commit: %v", err)
+			}
+		}
+
 		fmt.Printf("%s Added waiter to gate %s: %s\n", ui.RenderPass("✓"), gateID, waiter)
 	},
 }
@@ -304,6 +311,13 @@ Use --reason to provide context for why the gate was resolved.`,
 		// Close the gate
 		if err := store.CloseIssue(ctx, gateID, reason, actor, ""); err != nil {
 			FatalError("closing gate: %v", err)
+		}
+
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalError("failed to commit: %v", err)
+			}
 		}
 
 		fmt.Printf("%s Gate resolved: %s\n", ui.RenderPass("✓"), gateID)
@@ -764,6 +778,12 @@ func checkBeadGate(ctx context.Context, awaitID string) (bool, string) {
 func closeGate(_ interface{}, gateID, reason string) error {
 	if err := store.CloseIssue(rootCtx, gateID, reason, actor, ""); err != nil {
 		return err
+	}
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(rootCtx, actor); err != nil {
+			return err
+		}
 	}
 	return nil
 }

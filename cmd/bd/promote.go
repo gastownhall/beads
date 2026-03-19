@@ -78,6 +78,13 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Warning: failed to add promotion comment to %s: %v\n", fullID, err)
 		}
 
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
+
 		if jsonOutput {
 			updated, _ := store.GetIssue(ctx, fullID)
 			if updated != nil {
@@ -117,6 +124,13 @@ func promoteRouted(id, reason string) {
 	}
 	if err := result.Store.AddComment(rootCtx, result.ResolvedID, actor, comment); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to add promotion comment to %s: %v\n", id, err)
+	}
+
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt {
+		if _, err := result.Store.CommitPending(rootCtx, actor); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
 	}
 
 	if jsonOutput {
