@@ -165,6 +165,7 @@ func GetReadyWorkInTx(
 		orderBySQL = "ORDER BY priority ASC, created_at DESC, id ASC"
 	}
 
+	//nolint:gosec // G201: whereSQL contains column comparisons with ?, limitSQL is a safe integer
 	query := fmt.Sprintf(`
 		SELECT id FROM issues
 		%s
@@ -210,7 +211,8 @@ func GetReadyWorkInTx(
 
 	// When IncludeEphemeral is set, also query the wisps table.
 	if filter.IncludeEphemeral {
-		wispFilter := types.IssueFilter{Limit: filter.Limit}
+		ephTrue := true
+		wispFilter := types.IssueFilter{Limit: filter.Limit, Ephemeral: &ephTrue}
 		if filter.Status != "" {
 			s := filter.Status
 			wispFilter.Status = &s

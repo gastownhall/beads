@@ -331,12 +331,16 @@ func queryBlockingInfo(
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID string) ([]*types.Issue, error) {
 	// Step 1: Find open issues that depend on the closed issue via "blocks" deps.
-	// Check both tables to handle cross-table dependencies.
+	// Check all dep/issue table combinations to handle cross-table dependencies
+	// (e.g., a permanent issue blocked by a wisp, or vice versa).
 	var candidateIDs []string
 	for _, pair := range []struct{ depTable, issueTable string }{
 		{"dependencies", "issues"},
+		{"dependencies", "wisps"},
 		{"wisp_dependencies", "wisps"},
+		{"wisp_dependencies", "issues"},
 	} {
+		//nolint:gosec // G201: depTable/issueTable come from hardcoded constants above
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT d.issue_id
 			FROM %s d
@@ -385,7 +389,9 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 
 		for _, pair := range []struct{ depTable, issueTable string }{
 			{"dependencies", "issues"},
+			{"dependencies", "wisps"},
 			{"wisp_dependencies", "wisps"},
+			{"wisp_dependencies", "issues"},
 		} {
 			//nolint:gosec // G201: inClause contains only ? placeholders
 			rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
@@ -434,71 +440,51 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 // IsBlockedInTx checks if an issue is blocked by active dependencies within
 // an existing transaction. Returns whether the issue is blocked and, if so,
 // a list of blocker descriptions for display.
+// Checks all cross-table combinations so blockers in either issues or wisps
+// are detected regardless of which dep table the edge lives in.
 //
-//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+//nolint:gosec // G201: table names come from hardcoded constants
 func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []string, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, _, depTable := WispTableRouting(isWisp)
-	issueTable := "issues"
-	if isWisp {
-		issueTable = "wisps"
-	}
 
-	// Query active blockers.
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT d.depends_on_id, d.type
-		FROM %s d
-		JOIN %s i ON d.depends_on_id = i.id
-		WHERE d.issue_id = ?
-		  AND d.type IN ('blocks', 'waits-for', 'conditional-blocks')
-		  AND i.status NOT IN ('closed', 'pinned')
-	`, depTable, issueTable), issueID)
-	if err != nil {
-		return false, nil, fmt.Errorf("check blockers: %w", err)
-	}
-
+	// Check same-table blockers and cross-table blockers.
+	// For a permanent issue: deps in "dependencies", blockers in "issues" or "wisps".
+	// For a wisp: deps in "wisp_dependencies", blockers in "wisps" or "issues".
+	seen := make(map[string]bool)
 	var blockers []string
-	for rows.Next() {
-		var id, depType string
-		if err := rows.Scan(&id, &depType); err != nil {
-			_ = rows.Close()
-			return false, nil, fmt.Errorf("scan blocker: %w", err)
-		}
-		if depType != "blocks" {
-			blockers = append(blockers, id+" ("+depType+")")
-		} else {
-			blockers = append(blockers, id)
-		}
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return false, nil, fmt.Errorf("blocker rows: %w", err)
-	}
 
-	// Also check cross-table blockers (e.g., wisp blocked by permanent issue).
-	if isWisp {
-		crossRows, err := tx.QueryContext(ctx, `
+	for _, blockerTable := range []string{"issues", "wisps"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT d.depends_on_id, d.type
-			FROM wisp_dependencies d
-			JOIN issues i ON d.depends_on_id = i.id
+			FROM %s d
+			JOIN %s i ON d.depends_on_id = i.id
 			WHERE d.issue_id = ?
 			  AND d.type IN ('blocks', 'waits-for', 'conditional-blocks')
 			  AND i.status NOT IN ('closed', 'pinned')
-		`, issueID)
-		if err == nil {
-			for crossRows.Next() {
-				var id, depType string
-				if err := crossRows.Scan(&id, &depType); err != nil {
-					_ = crossRows.Close()
-					break
-				}
-				if depType != "blocks" {
-					blockers = append(blockers, id+" ("+depType+")")
-				} else {
-					blockers = append(blockers, id)
-				}
+		`, depTable, blockerTable), issueID)
+		if err != nil {
+			return false, nil, fmt.Errorf("check blockers (%s JOIN %s): %w", depTable, blockerTable, err)
+		}
+		for rows.Next() {
+			var id, depType string
+			if err := rows.Scan(&id, &depType); err != nil {
+				_ = rows.Close()
+				return false, nil, fmt.Errorf("scan blocker: %w", err)
 			}
-			_ = crossRows.Close()
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if depType != "blocks" {
+				blockers = append(blockers, id+" ("+depType+")")
+			} else {
+				blockers = append(blockers, id)
+			}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return false, nil, fmt.Errorf("blocker rows (%s JOIN %s): %w", depTable, blockerTable, err)
 		}
 	}
 

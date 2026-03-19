@@ -67,8 +67,13 @@ func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) t
 		return types.EventUpdated
 	}
 
-	newStatus, ok := statusVal.(string)
-	if !ok {
+	var newStatus string
+	switch v := statusVal.(type) {
+	case string:
+		newStatus = v
+	case types.Status:
+		newStatus = string(v)
+	default:
 		return types.EventUpdated
 	}
 
@@ -134,8 +139,15 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 	}
 
 	// Auto-clear pinned column when status transitions away from "pinned".
-	if newStatus, ok := updates["status"]; ok {
-		if oldIssue.Pinned && newStatus != "pinned" {
+	if rawStatus, ok := updates["status"]; ok {
+		var statusStr string
+		switch v := rawStatus.(type) {
+		case string:
+			statusStr = v
+		case types.Status:
+			statusStr = string(v)
+		}
+		if oldIssue.Pinned && statusStr != string(types.StatusPinned) {
 			if _, alreadySet := updates["pinned"]; !alreadySet {
 				setClauses = append(setClauses, "`pinned` = ?")
 				args = append(args, false)
@@ -148,6 +160,7 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 
 	args = append(args, id)
 
+	//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
 	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", issueTable, strings.Join(setClauses, ", "))
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return nil, fmt.Errorf("failed to update issue: %w", err)

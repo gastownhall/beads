@@ -57,6 +57,20 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 // RemoveDependency removes a dependency between two issues.
 // Delegates SQL work to issueops.RemoveDependencyInTx which handles wisp routing.
 func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
+	// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
+	if s.isActiveWisp(ctx, issueID) {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
+			return err
+		}
+		s.invalidateBlockedIDsCache()
+		return wrapTransactionError("commit remove wisp dependency", tx.Commit())
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -72,7 +86,7 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 		return fmt.Errorf("sql commit: %w", err)
 	}
 	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	if err := s.doltAddAndCommit(ctx, []string{"dependencies", "wisp_dependencies"}, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
+	if err := s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
 		return err
 	}
 	return nil
