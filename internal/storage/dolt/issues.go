@@ -196,8 +196,11 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 // ClaimIssue atomically claims an issue using compare-and-swap semantics.
 // It sets the assignee to actor and status to "in_progress" only if the issue
 // currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
+// Delegates SQL work to issueops.ClaimIssueInTx; handles Dolt-specific concerns
+// (wisp routing, DOLT_ADD/COMMIT, cache invalidation).
 func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
-	// Route ephemeral IDs to wisps table (falls through for promoted wisps)
+	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
+	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
 	if s.isActiveWisp(ctx, id) {
 		return s.claimWisp(ctx, id, actor)
 	}
@@ -206,54 +209,13 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() // No-op after successful commit
+	defer func() { _ = tx.Rollback() }()
 
-	// Read inside transaction for consistent snapshot
-	oldIssue, err := scanIssueTxFromTable(ctx, tx, "issues", id)
-	if err != nil {
-		return fmt.Errorf("failed to get issue for claim: %w", err)
+	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
+		return err
 	}
 
-	now := time.Now().UTC()
-
-	// Use conditional UPDATE with WHERE clause to ensure atomicity.
-	// The UPDATE only succeeds if assignee is currently empty.
-	result, err := tx.ExecContext(ctx, `
-		UPDATE issues
-		SET assignee = ?, status = 'in_progress', updated_at = ?
-		WHERE id = ? AND (assignee = '' OR assignee IS NULL)
-	`, actor, now, id)
-	if err != nil {
-		return fmt.Errorf("failed to claim issue: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		// Query current assignee inside the same transaction for consistency.
-		var currentAssignee string
-		err := tx.QueryRowContext(ctx, `SELECT assignee FROM issues WHERE id = ?`, id).Scan(&currentAssignee)
-		if err != nil {
-			return fmt.Errorf("failed to get current assignee: %w", err)
-		}
-		return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, currentAssignee)
-	}
-
-	// Record the claim event
-	oldData, _ := json.Marshal(oldIssue)
-	newUpdates := map[string]interface{}{
-		"assignee": actor,
-		"status":   "in_progress",
-	}
-	newData, _ := json.Marshal(newUpdates)
-
-	if err := recordEvent(ctx, tx, id, "claimed", actor, string(oldData), string(newData)); err != nil {
-		return fmt.Errorf("failed to record claim event: %w", err)
-	}
-
+	// Dolt versioning for permanent issues.
 	// GH#2455: Stage only the tables we modified, then commit without -A.
 	for _, table := range []string{"issues", "events"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)

@@ -13,43 +13,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// RemoveDependency removes a dependency between two issues.
-func (s *EmbeddedDoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID)
-	})
-}
-
-// RemoveLabel removes a label from an issue.
-func (s *EmbeddedDoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
-	})
-}
-
-// GetIssuesByIDs retrieves multiple issues by ID.
-func (s *EmbeddedDoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	var result []*types.Issue
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetIssuesByIDsInTx(ctx, tx, ids)
-		return err
-	})
-	return result, err
-}
-
-// GetDependentsWithMetadata returns issues that depend on the given issue,
-// along with the dependency type.
-func (s *EmbeddedDoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	var result []*types.IssueWithDependencyMetadata
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetDependentsWithMetadataInTx(ctx, tx, issueID)
-		return err
-	})
-	return result, err
-}
-
 // RunInTransaction executes a function within a database transaction.
 // EmbeddedDolt auto-commits the SQL transaction; Dolt versioning is deferred
 // to CommitPending which is called by the auto-commit flow.

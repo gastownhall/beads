@@ -13,6 +13,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// ClaimIssue atomically claims an issue using compare-and-swap semantics.
+// Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
+func (s *EmbeddedDoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := issueops.ClaimIssueInTx(ctx, tx, id, actor)
+		return err
+	})
+}
+
 // UpdateIssue updates fields on an issue.
 // Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
