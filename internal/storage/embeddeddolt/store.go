@@ -196,9 +196,7 @@ func (s *EmbeddedDoltStore) GetIssueByExternalRef(ctx context.Context, externalR
 	panic("embeddeddolt: GetIssueByExternalRef not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	panic("embeddeddolt: GetIssuesByIDs not implemented")
-}
+// GetIssuesByIDs is implemented in update_close_deps.go.
 
 // UpdateIssue is implemented in update_close.go.
 
@@ -210,9 +208,7 @@ func (s *EmbeddedDoltStore) DeleteIssue(ctx context.Context, id string) error {
 
 // AddDependency is implemented in dependencies.go.
 
-func (s *EmbeddedDoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	panic("embeddeddolt: RemoveDependency not implemented")
-}
+// RemoveDependency is implemented in update_close_deps.go.
 
 func (s *EmbeddedDoltStore) GetDependencies(ctx context.Context, issueID string) ([]*types.Issue, error) {
 	panic("embeddeddolt: GetDependencies not implemented")
@@ -226,9 +222,7 @@ func (s *EmbeddedDoltStore) GetDependenciesWithMetadata(ctx context.Context, iss
 	panic("embeddeddolt: GetDependenciesWithMetadata not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	panic("embeddeddolt: GetDependentsWithMetadata not implemented")
-}
+// GetDependentsWithMetadata is implemented in update_close_deps.go.
 
 func (s *EmbeddedDoltStore) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
 	panic("embeddeddolt: GetDependencyTree not implemented")
@@ -236,9 +230,7 @@ func (s *EmbeddedDoltStore) GetDependencyTree(ctx context.Context, issueID strin
 
 // AddLabel is implemented in labels.go.
 
-func (s *EmbeddedDoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	panic("embeddeddolt: RemoveLabel not implemented")
-}
+// RemoveLabel is implemented in update_close_deps.go.
 
 // GetLabels is implemented in labels.go.
 
@@ -274,9 +266,7 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 	panic("embeddeddolt: GetAllEventsSince not implemented")
 }
 
-func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
-	panic("embeddeddolt: RunInTransaction not implemented")
-}
+// RunInTransaction is implemented in update_close_deps.go.
 
 // Close marks the store as closed. Subsequent method calls will return errClosed.
 // It is safe to call multiple times.

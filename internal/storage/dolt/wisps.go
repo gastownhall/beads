@@ -609,23 +609,6 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	return wrapTransactionError("commit add wisp dependency", tx.Commit())
 }
 
-// removeWispDependency removes a dependency from wisp_dependencies.
-func (s *DoltStore) removeWispDependency(ctx context.Context, issueID, dependsOnID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM wisp_dependencies WHERE issue_id = ? AND depends_on_id = ?
-	`, issueID, dependsOnID); err != nil {
-		return fmt.Errorf("failed to remove wisp dependency: %w", err)
-	}
-
-	return wrapTransactionError("commit remove wisp dependency", tx.Commit())
-}
-
 // getWispDependencies retrieves issues that a wisp depends on.
 func (s *DoltStore) getWispDependencies(ctx context.Context, issueID string) ([]*types.Issue, error) {
 	rows, err := s.queryContext(ctx, `
@@ -741,107 +724,6 @@ func (s *DoltStore) getWispDependenciesWithMetadata(ctx context.Context, issueID
 		})
 	}
 	return results, nil
-}
-
-// getWispDependentsWithMetadata returns wisp dependents with metadata.
-func (s *DoltStore) getWispDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	rows, err := s.queryContext(ctx, `
-		SELECT issue_id, type FROM wisp_dependencies WHERE depends_on_id = ?
-	`, issueID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get wisp dependents with metadata: %w", err)
-	}
-
-	type depMeta struct {
-		depID, depType string
-	}
-	var deps []depMeta
-	for rows.Next() {
-		var depID, depType string
-		if err := rows.Scan(&depID, &depType); err != nil {
-			_ = rows.Close()
-			return nil, wrapScanError("scan wisp dependent metadata", err)
-		}
-		deps = append(deps, depMeta{depID: depID, depType: depType})
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, wrapQueryError("iterate wisp dependents", err)
-	}
-
-	if len(deps) == 0 {
-		return nil, nil
-	}
-
-	ids := make([]string, len(deps))
-	for i, d := range deps {
-		ids[i] = d.depID
-	}
-	issues, err := s.GetIssuesByIDs(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	issueMap := make(map[string]*types.Issue, len(issues))
-	for _, iss := range issues {
-		issueMap[iss.ID] = iss
-	}
-
-	var results []*types.IssueWithDependencyMetadata
-	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
-		if !ok {
-			continue
-		}
-		results = append(results, &types.IssueWithDependencyMetadata{
-			Issue:          *issue,
-			DependencyType: types.DependencyType(d.depType),
-		})
-	}
-	return results, nil
-}
-
-// addWispLabel adds a label to a wisp in the wisp_labels table.
-func (s *DoltStore) addWispLabel(ctx context.Context, issueID, label, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT IGNORE INTO wisp_labels (issue_id, label) VALUES (?, ?)
-	`, issueID, label)
-	if err != nil {
-		return fmt.Errorf("failed to add wisp label: %w", err)
-	}
-
-	if err := issueops.RecordEventInTable(ctx, tx, "wisp_events", issueID, types.EventLabelAdded, actor, "Added label: "+label); err != nil {
-		return fmt.Errorf("failed to record wisp label event: %w", err)
-	}
-
-	return tx.Commit()
-}
-
-// removeWispLabel removes a label from a wisp.
-func (s *DoltStore) removeWispLabel(ctx context.Context, issueID, label, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.ExecContext(ctx, `
-		DELETE FROM wisp_labels WHERE issue_id = ? AND label = ?
-	`, issueID, label)
-	if err != nil {
-		return fmt.Errorf("failed to remove wisp label: %w", err)
-	}
-
-	if err := issueops.RecordEventInTable(ctx, tx, "wisp_events", issueID, types.EventLabelRemoved, actor, "Removed label: "+label); err != nil {
-		return fmt.Errorf("failed to record wisp label event: %w", err)
-	}
-
-	return tx.Commit()
 }
 
 // FindWispDependentsRecursive finds all wisp dependents of the given IDs,

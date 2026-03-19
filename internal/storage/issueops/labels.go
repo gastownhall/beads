@@ -127,3 +127,30 @@ func AddLabelInTx(ctx context.Context, tx *sql.Tx, labelTable, eventTable, issue
 	}
 	return nil
 }
+
+// RemoveLabelInTx removes a label from an issue and records an event within
+// an existing transaction. Automatically routes to wisp tables if the ID is
+// an active wisp.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func RemoveLabelInTx(ctx context.Context, tx *sql.Tx, labelTable, eventTable, issueID, label, actor string) error {
+	if labelTable == "" || eventTable == "" {
+		isWisp := IsActiveWispInTx(ctx, tx, issueID)
+		_, lt, et, _ := WispTableRouting(isWisp)
+		if labelTable == "" {
+			labelTable = lt
+		}
+		if eventTable == "" {
+			eventTable = et
+		}
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label); err != nil {
+		return fmt.Errorf("remove label: %w", err)
+	}
+	comment := "Removed label: " + label
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?)`, eventTable),
+		issueID, types.EventLabelRemoved, actor, comment); err != nil {
+		return fmt.Errorf("remove label: record event: %w", err)
+	}
+	return nil
+}

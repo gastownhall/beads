@@ -55,23 +55,16 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 }
 
 // RemoveDependency removes a dependency between two issues.
-// Uses an explicit transaction so writes persist when @@autocommit is OFF.
+// Delegates SQL work to issueops.RemoveDependencyInTx which handles wisp routing.
 func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	// Route to wisp_dependencies if the issue is an active wisp
-	if s.isActiveWisp(ctx, issueID) {
-		return s.removeWispDependency(ctx, issueID, dependsOnID)
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
-	`, issueID, dependsOnID); err != nil {
-		return fmt.Errorf("failed to remove dependency: %w", err)
+	if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
+		return err
 	}
 
 	s.invalidateBlockedIDsCache()
@@ -79,7 +72,7 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 		return fmt.Errorf("sql commit: %w", err)
 	}
 	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	if err := s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
+	if err := s.doltAddAndCommit(ctx, []string{"dependencies", "wisp_dependencies"}, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
 		return err
 	}
 	return nil
@@ -195,74 +188,16 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 	return results, nil
 }
 
-// GetDependentsWithMetadata returns dependents with metadata
+// GetDependentsWithMetadata returns dependents with metadata.
+// Delegates to issueops.GetDependentsWithMetadataInTx which handles wisp routing.
 func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	if s.isActiveWisp(ctx, issueID) {
-		return s.getWispDependentsWithMetadata(ctx, issueID)
-	}
-
-	rows, err := s.queryContext(ctx, `
-		SELECT d.issue_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id
-		FROM dependencies d
-		WHERE d.depends_on_id = ?
-	`, issueID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get dependents with metadata: %w", err)
-	}
-
-	// Collect dep metadata first, then close rows before fetching issues.
-	// This avoids connection pool deadlock when MaxOpenConns=1 (embedded dolt).
-	type depMeta struct {
-		depID, depType string
-	}
-	var deps []depMeta
-	for rows.Next() {
-		var depID, depType, createdBy string
-		var createdAt sql.NullTime
-		var metadata, threadID sql.NullString
-
-		if err := rows.Scan(&depID, &depType, &createdAt, &createdBy, &metadata, &threadID); err != nil {
-			_ = rows.Close() // Best effort cleanup on error path
-			return nil, fmt.Errorf("failed to scan dependent: %w", err)
-		}
-		deps = append(deps, depMeta{depID: depID, depType: depType})
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close() // Best effort cleanup on error path
-		return nil, wrapQueryError("get dependents with metadata: rows", err)
-	}
-	_ = rows.Close() // Redundant close for safety (rows already iterated)
-
-	if len(deps) == 0 {
-		return nil, nil
-	}
-
-	// Batch-fetch all issues after rows are closed (connection released)
-	ids := make([]string, len(deps))
-	for i, d := range deps {
-		ids[i] = d.depID
-	}
-	issues, err := s.GetIssuesByIDs(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("get dependents with metadata: fetch issues: %w", err)
-	}
-	issueMap := make(map[string]*types.Issue, len(issues))
-	for _, iss := range issues {
-		issueMap[iss.ID] = iss
-	}
-
-	var results []*types.IssueWithDependencyMetadata
-	for _, d := range deps {
-		issue, ok := issueMap[d.depID]
-		if !ok {
-			continue
-		}
-		results = append(results, &types.IssueWithDependencyMetadata{
-			Issue:          *issue,
-			DependencyType: types.DependencyType(d.depType),
-		})
-	}
-	return results, nil
+	var result []*types.IssueWithDependencyMetadata
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependentsWithMetadataInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
 }
 
 // GetDependencyRecords returns raw dependency records for an issue
@@ -674,80 +609,19 @@ func (s *DoltStore) scanIssueIDs(ctx context.Context, rows *sql.Rows) ([]*types.
 	return ordered, nil
 }
 
-// GetIssuesByIDs retrieves multiple issues by ID in a single query to avoid N+1 performance issues
+// GetIssuesByIDs retrieves multiple issues by ID.
+// Delegates to issueops.GetIssuesByIDsInTx which handles wisp routing and label hydration.
 func (s *DoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-
-	// Partition IDs between wisps and issues tables
-	ephIDs, doltIDs := s.partitionByWispStatus(ctx, ids)
-	if len(ephIDs) > 0 {
-		var allIssues []*types.Issue
-		wispIssues, err := s.getWispsByIDs(ctx, ephIDs)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get wisp issues: %w", err)
-		}
-		allIssues = append(allIssues, wispIssues...)
-		if len(doltIDs) > 0 {
-			doltIssues, err := s.getIssuesByIDsDolt(ctx, doltIDs)
-			if err != nil {
-				return nil, fmt.Errorf("get issues by IDs: dolt: %w", err)
-			}
-			allIssues = append(allIssues, doltIssues...)
-		}
-		return allIssues, nil
-	}
-
-	return s.getIssuesByIDsDolt(ctx, ids)
-}
-
-func (s *DoltStore) getIssuesByIDsDolt(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	var issues []*types.Issue
-
-	// Batch IN clauses to avoid Dolt query-planner spikes with large ID sets.
-	for start := 0; start < len(ids); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		batch := ids[start:end]
-
-		placeholders := make([]string, len(batch))
-		args := make([]interface{}, len(batch))
-		for i, id := range batch {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-
-		// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
-		query := fmt.Sprintf(`
-			SELECT `+issueSelectColumns+`
-			FROM issues
-			WHERE id IN (%s)
-		`, strings.Join(placeholders, ","))
-
-		queryRows, err := s.queryContext(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get issues by IDs: %w", err)
-		}
-
-		for queryRows.Next() {
-			issue, err := scanIssueFrom(queryRows)
-			if err != nil {
-				_ = queryRows.Close()
-				return nil, wrapScanError("get issues by IDs: scan issue", err)
-			}
-			issues = append(issues, issue)
-		}
-		if err := queryRows.Err(); err != nil {
-			_ = queryRows.Close()
-			return nil, err
-		}
-		_ = queryRows.Close()
-	}
-
-	return issues, nil
+	var result []*types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetIssuesByIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return result, err
 }
 
 func scanDependencyRows(rows *sql.Rows) ([]*types.Dependency, error) {

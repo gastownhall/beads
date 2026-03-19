@@ -252,7 +252,7 @@ func TestSearchWispsFilterParity(t *testing.T) {
 	}
 
 	// Add a label to the wisp
-	if err := store.addWispLabel(ctx, wisp.ID, "test-label", "test-actor"); err != nil {
+	if err := store.AddLabel(ctx, wisp.ID, "test-label", "test-actor"); err != nil {
 		t.Fatalf("failed to add wisp label: %v", err)
 	}
 
