@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -106,4 +108,68 @@ func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 	}
 
 	return result, nil
+}
+
+// AddIssueCommentInTx adds a structured comment to an issue within a transaction.
+// Routes to comments or wisp_comments based on wisp status.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func AddIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string) (*types.Comment, error) {
+	return ImportIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC())
+}
+
+// ImportIssueCommentInTx adds a comment preserving the original timestamp.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	isWisp := IsActiveWispInTx(ctx, tx, issueID)
+	issueTable, _, _, _ := WispTableRouting(isWisp)
+	commentTable := "comments"
+	if isWisp {
+		commentTable = "wisp_comments"
+	}
+
+	// Verify issue exists.
+	var exists bool
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)`, issueTable), issueID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("check issue existence: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+
+	createdAt = createdAt.UTC()
+	id := uuid.Must(uuid.NewV7()).String()
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (id, issue_id, author, text, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, commentTable), id, issueID, author, text, createdAt); err != nil {
+		return nil, fmt.Errorf("add comment to %s: %w", commentTable, err)
+	}
+
+	return &types.Comment{
+		ID:        id,
+		IssueID:   issueID,
+		Author:    author,
+		Text:      text,
+		CreatedAt: createdAt,
+	}, nil
+}
+
+// AddCommentEventInTx adds a comment as an event to an issue within a transaction.
+// Routes to events or wisp_events based on wisp status.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func AddCommentEventInTx(ctx context.Context, tx *sql.Tx, issueID, actor, comment string) error {
+	isWisp := IsActiveWispInTx(ctx, tx, issueID)
+	_, _, eventTable, _ := WispTableRouting(isWisp)
+
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (issue_id, event_type, actor, comment)
+		VALUES (?, ?, ?, ?)
+	`, eventTable), issueID, types.EventCommented, actor, comment); err != nil {
+		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
+	}
+	return nil
 }

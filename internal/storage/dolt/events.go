@@ -6,27 +6,22 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // AddComment adds a comment event to an issue
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	table := "events"
-	if s.isActiveWisp(ctx, issueID) {
-		table = "wisp_events"
-	}
-
-	//nolint:gosec // G201: table is hardcoded
-	_, err := s.execContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, table), issueID, types.EventCommented, actor, comment)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to add comment: %w", err)
+		return fmt.Errorf("begin tx: %w", err)
 	}
-	return nil
+	defer func() { _ = tx.Rollback() }()
+
+	if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetEvents retrieves events for an issue
@@ -88,45 +83,13 @@ func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text s
 // ImportIssueComment adds a comment during import, preserving the original timestamp.
 // This prevents comment timestamp drift across import/export cycles.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
-	// Verify issue exists — route to wisps table for active wisps
-	issueTable := "issues"
-	commentTable := "comments"
-	if s.isActiveWisp(ctx, issueID) {
-		issueTable = "wisps"
-		commentTable = "wisp_comments"
-	}
-
-	// Verify issue exists — use queryRowContext for server-mode retry.
-	var exists bool
-	//nolint:gosec // G201: table is hardcoded
-	if err := s.queryRowContext(ctx, func(row *sql.Row) error {
-		return row.Scan(&exists)
-	}, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)`, issueTable), issueID); err != nil {
-		return nil, fmt.Errorf("failed to check issue existence: %w", err)
-	}
-	if !exists {
-		return nil, fmt.Errorf("issue %s not found", issueID)
-	}
-
-	createdAt = createdAt.UTC()
-	//nolint:gosec // G201: table is hardcoded
-	id := uuid.Must(uuid.NewV7()).String()
-	//nolint:gosec // G201: table is hardcoded
-	_, err := s.execContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, author, text, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, commentTable), id, issueID, author, text, createdAt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to add comment: %w", err)
-	}
-
-	return &types.Comment{
-		ID:        id,
-		IssueID:   issueID,
-		Author:    author,
-		Text:      text,
-		CreatedAt: createdAt,
-	}, nil
+	var result *types.Comment
+	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
+		return err
+	})
+	return result, err
 }
 
 // GetIssueComments retrieves all comments for an issue

@@ -94,42 +94,24 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 
 // GetDependencies retrieves issues that this issue depends on
 func (s *DoltStore) GetDependencies(ctx context.Context, issueID string) ([]*types.Issue, error) {
-	if s.isActiveWisp(ctx, issueID) {
-		return s.getWispDependencies(ctx, issueID)
-	}
-
-	rows, err := s.queryContext(ctx, `
-		SELECT i.id FROM issues i
-		JOIN dependencies d ON i.id = d.depends_on_id
-		WHERE d.issue_id = ?
-		ORDER BY i.priority ASC, i.created_at DESC
-	`, issueID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get dependencies: %w", err)
-	}
-	defer rows.Close()
-
-	return s.scanIssueIDs(ctx, rows)
+	var result []*types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependenciesInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
 }
 
 // GetDependents retrieves issues that depend on this issue
 func (s *DoltStore) GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error) {
-	if s.isActiveWisp(ctx, issueID) {
-		return s.getWispDependents(ctx, issueID)
-	}
-
-	rows, err := s.queryContext(ctx, `
-		SELECT i.id FROM issues i
-		JOIN dependencies d ON i.id = d.issue_id
-		WHERE d.depends_on_id = ?
-		ORDER BY i.priority ASC, i.created_at DESC
-	`, issueID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get dependents: %w", err)
-	}
-	defer rows.Close()
-
-	return s.scanIssueIDs(ctx, rows)
+	var result []*types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependentsInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
 }
 
 // GetDependenciesWithMetadata returns dependencies with metadata

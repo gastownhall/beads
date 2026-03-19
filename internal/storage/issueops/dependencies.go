@@ -415,3 +415,69 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID stri
 	}
 	return results, nil
 }
+
+// GetDependenciesInTx returns issues that the given issueID depends on.
+// Queries both dependencies and wisp_dependencies tables.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func GetDependenciesInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
+	var ids []string
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT depends_on_id FROM %s WHERE issue_id = ?`, depTable), issueID)
+		if err != nil {
+			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
+			}
+			ids = append(ids, id)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	return GetIssuesByIDsInTx(ctx, tx, ids)
+}
+
+// GetDependentsInTx returns issues that depend on the given issueID.
+// Queries both dependencies and wisp_dependencies tables.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func GetDependentsInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
+	var ids []string
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT issue_id FROM %s WHERE depends_on_id = ?`, depTable), issueID)
+		if err != nil {
+			return nil, fmt.Errorf("get dependents from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get dependents: scan: %w", scanErr)
+			}
+			ids = append(ids, id)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get dependents: rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	return GetIssuesByIDsInTx(ctx, tx, ids)
+}
