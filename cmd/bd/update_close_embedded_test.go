@@ -4,10 +4,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -1191,4 +1193,345 @@ func TestEmbeddedClose(t *testing.T) {
 		issue2 := bdCreate(t, bd, dir, "Suggest multi 2", "--type", "task")
 		bdCloseFail(t, bd, dir, issue1.ID, issue2.ID, "--suggest-next")
 	})
+}
+
+// TestEmbeddedUpdateConcurrent exercises create, update, and list operations
+// concurrently to verify EmbeddedDoltStore handles concurrent CLI invocations
+// without panics, data corruption, or deadlocks.
+func TestEmbeddedUpdateConcurrent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cu")
+
+	const (
+		numWorkers      = 10
+		issuesPerWorker = 5
+	)
+
+	type workerResult struct {
+		worker     int
+		ids        []string
+		listCounts []int
+		err        error
+	}
+
+	results := make([]workerResult, numWorkers)
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	for w := 0; w < numWorkers; w++ {
+		go func(worker int) {
+			defer wg.Done()
+			r := workerResult{worker: worker}
+
+			for i := 0; i < issuesPerWorker; i++ {
+				// Create an issue.
+				title := fmt.Sprintf("w%d-issue-%d", worker, i)
+				cmd := exec.Command(bd, "create", "--silent", title)
+				cmd.Dir = dir
+				cmd.Env = bdEnv(dir)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					r.err = fmt.Errorf("create %d: %v\n%s", i, err, out)
+					results[worker] = r
+					return
+				}
+				id := strings.TrimSpace(string(out))
+				if id == "" {
+					r.err = fmt.Errorf("create %d: empty ID", i)
+					results[worker] = r
+					return
+				}
+				r.ids = append(r.ids, id)
+
+				// Update: change status to in_progress.
+				uCmd := exec.Command(bd, "update", id, "--status", "in_progress")
+				uCmd.Dir = dir
+				uCmd.Env = bdEnv(dir)
+				uOut, err := uCmd.CombinedOutput()
+				if err != nil {
+					r.err = fmt.Errorf("update status %d: %v\n%s", i, err, uOut)
+					results[worker] = r
+					return
+				}
+
+				// Update: set priority and assignee.
+				uCmd2 := exec.Command(bd, "update", id, "--priority", fmt.Sprintf("%d", worker%4), "--assignee", fmt.Sprintf("agent-%d", worker))
+				uCmd2.Dir = dir
+				uCmd2.Env = bdEnv(dir)
+				uOut2, err := uCmd2.CombinedOutput()
+				if err != nil {
+					r.err = fmt.Errorf("update fields %d: %v\n%s", i, err, uOut2)
+					results[worker] = r
+					return
+				}
+
+				// Update: add a label.
+				uCmd3 := exec.Command(bd, "update", id, "--add-label", fmt.Sprintf("team-%d", worker%3))
+				uCmd3.Dir = dir
+				uCmd3.Env = bdEnv(dir)
+				uOut3, err := uCmd3.CombinedOutput()
+				if err != nil {
+					r.err = fmt.Errorf("update label %d: %v\n%s", i, err, uOut3)
+					results[worker] = r
+					return
+				}
+
+				// List to verify consistency (interleaved with writes).
+				listCmd := exec.Command(bd, "list", "--json", "--limit", "0")
+				listCmd.Dir = dir
+				listCmd.Env = bdEnv(dir)
+				listOut, err := listCmd.CombinedOutput()
+				if err != nil {
+					r.err = fmt.Errorf("list after update %d: %v\n%s", i, err, listOut)
+					results[worker] = r
+					return
+				}
+				s := string(listOut)
+				start := strings.Index(s, "[")
+				if start < 0 {
+					r.listCounts = append(r.listCounts, 0)
+					continue
+				}
+				var issues []json.RawMessage
+				if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
+					r.err = fmt.Errorf("list parse %d: %v\nraw: %s", i, jsonErr, s)
+					results[worker] = r
+					return
+				}
+				r.listCounts = append(r.listCounts, len(issues))
+			}
+
+			results[worker] = r
+		}(w)
+	}
+	wg.Wait()
+
+	// Check for errors and collect IDs.
+	allIDs := make(map[string]bool)
+	var failures int
+	for _, r := range results {
+		if r.err != nil {
+			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			failures++
+			continue
+		}
+		for _, id := range r.ids {
+			if allIDs[id] {
+				t.Errorf("duplicate ID %q from worker %d", id, r.worker)
+			}
+			allIDs[id] = true
+		}
+	}
+
+	if failures > 0 {
+		t.Fatalf("%d/%d workers failed", failures, numWorkers)
+	}
+
+	expectedTotal := numWorkers * issuesPerWorker
+	if len(allIDs) != expectedTotal {
+		t.Errorf("expected %d unique IDs, got %d", expectedTotal, len(allIDs))
+	}
+
+	// Verify all issues exist and were updated correctly.
+	store := openStore(t, beadsDir, "cu")
+	stats, err := store.GetStatistics(t.Context())
+	if err != nil {
+		t.Fatalf("GetStatistics: %v", err)
+	}
+	if stats.TotalIssues < expectedTotal {
+		t.Errorf("expected at least %d issues in DB, got %d", expectedTotal, stats.TotalIssues)
+	}
+
+	// Spot-check: every issue should be in_progress with an assignee.
+	for id := range allIDs {
+		issue, err := store.GetIssue(t.Context(), id)
+		if err != nil {
+			t.Errorf("GetIssue(%s): %v", id, err)
+			continue
+		}
+		if issue.Status != types.StatusInProgress {
+			t.Errorf("issue %s: expected status in_progress, got %s", id, issue.Status)
+		}
+		if issue.Assignee == "" {
+			t.Errorf("issue %s: expected assignee to be set", id)
+		}
+	}
+
+	// Verify list counts were monotonically non-decreasing per worker.
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		for i := 1; i < len(r.listCounts); i++ {
+			if r.listCounts[i] < r.listCounts[i-1] {
+				t.Errorf("worker %d: list count decreased from %d to %d at step %d",
+					r.worker, r.listCounts[i-1], r.listCounts[i], i)
+			}
+		}
+	}
+
+	t.Logf("created and updated %d issues across %d concurrent workers, %d in DB",
+		len(allIDs), numWorkers, stats.TotalIssues)
+}
+
+// TestEmbeddedCloseConcurrent exercises create, close, and list operations
+// concurrently to verify EmbeddedDoltStore handles concurrent CLI invocations
+// without panics, data corruption, or deadlocks.
+func TestEmbeddedCloseConcurrent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cx")
+
+	const (
+		numWorkers      = 10
+		issuesPerWorker = 5
+	)
+
+	type workerResult struct {
+		worker     int
+		ids        []string
+		listCounts []int
+		err        error
+	}
+
+	results := make([]workerResult, numWorkers)
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	for w := 0; w < numWorkers; w++ {
+		go func(worker int) {
+			defer wg.Done()
+			r := workerResult{worker: worker}
+
+			for i := 0; i < issuesPerWorker; i++ {
+				// Create an issue.
+				title := fmt.Sprintf("w%d-close-%d", worker, i)
+				cmd := exec.Command(bd, "create", "--silent", title)
+				cmd.Dir = dir
+				cmd.Env = bdEnv(dir)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					r.err = fmt.Errorf("create %d: %v\n%s", i, err, out)
+					results[worker] = r
+					return
+				}
+				id := strings.TrimSpace(string(out))
+				if id == "" {
+					r.err = fmt.Errorf("create %d: empty ID", i)
+					results[worker] = r
+					return
+				}
+				r.ids = append(r.ids, id)
+
+				// Close with a reason.
+				reason := fmt.Sprintf("done-by-worker-%d", worker)
+				cCmd := exec.Command(bd, "close", id, "--reason", reason)
+				cCmd.Dir = dir
+				cCmd.Env = bdEnv(dir)
+				cOut, err := cCmd.CombinedOutput()
+				if err != nil {
+					r.err = fmt.Errorf("close %d: %v\n%s", i, err, cOut)
+					results[worker] = r
+					return
+				}
+
+				// List to verify consistency (interleaved with writes).
+				listCmd := exec.Command(bd, "list", "--json", "--limit", "0", "--all")
+				listCmd.Dir = dir
+				listCmd.Env = bdEnv(dir)
+				listOut, err := listCmd.CombinedOutput()
+				if err != nil {
+					r.err = fmt.Errorf("list after close %d: %v\n%s", i, err, listOut)
+					results[worker] = r
+					return
+				}
+				s := string(listOut)
+				start := strings.Index(s, "[")
+				if start < 0 {
+					r.listCounts = append(r.listCounts, 0)
+					continue
+				}
+				var issues []json.RawMessage
+				if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
+					r.err = fmt.Errorf("list parse %d: %v\nraw: %s", i, jsonErr, s)
+					results[worker] = r
+					return
+				}
+				r.listCounts = append(r.listCounts, len(issues))
+			}
+
+			results[worker] = r
+		}(w)
+	}
+	wg.Wait()
+
+	// Check for errors and collect IDs.
+	allIDs := make(map[string]bool)
+	var failures int
+	for _, r := range results {
+		if r.err != nil {
+			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			failures++
+			continue
+		}
+		for _, id := range r.ids {
+			if allIDs[id] {
+				t.Errorf("duplicate ID %q from worker %d", id, r.worker)
+			}
+			allIDs[id] = true
+		}
+	}
+
+	if failures > 0 {
+		t.Fatalf("%d/%d workers failed", failures, numWorkers)
+	}
+
+	expectedTotal := numWorkers * issuesPerWorker
+	if len(allIDs) != expectedTotal {
+		t.Errorf("expected %d unique IDs, got %d", expectedTotal, len(allIDs))
+	}
+
+	// Verify all issues exist and are closed.
+	store := openStore(t, beadsDir, "cx")
+	for id := range allIDs {
+		issue, err := store.GetIssue(t.Context(), id)
+		if err != nil {
+			t.Errorf("GetIssue(%s): %v", id, err)
+			continue
+		}
+		if issue.Status != types.StatusClosed {
+			t.Errorf("issue %s: expected status closed, got %s", id, issue.Status)
+		}
+		if issue.ClosedAt == nil {
+			t.Errorf("issue %s: expected closed_at to be set", id)
+		}
+	}
+
+	// Verify list counts were monotonically non-decreasing per worker.
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		for i := 1; i < len(r.listCounts); i++ {
+			if r.listCounts[i] < r.listCounts[i-1] {
+				t.Errorf("worker %d: list count decreased from %d to %d at step %d",
+					r.worker, r.listCounts[i-1], r.listCounts[i], i)
+			}
+		}
+	}
+
+	stats, err := store.GetStatistics(t.Context())
+	if err != nil {
+		t.Fatalf("GetStatistics: %v", err)
+	}
+
+	t.Logf("created and closed %d issues across %d concurrent workers, %d in DB",
+		len(allIDs), numWorkers, stats.TotalIssues)
 }
