@@ -24,7 +24,11 @@ func FixMissingMetadata(path string, bdVersion string) error {
 	if err != nil {
 		return nil // Can't load config, nothing to fix
 	}
-	cfg := info.Config
+	if info != nil && info.SourceConfig == nil && info.Runtime != nil &&
+		(info.Runtime.SourceBeadsDir == "" || info.Runtime.SourceBeadsDir == info.Runtime.BeadsDir) {
+		return nil // No metadata.json at the repo path, nothing to fix
+	}
+	cfg, _ := metadataConfigForRepo(info)
 	if cfg == nil {
 		return nil // No config file, nothing to fix
 	}
