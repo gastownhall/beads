@@ -325,89 +325,13 @@ func (s *DoltStore) buildDependencyTree(ctx context.Context, issueID string, dep
 // Queries both dependencies and wisp_dependencies tables to detect cross-table
 // cycles (e.g., permanent A -> wisp B -> permanent A). (bd-xe27)
 func (s *DoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {
-	// Get all permanent dependencies
-	deps, err := s.GetAllDependencyRecords(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get all wisp dependencies
-	wispDeps, err := s.getAllWispDependencyRecords(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Build adjacency list from both tables
-	graph := make(map[string][]string)
-	for issueID, records := range deps {
-		for _, dep := range records {
-			if dep.Type == types.DepBlocks {
-				graph[issueID] = append(graph[issueID], dep.DependsOnID)
-			}
-		}
-	}
-	for issueID, records := range wispDeps {
-		for _, dep := range records {
-			if dep.Type == types.DepBlocks {
-				graph[issueID] = append(graph[issueID], dep.DependsOnID)
-			}
-		}
-	}
-
-	// Find cycles using DFS
-	var cycles [][]*types.Issue
-	visited := make(map[string]bool)
-	recStack := make(map[string]bool)
-	path := make([]string, 0)
-
-	var dfs func(node string) bool
-	dfs = func(node string) bool {
-		visited[node] = true
-		recStack[node] = true
-		path = append(path, node)
-
-		for _, neighbor := range graph[node] {
-			if !visited[neighbor] {
-				if dfs(neighbor) {
-					return true
-				}
-			} else if recStack[neighbor] {
-				// Found cycle - extract it
-				cycleStart := -1
-				for i, n := range path {
-					if n == neighbor {
-						cycleStart = i
-						break
-					}
-				}
-				if cycleStart >= 0 {
-					cyclePath := path[cycleStart:]
-					var cycleIssues []*types.Issue
-					for _, id := range cyclePath {
-						issue, _ := s.GetIssue(ctx, id) // Best effort: nil issue handled by caller
-						if issue != nil {
-							cycleIssues = append(cycleIssues, issue)
-						}
-					}
-					if len(cycleIssues) > 0 {
-						cycles = append(cycles, cycleIssues)
-					}
-				}
-			}
-		}
-
-		path = path[:len(path)-1]
-		recStack[node] = false
-		return false
-	}
-
-	for node := range graph {
-		if !visited[node] {
-			dfs(node)
-		}
-	}
-
-	return cycles, nil
+	var result [][]*types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.DetectCyclesInTx(ctx, tx)
+		return err
+	})
+	return result, err
 }
 
 // IsBlocked checks if an issue has open blockers.

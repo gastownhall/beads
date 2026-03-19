@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -345,40 +344,17 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 }
 
 // claimWisp atomically claims a wisp.
+// Delegates SQL work to issueops.ClaimIssueInTx; no Dolt versioning needed
+// since wisps live in dolt_ignored tables.
 func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) error {
-	now := time.Now().UTC()
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE wisps
-		SET assignee = ?, status = 'in_progress', updated_at = ?
-		WHERE id = ? AND (assignee = '' OR assignee IS NULL)
-	`, actor, now, id)
-	if err != nil {
-		return fmt.Errorf("failed to claim wisp: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		var currentAssignee string
-		err := tx.QueryRowContext(ctx, `SELECT assignee FROM wisps WHERE id = ?`, id).Scan(&currentAssignee)
-		if err != nil {
-			return fmt.Errorf("failed to get current assignee: %w", err)
-		}
-		return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, currentAssignee)
-	}
-
-	if err := issueops.RecordEventInTable(ctx, tx, "wisp_events", id, "claimed", actor, ""); err != nil {
-		return fmt.Errorf("failed to record claim event: %w", err)
+	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
+		return err
 	}
 
 	return wrapTransactionError("commit claim wisp", tx.Commit())
