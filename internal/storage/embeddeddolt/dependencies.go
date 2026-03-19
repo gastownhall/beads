@@ -36,6 +36,18 @@ func (s *EmbeddedDoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([
 	return result, err
 }
 
+// GetDependenciesWithMetadata returns issues that the given issue depends on,
+// along with the dependency type.
+func (s *EmbeddedDoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	var result []*types.IssueWithDependencyMetadata
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependenciesWithMetadataInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
+}
+
 // GetDependentsWithMetadata returns issues that depend on the given issue,
 // along with the dependency type.
 func (s *EmbeddedDoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {

@@ -218,9 +218,7 @@ func (s *EmbeddedDoltStore) GetDependents(ctx context.Context, issueID string) (
 	panic("embeddeddolt: GetDependents not implemented")
 }
 
-func (s *EmbeddedDoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	panic("embeddeddolt: GetDependenciesWithMetadata not implemented")
-}
+// GetDependenciesWithMetadata is implemented in dependencies.go.
 
 // GetDependentsWithMetadata is implemented in dependencies.go.
 
@@ -253,7 +251,13 @@ func (s *EmbeddedDoltStore) AddIssueComment(ctx context.Context, issueID, author
 }
 
 func (s *EmbeddedDoltStore) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
-	panic("embeddeddolt: GetIssueComments not implemented")
+	var result []*types.Comment
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetIssueCommentsInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
 }
 
 func (s *EmbeddedDoltStore) GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error) {

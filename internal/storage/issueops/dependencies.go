@@ -289,6 +289,70 @@ func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string) ([]*types
 	return allIssues, nil
 }
 
+// GetDependenciesWithMetadataInTx returns issues that the given issueID depends on,
+// along with the dependency type. Works within an existing transaction.
+// Queries both dependency tables to handle cross-table dependencies.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func GetDependenciesWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	type depMeta struct {
+		depID, depType string
+	}
+
+	// Query both dependency tables to find all dependencies.
+	var deps []depMeta
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT depends_on_id, type FROM %s WHERE issue_id = ?`, depTable), issueID)
+		if err != nil {
+			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var d depMeta
+			if scanErr := rows.Scan(&d.depID, &d.depType); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
+			}
+			deps = append(deps, d)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(deps) == 0 {
+		return nil, nil
+	}
+
+	// Fetch all dependency target issues.
+	ids := make([]string, len(deps))
+	for i, d := range deps {
+		ids[i] = d.depID
+	}
+	issues, err := GetIssuesByIDsInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("get dependencies: fetch issues: %w", err)
+	}
+	issueMap := make(map[string]*types.Issue, len(issues))
+	for _, iss := range issues {
+		issueMap[iss.ID] = iss
+	}
+
+	var results []*types.IssueWithDependencyMetadata
+	for _, d := range deps {
+		issue, ok := issueMap[d.depID]
+		if !ok {
+			continue
+		}
+		results = append(results, &types.IssueWithDependencyMetadata{
+			Issue:          *issue,
+			DependencyType: types.DependencyType(d.depType),
+		})
+	}
+	return results, nil
+}
+
 // GetDependentsWithMetadataInTx returns issues that depend on the given issueID
 // along with the dependency type. Works within an existing transaction.
 //

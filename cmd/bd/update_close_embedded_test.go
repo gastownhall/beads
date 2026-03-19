@@ -207,9 +207,8 @@ func TestEmbeddedClose(t *testing.T) {
 			t.Fatalf("bd dep add failed: %v\n%s", err, out)
 		}
 
-		// Closing the blocked issue should warn about blockers but still succeed
-		// (close guard warns but doesn't prevent close by default).
-		bdClose(t, bd, dir, blocked.ID)
+		// Closing a blocked issue requires --force.
+		bdClose(t, bd, dir, blocked.ID, "--force")
 		got := bdShow(t, bd, dir, blocked.ID)
 		if got.Status != types.StatusClosed {
 			t.Errorf("expected status closed, got %s", got.Status)
