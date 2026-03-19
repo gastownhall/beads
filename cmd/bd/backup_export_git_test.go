@@ -168,14 +168,20 @@ func TestBackupExportGitLeavesUnrelatedWorkingTreeChangesUntouched(t *testing.T)
 	if err := os.WriteFile(readmePath, []byte("modified locally\n"), 0644); err != nil {
 		t.Fatalf("WriteFile README.md: %v", err)
 	}
+	beforeStatus := statusLinesWithoutPath(gitOutput(t, h.repoDir, "status", "--short"), "README.md")
 
 	if _, err := runBackupExportGit(h.ctx, backupExportGitOptions{}); err != nil {
 		t.Fatalf("runBackupExportGit: %v", err)
 	}
 
 	status := gitOutput(t, h.repoDir, "status", "--short")
-	if !strings.Contains(status, " M README.md") {
+	if !statusHasPath(status, "README.md") {
 		t.Fatalf("expected README.md to remain modified, got:\n%s", status)
+	}
+	afterStatus := statusLinesWithoutPath(status, "README.md")
+	if !slices.Equal(afterStatus, beforeStatus) {
+		t.Fatalf("expected non-README status to stay unchanged\nbefore:\n%s\nafter:\n%s",
+			strings.Join(beforeStatus, "\n"), strings.Join(afterStatus, "\n"))
 	}
 
 	changedFiles := nonEmptyLines(gitOutput(t, h.repoDir, "show", "--name-only", "--pretty=format:", backupGitDefaultBranch))
@@ -187,6 +193,32 @@ func TestBackupExportGitLeavesUnrelatedWorkingTreeChangesUntouched(t *testing.T)
 			t.Fatalf("backup branch committed unrelated path %q", changed)
 		}
 	}
+}
+
+func statusLinesWithoutPath(status, path string) []string {
+	lines := nonEmptyLines(status)
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if statusLineHasPath(line, path) {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	slices.Sort(filtered)
+	return filtered
+}
+
+func statusHasPath(status, path string) bool {
+	for _, line := range nonEmptyLines(status) {
+		if statusLineHasPath(line, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func statusLineHasPath(line, path string) bool {
+	return strings.HasSuffix(strings.TrimSpace(line), path)
 }
 
 func TestBackupExportGitNotInGitRepo(t *testing.T) {
