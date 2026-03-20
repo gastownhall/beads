@@ -76,6 +76,24 @@ func TestNotionStatusFlagsRegistered(t *testing.T) {
 	}
 }
 
+func TestNotionHelpTextMentionsBDNotionAndLegacyFlag(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(notionCmd.Long, "bdnotion") {
+		t.Fatalf("notionCmd.Long = %q, want mention of bdnotion", notionCmd.Long)
+	}
+	flag := notionStatusCmd.Flags().Lookup("ncli-bin")
+	if flag == nil {
+		t.Fatal("missing --ncli-bin")
+	}
+	if !strings.Contains(flag.Usage, "legacy flag name") {
+		t.Fatalf("flag usage = %q, want legacy flag note", flag.Usage)
+	}
+	if !strings.Contains(flag.Usage, "bdnotion") {
+		t.Fatalf("flag usage = %q, want bdnotion guidance", flag.Usage)
+	}
+}
+
 func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
 
 	originalFactory := newNotionStatusClient

@@ -105,20 +105,21 @@ var notionCmd = &cobra.Command{
 	Use:     "notion",
 	GroupID: "advanced",
 	Short:   "Notion integration commands",
-	Long: "Synchronize issues between beads and Notion through ncli beads commands.\n\n" +
-		"This integration uses the local ncli binary rather than the Notion public API directly.\n\n" +
+	Long: "Synchronize issues between beads and Notion through a local bdnotion bridge binary.\n\n" +
+		"This integration keeps the existing tracker engine and JSON contract, but delegates Notion operations to the local bridge binary instead of calling the Notion public API directly.\n\n" +
 		"Examples:\n" +
 		"  bd notion status\n" +
 		"  bd notion sync\n" +
 		"  bd notion sync --dry-run\n" +
-		"  bd notion status --database-id <database-id> --view-url <view-url>",
+		"  bd notion status --database-id <database-id> --view-url <view-url>\n" +
+		"  bd notion status --ncli-bin /path/to/bdnotion",
 }
 
 var notionStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show Notion sync status",
 	Long: "Show the current Notion sync status, including:\n" +
-		"  - ncli readiness\n" +
+		"  - bridge readiness\n" +
 		"  - database and view selection\n" +
 		"  - schema validation status\n" +
 		"  - archive capability visibility",
@@ -133,19 +134,19 @@ var notionSyncCmd = &cobra.Command{
 		"  --pull         Import issues from Notion into beads\n" +
 		"  --push         Export issues from beads to Notion\n" +
 		"  (no flags)     Bidirectional sync: pull then push, with conflict resolution\n\n" +
-		"Pull and bidirectional sync always read the saved ncli beads config.\n" +
+		"Pull and bidirectional sync always read the saved bdnotion beads config.\n" +
 		"Database/view overrides are therefore only supported for push-only sync.\n\n" +
 		"By default, local beads issues are created in Notion and Notion-linked issues are updated on subsequent syncs.\n\n" +
-		"Archive and delete operations are not supported yet. If you need archive semantics, keep using the ncli dry-run flow until live MCP exposes archive support.",
+		"Archive and delete operations are not supported yet. If you need archive semantics, keep using the bdnotion dry-run flow until live MCP exposes archive support.",
 	RunE: runNotionSync,
 }
 
 func init() {
-	notionStatusCmd.Flags().StringVar(&notionNCLIBin, "ncli-bin", "", "Path to the ncli binary")
+	notionStatusCmd.Flags().StringVar(&notionNCLIBin, "ncli-bin", "", "Path to the Notion bridge binary (legacy flag name; use for bdnotion overrides)")
 	notionStatusCmd.Flags().StringVar(&notionDatabaseID, "database-id", "", "Override the Notion database ID")
 	notionStatusCmd.Flags().StringVar(&notionViewURL, "view-url", "", "Override the Notion view URL")
 
-	notionSyncCmd.Flags().StringVar(&notionNCLIBin, "ncli-bin", "", "Path to the ncli binary")
+	notionSyncCmd.Flags().StringVar(&notionNCLIBin, "ncli-bin", "", "Path to the Notion bridge binary (legacy flag name; use for bdnotion overrides)")
 	notionSyncCmd.Flags().StringVar(&notionDatabaseID, "database-id", "", "Override the Notion database ID")
 	notionSyncCmd.Flags().StringVar(&notionViewURL, "view-url", "", "Override the Notion view URL")
 	notionSyncCmd.Flags().BoolVar(&notionSyncPull, "pull", false, "Pull issues from Notion")
@@ -243,7 +244,7 @@ func preflightNotionSync(ctx context.Context) error {
 		return err
 	}
 	if resp == nil || !resp.Ready {
-		return fmt.Errorf("Notion sync is not ready; run \"bd notion status\" or \"ncli beads status\" to inspect configuration")
+		return fmt.Errorf("Notion sync is not ready; run \"bd notion status\" or \"bdnotion beads status\" to inspect configuration")
 	}
 	return nil
 }
@@ -287,7 +288,7 @@ func validateNotionSyncOverrides(ctx context.Context, opts itracker.SyncOptions)
 		return nil
 	}
 
-	return fmt.Errorf("pull and bidirectional Notion sync use the saved ncli beads config; database-id/view-url overrides are only supported with --push")
+	return fmt.Errorf("pull and bidirectional Notion sync use the saved bdnotion beads config; database-id/view-url overrides are only supported with --push")
 }
 
 func notionSyncIncludesPull(opts itracker.SyncOptions) bool {
