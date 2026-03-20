@@ -204,10 +204,10 @@ func TestEmbeddedDiff(t *testing.T) {
 		e := entries[0]
 		// Verify expected JSON keys
 		if _, ok := e["IssueID"]; !ok {
-			t.Error("expected 'issue_id' key in JSON entry")
+			t.Error("expected 'IssueID' key in JSON entry")
 		}
 		if _, ok := e["DiffType"]; !ok {
-			t.Error("expected 'diff_type' key in JSON entry")
+			t.Error("expected 'DiffType' key in JSON entry")
 		}
 	})
 

@@ -16,7 +16,10 @@ func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.His
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.HistoryInTx(ctx, tx, issueID)
-		return err
+		if err != nil {
+			return wrapQueryError("get issue history", err)
+		}
+		return nil
 	})
 	return result, err
 }
