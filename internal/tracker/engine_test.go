@@ -598,6 +598,64 @@ func TestEnginePushWithShouldPush(t *testing.T) {
 	}
 }
 
+func TestEnginePushWithShouldPushCanInspectLabels(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, tc := range []struct {
+		id    string
+		title string
+		label string
+	}{
+		{id: "bd-labelpush1", title: "Push labeled", label: "notion-sync"},
+		{id: "bd-labelskip1", title: "Skip unlabeled"},
+	} {
+		issue := &types.Issue{
+			ID:        tc.id,
+			Title:     tc.title,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", tc.id, err)
+		}
+		if tc.label != "" {
+			if err := store.AddLabel(ctx, tc.id, tc.label, "test-actor"); err != nil {
+				t.Fatalf("AddLabel(%s) error: %v", tc.id, err)
+			}
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		ShouldPush: func(issue *types.Issue) bool {
+			for _, label := range issue.Labels {
+				if label == "notion-sync" {
+					return true
+				}
+			}
+			return false
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if len(tracker.created) != 1 {
+		t.Fatalf("tracker.created = %d, want 1", len(tracker.created))
+	}
+	if tracker.created[0].ID != "bd-labelpush1" {
+		t.Fatalf("pushed issue ID = %q, want bd-labelpush1", tracker.created[0].ID)
+	}
+}
+
 func TestEnginePushWithContentEqual(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

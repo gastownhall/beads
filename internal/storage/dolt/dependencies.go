@@ -1026,6 +1026,22 @@ func (s *DoltStore) getIssuesByIDsDolt(ctx context.Context, ids []string) ([]*ty
 		_ = queryRows.Close()
 	}
 
+	if len(issues) == 0 {
+		return issues, nil
+	}
+
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+	labelsByIssue, err := s.GetLabelsForIssues(ctx, issueIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get issues by IDs: labels: %w", err)
+	}
+	for _, issue := range issues {
+		issue.Labels = labelsByIssue[issue.ID]
+	}
+
 	return issues, nil
 }
 
