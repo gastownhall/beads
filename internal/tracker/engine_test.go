@@ -875,6 +875,65 @@ func TestEnginePushWithShouldPushCanInspectLabels(t *testing.T) {
 	}
 }
 
+func TestEngineDryRunTreatsForeignExternalRefAsCreate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	foreignRef := "https://github.com/example/repo/issues/1"
+	issue := &types.Issue{
+		ID:          "bd-foreign1",
+		Title:       "Mirror me to Notion",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: &foreignRef,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := &mockExternalRefTracker{
+		mockTracker: newMockTracker("notion"),
+		isRef: func(ref string) bool {
+			return strings.Contains(ref, "notion.so")
+		},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+
+	var msgs []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Fatalf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if result.Stats.Updated != 0 {
+		t.Fatalf("Stats.Updated = %d, want 0", result.Stats.Updated)
+	}
+	joined := strings.Join(msgs, "\n")
+	if !strings.Contains(joined, "Would create in notion: Mirror me to Notion") {
+		t.Fatalf("messages = %q, want create message", joined)
+	}
+	if strings.Contains(joined, "Would update in notion") {
+		t.Fatalf("messages = %q, did not expect update message", joined)
+	}
+
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues() error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("stored issues = %d, want 1", len(issues))
+	}
+	if issues[0].ExternalRef == nil || *issues[0].ExternalRef != foreignRef {
+		t.Fatalf("external_ref = %v, want %q", issues[0].ExternalRef, foreignRef)
+	}
+}
+
 func TestEnginePushWithContentEqual(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
 	itracker "github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 type notionStatusClient interface {
@@ -167,7 +166,6 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 			concrete.OnMessage = func(msg string) { fmt.Fprintln(cmd.OutOrStdout(), "  "+msg) }
 		}
 		concrete.OnWarning = func(msg string) { fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", msg) }
-		concrete.PushHooks = buildNotionPushHooks(cmd.Context(), tr)
 	}
 
 	result, err := engine.Sync(cmd.Context(), opts)
@@ -245,70 +243,6 @@ func notionSyncIncludesPull(opts itracker.SyncOptions) bool {
 		return true
 	}
 	return opts.Pull
-}
-
-func buildNotionPushHooks(ctx context.Context, tr itracker.IssueTracker) *itracker.PushHooks {
-	return &itracker.PushHooks{
-		ShouldPush: func(issue *types.Issue) bool {
-			pushPrefix, _ := store.GetConfig(ctx, "notion.push_prefix")
-			pushLabel, _ := store.GetConfig(ctx, "notion.push_label")
-			return shouldPushNotionIssue(issue, tr, pushPrefix, pushLabel)
-		},
-	}
-}
-
-func shouldPushNotionIssue(issue *types.Issue, tr itracker.IssueTracker, pushPrefix, pushLabel string) bool {
-	if issue == nil || tr == nil {
-		return false
-	}
-
-	if issue.ExternalRef != nil && strings.TrimSpace(*issue.ExternalRef) != "" {
-		return tr.IsExternalRef(*issue.ExternalRef)
-	}
-
-	if !matchesNotionPushLabel(issue, pushLabel) {
-		return false
-	}
-
-	if strings.TrimSpace(pushPrefix) == "" {
-		return true
-	}
-
-	for _, prefix := range strings.Split(pushPrefix, ",") {
-		prefix = strings.TrimSpace(prefix)
-		prefix = strings.TrimSuffix(prefix, "-")
-		if prefix != "" && strings.HasPrefix(issue.ID, prefix+"-") {
-			return true
-		}
-	}
-
-	return false
-}
-
-func matchesNotionPushLabel(issue *types.Issue, pushLabel string) bool {
-	if issue == nil || strings.TrimSpace(pushLabel) == "" {
-		return false
-	}
-
-	configured := make(map[string]struct{})
-	for _, raw := range strings.Split(pushLabel, ",") {
-		label := strings.ToLower(strings.TrimSpace(raw))
-		if label != "" {
-			configured[label] = struct{}{}
-		}
-	}
-	if len(configured) == 0 {
-		return false
-	}
-
-	for _, raw := range issue.Labels {
-		label := strings.ToLower(strings.TrimSpace(raw))
-		if _, ok := configured[label]; ok {
-			return true
-		}
-	}
-
-	return false
 }
 
 func renderNotionStatus(cmd *cobra.Command, resp *notion.StatusResponse) {

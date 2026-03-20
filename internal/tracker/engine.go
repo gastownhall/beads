@@ -477,9 +477,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		}
 
 		extRef := derefStr(issue.ExternalRef)
+		willCreate := extRef == "" || !e.Tracker.IsExternalRef(extRef)
 
 		if opts.DryRun {
-			if extRef == "" {
+			if willCreate {
 				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), issue.Title)
 				stats.Created++
 			} else {
@@ -497,7 +498,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			pushIssue = &copy
 		}
 
-		if extRef == "" || !e.Tracker.IsExternalRef(extRef) {
+		if willCreate {
 			// Create in external tracker
 			created, err := e.Tracker.CreateIssue(ctx, pushIssue)
 			if err != nil {
