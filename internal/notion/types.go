@@ -296,7 +296,8 @@ type PushService interface {
 
 // PushPayload is the bdnotion beads push input shape.
 type PushPayload struct {
-	Issues []PushIssue `json:"issues"`
+	Issues         []PushIssue     `json:"issues"`
+	ExistingIssues []ExistingIssue `json:"existing_issues,omitempty"`
 }
 
 // PushIssue is one issue entry in the bdnotion beads push payload.
@@ -310,4 +311,20 @@ type PushIssue struct {
 	Assignee    string   `json:"assignee,omitempty"`
 	Labels      []string `json:"labels,omitempty"`
 	ExternalRef string   `json:"external_ref,omitempty"`
+}
+
+// ExistingIssue is an optional authoritative snapshot hint passed to bdnotion beads push.
+type ExistingIssue struct {
+	ID           string   `json:"id,omitempty"`
+	Title        string   `json:"title,omitempty"`
+	Description  string   `json:"description,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	Priority     string   `json:"priority,omitempty"`
+	IssueType    string   `json:"issue_type,omitempty"`
+	Assignee     string   `json:"assignee,omitempty"`
+	Labels       []string `json:"labels,omitempty"`
+	ExternalRef  string   `json:"external_ref,omitempty"`
+	NotionPageID string   `json:"notion_page_id,omitempty"`
+	CreatedAt    string   `json:"created_at,omitempty"`
+	UpdatedAt    string   `json:"updated_at,omitempty"`
 }

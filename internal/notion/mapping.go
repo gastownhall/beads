@@ -162,6 +162,11 @@ func PushPayloadFromIssue(issue *types.Issue, config *MappingConfig) (*PushPaylo
 
 // PushPayloadFromIssues converts multiple beads issues into the ncli push payload shape.
 func PushPayloadFromIssues(issues []*types.Issue, config *MappingConfig) (*PushPayload, error) {
+	return PushPayloadFromIssuesWithExisting(issues, nil, config)
+}
+
+// PushPayloadFromIssuesWithExisting converts multiple beads issues plus optional remote snapshots into the bdnotion push payload shape.
+func PushPayloadFromIssuesWithExisting(issues []*types.Issue, existing []ExistingIssue, config *MappingConfig) (*PushPayload, error) {
 	pushIssues := make([]PushIssue, 0, len(issues))
 	for _, issue := range issues {
 		pushIssue, err := PushIssueFromIssue(issue, config)
@@ -171,7 +176,8 @@ func PushPayloadFromIssues(issues []*types.Issue, config *MappingConfig) (*PushP
 		pushIssues = append(pushIssues, *pushIssue)
 	}
 	return &PushPayload{
-		Issues: pushIssues,
+		Issues:         pushIssues,
+		ExistingIssues: append([]ExistingIssue(nil), existing...),
 	}, nil
 }
 
@@ -224,6 +230,24 @@ func MarshalPushPayload(payload *PushPayload) ([]byte, error) {
 		return nil, fmt.Errorf("push payload is nil")
 	}
 	return json.Marshal(payload)
+}
+
+// ExistingIssueFromPullIssue narrows a pull response item to the fields bdnotion push can reuse.
+func ExistingIssueFromPullIssue(issue PulledIssue) ExistingIssue {
+	return ExistingIssue{
+		ID:           strings.TrimSpace(issue.ID),
+		Title:        strings.TrimSpace(issue.Title),
+		Description:  strings.TrimSpace(issue.Description),
+		Status:       strings.TrimSpace(issue.Status),
+		Priority:     strings.TrimSpace(issue.Priority),
+		IssueType:    strings.TrimSpace(firstNonEmpty(issue.IssueType, issue.Type)),
+		Assignee:     strings.TrimSpace(issue.Assignee),
+		Labels:       append([]string(nil), issue.Labels...),
+		ExternalRef:  strings.TrimSpace(issue.ExternalRef),
+		NotionPageID: strings.TrimSpace(issue.NotionPageID),
+		CreatedAt:    strings.TrimSpace(string(issue.CreatedAt)),
+		UpdatedAt:    strings.TrimSpace(string(issue.UpdatedAt)),
+	}
 }
 
 func priorityToBeads(raw string, config *MappingConfig) (int, error) {

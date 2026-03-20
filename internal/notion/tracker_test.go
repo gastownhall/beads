@@ -2,6 +2,7 @@ package notion
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -340,6 +341,60 @@ func TestTrackerBatchPushBuildsSinglePayloadAndNormalizesResponse(t *testing.T) 
 	}
 	if !strings.Contains(string(client.pushReq.Payload), "\"issues\"") {
 		t.Fatalf("payload = %s", client.pushReq.Payload)
+	}
+}
+
+func TestTrackerBatchPushIncludesExistingIssuesFromPullSnapshot(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeNotionClient{
+		pullResp: &PullResponse{
+			Issues: []PulledIssue{
+				{
+					ID:           "beads-2",
+					Title:        "Update me",
+					Description:  "Desc",
+					Status:       "in_progress",
+					Priority:     "high",
+					IssueType:    "feature",
+					Assignee:     "osamu",
+					Labels:       []string{"alpha"},
+					ExternalRef:  "https://www.notion.so/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					NotionPageID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+					CreatedAt:    "2026-03-19T14:00:00Z",
+					UpdatedAt:    "2026-03-19T14:05:00Z",
+				},
+			},
+		},
+		pushResp: &PushResponse{
+			Skipped: []PushResultItem{{ID: "beads-2"}},
+		},
+	}
+	tr := NewTracker(WithTrackerClient(client), WithTrackerDatabaseID("db_123"), WithTrackerViewURL("view://example"))
+
+	if _, err := tr.FetchIssues(context.Background(), itracker.FetchOptions{State: "all"}); err != nil {
+		t.Fatalf("FetchIssues returned error: %v", err)
+	}
+
+	issues := []*types.Issue{
+		{ID: "beads-2", Title: "Update me", Description: "Desc", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeFeature, Assignee: "osamu", Labels: []string{"alpha"}},
+	}
+	if _, err := tr.BatchPush(context.Background(), issues); err != nil {
+		t.Fatalf("BatchPush returned error: %v", err)
+	}
+
+	var payload PushPayload
+	if err := json.Unmarshal(client.pushReq.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload): %v", err)
+	}
+	if len(payload.ExistingIssues) != 1 {
+		t.Fatalf("existing issues = %#v", payload.ExistingIssues)
+	}
+	if payload.ExistingIssues[0].ID != "beads-2" || payload.ExistingIssues[0].NotionPageID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" {
+		t.Fatalf("existing issue = %#v", payload.ExistingIssues[0])
+	}
+	if payload.ExistingIssues[0].ExternalRef != "https://www.notion.so/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("external ref = %q", payload.ExistingIssues[0].ExternalRef)
 	}
 }
 

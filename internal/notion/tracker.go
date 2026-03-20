@@ -85,6 +85,7 @@ type Tracker struct {
 	viewURL            string
 	viewURLExplicit    bool
 	issueCache         []itracker.TrackerIssue
+	pullSnapshots      map[string]PulledIssue
 }
 
 // NewTracker constructs a Notion tracker.
@@ -145,6 +146,12 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 	resp, err := t.client.Pull(ctx, PullRequest{})
 	if err != nil {
 		return nil, err
+	}
+	t.pullSnapshots = make(map[string]PulledIssue, len(resp.Issues))
+	for _, issue := range resp.Issues {
+		if id := strings.TrimSpace(issue.ID); id != "" {
+			t.pullSnapshots[id] = issue
+		}
 	}
 
 	result := make([]itracker.TrackerIssue, 0, len(resp.Issues))
@@ -262,7 +269,8 @@ func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue) (*itrack
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
-	payload, err := PushPayloadFromIssues(issues, t.config)
+	existing := t.existingIssuesForBatchPush(issues)
+	payload, err := PushPayloadFromIssuesWithExisting(issues, existing, t.config)
 	if err != nil {
 		return nil, err
 	}
@@ -459,6 +467,27 @@ func canonicalPushExternalRef(pageID string) string {
 
 func (t *Tracker) canUseIssueCache(opts itracker.FetchOptions) bool {
 	return opts.State == "all" && opts.Since == nil && opts.Limit == 0
+}
+
+func (t *Tracker) existingIssuesForBatchPush(issues []*types.Issue) []ExistingIssue {
+	if len(issues) == 0 || len(t.pullSnapshots) == 0 {
+		return nil
+	}
+	existing := make([]ExistingIssue, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		pulled, ok := t.pullSnapshots[strings.TrimSpace(issue.ID)]
+		if !ok {
+			continue
+		}
+		existing = append(existing, ExistingIssueFromPullIssue(pulled))
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	return existing
 }
 
 func (t *Tracker) upsertIssueCache(issue *itracker.TrackerIssue) {
