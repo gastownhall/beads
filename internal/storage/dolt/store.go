@@ -68,40 +68,6 @@ func isTestDatabaseName(name string) bool {
 	return false
 }
 
-// autoStartRefs tracks in-process reference counts for auto-started dolt
-// sql-server processes, keyed by resolved server directory. When the count
-// drops to zero, the server is stopped. This prevents test-started servers
-// from leaking (GH#2542) while allowing multiple stores to share one server.
-var autoStartRefs struct {
-	mu sync.Mutex
-	m  map[string]int
-}
-
-func autoStartAcquire(serverDir string) {
-	autoStartRefs.mu.Lock()
-	defer autoStartRefs.mu.Unlock()
-	if autoStartRefs.m == nil {
-		autoStartRefs.m = make(map[string]int)
-	}
-	autoStartRefs.m[serverDir]++
-}
-
-// autoStartRelease decrements the refcount for serverDir and stops the server
-// when it reaches zero. Returns any error from stopping the server.
-func autoStartRelease(serverDir string) error {
-	autoStartRefs.mu.Lock()
-	defer autoStartRefs.mu.Unlock()
-	if autoStartRefs.m == nil {
-		return nil
-	}
-	autoStartRefs.m[serverDir]--
-	if autoStartRefs.m[serverDir] <= 0 {
-		delete(autoStartRefs.m, serverDir)
-		return doltserver.Stop(serverDir)
-	}
-	return nil
-}
-
 // Compile-time interface checks.
 var _ storage.DoltStorage = (*DoltStore)(nil)
 var _ storage.RawDBAccessor = (*DoltStore)(nil)
@@ -149,11 +115,6 @@ type DoltStore struct {
 	remoteUser     string // Remote auth user for Hosted Dolt push/pull (optional)
 	remotePassword string // Remote auth password for Hosted Dolt push/pull (optional)
 	serverMode     bool   // true when connected to external dolt sql-server (not embedded)
-
-	// autoStartedServerDir is set when this store triggered a dolt sql-server
-	// auto-start. Close() uses it to stop the server when the last store
-	// referencing it is closed (tracked via autoStartRefs).
-	autoStartedServerDir string
 }
 
 // Config holds Dolt database configuration
@@ -680,9 +641,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		return nil, ErrCircuitOpen
 	}
 
-	// Tracks server dir if we auto-started a server (for cleanup in Close, GH#2542).
-	var autoStartedDir string
-
 	// Fail-fast TCP check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
 	// rather than waiting for MySQL driver timeouts.
@@ -695,17 +653,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			if beadsDir == "" {
 				beadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
 			}
-			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(beadsDir)
+			port, startErr := doltserver.EnsureRunning(beadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
 					"To start manually: bd dolt start\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
 					addr, startErr)
-			}
-			// Track auto-started servers so Close() can stop them (GH#2542).
-			if startedByUs {
-				autoStartedDir = doltserver.ResolveServerDir(beadsDir)
-				autoStartAcquire(autoStartedDir)
 			}
 			// Update port — EnsureRunning allocates an ephemeral port
 			if port != cfg.ServerPort {
@@ -721,10 +674,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// Retry connection with longer timeout (server just started)
 			conn, dialErr = net.DialTimeout("tcp", addr, 2*time.Second)
 			if dialErr != nil {
-				// Release auto-start ref on connection failure
-				if autoStartedDir != "" {
-					_ = autoStartRelease(autoStartedDir)
-				}
 				if breaker != nil {
 					breaker.RecordFailure()
 				}
@@ -777,8 +726,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		remotePassword:       cfg.RemotePassword,
 		serverMode:           true,
 		readOnly:             cfg.ReadOnly,
-		autoStartedServerDir: autoStartedDir,
-	}
+			}
 
 	// Schema initialization for server mode (idempotent).
 	// Short retry for Dolt "no root value found in session" race: after
@@ -1301,15 +1249,6 @@ func (s *DoltStore) Close() error {
 		}
 	}
 	s.db = nil
-
-	// Stop auto-started server when the last store referencing it closes.
-	if s.autoStartedServerDir != "" {
-		if stopErr := autoStartRelease(s.autoStartedServerDir); stopErr != nil {
-			// Best-effort: don't mask other errors
-			fmt.Fprintf(os.Stderr, "Warning: failed to stop auto-started dolt server: %v\n", stopErr)
-		}
-		s.autoStartedServerDir = ""
-	}
 
 	// Clean up 0-byte noms LOCK files. The Dolt engine creates these when
 	// opening a database; they should be removed on clean shutdown but may
