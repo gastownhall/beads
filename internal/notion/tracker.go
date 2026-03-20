@@ -316,6 +316,12 @@ func (t *Tracker) issueFromPushResponse(resp *PushResponse, issue *types.Issue, 
 	if resp == nil {
 		return nil, fmt.Errorf("push response is nil")
 	}
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("push response reported %d error(s): %s", len(resp.Errors), summarizePushErrors(resp.Errors))
+	}
+	if len(resp.Updated) == 0 && len(resp.Created) == 0 {
+		return nil, fmt.Errorf("push response did not include a created or updated result")
+	}
 
 	var item *PushResultItem
 	if len(resp.Updated) > 0 {
@@ -355,6 +361,24 @@ func (t *Tracker) issueFromPushResponse(resp *PushResponse, issue *types.Issue, 
 	result.Identifier = ExtractNotionIdentifier(firstNonEmpty(externalID, issueExternalRef(issue)))
 	result.URL = issueExternalRef(issue)
 	return result, nil
+}
+
+func summarizePushErrors(errors []PushResultError) string {
+	parts := make([]string, 0, len(errors))
+	for _, item := range errors {
+		part := strings.TrimSpace(item.Message)
+		if item.Stage != "" {
+			part = strings.TrimSpace(item.Stage + ": " + part)
+		}
+		if item.ID != "" {
+			part = strings.TrimSpace(item.ID + " " + part)
+		}
+		if part == "" {
+			part = "unknown push error"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func matchesFetchOptions(issue *itracker.TrackerIssue, opts itracker.FetchOptions) bool {

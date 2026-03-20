@@ -2,6 +2,7 @@ package notion
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,6 +235,60 @@ func TestTrackerUpdateIssue(t *testing.T) {
 	}
 	if got := tr.ExtractIdentifier("https://www.notion.so/0123456789abcdef0123456789abcdef"); got != "01234567-89ab-cdef-0123-456789abcdef" {
 		t.Fatalf("identifier = %q", got)
+	}
+}
+
+func TestTrackerCreateIssueReturnsErrorOnPushErrors(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeNotionClient{
+		pushResp: &PushResponse{
+			Errors: []PushResultError{
+				{
+					ID:      "beads-1",
+					Stage:   "create",
+					Message: "schema mismatch",
+				},
+			},
+		},
+	}
+	tr := NewTracker(WithTrackerClient(client))
+
+	_, err := tr.CreateIssue(context.Background(), &types.Issue{
+		ID:        "beads-1",
+		Title:     "Create me",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "schema mismatch") {
+		t.Fatalf("error = %q, want schema mismatch", got)
+	}
+}
+
+func TestTrackerUpdateIssueReturnsErrorWithoutResultItem(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeNotionClient{
+		pushResp: &PushResponse{},
+	}
+	tr := NewTracker(WithTrackerClient(client))
+
+	_, err := tr.UpdateIssue(context.Background(), "01234567-89ab-cdef-0123-456789abcdef", &types.Issue{
+		ID:        "beads-1",
+		Title:     "Update me",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "did not include a created or updated result") {
+		t.Fatalf("error = %q", got)
 	}
 }
 

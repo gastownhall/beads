@@ -239,6 +239,49 @@ func TestEnginePushOnly(t *testing.T) {
 	}
 }
 
+func TestEnginePushCountsCreateErrors(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:        "bd-createerr1",
+		Title:     "Local issue",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.createErr = fmt.Errorf("push response reported 1 error")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 0 {
+		t.Errorf("Stats.Created = %d, want 0", result.Stats.Created)
+	}
+	if result.Stats.Errors != 1 {
+		t.Errorf("Stats.Errors = %d, want 1", result.Stats.Errors)
+	}
+
+	stored, err := store.GetIssue(ctx, "bd-createerr1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if stored.ExternalRef != nil {
+		t.Fatalf("external_ref = %q, want nil", *stored.ExternalRef)
+	}
+	if len(tracker.created) != 0 {
+		t.Errorf("tracker.created = %d, want 0", len(tracker.created))
+	}
+}
+
 func TestEngineDryRun(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
