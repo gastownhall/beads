@@ -40,7 +40,7 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 		"BEADS_DOLT_SHARED_SERVER=",
 	)
 
-	initOut, initErr := runBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	initOut, initErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
 		lower := strings.ToLower(initOut)
 		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
@@ -49,7 +49,7 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
 	}
 
-	createOut, createErr := runBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "create", "auto-start persists", "--json")
+	createOut, createErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "create", "auto-start persists", "--json")
 	if createErr != nil {
 		t.Fatalf("bd create failed: %v\n%s", createErr, createOut)
 	}
@@ -66,15 +66,15 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 		t.Fatalf("expected created issue id, got: %#v", created["id"])
 	}
 
-	statusOut, _ := runBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "dolt", "status")
+	statusOut, _ := runBDExecWithBinary(t, bdBinary, tmpDir, env, "dolt", "status")
 	if strings.Contains(statusOut, "Dolt server: running") {
-		stopOut, stopErr := runBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "dolt", "stop")
+		stopOut, stopErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "dolt", "stop")
 		if stopErr != nil {
 			t.Fatalf("bd dolt stop failed: %v\n%s", stopErr, stopOut)
 		}
 	}
 
-	statusOut, statusErr := runBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "dolt", "status")
+	statusOut, statusErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status before auto-start failed: %v\n%s", statusErr, statusOut)
 	}
@@ -82,12 +82,12 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 		t.Fatalf("expected stopped baseline before show; output:\n%s", statusOut)
 	}
 
-	showOut, showErr := runBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "show", issueID, "--json")
+	showOut, showErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "show", issueID, "--json")
 	if showErr != nil {
 		t.Fatalf("bd show failed: %v\n%s", showErr, showOut)
 	}
 
-	statusOut, statusErr = runBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "dolt", "status")
+	statusOut, statusErr = runBDExecWithBinary(t, bdBinary, tmpDir, env, "dolt", "status")
 	if statusErr != nil {
 		t.Fatalf("bd dolt status after auto-start failed: %v\n%s", statusErr, statusOut)
 	}
@@ -112,7 +112,7 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 	}
 	_ = conn.Close()
 
-	stopOut, stopErr := runBDExecAllowErrorWithEnv(t, bdBinary, tmpDir, env, "dolt", "stop")
+	stopOut, stopErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "dolt", "stop")
 	if stopErr != nil {
 		t.Fatalf("bd dolt stop cleanup failed: %v\n%s", stopErr, stopOut)
 	}
@@ -134,7 +134,7 @@ func buildLifecycleTestBinary(t *testing.T) string {
 	return bdBinary
 }
 
-func runBDExecAllowErrorWithEnv(t *testing.T, bdBinary string, dir string, env []string, args ...string) (string, error) {
+func runBDExecWithBinary(t *testing.T, bdBinary string, dir string, env []string, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(bdBinary, args...)
 	cmd.Dir = dir
