@@ -378,3 +378,35 @@ func TestExecWithLongTimeoutDSNRewrite(t *testing.T) {
 		t.Errorf("expected readTimeout=5m, got %v", reParsed.ReadTimeout)
 	}
 }
+
+func TestShouldStopAutoStartedServerOnClose(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+	}()
+
+	t.Run("normal repo local server stays up", func(t *testing.T) {
+		os.Unsetenv("BEADS_TEST_MODE")
+		if shouldStopAutoStartedServerOnClose(&Config{Database: "op_broker"}) {
+			t.Fatal("expected normal repo-local auto-start to persist after Close")
+		}
+	})
+
+	t.Run("test mode still owns cleanup", func(t *testing.T) {
+		os.Setenv("BEADS_TEST_MODE", "1")
+		if !shouldStopAutoStartedServerOnClose(&Config{Database: "op_broker"}) {
+			t.Fatal("expected BEADS_TEST_MODE to keep auto-start cleanup enabled")
+		}
+	})
+
+	t.Run("test database names still clean up", func(t *testing.T) {
+		os.Unsetenv("BEADS_TEST_MODE")
+		if !shouldStopAutoStartedServerOnClose(&Config{Database: "testdb_abcdef"}) {
+			t.Fatal("expected test database names to keep auto-start cleanup enabled")
+		}
+	})
+}
