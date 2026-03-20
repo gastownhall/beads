@@ -34,16 +34,13 @@ func (r StatusRequest) args() []string {
 }
 
 // PullRequest describes the inputs for `ncli beads pull`.
-type PullRequest struct {
-	ViewURL string
-}
+//
+// The current ncli CLI does not accept override flags for pull; it always reads
+// the saved beads config and local managed-page manifest.
+type PullRequest struct{}
 
 func (r PullRequest) args() []string {
-	args := []string{"--json"}
-	if strings.TrimSpace(r.ViewURL) != "" {
-		args = append(args, "--view-url", r.ViewURL)
-	}
-	return args
+	return []string{"--json"}
 }
 
 // PushRequest describes the inputs for `ncli beads push`.

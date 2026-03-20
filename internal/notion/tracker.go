@@ -142,7 +142,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 		return cloneTrackerIssues(t.issueCache), nil
 	}
 
-	resp, err := t.client.Pull(ctx, PullRequest{ViewURL: t.viewURL})
+	resp, err := t.client.Pull(ctx, PullRequest{})
 	if err != nil {
 		return nil, err
 	}

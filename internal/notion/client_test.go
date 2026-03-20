@@ -126,14 +126,14 @@ func TestPullValidJSON(t *testing.T) {
 		stdout: []byte(`{"issues":[{"id":"bd-1","title":"One","external_ref":"notion:page_1"}]}`),
 	}
 	client := NewClient(WithRunner(runner))
-	resp, err := client.Pull(context.Background(), PullRequest{ViewURL: "https://example.com/view"})
+	resp, err := client.Pull(context.Background(), PullRequest{})
 	if err != nil {
 		t.Fatalf("Pull returned error: %v", err)
 	}
 	if len(resp.Issues) != 1 {
 		t.Fatalf("issues = %d, want 1", len(resp.Issues))
 	}
-	wantArgs := []string{"beads", "pull", "--json", "--view-url", "https://example.com/view"}
+	wantArgs := []string{"beads", "pull", "--json"}
 	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
 		t.Fatalf("args = %v, want %v", runner.args, wantArgs)
 	}

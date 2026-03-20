@@ -67,9 +67,6 @@ func TestTrackerFetchIssues(t *testing.T) {
 	if issues[0].Identifier != "01234567-89ab-cdef-0123-456789abcdef" {
 		t.Fatalf("identifier = %q", issues[0].Identifier)
 	}
-	if client.pullReq.ViewURL != "https://example.com/view" {
-		t.Fatalf("view url = %q, want https://example.com/view", client.pullReq.ViewURL)
-	}
 }
 
 func TestTrackerFetchIssue(t *testing.T) {
@@ -199,9 +196,6 @@ func TestTrackerCreateIssueFallsBackToPullForExternalRef(t *testing.T) {
 	}
 	if created.URL != "https://www.notion.so/0123456789abcdef0123456789abcdef" {
 		t.Fatalf("url = %q", created.URL)
-	}
-	if client.pullReq.ViewURL != "view://example" {
-		t.Fatalf("view url = %q", client.pullReq.ViewURL)
 	}
 }
 
