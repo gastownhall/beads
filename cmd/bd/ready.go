@@ -60,6 +60,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		plainFormat, _ := cmd.Flags().GetBool("plain")
 		includeDeferred, _ := cmd.Flags().GetBool("include-deferred")
 		includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
+		excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
 		rigOverride, _ := cmd.Flags().GetString("rig")
 		var molType *types.MolType
 		if molTypeStr != "" {
@@ -82,6 +83,16 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 		}
 
+		// Normalize --exclude-type values.
+		var excludeTypes []types.IssueType
+		for _, raw := range excludeTypeStrs {
+			for _, t := range strings.Split(raw, ",") {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					excludeTypes = append(excludeTypes, types.IssueType(utils.NormalizeIssueType(t)))
+				}
+			}
+		}
 		filter := types.WorkFilter{
 			Status:           "open", // Only show open issues, not in_progress (matches bd list --ready)
 			Type:             issueType,
@@ -92,6 +103,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			LabelsAny:        labelsAny,
 			IncludeDeferred:  includeDeferred,  // GH#820: respect --include-deferred flag
 			IncludeEphemeral: includeEphemeral, // bd-i5k5x: allow ephemeral issues (e.g., merge-requests)
+			ExcludeTypes:     excludeTypes,
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
@@ -539,6 +551,7 @@ func init() {
 	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps")
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
+	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig gastown, --rig gt-, --rig gt)")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
