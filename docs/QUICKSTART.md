@@ -296,12 +296,14 @@ bd config set notion.push_prefix "beads"
 
 ### Override ncli Inputs
 
-If you do not want to rely on the saved `ncli` config, pass the inputs explicitly:
+If you do not want to rely on the saved `ncli` config, pass the inputs explicitly for status checks and push-only sync:
 
 ```bash
 bd notion status --ncli-bin /path/to/ncli --database-id <database-id> --view-url <view-url>
-bd notion sync --dry-run --database-id <database-id> --view-url <view-url>
+bd notion sync --push --dry-run --database-id <database-id> --view-url <view-url>
 ```
+
+Pull and bidirectional sync always read the saved `ncli beads` config. If you need a different target database for pull, update the saved `ncli` config first and then run `bd notion sync` without overrides.
 
 ### If Something Looks Wrong
 

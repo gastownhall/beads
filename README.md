@@ -133,4 +133,6 @@ bd notion sync
 
 Updating already-linked Notion issues works by default. Creating new Notion issues from local-only beads issues is opt-in via `notion.push_label`.
 
+Database/view overrides are safe for `bd notion status` and push-only sync. Pull or bidirectional sync must use the saved `ncli beads` config so both directions target the same database.
+
 Setup prerequisites, override flags, smoke steps, and current limitations live in [docs/QUICKSTART.md](docs/QUICKSTART.md#notion-sync-quickstart).

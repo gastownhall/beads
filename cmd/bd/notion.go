@@ -86,6 +86,8 @@ var notionSyncCmd = &cobra.Command{
 		"  --pull         Import issues from Notion into beads\n" +
 		"  --push         Export issues from beads to Notion\n" +
 		"  (no flags)     Bidirectional sync: pull then push, with conflict resolution\n\n" +
+		"Pull and bidirectional sync always read the saved ncli beads config.\n" +
+		"Database/view overrides are therefore only supported for push-only sync.\n\n" +
 		"Existing issues that already have a Notion external_ref can always be updated.\n" +
 		"Creating new Notion issues from local-only beads issues is opt-in through notion.push_label, with notion.push_prefix available as an extra narrowing filter.\n\n" +
 		"Archive and delete operations are not supported yet. If you need archive semantics, keep using the ncli dry-run flow until live MCP exposes archive support.",
@@ -143,6 +145,10 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	if err := ensureNotionStoreActive(); err != nil {
 		return fmt.Errorf("database not available: %w", err)
 	}
+	opts := buildNotionSyncOptions()
+	if err := validateNotionSyncOverrides(cmd.Context(), opts); err != nil {
+		return err
+	}
 
 	if err := preflightNotionSync(cmd.Context()); err != nil {
 		return err
@@ -164,7 +170,7 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		concrete.PushHooks = buildNotionPushHooks(cmd.Context(), tr)
 	}
 
-	result, err := engine.Sync(cmd.Context(), buildNotionSyncOptions())
+	result, err := engine.Sync(cmd.Context(), opts)
 	if err != nil {
 		return err
 	}
@@ -219,6 +225,26 @@ func buildNotionSyncOptions() itracker.SyncOptions {
 		opts.ConflictResolution = itracker.ConflictTimestamp
 	}
 	return opts
+}
+
+func validateNotionSyncOverrides(ctx context.Context, opts itracker.SyncOptions) error {
+	if !notionSyncIncludesPull(opts) {
+		return nil
+	}
+
+	cfg := resolveNotionRuntimeConfig(ctx)
+	if strings.TrimSpace(cfg.DatabaseID) == "" && strings.TrimSpace(cfg.ViewURL) == "" {
+		return nil
+	}
+
+	return fmt.Errorf("pull and bidirectional Notion sync use the saved ncli beads config; database-id/view-url overrides are only supported with --push")
+}
+
+func notionSyncIncludesPull(opts itracker.SyncOptions) bool {
+	if !opts.Pull && !opts.Push {
+		return true
+	}
+	return opts.Pull
 }
 
 func buildNotionPushHooks(ctx context.Context, tr itracker.IssueTracker) *itracker.PushHooks {

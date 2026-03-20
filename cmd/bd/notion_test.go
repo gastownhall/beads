@@ -409,6 +409,83 @@ func TestRunNotionSyncUsesEngine(t *testing.T) {
 	}
 }
 
+func TestValidateNotionSyncOverridesRejectsPullWithStoredOverrides(t *testing.T) {
+	originalStore := store
+	originalDB := notionDatabaseID
+	originalView := notionViewURL
+	t.Cleanup(func() {
+		store = originalStore
+		notionDatabaseID = originalDB
+		notionViewURL = originalView
+	})
+
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	if err := testStore.SetConfig(ctx, "notion.database_id", "store-db"); err != nil {
+		t.Fatalf("SetConfig(notion.database_id): %v", err)
+	}
+	store = testStore
+	notionDatabaseID = ""
+	notionViewURL = ""
+
+	err := validateNotionSyncOverrides(ctx, itracker.SyncOptions{Pull: true})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "only supported with --push") {
+		t.Fatalf("error = %q", err.Error())
+	}
+}
+
+func TestValidateNotionSyncOverridesAllowsPushOnlyOverrides(t *testing.T) {
+	originalStore := store
+	originalDB := notionDatabaseID
+	originalView := notionViewURL
+	t.Cleanup(func() {
+		store = originalStore
+		notionDatabaseID = originalDB
+		notionViewURL = originalView
+	})
+
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	if err := testStore.SetConfig(ctx, "notion.database_id", "store-db"); err != nil {
+		t.Fatalf("SetConfig(notion.database_id): %v", err)
+	}
+	store = testStore
+	notionDatabaseID = ""
+	notionViewURL = ""
+
+	if err := validateNotionSyncOverrides(ctx, itracker.SyncOptions{Push: true}); err != nil {
+		t.Fatalf("validateNotionSyncOverrides returned error: %v", err)
+	}
+}
+
+func TestValidateNotionSyncOverridesTreatsDefaultSyncAsPull(t *testing.T) {
+	originalStore := store
+	originalDB := notionDatabaseID
+	originalView := notionViewURL
+	t.Cleanup(func() {
+		store = originalStore
+		notionDatabaseID = originalDB
+		notionViewURL = originalView
+	})
+
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	if err := testStore.SetConfig(ctx, "notion.view_url", "view://stored"); err != nil {
+		t.Fatalf("SetConfig(notion.view_url): %v", err)
+	}
+	store = testStore
+	notionDatabaseID = ""
+	notionViewURL = ""
+
+	err := validateNotionSyncOverrides(ctx, itracker.SyncOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
 func TestPreflightNotionSyncRequiresReadyStatus(t *testing.T) {
 
 	originalFactory := newNotionStatusClient
