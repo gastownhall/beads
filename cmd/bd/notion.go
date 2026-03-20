@@ -197,10 +197,6 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	if err := preflightNotionSync(cmd.Context()); err != nil {
-		return err
-	}
-
 	tr := newNotionTracker()
 	if err := tr.Init(cmd.Context(), store); err != nil {
 		return fmt.Errorf("initializing Notion tracker: %w", err)
@@ -230,22 +226,6 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	renderNotionSyncResult(cmd, result)
-	return nil
-}
-
-func preflightNotionSync(ctx context.Context) error {
-	cfg := resolveNotionRuntimeConfig(ctx)
-	client := newNotionStatusClient(cfg.BinaryPath)
-	resp, err := client.Status(ctx, notion.StatusRequest{
-		DatabaseID: cfg.DatabaseID,
-		ViewURL:    cfg.ViewURL,
-	})
-	if err != nil {
-		return err
-	}
-	if resp == nil || !resp.Ready {
-		return fmt.Errorf("Notion sync is not ready; run \"bd notion status\" or \"bdnotion beads status\" to inspect configuration")
-	}
 	return nil
 }
 

@@ -17,12 +17,14 @@ import (
 )
 
 type fakeNotionStatusService struct {
-	resp *notion.StatusResponse
-	err  error
-	req  notion.StatusRequest
+	resp  *notion.StatusResponse
+	err   error
+	req   notion.StatusRequest
+	calls int
 }
 
 func (f *fakeNotionStatusService) Status(_ context.Context, req notion.StatusRequest) (*notion.StatusResponse, error) {
+	f.calls++
 	f.req = req
 	return f.resp, f.err
 }
@@ -428,9 +430,8 @@ func TestRunNotionSyncUsesEngine(t *testing.T) {
 		notionPreferNotion = originalPreferNotion
 	})
 
-	newNotionStatusClient = func(string) notionStatusClient {
-		return &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
-	}
+	fakeStatus := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
+	newNotionStatusClient = func(string) notionStatusClient { return fakeStatus }
 	newNotionTracker = func() itracker.IssueTracker { return &fakeNotionTracker{} }
 	fakeEngine := &fakeNotionSyncEngine{
 		result: &itracker.SyncResult{
@@ -458,6 +459,9 @@ func TestRunNotionSyncUsesEngine(t *testing.T) {
 	}
 	if !fakeEngine.opts.Pull || fakeEngine.opts.Push {
 		t.Fatalf("unexpected sync opts: %#v", fakeEngine.opts)
+	}
+	if fakeStatus.calls != 0 {
+		t.Fatalf("status client calls = %d, want 0", fakeStatus.calls)
 	}
 	if !strings.Contains(stdout.String(), "Dry run complete") {
 		t.Fatalf("stdout = %q", stdout.String())
@@ -538,78 +542,6 @@ func TestValidateNotionSyncOverridesTreatsDefaultSyncAsPull(t *testing.T) {
 	err := validateNotionSyncOverrides(ctx, itracker.SyncOptions{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
-	}
-}
-
-func TestPreflightNotionSyncRequiresReadyStatus(t *testing.T) {
-
-	originalFactory := newNotionStatusClient
-	originalStore := store
-	originalBin := notionNCLIBin
-	originalDB := notionDatabaseID
-	originalView := notionViewURL
-	t.Cleanup(func() {
-		newNotionStatusClient = originalFactory
-		store = originalStore
-		notionNCLIBin = originalBin
-		notionDatabaseID = originalDB
-		notionViewURL = originalView
-	})
-
-	newNotionStatusClient = func(string) notionStatusClient {
-		return &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: false}}
-	}
-
-	err := preflightNotionSync(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "Notion sync is not ready") {
-		t.Fatalf("error = %q", err.Error())
-	}
-}
-
-func TestPreflightNotionSyncUsesStoredOverridesWhenFlagsEmpty(t *testing.T) {
-	originalFactory := newNotionStatusClient
-	originalStore := store
-	originalBin := notionNCLIBin
-	originalDB := notionDatabaseID
-	originalView := notionViewURL
-	t.Cleanup(func() {
-		newNotionStatusClient = originalFactory
-		store = originalStore
-		notionNCLIBin = originalBin
-		notionDatabaseID = originalDB
-		notionViewURL = originalView
-	})
-
-	ctx := context.Background()
-	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
-	if err := testStore.SetConfig(ctx, "notion.ncli_bin", "/store/ncli"); err != nil {
-		t.Fatalf("SetConfig(notion.ncli_bin): %v", err)
-	}
-	if err := testStore.SetConfig(ctx, "notion.database_id", "store-db"); err != nil {
-		t.Fatalf("SetConfig(notion.database_id): %v", err)
-	}
-	if err := testStore.SetConfig(ctx, "notion.view_url", "https://store/view"); err != nil {
-		t.Fatalf("SetConfig(notion.view_url): %v", err)
-	}
-	store = testStore
-	notionNCLIBin = ""
-	notionDatabaseID = ""
-	notionViewURL = ""
-
-	newNotionStatusClient = func(binaryPath string) notionStatusClient {
-		if binaryPath != "/store/ncli" {
-			t.Fatalf("binary path = %q, want /store/ncli", binaryPath)
-		}
-		return &fakeNotionStatusService{
-			resp: &notion.StatusResponse{Ready: true},
-		}
-	}
-
-	if err := preflightNotionSync(ctx); err != nil {
-		t.Fatalf("preflightNotionSync returned error: %v", err)
 	}
 }
 
