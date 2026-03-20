@@ -172,6 +172,13 @@ Examples:
 		}
 		editSaved = true
 
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
+
 		displayTitle := issue.Title
 		if fieldToEdit == "title" {
 			displayTitle = newValue

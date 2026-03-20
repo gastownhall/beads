@@ -172,6 +172,20 @@ Examples:
 			}
 		}
 
+		// Embedded mode: flush Dolt commits on both stores.
+		if isEmbeddedDolt {
+			if sourceStore != nil {
+				if _, err := sourceStore.CommitPending(ctx, actor); err != nil {
+					WarnError("failed to commit source store: %v", err)
+				}
+			}
+			if targetStore != nil {
+				if _, err := targetStore.CommitPending(ctx, actor); err != nil {
+					WarnError("failed to commit target store: %v", err)
+				}
+			}
+		}
+
 		// Output
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
