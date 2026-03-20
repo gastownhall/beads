@@ -68,6 +68,7 @@ type StatusResponse struct {
 	ViewURL       string             `json:"view_url,omitempty"`
 	SchemaVersion string             `json:"schema_version,omitempty"`
 	Configured    bool               `json:"configured,omitempty"`
+	SavedConfig   bool               `json:"saved_config_present,omitempty"`
 	ConfigSource  string             `json:"config_source,omitempty"`
 	Auth          *StatusAuth        `json:"auth,omitempty"`
 	Database      *StatusDatabase    `json:"database,omitempty"`

@@ -97,7 +97,7 @@ func TestStatusValidJSON(t *testing.T) {
 	t.Parallel()
 
 	runner := &fakeRunner{
-		stdout: []byte(`{"ready":true,"data_source_id":"ds_123","archive":{"supported":false,"reason":"mcp missing"}}`),
+		stdout: []byte(`{"ready":true,"data_source_id":"ds_123","saved_config_present":true,"archive":{"supported":false,"reason":"mcp missing"}}`),
 	}
 	client := NewClient(WithRunner(runner))
 	resp, err := client.Status(context.Background(), StatusRequest{
@@ -112,6 +112,9 @@ func TestStatusValidJSON(t *testing.T) {
 	}
 	if resp.DataSourceID != "ds_123" {
 		t.Fatalf("data source id = %q, want ds_123", resp.DataSourceID)
+	}
+	if !resp.SavedConfig {
+		t.Fatal("saved config = false, want true")
 	}
 	wantArgs := []string{"beads", "status", "--json", "--database-id", "db_123", "--view-url", "https://example.com/view"}
 	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
