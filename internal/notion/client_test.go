@@ -143,7 +143,7 @@ func TestPushValidJSONAndStdin(t *testing.T) {
 	t.Parallel()
 
 	runner := &fakeRunner{
-		stdout: []byte(`{"dry_run":false,"input_count":1,"created_count":1,"updated_count":0,"skipped_count":0}`),
+		stdout: []byte(`{"dry_run":false,"archive_requested":false,"archive_supported":false,"archive_reason":"unsupported","input_count":1,"created_count":1,"updated_count":0,"skipped_count":0}`),
 	}
 	client := NewClient(WithRunner(runner))
 	payload := []byte(`{"issues":[{"id":"bd-1","title":"One"}]}`)
@@ -158,6 +158,15 @@ func TestPushValidJSONAndStdin(t *testing.T) {
 	}
 	if resp.CreatedCount != 1 {
 		t.Fatalf("created count = %d, want 1", resp.CreatedCount)
+	}
+	if resp.ArchiveRequested {
+		t.Fatal("archive requested = true, want false")
+	}
+	if resp.ArchiveSupported {
+		t.Fatal("archive supported = true, want false")
+	}
+	if resp.ArchiveReason != "unsupported" {
+		t.Fatalf("archive reason = %q, want unsupported", resp.ArchiveReason)
 	}
 	wantArgs := []string{"beads", "push", "--json", "--input", "-", "--database-id", "db_123", "--view-url", "https://example.com/view"}
 	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {

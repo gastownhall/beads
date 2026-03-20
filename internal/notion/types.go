@@ -206,6 +206,9 @@ func (s *NullableString) UnmarshalJSON(data []byte) error {
 // PushResponse is the machine-readable output from `ncli beads push --json`.
 type PushResponse struct {
 	DryRun               bool              `json:"dry_run"`
+	ArchiveRequested     bool              `json:"archive_requested,omitempty"`
+	ArchiveSupported     bool              `json:"archive_supported,omitempty"`
+	ArchiveReason        string            `json:"archive_reason,omitempty"`
 	InputCount           int               `json:"input_count"`
 	CreatedCount         int               `json:"created_count"`
 	UpdatedCount         int               `json:"updated_count"`
