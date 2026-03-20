@@ -430,6 +430,67 @@ func TestEngineDryRun(t *testing.T) {
 	}
 }
 
+func TestEngineDryRunCountsExistingIssuesAsUpdates(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := strPtr("https://notion.test/EXT-1")
+	issue := &types.Issue{
+		ID:          "bd-existing1",
+		Title:       "Existing issue",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: extRef,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("notion")
+	tracker.issues = []TrackerIssue{
+		{
+			ID:         "EXT-1",
+			Identifier: "EXT-1",
+			URL:        "https://notion.test/EXT-1",
+			Title:      "Existing issue updated",
+			UpdatedAt:  time.Now(),
+		},
+	}
+
+	var messages []string
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.OnMessage = func(msg string) {
+		messages = append(messages, msg)
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Created != 0 {
+		t.Errorf("PullStats.Created = %d, want 0", result.PullStats.Created)
+	}
+	if result.PullStats.Updated != 1 {
+		t.Errorf("PullStats.Updated = %d, want 1", result.PullStats.Updated)
+	}
+	joined := strings.Join(messages, "\n")
+	if strings.Contains(joined, "Would import") {
+		t.Fatalf("messages = %q, want update preview without import", joined)
+	}
+	if !strings.Contains(joined, "Would update local issue") {
+		t.Fatalf("messages = %q, want update preview", joined)
+	}
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues() error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("stored issues = %d, want 1", len(issues))
+	}
+}
+
 func TestEngineExcludeTypes(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

@@ -319,13 +319,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 			}
 		}
 
-		if opts.DryRun {
-			e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
-			stats.Created++
-			continue
-		}
-
-		// Check if we already have this issue
+		// Check if we already have this issue before dry-run so preview stats
+		// distinguish creates from updates.
 		ref := e.Tracker.BuildExternalRef(&extIssue)
 		existing, _ := e.Store.GetIssueByExternalRef(ctx, ref)
 		if existing == nil && ref != "" {
@@ -333,6 +328,17 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 			if identifier != "" {
 				existing = localByExternalIdentifier[identifier]
 			}
+		}
+
+		if opts.DryRun {
+			if existing != nil {
+				e.msg("[dry-run] Would update local issue: %s - %s", extIssue.Identifier, extIssue.Title)
+				stats.Updated++
+			} else {
+				e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
+				stats.Created++
+			}
+			continue
 		}
 
 		conv := mapper.IssueToBeads(&extIssue)
