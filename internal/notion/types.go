@@ -7,16 +7,16 @@ import (
 	"strings"
 )
 
-// DefaultBinaryPath is the default executable used for Notion operations.
-const DefaultBinaryPath = "ncli"
+// DefaultBinaryPath is the default executable used for Notion bridge operations.
+const DefaultBinaryPath = "bdnotion"
 
-// Client executes ncli beads commands for Notion sync.
+// Client executes bdnotion beads commands for Notion sync.
 type Client struct {
 	binaryPath string
 	runner     CommandRunner
 }
 
-// StatusRequest describes the inputs for `ncli beads status`.
+// StatusRequest describes the inputs for `bdnotion beads status`.
 type StatusRequest struct {
 	DatabaseID string
 	ViewURL    string
@@ -33,9 +33,9 @@ func (r StatusRequest) args() []string {
 	return args
 }
 
-// PullRequest describes the inputs for `ncli beads pull`.
+// PullRequest describes the inputs for `bdnotion beads pull`.
 //
-// The current ncli CLI does not accept override flags for pull; it always reads
+// The current bridge CLI does not accept override flags for pull; it always reads
 // the saved beads config and local managed-page manifest.
 type PullRequest struct{}
 
@@ -43,7 +43,7 @@ func (r PullRequest) args() []string {
 	return []string{"--json"}
 }
 
-// PushRequest describes the inputs for `ncli beads push`.
+// PushRequest describes the inputs for `bdnotion beads push`.
 type PushRequest struct {
 	DatabaseID string
 	ViewURL    string
@@ -61,7 +61,7 @@ func (r PushRequest) args() []string {
 	return args
 }
 
-// StatusResponse is the machine-readable output from `ncli beads status --json`.
+// StatusResponse is the machine-readable output from `bdnotion beads status --json`.
 type StatusResponse struct {
 	Ready         bool               `json:"ready"`
 	DataSourceID  string             `json:"data_source_id,omitempty"`
@@ -125,7 +125,7 @@ type ArchiveCapability struct {
 	SupportedCommands []string `json:"supported_commands,omitempty"`
 }
 
-// StatusState captures local ncli state information.
+// StatusState captures local bridge state information.
 type StatusState struct {
 	Path           string         `json:"path,omitempty"`
 	Present        bool           `json:"present,omitempty"`
@@ -144,14 +144,14 @@ type DoctorSummary struct {
 	PropertyMismatchCount int  `json:"property_mismatch_count,omitempty"`
 }
 
-// PullResponse is the machine-readable output from `ncli beads pull --json`.
+// PullResponse is the machine-readable output from `bdnotion beads pull --json`.
 type PullResponse struct {
 	Issues  []PulledIssue      `json:"issues"`
 	Archive *ArchiveCapability `json:"archive,omitempty"`
 	State   *StatusState       `json:"state,omitempty"`
 }
 
-// PulledIssue is the normalized issue record returned by ncli beads pull.
+// PulledIssue is the normalized issue record returned by bdnotion beads pull.
 type PulledIssue struct {
 	ID           string          `json:"id,omitempty"`
 	Title        string          `json:"title,omitempty"`
@@ -172,7 +172,7 @@ type PulledIssue struct {
 	Comments     []PulledComment `json:"comments,omitempty"`
 }
 
-// PulledComment is a normalized comment record returned by ncli beads pull.
+// PulledComment is a normalized comment record returned by bdnotion beads pull.
 type PulledComment struct {
 	CommentID    string         `json:"comment_id,omitempty"`
 	DiscussionID string         `json:"discussion_id,omitempty"`
@@ -201,7 +201,7 @@ func (s *NullableString) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// PushResponse is the machine-readable output from `ncli beads push --json`.
+// PushResponse is the machine-readable output from `bdnotion beads push --json`.
 type PushResponse struct {
 	DryRun               bool              `json:"dry_run"`
 	ArchiveRequested     bool              `json:"archive_requested,omitempty"`
@@ -239,7 +239,7 @@ type PushResultError struct {
 	Message string `json:"message,omitempty"`
 }
 
-// CommandError wraps ncli execution or decoding failures.
+// CommandError wraps bridge execution or decoding failures.
 type CommandError struct {
 	Operation string
 	Command   string
@@ -294,12 +294,12 @@ type PushService interface {
 	Push(ctx context.Context, req PushRequest) (*PushResponse, error)
 }
 
-// PushPayload is the ncli beads push input shape.
+// PushPayload is the bdnotion beads push input shape.
 type PushPayload struct {
 	Issues []PushIssue `json:"issues"`
 }
 
-// PushIssue is one issue entry in the ncli beads push payload.
+// PushIssue is one issue entry in the bdnotion beads push payload.
 type PushIssue struct {
 	ID          string   `json:"id,omitempty"`
 	Title       string   `json:"title,omitempty"`
