@@ -550,37 +550,13 @@ func (s *DoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.Ep
 
 // GetStaleIssues returns issues that haven't been updated recently
 func (s *DoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error) {
-	cutoff := time.Now().UTC().AddDate(0, 0, -filter.Days)
-
-	statusClause := "status IN ('open', 'in_progress')"
-	if filter.Status != "" {
-		statusClause = "status = ?"
-	}
-
-	// nolint:gosec // G201: statusClause contains only literal SQL or a single ? placeholder
-	query := fmt.Sprintf(`
-		SELECT id FROM issues
-		WHERE updated_at < ?
-		  AND %s
-		  AND (ephemeral = 0 OR ephemeral IS NULL)
-		ORDER BY updated_at ASC
-	`, statusClause)
-	args := []interface{}{cutoff}
-	if filter.Status != "" {
-		args = append(args, filter.Status)
-	}
-
-	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
-	}
-
-	rows, err := s.queryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get stale issues: %w", err)
-	}
-	defer rows.Close()
-
-	return s.scanIssueIDs(ctx, rows)
+	var result []*types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetStaleIssuesInTx(ctx, tx, filter)
+		return err
+	})
+	return result, err
 }
 
 // GetStatistics returns summary statistics
