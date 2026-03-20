@@ -3,7 +3,6 @@ package notion
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -49,6 +48,7 @@ func WithTrackerBinaryPath(path string) TrackerOption {
 	return func(t *Tracker) {
 		if strings.TrimSpace(path) != "" {
 			t.binaryPath = path
+			t.binaryPathExplicit = true
 		}
 	}
 }
@@ -58,6 +58,7 @@ func WithTrackerDatabaseID(databaseID string) TrackerOption {
 	return func(t *Tracker) {
 		if strings.TrimSpace(databaseID) != "" {
 			t.databaseID = databaseID
+			t.databaseIDExplicit = true
 		}
 	}
 }
@@ -67,19 +68,23 @@ func WithTrackerViewURL(viewURL string) TrackerOption {
 	return func(t *Tracker) {
 		if strings.TrimSpace(viewURL) != "" {
 			t.viewURL = viewURL
+			t.viewURLExplicit = true
 		}
 	}
 }
 
 // Tracker implements itracker.IssueTracker for Notion via ncli beads commands.
 type Tracker struct {
-	client     notionClient
-	config     *MappingConfig
-	store      storage.Storage
-	binaryPath string
-	databaseID string
-	viewURL    string
-	issueCache []itracker.TrackerIssue
+	client             notionClient
+	config             *MappingConfig
+	store              storage.Storage
+	binaryPath         string
+	binaryPathExplicit bool
+	databaseID         string
+	databaseIDExplicit bool
+	viewURL            string
+	viewURLExplicit    bool
+	issueCache         []itracker.TrackerIssue
 }
 
 // NewTracker constructs a Notion tracker.
@@ -98,34 +103,23 @@ func (t *Tracker) Name() string         { return "notion" }
 func (t *Tracker) DisplayName() string  { return "Notion" }
 func (t *Tracker) ConfigPrefix() string { return "notion" }
 
-func (t *Tracker) Init(_ context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	t.store = store
 	if t.client != nil {
 		return nil
 	}
 
-	if store != nil {
-		if value, err := store.GetConfig(context.Background(), "notion.ncli_bin"); err == nil && value != "" {
-			t.binaryPath = value
-		}
-		if value, err := store.GetConfig(context.Background(), "notion.database_id"); err == nil && value != "" {
-			t.databaseID = value
-		}
-		if value, err := store.GetConfig(context.Background(), "notion.view_url"); err == nil && value != "" {
-			t.viewURL = value
-		}
-	}
-	if t.binaryPath == DefaultBinaryPath {
-		if envValue := os.Getenv("NCLI_BIN"); envValue != "" {
-			t.binaryPath = envValue
-		}
-	}
-	if t.databaseID == "" {
-		t.databaseID = os.Getenv("NOTION_DATABASE_ID")
-	}
-	if t.viewURL == "" {
-		t.viewURL = os.Getenv("NOTION_VIEW_URL")
-	}
+	cfg := ResolveRuntimeConfig(ctx, store, RuntimeConfigInput{
+		BinaryPath:    t.binaryPath,
+		BinaryPathSet: t.binaryPathExplicit,
+		DatabaseID:    t.databaseID,
+		DatabaseIDSet: t.databaseIDExplicit,
+		ViewURL:       t.viewURL,
+		ViewURLSet:    t.viewURLExplicit,
+	})
+	t.binaryPath = cfg.BinaryPath
+	t.databaseID = cfg.DatabaseID
+	t.viewURL = cfg.ViewURL
 
 	t.client = NewClient(WithBinaryPath(t.binaryPath))
 	return nil

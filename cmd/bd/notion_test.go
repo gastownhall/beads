@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,12 +83,14 @@ func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
 	originalBin := notionNCLIBin
 	originalDB := notionDatabaseID
 	originalView := notionViewURL
+	originalStore := store
 	t.Cleanup(func() {
 		newNotionStatusClient = originalFactory
 		jsonOutput = originalJSON
 		notionNCLIBin = originalBin
 		notionDatabaseID = originalDB
 		notionViewURL = originalView
+		store = originalStore
 	})
 
 	fake := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
@@ -118,6 +121,118 @@ func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Ready: yes") {
 		t.Fatalf("stdout = %q, want Ready: yes", stdout.String())
+	}
+}
+
+func TestRunNotionStatusUsesStoredOverridesWhenFlagsEmpty(t *testing.T) {
+	originalFactory := newNotionStatusClient
+	originalJSON := jsonOutput
+	originalBin := notionNCLIBin
+	originalDB := notionDatabaseID
+	originalView := notionViewURL
+	originalStore := store
+	t.Cleanup(func() {
+		newNotionStatusClient = originalFactory
+		jsonOutput = originalJSON
+		notionNCLIBin = originalBin
+		notionDatabaseID = originalDB
+		notionViewURL = originalView
+		store = originalStore
+	})
+
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	if err := testStore.SetConfig(ctx, "notion.ncli_bin", "/store/ncli"); err != nil {
+		t.Fatalf("SetConfig(notion.ncli_bin): %v", err)
+	}
+	if err := testStore.SetConfig(ctx, "notion.database_id", "store-db"); err != nil {
+		t.Fatalf("SetConfig(notion.database_id): %v", err)
+	}
+	if err := testStore.SetConfig(ctx, "notion.view_url", "https://store/view"); err != nil {
+		t.Fatalf("SetConfig(notion.view_url): %v", err)
+	}
+	store = testStore
+
+	fake := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
+	newNotionStatusClient = func(binaryPath string) notionStatusClient {
+		if binaryPath != "/store/ncli" {
+			t.Fatalf("binary path = %q, want /store/ncli", binaryPath)
+		}
+		return fake
+	}
+	jsonOutput = false
+	notionNCLIBin = ""
+	notionDatabaseID = ""
+	notionViewURL = ""
+
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetContext(ctx)
+
+	if err := runNotionStatus(cmd, nil); err != nil {
+		t.Fatalf("runNotionStatus returned error: %v", err)
+	}
+	if fake.req.DatabaseID != "store-db" {
+		t.Fatalf("database id = %q, want store-db", fake.req.DatabaseID)
+	}
+	if fake.req.ViewURL != "https://store/view" {
+		t.Fatalf("view url = %q, want https://store/view", fake.req.ViewURL)
+	}
+}
+
+func TestRunNotionStatusFlagsOverrideStoredConfig(t *testing.T) {
+	originalFactory := newNotionStatusClient
+	originalJSON := jsonOutput
+	originalBin := notionNCLIBin
+	originalDB := notionDatabaseID
+	originalView := notionViewURL
+	originalStore := store
+	t.Cleanup(func() {
+		newNotionStatusClient = originalFactory
+		jsonOutput = originalJSON
+		notionNCLIBin = originalBin
+		notionDatabaseID = originalDB
+		notionViewURL = originalView
+		store = originalStore
+	})
+
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	if err := testStore.SetConfig(ctx, "notion.ncli_bin", "/store/ncli"); err != nil {
+		t.Fatalf("SetConfig(notion.ncli_bin): %v", err)
+	}
+	if err := testStore.SetConfig(ctx, "notion.database_id", "store-db"); err != nil {
+		t.Fatalf("SetConfig(notion.database_id): %v", err)
+	}
+	if err := testStore.SetConfig(ctx, "notion.view_url", "https://store/view"); err != nil {
+		t.Fatalf("SetConfig(notion.view_url): %v", err)
+	}
+	store = testStore
+
+	fake := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
+	newNotionStatusClient = func(binaryPath string) notionStatusClient {
+		if binaryPath != "/flag/ncli" {
+			t.Fatalf("binary path = %q, want /flag/ncli", binaryPath)
+		}
+		return fake
+	}
+	jsonOutput = false
+	notionNCLIBin = "/flag/ncli"
+	notionDatabaseID = "flag-db"
+	notionViewURL = "https://flag/view"
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+
+	if err := runNotionStatus(cmd, nil); err != nil {
+		t.Fatalf("runNotionStatus returned error: %v", err)
+	}
+	if fake.req.DatabaseID != "flag-db" {
+		t.Fatalf("database id = %q, want flag-db", fake.req.DatabaseID)
+	}
+	if fake.req.ViewURL != "https://flag/view" {
+		t.Fatalf("view url = %q, want https://flag/view", fake.req.ViewURL)
 	}
 }
 
@@ -272,7 +387,17 @@ func TestRunNotionSyncUsesEngine(t *testing.T) {
 func TestPreflightNotionSyncRequiresReadyStatus(t *testing.T) {
 
 	originalFactory := newNotionStatusClient
-	t.Cleanup(func() { newNotionStatusClient = originalFactory })
+	originalStore := store
+	originalBin := notionNCLIBin
+	originalDB := notionDatabaseID
+	originalView := notionViewURL
+	t.Cleanup(func() {
+		newNotionStatusClient = originalFactory
+		store = originalStore
+		notionNCLIBin = originalBin
+		notionDatabaseID = originalDB
+		notionViewURL = originalView
+	})
 
 	newNotionStatusClient = func(string) notionStatusClient {
 		return &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: false}}
@@ -284,6 +409,50 @@ func TestPreflightNotionSyncRequiresReadyStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Notion sync is not ready") {
 		t.Fatalf("error = %q", err.Error())
+	}
+}
+
+func TestPreflightNotionSyncUsesStoredOverridesWhenFlagsEmpty(t *testing.T) {
+	originalFactory := newNotionStatusClient
+	originalStore := store
+	originalBin := notionNCLIBin
+	originalDB := notionDatabaseID
+	originalView := notionViewURL
+	t.Cleanup(func() {
+		newNotionStatusClient = originalFactory
+		store = originalStore
+		notionNCLIBin = originalBin
+		notionDatabaseID = originalDB
+		notionViewURL = originalView
+	})
+
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	if err := testStore.SetConfig(ctx, "notion.ncli_bin", "/store/ncli"); err != nil {
+		t.Fatalf("SetConfig(notion.ncli_bin): %v", err)
+	}
+	if err := testStore.SetConfig(ctx, "notion.database_id", "store-db"); err != nil {
+		t.Fatalf("SetConfig(notion.database_id): %v", err)
+	}
+	if err := testStore.SetConfig(ctx, "notion.view_url", "https://store/view"); err != nil {
+		t.Fatalf("SetConfig(notion.view_url): %v", err)
+	}
+	store = testStore
+	notionNCLIBin = ""
+	notionDatabaseID = ""
+	notionViewURL = ""
+
+	newNotionStatusClient = func(binaryPath string) notionStatusClient {
+		if binaryPath != "/store/ncli" {
+			t.Fatalf("binary path = %q, want /store/ncli", binaryPath)
+		}
+		return &fakeNotionStatusService{
+			resp: &notion.StatusResponse{Ready: true},
+		}
+	}
+
+	if err := preflightNotionSync(ctx); err != nil {
+		t.Fatalf("preflightNotionSync returned error: %v", err)
 	}
 }
 

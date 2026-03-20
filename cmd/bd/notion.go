@@ -114,10 +114,11 @@ func init() {
 }
 
 func runNotionStatus(cmd *cobra.Command, _ []string) error {
-	client := newNotionStatusClient(notionNCLIBin)
+	cfg := resolveNotionRuntimeConfig(cmd.Context())
+	client := newNotionStatusClient(cfg.BinaryPath)
 	resp, err := client.Status(cmd.Context(), notion.StatusRequest{
-		DatabaseID: notionDatabaseID,
-		ViewURL:    notionViewURL,
+		DatabaseID: cfg.DatabaseID,
+		ViewURL:    cfg.ViewURL,
 	})
 	if err != nil {
 		return err
@@ -176,10 +177,11 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 }
 
 func preflightNotionSync(ctx context.Context) error {
-	client := newNotionStatusClient(notionNCLIBin)
+	cfg := resolveNotionRuntimeConfig(ctx)
+	client := newNotionStatusClient(cfg.BinaryPath)
 	resp, err := client.Status(ctx, notion.StatusRequest{
-		DatabaseID: notionDatabaseID,
-		ViewURL:    notionViewURL,
+		DatabaseID: cfg.DatabaseID,
+		ViewURL:    cfg.ViewURL,
 	})
 	if err != nil {
 		return err
@@ -188,6 +190,17 @@ func preflightNotionSync(ctx context.Context) error {
 		return fmt.Errorf("Notion sync is not ready; run \"bd notion status\" or \"ncli beads status\" to inspect configuration")
 	}
 	return nil
+}
+
+func resolveNotionRuntimeConfig(ctx context.Context) notion.RuntimeConfig {
+	return notion.ResolveRuntimeConfig(ctx, store, notion.RuntimeConfigInput{
+		BinaryPath:    notionNCLIBin,
+		BinaryPathSet: strings.TrimSpace(notionNCLIBin) != "",
+		DatabaseID:    notionDatabaseID,
+		DatabaseIDSet: strings.TrimSpace(notionDatabaseID) != "",
+		ViewURL:       notionViewURL,
+		ViewURLSet:    strings.TrimSpace(notionViewURL) != "",
+	})
 }
 
 func buildNotionSyncOptions() itracker.SyncOptions {
