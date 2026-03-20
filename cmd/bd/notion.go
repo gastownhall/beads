@@ -64,10 +64,17 @@ func newNotionUnsupportedPushStats() *notionUnsupportedPushStats {
 }
 
 func (s *notionUnsupportedPushStats) record(issueType types.IssueType) {
-	if s == nil || strings.TrimSpace(string(issueType)) == "" {
+	if s == nil || !shouldWarnUnsupportedNotionIssueType(issueType) {
 		return
 	}
 	s.counts[issueType]++
+}
+
+func shouldWarnUnsupportedNotionIssueType(issueType types.IssueType) bool {
+	if strings.TrimSpace(string(issueType)) == "" {
+		return false
+	}
+	return issueType != types.TypeEvent
 }
 
 func (s *notionUnsupportedPushStats) warningText() string {
