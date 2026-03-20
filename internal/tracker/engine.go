@@ -128,6 +128,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 			span.SetStatus(codes.Error, result.Error)
 			return result, err
 		}
+		result.PullStats = *pullStats
 		result.Stats.Pulled = pullStats.Created + pullStats.Updated
 		result.Stats.Created += pullStats.Created
 		result.Stats.Updated += pullStats.Updated
@@ -155,6 +156,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 			span.SetStatus(codes.Error, result.Error)
 			return result, err
 		}
+		result.PushStats = *pushStats
 		result.Stats.Pushed = pushStats.Created + pushStats.Updated
 		result.Stats.Created += pushStats.Created
 		result.Stats.Updated += pushStats.Updated

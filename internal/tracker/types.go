@@ -88,11 +88,13 @@ type SyncOptions struct {
 
 // SyncResult is the complete result of a sync operation.
 type SyncResult struct {
-	Success  bool      `json:"success"`
-	Stats    SyncStats `json:"stats"`
-	LastSync string    `json:"last_sync,omitempty"` // RFC3339 timestamp
-	Error    string    `json:"error,omitempty"`
-	Warnings []string  `json:"warnings,omitempty"`
+	Success   bool      `json:"success"`
+	Stats     SyncStats `json:"stats"`
+	LastSync  string    `json:"last_sync,omitempty"` // RFC3339 timestamp
+	Error     string    `json:"error,omitempty"`
+	Warnings  []string  `json:"warnings,omitempty"`
+	PullStats PullStats `json:"-"`
+	PushStats PushStats `json:"-"`
 }
 
 // SyncStats accumulates sync statistics.

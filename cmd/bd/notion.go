@@ -338,7 +338,7 @@ func renderNotionSyncResult(cmd *cobra.Command, result *itracker.SyncResult) {
 		return
 	}
 	if result.Stats.Pulled > 0 {
-		fmt.Fprintf(out, "✓ Pulled %d issues (%d created, %d updated)\n", result.Stats.Pulled, result.Stats.Created, result.Stats.Updated)
+		fmt.Fprintf(out, "✓ Pulled %d issues (%d created, %d updated)\n", result.Stats.Pulled, result.PullStats.Created, result.PullStats.Updated)
 	}
 	if result.Stats.Pushed > 0 {
 		fmt.Fprintf(out, "✓ Pushed %d issues\n", result.Stats.Pushed)

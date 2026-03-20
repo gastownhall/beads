@@ -279,6 +279,31 @@ func TestRenderNotionStatusIncludesArchiveWarning(t *testing.T) {
 	}
 }
 
+func TestRenderNotionSyncResultUsesPullPhaseStats(t *testing.T) {
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+
+	renderNotionSyncResult(cmd, &itracker.SyncResult{
+		Stats: itracker.SyncStats{
+			Pulled:  1,
+			Pushed:  1,
+			Created: 1,
+			Updated: 1,
+		},
+		PullStats: itracker.PullStats{Updated: 1},
+		PushStats: itracker.PushStats{Created: 1},
+	})
+
+	output := stdout.String()
+	if !strings.Contains(output, "Pulled 1 issues (0 created, 1 updated)") {
+		t.Fatalf("output = %q", output)
+	}
+	if strings.Contains(output, "Pulled 1 issues (1 created, 1 updated)") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestBuildNotionSyncOptions(t *testing.T) {
 
 	originalPull := notionSyncPull

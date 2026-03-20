@@ -221,6 +221,12 @@ func TestEnginePullOnly(t *testing.T) {
 	if result.Stats.Created != 2 {
 		t.Errorf("Stats.Created = %d, want 2", result.Stats.Created)
 	}
+	if result.PullStats.Created != 2 || result.PullStats.Updated != 0 {
+		t.Errorf("PullStats = %+v, want Created=2 Updated=0", result.PullStats)
+	}
+	if result.PushStats.Created != 0 || result.PushStats.Updated != 0 {
+		t.Errorf("PushStats = %+v, want zero value", result.PushStats)
+	}
 
 	// Verify issues were stored
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
@@ -261,6 +267,12 @@ func TestEnginePushOnly(t *testing.T) {
 	}
 	if result.Stats.Created != 1 {
 		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if result.PushStats.Created != 1 || result.PushStats.Updated != 0 {
+		t.Errorf("PushStats = %+v, want Created=1 Updated=0", result.PushStats)
+	}
+	if result.PullStats.Created != 0 || result.PullStats.Updated != 0 {
+		t.Errorf("PullStats = %+v, want zero value", result.PullStats)
 	}
 	if len(tracker.created) != 1 {
 		t.Errorf("tracker.created = %d, want 1", len(tracker.created))
