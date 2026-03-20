@@ -94,6 +94,51 @@ func TestStatusInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestStatusRestoresBridgeCLIAuthErrorFromStdout(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{
+		stdout: []byte("{\n  \"error\": \"Not authenticated\",\n  \"why\": \"bdnotion could not authenticate against the Notion MCP\",\n  \"hint\": \"Run \\\"bdnotion login\\\" again\"\n}\n"),
+		err:    errors.New("exit status 1"),
+	}
+	client := NewClient(WithRunner(runner))
+	_, err := client.Status(context.Background(), StatusRequest{})
+
+	var bridgeErr *BridgeCLIError
+	if !errors.As(err, &bridgeErr) {
+		t.Fatalf("expected BridgeCLIError, got %T (%v)", err, err)
+	}
+	if bridgeErr.What != "Not authenticated" {
+		t.Fatalf("What = %q", bridgeErr.What)
+	}
+	if bridgeErr.Hint != "Run \"bdnotion login\" again" {
+		t.Fatalf("Hint = %q", bridgeErr.Hint)
+	}
+	if !strings.Contains(bridgeErr.Error(), "Not authenticated") {
+		t.Fatalf("error = %v", bridgeErr)
+	}
+}
+
+func TestStatusFallsBackToCommandErrorWhenStdoutErrorJSONIsMalformed(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{
+		stdout: []byte("{"),
+		stderr: []byte("boom"),
+		err:    errors.New("exit status 1"),
+	}
+	client := NewClient(WithRunner(runner))
+	_, err := client.Status(context.Background(), StatusRequest{})
+
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("expected CommandError, got %T (%v)", err, err)
+	}
+	if !strings.Contains(cmdErr.Error(), "exit status 1") {
+		t.Fatalf("error = %v", cmdErr)
+	}
+}
+
 func TestStatusValidJSON(t *testing.T) {
 	t.Parallel()
 

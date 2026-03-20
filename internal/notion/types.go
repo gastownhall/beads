@@ -290,6 +290,40 @@ func (e *CommandError) Unwrap() error {
 	return e.Err
 }
 
+// BridgeCLIError is a structured error returned by bdnotion on stdout.
+type BridgeCLIError struct {
+	What      string
+	Why       string
+	Hint      string
+	Operation string
+	Command   string
+	ExitCode  int
+}
+
+type bridgeCLIErrorPayload struct {
+	Error string `json:"error"`
+	Why   string `json:"why,omitempty"`
+	Hint  string `json:"hint,omitempty"`
+}
+
+func (e *BridgeCLIError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+
+	parts := []string{strings.TrimSpace(e.What)}
+	if strings.TrimSpace(e.Why) != "" {
+		parts = append(parts, strings.TrimSpace(e.Why))
+	}
+	if strings.TrimSpace(e.Hint) != "" {
+		parts = append(parts, "Hint: "+strings.TrimSpace(e.Hint))
+	}
+	if strings.TrimSpace(e.Command) != "" && e.ExitCode != 0 {
+		parts = append(parts, fmt.Sprintf("(command: %s, exit=%d)", e.Command, e.ExitCode))
+	}
+	return strings.Join(parts, ": ")
+}
+
 // StatusService exposes the client method used by higher layers.
 type StatusService interface {
 	Status(ctx context.Context, req StatusRequest) (*StatusResponse, error)

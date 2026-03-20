@@ -281,6 +281,35 @@ func TestRunNotionStatusReturnsClientError(t *testing.T) {
 	}
 }
 
+func TestRunNotionStatusSurfacesBridgeAuthError(t *testing.T) {
+	originalFactory := newNotionStatusClient
+	t.Cleanup(func() { newNotionStatusClient = originalFactory })
+
+	newNotionStatusClient = func(string) notionStatusClient {
+		return &fakeNotionStatusService{
+			err: &notion.BridgeCLIError{
+				What: "Not authenticated",
+				Why:  "bdnotion could not authenticate against the Notion MCP",
+				Hint: "Run \"bdnotion login\" again",
+			},
+		}
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+
+	err := runNotionStatus(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "Not authenticated") {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "Run \"bdnotion login\" again") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRenderNotionStatusIncludesArchiveWarning(t *testing.T) {
 
 	cmd := &cobra.Command{}

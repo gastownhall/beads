@@ -122,6 +122,9 @@ func (c *Client) runJSON(ctx context.Context, operation string, args []string, s
 
 	stdout, stderr, err := c.runner.Run(ctx, c.binaryPath, fullArgs, stdin)
 	if err != nil {
+		if bridgeErr := decodeBridgeCLIError(operation, c.binaryPath, fullArgs, stdout, err); bridgeErr != nil {
+			return bridgeErr
+		}
 		return newCommandError(operation, c.binaryPath, fullArgs, stderr, err)
 	}
 	if err := decodeStrictJSON(stdout, target); err != nil {
@@ -156,6 +159,43 @@ func decodeStrictJSON(data []byte, target any) error {
 func buildCommandString(binaryPath string, args []string) string {
 	parts := append([]string{binaryPath}, args...)
 	return strings.Join(parts, " ")
+}
+
+func decodeBridgeCLIError(operation, binaryPath string, args []string, stdout []byte, runErr error) error {
+	if len(bytes.TrimSpace(stdout)) == 0 {
+		return nil
+	}
+
+	var payload bridgeCLIErrorPayload
+	if err := decodeStrictJSON(stdout, &payload); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(payload.Error) == "" {
+		return nil
+	}
+
+	bridgeErr := &BridgeCLIError{
+		What:      strings.TrimSpace(payload.Error),
+		Why:       strings.TrimSpace(payload.Why),
+		Hint:      strings.TrimSpace(payload.Hint),
+		Operation: operation,
+		Command:   buildCommandString(binaryPath, args),
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		bridgeErr.ExitCode = exitErr.ExitCode()
+		return bridgeErr
+	}
+
+	var execErr *exec.Error
+	if errors.As(runErr, &execErr) {
+		bridgeErr.ExitCode = -1
+		return bridgeErr
+	}
+
+	bridgeErr.ExitCode = -1
+	return bridgeErr
 }
 
 func newCommandError(operation, binaryPath string, args []string, stderr []byte, runErr error) *CommandError {
