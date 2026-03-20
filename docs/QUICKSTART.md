@@ -26,6 +26,7 @@ bd init --team
 ```
 
 The wizard will:
+
 - Create `.beads/` directory and Dolt database
 - **Prompt for your role** (maintainer or contributor) unless a flag is provided
 - Import existing issues from git (if any)
@@ -34,6 +35,7 @@ The wizard will:
 - Auto-start Dolt server for database operations
 
 Notes:
+
 - Dolt is the default (and only) storage backend. Data is stored in `.beads/dolt/`.
 - Dolt uses a `dolt sql-server` for database operations.
 - To import issues from an older installation, run `bd init --from-jsonl`.
@@ -47,9 +49,9 @@ During `bd init`, you'll be asked: "Contributing to someone else's repo? [y/N]"
 
 This sets `git config beads.role` which determines how beads routes issues:
 
-| Role | Use Case | Issue Storage |
-|------|----------|---------------|
-| `maintainer` | Repo owner, team with push access | In-repo `.beads/` |
+| Role          | Use Case                          | Issue Storage          |
+| ------------- | --------------------------------- | ---------------------- |
+| `maintainer`  | Repo owner, team with push access | In-repo `.beads/`      |
 | `contributor` | Fork contributor, OSS contributor | Separate planning repo |
 
 You can also configure manually:
@@ -100,6 +102,7 @@ For large features, use hierarchical IDs to organize work:
 ```
 
 Output:
+
 ```
 🌲 Dependency tree for bd-a3f8e9:
 
@@ -123,6 +126,7 @@ Output:
 ```
 
 Output:
+
 ```
 🌲 Dependency tree for bd-3:
 
@@ -132,6 +136,7 @@ Output:
 ```
 
 **Dependency visibility:** `bd list` shows blocking dependencies inline:
+
 ```
 ○ bd-a1b2 [P1] [task] - Set up database
 ○ bd-f14c [P2] [feature] - Create API (blocked by: bd-a1b2)
@@ -145,6 +150,7 @@ Output:
 ```
 
 Output:
+
 ```
 📋 Ready work (1 issues with no blockers):
 
@@ -243,6 +249,7 @@ bd admin cleanup --force
 ```
 
 **When to compact:**
+
 - Database file > 10MB with many old closed issues
 - After major project milestones when old issues are no longer relevant
 - Before archiving a project phase
@@ -282,17 +289,7 @@ bd notion sync --dry-run
 bd notion sync
 ```
 
-By default, `bd notion sync` only updates issues that already have a Notion `external_ref`. If you want local-only beads issues to be created in Notion, opt in with a label:
-
-```bash
-bd config set notion.push_label "notion-sync"
-```
-
-You can add `notion.push_prefix` as an extra narrowing filter, but it no longer enables export by itself:
-
-```bash
-bd config set notion.push_prefix "beads"
-```
+By default, `bd notion sync` creates Notion pages for local beads issues and updates issues that already have a Notion `external_ref`.
 
 ### Override ncli Inputs
 

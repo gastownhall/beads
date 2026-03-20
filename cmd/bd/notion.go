@@ -87,8 +87,7 @@ var notionSyncCmd = &cobra.Command{
 		"  (no flags)     Bidirectional sync: pull then push, with conflict resolution\n\n" +
 		"Pull and bidirectional sync always read the saved ncli beads config.\n" +
 		"Database/view overrides are therefore only supported for push-only sync.\n\n" +
-		"Existing issues that already have a Notion external_ref can always be updated.\n" +
-		"Creating new Notion issues from local-only beads issues is opt-in through notion.push_label, with notion.push_prefix available as an extra narrowing filter.\n\n" +
+		"By default, local beads issues are created in Notion and Notion-linked issues are updated on subsequent syncs.\n\n" +
 		"Archive and delete operations are not supported yet. If you need archive semantics, keep using the ncli dry-run flow until live MCP exposes archive support.",
 	RunE: runNotionSync,
 }

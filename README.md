@@ -30,43 +30,43 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 
 ## 🛠 Features
 
-* **[Dolt](https://github.com/dolthub/dolt)-Powered:** Version-controlled SQL database with cell-level merge, native branching, and built-in sync via Dolt remotes.
-* **Agent-Optimized:** JSON output, dependency tracking, and auto-ready task detection.
-* **Zero Conflict:** Hash-based IDs (`bd-a1b2`) prevent merge collisions in multi-agent/multi-branch workflows.
-* **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.
-* **Messaging:** Message issue type with threading (`--thread`), ephemeral lifecycle, and mail delegation.
-* **Graph Links:** `relates_to`, `duplicates`, `supersedes`, and `replies_to` for knowledge graphs.
+- **[Dolt](https://github.com/dolthub/dolt)-Powered:** Version-controlled SQL database with cell-level merge, native branching, and built-in sync via Dolt remotes.
+- **Agent-Optimized:** JSON output, dependency tracking, and auto-ready task detection.
+- **Zero Conflict:** Hash-based IDs (`bd-a1b2`) prevent merge collisions in multi-agent/multi-branch workflows.
+- **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.
+- **Messaging:** Message issue type with threading (`--thread`), ephemeral lifecycle, and mail delegation.
+- **Graph Links:** `relates_to`, `duplicates`, `supersedes`, and `replies_to` for knowledge graphs.
 
 ## 📖 Essential Commands
 
-| Command | Action |
-| --- | --- |
-| `bd ready` | List tasks with no open blockers. |
-| `bd create "Title" -p 0` | Create a P0 task. |
-| `bd update <id> --claim` | Atomically claim a task (sets assignee + in_progress). |
-| `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child). |
-| `bd show <id>` | View task details and audit trail. |
+| Command                       | Action                                                 |
+| ----------------------------- | ------------------------------------------------------ |
+| `bd ready`                    | List tasks with no open blockers.                      |
+| `bd create "Title" -p 0`      | Create a P0 task.                                      |
+| `bd update <id> --claim`      | Atomically claim a task (sets assignee + in_progress). |
+| `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child).            |
+| `bd show <id>`                | View task details and audit trail.                     |
 
 ## 🔗 Hierarchy & Workflow
 
 Beads supports hierarchical IDs for epics:
 
-* `bd-a3f8` (Epic)
-* `bd-a3f8.1` (Task)
-* `bd-a3f8.1.1` (Sub-task)
+- `bd-a3f8` (Epic)
+- `bd-a3f8.1` (Task)
+- `bd-a3f8.1.1` (Sub-task)
 
 **Stealth Mode:** Run `bd init --stealth` to use Beads locally without committing files to the main repo. Perfect for personal use on shared projects. See [Git-Free Usage](#-git-free-usage) below.
 
 **Contributor vs Maintainer:** When working on open-source projects:
 
-* **Contributors** (forked repos): Run `bd init --contributor` to route planning issues to a separate repo (e.g., `~/.beads-planning`). Keeps experimental work out of PRs.
-* **Maintainers** (write access): Beads auto-detects maintainer role via SSH URLs or HTTPS with credentials. Only need `git config beads.role maintainer` if using GitHub HTTPS without credentials but you have write access.
+- **Contributors** (forked repos): Run `bd init --contributor` to route planning issues to a separate repo (e.g., `~/.beads-planning`). Keeps experimental work out of PRs.
+- **Maintainers** (write access): Beads auto-detects maintainer role via SSH URLs or HTTPS with credentials. Only need `git config beads.role maintainer` if using GitHub HTTPS without credentials but you have write access.
 
 ## 📦 Installation
 
-* **npm:** `npm install -g @beads/bd`
-* **Homebrew:** `brew install beads`
-* **Go:** `go install github.com/steveyegge/beads/cmd/bd@latest`
+- **npm:** `npm install -g @beads/bd`
+- **Homebrew:** `brew install beads`
+- **Go:** `go install github.com/steveyegge/beads/cmd/bd@latest`
 
 **Requirements:** Linux, FreeBSD, macOS, or Windows.
 
@@ -107,6 +107,7 @@ bypassing git repo discovery. `--stealth` sets `no-git-ops: true` in
 config, disabling all git hook installation and git operations.
 
 This is useful for:
+
 - **Non-git VCS** (Sapling, Jujutsu, Piper) — no `.git/` directory needed
 - **Monorepos** — point `BEADS_DIR` at a specific subdirectory
 - **CI/CD** — isolated task tracking without repo-level side effects
@@ -117,8 +118,8 @@ For daemon mode without git, use `bd daemon start --local`
 
 ## 📝 Documentation
 
-* [Installing](docs/INSTALLING.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot Setup](docs/COPILOT_INTEGRATION.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [Troubleshooting](docs/TROUBLESHOOTING.md) | [FAQ](docs/FAQ.md)
-* [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/steveyegge/beads)
+- [Installing](docs/INSTALLING.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot Setup](docs/COPILOT_INTEGRATION.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [Troubleshooting](docs/TROUBLESHOOTING.md) | [FAQ](docs/FAQ.md)
+- [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/steveyegge/beads)
 
 ## 🔌 Notion Sync via ncli
 
@@ -131,7 +132,7 @@ bd notion status
 bd notion sync
 ```
 
-Updating already-linked Notion issues works by default. Creating new Notion issues from local-only beads issues is opt-in via `notion.push_label`.
+By default, `bd notion sync` creates Notion pages for local beads issues and updates issues that already carry a Notion link.
 
 Database/view overrides are safe for `bd notion status` and push-only sync. Pull or bidirectional sync must use the saved `ncli beads` config so both directions target the same database.
 
