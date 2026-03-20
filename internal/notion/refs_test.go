@@ -92,3 +92,39 @@ func TestBuildNotionExternalRefPrefersURL(t *testing.T) {
 		t.Fatalf("got = %q, want %q", got, want)
 	}
 }
+
+func TestCanonicalizeNotionPageURL(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{
+			name: "url",
+			ref:  "https://www.notion.so/Test-0123456789abcdef0123456789abcdef",
+			want: "https://www.notion.so/0123456789abcdef0123456789abcdef",
+		},
+		{
+			name: "prefixed id",
+			ref:  "notion:01234567-89ab-cdef-0123-456789abcdef",
+			want: "https://www.notion.so/0123456789abcdef0123456789abcdef",
+		},
+		{
+			name: "bare id",
+			ref:  "01234567-89ab-cdef-0123-456789abcdef",
+			want: "https://www.notion.so/0123456789abcdef0123456789abcdef",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := CanonicalizeNotionPageURL(tt.ref)
+			if !ok {
+				t.Fatal("expected ok, got false")
+			}
+			if got != tt.want {
+				t.Fatalf("got = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

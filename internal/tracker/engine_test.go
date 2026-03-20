@@ -66,12 +66,40 @@ type mockTracker struct {
 	fieldMapper FieldMapper
 }
 
+type mockExternalRefTracker struct {
+	*mockTracker
+	buildRef func(*TrackerIssue) string
+	extract  func(string) string
+	isRef    func(string) bool
+}
+
 func newMockTracker(name string) *mockTracker {
 	return &mockTracker{
 		name:        name,
 		updated:     make(map[string]*types.Issue),
 		fieldMapper: &mockMapper{},
 	}
+}
+
+func (m *mockExternalRefTracker) IsExternalRef(ref string) bool {
+	if m.isRef != nil {
+		return m.isRef(ref)
+	}
+	return m.mockTracker.IsExternalRef(ref)
+}
+
+func (m *mockExternalRefTracker) ExtractIdentifier(ref string) string {
+	if m.extract != nil {
+		return m.extract(ref)
+	}
+	return m.mockTracker.ExtractIdentifier(ref)
+}
+
+func (m *mockExternalRefTracker) BuildExternalRef(issue *TrackerIssue) string {
+	if m.buildRef != nil {
+		return m.buildRef(issue)
+	}
+	return m.mockTracker.BuildExternalRef(issue)
 }
 
 func (m *mockTracker) Name() string                                    { return m.name }
@@ -279,6 +307,81 @@ func TestEnginePushCountsCreateErrors(t *testing.T) {
 	}
 	if len(tracker.created) != 0 {
 		t.Errorf("tracker.created = %d, want 0", len(tracker.created))
+	}
+}
+
+func TestEnginePullMatchesExistingIssueByExternalIdentifier(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	legacyRef := strPtr("notion:01234567-89ab-cdef-0123-456789abcdef")
+	issue := &types.Issue{
+		ID:          "bd-notion1",
+		Title:       "Existing issue",
+		Description: "old description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: legacyRef,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	base := newMockTracker("notion")
+	base.issues = []TrackerIssue{
+		{
+			ID:          "01234567-89ab-cdef-0123-456789abcdef",
+			Identifier:  "01234567-89ab-cdef-0123-456789abcdef",
+			URL:         "https://www.notion.so/0123456789abcdef0123456789abcdef",
+			Title:       "Existing issue updated",
+			Description: "new description",
+			UpdatedAt:   time.Now(),
+		},
+	}
+	tracker := &mockExternalRefTracker{
+		mockTracker: base,
+		buildRef: func(issue *TrackerIssue) string {
+			return issue.URL
+		},
+		extract: func(ref string) string {
+			ref = strings.TrimSpace(ref)
+			ref = strings.TrimPrefix(ref, "notion:")
+			if strings.HasPrefix(ref, "https://www.notion.so/") {
+				ref = strings.TrimPrefix(ref, "https://www.notion.so/")
+			}
+			return strings.ToLower(strings.ReplaceAll(ref, "-", ""))
+		},
+		isRef: func(ref string) bool {
+			return strings.HasPrefix(ref, "notion:") || strings.HasPrefix(ref, "https://www.notion.so/")
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 0 {
+		t.Errorf("Stats.Created = %d, want 0", result.Stats.Created)
+	}
+	if result.Stats.Updated != 1 {
+		t.Errorf("Stats.Updated = %d, want 1", result.Stats.Updated)
+	}
+
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues() error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("stored issues = %d, want 1", len(issues))
+	}
+	if issues[0].ExternalRef == nil || *issues[0].ExternalRef != "https://www.notion.so/0123456789abcdef0123456789abcdef" {
+		t.Fatalf("external_ref = %v, want canonical url", issues[0].ExternalRef)
+	}
+	if issues[0].Title != "Existing issue updated" {
+		t.Fatalf("title = %q, want updated title", issues[0].Title)
 	}
 }
 

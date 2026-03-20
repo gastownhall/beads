@@ -39,7 +39,7 @@ func TestBeadsIssueFromPullIssueRoundTrip(t *testing.T) {
 	if beadsIssue.IssueType != types.TypeFeature {
 		t.Fatalf("issue type = %q, want %q", beadsIssue.IssueType, types.TypeFeature)
 	}
-	if beadsIssue.ExternalRef == nil || !strings.HasPrefix(*beadsIssue.ExternalRef, "https://www.notion.so/") {
+	if beadsIssue.ExternalRef == nil || *beadsIssue.ExternalRef != "https://www.notion.so/0123456789abcdef0123456789abcdef" {
 		t.Fatalf("external ref = %v, want canonical notion url", beadsIssue.ExternalRef)
 	}
 

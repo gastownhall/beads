@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -276,6 +277,26 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 		}
 	}
 
+	localIssues, err := e.Store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("searching local issues: %w", err)
+	}
+	localByExternalIdentifier := make(map[string]*types.Issue, len(localIssues))
+	for _, localIssue := range localIssues {
+		if localIssue == nil || localIssue.ExternalRef == nil {
+			continue
+		}
+		localRef := strings.TrimSpace(*localIssue.ExternalRef)
+		if localRef == "" || !e.Tracker.IsExternalRef(localRef) {
+			continue
+		}
+		identifier := e.Tracker.ExtractIdentifier(localRef)
+		if identifier == "" {
+			continue
+		}
+		localByExternalIdentifier[identifier] = localIssue
+	}
+
 	// Fetch issues from external tracker
 	extIssues, err := e.Tracker.FetchIssues(ctx, fetchOpts)
 	if err != nil {
@@ -305,6 +326,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 		// Check if we already have this issue
 		ref := e.Tracker.BuildExternalRef(&extIssue)
 		existing, _ := e.Store.GetIssueByExternalRef(ctx, ref)
+		if existing == nil && ref != "" {
+			identifier := e.Tracker.ExtractIdentifier(ref)
+			if identifier != "" {
+				existing = localByExternalIdentifier[identifier]
+			}
+		}
 
 		conv := mapper.IssueToBeads(&extIssue)
 		if conv == nil || conv.Issue == nil {
@@ -343,6 +370,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 			updates["description"] = conv.Issue.Description
 			updates["priority"] = conv.Issue.Priority
 			updates["status"] = string(conv.Issue.Status)
+			if ref != "" {
+				if existing.ExternalRef == nil || strings.TrimSpace(*existing.ExternalRef) != ref {
+					updates["external_ref"] = ref
+				}
+			}
 
 			// Preserve metadata from tracker
 			if extIssue.Metadata != nil {

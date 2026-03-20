@@ -129,7 +129,7 @@ func TrackerIssueFromPullIssue(issue PulledIssue, config *MappingConfig) (*track
 	}
 
 	var url string
-	if canonical, ok := CanonicalizeNotionExternalRef(issue.ExternalRef); ok && strings.HasPrefix(canonical, "https://") {
+	if canonical, ok := CanonicalizeNotionPageURL(issue.ExternalRef); ok {
 		url = canonical
 	}
 	if url == "" {

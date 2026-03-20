@@ -50,6 +50,15 @@ func CanonicalizeNotionExternalRef(ref string) (string, bool) {
 	return fmt.Sprintf("https://www.notion.so/%s", compactNotionPageID(pageID)), true
 }
 
+// CanonicalizeNotionPageURL normalizes any supported Notion page reference to a canonical page URL.
+func CanonicalizeNotionPageURL(ref string) (string, bool) {
+	pageID := ExtractNotionIdentifier(ref)
+	if pageID == "" {
+		return "", false
+	}
+	return fmt.Sprintf("https://www.notion.so/%s", compactNotionPageID(pageID)), true
+}
+
 // ExtractNotionIdentifier returns the normalized hyphenated page id.
 func ExtractNotionIdentifier(ref string) string {
 	ref = strings.TrimSpace(ref)
@@ -77,11 +86,11 @@ func BuildNotionExternalRef(issue *PulledIssue) string {
 	if issue == nil {
 		return ""
 	}
-	if canonical, ok := CanonicalizeNotionExternalRef(issue.ExternalRef); ok && strings.HasPrefix(canonical, "https://") {
+	if canonical, ok := CanonicalizeNotionPageURL(issue.ExternalRef); ok {
 		return canonical
 	}
-	if normalized, ok := normalizeNotionPageID(issue.NotionPageID); ok {
-		return "notion:" + normalized
+	if canonical, ok := CanonicalizeNotionPageURL(issue.NotionPageID); ok {
+		return canonical
 	}
 	if canonical, ok := CanonicalizeNotionExternalRef(issue.ExternalRef); ok {
 		return canonical

@@ -295,16 +295,16 @@ func (t *Tracker) BuildExternalRef(issue *itracker.TrackerIssue) string {
 	if issue == nil {
 		return ""
 	}
-	if canonical, ok := CanonicalizeNotionExternalRef(issue.URL); ok && strings.HasPrefix(canonical, "https://") {
+	if canonical, ok := CanonicalizeNotionPageURL(issue.URL); ok {
 		return canonical
 	}
 	if issue.ID != "" {
-		if canonical, ok := CanonicalizeNotionExternalRef(issue.ID); ok {
+		if canonical, ok := CanonicalizeNotionPageURL(issue.ID); ok {
 			return canonical
 		}
 	}
 	if issue.Identifier != "" {
-		if canonical, ok := CanonicalizeNotionExternalRef(issue.Identifier); ok {
+		if canonical, ok := CanonicalizeNotionPageURL(issue.Identifier); ok {
 			return canonical
 		}
 	}

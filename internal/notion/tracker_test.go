@@ -299,7 +299,7 @@ func TestTrackerBuildExternalRefFallback(t *testing.T) {
 	got := tr.BuildExternalRef(&itracker.TrackerIssue{
 		ID: "01234567-89ab-cdef-0123-456789abcdef",
 	})
-	want := "notion:01234567-89ab-cdef-0123-456789abcdef"
+	want := "https://www.notion.so/0123456789abcdef0123456789abcdef"
 	if got != want {
 		t.Fatalf("got = %q, want %q", got, want)
 	}
