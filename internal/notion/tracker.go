@@ -79,6 +79,7 @@ type Tracker struct {
 	binaryPath string
 	databaseID string
 	viewURL    string
+	issueCache []itracker.TrackerIssue
 }
 
 // NewTracker constructs a Notion tracker.
@@ -143,6 +144,9 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
+	if t.canUseIssueCache(opts) && t.issueCache != nil {
+		return cloneTrackerIssues(t.issueCache), nil
+	}
 
 	resp, err := t.client.Pull(ctx, PullRequest{ViewURL: t.viewURL})
 	if err != nil {
@@ -162,6 +166,9 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 		if opts.Limit > 0 && len(result) >= opts.Limit {
 			break
 		}
+	}
+	if t.canUseIssueCache(opts) {
+		t.issueCache = cloneTrackerIssues(result)
 	}
 
 	return result, nil
@@ -214,6 +221,7 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*itracke
 		return nil, err
 	}
 	if created != nil && strings.TrimSpace(t.BuildExternalRef(created)) != "" {
+		t.upsertIssueCache(created)
 		return created, nil
 	}
 	return t.fetchCreatedIssue(ctx, issue.ID, created)
@@ -248,7 +256,12 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 		return nil, err
 	}
 
-	return t.issueFromPushResponse(resp, &clone, externalID)
+	updated, err := t.issueFromPushResponse(resp, &clone, externalID)
+	if err != nil {
+		return nil, err
+	}
+	t.upsertIssueCache(updated)
+	return updated, nil
 }
 
 func (t *Tracker) fetchCreatedIssue(ctx context.Context, issueID string, fallback *itracker.TrackerIssue) (*itracker.TrackerIssue, error) {
@@ -274,6 +287,7 @@ func (t *Tracker) fetchCreatedIssue(ctx context.Context, issueID string, fallbac
 	}
 
 	if fallback != nil {
+		t.upsertIssueCache(fallback)
 		return fallback, nil
 	}
 	return nil, nil
@@ -379,6 +393,66 @@ func summarizePushErrors(errors []PushResultError) string {
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func (t *Tracker) canUseIssueCache(opts itracker.FetchOptions) bool {
+	return opts.State == "all" && opts.Since == nil && opts.Limit == 0
+}
+
+func (t *Tracker) upsertIssueCache(issue *itracker.TrackerIssue) {
+	if issue == nil || t.issueCache == nil {
+		return
+	}
+	for i := range t.issueCache {
+		if sameTrackerIssue(t.issueCache[i], *issue) {
+			t.issueCache[i] = cloneTrackerIssue(*issue)
+			return
+		}
+	}
+	t.issueCache = append(t.issueCache, cloneTrackerIssue(*issue))
+}
+
+func sameTrackerIssue(left, right itracker.TrackerIssue) bool {
+	leftIDs := []string{
+		ExtractNotionIdentifier(left.ID),
+		ExtractNotionIdentifier(left.Identifier),
+		ExtractNotionIdentifier(left.URL),
+	}
+	rightIDs := []string{
+		ExtractNotionIdentifier(right.ID),
+		ExtractNotionIdentifier(right.Identifier),
+		ExtractNotionIdentifier(right.URL),
+	}
+	for _, leftID := range leftIDs {
+		if leftID == "" {
+			continue
+		}
+		for _, rightID := range rightIDs {
+			if rightID != "" && leftID == rightID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cloneTrackerIssues(issues []itracker.TrackerIssue) []itracker.TrackerIssue {
+	if issues == nil {
+		return nil
+	}
+	cloned := make([]itracker.TrackerIssue, len(issues))
+	for i := range issues {
+		cloned[i] = cloneTrackerIssue(issues[i])
+	}
+	return cloned
+}
+
+func cloneTrackerIssue(issue itracker.TrackerIssue) itracker.TrackerIssue {
+	cloned := issue
+	if issue.Labels != nil {
+		cloned.Labels = append([]string(nil), issue.Labels...)
+	}
+	return cloned
 }
 
 func matchesFetchOptions(issue *itracker.TrackerIssue, opts itracker.FetchOptions) bool {

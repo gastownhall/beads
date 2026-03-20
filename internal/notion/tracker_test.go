@@ -16,6 +16,7 @@ type fakeNotionClient struct {
 	statusResp *StatusResponse
 	pullReq    PullRequest
 	pushReq    PushRequest
+	pullCalls  int
 }
 
 func (f *fakeNotionClient) Status(_ context.Context, req StatusRequest) (*StatusResponse, error) {
@@ -24,6 +25,7 @@ func (f *fakeNotionClient) Status(_ context.Context, req StatusRequest) (*Status
 
 func (f *fakeNotionClient) Pull(_ context.Context, req PullRequest) (*PullResponse, error) {
 	f.pullReq = req
+	f.pullCalls++
 	return f.pullResp, nil
 }
 
@@ -302,5 +304,43 @@ func TestTrackerBuildExternalRefFallback(t *testing.T) {
 	want := "https://www.notion.so/0123456789abcdef0123456789abcdef"
 	if got != want {
 		t.Fatalf("got = %q, want %q", got, want)
+	}
+}
+
+func TestTrackerFetchIssueCachesFullPull(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeNotionClient{
+		pullResp: &PullResponse{
+			Issues: []PulledIssue{
+				{
+					ID:           "beads-1",
+					Title:        "One",
+					Description:  "Desc",
+					Status:       "open",
+					Priority:     "medium",
+					IssueType:    "task",
+					ExternalRef:  "https://www.notion.so/0123456789abcdef0123456789abcdef",
+					NotionPageID: "01234567-89ab-cdef-0123-456789abcdef",
+					CreatedAt:    "2026-03-19T14:00:00Z",
+					UpdatedAt:    "2026-03-19T14:05:00Z",
+				},
+			},
+		},
+	}
+	tr := NewTracker(WithTrackerClient(client))
+
+	for i := 0; i < 2; i++ {
+		issue, err := tr.FetchIssue(context.Background(), "01234567-89ab-cdef-0123-456789abcdef")
+		if err != nil {
+			t.Fatalf("FetchIssue returned error: %v", err)
+		}
+		if issue == nil {
+			t.Fatal("expected issue, got nil")
+		}
+	}
+
+	if client.pullCalls != 1 {
+		t.Fatalf("pullCalls = %d, want 1", client.pullCalls)
 	}
 }
