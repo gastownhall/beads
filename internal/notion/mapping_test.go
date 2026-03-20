@@ -59,6 +59,9 @@ func TestBeadsIssueFromPullIssueRoundTrip(t *testing.T) {
 	if payload.Issues[0].IssueType != "feature" {
 		t.Fatalf("issue type = %q, want feature", payload.Issues[0].IssueType)
 	}
+	if len(payload.Issues[0].Labels) != 0 {
+		t.Fatalf("labels = %v, want omitted for live MCP compatibility", payload.Issues[0].Labels)
+	}
 }
 
 func TestBeadsIssueFromPullIssueRejectsUnsupportedEnums(t *testing.T) {
