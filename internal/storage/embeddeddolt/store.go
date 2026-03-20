@@ -388,7 +388,13 @@ func (s *EmbeddedDoltStore) ResolveConflicts(ctx context.Context, table string, 
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) History(ctx context.Context, issueID string) ([]*storage.HistoryEntry, error) {
-	panic("embeddeddolt: History not implemented")
+	var result []*storage.HistoryEntry
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.HistoryInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
 }
 
 func (s *EmbeddedDoltStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
@@ -402,7 +408,13 @@ func (s *EmbeddedDoltStore) AsOf(ctx context.Context, issueID string, ref string
 }
 
 func (s *EmbeddedDoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]*storage.DiffEntry, error) {
-	panic("embeddeddolt: Diff not implemented")
+	var result []*storage.DiffEntry
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.DiffInTx(ctx, tx, fromRef, toRef)
+		return err
+	})
+	return result, err
 }
 
 // ---------------------------------------------------------------------------
@@ -643,5 +655,11 @@ func (s *EmbeddedDoltStore) GetMoleculeLastActivity(ctx context.Context, molecul
 }
 
 func (s *EmbeddedDoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error) {
-	panic("embeddeddolt: GetStaleIssues not implemented")
+	var result []*types.Issue
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetStaleIssuesInTx(ctx, tx, filter)
+		return err
+	})
+	return result, err
 }
