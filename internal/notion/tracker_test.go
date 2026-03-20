@@ -148,6 +148,60 @@ func TestTrackerCreateIssue(t *testing.T) {
 	}
 }
 
+func TestTrackerCreateIssueFallsBackToPullForExternalRef(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeNotionClient{
+		pushResp: &PushResponse{
+			Created: []PushResultItem{
+				{
+					ID:    "beads-1",
+					Title: "Create me",
+				},
+			},
+		},
+		pullResp: &PullResponse{
+			Issues: []PulledIssue{
+				{
+					ID:           "beads-1",
+					Title:        "Create me",
+					Description:  "Created through fallback",
+					Status:       "open",
+					Priority:     "medium",
+					IssueType:    "task",
+					ExternalRef:  "https://www.notion.so/0123456789abcdef0123456789abcdef",
+					NotionPageID: "01234567-89ab-cdef-0123-456789abcdef",
+					CreatedAt:    "2026-03-19T14:00:00Z",
+					UpdatedAt:    "2026-03-19T14:05:00Z",
+				},
+			},
+		},
+	}
+	tr := NewTracker(WithTrackerClient(client), WithTrackerViewURL("view://example"))
+
+	issue := &types.Issue{
+		ID:        "beads-1",
+		Title:     "Create me",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	created, err := tr.CreateIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("CreateIssue returned error: %v", err)
+	}
+	if created == nil {
+		t.Fatal("expected created issue, got nil")
+	}
+	if created.URL != "https://www.notion.so/0123456789abcdef0123456789abcdef" {
+		t.Fatalf("url = %q", created.URL)
+	}
+	if client.pullReq.ViewURL != "view://example" {
+		t.Fatalf("view url = %q", client.pullReq.ViewURL)
+	}
+}
+
 func TestTrackerUpdateIssue(t *testing.T) {
 	t.Parallel()
 

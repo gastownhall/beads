@@ -209,7 +209,14 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*itracke
 		return nil, err
 	}
 
-	return t.issueFromPushResponse(resp, issue, "")
+	created, err := t.issueFromPushResponse(resp, issue, "")
+	if err != nil {
+		return nil, err
+	}
+	if created != nil && strings.TrimSpace(t.BuildExternalRef(created)) != "" {
+		return created, nil
+	}
+	return t.fetchCreatedIssue(ctx, issue.ID, created)
 }
 
 func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *types.Issue) (*itracker.TrackerIssue, error) {
@@ -242,6 +249,34 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 	}
 
 	return t.issueFromPushResponse(resp, &clone, externalID)
+}
+
+func (t *Tracker) fetchCreatedIssue(ctx context.Context, issueID string, fallback *itracker.TrackerIssue) (*itracker.TrackerIssue, error) {
+	issues, err := t.FetchIssues(ctx, itracker.FetchOptions{State: "all"})
+	if err != nil {
+		if fallback != nil {
+			return fallback, nil
+		}
+		return nil, err
+	}
+
+	for i := range issues {
+		if issues[i].Raw == nil {
+			continue
+		}
+		pulled, ok := issues[i].Raw.(*PulledIssue)
+		if !ok || pulled == nil {
+			continue
+		}
+		if strings.TrimSpace(pulled.ID) == strings.TrimSpace(issueID) {
+			return &issues[i], nil
+		}
+	}
+
+	if fallback != nil {
+		return fallback, nil
+	}
+	return nil, nil
 }
 
 func (t *Tracker) FieldMapper() itracker.FieldMapper {
