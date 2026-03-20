@@ -103,3 +103,14 @@ func TestPushIssueFromIssueRejectsUnsupportedExternalRef(t *testing.T) {
 		t.Fatalf("error = %q, want unsupported notion external ref", err.Error())
 	}
 }
+
+func TestSupportsIssueType(t *testing.T) {
+	t.Parallel()
+
+	if !SupportsIssueType(types.TypeTask, nil) {
+		t.Fatal("task should be supported")
+	}
+	if SupportsIssueType(types.IssueType("event"), nil) {
+		t.Fatal("event should not be supported")
+	}
+}

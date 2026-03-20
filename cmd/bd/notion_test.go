@@ -304,6 +304,43 @@ func TestRenderNotionSyncResultUsesPullPhaseStats(t *testing.T) {
 	}
 }
 
+func TestRenderNotionSyncResultPrintsWarnings(t *testing.T) {
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+
+	renderNotionSyncResult(cmd, &itracker.SyncResult{
+		Warnings: []string{"Skipped unsupported Notion issue types: event=2"},
+	})
+
+	output := stdout.String()
+	if !strings.Contains(output, "Warnings:") {
+		t.Fatalf("output = %q", output)
+	}
+	if !strings.Contains(output, "event=2") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestBuildNotionPushHooksTracksUnsupportedTypes(t *testing.T) {
+	hooks, stats := buildNotionPushHooks()
+	if hooks == nil || hooks.ShouldPush == nil {
+		t.Fatal("expected push hooks")
+	}
+	if !hooks.ShouldPush(&types.Issue{IssueType: types.TypeTask}) {
+		t.Fatal("task should be pushed")
+	}
+	if hooks.ShouldPush(&types.Issue{IssueType: types.IssueType("event")}) {
+		t.Fatal("event should be skipped")
+	}
+	if hooks.ShouldPush(&types.Issue{IssueType: types.IssueType("event")}) {
+		t.Fatal("event should be skipped")
+	}
+	if got := stats.warningText(); !strings.Contains(got, "event=2") {
+		t.Fatalf("warning = %q", got)
+	}
+}
+
 func TestBuildNotionSyncOptions(t *testing.T) {
 
 	originalPull := notionSyncPull

@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
 	itracker "github.com/steveyegge/beads/internal/tracker"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 type notionStatusClient interface {
@@ -52,6 +54,52 @@ var newNotionSyncEngine = func(tr itracker.IssueTracker) notionSyncEngine {
 
 var ensureNotionStoreActive = ensureStoreActive
 var checkNotionReadonly = CheckReadonly
+
+type notionUnsupportedPushStats struct {
+	counts map[types.IssueType]int
+}
+
+func newNotionUnsupportedPushStats() *notionUnsupportedPushStats {
+	return &notionUnsupportedPushStats{counts: make(map[types.IssueType]int)}
+}
+
+func (s *notionUnsupportedPushStats) record(issueType types.IssueType) {
+	if s == nil || strings.TrimSpace(string(issueType)) == "" {
+		return
+	}
+	s.counts[issueType]++
+}
+
+func (s *notionUnsupportedPushStats) warningText() string {
+	if s == nil || len(s.counts) == 0 {
+		return ""
+	}
+	typesList := make([]string, 0, len(s.counts))
+	for issueType, count := range s.counts {
+		typesList = append(typesList, fmt.Sprintf("%s=%d", issueType, count))
+	}
+	sort.Strings(typesList)
+	return fmt.Sprintf(
+		"Skipped unsupported Notion issue types: %s (supported: bug, feature, task, epic, chore)",
+		strings.Join(typesList, ", "),
+	)
+}
+
+func buildNotionPushHooks() (*itracker.PushHooks, *notionUnsupportedPushStats) {
+	stats := newNotionUnsupportedPushStats()
+	return &itracker.PushHooks{
+		ShouldPush: func(issue *types.Issue) bool {
+			if issue == nil {
+				return false
+			}
+			if notion.SupportsIssueType(issue.IssueType, nil) {
+				return true
+			}
+			stats.record(issue.IssueType)
+			return false
+		},
+	}, stats
+}
 
 var notionCmd = &cobra.Command{
 	Use:     "notion",
@@ -158,7 +206,9 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	}
 
 	engine := newNotionSyncEngine(tr)
+	var unsupportedStats *notionUnsupportedPushStats
 	if concrete, ok := engine.(*itracker.Engine); ok {
+		concrete.PushHooks, unsupportedStats = buildNotionPushHooks()
 		if jsonOutput {
 			concrete.OnMessage = func(msg string) { fmt.Fprintln(cmd.ErrOrStderr(), "  "+msg) }
 		} else {
@@ -170,6 +220,9 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	result, err := engine.Sync(cmd.Context(), opts)
 	if err != nil {
 		return err
+	}
+	if warning := unsupportedStats.warningText(); warning != "" {
+		result.Warnings = append(result.Warnings, warning)
 	}
 	if jsonOutput {
 		outputJSON(result)
