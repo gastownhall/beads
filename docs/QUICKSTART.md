@@ -268,18 +268,25 @@ See [README.md](../README.md) for full documentation.
 
 ## Notion Sync Quickstart
 
-The `bd notion` commands use the local `ncli beads` workflow. They do not configure Notion for you.
+The `bd notion` commands use the local `bdnotion beads` workflow. They keep the existing beads-side sync contract, but do not configure Notion for you automatically.
 
 ### Before You Run `bd notion`
 
 ```bash
-# One-time setup in ncli
-ncli beads init --parent <page-id>
-ncli beads config show
-ncli beads status
+# One-time authentication
+bdnotion login
+
+# Create a dedicated Beads database
+bdnotion beads init --parent <page-id>
+
+# Or point bdnotion at an existing Beads database/view
+bdnotion beads config set --database-id <database-id> --view-url <view-url>
+
+# Confirm the saved bridge configuration is ready
+bdnotion beads status
 ```
 
-You should only continue once `ncli beads status` reports `ready: true`.
+You should only continue once `bdnotion beads status` reports `ready: true`.
 
 ### Minimal bd Flow
 
@@ -291,24 +298,25 @@ bd notion sync
 
 By default, `bd notion sync` creates Notion pages for local beads issues and updates issues that already have a Notion `external_ref`.
 
-### Override ncli Inputs
+### Override Bridge Inputs
 
-If you do not want to rely on the saved `ncli` config, pass the inputs explicitly for status checks and push-only sync:
+If you do not want to rely on the saved `bdnotion` config, pass the inputs explicitly for status checks and push-only sync.
+The flag name stays `--ncli-bin` for compatibility, but it should point to the `bdnotion` binary:
 
 ```bash
-bd notion status --ncli-bin /path/to/ncli --database-id <database-id> --view-url <view-url>
-bd notion sync --push --dry-run --database-id <database-id> --view-url <view-url>
+bd notion status --ncli-bin /path/to/bdnotion --database-id <database-id> --view-url <view-url>
+bd notion sync --push --dry-run --ncli-bin /path/to/bdnotion --database-id <database-id> --view-url <view-url>
 ```
 
-Pull and bidirectional sync always read the saved `ncli beads` config. If you need a different target database for pull, update the saved `ncli` config first and then run `bd notion sync` without overrides.
+Pull and bidirectional sync always read the saved `bdnotion beads` config. If you need a different target database for pull, update the saved `bdnotion` config first and then run `bd notion sync` without overrides.
 
 ### If Something Looks Wrong
 
-Check the lower-level `ncli` diagnostics first:
+Check the lower-level `bdnotion` diagnostics first:
 
 ```bash
-ncli beads status
-ncli beads state doctor
+bdnotion beads status
+bdnotion beads state doctor
 ```
 
 ### Acceptance Smoke
@@ -316,7 +324,7 @@ ncli beads state doctor
 Use this exact sequence for a reproducible smoke test:
 
 ```bash
-ncli beads status
+bdnotion beads status
 bd notion status
 bd notion sync --dry-run
 bd notion sync
@@ -325,7 +333,7 @@ bd notion status
 
 Expected result:
 
-- `ncli beads status` returns `ready: true`
+- `bdnotion beads status` returns `ready: true`
 - `bd notion status` shows the selected database and archive support visibility
 - `bd notion sync --dry-run` completes without mutating data
 - `bd notion sync` completes through the shared tracker engine
