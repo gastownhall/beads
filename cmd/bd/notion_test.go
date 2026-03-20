@@ -292,6 +292,7 @@ func TestShouldPushNotionIssueRequiresOptInForUnlinkedIssues(t *testing.T) {
 		name       string
 		issue      *types.Issue
 		pushPrefix string
+		pushLabel  string
 		want       bool
 	}{
 		{
@@ -311,26 +312,66 @@ func TestShouldPushNotionIssueRequiresOptInForUnlinkedIssues(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "unlinked issue needs configured prefix",
+			name: "unlinked issue needs configured label",
 			issue: &types.Issue{
 				ID: "beads-1",
 			},
 			want: false,
 		},
 		{
-			name: "configured prefix opts issue in",
+			name: "prefix alone does not opt issue in",
 			issue: &types.Issue{
 				ID: "beads-1",
 			},
 			pushPrefix: "beads",
+			want:       false,
+		},
+		{
+			name: "configured label opts issue in",
+			issue: &types.Issue{
+				ID:     "beads-1",
+				Labels: []string{"notion-sync"},
+			},
+			pushLabel: "notion-sync",
+			want:      true,
+		},
+		{
+			name: "configured label is case-insensitive",
+			issue: &types.Issue{
+				ID:     "beads-1",
+				Labels: []string{"Notion-Sync"},
+			},
+			pushLabel: "notion-sync",
+			want:      true,
+		},
+		{
+			name: "label plus matching prefix allows issue",
+			issue: &types.Issue{
+				ID:     "beads-1",
+				Labels: []string{"notion-sync"},
+			},
+			pushPrefix: "beads",
+			pushLabel:  "notion-sync",
 			want:       true,
+		},
+		{
+			name: "label plus wrong prefix rejects issue",
+			issue: &types.Issue{
+				ID:     "beads-1",
+				Labels: []string{"notion-sync"},
+			},
+			pushPrefix: "proj",
+			pushLabel:  "notion-sync",
+			want:       false,
 		},
 		{
 			name: "different prefix stays out",
 			issue: &types.Issue{
-				ID: "beads-1",
+				ID:     "beads-1",
+				Labels: []string{"notion-sync"},
 			},
 			pushPrefix: "proj",
+			pushLabel:  "notion-sync",
 			want:       false,
 		},
 	}
@@ -338,7 +379,7 @@ func TestShouldPushNotionIssueRequiresOptInForUnlinkedIssues(t *testing.T) {
 	tracker := notion.NewTracker()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldPushNotionIssue(tt.issue, tracker, tt.pushPrefix)
+			got := shouldPushNotionIssue(tt.issue, tracker, tt.pushPrefix, tt.pushLabel)
 			if got != tt.want {
 				t.Fatalf("shouldPushNotionIssue() = %v, want %v", got, tt.want)
 			}

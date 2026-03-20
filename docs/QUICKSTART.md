@@ -282,7 +282,13 @@ bd notion sync --dry-run
 bd notion sync
 ```
 
-By default, `bd notion sync` only updates issues that already have a Notion `external_ref`. If you want local-only beads issues to be created in Notion, opt in with:
+By default, `bd notion sync` only updates issues that already have a Notion `external_ref`. If you want local-only beads issues to be created in Notion, opt in with a label:
+
+```bash
+bd config set notion.push_label "notion-sync"
+```
+
+You can add `notion.push_prefix` as an extra narrowing filter, but it no longer enables export by itself:
 
 ```bash
 bd config set notion.push_prefix "beads"

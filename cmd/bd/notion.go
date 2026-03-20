@@ -86,6 +86,8 @@ var notionSyncCmd = &cobra.Command{
 		"  --pull         Import issues from Notion into beads\n" +
 		"  --push         Export issues from beads to Notion\n" +
 		"  (no flags)     Bidirectional sync: pull then push, with conflict resolution\n\n" +
+		"Existing issues that already have a Notion external_ref can always be updated.\n" +
+		"Creating new Notion issues from local-only beads issues is opt-in through notion.push_label, with notion.push_prefix available as an extra narrowing filter.\n\n" +
 		"Archive and delete operations are not supported yet. If you need archive semantics, keep using the ncli dry-run flow until live MCP exposes archive support.",
 	RunE: runNotionSync,
 }
@@ -210,12 +212,13 @@ func buildNotionPushHooks(ctx context.Context, tr itracker.IssueTracker) *itrack
 	return &itracker.PushHooks{
 		ShouldPush: func(issue *types.Issue) bool {
 			pushPrefix, _ := store.GetConfig(ctx, "notion.push_prefix")
-			return shouldPushNotionIssue(issue, tr, pushPrefix)
+			pushLabel, _ := store.GetConfig(ctx, "notion.push_label")
+			return shouldPushNotionIssue(issue, tr, pushPrefix, pushLabel)
 		},
 	}
 }
 
-func shouldPushNotionIssue(issue *types.Issue, tr itracker.IssueTracker, pushPrefix string) bool {
+func shouldPushNotionIssue(issue *types.Issue, tr itracker.IssueTracker, pushPrefix, pushLabel string) bool {
 	if issue == nil || tr == nil {
 		return false
 	}
@@ -224,14 +227,44 @@ func shouldPushNotionIssue(issue *types.Issue, tr itracker.IssueTracker, pushPre
 		return tr.IsExternalRef(*issue.ExternalRef)
 	}
 
-	if strings.TrimSpace(pushPrefix) == "" {
+	if !matchesNotionPushLabel(issue, pushLabel) {
 		return false
+	}
+
+	if strings.TrimSpace(pushPrefix) == "" {
+		return true
 	}
 
 	for _, prefix := range strings.Split(pushPrefix, ",") {
 		prefix = strings.TrimSpace(prefix)
 		prefix = strings.TrimSuffix(prefix, "-")
 		if prefix != "" && strings.HasPrefix(issue.ID, prefix+"-") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func matchesNotionPushLabel(issue *types.Issue, pushLabel string) bool {
+	if issue == nil || strings.TrimSpace(pushLabel) == "" {
+		return false
+	}
+
+	configured := make(map[string]struct{})
+	for _, raw := range strings.Split(pushLabel, ",") {
+		label := strings.ToLower(strings.TrimSpace(raw))
+		if label != "" {
+			configured[label] = struct{}{}
+		}
+	}
+	if len(configured) == 0 {
+		return false
+	}
+
+	for _, raw := range issue.Labels {
+		label := strings.ToLower(strings.TrimSpace(raw))
+		if _, ok := configured[label]; ok {
 			return true
 		}
 	}
