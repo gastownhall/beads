@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	itracker "github.com/steveyegge/beads/internal/tracker"
@@ -73,6 +74,15 @@ func WithTrackerViewURL(viewURL string) TrackerOption {
 	}
 }
 
+// WithTrackerCacheMaxAge configures bounded-cache mode duration for pull/push bridge calls.
+func WithTrackerCacheMaxAge(cacheMaxAge time.Duration) TrackerOption {
+	return func(t *Tracker) {
+		if cacheMaxAge > 0 {
+			t.cacheMaxAge = cacheMaxAge
+		}
+	}
+}
+
 // Tracker implements itracker.IssueTracker for Notion via ncli beads commands.
 type Tracker struct {
 	client             notionClient
@@ -84,6 +94,7 @@ type Tracker struct {
 	databaseIDExplicit bool
 	viewURL            string
 	viewURLExplicit    bool
+	cacheMaxAge        time.Duration
 	issueCache         []itracker.TrackerIssue
 	pullSnapshots      map[string]PulledIssue
 }
@@ -143,7 +154,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 		return cloneTrackerIssues(t.issueCache), nil
 	}
 
-	resp, err := t.client.Pull(ctx, PullRequest{})
+	resp, err := t.client.Pull(ctx, PullRequest{CacheMaxAge: t.cacheMaxAge})
 	if err != nil {
 		return nil, err
 	}
@@ -209,9 +220,10 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*itracke
 	}
 
 	resp, err := t.client.Push(ctx, PushRequest{
-		DatabaseID: t.databaseID,
-		ViewURL:    t.viewURL,
-		Payload:    body,
+		DatabaseID:  t.databaseID,
+		ViewURL:     t.viewURL,
+		Payload:     body,
+		CacheMaxAge: t.cacheMaxAge,
 	})
 	if err != nil {
 		return nil, err
@@ -249,9 +261,10 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 	}
 
 	resp, err := t.client.Push(ctx, PushRequest{
-		DatabaseID: t.databaseID,
-		ViewURL:    t.viewURL,
-		Payload:    body,
+		DatabaseID:  t.databaseID,
+		ViewURL:     t.viewURL,
+		Payload:     body,
+		CacheMaxAge: t.cacheMaxAge,
 	})
 	if err != nil {
 		return nil, err
@@ -280,9 +293,10 @@ func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue) (*itrack
 	}
 
 	resp, err := t.client.Push(ctx, PushRequest{
-		DatabaseID: t.databaseID,
-		ViewURL:    t.viewURL,
-		Payload:    body,
+		DatabaseID:  t.databaseID,
+		ViewURL:     t.viewURL,
+		Payload:     body,
+		CacheMaxAge: t.cacheMaxAge,
 	})
 	if err != nil {
 		return nil, err

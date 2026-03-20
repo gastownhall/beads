@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // DefaultBinaryPath is the default executable used for Notion bridge operations.
@@ -37,17 +38,24 @@ func (r StatusRequest) args() []string {
 //
 // The current bridge CLI does not accept override flags for pull; it always reads
 // the saved beads config and local managed-page manifest.
-type PullRequest struct{}
+type PullRequest struct {
+	CacheMaxAge time.Duration
+}
 
 func (r PullRequest) args() []string {
-	return []string{"--json"}
+	args := []string{"--json"}
+	if r.CacheMaxAge > 0 {
+		args = append(args, "--cache-max-age", r.CacheMaxAge.String())
+	}
+	return args
 }
 
 // PushRequest describes the inputs for `bdnotion beads push`.
 type PushRequest struct {
-	DatabaseID string
-	ViewURL    string
-	Payload    []byte
+	DatabaseID  string
+	ViewURL     string
+	Payload     []byte
+	CacheMaxAge time.Duration
 }
 
 func (r PushRequest) args() []string {
@@ -57,6 +65,9 @@ func (r PushRequest) args() []string {
 	}
 	if strings.TrimSpace(r.ViewURL) != "" {
 		args = append(args, "--view-url", r.ViewURL)
+	}
+	if r.CacheMaxAge > 0 {
+		args = append(args, "--cache-max-age", r.CacheMaxAge.String())
 	}
 	return args
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
@@ -31,6 +32,7 @@ var (
 	notionPreferNotion bool
 	notionCreateOnly   bool
 	notionSyncState    string
+	notionCacheMaxAge  time.Duration
 )
 
 var newNotionStatusClient = func(binaryPath string) notionStatusClient {
@@ -45,6 +47,7 @@ var newNotionTracker = func() itracker.IssueTracker {
 		notion.WithTrackerBinaryPath(notionNCLIBin),
 		notion.WithTrackerDatabaseID(notionDatabaseID),
 		notion.WithTrackerViewURL(notionViewURL),
+		notion.WithTrackerCacheMaxAge(notionCacheMaxAge),
 	)
 }
 
@@ -163,6 +166,7 @@ func init() {
 	notionSyncCmd.Flags().BoolVar(&notionPreferNotion, "prefer-notion", false, "Prefer Notion version on conflicts")
 	notionSyncCmd.Flags().BoolVar(&notionCreateOnly, "create-only", false, "Only create new issues, do not update existing ones")
 	notionSyncCmd.Flags().StringVar(&notionSyncState, "state", "all", "Issue state to sync: open, closed, all")
+	notionSyncCmd.Flags().DurationVar(&notionCacheMaxAge, "cache-max-age", 0, "Reuse cached Notion snapshots younger than this duration during pull/push")
 
 	notionCmd.AddCommand(notionStatusCmd)
 	notionCmd.AddCommand(notionSyncCmd)

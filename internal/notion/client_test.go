@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeRunner struct {
@@ -142,6 +143,20 @@ func TestPullValidJSON(t *testing.T) {
 	}
 }
 
+func TestPullIncludesCacheMaxAgeFlag(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{stdout: []byte(`{"issues":[]}`)}
+	client := NewClient(WithRunner(runner))
+	if _, err := client.Pull(context.Background(), PullRequest{CacheMaxAge: 5 * time.Minute}); err != nil {
+		t.Fatalf("Pull returned error: %v", err)
+	}
+	wantArgs := []string{"beads", "pull", "--json", "--cache-max-age", "5m0s"}
+	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
+		t.Fatalf("args = %v, want %v", runner.args, wantArgs)
+	}
+}
+
 func TestPushValidJSONAndStdin(t *testing.T) {
 	t.Parallel()
 
@@ -190,5 +205,25 @@ func TestPushRequiresPayload(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "payload is required") {
 		t.Fatalf("error = %q, want payload is required", err.Error())
+	}
+}
+
+func TestPushIncludesCacheMaxAgeFlag(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{
+		stdout: []byte(`{"dry_run":true,"input_count":0,"created_count":0,"updated_count":0,"skipped_count":0}`),
+	}
+	client := NewClient(WithRunner(runner))
+	_, err := client.Push(context.Background(), PushRequest{
+		Payload:     []byte(`{"issues":[]}`),
+		CacheMaxAge: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("Push returned error: %v", err)
+	}
+	wantArgs := []string{"beads", "push", "--json", "--input", "-", "--cache-max-age", "5m0s"}
+	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
+		t.Fatalf("args = %v, want %v", runner.args, wantArgs)
 	}
 }

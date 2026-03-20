@@ -72,6 +72,21 @@ func TestTrackerFetchIssues(t *testing.T) {
 	}
 }
 
+func TestTrackerFetchIssuesPropagatesCacheMaxAge(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeNotionClient{
+		pullResp: &PullResponse{Issues: []PulledIssue{}},
+	}
+	tr := NewTracker(WithTrackerClient(client), WithTrackerCacheMaxAge(5*time.Minute))
+	if _, err := tr.FetchIssues(context.Background(), itracker.FetchOptions{State: "all"}); err != nil {
+		t.Fatalf("FetchIssues returned error: %v", err)
+	}
+	if client.pullReq.CacheMaxAge != 5*time.Minute {
+		t.Fatalf("cache max age = %v, want 5m", client.pullReq.CacheMaxAge)
+	}
+}
+
 func TestTrackerFetchIssue(t *testing.T) {
 	t.Parallel()
 
@@ -395,6 +410,24 @@ func TestTrackerBatchPushIncludesExistingIssuesFromPullSnapshot(t *testing.T) {
 	}
 	if payload.ExistingIssues[0].ExternalRef != "https://www.notion.so/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("external ref = %q", payload.ExistingIssues[0].ExternalRef)
+	}
+}
+
+func TestTrackerBatchPushPropagatesCacheMaxAge(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeNotionClient{
+		pushResp: &PushResponse{Skipped: []PushResultItem{{ID: "beads-2"}}},
+	}
+	tr := NewTracker(WithTrackerClient(client), WithTrackerCacheMaxAge(5*time.Minute))
+	issues := []*types.Issue{
+		{ID: "beads-2", Title: "Update me", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeFeature},
+	}
+	if _, err := tr.BatchPush(context.Background(), issues); err != nil {
+		t.Fatalf("BatchPush returned error: %v", err)
+	}
+	if client.pushReq.CacheMaxAge != 5*time.Minute {
+		t.Fatalf("cache max age = %v, want 5m", client.pushReq.CacheMaxAge)
 	}
 }
 

@@ -78,6 +78,12 @@ func TestNotionStatusFlagsRegistered(t *testing.T) {
 	}
 }
 
+func TestNotionSyncFlagsRegistered(t *testing.T) {
+	if notionSyncCmd.Flags().Lookup("cache-max-age") == nil {
+		t.Fatal("missing --cache-max-age")
+	}
+}
+
 func TestNotionHelpTextMentionsBDNotionAndLegacyFlag(t *testing.T) {
 	t.Parallel()
 
