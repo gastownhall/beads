@@ -258,6 +258,30 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 	return updated, nil
 }
 
+func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue) (*itracker.BatchPushResult, error) {
+	if err := t.Validate(); err != nil {
+		return nil, err
+	}
+	payload, err := PushPayloadFromIssues(issues, t.config)
+	if err != nil {
+		return nil, err
+	}
+	body, err := MarshalPushPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := t.client.Push(ctx, PushRequest{
+		DatabaseID: t.databaseID,
+		ViewURL:    t.viewURL,
+		Payload:    body,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return t.batchPushResult(resp), nil
+}
+
 func (t *Tracker) fetchCreatedIssue(ctx context.Context, issueID string, fallback *itracker.TrackerIssue) (*itracker.TrackerIssue, error) {
 	issues, err := t.FetchIssues(ctx, itracker.FetchOptions{State: "all"})
 	if err != nil {
@@ -387,6 +411,50 @@ func summarizePushErrors(errors []PushResultError) string {
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func (t *Tracker) batchPushResult(resp *PushResponse) *itracker.BatchPushResult {
+	result := &itracker.BatchPushResult{}
+	if resp == nil {
+		result.Errors = append(result.Errors, itracker.BatchPushError{Message: "push response is nil"})
+		return result
+	}
+	for _, item := range resp.Created {
+		result.Created = append(result.Created, itracker.BatchPushItem{
+			LocalID:     strings.TrimSpace(item.ID),
+			ExternalRef: firstNonEmpty(strings.TrimSpace(item.ExternalRef), canonicalPushExternalRef(item.NotionPageID)),
+		})
+	}
+	for _, item := range resp.Updated {
+		result.Updated = append(result.Updated, itracker.BatchPushItem{
+			LocalID:     strings.TrimSpace(item.ID),
+			ExternalRef: firstNonEmpty(strings.TrimSpace(item.ExternalRef), canonicalPushExternalRef(item.NotionPageID)),
+		})
+	}
+	for _, item := range resp.Skipped {
+		if id := strings.TrimSpace(item.ID); id != "" {
+			result.Skipped = append(result.Skipped, id)
+		}
+	}
+	for _, item := range resp.Errors {
+		result.Errors = append(result.Errors, itracker.BatchPushError{
+			LocalID: strings.TrimSpace(item.ID),
+			Message: strings.TrimSpace(firstNonEmpty(item.Stage+": "+item.Message, item.Message, item.Stage)),
+		})
+	}
+	return result
+}
+
+func canonicalPushExternalRef(pageID string) string {
+	pageID = strings.TrimSpace(pageID)
+	if pageID == "" {
+		return ""
+	}
+	canonical, ok := CanonicalizeNotionPageURL(pageID)
+	if !ok {
+		return ""
+	}
+	return canonical
 }
 
 func (t *Tracker) canUseIssueCache(opts itracker.FetchOptions) bool {

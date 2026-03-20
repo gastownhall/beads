@@ -157,12 +157,21 @@ func TrackerIssueFromPullIssue(issue PulledIssue, config *MappingConfig) (*track
 
 // PushPayloadFromIssue converts a beads issue into the ncli push payload shape.
 func PushPayloadFromIssue(issue *types.Issue, config *MappingConfig) (*PushPayload, error) {
-	pushIssue, err := PushIssueFromIssue(issue, config)
-	if err != nil {
-		return nil, err
+	return PushPayloadFromIssues([]*types.Issue{issue}, config)
+}
+
+// PushPayloadFromIssues converts multiple beads issues into the ncli push payload shape.
+func PushPayloadFromIssues(issues []*types.Issue, config *MappingConfig) (*PushPayload, error) {
+	pushIssues := make([]PushIssue, 0, len(issues))
+	for _, issue := range issues {
+		pushIssue, err := PushIssueFromIssue(issue, config)
+		if err != nil {
+			return nil, err
+		}
+		pushIssues = append(pushIssues, *pushIssue)
 	}
 	return &PushPayload{
-		Issues: []PushIssue{*pushIssue},
+		Issues: pushIssues,
 	}, nil
 }
 

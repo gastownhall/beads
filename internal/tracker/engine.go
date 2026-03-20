@@ -455,6 +455,33 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		return nil, fmt.Errorf("searching local issues: %w", err)
 	}
 
+	if !opts.DryRun {
+		if batchTracker, ok := e.Tracker.(BatchPushTracker); ok {
+			pushIssues, skipped := e.collectBatchPushIssues(issues, opts, skipIDs, forceIDs)
+			stats.Skipped += skipped
+			if len(pushIssues) == 0 {
+				return stats, nil
+			}
+			batchResult, err := batchTracker.BatchPush(ctx, pushIssues)
+			if err != nil {
+				return nil, fmt.Errorf("batch pushing issues: %w", err)
+			}
+			e.applyBatchPushResult(ctx, batchResult)
+			stats.Created += len(batchResult.Created)
+			stats.Updated += len(batchResult.Updated)
+			stats.Skipped += len(batchResult.Skipped)
+			stats.Errors += len(batchResult.Errors)
+			for _, item := range batchResult.Errors {
+				if item.LocalID != "" {
+					e.warn("Failed to push %s in %s: %s", item.LocalID, e.Tracker.DisplayName(), item.Message)
+					continue
+				}
+				e.warn("Failed to push issues in %s: %s", e.Tracker.DisplayName(), item.Message)
+			}
+			return stats, nil
+		}
+	}
+
 	for _, issue := range issues {
 		// Skip filtered types/states/ephemeral
 		if !e.shouldPushIssue(issue, opts) {
@@ -557,6 +584,58 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		attribute.Int("sync.errors", stats.Errors),
 	)
 	return stats, nil
+}
+
+func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions, skipIDs, forceIDs map[string]bool) ([]*types.Issue, int) {
+	pushIssues := make([]*types.Issue, 0, len(issues))
+	skipped := 0
+	for _, issue := range issues {
+		if !e.shouldPushIssue(issue, opts) {
+			skipped++
+			continue
+		}
+		if e.PushHooks != nil && e.PushHooks.ShouldPush != nil && !e.PushHooks.ShouldPush(issue) {
+			skipped++
+			continue
+		}
+		if skipIDs[issue.ID] {
+			skipped++
+			continue
+		}
+
+		extRef := derefStr(issue.ExternalRef)
+		willCreate := extRef == "" || !e.Tracker.IsExternalRef(extRef)
+		if !willCreate && opts.CreateOnly && !forceIDs[issue.ID] {
+			skipped++
+			continue
+		}
+		pushIssues = append(pushIssues, e.formatPushIssue(issue))
+	}
+	return pushIssues, skipped
+}
+
+func (e *Engine) formatPushIssue(issue *types.Issue) *types.Issue {
+	if e.PushHooks == nil || e.PushHooks.FormatDescription == nil {
+		return issue
+	}
+	copy := *issue
+	copy.Description = e.PushHooks.FormatDescription(issue)
+	return &copy
+}
+
+func (e *Engine) applyBatchPushResult(ctx context.Context, result *BatchPushResult) {
+	if result == nil {
+		return
+	}
+	for _, item := range result.Created {
+		if item.LocalID == "" || strings.TrimSpace(item.ExternalRef) == "" {
+			continue
+		}
+		updates := map[string]interface{}{"external_ref": strings.TrimSpace(item.ExternalRef)}
+		if err := e.Store.UpdateIssue(ctx, item.LocalID, updates, e.Actor); err != nil {
+			e.warn("Failed to update external_ref for %s: %v", item.LocalID, err)
+		}
+	}
 }
 
 // resolveConflicts applies the configured conflict resolution strategy.

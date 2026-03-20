@@ -125,6 +125,26 @@ type PushStats struct {
 	Errors  int
 }
 
+// BatchPushItem describes one local issue handled by a tracker batch push.
+type BatchPushItem struct {
+	LocalID     string
+	ExternalRef string
+}
+
+// BatchPushError describes one issue-level failure from a tracker batch push.
+type BatchPushError struct {
+	LocalID string
+	Message string
+}
+
+// BatchPushResult is the normalized result of a tracker batch push.
+type BatchPushResult struct {
+	Created []BatchPushItem
+	Updated []BatchPushItem
+	Skipped []string
+	Errors  []BatchPushError
+}
+
 // Conflict represents a bidirectional modification conflict.
 type Conflict struct {
 	IssueID            string    // Beads issue ID

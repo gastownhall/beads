@@ -17,6 +17,7 @@ type fakeNotionClient struct {
 	pullReq    PullRequest
 	pushReq    PushRequest
 	pullCalls  int
+	pushCalls  int
 }
 
 func (f *fakeNotionClient) Status(_ context.Context, req StatusRequest) (*StatusResponse, error) {
@@ -31,6 +32,7 @@ func (f *fakeNotionClient) Pull(_ context.Context, req PullRequest) (*PullRespon
 
 func (f *fakeNotionClient) Push(_ context.Context, req PushRequest) (*PushResponse, error) {
 	f.pushReq = req
+	f.pushCalls++
 	return f.pushResp, nil
 }
 
@@ -285,6 +287,59 @@ func TestTrackerUpdateIssueReturnsErrorWithoutResultItem(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "did not include a created or updated result") {
 		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestTrackerBatchPushBuildsSinglePayloadAndNormalizesResponse(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeNotionClient{
+		pushResp: &PushResponse{
+			Created: []PushResultItem{
+				{ID: "beads-1", NotionPageID: "01234567-89ab-cdef-0123-456789abcdef"},
+			},
+			Updated: []PushResultItem{
+				{ID: "beads-2", ExternalRef: "https://www.notion.so/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			},
+			Skipped: []PushResultItem{
+				{ID: "beads-3"},
+			},
+			Errors: []PushResultError{
+				{ID: "beads-4", Stage: "state_fetch", Message: "missing page"},
+			},
+		},
+	}
+	tr := NewTracker(WithTrackerClient(client), WithTrackerDatabaseID("db_123"), WithTrackerViewURL("view://example"))
+
+	issues := []*types.Issue{
+		{ID: "beads-1", Title: "Create me", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "beads-2", Title: "Update me", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeFeature},
+	}
+
+	result, err := tr.BatchPush(context.Background(), issues)
+	if err != nil {
+		t.Fatalf("BatchPush returned error: %v", err)
+	}
+	if client.pushCalls != 1 {
+		t.Fatalf("pushCalls = %d, want 1", client.pushCalls)
+	}
+	if len(result.Created) != 1 || result.Created[0].LocalID != "beads-1" {
+		t.Fatalf("created = %#v", result.Created)
+	}
+	if result.Created[0].ExternalRef != "https://www.notion.so/0123456789abcdef0123456789abcdef" {
+		t.Fatalf("created external_ref = %q", result.Created[0].ExternalRef)
+	}
+	if len(result.Updated) != 1 || result.Updated[0].LocalID != "beads-2" {
+		t.Fatalf("updated = %#v", result.Updated)
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "beads-3" {
+		t.Fatalf("skipped = %#v", result.Skipped)
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Message, "missing page") {
+		t.Fatalf("errors = %#v", result.Errors)
+	}
+	if !strings.Contains(string(client.pushReq.Payload), "\"issues\"") {
+		t.Fatalf("payload = %s", client.pushReq.Payload)
 	}
 }
 

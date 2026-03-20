@@ -73,6 +73,14 @@ type mockExternalRefTracker struct {
 	isRef    func(string) bool
 }
 
+type mockBatchTracker struct {
+	*mockTracker
+	batchResult *BatchPushResult
+	batchErr    error
+	batchCalls  int
+	batchIssues []*types.Issue
+}
+
 func newMockTracker(name string) *mockTracker {
 	return &mockTracker{
 		name:        name,
@@ -163,6 +171,18 @@ func (m *mockTracker) UpdateIssue(_ context.Context, externalID string, issue *t
 		Identifier: externalID,
 		Title:      issue.Title,
 	}, nil
+}
+
+func (m *mockBatchTracker) BatchPush(_ context.Context, issues []*types.Issue) (*BatchPushResult, error) {
+	if m.batchErr != nil {
+		return nil, m.batchErr
+	}
+	m.batchCalls++
+	m.batchIssues = append(m.batchIssues, issues...)
+	if m.batchResult != nil {
+		return m.batchResult, nil
+	}
+	return &BatchPushResult{}, nil
 }
 
 // mockMapper implements FieldMapper for testing.
@@ -276,6 +296,53 @@ func TestEnginePushOnly(t *testing.T) {
 	}
 	if len(tracker.created) != 1 {
 		t.Errorf("tracker.created = %d, want 1", len(tracker.created))
+	}
+}
+
+func TestEnginePushUsesBatchTrackerWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	ref := strPtr("https://notion.so/existing")
+	issues := []*types.Issue{
+		{ID: "bd-batch-1", Title: "Create me", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-batch-2", Title: "Update me", Status: types.StatusInProgress, IssueType: types.TypeFeature, Priority: 1, ExternalRef: ref},
+	}
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", issue.ID, err)
+		}
+	}
+
+	tracker := &mockBatchTracker{
+		mockTracker: newMockTracker("notion"),
+		batchResult: &BatchPushResult{
+			Created: []BatchPushItem{{LocalID: "bd-batch-1", ExternalRef: "https://notion.so/new-page"}},
+			Updated: []BatchPushItem{{LocalID: "bd-batch-2", ExternalRef: "https://notion.so/existing"}},
+		},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if tracker.batchCalls != 1 {
+		t.Fatalf("batchCalls = %d, want 1", tracker.batchCalls)
+	}
+	if len(tracker.created) != 0 || len(tracker.updated) != 0 {
+		t.Fatalf("fallback create/update path should not run: created=%d updated=%d", len(tracker.created), len(tracker.updated))
+	}
+	if result.PushStats.Created != 1 || result.PushStats.Updated != 1 {
+		t.Fatalf("PushStats = %+v", result.PushStats)
+	}
+	stored, err := store.GetIssue(ctx, "bd-batch-1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if stored.ExternalRef == nil || *stored.ExternalRef != "https://notion.so/new-page" {
+		t.Fatalf("external_ref = %#v, want batch-created ref", stored.ExternalRef)
 	}
 }
 
