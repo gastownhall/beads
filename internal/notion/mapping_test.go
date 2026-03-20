@@ -104,6 +104,49 @@ func TestPushIssueFromIssueRejectsUnsupportedExternalRef(t *testing.T) {
 	}
 }
 
+func TestPushPayloadFromIssuesWithExistingPreservesAuthoritativeSnapshots(t *testing.T) {
+	t.Parallel()
+
+	issue := &types.Issue{
+		ID:        "beads-123",
+		Title:     "Sync from Notion",
+		Status:    types.StatusInProgress,
+		Priority:  1,
+		IssueType: types.TypeFeature,
+	}
+	pulled := PulledIssue{
+		ID:           "beads-123",
+		Title:        "Sync from Notion",
+		Description:  "Short summary",
+		Status:       "in_progress",
+		Priority:     "high",
+		IssueType:    "feature",
+		Assignee:     "osamu",
+		Labels:       []string{"sync"},
+		ExternalRef:  "https://www.notion.so/Test-0123456789abcdef0123456789abcdef",
+		NotionPageID: "01234567-89ab-cdef-0123-456789abcdef",
+		CreatedAt:    "2026-03-19T14:00:00Z",
+		UpdatedAt:    "2026-03-19T14:05:00Z",
+	}
+
+	payload, err := PushPayloadFromIssuesWithExisting([]*types.Issue{issue}, []ExistingIssue{ExistingIssueFromPullIssue(pulled)}, nil)
+	if err != nil {
+		t.Fatalf("PushPayloadFromIssuesWithExisting returned error: %v", err)
+	}
+	if len(payload.Issues) != 1 {
+		t.Fatalf("issues = %d, want 1", len(payload.Issues))
+	}
+	if len(payload.ExistingIssues) != 1 {
+		t.Fatalf("existing issues = %d, want 1", len(payload.ExistingIssues))
+	}
+	if payload.ExistingIssues[0].NotionPageID != "01234567-89ab-cdef-0123-456789abcdef" {
+		t.Fatalf("page id = %q", payload.ExistingIssues[0].NotionPageID)
+	}
+	if payload.ExistingIssues[0].UpdatedAt != "2026-03-19T14:05:00Z" {
+		t.Fatalf("updated_at = %q", payload.ExistingIssues[0].UpdatedAt)
+	}
+}
+
 func TestSupportsIssueType(t *testing.T) {
 	t.Parallel()
 
