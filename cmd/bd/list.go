@@ -264,6 +264,13 @@ var listCmd = &cobra.Command{
 		limit, _ := cmd.Flags().GetInt("limit")
 		allFlag, _ := cmd.Flags().GetBool("all")
 		formatStr, _ := cmd.Flags().GetString("format")
+		// Handle --format json: the local --format flag shadows the hidden
+		// persistent --format on rootCmd, so "json" arrives here instead of
+		// setting jsonOutput via PersistentPreRun. Route it explicitly.
+		if strings.EqualFold(formatStr, "json") {
+			jsonOutput = true
+			formatStr = ""
+		}
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		labelPattern, _ := cmd.Flags().GetString("label-pattern")
@@ -358,7 +365,8 @@ var listCmd = &cobra.Command{
 		if flatFormat {
 			treeFormat = false
 		}
-		prettyFormat = (prettyFormat || treeFormat) && !jsonOutput // --tree is alias for --pretty; JSON wins
+		// --tree is alias for --pretty; JSON and explicit --format win
+		prettyFormat = (prettyFormat || treeFormat) && !jsonOutput && formatStr == ""
 		watchMode, _ := cmd.Flags().GetBool("watch")
 
 		// Pager control (bd-jdz3)
@@ -814,7 +822,7 @@ var listCmd = &cobra.Command{
 			return
 		}
 
-		// Handle format flag
+		// Handle format flag (non-json presets handled here; json handled earlier)
 		if formatStr != "" {
 			if err := outputFormattedList(ctx, activeStore, issues, formatStr); err != nil {
 				FatalError("%v", err)
