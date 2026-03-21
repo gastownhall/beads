@@ -50,7 +50,7 @@ Tool-level settings you can configure:
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share a single Dolt server across all projects at `~/.beads/shared-server/` |
 | `dolt.idle-timeout` | - | - | `30m` | Idle auto-stop timeout (`"0"` disables) |
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
-| `actor` | `--actor` | `BD_ACTOR` | `git config user.name` | Actor name for audit trail (see below) |
+| `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see below) |
 
 **Backend note:** Dolt is the primary storage backend. SQLite remains supported for simple single-user setups. See [DOLT.md](DOLT.md) for Dolt-specific configuration.
 
@@ -132,17 +132,17 @@ dolt:
 The actor name (used for `created_by` in issues and audit trails) is resolved in this order:
 
 1. `--actor` flag (explicit override)
-2. `BD_ACTOR` environment variable
-3. `BEADS_ACTOR` environment variable (alias for MCP/integration compatibility)
+2. `BEADS_ACTOR` environment variable
+3. `BD_ACTOR` environment variable (deprecated alias, kept for backwards compatibility)
 4. `git config user.name`
 5. `$USER` environment variable (system username fallback)
 6. `"unknown"` (final fallback)
 
 For most developers, no configuration is needed - beads will use your git identity automatically. This ensures your issue authorship matches your commit authorship.
 
-To override, set `BD_ACTOR` in your shell profile:
+To override, set `BEADS_ACTOR` in your shell profile:
 ```bash
-export BD_ACTOR="my-github-handle"
+export BEADS_ACTOR="my-github-handle"
 ```
 
 ### Sync Mode Configuration

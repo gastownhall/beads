@@ -8,7 +8,7 @@ import (
 )
 
 // TestGetActorWithGit tests the actor resolution fallback chain.
-// Priority: --actor flag > BD_ACTOR env > BEADS_ACTOR env > git config user.name > $USER > "unknown"
+// Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 func TestGetActorWithGit(t *testing.T) {
 	// Save original environment and actor variable
 	origActor := actor
@@ -65,20 +65,20 @@ func TestGetActorWithGit(t *testing.T) {
 			expected:   "flag-actor",
 		},
 		{
-			name:       "BD_ACTOR takes priority when no flag",
+			name:       "BEADS_ACTOR takes priority when no flag",
 			actorFlag:  "",
 			bdActor:    "bd-actor",
 			beadsActor: "beads-actor",
 			user:       "system-user",
-			expected:   "bd-actor",
+			expected:   "beads-actor",
 		},
 		{
-			name:       "BEADS_ACTOR takes priority when no BD_ACTOR",
+			name:       "BD_ACTOR used as fallback when no BEADS_ACTOR",
 			actorFlag:  "",
-			bdActor:    "",
-			beadsActor: "beads-actor",
+			bdActor:    "bd-actor",
+			beadsActor: "",
 			user:       "system-user",
-			expected:   "beads-actor",
+			expected:   "bd-actor",
 		},
 		{
 			name:        "git config user.name used when no env vars",
@@ -176,7 +176,7 @@ func TestGetActorWithGit_PriorityOrder(t *testing.T) {
 		}
 	}()
 
-	// Test: flag > BD_ACTOR > BEADS_ACTOR
+	// Test: flag > BEADS_ACTOR > BD_ACTOR
 	actor = "from-flag"
 	os.Setenv("BD_ACTOR", "from-bd-actor")
 	os.Setenv("BEADS_ACTOR", "from-beads-actor")
@@ -186,17 +186,17 @@ func TestGetActorWithGit_PriorityOrder(t *testing.T) {
 		t.Errorf("Expected flag to take priority, got %q", result)
 	}
 
-	// Test: BD_ACTOR > BEADS_ACTOR (no flag)
+	// Test: BEADS_ACTOR > BD_ACTOR (no flag)
 	actor = ""
 	result = getActorWithGit()
-	if result != "from-bd-actor" {
-		t.Errorf("Expected BD_ACTOR to take priority over BEADS_ACTOR, got %q", result)
+	if result != "from-beads-actor" {
+		t.Errorf("Expected BEADS_ACTOR to take priority over BD_ACTOR, got %q", result)
 	}
 
-	// Test: BEADS_ACTOR when BD_ACTOR is empty
-	os.Unsetenv("BD_ACTOR")
+	// Test: BD_ACTOR as fallback when BEADS_ACTOR is empty
+	os.Unsetenv("BEADS_ACTOR")
 	result = getActorWithGit()
-	if result != "from-beads-actor" {
-		t.Errorf("Expected BEADS_ACTOR to be used, got %q", result)
+	if result != "from-bd-actor" {
+		t.Errorf("Expected BD_ACTOR to be used as fallback, got %q", result)
 	}
 }

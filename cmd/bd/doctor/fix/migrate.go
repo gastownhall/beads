@@ -241,11 +241,11 @@ func importJSONLIntoStore(ctx context.Context, store storage.DoltStorage, jsonlP
 
 // detectActor returns the best available actor name for automated operations.
 func detectActor() string {
-	if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
-		return bdActor
-	}
 	if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
 		return beadsActor
+	}
+	if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
+		return bdActor
 	}
 	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
 		if gitUser := strings.TrimSpace(string(out)); gitUser != "" {

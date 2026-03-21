@@ -110,7 +110,7 @@ func Initialize() error {
 
 	// Automatic environment variable binding
 	// Environment variables take precedence over config file
-	// E.g., BD_JSON, BD_NO_DAEMON, BD_ACTOR, BD_DB
+	// E.g., BD_JSON, BD_NO_DAEMON, BD_DB (BD_ACTOR deprecated in favor of BEADS_ACTOR)
 	v.SetEnvPrefix("BD")
 
 	// Replace hyphens and dots with underscores for env var mapping

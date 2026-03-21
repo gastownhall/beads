@@ -78,7 +78,7 @@ If the slot is available (status=open), it will be acquired:
 If the slot is held (status=in_progress), the command fails and the
 requester is optionally added to the waiters list (use --wait flag).
 
-Use --holder to specify who is acquiring (default: BD_ACTOR env var).`,
+Use --holder to specify who is acquiring (default: BEADS_ACTOR env var).`,
 	Args: cobra.NoArgs,
 	RunE: runMergeSlotAcquire,
 }
@@ -101,7 +101,7 @@ var (
 )
 
 func init() {
-	mergeSlotAcquireCmd.Flags().StringVar(&mergeSlotHolder, "holder", "", "Who is acquiring the slot (default: BD_ACTOR)")
+	mergeSlotAcquireCmd.Flags().StringVar(&mergeSlotHolder, "holder", "", "Who is acquiring the slot (default: BEADS_ACTOR)")
 	mergeSlotAcquireCmd.Flags().BoolVar(&mergeSlotAddWaiter, "wait", false, "Add to waiters list if slot is held")
 	mergeSlotReleaseCmd.Flags().StringVar(&mergeSlotHolder, "holder", "", "Who is releasing the slot (for verification)")
 
@@ -252,7 +252,7 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 		holder = actor
 	}
 	if holder == "" {
-		return fmt.Errorf("no holder specified; use --holder or set BD_ACTOR env var")
+		return fmt.Errorf("no holder specified; use --holder or set BEADS_ACTOR env var")
 	}
 
 	// Get the slot bead

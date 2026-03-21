@@ -179,7 +179,7 @@ func resolveCommandBeadsDir(dbPath string) string {
 }
 
 // getActorWithGit returns the actor for audit trails with git config fallback.
-// Priority: --actor flag > BD_ACTOR env > BEADS_ACTOR env > git config user.name > $USER > "unknown"
+// Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless
 // explicitly overridden
 func getActorWithGit() string {
@@ -188,14 +188,14 @@ func getActorWithGit() string {
 		return actor
 	}
 
-	// Check BD_ACTOR env var (primary env override)
-	if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
-		return bdActor
-	}
-
-	// Check BEADS_ACTOR env var (alias for MCP/integration compatibility)
+	// Check BEADS_ACTOR env var (primary env override)
 	if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
 		return beadsActor
+	}
+
+	// Check BD_ACTOR env var (deprecated alias, kept for backwards compatibility)
+	if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
+		return bdActor
 	}
 
 	// Try git config user.name - the natural default for a git-native tool
@@ -242,7 +242,7 @@ func init() {
 
 	// Register persistent flags
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db)")
-	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BD_ACTOR, git user.name, $USER)")
+	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.PersistentFlags().String("format", "", "Output format (json). Alias for --json")
 	_ = rootCmd.PersistentFlags().MarkHidden("format") // Hidden alias for CLI ergonomics
