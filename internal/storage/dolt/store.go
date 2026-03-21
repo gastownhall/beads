@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -40,6 +41,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // DefaultSQLPort is the default port for dolt sql-server.
@@ -156,13 +158,14 @@ type DoltStore struct {
 	credentialKey []byte       // Random encryption key for federation credentials
 
 	// Per-invocation caches (lifetime = DoltStore lifetime)
-	customStatusCache            []string        // cached result of GetCustomStatuses
-	customStatusCached           bool            // true once customStatusCache has been populated
-	customTypeCache              []string        // cached result of GetCustomTypes
-	customTypeCached             bool            // true once customTypeCache has been populated
-	infraTypeCache               map[string]bool // cached result of GetInfraTypes
-	infraTypeCached              bool            // true once infraTypeCache has been populated
-	blockedIDsCache              []string        // cached result of computeBlockedIDs
+	customStatusDetailedCache    []types.CustomStatus // cached result of GetCustomStatusesDetailed
+	customStatusCache            []string             // cached name-only result (derived from detailed)
+	customStatusCached           bool                 // true once cache has been populated
+	customTypeCache              []string             // cached result of GetCustomTypes
+	customTypeCached             bool                 // true once customTypeCache has been populated
+	infraTypeCache               map[string]bool      // cached result of GetInfraTypes
+	infraTypeCached              bool                 // true once infraTypeCache has been populated
+	blockedIDsCache              []string             // cached result of computeBlockedIDs
 	blockedIDsCacheMap           map[string]bool
 	blockedIDsCached             bool // true once blockedIDsCache has been populated
 	blockedIDsCacheIncludesWisps bool // true if cache was computed with wisps
@@ -1138,7 +1141,19 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	if err == nil && version >= currentSchemaVersion {
 		// Wisps tables are dolt_ignore'd (not persisted in commit history),
 		// so they must be recreated on every server session. (GH#2271)
-		return createIgnoredTables(db)
+		if err := createIgnoredTables(db); err != nil {
+			return err
+		}
+		// Rebuild status views to match current custom status config.
+		// This ensures views stay in sync even after direct SQL config edits.
+		customStatuses := readCustomStatusesFromDB(ctx, db)
+		if _, err := db.ExecContext(ctx, BuildReadyIssuesView(customStatuses)); err != nil {
+			return fmt.Errorf("failed to create ready_issues view: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, BuildBlockedIssuesView(customStatuses)); err != nil {
+			return fmt.Errorf("failed to create blocked_issues view: %w", err)
+		}
+		return nil
 	}
 
 	// Acquire an advisory lock to serialize schema initialization across concurrent processes.
@@ -1226,11 +1241,13 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("failed to drop fk_dep_depends_on: %w", err)
 	}
 
-	// Create views
-	if _, err := db.ExecContext(ctx, readyIssuesView); err != nil {
+	// Create views — dynamically built to incorporate custom status categories.
+	// Read status.custom config directly from DB (DoltStore not yet constructed).
+	customStatuses := readCustomStatusesFromDB(ctx, db)
+	if _, err := db.ExecContext(ctx, BuildReadyIssuesView(customStatuses)); err != nil {
 		return fmt.Errorf("failed to create ready_issues view: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, blockedIssuesView); err != nil {
+	if _, err := db.ExecContext(ctx, BuildBlockedIssuesView(customStatuses)); err != nil {
 		return fmt.Errorf("failed to create blocked_issues view: %w", err)
 	}
 
@@ -2163,3 +2180,45 @@ type DoltStatus = storage.Status
 
 // StatusEntry is an alias for storage.StatusEntry.
 type StatusEntry = storage.StatusEntry
+
+// readCustomStatusesFromDB reads status.custom config directly from the database.
+// Used during initialization when DoltStore is not yet available.
+// Returns nil on any error (degraded mode — views use built-in statuses only).
+func readCustomStatusesFromDB(ctx context.Context, db *sql.DB) []types.CustomStatus {
+	var value string
+	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'status.custom'").Scan(&value)
+	if err != nil || value == "" {
+		return nil
+	}
+	parsed, parseErr := types.ParseCustomStatusConfig(value)
+	if parseErr != nil {
+		// Degraded mode: log warning, return nil so views use built-in statuses
+		log.Printf("warning: invalid status.custom config: %v. Using built-in statuses only.", parseErr)
+		return nil
+	}
+	return parsed
+}
+
+// RebuildStatusViews regenerates the ready_issues and blocked_issues views
+// based on current custom status configuration. Called within a write
+// transaction when status.custom config changes.
+func (s *DoltStore) RebuildStatusViews(ctx context.Context) error {
+	detailed, err := s.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		// On error, rebuild with built-in statuses only
+		detailed = nil
+	}
+	return s.rebuildStatusViewsWithStatuses(ctx, detailed)
+}
+
+func (s *DoltStore) rebuildStatusViewsWithStatuses(ctx context.Context, customStatuses []types.CustomStatus) error {
+	readySQL := BuildReadyIssuesView(customStatuses)
+	if _, err := s.db.ExecContext(ctx, readySQL); err != nil {
+		return fmt.Errorf("failed to rebuild ready_issues view: %w", err)
+	}
+	blockedSQL := BuildBlockedIssuesView(customStatuses)
+	if _, err := s.db.ExecContext(ctx, blockedSQL); err != nil {
+		return fmt.Errorf("failed to rebuild blocked_issues view: %w", err)
+	}
+	return nil
+}

@@ -445,14 +445,29 @@ var listCmd = &cobra.Command{
 				customStatuses = cs
 			}
 			if !s.IsValidWithCustom(customStatuses) {
-				FatalError("invalid status %q (valid: open, in_progress, blocked, deferred, closed, pinned, hooked)", status)
+				validList := "open, in_progress, blocked, deferred, closed, pinned, hooked"
+				if len(customStatuses) > 0 {
+					validList += ", " + strings.Join(customStatuses, ", ")
+				}
+				FatalError("invalid status %q (valid: %s)", status, validList)
 			}
 			filter.Status = &s
 		}
 
 		// Default to non-closed/non-pinned issues unless --all, --pinned, or explicit --status (GH#788, bd-uhcg)
+		// Also exclude custom statuses in done/frozen categories
 		if status == "" && !allFlag && !readyFlag && !pinnedFlag {
-			filter.ExcludeStatus = []types.Status{types.StatusClosed, types.StatusPinned}
+			excludeStatuses := []types.Status{types.StatusClosed, types.StatusPinned}
+			if store != nil {
+				if detailed, err := store.GetCustomStatusesDetailed(rootCtx); err == nil {
+					for _, cs := range detailed {
+						if cs.Category == types.CategoryDone || cs.Category == types.CategoryFrozen {
+							excludeStatuses = append(excludeStatuses, types.Status(cs.Name))
+						}
+					}
+				}
+			}
+			filter.ExcludeStatus = excludeStatuses
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {

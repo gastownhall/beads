@@ -1,5 +1,11 @@
 package dolt
 
+import (
+	"strings"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
 // currentSchemaVersion is bumped whenever the schema or migrations change.
 // initSchemaOnDB checks this against the stored version and skips re-initialization
 // when they match, avoiding ~20 DDL statements per bd invocation.
@@ -328,3 +334,111 @@ WHERE i.status NOT IN ('closed', 'pinned')
       )
   );
 `
+
+// BuildReadyIssuesView generates the ready_issues view SQL, incorporating
+// custom statuses with CategoryActive into the status filter.
+// When no active custom statuses exist, falls back to the static view.
+func BuildReadyIssuesView(customStatuses []types.CustomStatus) string {
+	active := types.CustomStatusesByCategory(customStatuses, types.CategoryActive)
+	if len(active) == 0 {
+		return readyIssuesView
+	}
+
+	statusList := "'open'"
+	for _, s := range active {
+		statusList += ", '" + escapeSQL(s.Name) + "'"
+	}
+
+	return `
+CREATE OR REPLACE VIEW ready_issues AS
+WITH RECURSIVE
+  blocked_directly AS (
+    SELECT DISTINCT d.issue_id
+    FROM dependencies d
+    WHERE d.type = 'blocks'
+      AND EXISTS (
+        SELECT 1 FROM issues blocker
+        WHERE blocker.id = d.depends_on_id
+          AND blocker.status NOT IN ('closed', 'pinned')
+      )
+  ),
+  blocked_transitively AS (
+    SELECT issue_id, 0 as depth
+    FROM blocked_directly
+    UNION ALL
+    SELECT d.issue_id, bt.depth + 1
+    FROM blocked_transitively bt
+    JOIN dependencies d ON d.depends_on_id = bt.issue_id
+    WHERE d.type = 'parent-child'
+      AND bt.depth < 50
+  )
+SELECT i.*
+FROM issues i
+LEFT JOIN blocked_transitively bt ON bt.issue_id = i.id
+WHERE i.status IN (` + statusList + `)
+  AND (i.ephemeral = 0 OR i.ephemeral IS NULL)
+  AND bt.issue_id IS NULL
+  AND (i.defer_until IS NULL OR i.defer_until <= NOW())
+  AND NOT EXISTS (
+    SELECT 1 FROM dependencies d_parent
+    JOIN issues parent ON parent.id = d_parent.depends_on_id
+    WHERE d_parent.issue_id = i.id
+      AND d_parent.type = 'parent-child'
+      AND parent.defer_until IS NOT NULL
+      AND parent.defer_until > NOW()
+  );
+`
+}
+
+// BuildBlockedIssuesView generates the blocked_issues view SQL, incorporating
+// custom statuses with CategoryDone/CategoryFrozen into the exclusion filter.
+func BuildBlockedIssuesView(customStatuses []types.CustomStatus) string {
+	done := types.CustomStatusesByCategory(customStatuses, types.CategoryDone)
+	frozen := types.CustomStatusesByCategory(customStatuses, types.CategoryFrozen)
+	if len(done) == 0 && len(frozen) == 0 {
+		return blockedIssuesView
+	}
+
+	excludeList := "'closed', 'pinned'"
+	for _, s := range done {
+		excludeList += ", '" + escapeSQL(s.Name) + "'"
+	}
+	for _, s := range frozen {
+		excludeList += ", '" + escapeSQL(s.Name) + "'"
+	}
+
+	return `
+CREATE OR REPLACE VIEW blocked_issues AS
+SELECT
+    i.*,
+    (SELECT COUNT(*)
+     FROM dependencies d
+     WHERE d.issue_id = i.id
+       AND d.type = 'blocks'
+       AND EXISTS (
+         SELECT 1 FROM issues blocker
+         WHERE blocker.id = d.depends_on_id
+           AND blocker.status NOT IN (` + excludeList + `)
+       )
+    ) as blocked_by_count
+FROM issues i
+WHERE i.status NOT IN (` + excludeList + `)
+  AND EXISTS (
+    SELECT 1 FROM dependencies d
+    WHERE d.issue_id = i.id
+      AND d.type = 'blocks'
+      AND EXISTS (
+        SELECT 1 FROM issues blocker
+        WHERE blocker.id = d.depends_on_id
+          AND blocker.status NOT IN (` + excludeList + `)
+      )
+  );
+`
+}
+
+// escapeSQL escapes a string for safe inclusion in SQL string literals.
+// Defense-in-depth: status names are already validated by ParseCustomStatusConfig
+// to match [a-z][a-z0-9_-]*, so this should never actually escape anything.
+func escapeSQL(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}

@@ -689,6 +689,7 @@ func TestStopNotRunningWithCleanupError(t *testing.T) {
 }
 
 func TestKillStaleServersPreservesOtherRepoServers(t *testing.T) {
+	t.Setenv("BEADS_DOLT_AUTO_START", "") // ensure auto-start guard doesn't short-circuit
 	dir := t.TempDir()
 	canonicalPID := 111
 	sameRepoOrphanPID := 222
