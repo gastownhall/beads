@@ -457,9 +457,22 @@ func bondMolProto(ctx context.Context, s storage.DoltStorage, mol, proto *types.
 	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
 }
 
-// bondMolMol bonds two molecules together
+// bondMolMol bonds two molecules together.
+// It checks for existing inverse dependencies to prevent creating direct cycles (GH#2719).
 func bondMolMol(ctx context.Context, s storage.DoltStorage, molA, molB *types.Issue, bondType, actorName string) (*BondResult, error) {
-	err := transact(ctx, s, fmt.Sprintf("bd: bond molecules %s + %s", molA.ID, molB.ID), func(tx storage.Transaction) error {
+	// Check for existing dependency in the inverse direction (GH#2719).
+	// If A already depends on B, creating B→A would form a direct cycle.
+	// Note: this only detects direct A⇆B cycles, not transitive ones (A→B→C→A).
+	existingDeps, err := s.GetDependencyRecords(ctx, molA.ID)
+	if err == nil {
+		for _, dep := range existingDeps {
+			if dep.DependsOnID == molB.ID {
+				return nil, fmt.Errorf("cannot bond %s → %s: inverse dependency already exists (%s depends on %s), which would create a cycle", molA.ID, molB.ID, molA.ID, molB.ID)
+			}
+		}
+	}
+
+	err = transact(ctx, s, fmt.Sprintf("bd: bond molecules %s + %s", molA.ID, molB.ID), func(tx storage.Transaction) error {
 		// Add dependency: B links to A
 		// Sequential: use blocks (B runs after A completes)
 		// Conditional: use conditional-blocks (B runs only if A fails)
