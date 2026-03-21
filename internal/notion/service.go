@@ -682,6 +682,18 @@ func (s *Service) Push(ctx context.Context, inputPath, databaseID, viewURL strin
 	if err != nil {
 		return err
 	}
+	return s.pushIssueSet(ctx, input, databaseID, viewURL, dryRun, archiveMissing, cacheMaxAge)
+}
+
+func (s *Service) PushPayload(ctx context.Context, payload []byte, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) error {
+	input, err := s.parsePushInput(bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	return s.pushIssueSet(ctx, input, databaseID, viewURL, dryRun, archiveMissing, cacheMaxAge)
+}
+
+func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) error {
 	duplicates := wire.FindDuplicateBeadsIDs(collectPushIDs(input.Issues))
 	if len(duplicates) > 0 {
 		return output.NewError("Duplicate Beads ID values in input", "input contains duplicate Beads ID values: "+strings.Join(duplicates, ", "), "Ensure each issue id appears only once before pushing", 1)
@@ -891,6 +903,10 @@ func (s *Service) readPushInput(inputPath string) (wire.PushIssueSet, error) {
 		}
 		reader = bytes.NewReader(data)
 	}
+	return s.parsePushInput(reader)
+}
+
+func (s *Service) parsePushInput(reader io.Reader) (wire.PushIssueSet, error) {
 	input, err := wire.ParsePushInput(reader)
 	if err != nil {
 		return wire.PushIssueSet{}, output.NewError("Invalid push input", err.Error(), "Pass a JSON array or an object with an issues array", 1)

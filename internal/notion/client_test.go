@@ -3,105 +3,112 @@ package notion
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
+	"io"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/notion/output"
 )
 
-type fakeRunner struct {
-	name   string
-	args   []string
-	stdin  []byte
-	stdout []byte
-	stderr []byte
-	err    error
+type fakeClientService struct {
+	stdout io.Writer
+
+	statusReq struct {
+		databaseID string
+		viewURL    string
+	}
+	pullReq struct {
+		cacheMaxAge time.Duration
+	}
+	pushReq struct {
+		payload        []byte
+		databaseID     string
+		viewURL        string
+		dryRun         bool
+		archiveMissing bool
+		cacheMaxAge    time.Duration
+	}
+
+	statusJSON string
+	pullJSON   string
+	pushJSON   string
+	err        error
 }
 
-func (f *fakeRunner) Run(_ context.Context, name string, args []string, stdin []byte) ([]byte, []byte, error) {
-	f.name = name
-	f.args = append([]string(nil), args...)
-	f.stdin = append([]byte(nil), stdin...)
-	return append([]byte(nil), f.stdout...), append([]byte(nil), f.stderr...), f.err
+func (f *fakeClientService) Status(_ context.Context, databaseID, viewURL string) error {
+	f.statusReq.databaseID = databaseID
+	f.statusReq.viewURL = viewURL
+	if f.statusJSON != "" {
+		_, _ = io.WriteString(f.stdout, f.statusJSON)
+	}
+	return f.err
 }
 
-func TestNewClientUsesDefaults(t *testing.T) {
+func (f *fakeClientService) Pull(_ context.Context, cacheMaxAge time.Duration) error {
+	f.pullReq.cacheMaxAge = cacheMaxAge
+	if f.pullJSON != "" {
+		_, _ = io.WriteString(f.stdout, f.pullJSON)
+	}
+	return f.err
+}
+
+func (f *fakeClientService) PushPayload(_ context.Context, payload []byte, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) error {
+	f.pushReq.payload = append([]byte(nil), payload...)
+	f.pushReq.databaseID = databaseID
+	f.pushReq.viewURL = viewURL
+	f.pushReq.dryRun = dryRun
+	f.pushReq.archiveMissing = archiveMissing
+	f.pushReq.cacheMaxAge = cacheMaxAge
+	if f.pushJSON != "" {
+		_, _ = io.WriteString(f.stdout, f.pushJSON)
+	}
+	return f.err
+}
+
+func newFakeClient(t *testing.T, svc *fakeClientService, factoryErr error) *Client {
+	t.Helper()
+	return NewClient(WithServiceFactory(func(stdout, _ io.Writer) (serviceClient, error) {
+		if factoryErr != nil {
+			return nil, factoryErr
+		}
+		svc.stdout = stdout
+		return svc, nil
+	}))
+}
+
+func TestStatusUsesServiceAndDecodesJSON(t *testing.T) {
 	t.Parallel()
 
-	client := NewClient()
-	if client.BinaryPath() != DefaultBinaryPath {
-		t.Fatalf("binary path = %q, want %q", client.BinaryPath(), DefaultBinaryPath)
+	svc := &fakeClientService{
+		statusJSON: `{"ready":true,"data_source_id":"ds_123","saved_config_present":true}`,
+	}
+	client := newFakeClient(t, svc, nil)
+	resp, err := client.Status(context.Background(), StatusRequest{
+		DatabaseID: "db_123",
+		ViewURL:    "https://example.com/view",
+	})
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if !resp.Ready {
+		t.Fatal("ready = false, want true")
+	}
+	if svc.statusReq.databaseID != "db_123" {
+		t.Fatalf("database id = %q", svc.statusReq.databaseID)
+	}
+	if svc.statusReq.viewURL != "https://example.com/view" {
+		t.Fatalf("view url = %q", svc.statusReq.viewURL)
 	}
 }
 
-func TestStatusInvalidBinaryPath(t *testing.T) {
+func TestStatusReturnsStructuredServiceError(t *testing.T) {
 	t.Parallel()
 
-	client := NewClient(WithBinaryPath(filepath.Join(t.TempDir(), "missing-ncli")))
-	_, err := client.Status(context.Background(), StatusRequest{})
-
-	var cmdErr *CommandError
-	if !errors.As(err, &cmdErr) {
-		t.Fatalf("expected CommandError, got %T", err)
+	svc := &fakeClientService{
+		err: output.NewError("Not authenticated", "could not authenticate against the Notion MCP", "Run \"bd notion login\" again", 1),
 	}
-	if cmdErr.ExitCode != -1 {
-		t.Fatalf("exit code = %d, want -1", cmdErr.ExitCode)
-	}
-}
-
-func TestStatusNonZeroExit(t *testing.T) {
-	t.Parallel()
-
-	scriptDir := t.TempDir()
-	scriptPath := filepath.Join(scriptDir, "fake-ncli.sh")
-	script := "#!/bin/sh\necho boom 1>&2\nexit 7\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-
-	client := NewClient(WithBinaryPath(scriptPath))
-	_, err := client.Status(context.Background(), StatusRequest{})
-
-	var cmdErr *CommandError
-	if !errors.As(err, &cmdErr) {
-		t.Fatalf("expected CommandError, got %T", err)
-	}
-	if cmdErr.ExitCode != 7 {
-		t.Fatalf("exit code = %d, want 7", cmdErr.ExitCode)
-	}
-	if !strings.Contains(cmdErr.Stderr, "boom") {
-		t.Fatalf("stderr = %q, want boom", cmdErr.Stderr)
-	}
-}
-
-func TestStatusInvalidJSON(t *testing.T) {
-	t.Parallel()
-
-	runner := &fakeRunner{stdout: []byte("{")}
-	client := NewClient(WithRunner(runner))
-	_, err := client.Status(context.Background(), StatusRequest{})
-
-	var cmdErr *CommandError
-	if !errors.As(err, &cmdErr) {
-		t.Fatalf("expected CommandError, got %T", err)
-	}
-	if !strings.Contains(cmdErr.Error(), "failed to decode JSON response") {
-		t.Fatalf("error = %q, want decode failure", cmdErr.Error())
-	}
-	if runner.name != DefaultBinaryPath {
-		t.Fatalf("binary path = %q, want %q", runner.name, DefaultBinaryPath)
-	}
-}
-
-func TestStatusRestoresBridgeCLIAuthErrorFromStdout(t *testing.T) {
-	t.Parallel()
-
-	runner := &fakeRunner{
-		stdout: []byte("{\n  \"error\": \"Not authenticated\",\n  \"why\": \"bdnotion could not authenticate against the Notion MCP\",\n  \"hint\": \"Run \\\"bdnotion login\\\" again\"\n}\n"),
-		err:    errors.New("exit status 1"),
-	}
-	client := NewClient(WithRunner(runner))
+	client := newFakeClient(t, svc, nil)
 	_, err := client.Status(context.Background(), StatusRequest{})
 
 	var bridgeErr *BridgeCLIError
@@ -111,142 +118,44 @@ func TestStatusRestoresBridgeCLIAuthErrorFromStdout(t *testing.T) {
 	if bridgeErr.What != "Not authenticated" {
 		t.Fatalf("What = %q", bridgeErr.What)
 	}
-	if bridgeErr.Hint != "Run \"bdnotion login\" again" {
+	if bridgeErr.Hint != "Run \"bd notion login\" again" {
 		t.Fatalf("Hint = %q", bridgeErr.Hint)
-	}
-	if !strings.Contains(bridgeErr.Error(), "Not authenticated") {
-		t.Fatalf("error = %v", bridgeErr)
 	}
 }
 
-func TestStatusFallsBackToCommandErrorWhenStdoutErrorJSONIsMalformed(t *testing.T) {
+func TestStatusInvalidJSON(t *testing.T) {
 	t.Parallel()
 
-	runner := &fakeRunner{
-		stdout: []byte("{"),
-		stderr: []byte("boom"),
-		err:    errors.New("exit status 1"),
-	}
-	client := NewClient(WithRunner(runner))
+	svc := &fakeClientService{statusJSON: "{"}
+	client := newFakeClient(t, svc, nil)
 	_, err := client.Status(context.Background(), StatusRequest{})
 
 	var cmdErr *CommandError
 	if !errors.As(err, &cmdErr) {
-		t.Fatalf("expected CommandError, got %T (%v)", err, err)
+		t.Fatalf("expected CommandError, got %T", err)
 	}
-	if !strings.Contains(cmdErr.Error(), "exit status 1") {
-		t.Fatalf("error = %v", cmdErr)
-	}
-}
-
-func TestStatusValidJSON(t *testing.T) {
-	t.Parallel()
-
-	runner := &fakeRunner{
-		stdout: []byte(`{"ready":true,"data_source_id":"ds_123","saved_config_present":true,"archive":{"supported":false,"reason":"mcp missing"}}`),
-	}
-	client := NewClient(WithRunner(runner))
-	resp, err := client.Status(context.Background(), StatusRequest{
-		DatabaseID: "db_123",
-		ViewURL:    "https://example.com/view",
-	})
-	if err != nil {
-		t.Fatalf("Status returned error: %v", err)
-	}
-	if !resp.Ready {
-		t.Fatalf("ready = false, want true")
-	}
-	if resp.DataSourceID != "ds_123" {
-		t.Fatalf("data source id = %q, want ds_123", resp.DataSourceID)
-	}
-	if !resp.SavedConfig {
-		t.Fatal("saved config = false, want true")
-	}
-	wantArgs := []string{"beads", "status", "--json", "--database-id", "db_123", "--view-url", "https://example.com/view"}
-	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
-		t.Fatalf("args = %v, want %v", runner.args, wantArgs)
+	if !strings.Contains(cmdErr.Error(), "failed to decode JSON response") {
+		t.Fatalf("error = %q, want decode failure", cmdErr.Error())
 	}
 }
 
-func TestPullValidJSON(t *testing.T) {
+func TestPullPassesCacheMaxAgeToService(t *testing.T) {
 	t.Parallel()
 
-	runner := &fakeRunner{
-		stdout: []byte(`{"issues":[{"id":"bd-1","title":"One","external_ref":"notion:page_1"}]}`),
-	}
-	client := NewClient(WithRunner(runner))
-	resp, err := client.Pull(context.Background(), PullRequest{})
-	if err != nil {
-		t.Fatalf("Pull returned error: %v", err)
-	}
-	if len(resp.Issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(resp.Issues))
-	}
-	wantArgs := []string{"beads", "pull", "--json"}
-	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
-		t.Fatalf("args = %v, want %v", runner.args, wantArgs)
-	}
-}
-
-func TestPullIncludesCacheMaxAgeFlag(t *testing.T) {
-	t.Parallel()
-
-	runner := &fakeRunner{stdout: []byte(`{"issues":[]}`)}
-	client := NewClient(WithRunner(runner))
+	svc := &fakeClientService{pullJSON: `{"issues":[]}`}
+	client := newFakeClient(t, svc, nil)
 	if _, err := client.Pull(context.Background(), PullRequest{CacheMaxAge: 5 * time.Minute}); err != nil {
 		t.Fatalf("Pull returned error: %v", err)
 	}
-	wantArgs := []string{"beads", "pull", "--json", "--cache-max-age", "5m0s"}
-	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
-		t.Fatalf("args = %v, want %v", runner.args, wantArgs)
-	}
-}
-
-func TestPushValidJSONAndStdin(t *testing.T) {
-	t.Parallel()
-
-	runner := &fakeRunner{
-		stdout: []byte(`{"dry_run":false,"archive_requested":false,"archive_supported":false,"archive_reason":"unsupported","input_count":1,"created_count":1,"updated_count":0,"skipped_count":0,"warnings":["Skipped unsupported Notion issue types: pm=1"]}`),
-	}
-	client := NewClient(WithRunner(runner))
-	payload := []byte(`{"issues":[{"id":"bd-1","title":"One"}]}`)
-
-	resp, err := client.Push(context.Background(), PushRequest{
-		DatabaseID: "db_123",
-		ViewURL:    "https://example.com/view",
-		Payload:    payload,
-	})
-	if err != nil {
-		t.Fatalf("Push returned error: %v", err)
-	}
-	if resp.CreatedCount != 1 {
-		t.Fatalf("created count = %d, want 1", resp.CreatedCount)
-	}
-	if resp.ArchiveRequested {
-		t.Fatal("archive requested = true, want false")
-	}
-	if resp.ArchiveSupported {
-		t.Fatal("archive supported = true, want false")
-	}
-	if resp.ArchiveReason != "unsupported" {
-		t.Fatalf("archive reason = %q, want unsupported", resp.ArchiveReason)
-	}
-	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "pm=1") {
-		t.Fatalf("warnings = %#v", resp.Warnings)
-	}
-	wantArgs := []string{"beads", "push", "--json", "--input", "-", "--database-id", "db_123", "--view-url", "https://example.com/view"}
-	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
-		t.Fatalf("args = %v, want %v", runner.args, wantArgs)
-	}
-	if string(runner.stdin) != string(payload) {
-		t.Fatalf("stdin = %q, want %q", string(runner.stdin), string(payload))
+	if svc.pullReq.cacheMaxAge != 5*time.Minute {
+		t.Fatalf("cache max age = %s", svc.pullReq.cacheMaxAge)
 	}
 }
 
 func TestPushRequiresPayload(t *testing.T) {
 	t.Parallel()
 
-	client := NewClient(WithRunner(&fakeRunner{}))
+	client := newFakeClient(t, &fakeClientService{}, nil)
 	_, err := client.Push(context.Background(), PushRequest{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -256,22 +165,57 @@ func TestPushRequiresPayload(t *testing.T) {
 	}
 }
 
-func TestPushIncludesCacheMaxAgeFlag(t *testing.T) {
+func TestPushPassesPayloadAndOverridesToService(t *testing.T) {
 	t.Parallel()
 
-	runner := &fakeRunner{
-		stdout: []byte(`{"dry_run":true,"input_count":0,"created_count":0,"updated_count":0,"skipped_count":0}`),
+	svc := &fakeClientService{
+		pushJSON: `{"dry_run":false,"archive_requested":false,"archive_supported":false,"input_count":1,"created_count":1,"updated_count":0,"skipped_count":0}`,
 	}
-	client := NewClient(WithRunner(runner))
-	_, err := client.Push(context.Background(), PushRequest{
-		Payload:     []byte(`{"issues":[]}`),
-		CacheMaxAge: 5 * time.Minute,
+	client := newFakeClient(t, svc, nil)
+	payload := []byte(`{"issues":[{"id":"bd-1","title":"One"}]}`)
+	resp, err := client.Push(context.Background(), PushRequest{
+		DatabaseID:  "db_123",
+		ViewURL:     "https://example.com/view",
+		Payload:     payload,
+		CacheMaxAge: 3 * time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("Push returned error: %v", err)
 	}
-	wantArgs := []string{"beads", "push", "--json", "--input", "-", "--cache-max-age", "5m0s"}
-	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {
-		t.Fatalf("args = %v, want %v", runner.args, wantArgs)
+	if resp.CreatedCount != 1 {
+		t.Fatalf("created count = %d", resp.CreatedCount)
+	}
+	if string(svc.pushReq.payload) != string(payload) {
+		t.Fatalf("payload = %q", string(svc.pushReq.payload))
+	}
+	if svc.pushReq.databaseID != "db_123" {
+		t.Fatalf("database id = %q", svc.pushReq.databaseID)
+	}
+	if svc.pushReq.viewURL != "https://example.com/view" {
+		t.Fatalf("view url = %q", svc.pushReq.viewURL)
+	}
+	if svc.pushReq.cacheMaxAge != 3*time.Minute {
+		t.Fatalf("cache max age = %s", svc.pushReq.cacheMaxAge)
+	}
+	if svc.pushReq.dryRun {
+		t.Fatal("dryRun = true, want false")
+	}
+	if svc.pushReq.archiveMissing {
+		t.Fatal("archiveMissing = true, want false")
+	}
+}
+
+func TestStatusReturnsFactoryErrorAsCommandError(t *testing.T) {
+	t.Parallel()
+
+	client := newFakeClient(t, &fakeClientService{}, errors.New("boom"))
+	_, err := client.Status(context.Background(), StatusRequest{})
+
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("expected CommandError, got %T (%v)", err, err)
+	}
+	if !strings.Contains(cmdErr.Error(), "boom") {
+		t.Fatalf("error = %v", cmdErr)
 	}
 }

@@ -20,7 +20,6 @@ type notionSyncEngine interface {
 }
 
 var (
-	notionNCLIBin      string
 	notionDatabaseID   string
 	notionViewURL      string
 	notionSyncPull     bool
@@ -33,16 +32,12 @@ var (
 	notionCacheMaxAge  time.Duration
 )
 
-var newNotionStatusClient = func(binaryPath string) notionStatusClient {
-	if strings.TrimSpace(binaryPath) == "" {
-		return notion.NewClient()
-	}
-	return notion.NewClient(notion.WithBinaryPath(binaryPath))
+var newNotionStatusClient = func() notionStatusClient {
+	return notion.NewClient()
 }
 
 var newNotionTracker = func() itracker.IssueTracker {
 	return notion.NewTracker(
-		notion.WithTrackerBinaryPath(notionNCLIBin),
 		notion.WithTrackerDatabaseID(notionDatabaseID),
 		notion.WithTrackerViewURL(notionViewURL),
 		notion.WithTrackerCacheMaxAge(notionCacheMaxAge),
@@ -60,21 +55,20 @@ var notionCmd = &cobra.Command{
 	Use:     "notion",
 	GroupID: "advanced",
 	Short:   "Notion integration commands",
-	Long: "Synchronize issues between beads and Notion through a local bdnotion bridge binary.\n\n" +
-		"This integration keeps the existing tracker engine and JSON contract, but delegates Notion operations to the local bridge binary instead of calling the Notion public API directly.\n\n" +
+	Long: "Synchronize issues between beads and Notion through the integrated Notion adapter.\n\n" +
+		"This integration keeps the shared tracker engine and JSON contract while running Notion auth, schema, state, and sync operations directly inside bd.\n\n" +
 		"Examples:\n" +
 		"  bd notion status\n" +
 		"  bd notion sync\n" +
 		"  bd notion sync --dry-run\n" +
-		"  bd notion status --database-id <database-id> --view-url <view-url>\n" +
-		"  bd notion status --ncli-bin /path/to/bdnotion",
+		"  bd notion status --database-id <database-id> --view-url <view-url>",
 }
 
 var notionStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show Notion sync status",
 	Long: "Show the current Notion sync status, including:\n" +
-		"  - bridge readiness\n" +
+		"  - auth and adapter readiness\n" +
 		"  - database and view selection\n" +
 		"  - schema validation status\n" +
 		"  - archive capability visibility",
@@ -89,19 +83,17 @@ var notionSyncCmd = &cobra.Command{
 		"  --pull         Import issues from Notion into beads\n" +
 		"  --push         Export issues from beads to Notion\n" +
 		"  (no flags)     Bidirectional sync: pull then push, with conflict resolution\n\n" +
-		"Pull and bidirectional sync always read the saved bdnotion beads config.\n" +
+		"Pull and bidirectional sync always read the saved Notion target config.\n" +
 		"Database/view overrides are therefore only supported for push-only sync.\n\n" +
 		"By default, local beads issues are created in Notion and Notion-linked issues are updated on subsequent syncs.\n\n" +
-		"Archive and delete operations are not supported yet. If you need archive semantics, keep using the bdnotion dry-run flow until live MCP exposes archive support.",
+		"Archive and delete operations are not supported yet. Use --dry-run to inspect what would change until live MCP exposes archive support.",
 	RunE: runNotionSync,
 }
 
 func init() {
-	notionStatusCmd.Flags().StringVar(&notionNCLIBin, "ncli-bin", "", "Path to the Notion bridge binary (legacy flag name; use for bdnotion overrides)")
 	notionStatusCmd.Flags().StringVar(&notionDatabaseID, "database-id", "", "Override the Notion database ID")
 	notionStatusCmd.Flags().StringVar(&notionViewURL, "view-url", "", "Override the Notion view URL")
 
-	notionSyncCmd.Flags().StringVar(&notionNCLIBin, "ncli-bin", "", "Path to the Notion bridge binary (legacy flag name; use for bdnotion overrides)")
 	notionSyncCmd.Flags().StringVar(&notionDatabaseID, "database-id", "", "Override the Notion database ID")
 	notionSyncCmd.Flags().StringVar(&notionViewURL, "view-url", "", "Override the Notion view URL")
 	notionSyncCmd.Flags().BoolVar(&notionSyncPull, "pull", false, "Pull issues from Notion")
@@ -120,7 +112,7 @@ func init() {
 
 func runNotionStatus(cmd *cobra.Command, _ []string) error {
 	cfg := resolveNotionRuntimeConfig(cmd.Context())
-	client := newNotionStatusClient(cfg.BinaryPath)
+	client := newNotionStatusClient()
 	resp, err := client.Status(cmd.Context(), notion.StatusRequest{
 		DatabaseID: cfg.DatabaseID,
 		ViewURL:    cfg.ViewURL,
@@ -182,12 +174,10 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 
 func resolveNotionRuntimeConfig(ctx context.Context) notion.RuntimeConfig {
 	return notion.ResolveRuntimeConfig(ctx, store, notion.RuntimeConfigInput{
-		BinaryPath:    notionNCLIBin,
-		BinaryPathSet: strings.TrimSpace(notionNCLIBin) != "",
 		DatabaseID:    notionDatabaseID,
-		DatabaseIDSet: strings.TrimSpace(notionDatabaseID) != "",
+		DatabaseIDSet: notionDatabaseID != "",
 		ViewURL:       notionViewURL,
-		ViewURLSet:    strings.TrimSpace(notionViewURL) != "",
+		ViewURLSet:    notionViewURL != "",
 	})
 }
 
@@ -219,7 +209,7 @@ func validateNotionSyncOverrides(ctx context.Context, opts itracker.SyncOptions)
 		return nil
 	}
 
-	return fmt.Errorf("pull and bidirectional Notion sync use the saved bdnotion beads config; database-id/view-url overrides are only supported with --push")
+	return fmt.Errorf("pull and bidirectional Notion sync use the saved Notion target config; database-id/view-url overrides are only supported with --push")
 }
 
 func notionSyncIncludesPull(opts itracker.SyncOptions) bool {

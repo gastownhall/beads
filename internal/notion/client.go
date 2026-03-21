@@ -7,61 +7,37 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
+	"time"
+
+	"github.com/steveyegge/beads/internal/notion/output"
+	"github.com/steveyegge/beads/internal/notion/state"
 )
 
-// CommandRunner executes the ncli process.
-type CommandRunner interface {
-	Run(ctx context.Context, name string, args []string, stdin []byte) ([]byte, []byte, error)
+type serviceClient interface {
+	Status(ctx context.Context, databaseID, viewURL string) error
+	Pull(ctx context.Context, cacheMaxAge time.Duration) error
+	PushPayload(ctx context.Context, payload []byte, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) error
 }
 
-// ExecRunner executes ncli through exec.CommandContext.
-type ExecRunner struct{}
-
-// Run executes a command and returns stdout, stderr, and the run error.
-func (ExecRunner) Run(ctx context.Context, name string, args []string, stdin []byte) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if len(stdin) > 0 {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-
-	err := cmd.Run()
-
-	return stdout.Bytes(), stderr.Bytes(), err
-}
+type serviceFactory func(stdout, stderr io.Writer) (serviceClient, error)
 
 // ClientOption mutates a Client at construction time.
 type ClientOption func(*Client)
 
-// WithBinaryPath overrides the ncli binary path.
-func WithBinaryPath(path string) ClientOption {
+// WithServiceFactory overrides the in-process service factory. Useful for tests.
+func WithServiceFactory(factory serviceFactory) ClientOption {
 	return func(c *Client) {
-		if strings.TrimSpace(path) != "" {
-			c.binaryPath = path
+		if factory != nil {
+			c.newService = factory
 		}
 	}
 }
 
-// WithRunner overrides the process runner. Useful for tests.
-func WithRunner(runner CommandRunner) ClientOption {
-	return func(c *Client) {
-		if runner != nil {
-			c.runner = runner
-		}
-	}
-}
-
-// NewClient creates a new Notion client backed by ncli beads commands.
+// NewClient creates a new in-process Notion client backed by internal/notion service calls.
 func NewClient(opts ...ClientOption) *Client {
 	client := &Client{
-		binaryPath: DefaultBinaryPath,
-		runner:     ExecRunner{},
+		newService: defaultServiceFactory,
 	}
 	for _, opt := range opts {
 		opt(client)
@@ -69,73 +45,100 @@ func NewClient(opts ...ClientOption) *Client {
 	return client
 }
 
-// BinaryPath returns the configured ncli binary path.
-func (c *Client) BinaryPath() string {
-	return c.binaryPath
-}
-
-// Status runs `ncli beads status --json`.
+// Status runs the integrated Notion status flow and decodes the JSON contract.
 func (c *Client) Status(ctx context.Context, req StatusRequest) (*StatusResponse, error) {
 	var resp StatusResponse
-	if err := c.runJSON(ctx, "status", req.args(), nil, &resp); err != nil {
+	if err := c.runJSON("status", func(svc serviceClient) error {
+		return svc.Status(ctx, req.DatabaseID, req.ViewURL)
+	}, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-// Pull runs `ncli beads pull --json`.
+// Pull runs the integrated Notion pull flow and decodes the JSON contract.
 func (c *Client) Pull(ctx context.Context, req PullRequest) (*PullResponse, error) {
 	var resp PullResponse
-	if err := c.runJSON(ctx, "pull", req.args(), nil, &resp); err != nil {
+	if err := c.runJSON("pull", func(svc serviceClient) error {
+		return svc.Pull(ctx, req.CacheMaxAge)
+	}, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-// Push runs `ncli beads push --json --input -`.
+// Push runs the integrated Notion push flow and decodes the JSON contract.
 func (c *Client) Push(ctx context.Context, req PushRequest) (*PushResponse, error) {
 	if len(req.Payload) == 0 {
 		return nil, fmt.Errorf("notion push payload is required")
 	}
 
 	var resp PushResponse
-	if err := c.runJSON(ctx, "push", req.args(), req.Payload, &resp); err != nil {
+	if err := c.runJSON("push", func(svc serviceClient) error {
+		return svc.PushPayload(ctx, req.Payload, req.DatabaseID, req.ViewURL, false, false, req.CacheMaxAge)
+	}, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-func (c *Client) runJSON(ctx context.Context, operation string, args []string, stdin []byte, target any) error {
+func defaultServiceFactory(stdout, stderr io.Writer) (serviceClient, error) {
+	paths, err := state.DefaultPaths()
+	if err != nil {
+		return nil, fmt.Errorf("resolve notion paths: %w", err)
+	}
+	authStore := state.NewAuthStore(paths)
+	ioo := output.NewIO(stdout, stderr).WithJSON(true)
+	return NewService(ioo, authStore), nil
+}
+
+func (c *Client) runJSON(operation string, invoke func(serviceClient) error, target any) error {
 	if c == nil {
 		return fmt.Errorf("notion client is nil")
 	}
-	if c.runner == nil {
-		return fmt.Errorf("notion command runner is nil")
-	}
-	if strings.TrimSpace(c.binaryPath) == "" {
-		return fmt.Errorf("notion binary path is empty")
+	if c.newService == nil {
+		return fmt.Errorf("notion service factory is nil")
 	}
 
-	fullArgs := make([]string, 0, len(args)+2)
-	fullArgs = append(fullArgs, "beads", operation)
-	fullArgs = append(fullArgs, args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
 
-	stdout, stderr, err := c.runner.Run(ctx, c.binaryPath, fullArgs, stdin)
+	svc, err := c.newService(&stdout, &stderr)
 	if err != nil {
-		if bridgeErr := decodeBridgeCLIError(operation, c.binaryPath, fullArgs, stdout, err); bridgeErr != nil {
-			return bridgeErr
-		}
-		return newCommandError(operation, c.binaryPath, fullArgs, stderr, err)
-	}
-	if err := decodeStrictJSON(stdout, target); err != nil {
 		return &CommandError{
 			Operation: operation,
-			Command:   buildCommandString(c.binaryPath, fullArgs),
-			Stderr:    strings.TrimSpace(string(stderr)),
+			Stderr:    strings.TrimSpace(stderr.String()),
+			Err:       err,
+		}
+	}
+	if err := invoke(svc); err != nil {
+		return mapServiceError(operation, strings.TrimSpace(stderr.String()), err)
+	}
+	if err := decodeStrictJSON(stdout.Bytes(), target); err != nil {
+		return &CommandError{
+			Operation: operation,
+			Stderr:    strings.TrimSpace(stderr.String()),
 			Err:       fmt.Errorf("failed to decode JSON response: %w", err),
 		}
 	}
 	return nil
+}
+
+func mapServiceError(operation, stderr string, err error) error {
+	var cliErr *output.Error
+	if errors.As(err, &cliErr) {
+		return &BridgeCLIError{
+			What:      strings.TrimSpace(cliErr.What),
+			Why:       strings.TrimSpace(cliErr.Why),
+			Hint:      strings.TrimSpace(cliErr.Hint),
+			Operation: operation,
+		}
+	}
+	return &CommandError{
+		Operation: operation,
+		Stderr:    stderr,
+		Err:       err,
+	}
 }
 
 func decodeStrictJSON(data []byte, target any) error {
@@ -150,75 +153,8 @@ func decodeStrictJSON(data []byte, target any) error {
 	if errors.Is(err, io.EOF) {
 		return nil
 	}
-	if err == nil {
-		return fmt.Errorf("unexpected trailing JSON content")
+	if err != nil {
+		return err
 	}
-	return err
-}
-
-func buildCommandString(binaryPath string, args []string) string {
-	parts := append([]string{binaryPath}, args...)
-	return strings.Join(parts, " ")
-}
-
-func decodeBridgeCLIError(operation, binaryPath string, args []string, stdout []byte, runErr error) error {
-	if len(bytes.TrimSpace(stdout)) == 0 {
-		return nil
-	}
-
-	var payload bridgeCLIErrorPayload
-	if err := decodeStrictJSON(stdout, &payload); err != nil {
-		return nil
-	}
-	if strings.TrimSpace(payload.Error) == "" {
-		return nil
-	}
-
-	bridgeErr := &BridgeCLIError{
-		What:      strings.TrimSpace(payload.Error),
-		Why:       strings.TrimSpace(payload.Why),
-		Hint:      strings.TrimSpace(payload.Hint),
-		Operation: operation,
-		Command:   buildCommandString(binaryPath, args),
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) {
-		bridgeErr.ExitCode = exitErr.ExitCode()
-		return bridgeErr
-	}
-
-	var execErr *exec.Error
-	if errors.As(runErr, &execErr) {
-		bridgeErr.ExitCode = -1
-		return bridgeErr
-	}
-
-	bridgeErr.ExitCode = -1
-	return bridgeErr
-}
-
-func newCommandError(operation, binaryPath string, args []string, stderr []byte, runErr error) *CommandError {
-	commandErr := &CommandError{
-		Operation: operation,
-		Command:   buildCommandString(binaryPath, args),
-		Stderr:    strings.TrimSpace(string(stderr)),
-		Err:       runErr,
-	}
-
-	var execErr *exec.Error
-	if errors.As(runErr, &execErr) {
-		commandErr.ExitCode = -1
-		return commandErr
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) {
-		commandErr.ExitCode = exitErr.ExitCode()
-		return commandErr
-	}
-
-	commandErr.ExitCode = -1
-
-	return commandErr
+	return fmt.Errorf("unexpected trailing JSON data")
 }

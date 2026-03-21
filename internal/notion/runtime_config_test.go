@@ -18,15 +18,11 @@ func TestResolveRuntimeConfigUsesStoredValuesWithoutExplicitOverrides(t *testing
 
 	cfg := ResolveRuntimeConfig(context.Background(), &configStore{
 		data: map[string]string{
-			"notion.ncli_bin":    "/store/ncli",
 			"notion.database_id": "store-db",
 			"notion.view_url":    "https://store/view",
 		},
 	}, RuntimeConfigInput{})
 
-	if cfg.BinaryPath != "/store/ncli" {
-		t.Fatalf("BinaryPath = %q, want /store/ncli", cfg.BinaryPath)
-	}
 	if cfg.DatabaseID != "store-db" {
 		t.Fatalf("DatabaseID = %q, want store-db", cfg.DatabaseID)
 	}
@@ -40,22 +36,16 @@ func TestResolveRuntimeConfigPrefersExplicitOverrides(t *testing.T) {
 
 	cfg := ResolveRuntimeConfig(context.Background(), &configStore{
 		data: map[string]string{
-			"notion.ncli_bin":    "/store/ncli",
 			"notion.database_id": "store-db",
 			"notion.view_url":    "https://store/view",
 		},
 	}, RuntimeConfigInput{
-		BinaryPath:    "/flag/ncli",
-		BinaryPathSet: true,
 		DatabaseID:    "flag-db",
 		DatabaseIDSet: true,
 		ViewURL:       "https://flag/view",
 		ViewURLSet:    true,
 	})
 
-	if cfg.BinaryPath != "/flag/ncli" {
-		t.Fatalf("BinaryPath = %q, want /flag/ncli", cfg.BinaryPath)
-	}
 	if cfg.DatabaseID != "flag-db" {
 		t.Fatalf("DatabaseID = %q, want flag-db", cfg.DatabaseID)
 	}

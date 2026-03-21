@@ -66,10 +66,6 @@ func (f *fakeNotionTracker) ExtractIdentifier(string) string                { re
 func (f *fakeNotionTracker) BuildExternalRef(*itracker.TrackerIssue) string { return "" }
 
 func TestNotionStatusFlagsRegistered(t *testing.T) {
-
-	if notionStatusCmd.Flags().Lookup("ncli-bin") == nil {
-		t.Fatal("missing --ncli-bin")
-	}
 	if notionStatusCmd.Flags().Lookup("database-id") == nil {
 		t.Fatal("missing --database-id")
 	}
@@ -84,50 +80,36 @@ func TestNotionSyncFlagsRegistered(t *testing.T) {
 	}
 }
 
-func TestNotionHelpTextMentionsBDNotionAndLegacyFlag(t *testing.T) {
+func TestNotionHelpTextOmitsLegacyBridgeNaming(t *testing.T) {
 	t.Parallel()
 
-	if !strings.Contains(notionCmd.Long, "bdnotion") {
-		t.Fatalf("notionCmd.Long = %q, want mention of bdnotion", notionCmd.Long)
+	if strings.Contains(notionCmd.Long, "bdnotion") {
+		t.Fatalf("notionCmd.Long = %q, want no bdnotion mention", notionCmd.Long)
 	}
-	flag := notionStatusCmd.Flags().Lookup("ncli-bin")
-	if flag == nil {
-		t.Fatal("missing --ncli-bin")
-	}
-	if !strings.Contains(flag.Usage, "legacy flag name") {
-		t.Fatalf("flag usage = %q, want legacy flag note", flag.Usage)
-	}
-	if !strings.Contains(flag.Usage, "bdnotion") {
-		t.Fatalf("flag usage = %q, want bdnotion guidance", flag.Usage)
+	if notionStatusCmd.Flags().Lookup("ncli-bin") != nil {
+		t.Fatal("unexpected --ncli-bin")
 	}
 }
 
 func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
-
 	originalFactory := newNotionStatusClient
 	originalJSON := jsonOutput
-	originalBin := notionNCLIBin
 	originalDB := notionDatabaseID
 	originalView := notionViewURL
 	originalStore := store
 	t.Cleanup(func() {
 		newNotionStatusClient = originalFactory
 		jsonOutput = originalJSON
-		notionNCLIBin = originalBin
 		notionDatabaseID = originalDB
 		notionViewURL = originalView
 		store = originalStore
 	})
 
 	fake := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
-	newNotionStatusClient = func(binaryPath string) notionStatusClient {
-		if binaryPath != "/tmp/ncli" {
-			t.Fatalf("binary path = %q, want /tmp/ncli", binaryPath)
-		}
+	newNotionStatusClient = func() notionStatusClient {
 		return fake
 	}
 	jsonOutput = false
-	notionNCLIBin = "/tmp/ncli"
 	notionDatabaseID = "db_123"
 	notionViewURL = "https://example.com/view"
 
@@ -153,14 +135,12 @@ func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
 func TestRunNotionStatusUsesStoredOverridesWhenFlagsEmpty(t *testing.T) {
 	originalFactory := newNotionStatusClient
 	originalJSON := jsonOutput
-	originalBin := notionNCLIBin
 	originalDB := notionDatabaseID
 	originalView := notionViewURL
 	originalStore := store
 	t.Cleanup(func() {
 		newNotionStatusClient = originalFactory
 		jsonOutput = originalJSON
-		notionNCLIBin = originalBin
 		notionDatabaseID = originalDB
 		notionViewURL = originalView
 		store = originalStore
@@ -168,9 +148,6 @@ func TestRunNotionStatusUsesStoredOverridesWhenFlagsEmpty(t *testing.T) {
 
 	ctx := context.Background()
 	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
-	if err := testStore.SetConfig(ctx, "notion.ncli_bin", "/store/ncli"); err != nil {
-		t.Fatalf("SetConfig(notion.ncli_bin): %v", err)
-	}
 	if err := testStore.SetConfig(ctx, "notion.database_id", "store-db"); err != nil {
 		t.Fatalf("SetConfig(notion.database_id): %v", err)
 	}
@@ -180,14 +157,10 @@ func TestRunNotionStatusUsesStoredOverridesWhenFlagsEmpty(t *testing.T) {
 	store = testStore
 
 	fake := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
-	newNotionStatusClient = func(binaryPath string) notionStatusClient {
-		if binaryPath != "/store/ncli" {
-			t.Fatalf("binary path = %q, want /store/ncli", binaryPath)
-		}
+	newNotionStatusClient = func() notionStatusClient {
 		return fake
 	}
 	jsonOutput = false
-	notionNCLIBin = ""
 	notionDatabaseID = ""
 	notionViewURL = ""
 
@@ -210,14 +183,12 @@ func TestRunNotionStatusUsesStoredOverridesWhenFlagsEmpty(t *testing.T) {
 func TestRunNotionStatusFlagsOverrideStoredConfig(t *testing.T) {
 	originalFactory := newNotionStatusClient
 	originalJSON := jsonOutput
-	originalBin := notionNCLIBin
 	originalDB := notionDatabaseID
 	originalView := notionViewURL
 	originalStore := store
 	t.Cleanup(func() {
 		newNotionStatusClient = originalFactory
 		jsonOutput = originalJSON
-		notionNCLIBin = originalBin
 		notionDatabaseID = originalDB
 		notionViewURL = originalView
 		store = originalStore
@@ -225,9 +196,6 @@ func TestRunNotionStatusFlagsOverrideStoredConfig(t *testing.T) {
 
 	ctx := context.Background()
 	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
-	if err := testStore.SetConfig(ctx, "notion.ncli_bin", "/store/ncli"); err != nil {
-		t.Fatalf("SetConfig(notion.ncli_bin): %v", err)
-	}
 	if err := testStore.SetConfig(ctx, "notion.database_id", "store-db"); err != nil {
 		t.Fatalf("SetConfig(notion.database_id): %v", err)
 	}
@@ -237,14 +205,10 @@ func TestRunNotionStatusFlagsOverrideStoredConfig(t *testing.T) {
 	store = testStore
 
 	fake := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
-	newNotionStatusClient = func(binaryPath string) notionStatusClient {
-		if binaryPath != "/flag/ncli" {
-			t.Fatalf("binary path = %q, want /flag/ncli", binaryPath)
-		}
+	newNotionStatusClient = func() notionStatusClient {
 		return fake
 	}
 	jsonOutput = false
-	notionNCLIBin = "/flag/ncli"
 	notionDatabaseID = "flag-db"
 	notionViewURL = "https://flag/view"
 
@@ -263,12 +227,11 @@ func TestRunNotionStatusFlagsOverrideStoredConfig(t *testing.T) {
 }
 
 func TestRunNotionStatusReturnsClientError(t *testing.T) {
-
 	originalFactory := newNotionStatusClient
 	t.Cleanup(func() { newNotionStatusClient = originalFactory })
 
-	wantErr := errors.New("ncli missing")
-	newNotionStatusClient = func(string) notionStatusClient {
+	wantErr := errors.New("service missing")
+	newNotionStatusClient = func() notionStatusClient {
 		return &fakeNotionStatusService{err: wantErr}
 	}
 
@@ -285,12 +248,12 @@ func TestRunNotionStatusSurfacesBridgeAuthError(t *testing.T) {
 	originalFactory := newNotionStatusClient
 	t.Cleanup(func() { newNotionStatusClient = originalFactory })
 
-	newNotionStatusClient = func(string) notionStatusClient {
+	newNotionStatusClient = func() notionStatusClient {
 		return &fakeNotionStatusService{
 			err: &notion.BridgeCLIError{
 				What: "Not authenticated",
-				Why:  "bdnotion could not authenticate against the Notion MCP",
-				Hint: "Run \"bdnotion login\" again",
+				Why:  "bd could not authenticate against the Notion MCP",
+				Hint: "Run \"bd notion login\" again",
 			},
 		}
 	}
@@ -305,7 +268,7 @@ func TestRunNotionStatusSurfacesBridgeAuthError(t *testing.T) {
 	if !strings.Contains(err.Error(), "Not authenticated") {
 		t.Fatalf("error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "Run \"bdnotion login\" again") {
+	if !strings.Contains(err.Error(), "Run \"bd notion login\" again") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -447,7 +410,7 @@ func TestRunNotionSyncUsesEngine(t *testing.T) {
 	})
 
 	fakeStatus := &fakeNotionStatusService{resp: &notion.StatusResponse{Ready: true}}
-	newNotionStatusClient = func(string) notionStatusClient { return fakeStatus }
+	newNotionStatusClient = func() notionStatusClient { return fakeStatus }
 	newNotionTracker = func() itracker.IssueTracker { return &fakeNotionTracker{} }
 	fakeEngine := &fakeNotionSyncEngine{
 		result: &itracker.SyncResult{

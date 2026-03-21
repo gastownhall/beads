@@ -8,16 +8,12 @@ import (
 	"time"
 )
 
-// DefaultBinaryPath is the default executable used for Notion bridge operations.
-const DefaultBinaryPath = "bdnotion"
-
-// Client executes bdnotion beads commands for Notion sync.
+// Client executes integrated Notion sync operations in-process.
 type Client struct {
-	binaryPath string
-	runner     CommandRunner
+	newService serviceFactory
 }
 
-// StatusRequest describes the inputs for `bdnotion beads status`.
+// StatusRequest describes the inputs for `bd notion status`.
 type StatusRequest struct {
 	DatabaseID string
 	ViewURL    string
@@ -34,7 +30,7 @@ func (r StatusRequest) args() []string {
 	return args
 }
 
-// PullRequest describes the inputs for `bdnotion beads pull`.
+// PullRequest describes the inputs for Notion pull operations.
 //
 // The current bridge CLI does not accept override flags for pull; it always reads
 // the saved beads config and local managed-page manifest.
@@ -50,7 +46,7 @@ func (r PullRequest) args() []string {
 	return args
 }
 
-// PushRequest describes the inputs for `bdnotion beads push`.
+// PushRequest describes the inputs for Notion push operations.
 type PushRequest struct {
 	DatabaseID  string
 	ViewURL     string
@@ -72,7 +68,7 @@ func (r PushRequest) args() []string {
 	return args
 }
 
-// StatusResponse is the machine-readable output from `bdnotion beads status --json`.
+// StatusResponse is the machine-readable output from `bd notion status --json`.
 type StatusResponse struct {
 	Ready         bool               `json:"ready"`
 	DataSourceID  string             `json:"data_source_id,omitempty"`
@@ -155,14 +151,14 @@ type DoctorSummary struct {
 	PropertyMismatchCount int  `json:"property_mismatch_count,omitempty"`
 }
 
-// PullResponse is the machine-readable output from `bdnotion beads pull --json`.
+// PullResponse is the machine-readable output from integrated Notion pull.
 type PullResponse struct {
 	Issues  []PulledIssue      `json:"issues"`
 	Archive *ArchiveCapability `json:"archive,omitempty"`
 	State   *StatusState       `json:"state,omitempty"`
 }
 
-// PulledIssue is the normalized issue record returned by bdnotion beads pull.
+// PulledIssue is the normalized issue record returned by integrated Notion pull.
 type PulledIssue struct {
 	ID           string          `json:"id,omitempty"`
 	Title        string          `json:"title,omitempty"`
@@ -183,7 +179,7 @@ type PulledIssue struct {
 	Comments     []PulledComment `json:"comments,omitempty"`
 }
 
-// PulledComment is a normalized comment record returned by bdnotion beads pull.
+// PulledComment is a normalized comment record returned by integrated Notion pull.
 type PulledComment struct {
 	CommentID    string         `json:"comment_id,omitempty"`
 	DiscussionID string         `json:"discussion_id,omitempty"`
@@ -212,7 +208,7 @@ func (s *NullableString) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// PushResponse is the machine-readable output from `bdnotion beads push --json`.
+// PushResponse is the machine-readable output from integrated Notion push.
 type PushResponse struct {
 	DryRun               bool              `json:"dry_run"`
 	ArchiveRequested     bool              `json:"archive_requested,omitempty"`
@@ -291,7 +287,7 @@ func (e *CommandError) Unwrap() error {
 	return e.Err
 }
 
-// BridgeCLIError is a structured error returned by bdnotion on stdout.
+// BridgeCLIError is a structured Notion command error with user-facing guidance.
 type BridgeCLIError struct {
 	What      string
 	Why       string
@@ -340,13 +336,13 @@ type PushService interface {
 	Push(ctx context.Context, req PushRequest) (*PushResponse, error)
 }
 
-// PushPayload is the bdnotion beads push input shape.
+// PushPayload is the Notion push input shape.
 type PushPayload struct {
 	Issues         []PushIssue     `json:"issues"`
 	ExistingIssues []ExistingIssue `json:"existing_issues,omitempty"`
 }
 
-// PushIssue is one issue entry in the bdnotion beads push payload.
+// PushIssue is one issue entry in the Notion push payload.
 type PushIssue struct {
 	ID          string   `json:"id,omitempty"`
 	Title       string   `json:"title,omitempty"`
@@ -359,7 +355,7 @@ type PushIssue struct {
 	ExternalRef string   `json:"external_ref,omitempty"`
 }
 
-// ExistingIssue is an optional authoritative snapshot hint passed to bdnotion beads push.
+// ExistingIssue is an optional authoritative snapshot hint passed to Notion push.
 type ExistingIssue struct {
 	ID           string   `json:"id,omitempty"`
 	Title        string   `json:"title,omitempty"`

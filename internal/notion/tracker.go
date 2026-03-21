@@ -44,16 +44,6 @@ func WithTrackerConfig(config *MappingConfig) TrackerOption {
 	}
 }
 
-// WithTrackerBinaryPath overrides the ncli binary path.
-func WithTrackerBinaryPath(path string) TrackerOption {
-	return func(t *Tracker) {
-		if strings.TrimSpace(path) != "" {
-			t.binaryPath = path
-			t.binaryPathExplicit = true
-		}
-	}
-}
-
 // WithTrackerDatabaseID overrides the target database id.
 func WithTrackerDatabaseID(databaseID string) TrackerOption {
 	return func(t *Tracker) {
@@ -74,7 +64,7 @@ func WithTrackerViewURL(viewURL string) TrackerOption {
 	}
 }
 
-// WithTrackerCacheMaxAge configures bounded-cache mode duration for pull/push bridge calls.
+// WithTrackerCacheMaxAge configures bounded-cache mode duration for pull/push calls.
 func WithTrackerCacheMaxAge(cacheMaxAge time.Duration) TrackerOption {
 	return func(t *Tracker) {
 		if cacheMaxAge > 0 {
@@ -83,13 +73,11 @@ func WithTrackerCacheMaxAge(cacheMaxAge time.Duration) TrackerOption {
 	}
 }
 
-// Tracker implements itracker.IssueTracker for Notion via ncli beads commands.
+// Tracker implements itracker.IssueTracker for Notion via in-process service calls.
 type Tracker struct {
 	client             notionClient
 	config             *MappingConfig
 	store              storage.Storage
-	binaryPath         string
-	binaryPathExplicit bool
 	databaseID         string
 	databaseIDExplicit bool
 	viewURL            string
@@ -102,8 +90,7 @@ type Tracker struct {
 // NewTracker constructs a Notion tracker.
 func NewTracker(opts ...TrackerOption) *Tracker {
 	tracker := &Tracker{
-		config:     DefaultMappingConfig(),
-		binaryPath: DefaultBinaryPath,
+		config: DefaultMappingConfig(),
 	}
 	for _, opt := range opts {
 		opt(tracker)
@@ -122,18 +109,15 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	}
 
 	cfg := ResolveRuntimeConfig(ctx, store, RuntimeConfigInput{
-		BinaryPath:    t.binaryPath,
-		BinaryPathSet: t.binaryPathExplicit,
 		DatabaseID:    t.databaseID,
 		DatabaseIDSet: t.databaseIDExplicit,
 		ViewURL:       t.viewURL,
 		ViewURLSet:    t.viewURLExplicit,
 	})
-	t.binaryPath = cfg.BinaryPath
 	t.databaseID = cfg.DatabaseID
 	t.viewURL = cfg.ViewURL
 
-	t.client = NewClient(WithBinaryPath(t.binaryPath))
+	t.client = NewClient()
 	return nil
 }
 
@@ -365,7 +349,7 @@ func (t *Tracker) BuildExternalRef(issue *itracker.TrackerIssue) string {
 	return ""
 }
 
-// Archive/delete sync remains unsupported until the ncli/live MCP surface exposes a real archive operation.
+// Archive/delete sync remains unsupported until the live MCP surface exposes a real archive operation.
 func (t *Tracker) issueFromPushResponse(resp *PushResponse, issue *types.Issue, externalID string) (*itracker.TrackerIssue, error) {
 	if resp == nil {
 		return nil, fmt.Errorf("push response is nil")

@@ -12,15 +12,12 @@ type configReader interface {
 
 // RuntimeConfig captures the effective runtime settings for Notion operations.
 type RuntimeConfig struct {
-	BinaryPath string
 	DatabaseID string
 	ViewURL    string
 }
 
 // RuntimeConfigInput describes explicit overrides before store/env resolution.
 type RuntimeConfigInput struct {
-	BinaryPath    string
-	BinaryPathSet bool
 	DatabaseID    string
 	DatabaseIDSet bool
 	ViewURL       string
@@ -33,14 +30,12 @@ type RuntimeConfigInput struct {
 //  1. Explicit CLI/tracker override
 //  2. Repo-scoped beads config
 //  3. Environment variable
-//  4. Built-in default (binary only)
 func ResolveRuntimeConfig(ctx context.Context, store configReader, input RuntimeConfigInput) RuntimeConfig {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	return RuntimeConfig{
-		BinaryPath: resolveRuntimeValue(ctx, store, input.BinaryPath, input.BinaryPathSet, "notion.ncli_bin", "NCLI_BIN", DefaultBinaryPath),
 		DatabaseID: resolveRuntimeValue(ctx, store, input.DatabaseID, input.DatabaseIDSet, "notion.database_id", "NOTION_DATABASE_ID", ""),
 		ViewURL:    resolveRuntimeValue(ctx, store, input.ViewURL, input.ViewURLSet, "notion.view_url", "NOTION_VIEW_URL", ""),
 	}
