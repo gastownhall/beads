@@ -532,18 +532,26 @@ func (s *Service) StateDoctor(ctx context.Context) error {
 }
 
 func (s *Service) Pull(ctx context.Context, cacheMaxAge time.Duration) error {
-	cfg, err := s.requireSavedConfig("pull")
+	response, err := s.PullResponse(ctx, cacheMaxAge)
 	if err != nil {
 		return err
 	}
+	return s.io.JSON(response)
+}
+
+func (s *Service) PullResponse(ctx context.Context, cacheMaxAge time.Duration) (*servicePullResponse, error) {
+	cfg, err := s.requireSavedConfig("pull")
+	if err != nil {
+		return nil, err
+	}
 	st, err := s.loadStateForTarget(cfg.DatabaseID, "saved beads config")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	session, err := s.requireSession(ctx, "beads pull")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = session.Close() }()
 
@@ -553,7 +561,7 @@ func (s *Service) Pull(ctx context.Context, cacheMaxAge time.Duration) error {
 	}
 	issues, fetchedIssues, err := s.pullManagedIssues(ctx, st, cacheMaxAge)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(fetchedIssues) > 0 {
 		verifiedAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -561,11 +569,11 @@ func (s *Service) Pull(ctx context.Context, cacheMaxAge time.Duration) error {
 			s.cacheManagedIssue(st, issue, verifiedAt)
 		}
 		if err := state.SaveBeadsState(s.paths, st); err != nil {
-			return output.Wrap(err, "failed to save beads state")
+			return nil, output.Wrap(err, "failed to save beads state")
 		}
 	}
 
-	return s.io.JSON(&servicePullResponse{
+	return &servicePullResponse{
 		Issues:  issues,
 		Archive: &archive,
 		State: &serviceStatusState{
@@ -575,7 +583,7 @@ func (s *Service) Pull(ctx context.Context, cacheMaxAge time.Duration) error {
 			ViewConfigured: cfg.ViewURL != "",
 			DoctorSummary:  buildStateSummary(st),
 		},
-	})
+	}, nil
 }
 
 func (s *Service) pullManagedIssues(ctx context.Context, st *state.BeadsState, cacheMaxAge time.Duration) ([]wire.Issue, []wire.Issue, error) {
@@ -682,36 +690,48 @@ func (s *Service) Push(ctx context.Context, inputPath, databaseID, viewURL strin
 	if err != nil {
 		return err
 	}
-	return s.pushIssueSet(ctx, input, databaseID, viewURL, dryRun, archiveMissing, cacheMaxAge)
-}
-
-func (s *Service) PushPayload(ctx context.Context, payload []byte, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) error {
-	input, err := s.parsePushInput(bytes.NewReader(payload))
+	response, err := s.pushIssueSetResponse(ctx, input, databaseID, viewURL, dryRun, archiveMissing)
 	if err != nil {
 		return err
 	}
-	return s.pushIssueSet(ctx, input, databaseID, viewURL, dryRun, archiveMissing, cacheMaxAge)
+	return s.io.JSON(response)
 }
 
-func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) error {
+func (s *Service) PushPayload(ctx context.Context, payload []byte, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) error {
+	response, err := s.PushPayloadResponse(ctx, payload, databaseID, viewURL, dryRun, archiveMissing, cacheMaxAge)
+	if err != nil {
+		return err
+	}
+	return s.io.JSON(response)
+}
+
+func (s *Service) PushPayloadResponse(ctx context.Context, payload []byte, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) (*servicePushResponse, error) {
+	input, err := s.parsePushInput(bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	return s.pushIssueSetResponse(ctx, input, databaseID, viewURL, dryRun, archiveMissing)
+}
+
+func (s *Service) pushIssueSetResponse(ctx context.Context, input wire.PushIssueSet, databaseID, viewURL string, dryRun, archiveMissing bool) (*servicePushResponse, error) {
 	duplicates := wire.FindDuplicateBeadsIDs(collectPushIDs(input.Issues))
 	if len(duplicates) > 0 {
-		return output.NewError("Duplicate Beads ID values in input", "input contains duplicate Beads ID values: "+strings.Join(duplicates, ", "), "Ensure each issue id appears only once before pushing", 1)
+		return nil, output.NewError("Duplicate Beads ID values in input", "input contains duplicate Beads ID values: "+strings.Join(duplicates, ", "), "Ensure each issue id appears only once before pushing", 1)
 	}
 	pushableIssues, unsupportedSkipped, warnings := filterUnsupportedPushIssues(input.Issues)
 
 	resolvedDatabaseID, resolvedViewURL, err := s.resolvePushTarget(databaseID, viewURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	st, err := s.loadStateForTarget(resolvedDatabaseID, "requested push target")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	session, err := s.requireSession(ctx, "beads push")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = session.Close() }()
 
@@ -723,7 +743,7 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 
 	databaseInfo, pushSchema, err := s.fetchPushDatabaseInfo(ctx, session, resolvedDatabaseID, resolvedViewURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	existingByID := map[string]wire.Issue{}
@@ -854,26 +874,26 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 	}
 
 	if dryRun {
-		return s.io.JSON(response)
+		return response, nil
 	}
 	if len(archived) > 0 && !archive.Supported {
-		return output.NewError("Archive-missing is unavailable on the current live Notion MCP", serviceFirstNonEmpty(archive.Reason, "the connected Notion MCP does not support archiving managed pages"), `Run "bd notion sync --push --dry-run" to inspect candidates, then archive or remove them manually in Notion`, 1)
+		return nil, output.NewError("Archive-missing is unavailable on the current live Notion MCP", serviceFirstNonEmpty(archive.Reason, "the connected Notion MCP does not support archiving managed pages"), `Run "bd notion sync --push --dry-run" to inspect candidates, then archive or remove them manually in Notion`, 1)
 	}
 
 	created, err = s.createPagesForPush(ctx, session, st, databaseInfo.DataSourceID, toCreate, pushSchema)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	response.Created = created
 	if err := s.updatePagesForPush(ctx, toUpdate, pushSchema); err != nil {
-		return err
+		return nil, err
 	}
 	if len(toUpdate) > 0 {
 		for _, item := range toUpdate {
 			st.SetPageID(item.Issue.ID, item.PageID)
 		}
 		if err := state.SaveBeadsState(s.paths, st); err != nil {
-			return output.Wrap(err, "failed to save beads state")
+			return nil, output.Wrap(err, "failed to save beads state")
 		}
 	}
 	if len(foreignStateKeys) > 0 {
@@ -887,7 +907,7 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 		}
 		if stateChanged {
 			if err := state.SaveBeadsState(s.paths, st); err != nil {
-				return output.Wrap(err, "failed to save beads state")
+				return nil, output.Wrap(err, "failed to save beads state")
 			}
 		}
 	}
@@ -900,17 +920,17 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 			},
 		})
 		if err != nil {
-			return output.Wrap(err, "failed to archive managed page "+item.ID)
+			return nil, output.Wrap(err, "failed to archive managed page "+item.ID)
 		}
 		st.Delete(item.ID)
 	}
 	if len(created) > 0 || len(archived) > 0 {
 		if err := state.SaveBeadsState(s.paths, st); err != nil {
-			return output.Wrap(err, "failed to save beads state")
+			return nil, output.Wrap(err, "failed to save beads state")
 		}
 	}
 	response.Created = created
-	return s.io.JSON(response)
+	return response, nil
 }
 
 func (s *Service) readPushInput(inputPath string) (wire.PushIssueSet, error) {
@@ -1329,13 +1349,21 @@ func stringValue(value any) string {
 }
 
 func (s *Service) Status(ctx context.Context, databaseID, viewURL string) error {
+	response, err := s.StatusResponse(ctx, databaseID, viewURL)
+	if err != nil {
+		return err
+	}
+	return s.io.JSON(response)
+}
+
+func (s *Service) StatusResponse(ctx context.Context, databaseID, viewURL string) (*serviceStatusResponse, error) {
 	cfg, err := state.ReadBeadsConfig(s.paths)
 	if err != nil {
-		return output.Wrap(err, "failed to read beads config")
+		return nil, output.Wrap(err, "failed to read beads config")
 	}
 	st, err := state.ReadBeadsState(s.paths)
 	if err != nil {
-		return output.Wrap(err, "failed to read beads state")
+		return nil, output.Wrap(err, "failed to read beads state")
 	}
 	resolvedDatabaseID := serviceFirstNonEmpty(databaseID, func() string {
 		if cfg != nil {
@@ -1381,39 +1409,39 @@ func (s *Service) Status(ctx context.Context, databaseID, viewURL string) error 
 		},
 	}
 	if resolvedDatabaseID == "" {
-		return s.io.JSON(response)
+		return response, nil
 	}
 	response.Database = &serviceStatusDatabase{ID: resolvedDatabaseID}
 	hasTokens, err := s.authStore.HasTokens()
 	if err != nil {
-		return output.Wrap(err, "failed to inspect auth state")
+		return nil, output.Wrap(err, "failed to inspect auth state")
 	}
 	if !hasTokens {
-		return s.io.JSON(response)
+		return response, nil
 	}
 	session, err := s.connector.Connect(ctx)
 	if err != nil {
-		return s.io.JSON(response)
+		return response, nil
 	}
 	defer func() { _ = session.Close() }()
 
 	authResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "notion-get-users", Arguments: map[string]any{"user_id": "self"}})
 	if err != nil {
-		return s.io.JSON(response)
+		return response, nil
 	}
 	authPayload, err := wire.ResultJSONMap(authResult, "beads status auth")
 	if err != nil {
-		return output.Wrap(err, "failed to decode auth payload")
+		return nil, output.Wrap(err, "failed to decode auth payload")
 	}
 	response.Auth = &serviceStatusAuth{OK: true, User: wire.ExtractSelfUser(authPayload)}
 
 	fetchResult, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "notion-fetch", Arguments: map[string]any{"id": resolvedDatabaseID}})
 	if err != nil {
-		return s.io.JSON(response)
+		return response, nil
 	}
 	fetchText, err := wire.ResultText(fetchResult, "beads status fetch")
 	if err != nil {
-		return output.Wrap(err, "failed to decode database fetch response")
+		return nil, output.Wrap(err, "failed to decode database fetch response")
 	}
 	info := wire.ExtractBeadsDatabaseInfoFromText(fetchText)
 	schema := wire.AssessSchema(wire.DetectBeadsPropertiesFromFetchText(fetchText), true)
@@ -1442,7 +1470,7 @@ func (s *Service) Status(ctx context.Context, databaseID, viewURL string) error 
 		DoctorSummary:  buildStateSummary(st),
 	}
 	response.Ready = response.Auth.OK && info.DataSourceID != "" && len(schema.Missing) == 0 && viewConfigured
-	return s.io.JSON(response)
+	return response, nil
 }
 
 func (s *Service) requireSession(ctx context.Context, command string) (mcpclient.Session, error) {

@@ -9,11 +9,10 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/notion/output"
+	"github.com/steveyegge/beads/internal/notion/wire"
 )
 
 type fakeClientService struct {
-	stdout io.Writer
-
 	statusReq struct {
 		databaseID string
 		viewURL    string
@@ -30,58 +29,52 @@ type fakeClientService struct {
 		cacheMaxAge    time.Duration
 	}
 
-	statusJSON string
-	pullJSON   string
-	pushJSON   string
+	statusResp *serviceStatusResponse
+	pullResp   *servicePullResponse
+	pushResp   *servicePushResponse
 	err        error
 }
 
-func (f *fakeClientService) Status(_ context.Context, databaseID, viewURL string) error {
+func (f *fakeClientService) StatusResponse(_ context.Context, databaseID, viewURL string) (*serviceStatusResponse, error) {
 	f.statusReq.databaseID = databaseID
 	f.statusReq.viewURL = viewURL
-	if f.statusJSON != "" {
-		_, _ = io.WriteString(f.stdout, f.statusJSON)
-	}
-	return f.err
+	return f.statusResp, f.err
 }
 
-func (f *fakeClientService) Pull(_ context.Context, cacheMaxAge time.Duration) error {
+func (f *fakeClientService) PullResponse(_ context.Context, cacheMaxAge time.Duration) (*servicePullResponse, error) {
 	f.pullReq.cacheMaxAge = cacheMaxAge
-	if f.pullJSON != "" {
-		_, _ = io.WriteString(f.stdout, f.pullJSON)
-	}
-	return f.err
+	return f.pullResp, f.err
 }
 
-func (f *fakeClientService) PushPayload(_ context.Context, payload []byte, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) error {
+func (f *fakeClientService) PushPayloadResponse(_ context.Context, payload []byte, databaseID, viewURL string, dryRun, archiveMissing bool, cacheMaxAge time.Duration) (*servicePushResponse, error) {
 	f.pushReq.payload = append([]byte(nil), payload...)
 	f.pushReq.databaseID = databaseID
 	f.pushReq.viewURL = viewURL
 	f.pushReq.dryRun = dryRun
 	f.pushReq.archiveMissing = archiveMissing
 	f.pushReq.cacheMaxAge = cacheMaxAge
-	if f.pushJSON != "" {
-		_, _ = io.WriteString(f.stdout, f.pushJSON)
-	}
-	return f.err
+	return f.pushResp, f.err
 }
 
 func newFakeClient(t *testing.T, svc *fakeClientService, factoryErr error) *Client {
 	t.Helper()
-	return NewClient(WithServiceFactory(func(stdout, _ io.Writer) (serviceClient, error) {
+	return NewClient(WithServiceFactory(func(_ io.Writer) (serviceClient, error) {
 		if factoryErr != nil {
 			return nil, factoryErr
 		}
-		svc.stdout = stdout
 		return svc, nil
 	}))
 }
 
-func TestStatusUsesServiceAndDecodesJSON(t *testing.T) {
+func TestStatusUsesServiceAndMapsTypedResponse(t *testing.T) {
 	t.Parallel()
 
 	svc := &fakeClientService{
-		statusJSON: `{"ready":true,"data_source_id":"ds_123","saved_config_present":true}`,
+		statusResp: &serviceStatusResponse{
+			Ready:        true,
+			DataSourceID: "ds_123",
+			SavedConfig:  true,
+		},
 	}
 	client := newFakeClient(t, svc, nil)
 	resp, err := client.Status(context.Background(), StatusRequest{
@@ -123,26 +116,10 @@ func TestStatusReturnsStructuredServiceError(t *testing.T) {
 	}
 }
 
-func TestStatusInvalidJSON(t *testing.T) {
-	t.Parallel()
-
-	svc := &fakeClientService{statusJSON: "{"}
-	client := newFakeClient(t, svc, nil)
-	_, err := client.Status(context.Background(), StatusRequest{})
-
-	var cmdErr *CommandError
-	if !errors.As(err, &cmdErr) {
-		t.Fatalf("expected CommandError, got %T", err)
-	}
-	if !strings.Contains(cmdErr.Error(), "failed to decode JSON response") {
-		t.Fatalf("error = %q, want decode failure", cmdErr.Error())
-	}
-}
-
 func TestPullPassesCacheMaxAgeToService(t *testing.T) {
 	t.Parallel()
 
-	svc := &fakeClientService{pullJSON: `{"issues":[]}`}
+	svc := &fakeClientService{pullResp: &servicePullResponse{Issues: []wire.Issue{}}}
 	client := newFakeClient(t, svc, nil)
 	if _, err := client.Pull(context.Background(), PullRequest{CacheMaxAge: 5 * time.Minute}); err != nil {
 		t.Fatalf("Pull returned error: %v", err)
@@ -169,7 +146,15 @@ func TestPushPassesPayloadAndOverridesToService(t *testing.T) {
 	t.Parallel()
 
 	svc := &fakeClientService{
-		pushJSON: `{"dry_run":false,"archive_requested":false,"archive_supported":false,"input_count":1,"created_count":1,"updated_count":0,"skipped_count":0}`,
+		pushResp: &servicePushResponse{
+			DryRun:           false,
+			ArchiveRequested: false,
+			ArchiveSupported: false,
+			InputCount:       1,
+			CreatedCount:     1,
+			UpdatedCount:     0,
+			SkippedCount:     0,
+		},
 	}
 	client := newFakeClient(t, svc, nil)
 	payload := []byte(`{"issues":[{"id":"bd-1","title":"One"}]}`)

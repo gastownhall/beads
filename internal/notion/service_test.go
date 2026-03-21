@@ -99,12 +99,11 @@ func TestServicePushPayloadCreatesWhenSavedStateTargetsDifferentDatabase(t *test
 		t.Fatalf("SaveBeadsState returned error: %v", err)
 	}
 
-	var stdout bytes.Buffer
 	authStore := state.NewAuthStore(paths)
 	if err := authStore.SaveTokens(state.StoredTokens{AccessToken: "test-token"}); err != nil {
 		t.Fatalf("SaveTokens returned error: %v", err)
 	}
-	svc := NewService(noutput.NewIO(&stdout, &bytes.Buffer{}).WithJSON(true), authStore)
+	svc := NewService(noutput.NewIO(&bytes.Buffer{}, &bytes.Buffer{}).WithJSON(true), authStore)
 	svc.connector = fakeSessionConnector{session: &fakeSession{
 		databaseID: "22222222-2222-2222-2222-222222222222",
 		viewURL:    "view://all-issues",
@@ -134,13 +133,9 @@ func TestServicePushPayloadCreatesWhenSavedStateTargetsDifferentDatabase(t *test
 		t.Fatalf("json.Marshal returned error: %v", err)
 	}
 
-	if err := svc.PushPayload(context.Background(), payload, "", "", true, false, 0); err != nil {
-		t.Fatalf("PushPayload returned error: %v", err)
-	}
-
-	var resp servicePushResponse
-	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
-		t.Fatalf("json.Unmarshal returned error: %v; payload=%s", err, stdout.String())
+	resp, err := svc.PushPayloadResponse(context.Background(), payload, "", "", true, false, 0)
+	if err != nil {
+		t.Fatalf("PushPayloadResponse returned error: %v", err)
 	}
 	if resp.CreatedCount != 1 {
 		t.Fatalf("created_count = %d, want 1", resp.CreatedCount)
