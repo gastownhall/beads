@@ -71,11 +71,7 @@ func (m *FieldMapper) TypeToBeads(trackerType interface{}) types.IssueType {
 }
 
 func (m *FieldMapper) TypeToTracker(beadsType types.IssueType) interface{} {
-	issueType, err := typeToNotion(beadsType, m.config)
-	if err != nil {
-		return ""
-	}
-	return issueType
+	return typeToNotion(beadsType, m.config)
 }
 
 func (m *FieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueConversion {

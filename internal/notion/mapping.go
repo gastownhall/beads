@@ -198,10 +198,7 @@ func PushIssueFromIssue(issue *types.Issue, config *MappingConfig) (*PushIssue, 
 	if err != nil {
 		return nil, err
 	}
-	issueType, err := typeToNotion(issue.IssueType, config)
-	if err != nil {
-		return nil, err
-	}
+	issueType := typeToNotion(issue.IssueType, config)
 
 	pushIssue := &PushIssue{
 		ID:          issue.ID,
@@ -290,16 +287,16 @@ func typeToBeads(raw string, config *MappingConfig) (types.IssueType, error) {
 	return value, nil
 }
 
-func typeToNotion(issueType types.IssueType, config *MappingConfig) (string, error) {
+func typeToNotion(issueType types.IssueType, config *MappingConfig) string {
 	trimmed := strings.TrimSpace(string(issueType))
 	if trimmed == "" {
-		return "", nil
+		return ""
 	}
 	value, ok := config.TypeToNotion[issueType]
 	if !ok {
-		return trimmed, nil
+		return trimmed
 	}
-	return value, nil
+	return value
 }
 
 func parseMappingTimestamp(raw string) (time.Time, error) {
