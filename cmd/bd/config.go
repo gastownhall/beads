@@ -301,7 +301,8 @@ func showConfigYAMLOverrides(dbConfig map[string]string) {
 		"create.require-description",
 		"validation.on-create", "validation.on-close", "validation.on-sync",
 		"hierarchy.max-depth",
-		"dolt.idle-timeout",
+		"backup.enabled", "backup.interval", "backup.git-push", "backup.git-repo",
+		"dolt.idle-timeout", "dolt.shared-server",
 	}
 
 	var yamlOverrides []string
@@ -333,13 +334,50 @@ var configUnsetCmd = &cobra.Command{
 	Short: "Delete a configuration value",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		// Config operations work in direct mode only
+		key := args[0]
+
+		// Check if this is a yaml-only key (startup settings like backup.*, routing.*, etc.)
+		// These must be removed from config.yaml, not the database. (GH#2727)
+		if config.IsYamlOnlyKey(key) {
+			if err := config.UnsetYamlConfig(key); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unsetting config: %v\n", err)
+				os.Exit(1)
+			}
+
+			if jsonOutput {
+				outputJSON(map[string]interface{}{
+					"key":      key,
+					"location": "config.yaml",
+				})
+			} else {
+				fmt.Printf("Unset %s (in config.yaml)\n", key)
+			}
+			return
+		}
+
+		// beads.role is stored in git config, not the database (GH#1531).
+		if key == "beads.role" {
+			gitCmd := exec.Command("git", "config", "--unset", "beads.role")
+			if err := gitCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unsetting beads.role in git config: %v\n", err)
+				os.Exit(1)
+			}
+			if jsonOutput {
+				outputJSON(map[string]interface{}{
+					"key":      key,
+					"location": "git config",
+				})
+			} else {
+				fmt.Printf("Unset %s (in git config)\n", key)
+			}
+			return
+		}
+
+		// Database-stored config requires direct mode
 		if err := ensureDirectMode("config unset requires direct database access"); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-
-		key := args[0]
 
 		ctx := rootCtx
 		if err := store.DeleteConfig(ctx, key); err != nil {
