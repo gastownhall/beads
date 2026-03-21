@@ -111,7 +111,7 @@ state.json
 # Augment AI configuration (user-specific)
 .augment/
 .agents/
-output
+/output
 bd_test
 .beads/export-state/
 .beads/beads.db
