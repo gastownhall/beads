@@ -8,6 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
+	noutput "github.com/steveyegge/beads/internal/notion/output"
+	nstate "github.com/steveyegge/beads/internal/notion/state"
 	itracker "github.com/steveyegge/beads/internal/tracker"
 )
 
@@ -19,9 +21,32 @@ type notionSyncEngine interface {
 	Sync(ctx context.Context, opts itracker.SyncOptions) (*itracker.SyncResult, error)
 }
 
+type notionManagementService interface {
+	Init(ctx context.Context, parentID, title string) error
+	Connect(ctx context.Context, databaseID, viewURL string) error
+	ConfigShow() error
+	ConfigClear() error
+	StateShow() error
+	StateExport(outputPath string) error
+	StateImport(inputPath string) error
+	StateDoctor(ctx context.Context) error
+}
+
+type notionCommandDeps struct {
+	io        *noutput.IO
+	authStore *nstate.AuthStore
+	service   notionManagementService
+}
+
 var (
 	notionDatabaseID   string
 	notionViewURL      string
+	notionInitParent   string
+	notionInitTitle    string
+	notionConnectDBID  string
+	notionConnectView  string
+	notionStateExport  string
+	notionStateImport  string
 	notionSyncPull     bool
 	notionSyncPush     bool
 	notionSyncDryRun   bool
@@ -47,6 +72,24 @@ var newNotionTracker = func() itracker.IssueTracker {
 var newNotionSyncEngine = func(tr itracker.IssueTracker) notionSyncEngine {
 	return itracker.NewEngine(tr, store, actor)
 }
+
+var newNotionCommandDeps = func(cmd *cobra.Command) (*notionCommandDeps, error) {
+	paths, err := nstate.DefaultPaths()
+	if err != nil {
+		return nil, fmt.Errorf("resolve Notion config paths: %w", err)
+	}
+	ioo := noutput.NewIO(cmd.OutOrStdout(), cmd.ErrOrStderr()).WithJSON(jsonOutput)
+	authStore := nstate.NewAuthStore(paths)
+	return &notionCommandDeps{
+		io:        ioo,
+		authStore: authStore,
+		service:   notion.NewService(ioo, authStore),
+	}, nil
+}
+
+var notionLoginAction = notion.Login
+var notionLogoutAction = notion.Logout
+var notionWhoAmIAction = notion.WhoAmI
 
 var ensureNotionStoreActive = ensureStoreActive
 var checkNotionReadonly = CheckReadonly
@@ -90,7 +133,97 @@ var notionSyncCmd = &cobra.Command{
 	RunE: runNotionSync,
 }
 
+var notionLoginCmd = &cobra.Command{
+	Use:   "login",
+	Short: "Authenticate bd against Notion",
+	RunE:  runNotionLogin,
+}
+
+var notionLogoutCmd = &cobra.Command{
+	Use:   "logout",
+	Short: "Remove saved Notion credentials",
+	RunE:  runNotionLogout,
+}
+
+var notionWhoAmICmd = &cobra.Command{
+	Use:   "whoami",
+	Short: "Show the authenticated Notion user",
+	RunE:  runNotionWhoAmI,
+}
+
+var notionInitCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Create a dedicated Beads database and default table view in Notion",
+	RunE:  runNotionInit,
+}
+
+var notionConnectCmd = &cobra.Command{
+	Use:   "connect",
+	Short: "Connect bd to an existing Notion Beads database and view",
+	RunE:  runNotionConnect,
+}
+
+var notionConfigCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Inspect or clear the saved Notion target",
+}
+
+var notionConfigShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show the saved Notion target configuration",
+	RunE:  runNotionConfigShow,
+}
+
+var notionConfigClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Clear the saved Notion target configuration",
+	RunE:  runNotionConfigClear,
+}
+
+var notionStateCmd = &cobra.Command{
+	Use:   "state",
+	Short: "Inspect and manage saved Notion page state",
+}
+
+var notionStateShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show saved Notion page state",
+	RunE:  runNotionStateShow,
+}
+
+var notionStateExportCmd = &cobra.Command{
+	Use:   "export",
+	Short: "Export saved Notion page state",
+	RunE:  runNotionStateExport,
+}
+
+var notionStateImportCmd = &cobra.Command{
+	Use:   "import",
+	Short: "Import saved Notion page state",
+	RunE:  runNotionStateImport,
+}
+
+var notionStateDoctorCmd = &cobra.Command{
+	Use:   "doctor",
+	Short: "Diagnose saved Notion state against live pages",
+	RunE:  runNotionStateDoctor,
+}
+
 func init() {
+	notionInitCmd.Flags().StringVar(&notionInitParent, "parent", "", "Parent page ID")
+	notionInitCmd.Flags().StringVar(&notionInitTitle, "title", "Beads Issues", "Database title")
+	_ = notionInitCmd.MarkFlagRequired("parent")
+
+	notionConnectCmd.Flags().StringVar(&notionConnectDBID, "database-id", "", "Notion database ID")
+	notionConnectCmd.Flags().StringVar(&notionConnectView, "view-url", "", "Notion view URL")
+	_ = notionConnectCmd.MarkFlagRequired("database-id")
+	_ = notionConnectCmd.MarkFlagRequired("view-url")
+
+	notionStateExportCmd.Flags().StringVar(&notionStateExport, "output", "", "Export file path, or - for stdout")
+	_ = notionStateExportCmd.MarkFlagRequired("output")
+	notionStateImportCmd.Flags().StringVar(&notionStateImport, "input", "", "Import file path, or - for stdin")
+	_ = notionStateImportCmd.MarkFlagRequired("input")
+
 	notionStatusCmd.Flags().StringVar(&notionDatabaseID, "database-id", "", "Override the Notion database ID")
 	notionStatusCmd.Flags().StringVar(&notionViewURL, "view-url", "", "Override the Notion view URL")
 
@@ -105,9 +238,106 @@ func init() {
 	notionSyncCmd.Flags().StringVar(&notionSyncState, "state", "all", "Issue state to sync: open, closed, all")
 	notionSyncCmd.Flags().DurationVar(&notionCacheMaxAge, "cache-max-age", 0, "Reuse cached Notion snapshots younger than this duration during pull/push")
 
+	notionConfigCmd.AddCommand(notionConfigShowCmd, notionConfigClearCmd)
+	notionStateCmd.AddCommand(notionStateShowCmd, notionStateExportCmd, notionStateImportCmd, notionStateDoctorCmd)
+	notionCmd.AddCommand(notionLoginCmd, notionLogoutCmd, notionWhoAmICmd, notionInitCmd, notionConnectCmd, notionConfigCmd, notionStateCmd)
 	notionCmd.AddCommand(notionStatusCmd)
 	notionCmd.AddCommand(notionSyncCmd)
 	rootCmd.AddCommand(notionCmd)
+}
+
+func runNotionLogin(cmd *cobra.Command, _ []string) error {
+	checkNotionReadonly("notion login")
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return notionLoginAction(cmd.Context(), deps.io, deps.authStore)
+}
+
+func runNotionLogout(cmd *cobra.Command, _ []string) error {
+	checkNotionReadonly("notion logout")
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return notionLogoutAction(deps.io, deps.authStore)
+}
+
+func runNotionWhoAmI(cmd *cobra.Command, _ []string) error {
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return notionWhoAmIAction(cmd.Context(), deps.io, deps.authStore)
+}
+
+func runNotionInit(cmd *cobra.Command, _ []string) error {
+	checkNotionReadonly("notion init")
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return deps.service.Init(cmd.Context(), notionInitParent, notionInitTitle)
+}
+
+func runNotionConnect(cmd *cobra.Command, _ []string) error {
+	checkNotionReadonly("notion connect")
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return deps.service.Connect(cmd.Context(), notionConnectDBID, notionConnectView)
+}
+
+func runNotionConfigShow(cmd *cobra.Command, _ []string) error {
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return deps.service.ConfigShow()
+}
+
+func runNotionConfigClear(cmd *cobra.Command, _ []string) error {
+	checkNotionReadonly("notion config clear")
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return deps.service.ConfigClear()
+}
+
+func runNotionStateShow(cmd *cobra.Command, _ []string) error {
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return deps.service.StateShow()
+}
+
+func runNotionStateExport(cmd *cobra.Command, _ []string) error {
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return deps.service.StateExport(notionStateExport)
+}
+
+func runNotionStateImport(cmd *cobra.Command, _ []string) error {
+	checkNotionReadonly("notion state import")
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return deps.service.StateImport(notionStateImport)
+}
+
+func runNotionStateDoctor(cmd *cobra.Command, _ []string) error {
+	deps, err := newNotionCommandDeps(cmd)
+	if err != nil {
+		return err
+	}
+	return deps.service.StateDoctor(cmd.Context())
 }
 
 func runNotionStatus(cmd *cobra.Command, _ []string) error {

@@ -11,6 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
+	noutput "github.com/steveyegge/beads/internal/notion/output"
+	nstate "github.com/steveyegge/beads/internal/notion/state"
 	"github.com/steveyegge/beads/internal/storage"
 	itracker "github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -41,6 +43,66 @@ func (f *fakeNotionSyncEngine) Sync(_ context.Context, opts itracker.SyncOptions
 }
 
 type fakeNotionTracker struct{}
+
+type fakeNotionManagementService struct {
+	initReq struct {
+		parentID string
+		title    string
+	}
+	connectReq struct {
+		databaseID string
+		viewURL    string
+	}
+	stateExportPath  string
+	stateImportPath  string
+	configShowCalls  int
+	configClearCalls int
+	stateShowCalls   int
+	stateDoctorCalls int
+	err              error
+}
+
+func (f *fakeNotionManagementService) Init(_ context.Context, parentID, title string) error {
+	f.initReq.parentID = parentID
+	f.initReq.title = title
+	return f.err
+}
+
+func (f *fakeNotionManagementService) Connect(_ context.Context, databaseID, viewURL string) error {
+	f.connectReq.databaseID = databaseID
+	f.connectReq.viewURL = viewURL
+	return f.err
+}
+
+func (f *fakeNotionManagementService) ConfigShow() error {
+	f.configShowCalls++
+	return f.err
+}
+
+func (f *fakeNotionManagementService) ConfigClear() error {
+	f.configClearCalls++
+	return f.err
+}
+
+func (f *fakeNotionManagementService) StateShow() error {
+	f.stateShowCalls++
+	return f.err
+}
+
+func (f *fakeNotionManagementService) StateExport(outputPath string) error {
+	f.stateExportPath = outputPath
+	return f.err
+}
+
+func (f *fakeNotionManagementService) StateImport(inputPath string) error {
+	f.stateImportPath = inputPath
+	return f.err
+}
+
+func (f *fakeNotionManagementService) StateDoctor(context.Context) error {
+	f.stateDoctorCalls++
+	return f.err
+}
 
 func (f *fakeNotionTracker) Name() string                                { return "notion" }
 func (f *fakeNotionTracker) DisplayName() string                         { return "Notion" }
@@ -77,6 +139,22 @@ func TestNotionStatusFlagsRegistered(t *testing.T) {
 func TestNotionSyncFlagsRegistered(t *testing.T) {
 	if notionSyncCmd.Flags().Lookup("cache-max-age") == nil {
 		t.Fatal("missing --cache-max-age")
+	}
+}
+
+func TestNotionManagementCommandsRegistered(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"login", "logout", "whoami", "init", "connect", "config", "state", "status", "sync"} {
+		if _, _, err := notionCmd.Find([]string{name}); err != nil {
+			t.Fatalf("missing subcommand %q: %v", name, err)
+		}
+	}
+	if _, _, err := notionCmd.Find([]string{"config", "show"}); err != nil {
+		t.Fatalf("missing config show: %v", err)
+	}
+	if _, _, err := notionCmd.Find([]string{"state", "doctor"}); err != nil {
+		t.Fatalf("missing state doctor: %v", err)
 	}
 }
 
@@ -270,6 +348,69 @@ func TestRunNotionStatusSurfacesBridgeAuthError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Run \"bd notion login\" again") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunNotionLoginUsesIntegratedDeps(t *testing.T) {
+	originalDeps := newNotionCommandDeps
+	originalAction := notionLoginAction
+	originalJSON := jsonOutput
+	t.Cleanup(func() {
+		newNotionCommandDeps = originalDeps
+		notionLoginAction = originalAction
+		jsonOutput = originalJSON
+	})
+
+	called := false
+	newNotionCommandDeps = func(cmd *cobra.Command) (*notionCommandDeps, error) {
+		return &notionCommandDeps{}, nil
+	}
+	notionLoginAction = func(_ context.Context, _ *noutput.IO, _ *nstate.AuthStore) error {
+		called = true
+		return nil
+	}
+	jsonOutput = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := runNotionLogin(cmd, nil); err != nil {
+		t.Fatalf("runNotionLogin returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("login action was not called")
+	}
+}
+
+func TestRunNotionInitUsesManagementService(t *testing.T) {
+	originalDeps := newNotionCommandDeps
+	originalReadonly := checkNotionReadonly
+	originalParent := notionInitParent
+	originalTitle := notionInitTitle
+	t.Cleanup(func() {
+		newNotionCommandDeps = originalDeps
+		checkNotionReadonly = originalReadonly
+		notionInitParent = originalParent
+		notionInitTitle = originalTitle
+	})
+
+	fakeSvc := &fakeNotionManagementService{}
+	newNotionCommandDeps = func(cmd *cobra.Command) (*notionCommandDeps, error) {
+		return &notionCommandDeps{service: fakeSvc}, nil
+	}
+	checkNotionReadonly = func(string) {}
+	notionInitParent = "page-123"
+	notionInitTitle = "Issues"
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := runNotionInit(cmd, nil); err != nil {
+		t.Fatalf("runNotionInit returned error: %v", err)
+	}
+	if fakeSvc.initReq.parentID != "page-123" {
+		t.Fatalf("parent id = %q", fakeSvc.initReq.parentID)
+	}
+	if fakeSvc.initReq.title != "Issues" {
+		t.Fatalf("title = %q", fakeSvc.initReq.title)
 	}
 }
 
