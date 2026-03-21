@@ -873,8 +873,8 @@ func TestInstallHooksBeads_PreservesGlobalHooks(t *testing.T) {
 }
 
 // TestInstallHooksBeads_PreservesDefaultGitHooks verifies that hooks in the
-// default .git/hooks/ directory are preserved when beads redirects
-// core.hooksPath to .beads/hooks/.
+// default .git/hooks/ directory (both managed and non-managed) are preserved
+// when beads redirects core.hooksPath to .beads/hooks/.
 func TestInstallHooksBeads_PreservesDefaultGitHooks(t *testing.T) {
 	repoDir := newGitRepo(t)
 	runInDir(t, repoDir, func() {
@@ -883,6 +883,9 @@ func TestInstallHooksBeads_PreservesDefaultGitHooks(t *testing.T) {
 			t.Fatalf("failed to create .git/hooks: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte("#!/bin/sh\necho custom-default-hook\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(hooksDir, "commit-msg"), []byte("#!/bin/sh\necho commit-msg-hook\n"), 0755); err != nil {
 			t.Fatal(err)
 		}
 
@@ -895,17 +898,26 @@ func TestInstallHooksBeads_PreservesDefaultGitHooks(t *testing.T) {
 			t.Fatalf("installHooksWithOptions(beads=true) failed: %v", err)
 		}
 
+		// Managed hook: should be preserved with beads section injected.
 		content, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-commit"))
 		if err != nil {
 			t.Fatalf("failed to read .beads/hooks/pre-commit: %v", err)
 		}
 		contentStr := string(content)
-
 		if !strings.Contains(contentStr, "echo custom-default-hook") {
 			t.Errorf(".git/hooks/pre-commit content not preserved.\nGot:\n%s", contentStr)
 		}
 		if !strings.Contains(contentStr, hookSectionBeginPrefix) {
 			t.Errorf("beads section marker missing.\nGot:\n%s", contentStr)
+		}
+
+		// Non-managed hook: should be copied as-is.
+		cmContent, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "commit-msg"))
+		if err != nil {
+			t.Fatalf("non-managed hook commit-msg not copied to .beads/hooks/: %v", err)
+		}
+		if !strings.Contains(string(cmContent), "echo commit-msg-hook") {
+			t.Errorf("Unmanaged hook content not preserved.\nGot:\n%s", string(cmContent))
 		}
 	})
 }
