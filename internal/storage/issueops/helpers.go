@@ -53,7 +53,6 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			mol_type, work_type, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
-			hook_bead, role_bead, agent_state, last_activity, role_type, rig,
 			due_at, defer_until, metadata
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
@@ -64,7 +63,6 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?,
 			?, ?, ?
 		)
 		ON DUPLICATE KEY UPDATE
@@ -94,7 +92,6 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		issue.MolType, issue.WorkType, issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
-		issue.HookBead, issue.RoleBead, issue.AgentState, issue.LastActivity, issue.RoleType, issue.Rig,
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
 	)
 	if err != nil {

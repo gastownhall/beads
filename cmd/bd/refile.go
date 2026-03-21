@@ -103,8 +103,6 @@ Examples:
 			SourceRepo:         sourceIssue.SourceRepo,
 			Ephemeral:          sourceIssue.Ephemeral,
 			MolType:            sourceIssue.MolType,
-			RoleType:           sourceIssue.RoleType,
-			Rig:                sourceIssue.Rig,
 			CreatedBy:          actor,
 		}
 

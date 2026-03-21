@@ -292,31 +292,6 @@ func formatIssueLongExtras(issue *types.Issue, formatTime func(time.Time) string
 			ui.RenderBold("COMPACTION"), strings.Join(compactParts, "\n")))
 	}
 
-	// Agent identity fields
-	var agentParts []string
-	if issue.HookBead != "" {
-		agentParts = append(agentParts, fmt.Sprintf("  Hook bead: %s", issue.HookBead))
-	}
-	if issue.RoleBead != "" {
-		agentParts = append(agentParts, fmt.Sprintf("  Role bead: %s", issue.RoleBead))
-	}
-	if issue.AgentState != "" {
-		agentParts = append(agentParts, fmt.Sprintf("  State: %s", issue.AgentState))
-	}
-	if issue.LastActivity != nil {
-		agentParts = append(agentParts, fmt.Sprintf("  Last activity: %s", formatTime(*issue.LastActivity)))
-	}
-	if issue.RoleType != "" {
-		agentParts = append(agentParts, fmt.Sprintf("  Role type: %s", issue.RoleType))
-	}
-	if issue.Rig != "" {
-		agentParts = append(agentParts, fmt.Sprintf("  Rig: %s", issue.Rig))
-	}
-	if len(agentParts) > 0 {
-		sections = append(sections, fmt.Sprintf("%s\n%s",
-			ui.RenderBold("AGENT IDENTITY"), strings.Join(agentParts, "\n")))
-	}
-
 	// Gate fields
 	var gateParts []string
 	if issue.AwaitType != "" {
@@ -334,12 +309,6 @@ func formatIssueLongExtras(issue *types.Issue, formatTime func(time.Time) string
 	if len(gateParts) > 0 {
 		sections = append(sections, fmt.Sprintf("%s\n%s",
 			ui.RenderBold("GATE"), strings.Join(gateParts, "\n")))
-	}
-
-	// Slot fields
-	if issue.Holder != "" {
-		sections = append(sections, fmt.Sprintf("%s\n  Holder: %s",
-			ui.RenderBold("SLOT"), issue.Holder))
 	}
 
 	// Source tracing
