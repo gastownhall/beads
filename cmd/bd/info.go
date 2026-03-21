@@ -210,6 +210,29 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.62.0",
+		Date:    "2026-03-21",
+		Changes: []string{
+			"NEW: Custom status categories (active/wip/done/frozen) control bd ready and bd list behavior",
+			"NEW: bd statuses command lists all statuses with icons and categories",
+			"NEW: bd note command for quick note appending",
+			"NEW: Audit logging of status changes to interactions.jsonl",
+			"NEW: --exclude-type flag for bd ready and bd list",
+			"NEW: Azure DevOps integration (bd ado sync/status/projects)",
+			"NEW: Memories included in export/import round-trip",
+			"CHANGE: BEADS_ACTOR replaces BD_ACTOR as primary env var",
+			"CHANGE: ServerMode enum consolidates Dolt server ownership inference",
+			"CHANGE: Internal GT-specific concepts removed — beads is now standalone",
+			"FIX: Windows Dolt lifecycle — stale state files, false stop warnings",
+			"FIX: Hook preservation — all hooks preserved on core.hooksPath override",
+			"FIX: Shim timeout 30s→300s — chained hooks no longer killed prematurely",
+			"FIX: GetNextChildIDTx broken SQL CAST for non-numeric IDs",
+			"FIX: Credential key added to project-root .gitignore",
+			"FIX: Concurrent initSchemaOnDB serialized with GET_LOCK",
+			"FIX: External Dolt servers no longer killed by KillStaleServers",
+		},
+	},
+	{
 		Version: "0.61.0",
 		Date:    "2026-03-15",
 		Changes: []string{
