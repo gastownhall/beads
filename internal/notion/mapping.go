@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// MappingConfig defines fixed conversions between ncli beads payloads and beads core types.
+// MappingConfig defines fixed conversions between Notion sync payloads and beads core types.
 type MappingConfig struct {
 	PriorityToBeads  map[string]int
 	PriorityToNotion map[int]string
@@ -68,7 +68,7 @@ func DefaultMappingConfig() *MappingConfig {
 	}
 }
 
-// BeadsIssueFromPullIssue converts one ncli pull issue into a beads core issue.
+// BeadsIssueFromPullIssue converts one pulled Notion issue into a beads core issue.
 func BeadsIssueFromPullIssue(issue PulledIssue, config *MappingConfig) (*types.Issue, error) {
 	if config == nil {
 		config = DefaultMappingConfig()
@@ -155,17 +155,17 @@ func TrackerIssueFromPullIssue(issue PulledIssue, config *MappingConfig) (*track
 	return trackerIssue, nil
 }
 
-// PushPayloadFromIssue converts a beads issue into the ncli push payload shape.
+// PushPayloadFromIssue converts a beads issue into the Notion push payload shape.
 func PushPayloadFromIssue(issue *types.Issue, config *MappingConfig) (*PushPayload, error) {
 	return PushPayloadFromIssues([]*types.Issue{issue}, config)
 }
 
-// PushPayloadFromIssues converts multiple beads issues into the ncli push payload shape.
+// PushPayloadFromIssues converts multiple beads issues into the Notion push payload shape.
 func PushPayloadFromIssues(issues []*types.Issue, config *MappingConfig) (*PushPayload, error) {
 	return PushPayloadFromIssuesWithExisting(issues, nil, config)
 }
 
-// PushPayloadFromIssuesWithExisting converts multiple beads issues plus optional remote snapshots into the bdnotion push payload shape.
+// PushPayloadFromIssuesWithExisting converts multiple beads issues plus optional remote snapshots into the Notion push payload shape.
 func PushPayloadFromIssuesWithExisting(issues []*types.Issue, existing []ExistingIssue, config *MappingConfig) (*PushPayload, error) {
 	pushIssues := make([]PushIssue, 0, len(issues))
 	for _, issue := range issues {
@@ -181,7 +181,7 @@ func PushPayloadFromIssuesWithExisting(issues []*types.Issue, existing []Existin
 	}, nil
 }
 
-// PushIssueFromIssue converts one beads issue into the ncli push issue shape.
+// PushIssueFromIssue converts one beads issue into the Notion push issue shape.
 func PushIssueFromIssue(issue *types.Issue, config *MappingConfig) (*PushIssue, error) {
 	if issue == nil {
 		return nil, fmt.Errorf("issue is nil")
@@ -232,7 +232,7 @@ func MarshalPushPayload(payload *PushPayload) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-// ExistingIssueFromPullIssue narrows a pull response item to the fields bdnotion push can reuse.
+// ExistingIssueFromPullIssue narrows a pull response item to the fields Notion push can reuse.
 func ExistingIssueFromPullIssue(issue PulledIssue) ExistingIssue {
 	return ExistingIssue{
 		ID:           strings.TrimSpace(issue.ID),

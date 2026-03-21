@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	loginClientName    = "bdnotion"
-	loginClientURI     = "https://github.com/osamu2001/bdnotion"
-	loginUserAgent     = "bdnotion/0.1.0"
+	loginClientName    = "beads-notion"
+	loginClientURI     = "https://github.com/steveyegge/beads"
+	loginUserAgent     = "bd-notion/0.1.0"
 	callbackServerAddr = "127.0.0.1:0"
 )
 
@@ -85,7 +85,7 @@ type oauthCallbackResult struct {
 
 func Login(ctx context.Context, ioo *output.IO, store *state.AuthStore) error {
 	if store == nil {
-		return output.NewError("Login failed", "bdnotion auth store is not configured", "Retry the command after reinitializing bdnotion", 1)
+		return output.NewError("Login failed", "bd notion auth store is not configured", "Retry the command after reinitializing bd notion", 1)
 	}
 
 	client := loginHTTPClient()
@@ -110,7 +110,7 @@ func Login(ctx context.Context, ioo *output.IO, store *state.AuthStore) error {
 
 	registeredClient, rawClient, err := registerOAuthClient(ctx, client, metadata, redirectURI)
 	if err != nil {
-		return output.Wrap(err, "failed to register bdnotion as an OAuth client")
+		return output.Wrap(err, "failed to register bd as an OAuth client")
 	}
 	if err := store.SaveClientInfo(rawClient); err != nil {
 		return output.Wrap(err, "failed to persist OAuth client credentials")
@@ -323,11 +323,11 @@ func loginCallbackHandler(expectedState string, results chan<- oauthCallbackResu
 		result := oauthCallbackResult{}
 		switch {
 		case params.Get("error") != "":
-			result.Err = output.NewError("Login failed", fmt.Sprintf("Notion returned an OAuth error: %s", params.Get("error_description")), "Retry \"bdnotion login\" and approve the requested access", 1)
+			result.Err = output.NewError("Login failed", fmt.Sprintf("Notion returned an OAuth error: %s", params.Get("error_description")), "Retry \"bd notion login\" and approve the requested access", 1)
 		case params.Get("state") != expectedState:
-			result.Err = output.NewError("Login failed", "OAuth callback state did not match the original request", "Retry \"bdnotion login\" to start a fresh browser flow", 1)
+			result.Err = output.NewError("Login failed", "OAuth callback state did not match the original request", "Retry \"bd notion login\" to start a fresh browser flow", 1)
 		case params.Get("code") == "":
-			result.Err = output.NewError("Login failed", "OAuth callback did not include an authorization code", "Retry \"bdnotion login\" and complete the browser flow again", 1)
+			result.Err = output.NewError("Login failed", "OAuth callback did not include an authorization code", "Retry \"bd notion login\" and complete the browser flow again", 1)
 		default:
 			result.Code = params.Get("code")
 		}
@@ -339,10 +339,10 @@ func loginCallbackHandler(expectedState string, results chan<- oauthCallbackResu
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		if result.Err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = io.WriteString(w, "Notion authorization failed. You can close this window and try bdnotion login again.\n")
+			_, _ = io.WriteString(w, "Notion authorization failed. You can close this window and try bd notion login again.\n")
 			return
 		}
-		_, _ = io.WriteString(w, "Notion authorization received. You can return to bdnotion.\n")
+		_, _ = io.WriteString(w, "Notion authorization received. You can return to bd.\n")
 	})
 }
 
@@ -362,7 +362,7 @@ func waitForAuthorizationCode(ctx context.Context, serverErrCh <-chan error, cal
 				return "", output.Wrap(err, "oauth callback server failed")
 			}
 		case <-timer.C:
-			return "", output.NewError("Authorization timed out", "bdnotion did not receive the Notion OAuth callback before the timeout", "Retry \"bdnotion login\" and complete the browser flow in your browser", 1)
+			return "", output.NewError("Authorization timed out", "bd did not receive the Notion OAuth callback before the timeout", "Retry \"bd notion login\" and complete the browser flow in your browser", 1)
 		case <-ctx.Done():
 			return "", output.Wrap(ctx.Err(), "login canceled")
 		}

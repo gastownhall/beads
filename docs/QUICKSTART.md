@@ -268,25 +268,25 @@ See [README.md](../README.md) for full documentation.
 
 ## Notion Sync Quickstart
 
-The `bd notion` commands use the local `bdnotion beads` workflow. They keep the existing beads-side sync contract, but do not configure Notion for you automatically.
+The `bd notion` commands are the only supported Notion workflow. They keep the existing beads-side sync contract and manage Notion auth, target selection, and state directly inside `bd`.
 
 ### Before You Run `bd notion`
 
 ```bash
 # One-time authentication
-bdnotion login
+bd notion login
 
 # Create a dedicated Beads database
-bdnotion beads init --parent <page-id>
+bd notion init --parent <page-id>
 
-# Or connect bdnotion to an existing Beads database/view
-bdnotion beads connect --database-id <database-id> --view-url <view-url>
+# Or connect bd to an existing Beads database/view
+bd notion connect --database-id <database-id> --view-url <view-url>
 
-# Confirm the saved bridge configuration is ready
-bdnotion beads status
+# Confirm the saved configuration is ready
+bd notion status
 ```
 
-You should only continue once `bdnotion beads status` reports `ready: true`.
+You should only continue once `bd notion status` reports `ready: true`.
 
 The dedicated Beads schema keeps the synced columns lean: `Name`, `Beads ID`, `Status`, `Priority`, `Type`, and `Description` are the required properties, while `Assignee` and `Labels` stay optional for backward compatibility with older Notion databases. The current live Notion MCP still rejects `Labels` arrays on push, so labels are preserved on pull/import but omitted from live push payloads for compatibility.
 
@@ -300,25 +300,24 @@ bd notion sync
 
 By default, `bd notion sync` creates Notion pages for local beads issues and updates issues that already have a Notion `external_ref`.
 
-### Override Bridge Inputs
+### Override Target Inputs
 
-If you do not want to rely on the saved `bdnotion` config, pass the inputs explicitly for status checks and push-only sync.
-The flag name stays `--ncli-bin` for compatibility, but it should point to the `bdnotion` binary:
+If you do not want to rely on the saved target config, pass the inputs explicitly for status checks and push-only sync:
 
 ```bash
-bd notion status --ncli-bin /path/to/bdnotion --database-id <database-id> --view-url <view-url>
-bd notion sync --push --dry-run --ncli-bin /path/to/bdnotion --database-id <database-id> --view-url <view-url>
+bd notion status --database-id <database-id> --view-url <view-url>
+bd notion sync --push --dry-run --database-id <database-id> --view-url <view-url>
 ```
 
-Pull and bidirectional sync always read the saved `bdnotion beads` config. If you need a different target database for pull, update the saved `bdnotion` config first and then run `bd notion sync` without overrides.
+Pull and bidirectional sync always read the saved target config. If you need a different target database for pull, update the saved config first and then run `bd notion sync` without overrides.
 
 ### If Something Looks Wrong
 
-Check the lower-level `bdnotion` diagnostics first:
+Check the integrated diagnostics first:
 
 ```bash
-bdnotion beads status
-bdnotion beads state doctor
+bd notion status
+bd notion state doctor
 ```
 
 ### Acceptance Smoke
@@ -326,7 +325,6 @@ bdnotion beads state doctor
 Use this exact sequence for a reproducible smoke test:
 
 ```bash
-bdnotion beads status
 bd notion status
 bd notion sync --dry-run
 bd notion sync
@@ -335,7 +333,6 @@ bd notion status
 
 Expected result:
 
-- `bdnotion beads status` returns `ready: true`
 - `bd notion status` shows the selected database and archive support visibility
 - `bd notion sync --dry-run` completes without mutating data
 - `bd notion sync` completes through the shared tracker engine

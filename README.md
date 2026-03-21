@@ -121,9 +121,9 @@ For daemon mode without git, use `bd daemon start --local`
 - [Installing](docs/INSTALLING.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot Setup](docs/COPILOT_INTEGRATION.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [Troubleshooting](docs/TROUBLESHOOTING.md) | [FAQ](docs/FAQ.md)
 - [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/steveyegge/beads)
 
-## 🔌 Notion Sync via ncli
+## 🔌 Notion Sync
 
-Beads can sync with Notion through the local `ncli` command. This integration does **not** call the Notion public API directly from `bd`; it delegates to the dedicated `ncli beads` workflow.
+Beads can sync with Notion through the integrated `bd notion` commands. The Notion adapter runs inside `bd` while keeping the shared tracker engine and JSON sync contract intact.
 
 Minimal flow:
 
@@ -134,6 +134,6 @@ bd notion sync
 
 By default, `bd notion sync` creates Notion pages for local beads issues and updates issues that already carry a Notion link.
 
-Database/view overrides are safe for `bd notion status` and push-only sync. Pull or bidirectional sync must use the saved `ncli beads` config so both directions target the same database.
+Database/view overrides are safe for `bd notion status` and push-only sync. Pull or bidirectional sync must use the saved Notion target config so both directions target the same database.
 
 Setup prerequisites, override flags, smoke steps, and current limitations live in [docs/QUICKSTART.md](docs/QUICKSTART.md#notion-sync-quickstart).

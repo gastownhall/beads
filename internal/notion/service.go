@@ -336,7 +336,7 @@ func (s *Service) Connect(ctx context.Context, databaseID, viewURL string) error
 	info := wire.ExtractBeadsDatabaseInfoFromText(fetchText)
 	schema := wire.AssessSchema(wire.DetectBeadsPropertiesFromFetchText(fetchText), true)
 	if len(schema.Missing) > 0 {
-		return output.NewError("Invalid beads database schema", "the target database is missing required properties: "+strings.Join(schema.Missing, ", "), "Use the dedicated beads schema before configuring bdnotion", 1)
+		return output.NewError("Invalid beads database schema", "the target database is missing required properties: "+strings.Join(schema.Missing, ", "), "Use the dedicated beads schema before running \"bd notion connect\"", 1)
 	}
 	if info.DataSourceID == "" {
 		return output.NewError("Missing data source ID", "could not extract a data_source_id from the fetched database", "Retry with a database page created by Notion tools", 1)
@@ -850,7 +850,7 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 		return s.io.JSON(response)
 	}
 	if len(archived) > 0 && !archive.Supported {
-		return output.NewError("Archive-missing is unavailable on the current live Notion MCP", serviceFirstNonEmpty(archive.Reason, "the connected Notion MCP does not support archiving managed pages"), `Run "bdnotion beads push --archive-missing --dry-run ..." to inspect candidates, then archive or remove them manually in Notion`, 1)
+		return output.NewError("Archive-missing is unavailable on the current live Notion MCP", serviceFirstNonEmpty(archive.Reason, "the connected Notion MCP does not support archiving managed pages"), `Run "bd notion sync --push --dry-run" to inspect candidates, then archive or remove them manually in Notion`, 1)
 	}
 
 	created, err = s.createPagesForPush(ctx, session, st, databaseInfo.DataSourceID, toCreate, pushSchema)
@@ -920,7 +920,7 @@ func (s *Service) requireSavedConfig(command string) (*state.BeadsConfig, error)
 		return nil, output.Wrap(err, "failed to read beads config")
 	}
 	if cfg == nil {
-		return nil, output.NewError("Missing beads database target", "beads "+command+" needs saved beads config with a database id", `Run "bdnotion beads init --parent <page-id>" or "bdnotion beads connect --database-id <id> --view-url <url>" first`, 1)
+		return nil, output.NewError("Missing beads database target", "beads "+command+" needs saved beads config with a database id", `Run "bd notion init --parent <page-id>" or "bd notion connect --database-id <id> --view-url <url>" first`, 1)
 	}
 	return cfg, nil
 }
@@ -934,7 +934,7 @@ func (s *Service) loadStateForTarget(databaseID, targetLabel string) (*state.Bea
 		return state.EmptyBeadsState(databaseID), nil
 	}
 	if st.DatabaseID != databaseID {
-		return nil, output.NewError("State database mismatch", "saved beads-state.json targets a different database than the "+targetLabel, `Run "bdnotion beads connect --database-id <id> --view-url <url>" or "bdnotion beads state import --input <path|->" for that database`, 1)
+		return nil, output.NewError("State database mismatch", "saved beads-state.json targets a different database than the "+targetLabel, `Run "bd notion connect --database-id <id> --view-url <url>" or "bd notion state import --input <path|->" for that database`, 1)
 	}
 	return st, nil
 }
@@ -942,7 +942,7 @@ func (s *Service) loadStateForTarget(databaseID, targetLabel string) (*state.Bea
 func (s *Service) resolvePushTarget(databaseID, viewURL string) (string, string, error) {
 	if databaseID != "" || viewURL != "" {
 		if databaseID == "" || viewURL == "" {
-			return "", "", output.NewError("Incomplete push target override", "when overriding saved config, beads push requires both --database-id and --view-url", `Pass both flags, or configure defaults with "bdnotion beads connect"`, 1)
+			return "", "", output.NewError("Incomplete push target override", "when overriding saved config, beads push requires both --database-id and --view-url", `Pass both flags, or configure defaults with "bd notion connect"`, 1)
 		}
 		return databaseID, viewURL, nil
 	}
@@ -1032,7 +1032,7 @@ func (s *Service) fetchManagedIssue(ctx context.Context, session mcpclient.Sessi
 		return wire.Issue{}, output.Wrap(err, "failed to normalize managed page "+expectedBeadsID)
 	}
 	if issue.ID != expectedBeadsID {
-		return wire.Issue{}, output.NewError("Managed page Beads ID mismatch", "saved state expects "+expectedBeadsID+" but the Notion page reports "+issue.ID, `Run "bdnotion beads state doctor" to inspect the saved state`, 1)
+		return wire.Issue{}, output.NewError("Managed page Beads ID mismatch", "saved state expects "+expectedBeadsID+" but the Notion page reports "+issue.ID, `Run "bd notion state doctor" to inspect the saved state`, 1)
 	}
 	issue.NotionPageID = serviceFirstNonEmpty(issue.NotionPageID, pageID)
 	issue.ExternalRef = serviceFirstNonEmpty(issue.ExternalRef, "notion:"+issue.NotionPageID)
@@ -1097,7 +1097,7 @@ func (s *Service) updatePagesForPush(ctx context.Context, items []pushUpdateTarg
 	}
 	for _, item := range items {
 		if item.PageID == "" {
-			return output.NewError("Invalid target row", "managed issue "+item.Issue.ID+" does not expose a Notion page id", `Run "bdnotion beads state doctor" to inspect the saved state`, 1)
+			return output.NewError("Invalid target row", "managed issue "+item.Issue.ID+" does not expose a Notion page id", `Run "bd notion state doctor" to inspect the saved state`, 1)
 		}
 	}
 
@@ -1405,11 +1405,11 @@ func (s *Service) requireSession(ctx context.Context, command string) (mcpclient
 		return nil, output.Wrap(err, "failed to inspect auth state")
 	}
 	if !hasTokens {
-		return nil, output.NewError("Not authenticated", command+" requires saved Notion credentials", "Run \"bdnotion login\" first", 1)
+		return nil, output.NewError("Not authenticated", command+" requires saved Notion credentials", "Run \"bd notion login\" first", 1)
 	}
 	session, err := s.connector.Connect(ctx)
 	if err != nil {
-		return nil, output.NewError("Not authenticated", command+" could not authenticate against the Notion MCP", "Run \"bdnotion login\" again", 1)
+		return nil, output.NewError("Not authenticated", command+" could not authenticate against the Notion MCP", "Run \"bd notion login\" again", 1)
 	}
 	return session, nil
 }

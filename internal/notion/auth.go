@@ -37,8 +37,8 @@ func verifyLiveAuth(ctx context.Context, store *state.AuthStore) (*mcp.CallToolR
 	if !ok {
 		return nil, output.NewError(
 			"Not authenticated",
-			"bdnotion could not find saved Notion credentials",
-			"Run \"bdnotion login\" first",
+			"bd could not find saved Notion credentials",
+			"Run \"bd notion login\" first",
 			1,
 		)
 	}
@@ -48,8 +48,8 @@ func verifyLiveAuth(ctx context.Context, store *state.AuthStore) (*mcp.CallToolR
 	if err != nil {
 		return nil, output.NewError(
 			"Not authenticated",
-			"bdnotion could not authenticate against the Notion MCP",
-			"Run \"bdnotion login\" again",
+			"bd could not authenticate against the Notion MCP",
+			"Run \"bd notion login\" again",
 			1,
 		)
 	}
@@ -62,8 +62,8 @@ func verifyLiveAuth(ctx context.Context, store *state.AuthStore) (*mcp.CallToolR
 	if err != nil {
 		return nil, output.NewError(
 			"Not authenticated",
-			"bdnotion could not authenticate against the Notion MCP",
-			"Run \"bdnotion login\" again",
+			"bd could not authenticate against the Notion MCP",
+			"Run \"bd notion login\" again",
 			1,
 		)
 	}
