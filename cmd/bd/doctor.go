@@ -99,6 +99,8 @@ Specific Check Mode (--check):
   Run a specific check in detail. Available checks:
   - artifacts: Detect and optionally clean beads classic artifacts
     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+  - conventions: Check for convention drift (lint warnings, stale
+    issues, orphaned issues). Advisory only - warns, never blocks.
   - pollution: Detect and optionally clean test issues from database
   - validate: Run focused data-integrity checks (duplicates, orphaned
     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -172,6 +174,7 @@ Examples:
   bd doctor --output diagnostics.json  # Export diagnostics to file
   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
+  bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
@@ -238,8 +241,11 @@ Examples:
 			case "artifacts":
 				runArtifactsCheck(absPath, doctorClean, doctorYes)
 				return
+			case "conventions":
+				runConventionsCheck(absPath)
+				return
 			default:
-				FatalErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, pollution, validate")
+				FatalErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
 			}
 		}
 
