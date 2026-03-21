@@ -709,6 +709,10 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
+	// Clean stale circuit breaker files before checking — prevents leftover
+	// state from previous sessions poisoning fresh inits (GH#2598).
+	CleanStaleCircuitBreakerFiles()
+
 	breaker := maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort)
 
 	// Circuit breaker: fail-fast if the server is known to be down.
