@@ -45,9 +45,6 @@ func configDir() (string, error) {
 	if dir := os.Getenv("BEADS_NOTION_CONFIG_DIR"); dir != "" {
 		return dir, nil
 	}
-	if dir := os.Getenv("BDNOTION_CONFIG_DIR"); dir != "" {
-		return dir, nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
