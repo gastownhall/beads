@@ -45,8 +45,11 @@ func hookSectionEndLine() string {
 // hookTimeoutSeconds is the maximum time a beads hook is allowed to run before
 // being killed and allowing the git operation to proceed.  A bounded timeout
 // prevents `bd hooks run` from hanging `git push` indefinitely (GH#2453).
+// The default is 300 seconds (5 minutes) to accommodate chained hooks — e.g.
+// pre-commit framework pipelines that run linters, type-checkers, and builds
+// inside `bd hooks run` via the `.old` hook chain (GH#2732).
 // The value can be overridden via the BEADS_HOOK_TIMEOUT environment variable.
-const hookTimeoutSeconds = 30
+const hookTimeoutSeconds = 300
 
 // generateHookSection returns the marked section content for a given hook name.
 // The section is self-contained: it checks for bd availability, runs the hook

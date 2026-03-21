@@ -589,6 +589,21 @@ bd vc conflicts
 
 See [ADVANCED.md#handling-git-merge-conflicts](ADVANCED.md#handling-git-merge-conflicts) for details.
 
+### Hook timeout kills chained pre-commit hooks
+
+**Symptom:** After `bd hooks install`, chained pre-commit hooks (eslint, prettier, ruff, etc.) stop running. You see: `beads: hook 'pre-commit' timed out after 300s -- continuing without beads`.
+
+**Cause:** The beads hook shim wraps `bd hooks run` with an OS-level `timeout`. Since `bd hooks run` chains to your original hook (`.git/hooks/pre-commit.old`) internally, the timeout covers both beads' own work and your entire hook pipeline.
+
+**Fix:** Increase the timeout via the `BEADS_HOOK_TIMEOUT` environment variable:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export BEADS_HOOK_TIMEOUT=600  # 10 minutes (in seconds)
+```
+
+The default timeout is 300 seconds (5 minutes). For repos with very heavy pre-commit pipelines, you may need to increase this further.
+
 ### Permission denied on git hooks
 
 Git hooks need execute permissions:
