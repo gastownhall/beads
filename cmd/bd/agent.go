@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -185,14 +184,11 @@ func runAgentState(cmd *cobra.Command, args []string) error {
 
 	// If agent not found, auto-create it
 	if notFound {
-		roleType, rig := parseAgentIDFields(agentID)
 		agent = &types.Issue{
 			ID:        agentID,
 			Title:     fmt.Sprintf("Agent: %s", agentID),
 			IssueType: types.TypeTask, // Use task type; gt:agent label marks it as agent
 			Status:    types.StatusOpen,
-			RoleType:  roleType,
-			Rig:       rig,
 			CreatedBy: actor,
 		}
 
@@ -202,17 +198,6 @@ func runAgentState(cmd *cobra.Command, args []string) error {
 		// Add gt:agent label to mark as agent bead
 		if err := activeStore.AddLabel(ctx, agent.ID, "gt:agent", actor); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to add gt:agent label: %v\n", err)
-		}
-		// Add role_type and rig labels for filtering
-		if roleType != "" {
-			if err := activeStore.AddLabel(ctx, agent.ID, "role_type:"+roleType, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to add role_type label: %v\n", err)
-			}
-		}
-		if rig != "" {
-			if err := activeStore.AddLabel(ctx, agent.ID, "rig:"+rig, actor); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to add rig label: %v\n", err)
-			}
 		}
 	} else {
 		// Get existing agent bead to verify it's an agent
@@ -601,78 +586,4 @@ func isAgentBead(labels []string) bool {
 		}
 	}
 	return false
-}
-
-// sliceToSet converts a string slice to a map for O(1) lookup.
-func sliceToSet(slice []string) map[string]bool {
-	if len(slice) == 0 {
-		return nil
-	}
-	m := make(map[string]bool, len(slice))
-	for _, s := range slice {
-		m[s] = true
-	}
-	return m
-}
-
-// parseAgentIDFields extracts role_type and rig from an agent bead ID.
-// Roles must be configured via agent_roles.* in config.yaml:
-//   - agent_roles.town_level: Singleton roles with no rig (pattern: <prefix>-<role>)
-//   - agent_roles.rig_level: One per rig (pattern: <prefix>-<rig>-<role>)
-//   - agent_roles.named: Multiple per rig with names (pattern: <prefix>-<rig>-<role>-<name>)
-func parseAgentIDFields(agentID string) (roleType, rig string) {
-	// Must contain a hyphen to have a prefix
-	hyphenIdx := strings.Index(agentID, "-")
-	if hyphenIdx <= 0 {
-		return "", ""
-	}
-
-	// Split into parts after the prefix
-	rest := agentID[hyphenIdx+1:] // Skip "<prefix>-"
-	parts := strings.Split(rest, "-")
-
-	if len(parts) < 1 {
-		return "", ""
-	}
-
-	// Load role classifications from config (application-defined)
-	townLevelRoles := sliceToSet(config.GetTownLevelRoles())
-	rigLevelRoles := sliceToSet(config.GetRigLevelRoles())
-	namedRoles := sliceToSet(config.GetNamedRoles())
-
-	// If no roles configured, agent ID parsing is disabled
-	if townLevelRoles == nil && rigLevelRoles == nil && namedRoles == nil {
-		return "", ""
-	}
-
-	// Case 1: Town-level roles (gt-mayor, gt-deacon) - single part after prefix
-	if len(parts) == 1 {
-		role := parts[0]
-		if townLevelRoles[role] {
-			return role, ""
-		}
-		return "", "" // Unknown format
-	}
-
-	// For 2+ parts, scan from the right to find a known role.
-	// This allows rig names to contain hyphens (e.g., "my-project").
-	for i := len(parts) - 1; i >= 0; i-- {
-		part := parts[i]
-
-		// Check for rig-level role (witness, refinery) - must be at end
-		if rigLevelRoles[part] && i == len(parts)-1 {
-			// rig is everything before role
-			rig = strings.Join(parts[:i], "-")
-			return part, rig
-		}
-
-		// Check for named role (crew, polecat) - must have something after (the name)
-		if namedRoles[part] && i < len(parts)-1 {
-			// rig is everything before role
-			rig = strings.Join(parts[:i], "-")
-			return part, rig
-		}
-	}
-
-	return "", "" // Unknown format
 }
