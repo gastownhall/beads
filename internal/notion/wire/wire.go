@@ -21,15 +21,17 @@ const (
 )
 
 var (
-	databaseTagRe     = regexp.MustCompile(`<database\b[^>]*>`)
-	dataSourceTagRe   = regexp.MustCompile(`<data-source\b[^>]*>`)
-	viewTagRe         = regexp.MustCompile(`<view\b[^>]*>`)
-	attrReTemplate    = `%s="([^"]+)"`
-	taggedContentTmpl = `<%s>\s*([\s\S]*?)\s*</%s>`
-	viewURLAttrRe     = regexp.MustCompile(`url="(?:\{\{)?(view://[^"]+?)(?:\}\})?"`)
-	viewURLDirectRe   = regexp.MustCompile(`(?:\{\{)?(view://[0-9a-z-]+)(?:\}\})?`)
-	uuidRe            = regexp.MustCompile(`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
-	compactUUIDRe     = regexp.MustCompile(`([0-9a-f]{32})`)
+	databaseTagRe         = regexp.MustCompile(`<database\b[^>]*>`)
+	ancestorDatabaseTagRe = regexp.MustCompile(`<ancestor-[^>]*database\b[^>]*>`)
+	dataSourceTagRe       = regexp.MustCompile(`<data-source\b[^>]*>`)
+	parentDataSourceTagRe = regexp.MustCompile(`<parent-data-source\b[^>]*>`)
+	viewTagRe             = regexp.MustCompile(`<view\b[^>]*>`)
+	attrReTemplate        = `%s="([^"]+)"`
+	taggedContentTmpl     = `<%s>\s*([\s\S]*?)\s*</%s>`
+	viewURLAttrRe         = regexp.MustCompile(`url="(?:\{\{)?(view://[^"]+?)(?:\}\})?"`)
+	viewURLDirectRe       = regexp.MustCompile(`(?:\{\{)?(view://[0-9a-z-]+)(?:\}\})?`)
+	uuidRe                = regexp.MustCompile(`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+	compactUUIDRe         = regexp.MustCompile(`([0-9a-f]{32})`)
 )
 
 var RequiredProperties = []string{"Name", "Beads ID", "Status", "Priority", "Type", "Description"}
@@ -293,6 +295,38 @@ func ExtractBeadsDatabaseInfoFromText(text string) DatabaseInfo {
 		DataSourceID: strings.TrimPrefix(dataSourceURL, "collection://"),
 		Views:        views,
 	}
+}
+
+func ExtractPageParentageFromText(text string) DatabaseInfo {
+	databaseTag := ancestorDatabaseTagRe.FindString(text)
+	if databaseTag == "" {
+		databaseTag = databaseTagRe.FindString(text)
+	}
+	dataSourceTag := parentDataSourceTagRe.FindString(text)
+	databaseURL := extractAttr(databaseTag, "url")
+	dataSourceURL := extractAttr(dataSourceTag, "url")
+	return DatabaseInfo{
+		DatabaseID:   ExtractPageIDFromURL(databaseURL),
+		DatabaseURL:  databaseURL,
+		DataSourceID: strings.TrimPrefix(dataSourceURL, "collection://"),
+	}
+}
+
+func MatchesTargetDatabase(actual, target DatabaseInfo) bool {
+	matched := false
+	if strings.TrimSpace(actual.DataSourceID) != "" && strings.TrimSpace(target.DataSourceID) != "" {
+		if actual.DataSourceID != target.DataSourceID {
+			return false
+		}
+		matched = true
+	}
+	if strings.TrimSpace(actual.DatabaseID) != "" && strings.TrimSpace(target.DatabaseID) != "" {
+		if actual.DatabaseID != target.DatabaseID {
+			return false
+		}
+		matched = true
+	}
+	return matched
 }
 
 func DetectBeadsPropertiesFromFetchText(text string) []string {

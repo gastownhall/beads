@@ -646,7 +646,7 @@ func (s *Service) pullManagedIssues(ctx context.Context, st *state.BeadsState, c
 				if ctx.Err() != nil {
 					return
 				}
-				issue, err := s.fetchManagedIssue(ctx, session, task.beadsID, task.pageID)
+				issue, _, err := s.fetchManagedIssue(ctx, session, task.beadsID, task.pageID)
 				if err != nil {
 					setErr(err)
 					return
@@ -733,18 +733,19 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 		}
 	}
 	brokenStateIDs := map[string]servicePushResultError{}
+	foreignStateIDs := map[string]string{}
 	stateIDs := managedStateIDsForPush(st.PageIDs, pushableIssues, archiveMissing)
 	for _, id := range stateIDs {
 		if _, ok := existingByID[id]; ok {
 			continue
 		}
-		if cached, ok := cachedManagedIssueForPush(st, id, cacheMaxAge); ok {
-			existingByID[id] = cached
-			continue
-		}
-		issue, err := s.fetchManagedIssue(ctx, session, id, st.PageIDs[id])
+		issue, parentage, err := s.fetchManagedIssue(ctx, session, id, st.PageIDs[id])
 		if err != nil {
 			brokenStateIDs[id] = servicePushResultError{ID: id, Stage: "state_fetch", Message: err.Error()}
+			continue
+		}
+		if !wire.MatchesTargetDatabase(parentage, databaseInfo) {
+			foreignStateIDs[id] = st.PageIDs[id]
 			continue
 		}
 		existingByID[id] = issue
@@ -763,6 +764,14 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 	slices.Sort(brokenKeys)
 	for _, id := range brokenKeys {
 		errors = append(errors, brokenStateIDs[id])
+	}
+	foreignStateKeys := make([]string, 0, len(foreignStateIDs))
+	for id := range foreignStateIDs {
+		foreignStateKeys = append(foreignStateKeys, id)
+	}
+	if len(foreignStateKeys) > 0 {
+		slices.Sort(foreignStateKeys)
+		warnings = append(warnings, staleNotionReferenceWarning("Ignored stale beads-state.json entries outside the current Notion target", foreignStateKeys))
 	}
 
 	for _, issue := range input.Issues {
@@ -797,6 +806,12 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 	if archiveMissing {
 		for _, id := range stateIDs {
 			if _, ok := inputIDs[id]; ok {
+				continue
+			}
+			if _, ok := brokenStateIDs[id]; ok {
+				continue
+			}
+			if _, ok := foreignStateIDs[id]; ok {
 				continue
 			}
 			current := existingByID[id]
@@ -867,6 +882,21 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 		}
 		if err := state.SaveBeadsState(s.paths, st); err != nil {
 			return output.Wrap(err, "failed to save beads state")
+		}
+	}
+	if len(foreignStateKeys) > 0 {
+		stateChanged := false
+		for _, id := range foreignStateKeys {
+			if st.PageIDFor(id) != foreignStateIDs[id] {
+				continue
+			}
+			st.Delete(id)
+			stateChanged = true
+		}
+		if stateChanged {
+			if err := state.SaveBeadsState(s.paths, st); err != nil {
+				return output.Wrap(err, "failed to save beads state")
+			}
 		}
 	}
 	for _, item := range archived {
@@ -1014,29 +1044,29 @@ func (s *Service) fetchPushDatabaseInfo(ctx context.Context, session mcpclient.S
 	return info, schema, nil
 }
 
-func (s *Service) fetchManagedIssue(ctx context.Context, session mcpclient.Session, expectedBeadsID, pageID string) (wire.Issue, error) {
+func (s *Service) fetchManagedIssue(ctx context.Context, session mcpclient.Session, expectedBeadsID, pageID string) (wire.Issue, wire.DatabaseInfo, error) {
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "notion-fetch", Arguments: map[string]any{"id": pageID}})
 	if err != nil {
-		return wire.Issue{}, output.Wrap(err, "failed to fetch managed page "+expectedBeadsID)
+		return wire.Issue{}, wire.DatabaseInfo{}, output.Wrap(err, "failed to fetch managed page "+expectedBeadsID)
 	}
 	text, err := wire.ResultText(result, "managed page fetch")
 	if err != nil {
-		return wire.Issue{}, output.Wrap(err, "failed to decode managed page fetch")
+		return wire.Issue{}, wire.DatabaseInfo{}, output.Wrap(err, "failed to decode managed page fetch")
 	}
 	payload, err := wire.ResultJSONMap(result, "managed page fetch")
 	if err != nil {
-		return wire.Issue{}, output.Wrap(err, "failed to decode managed page payload")
+		return wire.Issue{}, wire.DatabaseInfo{}, output.Wrap(err, "failed to decode managed page payload")
 	}
 	issue, err := wire.NormalizePageFetchPayload(text, payload)
 	if err != nil {
-		return wire.Issue{}, output.Wrap(err, "failed to normalize managed page "+expectedBeadsID)
+		return wire.Issue{}, wire.DatabaseInfo{}, output.Wrap(err, "failed to normalize managed page "+expectedBeadsID)
 	}
 	if issue.ID != expectedBeadsID {
-		return wire.Issue{}, output.NewError("Managed page Beads ID mismatch", "saved state expects "+expectedBeadsID+" but the Notion page reports "+issue.ID, `Run "bd notion state doctor" to inspect the saved state`, 1)
+		return wire.Issue{}, wire.DatabaseInfo{}, output.NewError("Managed page Beads ID mismatch", "saved state expects "+expectedBeadsID+" but the Notion page reports "+issue.ID, `Run "bd notion state doctor" to inspect the saved state`, 1)
 	}
 	issue.NotionPageID = serviceFirstNonEmpty(issue.NotionPageID, pageID)
 	issue.ExternalRef = serviceFirstNonEmpty(issue.ExternalRef, "notion:"+issue.NotionPageID)
-	return issue, nil
+	return issue, wire.ExtractPageParentageFromText(text), nil
 }
 
 func (s *Service) createPagesForPush(ctx context.Context, session mcpclient.Session, st *state.BeadsState, dataSourceID string, issues []wire.PushIssue, schema wire.SchemaStatus) ([]servicePushResultItem, error) {
@@ -1197,6 +1227,21 @@ func filterUnsupportedPushIssues(issues []wire.PushIssue) ([]wire.PushIssue, []s
 	slices.Sort(parts)
 	warnings := []string{fmt.Sprintf("Skipped unsupported Notion issue types: %s (supported: bug, feature, task, epic, chore)", strings.Join(parts, ", "))}
 	return filtered, skipped, warnings
+}
+
+func staleNotionReferenceWarning(prefix string, ids []string) string {
+	if len(ids) == 0 {
+		return strings.TrimSpace(prefix)
+	}
+	limit := len(ids)
+	if limit > 3 {
+		limit = 3
+	}
+	sample := strings.Join(ids[:limit], ", ")
+	if len(ids) == limit {
+		return fmt.Sprintf("%s: %s", prefix, sample)
+	}
+	return fmt.Sprintf("%s: %s (+%d more)", prefix, sample, len(ids)-limit)
 }
 
 func pushIssueMatches(current wire.Issue, next wire.PushIssue) bool {
