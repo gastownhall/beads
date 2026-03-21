@@ -633,26 +633,6 @@ func TestIssueTypeRequiredSections(t *testing.T) {
 	}
 }
 
-func TestAgentStateIsValid(t *testing.T) {
-	cases := []struct {
-		name  string
-		state AgentState
-		want  bool
-	}{
-		{"idle", StateIdle, true},
-		{"running", StateRunning, true},
-		{"empty", AgentState(""), true}, // empty allowed for non-agent beads
-		{"invalid", AgentState("dormant"), false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.state.IsValid(); got != tc.want {
-				t.Fatalf("AgentState(%q).IsValid() = %v, want %v", tc.state, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestMolTypeIsValid(t *testing.T) {
 	cases := []struct {
 		name  string

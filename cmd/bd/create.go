@@ -170,14 +170,6 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Agent-specific flags
-		agentRig, _ := cmd.Flags().GetString("agent-rig")
-
-		// Validate agent-specific flags require --type=agent
-		if agentRig != "" && issueType != "agent" {
-			FatalError("--agent-rig flag requires --type=agent")
-		}
-
 		// Event-specific flags
 		eventCategory, _ := cmd.Flags().GetString("event-category")
 		eventActor, _ := cmd.Flags().GetString("event-actor")
@@ -285,7 +277,6 @@ var createCmd = &cobra.Command{
 				Owner:              getOwner(),
 				MolType:            molType,
 				WispType:           wispType,
-				Rig:                agentRig,
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
 				Metadata:           metadata,
@@ -549,7 +540,6 @@ var createCmd = &cobra.Command{
 			Owner:              getOwner(),
 			MolType:            molType,
 			WispType:           wispType,
-			Rig:                agentRig,
 			EventKind:          eventCategory,
 			Actor:              eventActor,
 			Target:             eventTarget,
@@ -639,34 +629,6 @@ var createCmd = &cobra.Command{
 				WarnError("failed to add label %s: %v", label, err)
 			} else {
 				postCreateWrites = true
-			}
-		}
-
-		// Auto-add role_type/rig labels for agent beads (enables filtering queries)
-		// Check for gt:agent label to identify agent beads (Gas Town separation)
-		hasAgentLabel := false
-		for _, l := range labels {
-			if l == "gt:agent" {
-				hasAgentLabel = true
-				break
-			}
-		}
-		if hasAgentLabel {
-			if issue.RoleType != "" {
-				agentLabel := "role_type:" + issue.RoleType
-				if err := store.AddLabel(ctx, issue.ID, agentLabel, actor); err != nil {
-					WarnError("failed to add role_type label: %v", err)
-				} else {
-					postCreateWrites = true
-				}
-			}
-			if issue.Rig != "" {
-				rigLabel := "rig:" + issue.Rig
-				if err := store.AddLabel(ctx, issue.ID, rigLabel, actor); err != nil {
-					WarnError("failed to add rig label: %v", err)
-				} else {
-					postCreateWrites = true
-				}
 			}
 		}
 
@@ -833,8 +795,6 @@ func init() {
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-polecat), patrol (recurring ops), work (default)")
 	createCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 	createCmd.Flags().Bool("validate", false, "Validate description contains required sections for issue type")
-	// Agent-specific flags (only valid when --type=agent)
-	createCmd.Flags().String("agent-rig", "", "Agent's rig name (requires --type=agent)")
 	// Event-specific flags (only valid when --type=event)
 	createCmd.Flags().String("event-category", "", "Event category (e.g., patrol.muted, agent.started) (requires --type=event)")
 	createCmd.Flags().String("event-actor", "", "Entity URI who caused this event (requires --type=event)")
@@ -907,8 +867,6 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 	if molTypeStr != "" {
 		molType = types.MolType(molTypeStr)
 	}
-	agentRig, _ := cmd.Flags().GetString("agent-rig")
-
 	// Extract wisp type (TTL classification for ephemeral wisps)
 	wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
 	var wispType types.WispType
@@ -985,7 +943,6 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 		// Molecule/agent fields (bd-xwvo fix)
 		MolType:  molType,
 		WispType: wispType,
-		Rig:      agentRig,
 		// Time scheduling fields (bd-xwvo fix)
 		DueAt:      dueAt,
 		DeferUntil: deferUntil,

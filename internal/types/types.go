@@ -93,20 +93,9 @@ type Issue struct {
 	Timeout   time.Duration `json:"timeout,omitempty"`    // Max wait time before escalation
 	Waiters   []string      `json:"waiters,omitempty"`    // Mail addresses to notify when gate clears
 
-	// ===== Slot Fields (exclusive access primitives) =====
-	Holder string `json:"holder,omitempty"` // Who currently holds the slot (empty = available)
-
 	// ===== Source Tracing Fields (formula cooking origin) =====
 	SourceFormula  string `json:"source_formula,omitempty"`  // Formula name where step was defined
 	SourceLocation string `json:"source_location,omitempty"` // Path: "steps[0]", "advice[0].after"
-
-	// ===== Agent Identity Fields (agent-as-bead support) =====
-	HookBead     string     `json:"hook_bead,omitempty"`     // Current work on agent's hook (0..1)
-	RoleBead     string     `json:"role_bead,omitempty"`     // Role definition bead (required for agents)
-	AgentState   AgentState `json:"agent_state,omitempty"`   // Agent state: idle|running|stuck|stopped
-	LastActivity *time.Time `json:"last_activity,omitempty"` // Updated on each action (timeout detection)
-	RoleType     string     `json:"role_type,omitempty"`     // Agent role type (application-defined)
-	Rig          string     `json:"rig,omitempty"`           // Rig name (empty for town-level agents)
 
 	// ===== Molecule Type Fields (swarm coordination) =====
 	MolType MolType `json:"mol_type,omitempty"` // Molecule type: swarm|patrol|work (empty = work)
@@ -163,16 +152,6 @@ func (i *Issue) ComputeContentHash() string {
 	for _, waiter := range i.Waiters {
 		w.str(waiter)
 	}
-
-	// Slot fields for exclusive access
-	w.str(i.Holder)
-
-	// Agent identity fields
-	w.str(i.HookBead)
-	w.str(i.RoleBead)
-	w.str(string(i.AgentState))
-	w.str(i.RoleType)
-	w.str(i.Rig)
 
 	// Molecule type
 	w.str(string(i.MolType))
@@ -263,10 +242,6 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	if i.Status != StatusClosed && i.ClosedAt != nil {
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
 	}
-	// Validate agent state if set
-	if !i.AgentState.IsValid() {
-		return fmt.Errorf("invalid agent state: %s", i.AgentState)
-	}
 	// Validate metadata is well-formed JSON if set (GH#1406)
 	if len(i.Metadata) > 0 {
 		if !json.Valid(i.Metadata) {
@@ -314,10 +289,6 @@ func (i *Issue) ValidateForImport(customStatuses []string) error {
 	}
 	if i.Status != StatusClosed && i.ClosedAt != nil {
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
-	}
-	// Validate agent state if set
-	if !i.AgentState.IsValid() {
-		return fmt.Errorf("invalid agent state: %s", i.AgentState)
 	}
 	// Validate metadata is well-formed JSON if set (GH#1406)
 	if len(i.Metadata) > 0 {
@@ -495,30 +466,6 @@ func (t IssueType) RequiredSections() []RequiredSection {
 		// Chore and custom types have no required sections
 		return nil
 	}
-}
-
-// AgentState represents the self-reported state of an agent
-type AgentState string
-
-// Agent state constants
-const (
-	StateIdle     AgentState = "idle"     // Agent is waiting for work
-	StateSpawning AgentState = "spawning" // Agent is starting up
-	StateRunning  AgentState = "running"  // Agent is executing (general)
-	StateWorking  AgentState = "working"  // Agent is actively working on a task
-	StateStuck    AgentState = "stuck"    // Agent is blocked and needs help
-	StateDone     AgentState = "done"     // Agent completed its current work
-	StateStopped  AgentState = "stopped"  // Agent has cleanly shut down
-	StateDead     AgentState = "dead"     // Agent died without clean shutdown (timeout detection)
-)
-
-// IsValid checks if the agent state value is valid
-func (s AgentState) IsValid() bool {
-	switch s {
-	case StateIdle, StateSpawning, StateRunning, StateWorking, StateStuck, StateDone, StateStopped, StateDead, "":
-		return true // empty is valid (non-agent beads)
-	}
-	return false
 }
 
 // MolType categorizes the molecule type for swarm coordination

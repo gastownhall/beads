@@ -125,8 +125,6 @@ Examples:
 			SourceRepo:         sourceIssue.SourceRepo,
 			Ephemeral:          sourceIssue.Ephemeral,
 			MolType:            sourceIssue.MolType,
-			RoleType:           sourceIssue.RoleType,
-			Rig:                sourceIssue.Rig,
 			DueAt:              sourceIssue.DueAt,
 			DeferUntil:         sourceIssue.DeferUntil,
 			CreatedBy:          actor,

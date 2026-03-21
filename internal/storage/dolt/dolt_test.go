@@ -2153,8 +2153,8 @@ func TestEphemeralExplicitID_UpdateIssue(t *testing.T) {
 	defer cancel()
 
 	issue := &types.Issue{
-		ID:        "test-agent-max",
-		Title:     "Agent: test-agent-max",
+		ID:        "test-ephemeral-update",
+		Title:     "Ephemeral: test-ephemeral-update",
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
@@ -2166,19 +2166,19 @@ func TestEphemeralExplicitID_UpdateIssue(t *testing.T) {
 
 	// UpdateIssue should work (this was broken per GH#2053)
 	updates := map[string]interface{}{
-		"agent_state": "running",
+		"title": "Updated ephemeral title",
 	}
-	if err := store.UpdateIssue(ctx, "test-agent-max", updates, "test-user"); err != nil {
+	if err := store.UpdateIssue(ctx, "test-ephemeral-update", updates, "test-user"); err != nil {
 		t.Fatalf("UpdateIssue failed for ephemeral bead with explicit ID: %v", err)
 	}
 
 	// Verify the update persisted
-	got, err := store.GetIssue(ctx, "test-agent-max")
+	got, err := store.GetIssue(ctx, "test-ephemeral-update")
 	if err != nil {
 		t.Fatalf("GetIssue after update failed: %v", err)
 	}
-	if got.AgentState != "running" {
-		t.Errorf("Expected agent_state %q, got %q", "running", got.AgentState)
+	if got.Title != "Updated ephemeral title" {
+		t.Errorf("Expected title %q, got %q", "Updated ephemeral title", got.Title)
 	}
 }
 

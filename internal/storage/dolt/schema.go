@@ -66,13 +66,6 @@ CREATE TABLE IF NOT EXISTS issues (
     await_id VARCHAR(255) DEFAULT '',
     timeout_ns BIGINT DEFAULT 0,
     waiters TEXT DEFAULT '',
-    -- Agent fields
-    hook_bead VARCHAR(255) DEFAULT '',
-    role_bead VARCHAR(255) DEFAULT '',
-    agent_state VARCHAR(32) DEFAULT '',
-    last_activity DATETIME,
-    role_type VARCHAR(32) DEFAULT '',
-    rig VARCHAR(255) DEFAULT '',
     -- Time-based scheduling fields
     due_at DATETIME,
     defer_until DATETIME,
