@@ -503,6 +503,60 @@ func TestCLI_UpdateAppendNotesMutualExclusion(t *testing.T) {
 	}
 }
 
+func TestCLI_NoteCommand(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow CLI test in short mode")
+	}
+	tmpDir := setupCLITestDB(t)
+
+	// Create an issue with initial notes
+	out := runBDInProcess(t, tmpDir, "create", "Issue for note test", "-p", "2", "--notes", "Original notes", "--json")
+	var issue map[string]interface{}
+	json.Unmarshal([]byte(out), &issue)
+	id := issue["id"].(string)
+
+	// Test: bd note <id> <text> appends to existing notes
+	runBDInProcess(t, tmpDir, "note", id, "Added via note command")
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	var updated []map[string]interface{}
+	json.Unmarshal([]byte(out), &updated)
+	notes := updated[0]["notes"].(string)
+	if notes != "Original notes\nAdded via note command" {
+		t.Errorf("Expected 'Original notes\\nAdded via note command', got: %q", notes)
+	}
+
+	// Test: bd note <id> with multiple words joins them
+	runBDInProcess(t, tmpDir, "note", id, "second", "note", "here")
+	out = runBDInProcess(t, tmpDir, "show", id, "--json")
+	json.Unmarshal([]byte(out), &updated)
+	notes = updated[0]["notes"].(string)
+	if notes != "Original notes\nAdded via note command\nsecond note here" {
+		t.Errorf("Expected three lines, got: %q", notes)
+	}
+
+	// Test: bd note on issue with no existing notes
+	out = runBDInProcess(t, tmpDir, "create", "Issue with no notes", "-p", "2", "--json")
+	json.Unmarshal([]byte(out), &issue)
+	id2 := issue["id"].(string)
+
+	runBDInProcess(t, tmpDir, "note", id2, "First note ever")
+	out = runBDInProcess(t, tmpDir, "show", id2, "--json")
+	json.Unmarshal([]byte(out), &updated)
+	notes = updated[0]["notes"].(string)
+	if notes != "First note ever" {
+		t.Errorf("Expected 'First note ever', got: %q", notes)
+	}
+
+	// Test: bd note with no text should fail
+	_, stderr, err := runBDInProcessAllowError(t, tmpDir, "note", id)
+	if err == nil {
+		t.Errorf("Expected error when no note text provided, got none")
+	}
+	if !strings.Contains(stderr, "no note text provided") {
+		t.Errorf("Expected 'no note text provided' error, got: %v", stderr)
+	}
+}
+
 func TestCLI_Close(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
