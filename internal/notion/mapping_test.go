@@ -147,13 +147,20 @@ func TestPushPayloadFromIssuesWithExistingPreservesAuthoritativeSnapshots(t *tes
 	}
 }
 
-func TestSupportsIssueType(t *testing.T) {
+func TestPushPayloadFromIssuePreservesUnsupportedIssueTypeForBridge(t *testing.T) {
 	t.Parallel()
 
-	if !SupportsIssueType(types.TypeTask, nil) {
-		t.Fatal("task should be supported")
+	payload, err := PushPayloadFromIssue(&types.Issue{
+		ID:        "beads-unsupported",
+		Title:     "Custom type",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.IssueType("pm"),
+	}, nil)
+	if err != nil {
+		t.Fatalf("PushPayloadFromIssue returned error: %v", err)
 	}
-	if SupportsIssueType(types.IssueType("event"), nil) {
-		t.Fatal("event should not be supported")
+	if got := payload.Issues[0].IssueType; got != "pm" {
+		t.Fatalf("issue type = %q, want pm", got)
 	}
 }

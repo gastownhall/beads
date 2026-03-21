@@ -226,6 +226,7 @@ type PushResponse struct {
 	BodyUpdatedCount     int               `json:"body_updated_count,omitempty"`
 	CommentsCreatedCount int               `json:"comments_created_count,omitempty"`
 	Errors               []PushResultError `json:"errors,omitempty"`
+	Warnings             []string          `json:"warnings,omitempty"`
 	Created              []PushResultItem  `json:"created,omitempty"`
 	Updated              []PushResultItem  `json:"updated,omitempty"`
 	Skipped              []PushResultItem  `json:"skipped,omitempty"`

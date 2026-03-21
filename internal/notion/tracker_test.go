@@ -323,6 +323,7 @@ func TestTrackerBatchPushBuildsSinglePayloadAndNormalizesResponse(t *testing.T) 
 			Errors: []PushResultError{
 				{ID: "beads-4", Stage: "state_fetch", Message: "missing page"},
 			},
+			Warnings: []string{"Skipped unsupported Notion issue types: pm=1"},
 		},
 	}
 	tr := NewTracker(WithTrackerClient(client), WithTrackerDatabaseID("db_123"), WithTrackerViewURL("view://example"))
@@ -353,6 +354,9 @@ func TestTrackerBatchPushBuildsSinglePayloadAndNormalizesResponse(t *testing.T) 
 	}
 	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Message, "missing page") {
 		t.Fatalf("errors = %#v", result.Errors)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "pm=1") {
+		t.Fatalf("warnings = %#v", result.Warnings)
 	}
 	if !strings.Contains(string(client.pushReq.Payload), "\"issues\"") {
 		t.Fatalf("payload = %s", client.pushReq.Payload)

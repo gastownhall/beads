@@ -119,10 +119,11 @@ type PullStats struct {
 
 // PushStats tracks push operation results.
 type PushStats struct {
-	Created int
-	Updated int
-	Skipped int
-	Errors  int
+	Created  int
+	Updated  int
+	Skipped  int
+	Errors   int
+	Warnings []string
 }
 
 // BatchPushItem describes one local issue handled by a tracker batch push.
@@ -139,10 +140,11 @@ type BatchPushError struct {
 
 // BatchPushResult is the normalized result of a tracker batch push.
 type BatchPushResult struct {
-	Created []BatchPushItem
-	Updated []BatchPushItem
-	Skipped []string
-	Errors  []BatchPushError
+	Created  []BatchPushItem
+	Updated  []BatchPushItem
+	Skipped  []string
+	Errors   []BatchPushError
+	Warnings []string
 }
 
 // Conflict represents a bidirectional modification conflict.

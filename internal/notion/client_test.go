@@ -206,7 +206,7 @@ func TestPushValidJSONAndStdin(t *testing.T) {
 	t.Parallel()
 
 	runner := &fakeRunner{
-		stdout: []byte(`{"dry_run":false,"archive_requested":false,"archive_supported":false,"archive_reason":"unsupported","input_count":1,"created_count":1,"updated_count":0,"skipped_count":0}`),
+		stdout: []byte(`{"dry_run":false,"archive_requested":false,"archive_supported":false,"archive_reason":"unsupported","input_count":1,"created_count":1,"updated_count":0,"skipped_count":0,"warnings":["Skipped unsupported Notion issue types: pm=1"]}`),
 	}
 	client := NewClient(WithRunner(runner))
 	payload := []byte(`{"issues":[{"id":"bd-1","title":"One"}]}`)
@@ -230,6 +230,9 @@ func TestPushValidJSONAndStdin(t *testing.T) {
 	}
 	if resp.ArchiveReason != "unsupported" {
 		t.Fatalf("archive reason = %q, want unsupported", resp.ArchiveReason)
+	}
+	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "pm=1") {
+		t.Fatalf("warnings = %#v", resp.Warnings)
 	}
 	wantArgs := []string{"beads", "push", "--json", "--input", "-", "--database-id", "db_123", "--view-url", "https://example.com/view"}
 	if strings.Join(runner.args, " ") != strings.Join(wantArgs, " ") {

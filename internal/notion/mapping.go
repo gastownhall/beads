@@ -291,20 +291,15 @@ func typeToBeads(raw string, config *MappingConfig) (types.IssueType, error) {
 }
 
 func typeToNotion(issueType types.IssueType, config *MappingConfig) (string, error) {
+	trimmed := strings.TrimSpace(string(issueType))
+	if trimmed == "" {
+		return "", nil
+	}
 	value, ok := config.TypeToNotion[issueType]
 	if !ok {
-		return "", fmt.Errorf("unsupported beads issue type %q", issueType)
+		return trimmed, nil
 	}
 	return value, nil
-}
-
-// SupportsIssueType reports whether the fixed Notion schema can represent the given beads issue type.
-func SupportsIssueType(issueType types.IssueType, config *MappingConfig) bool {
-	if config == nil {
-		config = DefaultMappingConfig()
-	}
-	_, ok := config.TypeToNotion[issueType]
-	return ok
 }
 
 func parseMappingTimestamp(raw string) (time.Time, error) {

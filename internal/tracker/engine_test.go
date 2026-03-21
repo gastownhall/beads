@@ -318,8 +318,9 @@ func TestEnginePushUsesBatchTrackerWhenAvailable(t *testing.T) {
 	tracker := &mockBatchTracker{
 		mockTracker: newMockTracker("notion"),
 		batchResult: &BatchPushResult{
-			Created: []BatchPushItem{{LocalID: "bd-batch-1", ExternalRef: "https://notion.so/new-page"}},
-			Updated: []BatchPushItem{{LocalID: "bd-batch-2", ExternalRef: "https://notion.so/existing"}},
+			Created:  []BatchPushItem{{LocalID: "bd-batch-1", ExternalRef: "https://notion.so/new-page"}},
+			Updated:  []BatchPushItem{{LocalID: "bd-batch-2", ExternalRef: "https://notion.so/existing"}},
+			Warnings: []string{"Skipped unsupported Notion issue types: pm=1"},
 		},
 	}
 	engine := NewEngine(tracker, store, "test-actor")
@@ -336,6 +337,9 @@ func TestEnginePushUsesBatchTrackerWhenAvailable(t *testing.T) {
 	}
 	if result.PushStats.Created != 1 || result.PushStats.Updated != 1 {
 		t.Fatalf("PushStats = %+v", result.PushStats)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "pm=1") {
+		t.Fatalf("warnings = %#v", result.Warnings)
 	}
 	stored, err := store.GetIssue(ctx, "bd-batch-1")
 	if err != nil {

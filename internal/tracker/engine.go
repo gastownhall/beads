@@ -162,6 +162,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Updated += pushStats.Updated
 		result.Stats.Skipped += pushStats.Skipped
 		result.Stats.Errors += pushStats.Errors
+		result.Warnings = append(result.Warnings, pushStats.Warnings...)
 	}
 
 	// Record final stats as span attributes.
@@ -471,6 +472,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			stats.Updated += len(batchResult.Updated)
 			stats.Skipped += len(batchResult.Skipped)
 			stats.Errors += len(batchResult.Errors)
+			stats.Warnings = append(stats.Warnings, batchResult.Warnings...)
 			for _, item := range batchResult.Errors {
 				if item.LocalID != "" {
 					e.warn("Failed to push %s in %s: %s", item.LocalID, e.Tracker.DisplayName(), item.Message)

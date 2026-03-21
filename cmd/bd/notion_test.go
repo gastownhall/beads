@@ -377,51 +377,6 @@ func TestRenderNotionSyncResultPrintsWarnings(t *testing.T) {
 	}
 }
 
-func TestBuildNotionPushHooksTracksUnsupportedTypes(t *testing.T) {
-	hooks, stats := buildNotionPushHooks()
-	if hooks == nil || hooks.ShouldPush == nil {
-		t.Fatal("expected push hooks")
-	}
-	if !hooks.ShouldPush(&types.Issue{IssueType: types.TypeTask}) {
-		t.Fatal("task should be pushed")
-	}
-	if hooks.ShouldPush(&types.Issue{IssueType: types.IssueType("event")}) {
-		t.Fatal("event should be skipped")
-	}
-	if hooks.ShouldPush(&types.Issue{IssueType: types.IssueType("event")}) {
-		t.Fatal("event should be skipped")
-	}
-	if got := stats.warningText(); got != "" {
-		t.Fatalf("warning = %q, want empty", got)
-	}
-	if hooks.ShouldPush(&types.Issue{IssueType: types.IssueType("pm")}) {
-		t.Fatal("custom unsupported type should be skipped")
-	}
-	if got := stats.warningText(); !strings.Contains(got, "pm=1") {
-		t.Fatalf("warning = %q", got)
-	}
-}
-
-func TestShouldWarnUnsupportedNotionIssueType(t *testing.T) {
-	tests := []struct {
-		name      string
-		issueType types.IssueType
-		want      bool
-	}{
-		{name: "empty", issueType: "", want: false},
-		{name: "event", issueType: types.TypeEvent, want: false},
-		{name: "custom", issueType: types.IssueType("pm"), want: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldWarnUnsupportedNotionIssueType(tt.issueType); got != tt.want {
-				t.Fatalf("shouldWarnUnsupportedNotionIssueType(%q) = %v, want %v", tt.issueType, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestBuildNotionSyncOptions(t *testing.T) {
 
 	originalPull := notionSyncPull

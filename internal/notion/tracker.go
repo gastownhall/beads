@@ -464,6 +464,7 @@ func (t *Tracker) batchPushResult(resp *PushResponse) *itracker.BatchPushResult 
 			Message: strings.TrimSpace(firstNonEmpty(item.Stage+": "+item.Message, item.Message, item.Stage)),
 		})
 	}
+	result.Warnings = append(result.Warnings, resp.Warnings...)
 	return result
 }
 
