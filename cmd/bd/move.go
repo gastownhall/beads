@@ -25,9 +25,9 @@ This command:
 3. Closes the source issue with a redirect note
 
 The target rig can be specified as:
-  - A rig name: beads, gastown
-  - A prefix: bd-, gt-
-  - A prefix without hyphen: bd, gt
+  - A rig name: beads, my-project
+  - A prefix: bd-, mp-
+  - A prefix without hyphen: bd, mp
 
 Dependency handling for cross-rig moves:
   - Issues that depend ON the moved issue: updated to external refs
@@ -36,9 +36,9 @@ Dependency handling for cross-rig moves:
 Note: Labels are copied. Comments and event history are not transferred.
 
 Examples:
-  bd move hq-c21fj --to beads     # Move to beads by rig name
-  bd move hq-q3tki --to gt-       # Move to gastown by prefix
-  bd move hq-1h2to --to gt        # Move to gastown (prefix without hyphen)`,
+  bd move hq-c21fj --to beads       # Move to beads by rig name
+  bd move hq-q3tki --to mp-         # Move to my-project by prefix
+  bd move hq-1h2to --to mp          # Move to my-project (prefix without hyphen)`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("move")

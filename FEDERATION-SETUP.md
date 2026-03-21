@@ -1,7 +1,7 @@
 # Federation Setup Guide
 
 Federation enables peer-to-peer synchronization of beads databases between
-multiple Gas Towns using Dolt remotes. Each town maintains its own database
+multiple workspaces using Dolt remotes. Each workspace maintains its own database
 while sharing work items with configured peers.
 
 ## Overview
@@ -110,7 +110,7 @@ bd config list | grep federation.peers
 
 ### How It Works
 
-1. Each Gas Town has its own Dolt database
+1. Each workspace has its own Dolt database
 2. `add-peer` registers a Dolt remote (similar to `git remote add`)
 3. Push/pull operations sync commits between peers
 4. Conflict resolution follows configured strategy

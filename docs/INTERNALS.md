@@ -153,7 +153,7 @@ The FlushManager is designed to work correctly when commands run multiple times 
 
 ### Server Mode
 
-When running with Dolt server mode (Gas Town), the CLI communicates with the Dolt SQL server for database operations. The FlushManager is NOT used in server mode — the server process has its own flush coordination.
+When running with Dolt server mode (orchestrator), the CLI communicates with the Dolt SQL server for database operations. The FlushManager is NOT used in server mode — the server process has its own flush coordination.
 
 The server mode check in `PersistentPostRun` ensures FlushManager shutdown only occurs in embedded mode (standalone users).
 

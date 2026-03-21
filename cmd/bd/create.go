@@ -485,8 +485,8 @@ var createCmd = &cobra.Command{
 		// Validate explicit ID format if provided
 		if explicitID != "" {
 			// Basic format validation for all issue types.
-			// Note: Gas Town-specific agent ID validation (mayor, polecat, witness, etc.)
-			// is handled by gastown, not beads core.
+			// Note: Orchestrator-specific agent ID validation (mayor, polecat, witness, etc.)
+			// is handled by the orchestrator, not beads core.
 			_, err := validation.ValidateIDFormat(explicitID)
 			if err != nil {
 				FatalError("%v", err)

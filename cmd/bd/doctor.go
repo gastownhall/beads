@@ -43,23 +43,23 @@ type doctorResult struct {
 }
 
 var (
-	doctorFix                  bool
-	doctorYes                  bool
-	doctorInteractive          bool   // per-fix confirmation mode
-	doctorDryRun               bool   // preview fixes without applying
-	doctorOutput               string // export diagnostics to file
-	doctorFixChildParent       bool   // opt-in fix for child→parent deps
-	doctorVerbose              bool   // show detailed output during fixes
-	perfMode                   bool
-	checkHealthMode            bool
-	doctorCheckFlag            string // run specific check (e.g., "pollution")
-	doctorClean                bool   // for pollution check, delete detected issues
-	doctorDeep                 bool   // full graph integrity validation
-	doctorGastown              bool   // running in gastown multi-workspace mode
-	gastownDuplicatesThreshold int    // duplicate tolerance threshold for gastown mode
-	doctorServer               bool   // run server mode health checks
-	doctorMigration            string // migration validation mode: "pre" or "post"
-	doctorAgent                bool   // agent-facing diagnostic mode (ZFC-compliant)
+	doctorFix                       bool
+	doctorYes                       bool
+	doctorInteractive               bool   // per-fix confirmation mode
+	doctorDryRun                    bool   // preview fixes without applying
+	doctorOutput                    string // export diagnostics to file
+	doctorFixChildParent            bool   // opt-in fix for child→parent deps
+	doctorVerbose                   bool   // show detailed output during fixes
+	perfMode                        bool
+	checkHealthMode                 bool
+	doctorCheckFlag                 string // run specific check (e.g., "pollution")
+	doctorClean                     bool   // for pollution check, delete detected issues
+	doctorDeep                      bool   // full graph integrity validation
+	doctorOrchestrator              bool   // running in orchestrator multi-workspace mode
+	orchestratorDuplicatesThreshold int    // duplicate tolerance threshold for orchestrator mode
+	doctorServer                    bool   // run server mode health checks
+	doctorMigration                 string // migration validation mode: "pre" or "post"
+	doctorAgent                     bool   // agent-facing diagnostic mode (ZFC-compliant)
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
@@ -205,13 +205,13 @@ Examples:
 			FatalError("failed to resolve path: %v", err)
 		}
 
-		// Guardrail: never run mutating bd doctor fix from Gas Town town root.
-		// Town-level repair must go through `gt doctor --fix` because town roots
+		// Guardrail: never run mutating bd doctor fix from orchestrator workspace root.
+		// Town-level repair must go through `gt doctor --fix` because workspace roots
 		// have additional invariants beyond beads-only repos.
-		if doctorFix && isGasTownTownRoot(absPath) {
+		if doctorFix && isOrchestratorRoot(absPath) {
 			FatalErrorWithHint(
-				"refusing to run 'bd doctor --fix' at Gas Town town root",
-				"Use 'gt doctor --fix' from town root, or run 'bd doctor --fix' inside a specific rig clone (e.g. <rig>/mayor/rig)",
+				"refusing to run 'bd doctor --fix' at orchestrator workspace root",
+				"Use 'gt doctor --fix' from workspace root, or run 'bd doctor --fix' inside a specific rig clone (e.g. <rig>/mayor/rig)",
 			)
 		}
 
@@ -327,8 +327,8 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes")
 	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove child→parent dependencies (opt-in)")
 	doctorCmd.Flags().BoolVarP(&doctorVerbose, "verbose", "v", false, "Show all checks (default shows only warnings/errors)")
-	doctorCmd.Flags().BoolVar(&doctorGastown, "gastown", false, "Running in gastown multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
-	doctorCmd.Flags().IntVar(&gastownDuplicatesThreshold, "gastown-duplicates-threshold", 1000, "Duplicate tolerance threshold for gastown mode (wisps are ephemeral)")
+	doctorCmd.Flags().BoolVar(&doctorOrchestrator, "orchestrator", false, "Running in orchestrator multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
+	doctorCmd.Flags().IntVar(&orchestratorDuplicatesThreshold, "orchestrator-duplicates-threshold", 1000, "Duplicate tolerance threshold for orchestrator mode (wisps are ephemeral)")
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
 	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
@@ -374,11 +374,11 @@ func runDiagnostics(path string) doctorResult {
 		OverallOK:  true,
 	}
 
-	// Auto-detect gastown mode: routes.jsonl is only created by gastown workspaces
-	if !doctorGastown {
+	// Auto-detect orchestrator mode: routes.jsonl is only created by orchestrator workspaces
+	if !doctorOrchestrator {
 		routesFile := filepath.Join(path, ".beads", "routes.jsonl")
 		if _, err := os.Stat(routesFile); err == nil {
-			doctorGastown = true
+			doctorOrchestrator = true
 		}
 	}
 
@@ -741,7 +741,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for child→parent deps, just warn
 
 	// Check 23: Duplicate issues (from bd validate)
-	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorGastown, gastownDuplicatesThreshold))
+	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))
 	result.Checks = append(result.Checks, duplicatesCheck)
 	// Don't fail overall check for duplicates, just warn
 
@@ -765,7 +765,7 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, persistentMolCheck)
 	// Don't fail overall check for persistent mol issues, just warn
 
-	// Check 26c: Legacy merge queue files (gastown mrqueue remnants)
+	// Check 26c: Legacy merge queue files (orchestrator mrqueue remnants)
 	staleMQFilesCheck := convertDoctorCheck(doctor.CheckStaleMQFiles(path))
 	result.Checks = append(result.Checks, staleMQFilesCheck)
 	// Don't fail overall check for legacy MQ files, just warn

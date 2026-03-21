@@ -39,7 +39,7 @@ import (
 const maxEphemeralPortAttempts = 10
 
 // DefaultSharedServerPort is the default port for shared server mode.
-// Uses 3308 to avoid conflict with Gas Town which uses 3307.
+// Uses 3308 to avoid conflict with the orchestrator which uses 3307.
 const DefaultSharedServerPort = 3308
 
 // IsSharedServerMode returns true if shared server mode is enabled.
@@ -382,7 +382,7 @@ func DefaultConfig(beadsDir string) *Config {
 	// shared server port. In per-project mode, Start() will allocate an
 	// ephemeral port from the OS (GH#2098, GH#2372).
 	if cfg.Port == 0 && IsSharedServerMode() {
-		cfg.Port = DefaultSharedServerPort // 3308 - avoids Gas Town conflict on 3307
+		cfg.Port = DefaultSharedServerPort // 3308 - avoids orchestrator conflict on 3307
 	}
 
 	return cfg
@@ -472,9 +472,9 @@ func EnsureRunning(beadsDir string) (int, error) {
 func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err error) {
 	serverDir := resolveServerDir(beadsDir)
 
-	// Inform when Gas Town is also running on this machine
+	// Inform when an orchestrator is also running on this machine
 	if IsSharedServerMode() && os.Getenv("GT_ROOT") != "" {
-		fmt.Fprintf(os.Stderr, "Info: Gas Town detected (GT_ROOT set). Shared server uses port %d to avoid conflict.\n", DefaultSharedServerPort)
+		fmt.Fprintf(os.Stderr, "Info: Orchestrator detected (GT_ROOT set). Shared server uses port %d to avoid conflict.\n", DefaultSharedServerPort)
 	}
 
 	state, err := IsRunning(serverDir)

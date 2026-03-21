@@ -37,7 +37,7 @@ Dolt is the default (and only supported) storage backend. The legacy SQLite
 backend has been removed. Use --backend=sqlite to see migration instructions.
 
 Use --database to specify an existing server database name, overriding the
-default prefix-based naming. This is useful when an external tool (e.g. gastown)
+default prefix-based naming. This is useful when an external tool (e.g. an orchestrator)
 has already created the database.
 
 With --stealth: configures per-repository git settings for invisible beads usage:
@@ -360,7 +360,7 @@ environment variable.`,
 			dbName = "beads"
 		}
 		// --database flag overrides all prefix-based naming. This allows callers
-		// (e.g. gastown) to specify a pre-existing database name, preventing orphan
+		// (e.g. an orchestrator) to specify a pre-existing database name, preventing orphan
 		// database creation when the database was already created externally.
 		if database != "" {
 			dbName = database

@@ -24,10 +24,10 @@ var (
 var federationCmd = &cobra.Command{
 	Use:     "federation",
 	GroupID: "sync",
-	Short:   "Manage peer-to-peer federation with other Gas Towns",
+	Short:   "Manage peer-to-peer federation with other workspaces",
 	Long: `Manage peer-to-peer federation between Dolt-backed beads databases.
 
-Federation enables synchronized issue tracking across multiple Gas Towns,
+Federation enables synchronized issue tracking across multiple workspaces,
 each maintaining their own Dolt database while sharing updates via remotes.
 
 Requires the Dolt storage backend.`,

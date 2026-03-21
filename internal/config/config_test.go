@@ -580,8 +580,8 @@ func TestGetExternalProjects(t *testing.T) {
 
 	// Test with Set
 	Set("external_projects", map[string]string{
-		"beads":   "../beads",
-		"gastown": "/absolute/path/to/gastown",
+		"beads":         "../beads",
+		"other-project": "/absolute/path/to/other-project",
 	})
 
 	got = GetExternalProjects()
@@ -591,8 +591,8 @@ func TestGetExternalProjects(t *testing.T) {
 	if got["beads"] != "../beads" {
 		t.Errorf("GetExternalProjects()[beads] = %q, want \"../beads\"", got["beads"])
 	}
-	if got["gastown"] != "/absolute/path/to/gastown" {
-		t.Errorf("GetExternalProjects()[gastown] = %q, want \"/absolute/path/to/gastown\"", got["gastown"])
+	if got["other-project"] != "/absolute/path/to/other-project" {
+		t.Errorf("GetExternalProjects()[other-project] = %q, want \"/absolute/path/to/other-project\"", got["other-project"])
 	}
 }
 
@@ -604,7 +604,7 @@ func TestGetExternalProjectsFromConfig(t *testing.T) {
 	configContent := `
 external_projects:
   beads: ../beads
-  gastown: /path/to/gastown
+  other-project: /path/to/other-project
   other: ./relative/path
 `
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -634,8 +634,8 @@ external_projects:
 	if got["beads"] != "../beads" {
 		t.Errorf("GetExternalProjects()[beads] = %q, want \"../beads\"", got["beads"])
 	}
-	if got["gastown"] != "/path/to/gastown" {
-		t.Errorf("GetExternalProjects()[gastown] = %q, want \"/path/to/gastown\"", got["gastown"])
+	if got["other-project"] != "/path/to/other-project" {
+		t.Errorf("GetExternalProjects()[other-project] = %q, want \"/path/to/other-project\"", got["other-project"])
 	}
 	if got["other"] != "./relative/path" {
 		t.Errorf("GetExternalProjects()[other] = %q, want \"./relative/path\"", got["other"])

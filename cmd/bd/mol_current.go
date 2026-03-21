@@ -178,7 +178,7 @@ func getMoleculeProgress(ctx context.Context, s storage.DoltStorage, moleculeID 
 	// Compute step readiness from within-molecule dependencies.
 	// Uses analyzeMoleculeParallel instead of GetReadyWork because GetReadyWork
 	// excludes ephemeral issues (wisp steps are ephemeral by definition).
-	// See: https://github.com/steveyegge/gastown/issues/1276
+	// See: https://github.com/steveyegge/gastown/issues/1276 (historical reference)
 	analysis := analyzeMoleculeParallel(subgraph)
 	readyIDs := make(map[string]bool)
 	for id, info := range analysis.Steps {

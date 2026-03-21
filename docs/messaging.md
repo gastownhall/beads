@@ -4,7 +4,7 @@ Beads supports messaging as a first-class issue type, enabling inter-agent and h
 
 ## Architecture
 
-Mail commands (`bd mail`) delegate to an external mail provider (typically `gt mail` in Gas Town). Beads stores messages as issues with `type: message`, threading via `replies_to` dependencies, and ephemeral lifecycle via the `ephemeral` flag.
+Mail commands (`bd mail`) delegate to an external mail provider (typically `gt mail` in an orchestrator). Beads stores messages as issues with `type: message`, threading via `replies_to` dependencies, and ephemeral lifecycle via the `ephemeral` flag.
 
 This design separates concerns:
 - **Beads** = data plane (stores messages as issues)

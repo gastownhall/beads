@@ -21,14 +21,14 @@ This creates a new issue in the target rig with the same content,
 then closes the source issue with a reference to the new location.
 
 The target rig can be specified as:
-  - A rig name: beads, gastown
-  - A prefix: bd-, gt-
-  - A prefix without hyphen: bd, gt
+  - A rig name: beads, my-project
+  - A prefix: bd-, mp-
+  - A prefix without hyphen: bd, mp
 
 Examples:
-  bd refile bd-8hea gastown     # Move to gastown by rig name
-  bd refile bd-8hea gt-         # Move to gastown by prefix
-  bd refile bd-8hea gt          # Move to gastown (prefix without hyphen)`,
+  bd refile bd-8hea my-project  # Move to my-project by rig name
+  bd refile bd-8hea mp-         # Move to my-project by prefix
+  bd refile bd-8hea mp          # Move to my-project (prefix without hyphen)`,
 	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("refile")

@@ -114,9 +114,9 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 }
 
 // CheckDuplicateIssues detects issues with identical content.
-// When gastownMode is true, the threshold parameter defines how many duplicates
-// are acceptable before warning (default 1000 for gastown's ephemeral wisps).
-func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) DoctorCheck {
+// When orchestratorMode is true, the threshold parameter defines how many duplicates
+// are acceptable before warning (default 1000 for orchestrator's ephemeral wisps).
+func CheckDuplicateIssues(path string, orchestratorMode bool, orchestratorThreshold int) DoctorCheck {
 	// Follow redirect to resolve actual beads directory (bd-tvus fix)
 	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
@@ -130,13 +130,13 @@ func CheckDuplicateIssues(path string, gastownMode bool, gastownThreshold int) D
 	}
 	defer func() { _ = store.Close() }()
 
-	return checkDuplicateIssuesDB(db, gastownMode, gastownThreshold)
+	return checkDuplicateIssuesDB(db, orchestratorMode, orchestratorThreshold)
 }
 
 // checkDuplicateIssuesDB is the core logic for CheckDuplicateIssues, operating
 // on a *sql.DB directly. This enables fast testing with branch-per-test isolation
 // instead of per-test database creation.
-func checkDuplicateIssuesDB(db *sql.DB, gastownMode bool, gastownThreshold int) DoctorCheck {
+func checkDuplicateIssuesDB(db *sql.DB, orchestratorMode bool, orchestratorThreshold int) DoctorCheck {
 	// Use SQL aggregation to find duplicates without loading all issues into memory.
 	// The old approach loaded every issue via SearchIssues which was O(n) in both
 	// time and memory — catastrophically slow on large databases (e.g., 23k+ issues
@@ -165,8 +165,8 @@ func checkDuplicateIssuesDB(db *sql.DB, gastownMode bool, gastownThreshold int) 
 
 	// Apply threshold based on mode
 	threshold := 0 // Default: any duplicates are warnings
-	if gastownMode {
-		threshold = gastownThreshold // Gastown: configurable threshold (default 1000)
+	if orchestratorMode {
+		threshold = orchestratorThreshold // Orchestrator: configurable threshold (default 1000)
 	}
 
 	if totalDuplicates == 0 {
@@ -190,8 +190,8 @@ func checkDuplicateIssuesDB(db *sql.DB, gastownMode bool, gastownThreshold int) 
 
 	// Under threshold - OK
 	message := "No duplicate issues"
-	if gastownMode && totalDuplicates > 0 {
-		message = fmt.Sprintf("%d duplicate(s) detected (within gastown threshold of %d)", totalDuplicates, threshold)
+	if orchestratorMode && totalDuplicates > 0 {
+		message = fmt.Sprintf("%d duplicate(s) detected (within orchestrator threshold of %d)", totalDuplicates, threshold)
 	}
 	return DoctorCheck{
 		Name:    "Duplicate Issues",

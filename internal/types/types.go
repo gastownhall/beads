@@ -373,15 +373,15 @@ const (
 )
 
 // TypeEvent is a system-internal type used by set-state for audit trail beads.
-// Originally a Gas Town type, promoted to built-in internal type. It is not a
+// Originally an orchestrator type, promoted to built-in internal type. It is not a
 // core work type (not in IsValid) but is accepted by IsValidWithCustom /
 // ValidateWithCustom and treated as built-in for hydration trust (GH#1356).
 const TypeEvent IssueType = "event"
 
-// Note: Gas Town types (molecule, gate, convoy, merge-request, slot, agent, role, rig)
+// Note: Orchestrator types (molecule, gate, convoy, merge-request, slot, agent, role, rig)
 // were removed from beads core. They are now purely custom types with no built-in constants.
 // Use string literals like types.IssueType("molecule") if needed, and configure types.custom.
-// (event was also a Gas Town type but was promoted to a built-in internal type above.)
+// (event was also an orchestrator type but was promoted to a built-in internal type above.)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
 // IsValid checks if the issue type is a core work type.

@@ -372,7 +372,7 @@ var doltKillallCmd = &cobra.Command{
 	Long: `Find and kill orphan dolt sql-server processes not tracked by the
 canonical PID file for the current repo's Dolt data directory.
 
-Under Gas Town, the canonical server lives at $GT_ROOT/.beads/. Any other
+Under an orchestrator, the canonical server lives at $GT_ROOT/.beads/. Any other
 dolt sql-server processes using that shared data directory are considered
 orphans and will be killed.
 
@@ -405,8 +405,8 @@ servers are preserved.`,
 // - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
 // - doctest_*: doctor test helpers
 // - doctortest_*: doctor test helpers
-// - beads_pt*: gastown patrol_helpers_test.go random prefixes
-// - beads_vr*: gastown mail/router_test.go random prefixes
+// - beads_pt*: orchestrator patrol_helpers_test.go random prefixes
+// - beads_vr*: orchestrator mail/router_test.go random prefixes
 // - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
 var staleDatabasePrefixes = []string{"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t"}
 

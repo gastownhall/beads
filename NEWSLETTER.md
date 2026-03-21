@@ -20,7 +20,7 @@ The new `bd context` command complements this with safe-first error guidance: wh
 
 ## New Commands and Flags
 
-**`bd done`** is now an alias for `bd close`, and `bd done <id> <message>` treats the last argument as the close reason. This aligns with Gas Town's vocabulary — agents run `gt done` to finish sessions, and now `bd done` works the same way for beads.
+**`bd done`** is now an alias for `bd close`, and `bd done <id> <message>` treats the last argument as the close reason. This aligns with orchestrator vocabulary — agents run `gt done` to finish sessions, and now `bd done` works the same way for beads.
 
 **`bd help --list` and `bd help --doc`** produce machine-readable command listings and full documentation. Useful for generating docs, feeding to agents, or building tooling.
 

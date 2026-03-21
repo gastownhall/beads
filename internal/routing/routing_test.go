@@ -123,7 +123,7 @@ func TestExtractProjectFromPath(t *testing.T) {
 		want string
 	}{
 		{"beads/mayor/rig", "beads"},
-		{"gastown/crew/max", "gastown"},
+		{"my-project/crew/max", "my-project"},
 		{"simple", "simple"},
 		{"", ""},
 		{"/absolute/path", ""}, // Starts with /, first component is empty
@@ -368,7 +368,7 @@ func TestDetectUserRole_UpstreamSameRepoStillMaintainer(t *testing.T) {
 // Before fix: walking up from <town>/olympus/.beads finds <town>/olympus (WRONG)
 // After fix: findTownRootFromCWD() walks up from CWD to find mayor/town.json at <town>
 func TestFindTownRoutes_SymlinkedBeadsDir(t *testing.T) {
-	// Create temporary directory structure simulating Gas Town:
+	// Create temporary directory structure simulating an orchestrator workspace:
 	// tmpDir/
 	//   mayor/
 	//     town.json    <- town root marker

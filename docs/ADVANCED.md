@@ -312,7 +312,7 @@ Understanding the role of each component:
 
 ### RPC Layer (Server Mode)
 - **Multi-writer access** — Connects to a running Dolt server (`bd dolt start`) for concurrent clients
-- **Used in multi-agent setups** — Gas Town and similar environments where multiple agents write simultaneously
+- **Used in multi-agent setups** — orchestrator environments where multiple agents write simultaneously
 - **Not needed for single-user** — embedded mode handles all local operations without a server
 
 ### MCP Server (Optional)
