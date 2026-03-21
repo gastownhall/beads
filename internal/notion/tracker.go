@@ -425,18 +425,8 @@ func (t *Tracker) batchPushResult(resp *PushResponse) *itracker.BatchPushResult 
 		result.Errors = append(result.Errors, itracker.BatchPushError{Message: "push response is nil"})
 		return result
 	}
-	for _, item := range resp.Created {
-		result.Created = append(result.Created, itracker.BatchPushItem{
-			LocalID:     strings.TrimSpace(item.ID),
-			ExternalRef: firstNonEmpty(strings.TrimSpace(item.ExternalRef), canonicalPushExternalRef(item.NotionPageID)),
-		})
-	}
-	for _, item := range resp.Updated {
-		result.Updated = append(result.Updated, itracker.BatchPushItem{
-			LocalID:     strings.TrimSpace(item.ID),
-			ExternalRef: firstNonEmpty(strings.TrimSpace(item.ExternalRef), canonicalPushExternalRef(item.NotionPageID)),
-		})
-	}
+	result.Created = batchPushItemsFromResponse(resp.Created)
+	result.Updated = batchPushItemsFromResponse(resp.Updated)
 	for _, item := range resp.Skipped {
 		if id := strings.TrimSpace(item.ID); id != "" {
 			result.Skipped = append(result.Skipped, id)
@@ -449,6 +439,17 @@ func (t *Tracker) batchPushResult(resp *PushResponse) *itracker.BatchPushResult 
 		})
 	}
 	result.Warnings = append(result.Warnings, resp.Warnings...)
+	return result
+}
+
+func batchPushItemsFromResponse(items []PushResultItem) []itracker.BatchPushItem {
+	result := make([]itracker.BatchPushItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, itracker.BatchPushItem{
+			LocalID:     strings.TrimSpace(item.ID),
+			ExternalRef: firstNonEmpty(strings.TrimSpace(item.ExternalRef), canonicalPushExternalRef(item.NotionPageID)),
+		})
+	}
 	return result
 }
 

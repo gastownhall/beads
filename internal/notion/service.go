@@ -757,20 +757,12 @@ func (s *Service) pushIssueSet(ctx context.Context, input wire.PushIssueSet, dat
 	skipped := append([]servicePushResultItem(nil), unsupportedSkipped...)
 	errors := make([]servicePushResultError, 0, len(brokenStateIDs))
 
-	brokenKeys := make([]string, 0, len(brokenStateIDs))
-	for id := range brokenStateIDs {
-		brokenKeys = append(brokenKeys, id)
-	}
-	slices.Sort(brokenKeys)
+	brokenKeys := sortedStringKeys(brokenStateIDs)
 	for _, id := range brokenKeys {
 		errors = append(errors, brokenStateIDs[id])
 	}
-	foreignStateKeys := make([]string, 0, len(foreignStateIDs))
-	for id := range foreignStateIDs {
-		foreignStateKeys = append(foreignStateKeys, id)
-	}
+	foreignStateKeys := sortedStringKeys(foreignStateIDs)
 	if len(foreignStateKeys) > 0 {
-		slices.Sort(foreignStateKeys)
 		warnings = append(warnings, staleNotionReferenceWarning("Ignored stale beads-state.json entries outside the current Notion target", foreignStateKeys))
 	}
 
@@ -1242,6 +1234,15 @@ func staleNotionReferenceWarning(prefix string, ids []string) string {
 		return fmt.Sprintf("%s: %s", prefix, sample)
 	}
 	return fmt.Sprintf("%s: %s (+%d more)", prefix, sample, len(ids)-limit)
+}
+
+func sortedStringKeys[T any](items map[string]T) []string {
+	keys := make([]string, 0, len(items))
+	for key := range items {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func pushIssueMatches(current wire.Issue, next wire.PushIssue) bool {

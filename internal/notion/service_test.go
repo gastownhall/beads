@@ -29,10 +29,6 @@ type fakeSession struct {
 	pageData   map[string]fakeFetchedPage
 	viewURL    string
 	tools      []*mcp.Tool
-	queryData  map[string]any
-	fetchIDs   []string
-	callCounts map[string]int
-	updateErr  error
 }
 
 type fakeFetchedPage struct {
@@ -45,15 +41,10 @@ type fakeFetchedPage struct {
 }
 
 func (s *fakeSession) CallTool(_ context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-	if s.callCounts == nil {
-		s.callCounts = map[string]int{}
-	}
-	s.callCounts[params.Name]++
 	switch params.Name {
 	case "notion-fetch":
 		args, _ := params.Arguments.(map[string]any)
 		id, _ := args["id"].(string)
-		s.fetchIDs = append(s.fetchIDs, id)
 		if id == s.databaseID {
 			return &mcp.CallToolResult{StructuredContent: map[string]any{
 				"result": "<database url=\"https://www.notion.so/" + s.databaseID + "\"><data-source url=\"collection://data-source-1\"><view url=\"" + s.viewURL + "\" name=\"All Issues\" type=\"table\"><data-source-state>{\"schema\":{\"Name\":{},\"Beads ID\":{},\"Status\":{},\"Priority\":{},\"Type\":{},\"Description\":{},\"Assignee\":{},\"Labels\":{}}}</data-source-state>",
@@ -67,9 +58,6 @@ func (s *fakeSession) CallTool(_ context.Context, params *mcp.CallToolParams) (*
 			}}, nil
 		}
 	case "notion-update-page":
-		if s.updateErr != nil {
-			return nil, s.updateErr
-		}
 		return &mcp.CallToolResult{StructuredContent: map[string]any{"ok": true}}, nil
 	}
 	return nil, nil
