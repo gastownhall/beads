@@ -23,18 +23,32 @@ func GetNextChildIDTx(ctx context.Context, tx *sql.Tx, parentID string) (string,
 
 	// Check existing children to prevent overwrites after JSONL import (GH#2166).
 	// The counter may be stale if issues were imported without reconciling child_counters.
-	var maxExisting sql.NullInt64
-	err = tx.QueryRowContext(ctx, `
-		SELECT MAX(CAST(SUBSTRING_INDEX(id, '.', -1) AS UNSIGNED))
-		FROM issues
+	//
+	// We fetch direct child IDs and parse the numeric suffix in Go rather than
+	// using SQL CAST(SUBSTRING_INDEX(...) AS UNSIGNED), which silently returns 0
+	// for non-numeric ID suffixes (see GH#2721).
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM issues
 		WHERE id LIKE CONCAT(?, '.%')
 		  AND id NOT LIKE CONCAT(?, '.%.%')
-	`, parentID, parentID).Scan(&maxExisting)
+	`, parentID, parentID)
 	if err != nil {
-		return "", fmt.Errorf("get next child ID: scan existing children: %w", err)
+		return "", fmt.Errorf("get next child ID: query existing children: %w", err)
 	}
-	if maxExisting.Valid && int(maxExisting.Int64) > lastChild {
-		lastChild = int(maxExisting.Int64)
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", fmt.Errorf("get next child ID: scan child row: %w", err)
+		}
+		_, childNum, ok := ParseHierarchicalID(id)
+		if ok && childNum > lastChild {
+			lastChild = childNum
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("get next child ID: iterate children: %w", err)
 	}
 
 	nextChild := lastChild + 1
