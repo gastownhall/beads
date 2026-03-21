@@ -59,8 +59,8 @@ func TestBeadsIssueFromPullIssueRoundTrip(t *testing.T) {
 	if payload.Issues[0].IssueType != "feature" {
 		t.Fatalf("issue type = %q, want feature", payload.Issues[0].IssueType)
 	}
-	if len(payload.Issues[0].Labels) != 0 {
-		t.Fatalf("labels = %v, want omitted for live MCP compatibility", payload.Issues[0].Labels)
+	if got := payload.Issues[0].Labels; len(got) != 2 || got[0] != "sync" || got[1] != "notion" {
+		t.Fatalf("labels = %v, want [sync notion]", got)
 	}
 }
 
@@ -162,5 +162,23 @@ func TestPushPayloadFromIssuePreservesUnsupportedIssueTypeForBridge(t *testing.T
 	}
 	if got := payload.Issues[0].IssueType; got != "pm" {
 		t.Fatalf("issue type = %q, want pm", got)
+	}
+}
+
+func TestPushPayloadFromIssueOmitsEmptyLabels(t *testing.T) {
+	t.Parallel()
+
+	payload, err := PushPayloadFromIssue(&types.Issue{
+		ID:        "beads-empty-labels",
+		Title:     "No labels",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}, nil)
+	if err != nil {
+		t.Fatalf("PushPayloadFromIssue returned error: %v", err)
+	}
+	if payload.Issues[0].Labels != nil {
+		t.Fatalf("labels = %v, want nil for empty labels", payload.Issues[0].Labels)
 	}
 }

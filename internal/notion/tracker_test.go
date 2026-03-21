@@ -329,7 +329,7 @@ func TestTrackerBatchPushBuildsSinglePayloadAndNormalizesResponse(t *testing.T) 
 	tr := NewTracker(WithTrackerClient(client), WithTrackerDatabaseID("db_123"), WithTrackerViewURL("view://example"))
 
 	issues := []*types.Issue{
-		{ID: "beads-1", Title: "Create me", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "beads-1", Title: "Create me", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{"alpha", "beta"}},
 		{ID: "beads-2", Title: "Update me", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeFeature},
 	}
 
@@ -360,6 +360,13 @@ func TestTrackerBatchPushBuildsSinglePayloadAndNormalizesResponse(t *testing.T) 
 	}
 	if !strings.Contains(string(client.pushReq.Payload), "\"issues\"") {
 		t.Fatalf("payload = %s", client.pushReq.Payload)
+	}
+	var payload PushPayload
+	if err := json.Unmarshal(client.pushReq.Payload, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(payload): %v", err)
+	}
+	if got := payload.Issues[0].Labels; len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
+		t.Fatalf("payload labels = %v, want [alpha beta]", got)
 	}
 }
 
