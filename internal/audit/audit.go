@@ -128,19 +128,24 @@ func Append(e *Entry) (string, error) {
 // LogFieldChange logs a field change (status, assignee, priority, etc.) to the
 // audit log. This survives Dolt GC flatten, which destroys commit history.
 // Best-effort: errors are silently ignored so audit logging never blocks operations.
-func LogFieldChange(issueID, field, oldValue, newValue, actor string) {
+// Optional reason is included when non-empty (e.g., close reason, cleanup rule).
+func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
 	if oldValue == newValue {
 		return
+	}
+	extra := map[string]any{
+		"field":     field,
+		"old_value": oldValue,
+		"new_value": newValue,
+	}
+	if reason != "" {
+		extra["reason"] = reason
 	}
 	_, _ = Append(&Entry{
 		Kind:    "field_change",
 		IssueID: issueID,
 		Actor:   actor,
-		Extra: map[string]any{
-			"field":     field,
-			"old_value": oldValue,
-			"new_value": newValue,
-		},
+		Extra:   extra,
 	})
 }
 

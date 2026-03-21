@@ -372,13 +372,13 @@ create, update, show, or close operation).`,
 				}
 				// Audit log key field changes (survives Dolt GC flatten)
 				if s, ok := regularUpdates["status"].(string); ok {
-					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor)
+					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor, "")
 				}
 				if a, ok := regularUpdates["assignee"].(string); ok {
-					audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, a, actor)
+					audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, a, actor, "")
 				}
 				if p, ok := regularUpdates["priority"].(int); ok {
-					audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", p), actor)
+					audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", p), actor, "")
 				}
 			}
 

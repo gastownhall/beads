@@ -171,7 +171,7 @@ create, update, show, or close operation).`,
 			if issue != nil {
 				oldStatus = string(issue.Status)
 			}
-			audit.LogFieldChange(id, "status", oldStatus, "closed", actor)
+			audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
 
 			closedCount++
 
