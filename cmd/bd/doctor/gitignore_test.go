@@ -1793,7 +1793,7 @@ func TestCheckProjectGitignore_AllPresent(t *testing.T) {
 		}
 	}()
 
-	content := "node_modules/\n.dolt/\n*.db\n"
+	content := "node_modules/\n.dolt/\n*.db\n.beads-credential-key\n"
 	if err := os.WriteFile(".gitignore", []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -2363,6 +2363,22 @@ func TestRequiredPatterns_ContainsCredentialKey(t *testing.T) {
 	}
 	if !found {
 		t.Error("requiredPatterns should include '.beads-credential-key'")
+	}
+}
+
+// TestProjectGitignorePatterns_ContainsCredentialKey verifies that the
+// project-root .gitignore patterns include .beads-credential-key to prevent
+// the credential encryption key from being committed even outside .beads/.
+func TestProjectGitignorePatterns_ContainsCredentialKey(t *testing.T) {
+	found := false
+	for _, pattern := range ProjectGitignorePatterns {
+		if pattern == ".beads-credential-key" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("ProjectGitignorePatterns should include '.beads-credential-key'")
 	}
 }
 
