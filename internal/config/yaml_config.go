@@ -148,6 +148,30 @@ func GetYamlConfig(key string) string {
 	return v.GetString(normalizedKey)
 }
 
+// UnsetYamlConfig removes a configuration value from the project's config.yaml file.
+// The key line is commented out (prefixed with "# ") to preserve it as documentation.
+func UnsetYamlConfig(key string) error {
+	configPath, err := findProjectConfigYaml()
+	if err != nil {
+		return err
+	}
+
+	normalizedKey := normalizeYamlKey(key)
+
+	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from findProjectConfigYaml
+	if err != nil {
+		return fmt.Errorf("failed to read config.yaml: %w", err)
+	}
+
+	newContent := commentOutYamlKey(string(content), normalizedKey)
+
+	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+		return fmt.Errorf("failed to write config.yaml: %w", err)
+	}
+
+	return nil
+}
+
 // findProjectConfigYaml finds the project's .beads/config.yaml file.
 func findProjectConfigYaml() (string, error) {
 	cwd, err := os.Getwd()
@@ -211,6 +235,32 @@ func updateYamlKey(content, key, value string) (string, error) {
 	}
 
 	return strings.Join(result, "\n"), nil
+}
+
+// commentOutYamlKey comments out a key in yaml content by prefixing the line with "# ".
+// If the key is already commented or not found, the content is returned unchanged.
+func commentOutYamlKey(content, key string) string {
+	// Match the key line (not already commented)
+	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:`)
+
+	var result []string
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if keyPattern.MatchString(line) {
+			matches := keyPattern.FindStringSubmatch(line)
+			indent := ""
+			if len(matches) > 1 {
+				indent = matches[1]
+			}
+			// Comment out the line, preserving indentation
+			result = append(result, indent+"# "+strings.TrimLeft(line, " \t"))
+		} else {
+			result = append(result, line)
+		}
+	}
+
+	return strings.Join(result, "\n")
 }
 
 // formatYamlValue formats a value appropriately for YAML.
