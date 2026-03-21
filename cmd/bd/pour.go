@@ -34,7 +34,7 @@ WHEN TO USE POUR vs WISP:
 
   wisp (vapor): Ephemeral work that auto-cleans up
     - Release workflows (one-time execution)
-    - Patrol cycles (deacon, witness, refinery)
+    - Operational loops and recurring cycles
     - Health checks and diagnostics
     - Any operational workflow without audit value
 
