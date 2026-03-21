@@ -569,7 +569,7 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 	// core.hooksPath or the default .git/hooks). Without this, setting a local
 	// core.hooksPath silently shadows the global one and those hooks stop running.
 	if beadsHooks || shared {
-		preservePreexistingHooks(hooksDir, hookNames)
+		preservePreexistingHooks(hooksDir)
 	}
 
 	// Install each hook using section markers (GH#1380).
@@ -638,7 +638,7 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 // hooks directory into targetDir. This prevents hooks from a global
 // core.hooksPath (or the default .git/hooks/) from being silently lost when
 // beads sets a local core.hooksPath override.
-func preservePreexistingHooks(targetDir string, hookNames []string) {
+func preservePreexistingHooks(targetDir string) {
 	// Get the hooks directory git would currently use (before we override it).
 	currentDir, err := git.GetGitHooksDir()
 	if err != nil {
@@ -670,12 +670,22 @@ func preservePreexistingHooks(targetDir string, hookNames []string) {
 		}
 	}
 
-	for _, hookName := range hookNames {
-		srcPath := filepath.Join(currentDir, hookName)
+	// Copy all hooks from the source directory, not just managed ones.
+	entries, err := os.ReadDir(currentDir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || strings.HasSuffix(entry.Name(), ".sample") {
+			continue
+		}
+
+		srcPath := filepath.Join(currentDir, entry.Name())
 		// #nosec G304 -- hook path constrained to known hooks directories
 		content, err := os.ReadFile(srcPath)
 		if err != nil {
-			continue // hook doesn't exist in the source dir
+			continue
 		}
 
 		contentStr := string(content)
@@ -686,17 +696,17 @@ func preservePreexistingHooks(targetDir string, hookNames []string) {
 		}
 
 		// Don't overwrite existing files in target
-		dstPath := filepath.Join(targetDir, hookName)
+		dstPath := filepath.Join(targetDir, entry.Name())
 		if _, err := os.Stat(dstPath); err == nil {
 			continue
 		}
 
 		// #nosec G306 -- git hooks must be executable
 		if err := os.WriteFile(dstPath, content, 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to preserve %s hook from %s: %v\n", hookName, currentDir, err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to preserve %s hook from %s: %v\n", entry.Name(), currentDir, err)
 			continue
 		}
-		fmt.Printf("  Preserving existing %s hook from %s\n", hookName, currentDir)
+		fmt.Printf("  Preserving existing %s hook from %s\n", entry.Name(), currentDir)
 	}
 }
 
