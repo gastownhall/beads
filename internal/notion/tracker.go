@@ -231,7 +231,10 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 
 	clone := *issue
 	if strings.TrimSpace(externalID) != "" {
-		externalRef := "notion:" + externalID
+		externalRef := canonicalPushExternalRef(externalID)
+		if externalRef == "" {
+			return nil, fmt.Errorf("invalid notion page id %q", externalID)
+		}
 		clone.ExternalRef = &externalRef
 	}
 

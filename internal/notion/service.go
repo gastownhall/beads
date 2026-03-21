@@ -1057,7 +1057,7 @@ func (s *Service) fetchManagedIssue(ctx context.Context, session mcpclient.Sessi
 		return wire.Issue{}, wire.DatabaseInfo{}, output.NewError("Managed page Beads ID mismatch", "saved state expects "+expectedBeadsID+" but the Notion page reports "+issue.ID, `Run "bd notion state doctor" to inspect the saved state`, 1)
 	}
 	issue.NotionPageID = serviceFirstNonEmpty(issue.NotionPageID, pageID)
-	issue.ExternalRef = serviceFirstNonEmpty(issue.ExternalRef, "notion:"+issue.NotionPageID)
+	issue.ExternalRef = serviceFirstNonEmpty(issue.ExternalRef, canonicalPushExternalRef(issue.NotionPageID))
 	return issue, wire.ExtractPageParentageFromText(text), nil
 }
 
@@ -1101,7 +1101,7 @@ func (s *Service) createPagesForPush(ctx context.Context, session mcpclient.Sess
 			item.Reason = "missing_page_id"
 		}
 		if item.ExternalRef == "" && item.NotionPageID != "" {
-			item.ExternalRef = "notion:" + item.NotionPageID
+			item.ExternalRef = canonicalPushExternalRef(item.NotionPageID)
 		}
 		items = append(items, item)
 	}
@@ -1304,7 +1304,7 @@ func normalizeManagedIssueFromState(issue wire.Issue, st *state.BeadsState) wire
 		issue.NotionPageID = serviceFirstNonEmpty(issue.NotionPageID, st.PageIDFor(issue.ID))
 	}
 	if issue.ExternalRef == "" && issue.NotionPageID != "" {
-		issue.ExternalRef = "notion:" + issue.NotionPageID
+		issue.ExternalRef = canonicalPushExternalRef(issue.NotionPageID)
 	}
 	issue.Type = serviceFirstNonEmpty(issue.Type, issue.IssueType)
 	issue.IssueType = serviceFirstNonEmpty(issue.IssueType, issue.Type)

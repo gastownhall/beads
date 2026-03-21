@@ -15,23 +15,11 @@ func IsNotionExternalRef(ref string) bool {
 	return ok
 }
 
-// CanonicalizeNotionExternalRef normalizes URLs to a stable Notion page URL and page ids to notion:<page_id>.
+// CanonicalizeNotionExternalRef normalizes supported Notion page URLs to a stable external ref.
 func CanonicalizeNotionExternalRef(ref string) (string, bool) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "", false
-	}
-
-	if strings.HasPrefix(strings.ToLower(ref), "notion:") {
-		normalized, ok := normalizeNotionPageID(strings.TrimSpace(ref[len("notion:"):]))
-		if !ok {
-			return "", false
-		}
-		return "notion:" + normalized, true
-	}
-
-	if normalized, ok := normalizeNotionPageID(ref); ok {
-		return "notion:" + normalized, true
 	}
 
 	parsed, err := url.Parse(ref)
@@ -47,29 +35,21 @@ func CanonicalizeNotionExternalRef(ref string) (string, bool) {
 	if pageID == "" {
 		return "", false
 	}
-	return fmt.Sprintf("https://www.notion.so/%s", compactNotionPageID(pageID)), true
+	return notionPageURL(pageID), true
 }
 
-// CanonicalizeNotionPageURL normalizes any supported Notion page reference to a canonical page URL.
+// CanonicalizeNotionPageURL normalizes a supported Notion page URL or page id to a canonical page URL.
 func CanonicalizeNotionPageURL(ref string) (string, bool) {
 	pageID := ExtractNotionIdentifier(ref)
 	if pageID == "" {
 		return "", false
 	}
-	return fmt.Sprintf("https://www.notion.so/%s", compactNotionPageID(pageID)), true
+	return notionPageURL(pageID), true
 }
 
 // ExtractNotionIdentifier returns the normalized hyphenated page id.
 func ExtractNotionIdentifier(ref string) string {
 	ref = strings.TrimSpace(ref)
-	if strings.HasPrefix(strings.ToLower(ref), "notion:") {
-		normalized, ok := normalizeNotionPageID(strings.TrimSpace(ref[len("notion:"):]))
-		if ok {
-			return normalized
-		}
-		return ""
-	}
-
 	if normalized, ok := normalizeNotionPageID(ref); ok {
 		return normalized
 	}
@@ -96,6 +76,10 @@ func BuildNotionExternalRef(issue *PulledIssue) string {
 		return canonical
 	}
 	return ""
+}
+
+func notionPageURL(pageID string) string {
+	return fmt.Sprintf("https://www.notion.so/%s", compactNotionPageID(pageID))
 }
 
 func extractNotionPageID(path string) string {

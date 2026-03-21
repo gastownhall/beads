@@ -398,7 +398,7 @@ func TestEnginePullMatchesExistingIssueByExternalIdentifier(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
 
-	legacyRef := strPtr("notion:01234567-89ab-cdef-0123-456789abcdef")
+	externalRef := strPtr("https://www.notion.so/0123456789abcdef0123456789abcdef")
 	issue := &types.Issue{
 		ID:          "bd-notion1",
 		Title:       "Existing issue",
@@ -406,7 +406,7 @@ func TestEnginePullMatchesExistingIssueByExternalIdentifier(t *testing.T) {
 		Status:      types.StatusOpen,
 		IssueType:   types.TypeTask,
 		Priority:    2,
-		ExternalRef: legacyRef,
+		ExternalRef: externalRef,
 	}
 	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
 		t.Fatalf("CreateIssue() error: %v", err)
@@ -430,14 +430,13 @@ func TestEnginePullMatchesExistingIssueByExternalIdentifier(t *testing.T) {
 		},
 		extract: func(ref string) string {
 			ref = strings.TrimSpace(ref)
-			ref = strings.TrimPrefix(ref, "notion:")
 			if strings.HasPrefix(ref, "https://www.notion.so/") {
 				ref = strings.TrimPrefix(ref, "https://www.notion.so/")
 			}
 			return strings.ToLower(strings.ReplaceAll(ref, "-", ""))
 		},
 		isRef: func(ref string) bool {
-			return strings.HasPrefix(ref, "notion:") || strings.HasPrefix(ref, "https://www.notion.so/")
+			return strings.HasPrefix(ref, "https://www.notion.so/")
 		},
 	}
 

@@ -110,7 +110,7 @@ func TestTrackerFetchIssue(t *testing.T) {
 	}
 	tr := NewTracker(WithTrackerClient(client))
 
-	issue, err := tr.FetchIssue(context.Background(), "notion:01234567-89ab-cdef-0123-456789abcdef")
+	issue, err := tr.FetchIssue(context.Background(), "https://www.notion.so/0123456789abcdef0123456789abcdef")
 	if err != nil {
 		t.Fatalf("FetchIssue returned error: %v", err)
 	}

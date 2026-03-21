@@ -18,16 +18,16 @@ func TestCanonicalizeNotionExternalRef(t *testing.T) {
 			ok:   true,
 		},
 		{
-			name: "bare page id",
+			name: "bare page id rejected",
 			ref:  "0123456789abcdef0123456789abcdef",
-			want: "notion:01234567-89ab-cdef-0123-456789abcdef",
-			ok:   true,
+			want: "",
+			ok:   false,
 		},
 		{
-			name: "prefixed page id",
+			name: "prefixed page id rejected",
 			ref:  "notion:01234567-89ab-cdef-0123-456789abcdef",
-			want: "notion:01234567-89ab-cdef-0123-456789abcdef",
-			ok:   true,
+			want: "",
+			ok:   false,
 		},
 		{
 			name: "not notion",
@@ -65,10 +65,6 @@ func TestExtractNotionIdentifier(t *testing.T) {
 			ref:  "0123456789abcdef0123456789abcdef",
 			want: "01234567-89ab-cdef-0123-456789abcdef",
 		},
-		{
-			ref:  "notion:01234567-89ab-cdef-0123-456789abcdef",
-			want: "01234567-89ab-cdef-0123-456789abcdef",
-		},
 	}
 
 	for _, tt := range tests {
@@ -104,11 +100,6 @@ func TestCanonicalizeNotionPageURL(t *testing.T) {
 		{
 			name: "url",
 			ref:  "https://www.notion.so/Test-0123456789abcdef0123456789abcdef",
-			want: "https://www.notion.so/0123456789abcdef0123456789abcdef",
-		},
-		{
-			name: "prefixed id",
-			ref:  "notion:01234567-89ab-cdef-0123-456789abcdef",
 			want: "https://www.notion.so/0123456789abcdef0123456789abcdef",
 		},
 		{

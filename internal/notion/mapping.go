@@ -317,5 +317,9 @@ func urlOrFallback(url, pageID string) string {
 	if url != "" {
 		return url
 	}
-	return "notion:" + pageID
+	canonical, ok := CanonicalizeNotionPageURL(pageID)
+	if !ok {
+		return ""
+	}
+	return canonical
 }
