@@ -18,6 +18,7 @@ package doltserver
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -31,7 +32,51 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/lockfile"
+)
+
+// ErrServerNotRunning is returned by Stop when the Dolt server is not running.
+// Callers can use errors.Is to distinguish this expected condition from real
+// failures (GH#2670).
+var ErrServerNotRunning = errors.New("dolt server is not running")
+
+// IgnoreNotRunning strips ErrServerNotRunning from err and returns any
+// remaining errors (typically cleanup failures). If the only error was the
+// sentinel, it returns nil. Handles both errors.Join (multi-unwrap) and
+// standard fmt.Errorf wrapping (single-unwrap).
+//
+// IMPORTANT: call directly on Stop()/StopWithForce() return values only.
+// Do not wrap the error before passing it here — wrapping may hide joined
+// cleanup errors from the multi-unwrap path.
+func IgnoreNotRunning(err error) error {
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrServerNotRunning) {
+		return err // unrelated error, pass through
+	}
+	// Multi-error from errors.Join: filter out the sentinel, keep the rest.
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var remaining []error
+		for _, e := range joined.Unwrap() {
+			if e != nil && !errors.Is(e, ErrServerNotRunning) {
+				remaining = append(remaining, e)
+			}
+		}
+		return errors.Join(remaining...)
+	}
+	// Single-wrapped error (e.g., fmt.Errorf("%w", ErrServerNotRunning)):
+	// the sentinel is the only meaningful content, so treat as pure sentinel.
+	return nil
+}
+
+// PIDFileName and PortFileName are the canonical state file names used by the
+// Dolt server lifecycle. They are exported so cross-package tests can reference
+// the same names as the production code.
+const (
+	PIDFileName  = "dolt-server.pid"
+	PortFileName = "dolt-server.port"
 )
 
 // maxEphemeralPortAttempts is the number of times Start() retries ephemeral
@@ -60,17 +105,19 @@ func IsSharedServerMode() bool {
 // IsAutoStartDisabled returns true if the dolt server should NOT be
 // auto-started or managed by bd. When true, KillStaleServers and
 // auto-start are suppressed — the server is externally managed (e.g.,
-// by systemd). Checks (in priority order):
-//  1. BEADS_DOLT_AUTO_START=0 env var → always disabled
-//  2. dolt.auto-start config value "false"/"0"/"off" → disabled
+// by systemd).
+//
+// Either source can disable auto-start independently — there is no way
+// to force-enable via env when the config file says disabled. Accepted
+// disable values (case-insensitive): "0", "false", "off".
 //
 // This is used by KillStaleServers and Start to avoid killing or
 // interfering with externally-managed dolt processes (GH#2641).
 func IsAutoStartDisabled() bool {
-	if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
+	if v := strings.ToLower(os.Getenv("BEADS_DOLT_AUTO_START")); v == "0" || v == "false" || v == "off" {
 		return true
 	}
-	v := config.GetString("dolt.auto-start")
+	v := strings.ToLower(config.GetString("dolt.auto-start"))
 	return v == "false" || v == "0" || v == "off"
 }
 
@@ -176,10 +223,10 @@ type State struct {
 }
 
 // file paths within .beads/
-func pidPath(beadsDir string) string  { return filepath.Join(beadsDir, "dolt-server.pid") }
+func pidPath(beadsDir string) string  { return filepath.Join(beadsDir, PIDFileName) }
 func logPath(beadsDir string) string  { return filepath.Join(beadsDir, "dolt-server.log") }
 func lockPath(beadsDir string) string { return filepath.Join(beadsDir, "dolt-server.lock") }
-func portPath(beadsDir string) string { return filepath.Join(beadsDir, "dolt-server.port") }
+func portPath(beadsDir string) string { return filepath.Join(beadsDir, PortFileName) }
 
 // MaxDoltServers is the hard ceiling on concurrent dolt sql-server processes.
 // Allows up to 3 (e.g., multiple projects).
@@ -779,6 +826,10 @@ func FlushWorkingSet(host string, port int) error {
 }
 
 // Stop gracefully stops the managed server and its idle monitor.
+// Stop is idempotent: when the server is already stopped it returns
+// ErrServerNotRunning after cleaning up any leftover state files.
+// Callers should use errors.Is(err, ErrServerNotRunning) to distinguish
+// this expected condition from real failures.
 func Stop(beadsDir string) error {
 	return StopWithForce(beadsDir, false)
 }
@@ -791,7 +842,12 @@ func StopWithForce(beadsDir string, force bool) error {
 		return err
 	}
 	if !state.Running {
-		return fmt.Errorf("Dolt server is not running")
+		// Server not running — still clean up any leftover state files
+		// so bd dolt status won't report stale state (GH#2670).
+		// Join cleanup errors with the sentinel so callers can still use
+		// errors.Is(err, ErrServerNotRunning) while operators see filesystem issues.
+		cleanupErr := cleanupStateFiles(beadsDir)
+		return errors.Join(ErrServerNotRunning, cleanupErr)
 	}
 
 	// Flush uncommitted working set changes before stopping the server.
@@ -802,29 +858,29 @@ func StopWithForce(beadsDir string, force bool) error {
 	}
 
 	if err := gracefulStop(state.PID, 5*time.Second); err != nil {
-		cleanupStateFiles(beadsDir)
-		return err
+		return errors.Join(err, cleanupStateFiles(beadsDir))
 	}
-	cleanupStateFiles(beadsDir)
-	return nil
+	return cleanupStateFiles(beadsDir)
 }
 
-// cleanupStateFiles removes all server state files.
-func cleanupStateFiles(beadsDir string) {
-	_ = os.Remove(pidPath(beadsDir))
-	_ = os.Remove(portPath(beadsDir))
+// cleanupStateFiles removes all server state files (PID and port).
+// Returns a joined error for non-NotExist removal failures so callers
+// can surface filesystem problems while still treating "already clean"
+// as success. Logs non-NotExist errors at debug level (GH#2670).
+func cleanupStateFiles(beadsDir string) error {
+	var errs []error
+	for _, path := range []string{pidPath(beadsDir), portPath(beadsDir)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			debug.Logf("failed to remove server state file %s: %v", path, err)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // LogPath returns the path to the server log file.
 func LogPath(beadsDir string) string {
 	return logPath(beadsDir)
-}
-
-// isAutoStartDisabled returns true when the user has opted out of beads
-// auto-starting dolt servers (e.g. because a systemd unit manages the server).
-func isAutoStartDisabled() bool {
-	v := os.Getenv("BEADS_DOLT_AUTO_START")
-	return v == "0" || strings.EqualFold(v, "false")
 }
 
 // killStaleServersForDir finds and kills orphan dolt sql-server processes for
@@ -840,8 +896,12 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 		return nil, nil
 	}
 
-	// If the server is externally managed, never kill anything.
-	if ResolveServerMode(beadsDir) == ServerModeExternal {
+	// If auto-start is disabled the server is externally managed (e.g., by
+	// systemd or a manual bd dolt start), so we must not kill any processes.
+	// IsAutoStartDisabled covers the BEADS_DOLT_AUTO_START env var and
+	// dolt.auto-start config; ResolveServerMode covers explicit port/shared
+	// server/embedded configurations. Both indicate "not our server" (GH#2641).
+	if IsAutoStartDisabled() || ResolveServerMode(beadsDir) == ServerModeExternal {
 		return nil, nil
 	}
 

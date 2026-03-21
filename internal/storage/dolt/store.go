@@ -105,6 +105,9 @@ func autoStartAcquireExisting(serverDir string) bool {
 
 // autoStartRelease decrements the refcount for serverDir and stops the server
 // when it reaches zero. Returns any error from stopping the server.
+// If the server is already stopped (e.g. killed externally, or never started),
+// the ErrServerNotRunning sentinel is silently absorbed to avoid false
+// "failed to stop" warnings (GH#2670).
 func autoStartRelease(serverDir string) error {
 	autoStartRefs.mu.Lock()
 	defer autoStartRefs.mu.Unlock()
@@ -114,7 +117,10 @@ func autoStartRelease(serverDir string) error {
 	autoStartRefs.m[serverDir]--
 	if autoStartRefs.m[serverDir] <= 0 {
 		delete(autoStartRefs.m, serverDir)
-		return doltserver.Stop(serverDir)
+		// Stop is idempotent: returns ErrServerNotRunning (possibly joined
+		// with cleanup errors) when the server is already gone. Strip the
+		// sentinel but propagate any real cleanup failures.
+		return doltserver.IgnoreNotRunning(doltserver.Stop(serverDir))
 	}
 	return nil
 }

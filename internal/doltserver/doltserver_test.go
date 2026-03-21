@@ -1,6 +1,8 @@
 package doltserver
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -580,6 +582,112 @@ func TestCleanupStateFiles(t *testing.T) {
 	}
 }
 
+// TestStopNotRunningCleansUpStateFiles verifies that calling Stop when the server
+// is not running still removes leftover PID/port files, so bd dolt status won't
+// report stale state (GH#2670).
+func TestStopNotRunningCleansUpStateFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create stale PID/port files pointing to a non-existent process
+	if err := os.WriteFile(pidPath(dir), []byte("999999999"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(portPath(dir), []byte("13307"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stop should return ErrServerNotRunning but still clean up files
+	err := Stop(dir)
+	if !errors.Is(err, ErrServerNotRunning) {
+		t.Fatalf("expected ErrServerNotRunning, got: %v", err)
+	}
+
+	// Verify state files were cleaned up
+	if _, statErr := os.Stat(pidPath(dir)); !os.IsNotExist(statErr) {
+		t.Error("PID file should be removed after Stop on dead server")
+	}
+	if _, statErr := os.Stat(portPath(dir)); !os.IsNotExist(statErr) {
+		t.Error("port file should be removed after Stop on dead server")
+	}
+}
+
+// TestCleanupStateFilesReturnsError verifies that cleanupStateFiles returns
+// errors when removal fails for reasons other than NotExist (e.g., permission denied).
+func TestCleanupStateFilesReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod not effective on Windows")
+	}
+	dir := t.TempDir()
+
+	// Create a PID file then make the directory read-only so removal fails.
+	if err := os.WriteFile(pidPath(dir), []byte("12345"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0755) })
+
+	err := cleanupStateFiles(dir)
+	if err == nil {
+		t.Error("expected error when directory is read-only, got nil")
+	}
+}
+
+// TestCleanupStateFilesNoFiles verifies cleanupStateFiles returns nil
+// when no state files exist (already clean).
+func TestCleanupStateFilesNoFiles(t *testing.T) {
+	dir := t.TempDir()
+	err := cleanupStateFiles(dir)
+	if err != nil {
+		t.Errorf("expected nil for missing files, got: %v", err)
+	}
+}
+
+// TestStopNoStateFiles verifies Stop on an empty directory (no PID/port files)
+// returns ErrServerNotRunning with no cleanup errors.
+func TestStopNoStateFiles(t *testing.T) {
+	dir := t.TempDir()
+	err := Stop(dir)
+	if !errors.Is(err, ErrServerNotRunning) {
+		t.Fatalf("expected ErrServerNotRunning, got: %v", err)
+	}
+	// Should be the pure sentinel since there are no files to fail on.
+	remaining := IgnoreNotRunning(err)
+	if remaining != nil {
+		t.Errorf("expected no cleanup errors, got: %v", remaining)
+	}
+}
+
+// TestStopNotRunningWithCleanupError verifies that Stop returns both the
+// sentinel and cleanup errors when the server is not running but state
+// files can't be removed.
+func TestStopNotRunningWithCleanupError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod not effective on Windows")
+	}
+	dir := t.TempDir()
+
+	// Create stale PID file, then make dir read-only.
+	if err := os.WriteFile(pidPath(dir), []byte("999999999"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0755) })
+
+	err := Stop(dir)
+	if !errors.Is(err, ErrServerNotRunning) {
+		t.Fatalf("expected ErrServerNotRunning in error, got: %v", err)
+	}
+	// Should also contain the cleanup error.
+	remaining := IgnoreNotRunning(err)
+	if remaining == nil {
+		t.Error("expected cleanup error to be preserved, got nil")
+	}
+}
+
 func TestKillStaleServersPreservesOtherRepoServers(t *testing.T) {
 	dir := t.TempDir()
 	canonicalPID := 111
@@ -723,6 +831,9 @@ func TestIsAutoStartDisabled(t *testing.T) {
 		{"false", true},
 		{"FALSE", true},
 		{"False", true},
+		{"off", true},
+		{"OFF", true},
+		{"Off", true},
 		{"1", false},
 		{"true", false},
 		{"", false},
@@ -730,8 +841,81 @@ func TestIsAutoStartDisabled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run("env="+tt.envVal, func(t *testing.T) {
 			t.Setenv("BEADS_DOLT_AUTO_START", tt.envVal)
-			if got := isAutoStartDisabled(); got != tt.want {
-				t.Errorf("isAutoStartDisabled() = %v, want %v", got, tt.want)
+			if got := IsAutoStartDisabled(); got != tt.want {
+				t.Errorf("IsAutoStartDisabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsAutoStartDisabled_Sources verifies that disable is OR-ed across
+// env and config: either source can independently disable auto-start, and
+// there is no way to force-enable via one source when the other says disabled.
+func TestIsAutoStartDisabled_Sources(t *testing.T) {
+	// Initialize config so config.Set/GetString works.
+	t.Chdir(t.TempDir())
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		env  string
+		cfg  string
+		want bool
+	}{
+		{"env_disabled_config_enabled", "0", "true", true},  // env wins
+		{"env_empty_config_disabled", "", "false", true},    // config kicks in
+		{"env_empty_config_off", "", "off", true},           // config "off" works
+		{"env_empty_config_OFF", "", "OFF", true},           // config case-insensitive
+		{"env_empty_config_0", "", "0", true},               // config "0"
+		{"env_enabled_config_disabled", "1", "false", true}, // config still disables; env can't force-enable
+		{"both_empty", "", "", false},                       // neither set
+		{"env_off_config_true", "off", "true", true},        // env wins
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_AUTO_START", tt.env)
+			config.Set("dolt.auto-start", tt.cfg)
+			defer config.Set("dolt.auto-start", "")
+			if got := IsAutoStartDisabled(); got != tt.want {
+				t.Errorf("IsAutoStartDisabled() = %v, want %v (env=%q, cfg=%q)",
+					got, tt.want, tt.env, tt.cfg)
+			}
+		})
+	}
+}
+
+func TestIgnoreNotRunning(t *testing.T) {
+	cleanupErr := errors.New("permission denied")
+
+	tests := []struct {
+		name    string
+		err     error
+		wantNil bool
+		wantMsg string
+	}{
+		{"nil", nil, true, ""},
+		{"pure_sentinel", ErrServerNotRunning, true, ""},
+		{"joined_sentinel_nil", errors.Join(ErrServerNotRunning, nil), true, ""},
+		{"joined_sentinel_cleanup", errors.Join(ErrServerNotRunning, cleanupErr), false, "permission denied"},
+		{"unrelated_error", errors.New("connection refused"), false, "connection refused"},
+		{"single_wrapped_sentinel", fmt.Errorf("stop: %w", ErrServerNotRunning), true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IgnoreNotRunning(tt.err)
+			if tt.wantNil {
+				if got != nil {
+					t.Errorf("IgnoreNotRunning() = %v, want nil", got)
+				}
+			} else {
+				if got == nil {
+					t.Fatal("IgnoreNotRunning() = nil, want error")
+				}
+				if !strings.Contains(got.Error(), tt.wantMsg) {
+					t.Errorf("IgnoreNotRunning() = %q, want containing %q", got, tt.wantMsg)
+				}
 			}
 		})
 	}
