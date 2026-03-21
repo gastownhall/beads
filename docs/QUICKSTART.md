@@ -288,7 +288,7 @@ bdnotion beads status
 
 You should only continue once `bdnotion beads status` reports `ready: true`.
 
-The dedicated Beads schema keeps the synced columns lean: `Name`, `Beads ID`, `Status`, `Priority`, `Type`, and `Description` are the required properties, while `Assignee` and `Labels` stay optional for backward compatibility with older Notion databases.
+The dedicated Beads schema keeps the synced columns lean: `Name`, `Beads ID`, `Status`, `Priority`, `Type`, and `Description` are the required properties, while `Assignee` and `Labels` stay optional for backward compatibility with older Notion databases. The current live Notion MCP still rejects `Labels` arrays on push, so labels are preserved on pull/import but omitted from live push payloads for compatibility.
 
 ### Minimal bd Flow
 

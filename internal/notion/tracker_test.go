@@ -365,8 +365,8 @@ func TestTrackerBatchPushBuildsSinglePayloadAndNormalizesResponse(t *testing.T) 
 	if err := json.Unmarshal(client.pushReq.Payload, &payload); err != nil {
 		t.Fatalf("json.Unmarshal(payload): %v", err)
 	}
-	if got := payload.Issues[0].Labels; len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
-		t.Fatalf("payload labels = %v, want [alpha beta]", got)
+	if payload.Issues[0].Labels != nil {
+		t.Fatalf("payload labels = %v, want omitted for live MCP compatibility", payload.Issues[0].Labels)
 	}
 }
 
