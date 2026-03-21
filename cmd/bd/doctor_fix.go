@@ -202,8 +202,10 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 func applyFixList(path string, fixes []doctorCheck) {
 	// Apply fixes in a dependency-aware order.
 	// Rough dependency chain:
-	// permissions/lock cleanup → config sanity → DB integrity/migrations.
+	// gitignore (fast, security-critical) → permissions/lock cleanup → config sanity → DB integrity/migrations.
 	order := []string{
+		"Gitignore",
+		"Project Gitignore",
 		"Metadata Config",
 		"Lock Files",
 		"Permissions",

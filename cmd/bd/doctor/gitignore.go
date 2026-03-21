@@ -58,6 +58,7 @@ dolt-server.pid
 dolt-server.log
 dolt-server.lock
 dolt-server.port
+dolt-server.activity
 
 # Corrupt backup directories (created by bd doctor --fix recovery)
 *.corrupt.backup/
@@ -109,6 +110,7 @@ var requiredPatterns = []string{
 	"dolt-server.log",
 	"dolt-server.lock",
 	"dolt-server.port",
+	"dolt-server.activity",
 	"daemon.*",
 	"interactions.jsonl",
 	"*.lock",
