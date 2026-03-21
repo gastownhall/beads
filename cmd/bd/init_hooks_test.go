@@ -796,6 +796,120 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 	})
 }
 
+// setupBeadsDir creates .beads/ with a minimal metadata.json so FindBeadsDir works.
+func setupBeadsDir(t *testing.T, repoDir string) string {
+	t.Helper()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads/: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatalf("failed to create metadata.json: %v", err)
+	}
+	return beadsDir
+}
+
+// TestInstallHooksBeads_PreservesGlobalHooks is a regression test: bd init sets
+// a local core.hooksPath that shadows the global one, silently killing global
+// hooks. The fix copies hooks from the effective directory before overriding.
+func TestInstallHooksBeads_PreservesGlobalHooks(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(fakeHome, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(fakeHome, ".gitconfig"))
+
+	globalHooksDir := filepath.Join(fakeHome, "global-hooks")
+	if err := os.MkdirAll(globalHooksDir, 0755); err != nil {
+		t.Fatalf("failed to create global hooks dir: %v", err)
+	}
+	globalHookContent := "#!/bin/sh\necho global-hook-marker\n"
+	if err := os.WriteFile(filepath.Join(globalHooksDir, "pre-commit"), []byte(globalHookContent), 0755); err != nil {
+		t.Fatalf("failed to write global pre-commit hook: %v", err)
+	}
+
+	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", globalHooksDir)
+	if out, err := setGlobal.CombinedOutput(); err != nil {
+		t.Fatalf("failed to set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	// Manual repo init (can't use newGitRepo which sets a local core.hooksPath).
+	repoDir := t.TempDir()
+	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd.Dir = repoDir
+	if err := initCmd.Run(); err != nil {
+		t.Fatalf("git init failed: %v", err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("git config %v failed: %v", args, err)
+		}
+	}
+
+	runInDir(t, repoDir, func() {
+		beadsDir := setupBeadsDir(t, repoDir)
+
+		if err := installHooksWithOptions(managedHookNames, false, false, false, true); err != nil {
+			t.Fatalf("installHooksWithOptions(beads=true) failed: %v", err)
+		}
+
+		content, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-commit"))
+		if err != nil {
+			t.Fatalf("failed to read .beads/hooks/pre-commit: %v", err)
+		}
+		contentStr := string(content)
+
+		if !strings.Contains(contentStr, "echo global-hook-marker") {
+			t.Errorf("global hook content not preserved in .beads/hooks/pre-commit.\nGot:\n%s", contentStr)
+		}
+		if !strings.Contains(contentStr, hookSectionBeginPrefix) {
+			t.Errorf("beads section marker missing.\nGot:\n%s", contentStr)
+		}
+	})
+}
+
+// TestInstallHooksBeads_PreservesDefaultGitHooks verifies that hooks in the
+// default .git/hooks/ directory are preserved when beads redirects
+// core.hooksPath to .beads/hooks/.
+func TestInstallHooksBeads_PreservesDefaultGitHooks(t *testing.T) {
+	repoDir := newGitRepo(t)
+	runInDir(t, repoDir, func() {
+		hooksDir := filepath.Join(repoDir, ".git", "hooks")
+		if err := os.MkdirAll(hooksDir, 0755); err != nil {
+			t.Fatalf("failed to create .git/hooks: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte("#!/bin/sh\necho custom-default-hook\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Unset the local core.hooksPath that newGitRepo sets so git falls back to .git/hooks/.
+		exec.Command("git", "config", "--unset", "core.hooksPath").Run()
+
+		beadsDir := setupBeadsDir(t, repoDir)
+
+		if err := installHooksWithOptions(managedHookNames, false, false, false, true); err != nil {
+			t.Fatalf("installHooksWithOptions(beads=true) failed: %v", err)
+		}
+
+		content, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-commit"))
+		if err != nil {
+			t.Fatalf("failed to read .beads/hooks/pre-commit: %v", err)
+		}
+		contentStr := string(content)
+
+		if !strings.Contains(contentStr, "echo custom-default-hook") {
+			t.Errorf(".git/hooks/pre-commit content not preserved.\nGot:\n%s", contentStr)
+		}
+		if !strings.Contains(contentStr, hookSectionBeginPrefix) {
+			t.Errorf("beads section marker missing.\nGot:\n%s", contentStr)
+		}
+	})
+}
+
 func TestHooksNeedUpdate(t *testing.T) {
 	tests := []struct {
 		name           string

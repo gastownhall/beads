@@ -564,6 +564,14 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
+	// When setting a local core.hooksPath (beads or shared mode), preserve any
+	// hooks from the previously effective hooks directory (e.g. a global
+	// core.hooksPath or the default .git/hooks). Without this, setting a local
+	// core.hooksPath silently shadows the global one and those hooks stop running.
+	if beadsHooks || shared {
+		preservePreexistingHooks(hooksDir, hookNames)
+	}
+
 	// Install each hook using section markers (GH#1380).
 	// Only the content between markers is managed by beads; user content
 	// outside the markers is preserved across reinstalls and upgrades.
@@ -624,6 +632,72 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 	}
 
 	return nil
+}
+
+// preservePreexistingHooks copies non-beads hooks from the currently effective
+// hooks directory into targetDir. This prevents hooks from a global
+// core.hooksPath (or the default .git/hooks/) from being silently lost when
+// beads sets a local core.hooksPath override.
+func preservePreexistingHooks(targetDir string, hookNames []string) {
+	// Get the hooks directory git would currently use (before we override it).
+	currentDir, err := git.GetGitHooksDir()
+	if err != nil {
+		return
+	}
+
+	// Resolve to absolute paths for reliable comparison.
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		return
+	}
+	absCurrent, err := filepath.Abs(currentDir)
+	if err != nil {
+		return
+	}
+
+	// If the current dir is already our target, this is a re-install — skip.
+	if absTarget == absCurrent {
+		return
+	}
+
+	// If current dir is already a beads-managed directory, skip.
+	repoRoot := git.GetRepoRoot()
+	if repoRoot != "" {
+		absBeadsHooks, _ := filepath.Abs(filepath.Join(repoRoot, ".beads", "hooks"))
+		absSharedHooks, _ := filepath.Abs(filepath.Join(repoRoot, ".beads-hooks"))
+		if absCurrent == absBeadsHooks || absCurrent == absSharedHooks {
+			return
+		}
+	}
+
+	for _, hookName := range hookNames {
+		srcPath := filepath.Join(currentDir, hookName)
+		// #nosec G304 -- hook path constrained to known hooks directories
+		content, err := os.ReadFile(srcPath)
+		if err != nil {
+			continue // hook doesn't exist in the source dir
+		}
+
+		contentStr := string(content)
+		// Skip if it's already a beads hook
+		if strings.Contains(contentStr, hookSectionBeginPrefix) ||
+			strings.Contains(contentStr, inlineHookMarker) {
+			continue
+		}
+
+		// Don't overwrite existing files in target
+		dstPath := filepath.Join(targetDir, hookName)
+		if _, err := os.Stat(dstPath); err == nil {
+			continue
+		}
+
+		// #nosec G306 -- git hooks must be executable
+		if err := os.WriteFile(dstPath, content, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to preserve %s hook from %s: %v\n", hookName, currentDir, err)
+			continue
+		}
+		fmt.Printf("  Preserving existing %s hook from %s\n", hookName, currentDir)
+	}
 }
 
 func configureSharedHooksPath() error {
