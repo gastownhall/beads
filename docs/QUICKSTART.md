@@ -288,6 +288,8 @@ bdnotion beads status
 
 You should only continue once `bdnotion beads status` reports `ready: true`.
 
+The dedicated Beads schema keeps the synced columns lean: `Name`, `Beads ID`, `Status`, `Priority`, `Type`, and `Description` are the required properties, while `Assignee` and `Labels` stay optional for backward compatibility with older Notion databases.
+
 ### Minimal bd Flow
 
 ```bash
