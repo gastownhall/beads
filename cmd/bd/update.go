@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
@@ -368,6 +369,16 @@ create, update, show, or close operation).`,
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 					result.Close()
 					continue
+				}
+				// Audit log key field changes (survives Dolt GC flatten)
+				if s, ok := regularUpdates["status"].(string); ok {
+					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor)
+				}
+				if a, ok := regularUpdates["assignee"].(string); ok {
+					audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, a, actor)
+				}
+				if p, ok := regularUpdates["priority"].(int); ok {
+					audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", p), actor)
 				}
 			}
 

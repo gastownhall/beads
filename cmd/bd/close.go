@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
@@ -164,6 +165,13 @@ create, update, show, or close operation).`,
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
+
+			// Audit log the close (survives Dolt GC flatten)
+			oldStatus := "open"
+			if issue != nil {
+				oldStatus = string(issue.Status)
+			}
+			audit.LogFieldChange(id, "status", oldStatus, "closed", actor)
 
 			closedCount++
 
