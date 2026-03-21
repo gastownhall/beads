@@ -316,7 +316,7 @@ func cleanStaleCircuitBreakerFilesIn(dir string) {
 		}
 
 		// For other breaker files, check if the state is stale.
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G304: path is from filepath.Glob with controlled pattern
 		if err != nil {
 			continue
 		}
