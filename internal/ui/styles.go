@@ -88,7 +88,7 @@ var (
 		Dark:  "#d2a6ff",
 	}
 	ColorStatusHooked = lipgloss.AdaptiveColor{
-		Light: "#59c2ff", // cyan - actively worked by agent (GUPP)
+		Light: "#59c2ff", // cyan - actively worked
 		Dark:  "#59c2ff",
 	}
 

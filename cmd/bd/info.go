@@ -791,7 +791,7 @@ var versionChanges = []VersionChange{
 			"NEW: bd human command - Focused help menu for humans",
 			"NEW: bd show --short - Compact output mode for scripting",
 			"NEW: bd delete --reason - Audit trail for deletions",
-			"NEW: 'hooked' status - Hook-based work assignment for orchestrators",
+			"NEW: 'hooked' status - Work actively claimed by a worker",
 			"NEW: mol_type schema field - Molecule classification tracking",
 			"FIX: --var flag allows commas in values (GH#786)",
 			"FIX: bd sync in bare repo worktrees (GH#785)",

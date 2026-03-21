@@ -328,7 +328,7 @@ const (
 	StatusDeferred   Status = "deferred" // Deliberately put on ice for later
 	StatusClosed     Status = "closed"
 	StatusPinned     Status = "pinned" // Persistent bead that stays open indefinitely
-	StatusHooked     Status = "hooked" // Work attached to an agent's hook (GUPP)
+	StatusHooked     Status = "hooked" // Work actively claimed by a worker
 )
 
 // IsValid checks if the status value is valid (built-in statuses only)
