@@ -73,7 +73,6 @@ func TestServicePushPayloadCreatesWhenSavedStateTargetsDifferentDatabase(t *test
 	tmpDir := t.TempDir()
 	paths := &state.Paths{
 		ConfigDir:       tmpDir,
-		LegacyConfigDir: filepath.Join(tmpDir, "legacy"),
 		ClientPath:      filepath.Join(tmpDir, "client.json"),
 		TokensPath:      filepath.Join(tmpDir, "tokens.json"),
 		AuthStatePath:   filepath.Join(tmpDir, "auth-state.json"),

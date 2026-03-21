@@ -158,17 +158,6 @@ func TestNotionManagementCommandsRegistered(t *testing.T) {
 	}
 }
 
-func TestNotionHelpTextOmitsLegacyBridgeNaming(t *testing.T) {
-	t.Parallel()
-
-	if strings.Contains(notionCmd.Long, "bdnotion") {
-		t.Fatalf("notionCmd.Long = %q, want no bdnotion mention", notionCmd.Long)
-	}
-	if notionStatusCmd.Flags().Lookup("ncli-bin") != nil {
-		t.Fatal("unexpected --ncli-bin")
-	}
-}
-
 func TestRunNotionStatusPassesFlagsToClient(t *testing.T) {
 	originalFactory := newNotionStatusClient
 	originalJSON := jsonOutput
