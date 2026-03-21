@@ -109,12 +109,12 @@ export BEADS_DOLT_SHARED_SERVER=1
 ```
 
 Shared server state lives in `~/.beads/shared-server/` and uses port 3308 by default
-(avoiding conflict with Gas Town on 3307). Each project's data remains isolated in its
+(avoiding conflict with the orchestrator on 3307). Each project's data remains isolated in its
 own database (named by project prefix). See [DOLT.md](DOLT.md) for details.
 
 ## Central Dolt Server (macOS)
 
-If you plan to use Gas Town or manage multiple beads projects from a single
+If you plan to use an orchestrator or manage multiple beads projects from a single
 machine, you can run a central persistent Dolt server instead of per-project
 embedded instances.
 
@@ -125,10 +125,10 @@ embedded instances.
 | **Setup** | Zero-config — `bd init` handles everything | One-time server setup required |
 | **Data location** | `.beads/dolt/` per project | Central directory (e.g. `/opt/homebrew/var/dolt`) |
 | **Concurrency** | Single writer per project | Multi-writer via MySQL protocol |
-| **Use case** | Solo development, single project | Gas Town, multiple projects, multiple agents |
+| **Use case** | Solo development, single project | Orchestrator, multiple projects, multiple agents |
 
 For single-project solo use, **embedded mode is recommended** — it requires no
-setup. Switch to a central server when you need Gas Town or concurrent access.
+setup. Switch to a central server when you need an orchestrator or concurrent access.
 
 ### Why Not `brew services start dolt`?
 

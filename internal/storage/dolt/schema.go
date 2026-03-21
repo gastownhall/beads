@@ -223,7 +223,7 @@ CREATE TABLE IF NOT EXISTS interactions (
 );
 
 -- Federation peers table (for SQL user authentication)
--- Stores credentials for peer-to-peer Dolt remotes between Gas Towns
+-- Stores credentials for peer-to-peer Dolt remotes between workspaces
 CREATE TABLE IF NOT EXISTS federation_peers (
     name VARCHAR(255) PRIMARY KEY,
     remote_url VARCHAR(1024) NOT NULL,

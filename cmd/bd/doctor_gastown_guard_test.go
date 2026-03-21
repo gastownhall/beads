@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestIsGasTownTownRoot_TrueWhenTownMarkersPresent(t *testing.T) {
+func TestIsOrchestratorRoot_TrueWhenMarkersPresent(t *testing.T) {
 	root := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0750); err != nil {
@@ -24,12 +24,12 @@ func TestIsGasTownTownRoot_TrueWhenTownMarkersPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !isGasTownTownRoot(root) {
-		t.Fatalf("expected %s to be detected as Gas Town root", root)
+	if !isOrchestratorRoot(root) {
+		t.Fatalf("expected %s to be detected as orchestrator root", root)
 	}
 }
 
-func TestIsGasTownTownRoot_FalseWhenMarkersMissing(t *testing.T) {
+func TestIsOrchestratorRoot_FalseWhenMarkersMissing(t *testing.T) {
 	tests := []struct {
 		name       string
 		setupTown  bool
@@ -61,8 +61,8 @@ func TestIsGasTownTownRoot_FalseWhenMarkersMissing(t *testing.T) {
 				}
 			}
 
-			if isGasTownTownRoot(root) {
-				t.Fatalf("expected %s to NOT be detected as Gas Town root", root)
+			if isOrchestratorRoot(root) {
+				t.Fatalf("expected %s to NOT be detected as orchestrator root", root)
 			}
 		})
 	}

@@ -3,7 +3,7 @@
 **Date:** 2026-02-23
 **Dolt Version:** 1.82.2 (now upgraded to 1.82.4)
 **Platform:** macOS Darwin 25.3.0, arm64
-**Reporter:** Steve Yegge (Gas Town / beads project)
+**Reporter:** Steve Yegge (multi-agent workspace / beads project)
 
 ## Summary
 
@@ -14,7 +14,7 @@ force-killing the Dolt server and all ~15 stuck bd/gt processes to recover.
 
 ## Environment
 
-Gas Town is a multi-agent workspace where ~20 Claude Code agents run
+The workspace is a multi-agent environment where ~20 Claude Code agents run
 concurrently, each issuing `bd` (beads CLI) commands that connect to a shared
 Dolt SQL server.
 
@@ -32,7 +32,7 @@ listener:
 
 ### Databases
 
-The shared server hosts ~15 databases (beads, gastown, hq, wyvern, sky, plus
+The shared server hosts ~15 databases (beads, hq, plus project-specific and
 test databases from automated test runs).
 
 ### Client Connection Pattern (pre-fix)

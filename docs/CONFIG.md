@@ -233,7 +233,7 @@ output:
 # Paths can be relative (from cwd) or absolute
 external_projects:
   beads: ../beads
-  gastown: /path/to/gastown
+  other-project: /path/to/other-project
 ```
 
 ### Why Two Systems?

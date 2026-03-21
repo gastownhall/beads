@@ -24,7 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 3. **CLI Layer** (`cmd/bd/`)
    - Cobra-based commands (one file per command: `create.go`, `list.go`, etc.)
-   - Direct database access (embedded mode for standalone, server mode for Gas Town)
+   - Direct database access (embedded mode for standalone, server mode for orchestrator)
    - All commands support `--json` for programmatic use
    - Main entry point in `main.go`
 

@@ -513,7 +513,7 @@ func TestIssueTypeIsValid(t *testing.T) {
 		{TypeMessage, true},
 		// Molecule is now a core type (used by swarm create)
 		{IssueType("molecule"), true},
-		// Gas Town types are now custom types (not built-in)
+		// Orchestrator types are now custom types (not built-in)
 		{IssueType("merge-request"), false},
 		{IssueType("gate"), false},
 		{IssueType("agent"), false},
@@ -611,7 +611,7 @@ func TestIssueTypeRequiredSections(t *testing.T) {
 		{TypeDecision, 3, "## Decision"},
 		{TypeChore, 0, ""},
 		{TypeMessage, 0, ""},
-		// Gas Town types are now custom and have no required sections
+		// Orchestrator types are now custom and have no required sections
 		{IssueType("molecule"), 0, ""},
 		{IssueType("gate"), 0, ""},
 		{TypeEvent, 0, ""},

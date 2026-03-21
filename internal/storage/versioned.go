@@ -47,7 +47,7 @@ type SyncStatus struct {
 }
 
 // FederationPeer represents a remote peer with authentication credentials.
-// Used for peer-to-peer Dolt remotes between Gas Towns with SQL user auth.
+// Used for peer-to-peer Dolt remotes between workspaces with SQL user auth.
 type FederationPeer struct {
 	Name        string     // Unique name for this peer (used as remote name)
 	RemoteURL   string     // Dolt remote URL (e.g., http://host:port/org/db)

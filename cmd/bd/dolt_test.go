@@ -519,7 +519,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 }
 
 func TestDoltServerIsRunning(t *testing.T) {
-	// Clear GT_ROOT so IsRunning doesn't find the Gas Town daemon's real PID file.
+	// Clear GT_ROOT so IsRunning doesn't find the orchestrator daemon's real PID file.
 	if old, ok := os.LookupEnv("GT_ROOT"); ok {
 		os.Unsetenv("GT_ROOT")
 		t.Cleanup(func() { os.Setenv("GT_ROOT", old) })

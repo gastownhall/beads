@@ -642,7 +642,7 @@ func GetMultiRepoConfig() *MultiRepoConfig {
 //
 //	external_projects:
 //	  beads: ../beads
-//	  gastown: /absolute/path/to/gastown
+//	  other-project: /absolute/path/to/other-project
 func GetExternalProjects() map[string]string {
 	return GetStringMapString("external_projects")
 }

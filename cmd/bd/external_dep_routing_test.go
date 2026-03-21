@@ -13,7 +13,7 @@ import (
 )
 
 // TestResolveExternalDepsViaRouting tests that external dependency references
-// (e.g., "external:gastown:gt-42zaq") are resolved via prefix routes to show
+// (e.g., "external:other-project:op-42zaq") are resolved via prefix routes to show
 // the actual issue details from the target database.
 //
 // This is the core fix for bd-k0pfm: bd show should resolve cross-database deps.

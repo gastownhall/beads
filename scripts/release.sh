@@ -7,7 +7,7 @@ set -euo pipefail
 #
 # WHY A MOLECULE INSTEAD OF A SCRIPT?
 #
-# Gas Town uses molecules (not scripts) for multi-step workflows because:
+# Orchestrators use molecules (not scripts) for multi-step workflows because:
 #
 #   1. LEDGER: Each step is a timestamped entry in your work history.
 #      Your CV accumulates from completed work. Batch scripts are invisible.
@@ -22,7 +22,7 @@ set -euo pipefail
 #      Clean phase handoffs without busy-waiting.
 #
 # Read more:
-#   - Gas Town docs: PRIMING.md (see "The Batch-Closure Heresy")
+#   - Orchestrator docs: PRIMING.md (see "The Batch-Closure Heresy")
 #   - HOP docs: CONTEXT.md (see "The Mission" and "MEOW Stack")
 #
 # THE RELEASE MOLECULE
@@ -138,7 +138,7 @@ if [ "$DRY_RUN" = true ]; then
     echo "  • Observable via bd activity --follow"
     echo "  • Gates wait for CI without polling"
     echo ""
-    echo "Read: Gas Town docs → PRIMING.md → 'The Batch-Closure Heresy'"
+    echo "Read: Orchestrator docs → PRIMING.md → 'The Batch-Closure Heresy'"
     exit 0
 fi
 

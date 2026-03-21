@@ -163,8 +163,8 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 // - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
 // - doctest_*: doctor test helpers
 // - doctortest_*: doctor test helpers
-// - beads_pt*: gastown patrol_helpers_test.go random prefixes
-// - beads_vr*: gastown mail/router_test.go random prefixes
+// - beads_pt*: orchestrator patrol_helpers_test.go random prefixes
+// - beads_vr*: orchestrator mail/router_test.go random prefixes
 // - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
 var staleDatabasePrefixes = []string{
 	"testdb_",

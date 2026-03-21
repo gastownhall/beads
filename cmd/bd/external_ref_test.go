@@ -17,7 +17,7 @@ func TestValidateExternalRef(t *testing.T) {
 		},
 		{
 			name:    "valid with complex capability",
-			ref:     "external:gastown:cross-project-deps",
+			ref:     "external:other-project:cross-project-deps",
 			wantErr: false,
 		},
 		{
@@ -90,7 +90,7 @@ func TestParseExternalRef(t *testing.T) {
 		wantCapability string
 	}{
 		{"external:beads:mol-run-assignee", "beads", "mol-run-assignee"},
-		{"external:gastown:cross-project", "gastown", "cross-project"},
+		{"external:other-project:cross-project", "other-project", "cross-project"},
 		{"external:a:b", "a", "b"},
 		{"bd-xyz", "", ""},        // not external
 		{"external:", "", ""},     // invalid format

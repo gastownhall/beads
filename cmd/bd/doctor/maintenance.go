@@ -255,7 +255,7 @@ func checkPersistentMolIssuesForIssues(issues []*types.Issue) DoctorCheck {
 	}
 }
 
-// CheckStaleMQFiles detects legacy .beads/mq/*.json files from gastown.
+// CheckStaleMQFiles detects legacy .beads/mq/*.json files from the orchestrator.
 // These files are LOCAL ONLY (not committed) and represent stale merge queue
 // entries from the old mrqueue implementation. They are safe to delete since
 // gt done already creates merge-request wisps in beads.
@@ -286,7 +286,7 @@ func CheckStaleMQFiles(path string) DoctorCheck {
 		Name:     "Legacy MQ Files",
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d stale .beads/mq/*.json file(s)", len(files)),
-		Detail:   "Legacy gastown merge queue files (local only, safe to delete)",
+		Detail:   "Legacy orchestrator merge queue files (local only, safe to delete)",
 		Fix:      "Run 'bd doctor --fix' to delete, or 'rm -rf .beads/mq/'",
 		Category: CategoryMaintenance,
 	}

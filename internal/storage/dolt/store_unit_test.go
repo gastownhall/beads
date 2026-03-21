@@ -256,7 +256,7 @@ func TestApplyConfigDefaults_TestModeWithPort(t *testing.T) {
 
 // TestApplyConfigDefaults_TestModeBlocksProdPort verifies that BEADS_TEST_MODE=1
 // forces port 1 even when BEADS_DOLT_PORT is explicitly set to the production port.
-// This is the fix for Clown Show #14: Gas Town's beads module injects
+// This is the fix for Clown Show #14: The orchestrator's beads module injects
 // BEADS_DOLT_PORT=3307 from metadata.json, bypassing the test mode guard.
 func TestApplyConfigDefaults_TestModeBlocksProdPort(t *testing.T) {
 	origTestMode := os.Getenv("BEADS_TEST_MODE")
@@ -287,7 +287,7 @@ func TestApplyConfigDefaults_TestModeBlocksProdPort(t *testing.T) {
 
 // TestApplyConfigDefaults_EnvOverridesConfig verifies that BEADS_DOLT_PORT
 // overrides a port already set by metadata.json, even outside test mode.
-// This is the fix for hq-27t (test pollution): callers like Gas Town set
+// This is the fix for hq-27t (test pollution): callers like the orchestrator set
 // BEADS_DOLT_PORT to route bd to a test server instead of production.
 func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
 	origTestMode := os.Getenv("BEADS_TEST_MODE")

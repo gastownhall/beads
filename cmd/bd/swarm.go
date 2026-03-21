@@ -1175,7 +1175,7 @@ Examples:
 
 func init() {
 	swarmValidateCmd.Flags().Bool("verbose", false, "Include detailed issue graph in output")
-	swarmCreateCmd.Flags().String("coordinator", "", "Coordinator address (e.g., gastown/witness)")
+	swarmCreateCmd.Flags().String("coordinator", "", "Coordinator address (e.g., my-project/witness)")
 	swarmCreateCmd.Flags().Bool("force", false, "Create new swarm even if one already exists")
 
 	swarmCmd.AddCommand(swarmValidateCmd)

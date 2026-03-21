@@ -9,7 +9,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 ## Terminal UIs
 
-- **[Mardi Gras](https://github.com/quietpublish/mardi-gras)** - Parade-themed terminal UI with real-time updates, Gas Town agent orchestration, tmux integration, and Claude Code dispatch. Uses `bd list --json`. Built by [@matt-wright86](https://github.com/matt-wright86). (Go)
+- **[Mardi Gras](https://github.com/quietpublish/mardi-gras)** - Parade-themed terminal UI with real-time updates, multi-agent orchestration, tmux integration, and Claude Code dispatch. Uses `bd list --json`. Built by [@matt-wright86](https://github.com/matt-wright86). (Go)
 
 - **[perles](https://github.com/zjrosen/perles)** - Terminal UI search, dependency and kanban viewer powered by a custom BQL (Beads Query Language). Built by [@zjrosen](https://github.com/zjrosen). (Go)
 

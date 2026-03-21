@@ -75,7 +75,7 @@ func TestCheckBeadGate_InvalidFormat(t *testing.T) {
 		},
 		{
 			name:    "no colon",
-			awaitID: "gastown-gt-abc",
+			awaitID: "my-project-mp-abc",
 			wantErr: "invalid await_id format",
 		},
 		{
@@ -85,7 +85,7 @@ func TestCheckBeadGate_InvalidFormat(t *testing.T) {
 		},
 		{
 			name:    "missing bead",
-			awaitID: "gastown:",
+			awaitID: "my-project:",
 			wantErr: "await_id missing rig name or bead ID",
 		},
 	}

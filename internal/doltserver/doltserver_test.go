@@ -73,11 +73,11 @@ func TestIsRunningNoServer(t *testing.T) {
 	}
 }
 
-func TestIsRunningChecksDaemonPidUnderGasTown(t *testing.T) {
+func TestIsRunningChecksDaemonPidUnderOrchestrator(t *testing.T) {
 	dir := t.TempDir()
 	gtRoot := t.TempDir()
 
-	// Set GT_ROOT to simulate Gas Town environment
+	// Set GT_ROOT to simulate orchestrator environment
 	orig := os.Getenv("GT_ROOT")
 	os.Setenv("GT_ROOT", gtRoot)
 	defer func() {
@@ -417,7 +417,7 @@ func TestMaxDoltServers(t *testing.T) {
 			}
 		}()
 
-		// CWD must be outside any Gas Town workspace for standalone test
+		// CWD must be outside any orchestrator workspace for standalone test
 		origWd, err := os.Getwd()
 		if err != nil {
 			t.Fatal(err)
@@ -432,7 +432,7 @@ func TestMaxDoltServers(t *testing.T) {
 		}
 	})
 
-	t.Run("gastown_same_as_standalone", func(t *testing.T) {
+	t.Run("orchestrator_same_as_standalone", func(t *testing.T) {
 		// After daemon removal, GT_ROOT no longer affects maxDoltServers
 		t.Setenv("GT_ROOT", t.TempDir())
 
@@ -1096,7 +1096,7 @@ func TestDefaultConfig_SharedModeGeneralPortOverrides(t *testing.T) {
 
 func TestDefaultSharedServerPort_DiffersFromDefault(t *testing.T) {
 	if DefaultSharedServerPort == configfile.DefaultDoltServerPort {
-		t.Errorf("DefaultSharedServerPort (%d) must differ from DefaultDoltServerPort (%d) to avoid Gas Town conflict",
+		t.Errorf("DefaultSharedServerPort (%d) must differ from DefaultDoltServerPort (%d) to avoid orchestrator conflict",
 			DefaultSharedServerPort, configfile.DefaultDoltServerPort)
 	}
 }

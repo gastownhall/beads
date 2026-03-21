@@ -78,7 +78,7 @@ func runValidateCheckInner(path string) bool {
 // collectValidateChecks runs the four data-integrity checks.
 func collectValidateChecks(path string) []validateCheckResult {
 	return []validateCheckResult{
-		{check: convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorGastown, gastownDuplicatesThreshold))},
+		{check: convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))},
 		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path)), fixable: true},
 		{check: convertDoctorCheck(doctor.CheckTestPollution(path))},
 		{check: convertDoctorCheck(doctor.CheckGitConflicts(path))},

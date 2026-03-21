@@ -294,7 +294,7 @@ create, update, show, or close operation).`,
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
 		for _, id := range args {
-			// Resolve and get issue with routing (e.g., gt-xyz routes to gastown)
+			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
 			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
 				if result != nil {

@@ -83,7 +83,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	// Enable auto-start for standalone users (similar to main.go's auto-start
 	// handling), with additional support for BEADS_TEST_MODE and a config.yaml
 	// fallback for library consumers that never call config.Initialize().
-	// Disabled under Gas Town (which manages its own server), by explicit config,
+	// Disabled under orchestrator (which manages its own server), by explicit config,
 	// or in test mode (tests manage their own server lifecycle via testdoltserver).
 	// Note: cfg.ReadOnly refers to the store's read-only mode, not the server —
 	// the server must be running regardless of whether the store is read-only.

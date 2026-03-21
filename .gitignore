@@ -116,7 +116,7 @@ bd_test
 .beads/export-state/
 .beads/beads.db
 
-# Gas Town (added by gt)
+# Orchestrator (added by gt)
 .logs/
 .beads/
 .opencode/

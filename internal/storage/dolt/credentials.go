@@ -21,7 +21,7 @@ import (
 )
 
 // Credential storage and encryption for federation peers.
-// Enables SQL user authentication when syncing with peer Gas Towns.
+// Enables SQL user authentication when syncing with peer workspaces.
 
 // credentialKeyFile is the filename for the random encryption key stored alongside the database.
 const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: not a credential, just a filename

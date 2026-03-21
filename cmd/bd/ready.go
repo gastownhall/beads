@@ -552,7 +552,7 @@ func init() {
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
-	readyCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig gastown, --rig gt-, --rig gt)")
+	readyCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig my-project, --rig gt-, --rig gt)")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
