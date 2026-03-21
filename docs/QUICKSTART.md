@@ -279,8 +279,8 @@ bdnotion login
 # Create a dedicated Beads database
 bdnotion beads init --parent <page-id>
 
-# Or point bdnotion at an existing Beads database/view
-bdnotion beads config set --database-id <database-id> --view-url <view-url>
+# Or connect bdnotion to an existing Beads database/view
+bdnotion beads connect --database-id <database-id> --view-url <view-url>
 
 # Confirm the saved bridge configuration is ready
 bdnotion beads status
