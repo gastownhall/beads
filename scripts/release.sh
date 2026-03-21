@@ -22,8 +22,8 @@ set -euo pipefail
 #      Clean phase handoffs without busy-waiting.
 #
 # Read more:
-#   - ~/gt/docs/PRIMING.md (see "The Batch-Closure Heresy")
-#   - ~/hop/docs/CONTEXT.md (see "The Mission" and "MEOW Stack")
+#   - Gas Town docs: PRIMING.md (see "The Batch-Closure Heresy")
+#   - HOP docs: CONTEXT.md (see "The Mission" and "MEOW Stack")
 #
 # THE RELEASE MOLECULE
 #
@@ -138,7 +138,7 @@ if [ "$DRY_RUN" = true ]; then
     echo "  • Observable via bd activity --follow"
     echo "  • Gates wait for CI without polling"
     echo ""
-    echo "Read: ~/gt/docs/PRIMING.md → 'The Batch-Closure Heresy'"
+    echo "Read: Gas Town docs → PRIMING.md → 'The Batch-Closure Heresy'"
     exit 0
 fi
 

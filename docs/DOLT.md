@@ -371,7 +371,7 @@ bd dolt show
 ### Data Location (Gas Town)
 
 ```
-~/gt/.dolt-data/
+<town-root>/.dolt-data/
 ├── hq/                  # Town beads (hq-*)
 ├── gastown/             # Gastown rig (gt-*)
 ├── beads/               # Beads rig (bd-*)

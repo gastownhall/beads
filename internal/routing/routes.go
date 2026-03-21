@@ -59,7 +59,7 @@ func LoadRoutes(beadsDir string) ([]Route, error) {
 // LoadTownRoutes loads routes from the town-level routes.jsonl.
 // It first checks the given beadsDir, then walks up to find the town root
 // and loads routes from there. This is useful for multi-rig setups (Gas Town)
-// where routes.jsonl lives at ~/gt/.beads/ rather than in individual rig directories.
+// where routes.jsonl lives at <town-root>/.beads/ rather than in individual rig directories.
 // Returns routes and nil error on success, or nil routes if not in a town or no routes found.
 func LoadTownRoutes(beadsDir string) ([]Route, error) {
 	routes, _ := findTownRoutes(beadsDir)
@@ -335,18 +335,18 @@ func findTownRootFromCWD() string {
 // Returns (routes, townRoot). Returns nil routes if not in an orchestrator town or no routes found.
 //
 // IMPORTANT: This function handles symlinked .beads directories correctly.
-// When .beads is a symlink (e.g., ~/gt/.beads -> ~/gt/olympus/.beads), we must
-// use findTownRoot() starting from CWD to determine the actual town root rather
-// than starting from currentBeadsDir, which may be the resolved symlink path.
+// When .beads is a symlink (e.g., <town-root>/.beads -> <town-root>/olympus/.beads),
+// we must use findTownRoot() starting from CWD to determine the actual town root
+// rather than starting from currentBeadsDir, which may be the resolved symlink path.
 func findTownRoutes(currentBeadsDir string) ([]Route, string) {
 	// First try the current beads dir (works if we're already at town level)
 	routes, err := LoadRoutes(currentBeadsDir)
 	if err == nil && len(routes) > 0 {
 		// Use findTownRoot() starting from CWD to determine the actual town root.
 		// We must NOT use currentBeadsDir as the starting point because if .beads
-		// is a symlink (e.g., ~/gt/.beads -> ~/gt/olympus/.beads), currentBeadsDir
-		// will be the resolved path (e.g., ~/gt/olympus/.beads) and walking up
-		// from there would find ~/gt/olympus as the town root instead of ~/gt.
+		// is a symlink (e.g., <town>/.beads -> <town>/olympus/.beads), currentBeadsDir
+		// will be the resolved path (e.g., <town>/olympus/.beads) and walking up
+		// from there would find <town>/olympus as the town root instead of <town>.
 		townRoot := findTownRootFromCWD()
 		if townRoot != "" {
 			if os.Getenv("BD_DEBUG_ROUTING") != "" {
