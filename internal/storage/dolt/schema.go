@@ -3,7 +3,7 @@ package dolt
 // currentSchemaVersion is bumped whenever the schema or migrations change.
 // initSchemaOnDB checks this against the stored version and skips re-initialization
 // when they match, avoiding ~20 DDL statements per bd invocation.
-const currentSchemaVersion = 8
+const currentSchemaVersion = 9
 
 // schema defines the MySQL-compatible database schema for Dolt.
 const schema = `
@@ -44,14 +44,10 @@ CREATE TABLE IF NOT EXISTS issues (
     pinned TINYINT(1) DEFAULT 0,
     -- Template field
     is_template TINYINT(1) DEFAULT 0,
-    -- Work economics field (HOP Decision 006)
-    crystallizes TINYINT(1) DEFAULT 0,
     -- Molecule type field
     mol_type VARCHAR(32) DEFAULT '',
-    -- Work type field (Decision 006: mutex vs open_competition)
+    -- Work type field (mutex vs open_competition)
     work_type VARCHAR(32) DEFAULT 'mutex',
-    -- HOP quality score field (0.0-1.0)
-    quality_score DOUBLE,
     -- Federation source system field
     source_system VARCHAR(255) DEFAULT '',
     -- Custom metadata field (GH#1406)

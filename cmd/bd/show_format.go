@@ -355,29 +355,6 @@ func formatIssueLongExtras(issue *types.Issue, formatTime func(time.Time) string
 			ui.RenderBold("SOURCE TRACING"), strings.Join(sourceParts, "\n")))
 	}
 
-	// HOP fields
-	var hopParts []string
-	if issue.Creator != nil && !issue.Creator.IsEmpty() {
-		hopParts = append(hopParts, fmt.Sprintf("  Creator: %s", issue.Creator.String()))
-	}
-	if issue.QualityScore != nil {
-		hopParts = append(hopParts, fmt.Sprintf("  Quality score: %.2f", *issue.QualityScore))
-	}
-	if issue.Crystallizes {
-		hopParts = append(hopParts, "  Crystallizes: yes")
-	}
-	if len(issue.Validations) > 0 {
-		var vals []string
-		for _, v := range issue.Validations {
-			vals = append(vals, fmt.Sprintf("%s (%s)", v.Validator.String(), v.Outcome))
-		}
-		hopParts = append(hopParts, fmt.Sprintf("  Validations: %s", strings.Join(vals, ", ")))
-	}
-	if len(hopParts) > 0 {
-		sections = append(sections, fmt.Sprintf("%s\n%s",
-			ui.RenderBold("HOP"), strings.Join(hopParts, "\n")))
-	}
-
 	// Bonded-from references
 	if len(issue.BondedFrom) > 0 {
 		var refs []string
