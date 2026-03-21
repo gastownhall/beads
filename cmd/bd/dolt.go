@@ -1400,7 +1400,10 @@ func openDoltServerConnection() (*sql.DB, func()) {
 // Includes the beadsDir path for debugging worktree config pollution (bd-la2cl).
 func logDoltConfigChange(beadsDir, key, value string) {
 	logPath := filepath.Join(beadsDir, "dolt-config.log")
-	actor := os.Getenv("BD_ACTOR")
+	actor := os.Getenv("BEADS_ACTOR")
+	if actor == "" {
+		actor = os.Getenv("BD_ACTOR") // deprecated fallback
+	}
 	if actor == "" {
 		actor = "unknown"
 	}

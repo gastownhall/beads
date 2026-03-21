@@ -93,8 +93,8 @@ Ephemeral messages are:
 The actor identity (used for `sender` on messages) is resolved in order:
 
 1. `--actor` flag on the command
-2. `BD_ACTOR` environment variable
-3. `BEADS_ACTOR` environment variable
+2. `BEADS_ACTOR` environment variable
+3. `BD_ACTOR` environment variable (deprecated alias)
 4. `git config user.name`
 5. `$USER` environment variable
 6. `"unknown"`

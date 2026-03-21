@@ -49,7 +49,7 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 # output:
 #   title-length: 255
 
-# Default actor for audit trails (overridden by BD_ACTOR or --actor)
+# Default actor for audit trails (overridden by BEADS_ACTOR or --actor)
 # actor: ""
 
 # Export events (audit trail) to .beads/events.jsonl on each flush/sync
