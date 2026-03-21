@@ -2983,7 +2983,7 @@ and muscle memory before v1.0.0 to avoid breakage.
   - Add project notes that won't be committed
   - Gitignored by default
 
-- **Auto-add "landing the plane" instructions to AGENTS.md**
+- **Auto-add session completion instructions to AGENTS.md**
   - New projects get session-close protocol guidance
 
 - **Inline tombstones for soft-delete**

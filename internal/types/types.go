@@ -563,9 +563,9 @@ type MolType string
 
 // MolType constants
 const (
-	MolTypeSwarm  MolType = "swarm"  // Swarm molecule: coordinated multi-polecat work
-	MolTypePatrol MolType = "patrol" // Patrol molecule: recurring operational work (Witness, Deacon, etc.)
-	MolTypeWork   MolType = "work"   // Work molecule: regular polecat work (default)
+	MolTypeSwarm  MolType = "swarm"  // Swarm molecule: coordinated multi-worker work
+	MolTypePatrol MolType = "patrol" // Patrol molecule: recurring operational work
+	MolTypeWork   MolType = "work"   // Work molecule: regular assigned work (default)
 )
 
 // IsValid checks if the mol type value is valid
@@ -1127,23 +1127,23 @@ func (i *Issue) GetConstituents() []BondRef {
 // Example usage:
 //
 //	ref := &EntityRef{
-//	    Name:     "polecat/Nux",
-//	    Platform: "gastown",
-//	    Org:      "steveyegge",
-//	    ID:       "polecat-nux",
+//	    Name:     "worker/Alice",
+//	    Platform: "github",
+//	    Org:      "acme-corp",
+//	    ID:       "worker-alice",
 //	}
-//	uri := ref.URI() // "hop://gastown/steveyegge/polecat-nux"
+//	uri := ref.URI() // "hop://github/acme-corp/worker-alice"
 type EntityRef struct {
-	// Name is the human-readable identifier (e.g., "polecat/Nux", "mayor")
+	// Name is the human-readable identifier (e.g., "worker/Alice", "admin")
 	Name string `json:"name,omitempty"`
 
-	// Platform identifies the execution context (e.g., "gastown", "github")
+	// Platform identifies the execution context (e.g., "github", "gitlab")
 	Platform string `json:"platform,omitempty"`
 
 	// Org identifies the organization (e.g., "steveyegge", "anthropics")
 	Org string `json:"org,omitempty"`
 
-	// ID is the unique identifier within the platform/org (e.g., "polecat-nux")
+	// ID is the unique identifier within the platform/org (e.g., "worker-alice")
 	ID string `json:"id,omitempty"`
 }
 

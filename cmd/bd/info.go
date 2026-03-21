@@ -734,7 +734,7 @@ var versionChanges = []VersionChange{
 			"NEW: Sync divergence detection - JSONL/SQLite/git consistency checks (GH#885)",
 			"NEW: PRIME.md override - Custom prime output per project (GH#876)",
 			"NEW: Compound visualization - bd mol show displays compound structure (bd-iw4z)",
-			"NEW: /handoff skill - Session cycling slash command (bd-xwvo)",
+			"NEW: /handoff skill - Session handoff slash command (bd-xwvo)",
 			"FIX: bd ready now shows in_progress issues (#894)",
 			"FIX: macOS case-insensitive path handling for worktrees/daemon (GH#880)",
 			"FIX: Sync metadata timing - finalize after commit not push (GH#885)",
