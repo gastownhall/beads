@@ -31,7 +31,7 @@ import (
 // 2. Cross-town sync via DOLT_FETCH/DOLT_PUSH
 // 3. Federation message exchange
 //
-// See ~/hop/docs/architecture/FEDERATION.md for full federation spec.
+// See HOP docs: architecture/FEDERATION.md for full federation spec.
 
 // TestFederationDatabaseIsolation verifies that two DoltStores have isolated databases
 func TestFederationDatabaseIsolation(t *testing.T) {

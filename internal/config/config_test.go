@@ -580,8 +580,8 @@ func TestGetExternalProjects(t *testing.T) {
 
 	// Test with Set
 	Set("external_projects", map[string]string{
-		"beads":   "../beads",
-		"gastown": "/absolute/path/to/gastown",
+		"beads":         "../beads",
+		"other-project": "/absolute/path/to/other-project",
 	})
 
 	got = GetExternalProjects()
@@ -591,8 +591,8 @@ func TestGetExternalProjects(t *testing.T) {
 	if got["beads"] != "../beads" {
 		t.Errorf("GetExternalProjects()[beads] = %q, want \"../beads\"", got["beads"])
 	}
-	if got["gastown"] != "/absolute/path/to/gastown" {
-		t.Errorf("GetExternalProjects()[gastown] = %q, want \"/absolute/path/to/gastown\"", got["gastown"])
+	if got["other-project"] != "/absolute/path/to/other-project" {
+		t.Errorf("GetExternalProjects()[other-project] = %q, want \"/absolute/path/to/other-project\"", got["other-project"])
 	}
 }
 
@@ -604,7 +604,7 @@ func TestGetExternalProjectsFromConfig(t *testing.T) {
 	configContent := `
 external_projects:
   beads: ../beads
-  gastown: /path/to/gastown
+  other-project: /path/to/other-project
   other: ./relative/path
 `
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -634,8 +634,8 @@ external_projects:
 	if got["beads"] != "../beads" {
 		t.Errorf("GetExternalProjects()[beads] = %q, want \"../beads\"", got["beads"])
 	}
-	if got["gastown"] != "/path/to/gastown" {
-		t.Errorf("GetExternalProjects()[gastown] = %q, want \"/path/to/gastown\"", got["gastown"])
+	if got["other-project"] != "/path/to/other-project" {
+		t.Errorf("GetExternalProjects()[other-project] = %q, want \"/path/to/other-project\"", got["other-project"])
 	}
 	if got["other"] != "./relative/path" {
 		t.Errorf("GetExternalProjects()[other] = %q, want \"./relative/path\"", got["other"])
@@ -1292,122 +1292,6 @@ func TestGetCustomTypesFromYAML_NilViper(t *testing.T) {
 	got := GetCustomTypesFromYAML()
 	if got != nil {
 		t.Errorf("GetCustomTypesFromYAML() with nil viper = %v, want nil", got)
-	}
-}
-
-func TestGetAgentRoles(t *testing.T) {
-	// Isolate from environment variables
-	restore := envSnapshot(t)
-	defer restore()
-
-	// Create a temporary directory with a .beads/config.yaml
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("failed to create .beads directory: %v", err)
-	}
-
-	// Write a config file with agent_roles
-	configContent := `
-agent_roles:
-  town_level: "mayor,deacon"
-  rig_level: "witness,refinery"
-  named: "crew,polecat"
-`
-	configPath := filepath.Join(beadsDir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
-		t.Fatalf("failed to write config file: %v", err)
-	}
-
-	// Change to tmp directory so config is found
-	t.Chdir(tmpDir)
-
-	// Reset and initialize viper
-	ResetForTesting()
-	if err := Initialize(); err != nil {
-		t.Fatalf("Initialize() returned error: %v", err)
-	}
-
-	t.Run("town_level_roles", func(t *testing.T) {
-		got := GetTownLevelRoles()
-		expected := []string{"mayor", "deacon"}
-		if len(got) != len(expected) {
-			t.Errorf("GetTownLevelRoles() returned %d roles, want %d", len(got), len(expected))
-		}
-		for i, role := range expected {
-			if i >= len(got) || got[i] != role {
-				t.Errorf("GetTownLevelRoles()[%d] = %q, want %q", i, got[i], role)
-			}
-		}
-	})
-
-	t.Run("rig_level_roles", func(t *testing.T) {
-		got := GetRigLevelRoles()
-		expected := []string{"witness", "refinery"}
-		if len(got) != len(expected) {
-			t.Errorf("GetRigLevelRoles() returned %d roles, want %d", len(got), len(expected))
-		}
-		for i, role := range expected {
-			if i >= len(got) || got[i] != role {
-				t.Errorf("GetRigLevelRoles()[%d] = %q, want %q", i, got[i], role)
-			}
-		}
-	})
-
-	t.Run("named_roles", func(t *testing.T) {
-		got := GetNamedRoles()
-		expected := []string{"crew", "polecat"}
-		if len(got) != len(expected) {
-			t.Errorf("GetNamedRoles() returned %d roles, want %d", len(got), len(expected))
-		}
-		for i, role := range expected {
-			if i >= len(got) || got[i] != role {
-				t.Errorf("GetNamedRoles()[%d] = %q, want %q", i, got[i], role)
-			}
-		}
-	})
-}
-
-func TestGetAgentRoles_NotSet(t *testing.T) {
-	// Isolate from environment variables
-	restore := envSnapshot(t)
-	defer restore()
-
-	// Create a temporary directory with a .beads/config.yaml WITHOUT agent_roles
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("failed to create .beads directory: %v", err)
-	}
-
-	// Write a config file without agent_roles
-	configContent := `
-sync:
-  mode: dolt-native
-`
-	configPath := filepath.Join(beadsDir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
-		t.Fatalf("failed to write config file: %v", err)
-	}
-
-	// Change to tmp directory so config is found
-	t.Chdir(tmpDir)
-
-	// Reset and initialize viper
-	ResetForTesting()
-	if err := Initialize(); err != nil {
-		t.Fatalf("Initialize() returned error: %v", err)
-	}
-
-	// All role functions should return nil when not configured
-	if got := GetTownLevelRoles(); got != nil {
-		t.Errorf("GetTownLevelRoles() = %v, want nil when not set", got)
-	}
-	if got := GetRigLevelRoles(); got != nil {
-		t.Errorf("GetRigLevelRoles() = %v, want nil when not set", got)
-	}
-	if got := GetNamedRoles(); got != nil {
-		t.Errorf("GetNamedRoles() = %v, want nil when not set", got)
 	}
 }
 

@@ -72,6 +72,9 @@ func isTestDatabaseName(name string) bool {
 // sql-server processes, keyed by resolved server directory. When the count
 // drops to zero, the server is stopped. This prevents test-started servers
 // from leaking (GH#2542) while allowing multiple stores to share one server.
+// Normal repo-local auto-starts are intentionally not tracked here: those
+// servers should stay up like an explicit `bd dolt start`, rather than being
+// torn down at the end of each command.
 var autoStartRefs struct {
 	mu sync.Mutex
 	m  map[string]int
@@ -84,6 +87,20 @@ func autoStartAcquire(serverDir string) {
 		autoStartRefs.m = make(map[string]int)
 	}
 	autoStartRefs.m[serverDir]++
+}
+
+// autoStartAcquireExisting increments the refcount for serverDir only when the
+// current process is already tracking that auto-started server. This lets later
+// stores share the same test-owned server without taking ownership of servers
+// started by other processes.
+func autoStartAcquireExisting(serverDir string) bool {
+	autoStartRefs.mu.Lock()
+	defer autoStartRefs.mu.Unlock()
+	if autoStartRefs.m == nil || autoStartRefs.m[serverDir] <= 0 {
+		return false
+	}
+	autoStartRefs.m[serverDir]++
+	return true
 }
 
 // autoStartRelease decrements the refcount for serverDir and stops the server
@@ -100,6 +117,17 @@ func autoStartRelease(serverDir string) error {
 		return doltserver.Stop(serverDir)
 	}
 	return nil
+}
+
+// shouldStopAutoStartedServerOnClose reports whether an auto-started server
+// should be treated as test-owned cleanup state instead of a normal repo-local
+// server. In real repos, auto-start should behave like a persistent helper
+// server, not a single-command subprocess.
+func shouldStopAutoStartedServerOnClose(cfg *Config) bool {
+	if os.Getenv("BEADS_TEST_MODE") == "1" {
+		return true
+	}
+	return isTestDatabaseName(cfg.Database)
 }
 
 // Compile-time interface checks.
@@ -191,7 +219,7 @@ type Config struct {
 
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
-	// automatically if one isn't running. Disabled under Gas Town (GT_ROOT set).
+	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).
 	AutoStart bool
 
 	// MaxOpenConns overrides the connection pool size (0 = default 10).
@@ -545,7 +573,11 @@ func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) err
 // applyConfigDefaults fills in default values for unset Config fields.
 func applyConfigDefaults(cfg *Config) {
 	if cfg.Database == "" {
-		if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.Path != "" {
+		// Check env var first — this is the highest-priority override and
+		// must be consulted even when no config file was loaded.
+		if d := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); d != "" {
+			cfg.Database = d
+		} else if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.Path != "" {
 			// Test mode: derive unique database name from path for isolation.
 			// Each test creates a unique temp directory, so hashing the path
 			// gives each test its own database on the shared test server.
@@ -553,6 +585,7 @@ func applyConfigDefaults(cfg *Config) {
 			_, _ = h.Write([]byte(cfg.Path)) // hash.Hash.Write never returns an error
 			cfg.Database = fmt.Sprintf("testdb_%x", h.Sum64())
 		} else {
+			fmt.Fprintf(os.Stderr, "warning: no database name configured; falling back to default %q\n", configfile.DefaultDoltDatabase)
 			cfg.Database = configfile.DefaultDoltDatabase
 		}
 	}
@@ -585,7 +618,7 @@ func applyConfigDefaults(cfg *Config) {
 	// BEADS_TEST_MODE guard > metadata config > default.
 	// CRITICAL: BEADS_TEST_MODE=1 forces port 1 (immediate fail) if the resolved port
 	// is the production port (DefaultSQLPort). This prevents test databases from leaking
-	// onto production even when the port env var is set to 3307 by Gas Town's beads module.
+	// onto production even when the port env var is set to 3307 by the orchestrator's beads module.
 	// Only an explicit non-production port (e.g., 43211 for a test server)
 	// overrides test mode — that's a deliberate test server assignment.
 	envPort := os.Getenv("BEADS_DOLT_SERVER_PORT")
@@ -599,11 +632,18 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	// If env var didn't provide a port, consult the full resolution chain:
 	// port file > config.yaml > metadata.json (GH#2590).
-	// Previously, port 0 fell through to the MySQL driver default (3307),
-	// causing cross-project connections when another Dolt sat on 3307.
-	if cfg.ServerPort == 0 && cfg.Path != "" {
-		if resolved := doltserver.DefaultConfig(cfg.Path); resolved.Port > 0 {
-			cfg.ServerPort = resolved.Port
+	// Resolve from the owning .beads dir when available; cfg.Path is the Dolt
+	// data path, not the config directory, and using it directly can miss the
+	// repo-local port file or metadata.
+	if cfg.ServerPort == 0 {
+		resolveDir := cfg.BeadsDir
+		if resolveDir == "" && cfg.Path != "" {
+			resolveDir = filepath.Dir(cfg.Path)
+		}
+		if resolveDir != "" {
+			if resolved := doltserver.DefaultConfig(resolveDir); resolved.Port > 0 {
+				cfg.ServerPort = resolved.Port
+			}
 		}
 	}
 	// Port 0 means "not yet resolved" — auto-start (EnsureRunning) will
@@ -670,6 +710,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Tracks server dir if we auto-started a server (for cleanup in Close, GH#2542).
 	var autoStartedDir string
+	trackAutoStartedServer := shouldStopAutoStartedServerOnClose(cfg)
+	resolvedBeadsDir := cfg.BeadsDir
+	if resolvedBeadsDir == "" {
+		resolvedBeadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
+	}
+	serverDir := doltserver.ResolveServerDir(resolvedBeadsDir)
 
 	// Fail-fast TCP check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
@@ -679,20 +725,18 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if dialErr != nil {
 		// Auto-start: if enabled and connecting to localhost, start a server
 		if cfg.AutoStart && isLocalHost(cfg.ServerHost) && cfg.Path != "" {
-			beadsDir := cfg.BeadsDir
-			if beadsDir == "" {
-				beadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
-			}
-			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(beadsDir)
+			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
 					"To start manually: bd dolt start\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
 					addr, startErr)
 			}
-			// Track auto-started servers so Close() can stop them (GH#2542).
-			if startedByUs {
-				autoStartedDir = doltserver.ResolveServerDir(beadsDir)
+			// Only tests should stop auto-started servers on Close(). In normal
+			// repo-local server mode, leaving the server up avoids endpoint churn
+			// and circuit-breaker trips between commands.
+			if startedByUs && trackAutoStartedServer {
+				autoStartedDir = serverDir
 				autoStartAcquire(autoStartedDir)
 			}
 			// Update port — EnsureRunning allocates an ephemeral port
@@ -717,7 +761,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					breaker.RecordFailure()
 				}
 				return nil, fmt.Errorf("Dolt server auto-started but still unreachable at %s: %w\n\n"+
-					"Check logs: %s", addr, dialErr, doltserver.LogPath(beadsDir))
+					"Check logs: %s", addr, dialErr, doltserver.LogPath(resolvedBeadsDir))
 			}
 		} else {
 			if breaker != nil {
@@ -728,6 +772,14 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 	}
 	_ = conn.Close()
+
+	// If this process already owns a test-started auto-start server, later
+	// stores sharing it must participate in the refcount so one Close() does
+	// not stop the server out from under another open store.
+	if autoStartedDir == "" && trackAutoStartedServer && autoStartAcquireExisting(serverDir) {
+		autoStartedDir = serverDir
+	}
+
 	// TCP dial succeeded — record success to reset the breaker
 	if breaker != nil {
 		breaker.RecordSuccess()
@@ -1015,7 +1067,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 				_ = db.Close()
 				// Check for connection refused - server likely not running
 				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using Gas Town",
+					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
 						cfg.ServerHost, cfg.ServerPort, err)
 				}
 				return nil, "", fmt.Errorf("failed to create database: %w", err)

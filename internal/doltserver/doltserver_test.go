@@ -73,11 +73,11 @@ func TestIsRunningNoServer(t *testing.T) {
 	}
 }
 
-func TestIsRunningChecksDaemonPidUnderGasTown(t *testing.T) {
+func TestIsRunningChecksDaemonPidUnderOrchestrator(t *testing.T) {
 	dir := t.TempDir()
 	gtRoot := t.TempDir()
 
-	// Set GT_ROOT to simulate Gas Town environment
+	// Set GT_ROOT to simulate orchestrator environment
 	orig := os.Getenv("GT_ROOT")
 	os.Setenv("GT_ROOT", gtRoot)
 	defer func() {
@@ -417,7 +417,7 @@ func TestMaxDoltServers(t *testing.T) {
 			}
 		}()
 
-		// CWD must be outside any Gas Town workspace for standalone test
+		// CWD must be outside any orchestrator workspace for standalone test
 		origWd, err := os.Getwd()
 		if err != nil {
 			t.Fatal(err)
@@ -432,7 +432,7 @@ func TestMaxDoltServers(t *testing.T) {
 		}
 	})
 
-	t.Run("gastown_same_as_standalone", func(t *testing.T) {
+	t.Run("orchestrator_same_as_standalone", func(t *testing.T) {
 		// After daemon removal, GT_ROOT no longer affects maxDoltServers
 		t.Setenv("GT_ROOT", t.TempDir())
 
@@ -616,7 +616,10 @@ func TestKillStaleServersPreservesOtherRepoServers(t *testing.T) {
 	}
 }
 
-func TestKillStaleServersWithoutCanonicalPIDOnlyKillsOwnedDir(t *testing.T) {
+func TestKillStaleServersWithoutCanonicalPIDIsNoop(t *testing.T) {
+	// Without a PID file, beads has no record of starting a server.
+	// killStaleServersForDir should be a no-op to avoid killing
+	// externally-managed servers (systemd, other repos, etc).
 	dir := t.TempDir()
 	sameRepoOrphanPID := 222
 	otherRepoPID := 333
@@ -636,11 +639,101 @@ func TestKillStaleServersWithoutCanonicalPIDOnlyKillsOwnedDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("killStaleServersForDir error: %v", err)
 	}
-	if len(got) != 1 || got[0] != sameRepoOrphanPID {
-		t.Fatalf("killed=%v, want [%d]", got, sameRepoOrphanPID)
+	if len(got) != 0 {
+		t.Fatalf("killed=%v, want [] (no PID file means nothing is stale)", got)
 	}
-	if len(killed) != 1 || killed[0] != sameRepoOrphanPID {
-		t.Fatalf("kill callback got %v, want [%d]", killed, sameRepoOrphanPID)
+	if len(killed) != 0 {
+		t.Fatalf("kill callback got %v, want [] (no PID file means nothing is stale)", killed)
+	}
+}
+
+func TestKillStaleServersSkipsExplicitPort(t *testing.T) {
+	// When metadata.json has an explicit port, the server is externally
+	// managed and killStaleServersForDir should be a complete no-op.
+	dir := t.TempDir()
+
+	// Write a metadata.json with an explicit port
+	metadataPath := filepath.Join(dir, "metadata.json")
+	if err := os.WriteFile(metadataPath, []byte(`{"dolt_server_port": 3307}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a PID file (would normally trigger stale cleanup)
+	canonicalPID := 111
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(canonicalPID)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	orphanPID := 222
+	var killed []int
+	got, err := killStaleServersForDir(
+		dir,
+		[]int{canonicalPID, orphanPID},
+		func(pid int, _ string) bool { return true },
+		func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("killStaleServersForDir error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("killed=%v, want [] (explicit port = externally managed)", got)
+	}
+}
+
+func TestKillStaleServersSkipsAutoStartDisabled(t *testing.T) {
+	// When BEADS_DOLT_AUTO_START=0, the server is externally managed
+	// and killStaleServersForDir should be a complete no-op.
+	dir := t.TempDir()
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+
+	// Write a PID file
+	canonicalPID := 111
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(canonicalPID)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	orphanPID := 222
+	var killed []int
+	got, err := killStaleServersForDir(
+		dir,
+		[]int{canonicalPID, orphanPID},
+		func(pid int, _ string) bool { return true },
+		func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("killStaleServersForDir error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("killed=%v, want [] (auto-start disabled = externally managed)", got)
+	}
+}
+
+func TestIsAutoStartDisabled(t *testing.T) {
+	tests := []struct {
+		envVal string
+		want   bool
+	}{
+		{"0", true},
+		{"false", true},
+		{"FALSE", true},
+		{"False", true},
+		{"1", false},
+		{"true", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run("env="+tt.envVal, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_AUTO_START", tt.envVal)
+			if got := isAutoStartDisabled(); got != tt.want {
+				t.Errorf("isAutoStartDisabled() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1003,7 +1096,7 @@ func TestDefaultConfig_SharedModeGeneralPortOverrides(t *testing.T) {
 
 func TestDefaultSharedServerPort_DiffersFromDefault(t *testing.T) {
 	if DefaultSharedServerPort == configfile.DefaultDoltServerPort {
-		t.Errorf("DefaultSharedServerPort (%d) must differ from DefaultDoltServerPort (%d) to avoid Gas Town conflict",
+		t.Errorf("DefaultSharedServerPort (%d) must differ from DefaultDoltServerPort (%d) to avoid orchestrator conflict",
 			DefaultSharedServerPort, configfile.DefaultDoltServerPort)
 	}
 }
@@ -1016,5 +1109,112 @@ func TestDefaultConfig_SharedModeBeadsDir(t *testing.T) {
 	expected := filepath.Join(home, ".beads", "shared-server")
 	if cfg.BeadsDir != expected {
 		t.Errorf("DefaultConfig.BeadsDir = %q, want %q", cfg.BeadsDir, expected)
+	}
+}
+
+// --- ServerMode tests ---
+
+func TestResolveServerMode_Default(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeOwned {
+		t.Errorf("expected ServerModeOwned for empty dir, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_SharedServer(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+
+	dir := t.TempDir()
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with shared server, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_ExplicitPort(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	// Write metadata.json with explicit port
+	metaCfg := &configfile.Config{
+		DoltServerPort: 3307,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with explicit port, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_ServerModeEnv(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with BEADS_DOLT_SERVER_MODE=1, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_EmbeddedMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	// Write metadata.json with embedded mode
+	metaCfg := &configfile.Config{
+		DoltMode: "embedded",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeEmbedded {
+		t.Errorf("expected ServerModeEmbedded with dolt_mode=embedded, got %v", mode)
+	}
+}
+
+func TestServerMode_String(t *testing.T) {
+	tests := []struct {
+		mode ServerMode
+		want string
+	}{
+		{ServerModeOwned, "owned"},
+		{ServerModeExternal, "external"},
+		{ServerModeEmbedded, "embedded"},
+		{ServerMode(99), "ServerMode(99)"},
+	}
+	for _, tc := range tests {
+		if got := tc.mode.String(); got != tc.want {
+			t.Errorf("ServerMode(%d).String() = %q, want %q", int(tc.mode), got, tc.want)
+		}
+	}
+}
+
+func TestDefaultConfig_IncludesMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	cfg := DefaultConfig(dir)
+	if cfg.Mode != ServerModeOwned {
+		t.Errorf("expected DefaultConfig.Mode = Owned for empty dir, got %v", cfg.Mode)
 	}
 }

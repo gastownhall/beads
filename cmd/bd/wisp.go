@@ -38,7 +38,7 @@ locally but NOT synced via git.
 WHEN TO USE WISP vs POUR:
   wisp (vapor): Ephemeral work that auto-cleans up
     - Release workflows (one-time execution)
-    - Patrol cycles (deacon, witness, refinery)
+    - Operational loops and recurring cycles
     - Health checks and diagnostics
     - Any operational workflow without audit value
 
@@ -58,7 +58,7 @@ The wisp lifecycle:
 
 Examples:
   bd mol wisp beads-release --var version=1.0  # Release workflow
-  bd mol wisp mol-patrol                       # Ephemeral patrol cycle
+  bd mol wisp mol-my-workflow                  # Ephemeral operational cycle
   bd mol wisp list                             # List all wisps
   bd mol wisp gc                               # Garbage collect old wisps
 
@@ -116,7 +116,7 @@ The resulting wisp is stored in the main database with Ephemeral=true and NOT sy
 Phase transition: Proto (solid) -> Wisp (vapor)
 
 Use wisp for:
-  - Patrol cycles (deacon, witness)
+  - Operational loops and recurring cycles
   - Health checks and monitoring
   - One-shot orchestration runs
   - Routine operations with no audit value

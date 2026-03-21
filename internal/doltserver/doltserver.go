@@ -39,7 +39,7 @@ import (
 const maxEphemeralPortAttempts = 10
 
 // DefaultSharedServerPort is the default port for shared server mode.
-// Uses 3308 to avoid conflict with Gas Town which uses 3307.
+// Uses 3308 to avoid conflict with the orchestrator which uses 3307.
 const DefaultSharedServerPort = 3308
 
 // IsSharedServerMode returns true if shared server mode is enabled.
@@ -55,6 +55,23 @@ func IsSharedServerMode() bool {
 		return true
 	}
 	return config.GetBool("dolt.shared-server")
+}
+
+// IsAutoStartDisabled returns true if the dolt server should NOT be
+// auto-started or managed by bd. When true, KillStaleServers and
+// auto-start are suppressed — the server is externally managed (e.g.,
+// by systemd). Checks (in priority order):
+//  1. BEADS_DOLT_AUTO_START=0 env var → always disabled
+//  2. dolt.auto-start config value "false"/"0"/"off" → disabled
+//
+// This is used by KillStaleServers and Start to avoid killing or
+// interfering with externally-managed dolt processes (GH#2641).
+func IsAutoStartDisabled() bool {
+	if os.Getenv("BEADS_DOLT_AUTO_START") == "0" {
+		return true
+	}
+	v := config.GetString("dolt.auto-start")
+	return v == "false" || v == "0" || v == "off"
 }
 
 // SharedServerDir returns the directory for shared server state files.
@@ -144,9 +161,10 @@ func ResolveDoltDir(beadsDir string) string {
 
 // Config holds the server configuration.
 type Config struct {
-	BeadsDir string // Path to .beads/ directory
-	Port     int    // MySQL protocol port (0 = allocate ephemeral port on Start)
-	Host     string // Bind address (default: 127.0.0.1)
+	BeadsDir string     // Path to .beads/ directory
+	Port     int        // MySQL protocol port (0 = allocate ephemeral port on Start)
+	Host     string     // Bind address (default: 127.0.0.1)
+	Mode     ServerMode // Server ownership mode (Owned, External, Embedded)
 }
 
 // State holds runtime information about a managed server.
@@ -314,6 +332,7 @@ func DefaultConfig(beadsDir string) *Config {
 	cfg := &Config{
 		BeadsDir: beadsDir,
 		Host:     "127.0.0.1",
+		Mode:     ResolveServerMode(beadsDir),
 	}
 
 	// Check env var override first (used by tests and manual overrides)
@@ -363,7 +382,7 @@ func DefaultConfig(beadsDir string) *Config {
 	// shared server port. In per-project mode, Start() will allocate an
 	// ephemeral port from the OS (GH#2098, GH#2372).
 	if cfg.Port == 0 && IsSharedServerMode() {
-		cfg.Port = DefaultSharedServerPort // 3308 - avoids Gas Town conflict on 3307
+		cfg.Port = DefaultSharedServerPort // 3308 - avoids orchestrator conflict on 3307
 	}
 
 	return cfg
@@ -453,9 +472,9 @@ func EnsureRunning(beadsDir string) (int, error) {
 func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err error) {
 	serverDir := resolveServerDir(beadsDir)
 
-	// Inform when Gas Town is also running on this machine
+	// Inform when an orchestrator is also running on this machine
 	if IsSharedServerMode() && os.Getenv("GT_ROOT") != "" {
-		fmt.Fprintf(os.Stderr, "Info: Gas Town detected (GT_ROOT set). Shared server uses port %d to avoid conflict.\n", DefaultSharedServerPort)
+		fmt.Fprintf(os.Stderr, "Info: Orchestrator detected (GT_ROOT set). Shared server uses port %d to avoid conflict.\n", DefaultSharedServerPort)
 	}
 
 	state, err := IsRunning(serverDir)
@@ -467,15 +486,15 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return state.Port, false, nil
 	}
 
-	// Check whether the server is externally managed before starting.
-	// If metadata.json has an explicit dolt_server_port, the user has
-	// configured a shared/external server (e.g. systemd-managed). Do not
-	// start a per-project server — it would conflict with the external one.
-	if hasExplicitPort(beadsDir) {
+	// If the server mode is External (explicit port in metadata.json,
+	// shared server mode, etc.), do not start a per-project server —
+	// it would conflict with the external one.
+	mode := ResolveServerMode(beadsDir)
+	if mode == ServerModeExternal {
 		cfg := DefaultConfig(beadsDir)
 		return 0, false, fmt.Errorf("Dolt server is not running on port %d, and auto-start is suppressed "+
-			"because an explicit server port is configured (external/shared server).\n\n"+
-			"Start the external server, or remove the explicit port configuration to allow auto-start.\n"+
+			"because the server is externally managed (dolt.auto-start: false or explicit port configured).\n\n"+
+			"Start the external server, or enable auto-start to allow bd to manage the server.\n"+
 			"  To start manually: bd dolt start\n"+
 			"  To check status: bd dolt status", cfg.Port)
 	}
@@ -485,20 +504,6 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return 0, false, err
 	}
 	return s.Port, true, nil
-}
-
-// hasExplicitPort returns true if beadsDir's metadata.json has an explicit
-// dolt_server_port configured, indicating the server is externally managed.
-func hasExplicitPort(beadsDir string) bool {
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if _, err := os.Stat(metadataPath); err != nil {
-		return false
-	}
-	fileCfg, err := configfile.Load(beadsDir)
-	if err != nil || fileCfg == nil {
-		return false
-	}
-	return fileCfg.DoltServerPort > 0
 }
 
 // Start explicitly starts a dolt sql-server for the project.
@@ -815,25 +820,52 @@ func LogPath(beadsDir string) string {
 	return logPath(beadsDir)
 }
 
+// isAutoStartDisabled returns true when the user has opted out of beads
+// auto-starting dolt servers (e.g. because a systemd unit manages the server).
+func isAutoStartDisabled() bool {
+	v := os.Getenv("BEADS_DOLT_AUTO_START")
+	return v == "0" || strings.EqualFold(v, "false")
+}
+
 // killStaleServersForDir finds and kills orphan dolt sql-server processes for
 // the current repo's Dolt data directory that are not tracked by the canonical
-// PID file. Servers owned by other repos are preserved.
+// PID file. Only processes that beads started (tracked via the PID file) are
+// eligible for cleanup. Externally-managed servers are never killed.
+//
+// A process is considered "external" (never kill) when any of:
+//   - ResolveServerMode() returns ServerModeExternal (explicit port, shared server, etc.)
+//   - No PID file exists (beads has no record of starting a server)
 func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, string) bool, kill func(int) error) ([]int, error) {
 	if len(allPIDs) == 0 {
 		return nil, nil
 	}
 
-	// Collect canonical PIDs (ones we should NOT kill).
-	canonicalPIDs := make(map[int]bool)
-	serverDir := resolveServerDir(beadsDir)
-	if serverDir != "" {
-		if data, readErr := os.ReadFile(pidPath(serverDir)); readErr == nil {
-			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
-				canonicalPIDs[pid] = true
-			}
-		}
+	// If the server is externally managed, never kill anything.
+	if ResolveServerMode(beadsDir) == ServerModeExternal {
+		return nil, nil
 	}
 
+	serverDir := resolveServerDir(beadsDir)
+
+	// Read the canonical PID from the PID file. If there is no PID file,
+	// beads has no record of having started a server for this directory,
+	// so there is nothing stale to clean up. This prevents killing
+	// externally-started servers (systemd, other repos sharing a data dir).
+	var canonicalPID int
+	if data, readErr := os.ReadFile(pidPath(serverDir)); readErr == nil {
+		if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && pid > 0 {
+			canonicalPID = pid
+		}
+	}
+	if canonicalPID == 0 {
+		// No valid PID file → no beads-owned server to compare against.
+		// Nothing is stale from our perspective.
+		return nil, nil
+	}
+
+	// The canonical PID itself is alive and tracked — never kill it.
+	// Only kill OTHER dolt processes in our data dir (orphans from a
+	// previous beads-started server that lost its PID file tracking).
 	ownedDoltDir := ResolveDoltDir(serverDir)
 
 	var killed []int
@@ -841,7 +873,7 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 		if pid == os.Getpid() {
 			continue
 		}
-		if canonicalPIDs[pid] {
+		if pid == canonicalPID {
 			continue // preserve canonical server
 		}
 		if !inDir(pid, ownedDoltDir) {
@@ -857,7 +889,14 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 // KillStaleServers finds and kills orphan dolt sql-server processes for the
 // current repo's Dolt data directory that are not tracked by the canonical PID
 // file. Returns the PIDs of killed processes.
+//
+// When auto-start is disabled (BEADS_DOLT_AUTO_START=0 or dolt.auto-start:
+// false), this function is a no-op — the dolt server is externally managed
+// and must not be killed by bd (GH#2641).
 func KillStaleServers(beadsDir string) ([]int, error) {
+	if IsAutoStartDisabled() {
+		return nil, nil
+	}
 	allPIDs := listDoltProcessPIDs()
 	return killStaleServersForDir(
 		beadsDir,

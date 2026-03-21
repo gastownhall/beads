@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -31,7 +30,7 @@ func isNotFoundErr(err error) bool {
 // beadsDirOverride returns true if BEADS_DIR is explicitly set in the environment.
 // When set, BEADS_DIR specifies the exact database to use and prefix-based routing
 // must be skipped. This matches bd list's behavior (which never routes) and the
-// contract expected by all gastown callers that set BEADS_DIR (GH#663).
+// contract expected by all orchestrator callers that set BEADS_DIR (GH#663).
 func beadsDirOverride() bool {
 	return os.Getenv("BEADS_DIR") != ""
 }
@@ -87,7 +86,7 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.DoltS
 	// to the routed store. Checking the local store first would risk finding
 	// phantom/duplicate copies in the wrong database (bd-7vk).
 	if routesDifferently {
-		routedStore, err := dolt.NewFromConfig(ctx, targetDir)
+		routedStore, err := newDoltStoreFromConfig(ctx, targetDir)
 		if err != nil {
 			return nil, fmt.Errorf("opening routed store at %s: %w", targetDir, err)
 		}
@@ -173,7 +172,7 @@ func openStoreForRig(ctx context.Context, rigOrPrefix string) (storage.DoltStora
 		return nil, err
 	}
 
-	targetStore, err := dolt.NewFromConfigWithOptions(ctx, targetBeadsDir, &dolt.Config{ReadOnly: true})
+	targetStore, err := newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open rig %q database: %v", rigOrPrefix, err)
 	}
@@ -213,7 +212,7 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 	routesDifferently := routeErr == nil && routed && (targetDir != beadsDir || os.Getenv("BEADS_DOLT_SERVER_DATABASE") != "")
 
 	if routesDifferently {
-		routedStore, err := dolt.NewFromConfig(ctx, targetDir)
+		routedStore, err := newDoltStoreFromConfig(ctx, targetDir)
 		if err != nil {
 			return nil, fmt.Errorf("opening routed store at %s: %w", targetDir, err)
 		}
@@ -289,7 +288,7 @@ func needsRouting(id string) bool {
 // prefix routes to locate and query the target database.
 //
 // GetDependenciesWithMetadata uses a JOIN between dependencies and issues tables,
-// so external refs (e.g., "external:gastown:gt-42zaq") that don't exist in the local
+// so external refs (e.g., "external:other-project:op-42zaq") that don't exist in the local
 // issues table are silently dropped. This function fills in those gaps by:
 // 1. Getting raw dependency records
 // 2. Filtering for external refs
@@ -355,7 +354,7 @@ func resolveExternalDepsViaRouting(ctx context.Context, issueStore storage.DoltS
 }
 
 // resolveBlockedByRefs takes a list of blocker IDs (which may include external refs
-// like "external:gastown:gt-42zaq") and resolves them to human-readable strings.
+// like "external:other-project:op-42zaq") and resolves them to human-readable strings.
 // Local IDs pass through unchanged. External refs are resolved via routing to show
 // the actual issue ID and title from the target database.
 func resolveBlockedByRefs(ctx context.Context, refs []string) []string {

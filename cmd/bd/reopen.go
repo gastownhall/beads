@@ -80,6 +80,14 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				fmt.Printf("%s Reopened %s%s\n", ui.RenderAccent("↻"), fullID, reasonMsg)
 			}
 		}
+
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
+
 		if jsonOutput && len(reopenedIssues) > 0 {
 			outputJSON(reopenedIssues)
 		}

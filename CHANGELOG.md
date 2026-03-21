@@ -2983,7 +2983,7 @@ and muscle memory before v1.0.0 to avoid breakage.
   - Add project notes that won't be committed
   - Gitignored by default
 
-- **Auto-add "landing the plane" instructions to AGENTS.md**
+- **Auto-add session completion instructions to AGENTS.md**
   - New projects get session-close protocol guidance
 
 - **Inline tombstones for soft-delete**
@@ -4254,7 +4254,7 @@ This release represents a major stability and performance improvement with **179
   - Pre-configured Go environment with bd pre-installed
   - Auto-detects existing `.beads/` and imports on startup
 
-- **Landing the Plane Protocol** (095e40d): Session-ending checklist for AI agents
+- **Session Completion Protocol** (095e40d): Session-ending checklist for AI agents
   - Quality gates, sync procedures, git cleanup
   - Ensures clean handoff between sessions
 

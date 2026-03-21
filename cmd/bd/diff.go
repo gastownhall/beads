@@ -11,10 +11,10 @@ import (
 var diffCmd = &cobra.Command{
 	Use:     "diff <from-ref> <to-ref>",
 	GroupID: "views",
-	Short:   "Show changes between two commits or branches (requires Dolt backend)",
+	Short:   "Show changes between two commits or branches",
 	Long: `Show the differences in issues between two commits or branches.
 
-This command requires the Dolt storage backend. The refs can be:
+The refs can be:
 - Commit hashes (e.g., abc123def)
 - Branch names (e.g., main, feature-branch)
 - Special refs like HEAD, HEAD~1

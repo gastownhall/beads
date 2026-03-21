@@ -2,30 +2,26 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // History returns the complete version history for an issue.
 func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.HistoryEntry, error) {
-	internal, err := s.getIssueHistory(ctx, issueID)
-	if err != nil {
-		return nil, wrapQueryError("get issue history", err)
-	}
-
-	// Convert internal representation to interface type
-	entries := make([]*storage.HistoryEntry, len(internal))
-	for i, h := range internal {
-		entries[i] = &storage.HistoryEntry{
-			CommitHash: h.CommitHash,
-			Committer:  h.Committer,
-			CommitDate: h.CommitDate,
-			Issue:      h.Issue,
+	var result []*storage.HistoryEntry
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.HistoryInTx(ctx, tx, issueID)
+		if err != nil {
+			return wrapQueryError("get issue history", err)
 		}
-	}
-	return entries, nil
+		return nil
+	})
+	return result, err
 }
 
 // AsOf returns the state of an issue at a specific commit hash or branch ref.
@@ -37,103 +33,13 @@ func (s *DoltStore) AsOf(ctx context.Context, issueID string, ref string) (*type
 // Diff returns changes between two commits/branches.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]*storage.DiffEntry, error) {
-	// Validate refs to prevent SQL injection
-	if err := validateRef(fromRef); err != nil {
-		return nil, fmt.Errorf("invalid fromRef: %w", err)
-	}
-	if err := validateRef(toRef); err != nil {
-		return nil, fmt.Errorf("invalid toRef: %w", err)
-	}
-
-	// Query issue-level diffs using dolt_diff table function
-	// Syntax: dolt_diff(from_ref, to_ref, 'table_name')
-	// Note: refs are validated above
-	// nolint:gosec // G201: refs validated by validateRef()
-	query := fmt.Sprintf(`
-		SELECT
-			COALESCE(from_id, '') as from_id,
-			COALESCE(to_id, '') as to_id,
-			diff_type,
-			from_title, to_title,
-			from_description, to_description,
-			from_status, to_status,
-			from_priority, to_priority
-		FROM dolt_diff('%s', '%s', 'issues')
-	`, fromRef, toRef)
-
-	rows, err := s.queryContext(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get diff: %w", err)
-	}
-	defer rows.Close()
-
-	var entries []*storage.DiffEntry
-	for rows.Next() {
-		var fromID, toID, diffType string
-		var fromTitle, toTitle, fromDesc, toDesc, fromStatus, toStatus *string
-		var fromPriority, toPriority *int
-
-		if err := rows.Scan(&fromID, &toID, &diffType,
-			&fromTitle, &toTitle,
-			&fromDesc, &toDesc,
-			&fromStatus, &toStatus,
-			&fromPriority, &toPriority); err != nil {
-			return nil, fmt.Errorf("failed to scan diff: %w", err)
-		}
-
-		entry := &storage.DiffEntry{
-			DiffType: diffType,
-		}
-
-		// Determine issue ID (use to_id for added, from_id for removed, either for modified)
-		if toID != "" {
-			entry.IssueID = toID
-		} else {
-			entry.IssueID = fromID
-		}
-
-		// Build old value for modified/removed
-		if diffType != "added" && fromID != "" {
-			entry.OldValue = &types.Issue{
-				ID: fromID,
-			}
-			if fromTitle != nil {
-				entry.OldValue.Title = *fromTitle
-			}
-			if fromDesc != nil {
-				entry.OldValue.Description = *fromDesc
-			}
-			if fromStatus != nil {
-				entry.OldValue.Status = types.Status(*fromStatus)
-			}
-			if fromPriority != nil {
-				entry.OldValue.Priority = *fromPriority
-			}
-		}
-
-		// Build new value for modified/added
-		if diffType != "removed" && toID != "" {
-			entry.NewValue = &types.Issue{
-				ID: toID,
-			}
-			if toTitle != nil {
-				entry.NewValue.Title = *toTitle
-			}
-			if toDesc != nil {
-				entry.NewValue.Description = *toDesc
-			}
-			if toStatus != nil {
-				entry.NewValue.Status = types.Status(*toStatus)
-			}
-			if toPriority != nil {
-				entry.NewValue.Priority = *toPriority
-			}
-		}
-
-		entries = append(entries, entry)
-	}
-
-	return entries, rows.Err()
+	var result []*storage.DiffEntry
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.DiffInTx(ctx, tx, fromRef, toRef)
+		return err
+	})
+	return result, err
 }
 
 // ListBranches returns the names of all branches.

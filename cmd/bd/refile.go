@@ -21,14 +21,14 @@ This creates a new issue in the target rig with the same content,
 then closes the source issue with a reference to the new location.
 
 The target rig can be specified as:
-  - A rig name: beads, gastown
-  - A prefix: bd-, gt-
-  - A prefix without hyphen: bd, gt
+  - A rig name: beads, my-project
+  - A prefix: bd-, mp-
+  - A prefix without hyphen: bd, mp
 
 Examples:
-  bd refile bd-8hea gastown     # Move to gastown by rig name
-  bd refile bd-8hea gt-         # Move to gastown by prefix
-  bd refile bd-8hea gt          # Move to gastown (prefix without hyphen)`,
+  bd refile bd-8hea my-project  # Move to my-project by rig name
+  bd refile bd-8hea mp-         # Move to my-project by prefix
+  bd refile bd-8hea mp          # Move to my-project (prefix without hyphen)`,
 	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("refile")
@@ -103,8 +103,6 @@ Examples:
 			SourceRepo:         sourceIssue.SourceRepo,
 			Ephemeral:          sourceIssue.Ephemeral,
 			MolType:            sourceIssue.MolType,
-			RoleType:           sourceIssue.RoleType,
-			Rig:                sourceIssue.Rig,
 			CreatedBy:          actor,
 		}
 
@@ -133,6 +131,20 @@ Examples:
 			closeReason := fmt.Sprintf("Refiled to %s", newIssue.ID)
 			if err := result.Store.CloseIssue(ctx, resolvedSourceID, closeReason, actor, ""); err != nil {
 				WarnError("failed to close source issue: %v", err)
+			}
+		}
+
+		// Embedded mode: flush Dolt commits on both stores.
+		if isEmbeddedDolt {
+			if result.Store != nil {
+				if _, err := result.Store.CommitPending(ctx, actor); err != nil {
+					WarnError("failed to commit source store: %v", err)
+				}
+			}
+			if targetStore != nil {
+				if _, err := targetStore.CommitPending(ctx, actor); err != nil {
+					WarnError("failed to commit target store: %v", err)
+				}
 			}
 		}
 

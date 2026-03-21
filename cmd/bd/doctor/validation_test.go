@@ -189,9 +189,9 @@ func TestCheckDuplicateIssues_NoDatabase(t *testing.T) {
 	}
 }
 
-// TestCheckDuplicateIssues_GastownUnderThreshold verifies that with gastown mode enabled,
+// TestCheckDuplicateIssues_OrchestratorUnderThreshold verifies that with orchestrator mode enabled,
 // duplicates under the threshold are OK.
-func TestCheckDuplicateIssues_GastownUnderThreshold(t *testing.T) {
+func TestCheckDuplicateIssues_OrchestratorUnderThreshold(t *testing.T) {
 	store := newTestDoltStore(t, "test")
 	ctx := context.Background()
 
@@ -211,17 +211,17 @@ func TestCheckDuplicateIssues_GastownUnderThreshold(t *testing.T) {
 	check := checkDuplicateIssuesDB(store.DB(), true, 1000)
 
 	if check.Status != StatusOK {
-		t.Errorf("Status = %q, want %q (under gastown threshold)", check.Status, StatusOK)
+		t.Errorf("Status = %q, want %q (under orchestrator threshold)", check.Status, StatusOK)
 		t.Logf("Message: %s", check.Message)
 	}
-	if check.Message != "50 duplicate(s) detected (within gastown threshold of 1000)" {
+	if check.Message != "50 duplicate(s) detected (within orchestrator threshold of 1000)" {
 		t.Errorf("Message = %q, want message about being within threshold", check.Message)
 	}
 }
 
-// TestCheckDuplicateIssues_GastownOverThreshold verifies that with gastown mode enabled,
+// TestCheckDuplicateIssues_OrchestratorOverThreshold verifies that with orchestrator mode enabled,
 // duplicates over the threshold still warn.
-func TestCheckDuplicateIssues_GastownOverThreshold(t *testing.T) {
+func TestCheckDuplicateIssues_OrchestratorOverThreshold(t *testing.T) {
 	store := newTestDoltStore(t, "test")
 	ctx := context.Background()
 
@@ -252,15 +252,15 @@ func TestCheckDuplicateIssues_GastownOverThreshold(t *testing.T) {
 	check := checkDuplicateIssuesDB(db, true, 25)
 
 	if check.Status != StatusWarning {
-		t.Errorf("Status = %q, want %q (over gastown threshold)", check.Status, StatusWarning)
+		t.Errorf("Status = %q, want %q (over orchestrator threshold)", check.Status, StatusWarning)
 	}
 	if check.Message != "50 duplicate issue(s) in 1 group(s)" {
 		t.Errorf("Message = %q, want '50 duplicate issue(s) in 1 group(s)'", check.Message)
 	}
 }
 
-// TestCheckDuplicateIssues_GastownCustomThreshold verifies custom threshold works.
-func TestCheckDuplicateIssues_GastownCustomThreshold(t *testing.T) {
+// TestCheckDuplicateIssues_OrchestratorCustomThreshold verifies custom threshold works.
+func TestCheckDuplicateIssues_OrchestratorCustomThreshold(t *testing.T) {
 	store := newTestDoltStore(t, "test")
 	ctx := context.Background()
 
@@ -298,9 +298,9 @@ func TestCheckDuplicateIssues_GastownCustomThreshold(t *testing.T) {
 	}
 }
 
-// TestCheckDuplicateIssues_NonGastownMode verifies that without gastown mode,
+// TestCheckDuplicateIssues_NonOrchestratorMode verifies that without orchestrator mode,
 // any duplicates are warnings (backward compatibility).
-func TestCheckDuplicateIssues_NonGastownMode(t *testing.T) {
+func TestCheckDuplicateIssues_NonOrchestratorMode(t *testing.T) {
 	store := newTestDoltStore(t, "test")
 	ctx := context.Background()
 
@@ -320,7 +320,7 @@ func TestCheckDuplicateIssues_NonGastownMode(t *testing.T) {
 	check := checkDuplicateIssuesDB(store.DB(), false, 1000)
 
 	if check.Status != StatusWarning {
-		t.Errorf("Status = %q, want %q (non-gastown should warn on any duplicates)", check.Status, StatusWarning)
+		t.Errorf("Status = %q, want %q (non-orchestrator should warn on any duplicates)", check.Status, StatusWarning)
 	}
 	if check.Message != "50 duplicate issue(s) in 1 group(s)" {
 		t.Errorf("Message = %q, want '50 duplicate issue(s) in 1 group(s)'", check.Message)

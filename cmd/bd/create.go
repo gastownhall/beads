@@ -170,14 +170,6 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Agent-specific flags
-		agentRig, _ := cmd.Flags().GetString("agent-rig")
-
-		// Validate agent-specific flags require --type=agent
-		if agentRig != "" && issueType != "agent" {
-			FatalError("--agent-rig flag requires --type=agent")
-		}
-
 		// Event-specific flags
 		eventCategory, _ := cmd.Flags().GetString("event-category")
 		eventActor, _ := cmd.Flags().GetString("event-actor")
@@ -240,6 +232,25 @@ var createCmd = &cobra.Command{
 			metadata = json.RawMessage(metadataJSON)
 		}
 
+		// Validate template based on --validate flag or config
+		// Uses LintIssue for field-aware validation: checks --acceptance field too (GH#2468 parity)
+		validateTemplate, _ := cmd.Flags().GetBool("validate")
+		validationMode := config.GetString("validation.on-create")
+		if validateTemplate || validationMode == "error" || validationMode == "warn" {
+			lintIssue := &types.Issue{
+				IssueType:          types.IssueType(issueType).Normalize(),
+				Description:        description,
+				AcceptanceCriteria: acceptance,
+			}
+			if err := validation.LintIssue(lintIssue); err != nil {
+				if validateTemplate || validationMode == "error" {
+					FatalError("%v", err)
+				}
+				// warn mode: print warning but proceed
+				fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
+			}
+		}
+
 		// Handle --dry-run flag (before --rig to ensure it works with cross-rig creation)
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		if dryRun {
@@ -266,7 +277,6 @@ var createCmd = &cobra.Command{
 				Owner:              getOwner(),
 				MolType:            molType,
 				WispType:           wispType,
-				Rig:                agentRig,
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
 				Metadata:           metadata,
@@ -368,28 +378,6 @@ var createCmd = &cobra.Command{
 				FatalError("estimate must be a non-negative number of minutes")
 			}
 			estimatedMinutes = &est
-		}
-
-		// Validate template based on --validate flag or config
-		validateTemplate, _ := cmd.Flags().GetBool("validate")
-		if validateTemplate {
-			// Explicit --validate flag: fail on error
-			if err := validation.ValidateTemplate(types.IssueType(issueType), description); err != nil {
-				FatalError("%v", err)
-			}
-		} else {
-			// Check validation.on-create config (bd-t7jq)
-			validationMode := config.GetString("validation.on-create")
-			if validationMode == "error" || validationMode == "warn" {
-				if err := validation.ValidateTemplate(types.IssueType(issueType), description); err != nil {
-					if validationMode == "error" {
-						FatalError("%v", err)
-					} else {
-						// warn mode: print warning but proceed
-						fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
-					}
-				}
-			}
 		}
 
 		// Use global jsonOutput set by PersistentPreRun
@@ -497,8 +485,8 @@ var createCmd = &cobra.Command{
 		// Validate explicit ID format if provided
 		if explicitID != "" {
 			// Basic format validation for all issue types.
-			// Note: Gas Town-specific agent ID validation (mayor, polecat, witness, etc.)
-			// is handled by gastown, not beads core.
+			// Note: Orchestrator-specific agent ID validation (mayor, polecat, witness, etc.)
+			// is handled by the orchestrator, not beads core.
 			_, err := validation.ValidateIDFormat(explicitID)
 			if err != nil {
 				FatalError("%v", err)
@@ -552,7 +540,6 @@ var createCmd = &cobra.Command{
 			Owner:              getOwner(),
 			MolType:            molType,
 			WispType:           wispType,
-			Rig:                agentRig,
 			EventKind:          eventCategory,
 			Actor:              eventActor,
 			Target:             eventTarget,
@@ -642,34 +629,6 @@ var createCmd = &cobra.Command{
 				WarnError("failed to add label %s: %v", label, err)
 			} else {
 				postCreateWrites = true
-			}
-		}
-
-		// Auto-add role_type/rig labels for agent beads (enables filtering queries)
-		// Check for gt:agent label to identify agent beads (Gas Town separation)
-		hasAgentLabel := false
-		for _, l := range labels {
-			if l == "gt:agent" {
-				hasAgentLabel = true
-				break
-			}
-		}
-		if hasAgentLabel {
-			if issue.RoleType != "" {
-				agentLabel := "role_type:" + issue.RoleType
-				if err := store.AddLabel(ctx, issue.ID, agentLabel, actor); err != nil {
-					WarnError("failed to add role_type label: %v", err)
-				} else {
-					postCreateWrites = true
-				}
-			}
-			if issue.Rig != "" {
-				rigLabel := "rig:" + issue.Rig
-				if err := store.AddLabel(ctx, issue.ID, rigLabel, actor); err != nil {
-					WarnError("failed to add rig label: %v", err)
-				} else {
-					postCreateWrites = true
-				}
 			}
 		}
 
@@ -836,8 +795,6 @@ func init() {
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-polecat), patrol (recurring ops), work (default)")
 	createCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 	createCmd.Flags().Bool("validate", false, "Validate description contains required sections for issue type")
-	// Agent-specific flags (only valid when --type=agent)
-	createCmd.Flags().String("agent-rig", "", "Agent's rig name (requires --type=agent)")
 	// Event-specific flags (only valid when --type=event)
 	createCmd.Flags().String("event-category", "", "Event category (e.g., patrol.muted, agent.started) (requires --type=event)")
 	createCmd.Flags().String("event-actor", "", "Entity URI who caused this event (requires --type=event)")
@@ -910,8 +867,6 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 	if molTypeStr != "" {
 		molType = types.MolType(molTypeStr)
 	}
-	agentRig, _ := cmd.Flags().GetString("agent-rig")
-
 	// Extract wisp type (TTL classification for ephemeral wisps)
 	wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
 	var wispType types.WispType
@@ -988,7 +943,6 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 		// Molecule/agent fields (bd-xwvo fix)
 		MolType:  molType,
 		WispType: wispType,
-		Rig:      agentRig,
 		// Time scheduling fields (bd-xwvo fix)
 		DueAt:      dueAt,
 		DeferUntil: deferUntil,

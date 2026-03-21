@@ -21,7 +21,7 @@ import (
 )
 
 // Credential storage and encryption for federation peers.
-// Enables SQL user authentication when syncing with peer Gas Towns.
+// Enables SQL user authentication when syncing with peer workspaces.
 
 // credentialKeyFile is the filename for the random encryption key stored alongside the database.
 const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: not a credential, just a filename
@@ -90,8 +90,12 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 		return fmt.Errorf("failed to migrate credential keys: %w", err)
 	}
 
-	// Write key file with owner-only permissions (0600)
-	// beadsDir (.beads/) always exists — no MkdirAll needed
+	// Write key file with owner-only permissions (0600).
+	// Ensure the directory exists first — when connecting to an external
+	// server without having run `bd init`, .beads/ may not exist yet (GH#2641).
+	if err := os.MkdirAll(s.beadsDir, 0750); err != nil {
+		return fmt.Errorf("failed to create beads directory %s: %w", s.beadsDir, err)
+	}
 	if err := os.WriteFile(keyPath, key, 0600); err != nil {
 		return fmt.Errorf("failed to write credential key file: %w", err)
 	}

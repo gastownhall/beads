@@ -32,7 +32,7 @@ var obsidianPriority = []string{
 }
 
 // obsidianTypeTag maps bd issue type to Obsidian tag (core types only)
-// Gas Town types are custom types and will use their issue_type value as a tag.
+// Custom types (e.g. orchestrator-specific) will use their issue_type value as a tag.
 var obsidianTypeTag = map[types.IssueType]string{
 	types.TypeBug:     "#Bug",
 	types.TypeFeature: "#Feature",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -34,6 +35,72 @@ func GetLabelsInTx(ctx context.Context, tx *sql.Tx, table, issueID string) ([]st
 	return labels, rows.Err()
 }
 
+// GetLabelsForIssuesInTx fetches labels for multiple issues in a single transaction.
+// Routes each ID to labels or wisp_labels based on wisp status.
+// Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
+func GetLabelsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]string, error) {
+	if len(issueIDs) == 0 {
+		return make(map[string][]string), nil
+	}
+
+	result := make(map[string][]string)
+
+	var wispIDs, permIDs []string
+	for _, id := range issueIDs {
+		if IsActiveWispInTx(ctx, tx, id) {
+			wispIDs = append(wispIDs, id)
+		} else {
+			permIDs = append(permIDs, id)
+		}
+	}
+
+	for _, pair := range []struct {
+		table string
+		ids   []string
+	}{
+		{"wisp_labels", wispIDs},
+		{"labels", permIDs},
+	} {
+		if len(pair.ids) == 0 {
+			continue
+		}
+		for start := 0; start < len(pair.ids); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(pair.ids) {
+				end = len(pair.ids)
+			}
+			batch := pair.ids[start:end]
+			placeholders := make([]string, len(batch))
+			args := make([]any, len(batch))
+			for i, id := range batch {
+				placeholders[i] = "?"
+				args[i] = id
+			}
+			//nolint:gosec // G201: pair.table is hardcoded
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label`,
+				pair.table, strings.Join(placeholders, ",")), args...)
+			if err != nil {
+				return nil, fmt.Errorf("get labels for issues from %s: %w", pair.table, err)
+			}
+			for rows.Next() {
+				var issueID, label string
+				if err := rows.Scan(&issueID, &label); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("get labels for issues: scan: %w", err)
+				}
+				result[issueID] = append(result[issueID], label)
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("get labels for issues: rows: %w", err)
+			}
+		}
+	}
+
+	return result, nil
+}
+
 // AddLabelInTx adds a label to an issue and records an event within an existing
 // transaction. Automatically routes to wisp tables if the ID is an active wisp.
 // Uses INSERT IGNORE for idempotency.
@@ -57,6 +124,33 @@ func AddLabelInTx(ctx context.Context, tx *sql.Tx, labelTable, eventTable, issue
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?)`, eventTable),
 		issueID, types.EventLabelAdded, actor, comment); err != nil {
 		return fmt.Errorf("add label: record event: %w", err)
+	}
+	return nil
+}
+
+// RemoveLabelInTx removes a label from an issue and records an event within
+// an existing transaction. Automatically routes to wisp tables if the ID is
+// an active wisp.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func RemoveLabelInTx(ctx context.Context, tx *sql.Tx, labelTable, eventTable, issueID, label, actor string) error {
+	if labelTable == "" || eventTable == "" {
+		isWisp := IsActiveWispInTx(ctx, tx, issueID)
+		_, lt, et, _ := WispTableRouting(isWisp)
+		if labelTable == "" {
+			labelTable = lt
+		}
+		if eventTable == "" {
+			eventTable = et
+		}
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label); err != nil {
+		return fmt.Errorf("remove label: %w", err)
+	}
+	comment := "Removed label: " + label
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?)`, eventTable),
+		issueID, types.EventLabelRemoved, actor, comment); err != nil {
+		return fmt.Errorf("remove label: record event: %w", err)
 	}
 	return nil
 }

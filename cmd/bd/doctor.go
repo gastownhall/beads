@@ -43,23 +43,23 @@ type doctorResult struct {
 }
 
 var (
-	doctorFix                  bool
-	doctorYes                  bool
-	doctorInteractive          bool   // per-fix confirmation mode
-	doctorDryRun               bool   // preview fixes without applying
-	doctorOutput               string // export diagnostics to file
-	doctorFixChildParent       bool   // opt-in fix for child→parent deps
-	doctorVerbose              bool   // show detailed output during fixes
-	perfMode                   bool
-	checkHealthMode            bool
-	doctorCheckFlag            string // run specific check (e.g., "pollution")
-	doctorClean                bool   // for pollution check, delete detected issues
-	doctorDeep                 bool   // full graph integrity validation
-	doctorGastown              bool   // running in gastown multi-workspace mode
-	gastownDuplicatesThreshold int    // duplicate tolerance threshold for gastown mode
-	doctorServer               bool   // run server mode health checks
-	doctorMigration            string // migration validation mode: "pre" or "post"
-	doctorAgent                bool   // agent-facing diagnostic mode (ZFC-compliant)
+	doctorFix                       bool
+	doctorYes                       bool
+	doctorInteractive               bool   // per-fix confirmation mode
+	doctorDryRun                    bool   // preview fixes without applying
+	doctorOutput                    string // export diagnostics to file
+	doctorFixChildParent            bool   // opt-in fix for child→parent deps
+	doctorVerbose                   bool   // show detailed output during fixes
+	perfMode                        bool
+	checkHealthMode                 bool
+	doctorCheckFlag                 string // run specific check (e.g., "pollution")
+	doctorClean                     bool   // for pollution check, delete detected issues
+	doctorDeep                      bool   // full graph integrity validation
+	doctorOrchestrator              bool   // running in orchestrator multi-workspace mode
+	orchestratorDuplicatesThreshold int    // duplicate tolerance threshold for orchestrator mode
+	doctorServer                    bool   // run server mode health checks
+	doctorMigration                 string // migration validation mode: "pre" or "post"
+	doctorAgent                     bool   // agent-facing diagnostic mode (ZFC-compliant)
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
@@ -99,6 +99,8 @@ Specific Check Mode (--check):
   Run a specific check in detail. Available checks:
   - artifacts: Detect and optionally clean beads classic artifacts
     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
+  - conventions: Check for convention drift (lint warnings, stale
+    issues, orphaned issues). Advisory only - warns, never blocks.
   - pollution: Detect and optionally clean test issues from database
   - validate: Run focused data-integrity checks (duplicates, orphaned
     deps, test pollution, git conflicts). Use with --fix to auto-repair.
@@ -172,6 +174,7 @@ Examples:
   bd doctor --output diagnostics.json  # Export diagnostics to file
   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
+  bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
@@ -202,13 +205,13 @@ Examples:
 			FatalError("failed to resolve path: %v", err)
 		}
 
-		// Guardrail: never run mutating bd doctor fix from Gas Town town root.
-		// Town-level repair must go through `gt doctor --fix` because town roots
+		// Guardrail: never run mutating bd doctor fix from orchestrator workspace root.
+		// Town-level repair must go through `gt doctor --fix` because workspace roots
 		// have additional invariants beyond beads-only repos.
-		if doctorFix && isGasTownTownRoot(absPath) {
+		if doctorFix && isOrchestratorRoot(absPath) {
 			FatalErrorWithHint(
-				"refusing to run 'bd doctor --fix' at Gas Town town root",
-				"Use 'gt doctor --fix' from town root, or run 'bd doctor --fix' inside a specific rig clone (e.g. <rig>/mayor/rig)",
+				"refusing to run 'bd doctor --fix' at orchestrator workspace root",
+				"Use 'gt doctor --fix' from workspace root, or run 'bd doctor --fix' inside a specific rig clone (e.g. <rig>/mayor/rig)",
 			)
 		}
 
@@ -238,8 +241,11 @@ Examples:
 			case "artifacts":
 				runArtifactsCheck(absPath, doctorClean, doctorYes)
 				return
+			case "conventions":
+				runConventionsCheck(absPath)
+				return
 			default:
-				FatalErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, pollution, validate")
+				FatalErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
 			}
 		}
 
@@ -321,8 +327,8 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorDryRun, "dry-run", false, "Preview fixes without making changes")
 	doctorCmd.Flags().BoolVar(&doctorFixChildParent, "fix-child-parent", false, "Remove child→parent dependencies (opt-in)")
 	doctorCmd.Flags().BoolVarP(&doctorVerbose, "verbose", "v", false, "Show all checks (default shows only warnings/errors)")
-	doctorCmd.Flags().BoolVar(&doctorGastown, "gastown", false, "Running in gastown multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
-	doctorCmd.Flags().IntVar(&gastownDuplicatesThreshold, "gastown-duplicates-threshold", 1000, "Duplicate tolerance threshold for gastown mode (wisps are ephemeral)")
+	doctorCmd.Flags().BoolVar(&doctorOrchestrator, "orchestrator", false, "Running in orchestrator multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
+	doctorCmd.Flags().IntVar(&orchestratorDuplicatesThreshold, "orchestrator-duplicates-threshold", 1000, "Duplicate tolerance threshold for orchestrator mode (wisps are ephemeral)")
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
 	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
@@ -368,11 +374,11 @@ func runDiagnostics(path string) doctorResult {
 		OverallOK:  true,
 	}
 
-	// Auto-detect gastown mode: routes.jsonl is only created by gastown workspaces
-	if !doctorGastown {
+	// Auto-detect orchestrator mode: routes.jsonl is only created by orchestrator workspaces
+	if !doctorOrchestrator {
 		routesFile := filepath.Join(path, ".beads", "routes.jsonl")
 		if _, err := os.Stat(routesFile); err == nil {
-			doctorGastown = true
+			doctorOrchestrator = true
 		}
 	}
 
@@ -466,36 +472,43 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// GH#2636: Open a single shared store for all database checks.
+	// This prevents the infinite Dolt server restart loop that occurred when each
+	// check opened and closed its own store (each close kills the server, each
+	// open restarts it). The shared store stays alive for the entire doctor run.
+	sharedStore := doctor.NewSharedStore(path)
+	defer sharedStore.Close()
+
 	// Check 2: Database version
-	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	dbCheck := convertWithCategory(doctor.CheckDatabaseVersionWithStore(sharedStore, Version), doctor.CategoryCore)
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2a: Schema compatibility
-	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibilityWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2b: Repo fingerprint (detects wrong database or URL change)
-	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprint(path), doctor.CategoryCore)
+	fingerprintCheck := convertWithCategory(doctor.CheckRepoFingerprintWithStore(sharedStore, path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, fingerprintCheck)
 	if fingerprintCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 2c: Database integrity
-	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrity(path), doctor.CategoryCore)
+	integrityCheck := convertWithCategory(doctor.CheckDatabaseIntegrityWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, integrityCheck)
 	if integrityCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 3: ID format (hash vs sequential)
-	idCheck := convertWithCategory(doctor.CheckIDFormat(path), doctor.CategoryCore)
+	idCheck := convertWithCategory(doctor.CheckIDFormatWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, idCheck)
 	if idCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -519,12 +532,12 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// Check 7a: Configuration value validation
-	configValuesCheck := convertWithCategory(doctor.CheckConfigValues(path), doctor.CategoryData)
+	configValuesCheck := convertWithCategory(doctor.CheckConfigValuesWithStore(path, sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, configValuesCheck)
 	// Don't fail overall check for config value warnings, just warn
 
 	// Check 7a1: Project identity (GH#2372 backfill)
-	projectIDCheck := convertWithCategory(doctor.CheckProjectIdentity(path), doctor.CategoryData)
+	projectIDCheck := convertWithCategory(doctor.CheckProjectIdentityWithStore(sharedStore, path), doctor.CategoryData)
 	result.Checks = append(result.Checks, projectIDCheck)
 	if projectIDCheck.Status == statusWarning || projectIDCheck.Status == statusError {
 		result.OverallOK = false
@@ -536,7 +549,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for multi-repo types, just informational
 
 	// Check 7c: Role configuration (beads.role)
-	roleCheck := convertDoctorCheck(doctor.CheckBeadsRole(path))
+	roleCheck := convertDoctorCheck(doctor.CheckBeadsRoleWithStore(path, sharedStore))
 	result.Checks = append(result.Checks, roleCheck)
 	// Don't fail overall check for role config, just warn - URL heuristic fallback still works
 
@@ -585,14 +598,14 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, doltModeCheck)
 
 	// Check 9: Permissions
-	permCheck := convertWithCategory(doctor.CheckPermissions(path), doctor.CategoryCore)
+	permCheck := convertWithCategory(doctor.CheckPermissionsWithStore(path, sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, permCheck)
 	if permCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 10: Dependency cycles
-	cycleCheck := convertWithCategory(doctor.CheckDependencyCycles(path), doctor.CategoryMetadata)
+	cycleCheck := convertWithCategory(doctor.CheckDependencyCyclesWithStore(sharedStore), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, cycleCheck)
 	if cycleCheck.Status == statusError || cycleCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -728,7 +741,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for child→parent deps, just warn
 
 	// Check 23: Duplicate issues (from bd validate)
-	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorGastown, gastownDuplicatesThreshold))
+	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))
 	result.Checks = append(result.Checks, duplicatesCheck)
 	// Don't fail overall check for duplicates, just warn
 
@@ -752,7 +765,7 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, persistentMolCheck)
 	// Don't fail overall check for persistent mol issues, just warn
 
-	// Check 26c: Legacy merge queue files (gastown mrqueue remnants)
+	// Check 26c: Legacy merge queue files (orchestrator mrqueue remnants)
 	staleMQFilesCheck := convertDoctorCheck(doctor.CheckStaleMQFiles(path))
 	result.Checks = append(result.Checks, staleMQFilesCheck)
 	// Don't fail overall check for legacy MQ files, just warn
@@ -764,7 +777,7 @@ func runDiagnostics(path string) doctorResult {
 
 	// Check 29: Database size (pruning suggestion)
 	// Note: This check has no auto-fix - pruning is destructive and user-controlled
-	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSize(path))
+	sizeCheck := convertDoctorCheck(doctor.CheckDatabaseSizeWithStore(sharedStore))
 	result.Checks = append(result.Checks, sizeCheck)
 	// Don't fail overall check for size warning, just inform
 
@@ -797,7 +810,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall — this is a recommendation, not a broken state
 
 	// GH#1095: Filter out suppressed checks (doctor.suppress.<slug> = true)
-	suppressed := doctor.GetSuppressedChecks(path)
+	suppressed := doctor.GetSuppressedChecksWithStore(sharedStore)
 	if len(suppressed) > 0 {
 		var suppressedCount int
 		var filtered []doctorCheck

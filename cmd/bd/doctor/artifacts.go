@@ -201,7 +201,7 @@ func isRedirectExpectedDir(beadsDir string) bool {
 		return true
 	}
 
-	// Check if this is a rig-root .beads/ (e.g., gastown/.beads/)
+	// Check if this is a rig-root .beads/ (e.g., my-project/.beads/)
 	// that should redirect to mayor/rig/.beads/
 	// A rig-root .beads has a sibling "mayor/" or "polecats/" directory
 	if hasSibling(parent, "mayor") || hasSibling(parent, "polecats") {

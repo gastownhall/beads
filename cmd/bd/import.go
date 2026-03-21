@@ -18,6 +18,10 @@ If no file is specified, imports from .beads/issues.jsonl (the git-tracked
 export). This is the incremental counterpart to 'bd export': new issues are
 created and existing issues are updated (upsert semantics).
 
+Memory records (lines with "_type":"memory") are automatically detected and
+imported as persistent memories (equivalent to 'bd remember'). This makes
+'bd export | bd import' a full round-trip for both issues and memories.
+
 This command makes the git-tracked JSONL portable again — after 'git pull'
 brings new issues, 'bd import' loads them into the local Dolt database.
 
@@ -74,15 +78,24 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no database — run 'bd init' or 'bd bootstrap' first")
 	}
 
-	count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+	result, err := importFromLocalJSONLFull(ctx, store, jsonlPath)
 	if err != nil {
 		return fmt.Errorf("import failed: %w", err)
 	}
 
-	if err := store.Commit(ctx, fmt.Sprintf("bd import: %d issues from %s", count, filepath.Base(jsonlPath))); err != nil {
+	commitMsg := fmt.Sprintf("bd import: %d issues", result.Issues)
+	if result.Memories > 0 {
+		commitMsg += fmt.Sprintf(", %d memories", result.Memories)
+	}
+	commitMsg += fmt.Sprintf(" from %s", filepath.Base(jsonlPath))
+	if err := store.Commit(ctx, commitMsg); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", count, jsonlPath)
+	if result.Memories > 0 {
+		fmt.Fprintf(os.Stderr, "Imported %d issues and %d memories from %s\n", result.Issues, result.Memories, jsonlPath)
+	} else {
+		fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", result.Issues, jsonlPath)
+	}
 	return nil
 }

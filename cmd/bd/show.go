@@ -112,7 +112,7 @@ var showCmd = &cobra.Command{
 		allDetails := []interface{}{}
 		foundCount := 0
 		for idx, id := range args {
-			// Resolve and get issue with routing (e.g., gt-xyz routes to gastown)
+			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
 			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
 				if result != nil {
@@ -242,7 +242,7 @@ var showCmd = &cobra.Command{
 
 			// Resolve external deps via routing (bd-k0pfm)
 			// GetDependenciesWithMetadata JOINs on issues table, so external refs
-			// (e.g., "external:gastown:gt-42zaq") are silently dropped.
+			// (e.g., "external:other-project:gt-42zaq") are silently dropped.
 			// Resolve them via prefix routes and merge into the dep list.
 			if externalDeps, err := resolveExternalDepsViaRouting(ctx, issueStore, issue.ID); err == nil {
 				depsWithMeta = append(depsWithMeta, externalDeps...)

@@ -37,3 +37,9 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	}
 	return embeddeddolt.New(ctx, beadsDir, database, "main")
 }
+
+// newReadOnlyStoreFromConfig creates a read-only embedded Dolt storage backend.
+// Embedded dolt is single-process so read-only is not enforced at the engine level.
+func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return newDoltStoreFromConfig(ctx, beadsDir)
+}

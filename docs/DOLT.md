@@ -18,7 +18,7 @@ Beads uses Dolt as its storage backend. Dolt provides a version-controlled SQL d
 # Embedded mode (single writer, no server — default for standalone)
 bd init
 
-# Server mode (multi-writer, e.g. Gas Town)
+# Server mode (multi-writer, e.g. orchestrator)
 gt dolt start           # Start the Dolt server
 bd init --server        # Initialize with server mode
 ```
@@ -50,12 +50,12 @@ standalone Beads users. The `bd` binary includes everything; just `bd init` and 
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
 
-### Server Mode (Multi-Writer / Gas Town)
+### Server Mode (Multi-Writer / Orchestrator)
 
 Connects to a running `dolt sql-server` for multi-client access.
 
 ```bash
-# Start the server (Gas Town)
+# Start the server (orchestrator)
 gt dolt start
 
 # Or manually
@@ -73,7 +73,7 @@ dolt:
 
 Server mode is required for:
 - Multiple agents writing simultaneously
-- Gas Town multi-rig setups
+- Orchestrator multi-rig setups
 - Federation with remote peers
 
 ## Federation (Peer-to-Peer Sync)
@@ -84,7 +84,7 @@ Federation enables direct sync between Dolt installations without a central hub.
 
 ```
 ┌─────────────────┐         ┌─────────────────┐
-│   Gas Town A    │◄───────►│   Gas Town B    │
+│  Workspace A    │◄───────►│  Workspace B    │
 │  dolt sql-server│  sync   │  dolt sql-server│
 │  :3306 (sql)    │         │  :3306 (sql)    │
 │  :8080 (remote) │         │  :8080 (remote) │
@@ -180,7 +180,7 @@ failed to create database: dial tcp 127.0.0.1:3307: connect: connection refused
 
 **Fix:**
 ```bash
-gt dolt start        # Gas Town command
+gt dolt start        # Orchestrator command
 # Or
 gt dolt status       # Check if running
 ```
@@ -301,7 +301,7 @@ In **embedded mode** (standalone default), each `bd` write command creates a Dol
 bd create "New issue"    # Creates issue + Dolt commit
 ```
 
-In **server mode** (Gas Town), auto-commit defaults to OFF because the server
+In **server mode** (orchestrator), auto-commit defaults to OFF because the server
 manages its own transaction lifecycle. Firing `DOLT_COMMIT` after every write
 under concurrent load causes 'database is read only' errors.
 
@@ -313,9 +313,9 @@ bd --dolt-auto-commit off create "Issue 2"
 bd vc commit -m "Batch: created issues"
 ```
 
-## Server Management (Gas Town)
+## Server Management (Orchestrator)
 
-Gas Town provides integrated Dolt server management:
+The orchestrator provides integrated Dolt server management:
 
 ```bash
 gt dolt start            # Start server (background)
@@ -344,7 +344,7 @@ bd init --prefix myproject --shared-server
 ```
 
 **Benefits:**
-- No port conflicts between projects (single server on port 3308, avoids Gas Town on 3307)
+- No port conflicts between projects (single server on port 3308, avoids orchestrator on 3307)
 - Reduced resource usage (one process instead of many)
 - Automatic database isolation (each project uses its own database name)
 
@@ -353,7 +353,7 @@ bd init --prefix myproject --shared-server
 - Dolt data directory: `~/.beads/shared-server/dolt/`
 - Each project's database is stored as a subdirectory (e.g., `~/.beads/shared-server/dolt/myproject/`)
 - The file lock mechanism ensures safe concurrent access from multiple projects
-- Default port is 3308 (not 3307) to avoid conflict with Gas Town. Override with `BEADS_DOLT_SERVER_PORT` or `dolt.port` in config.yaml
+- Default port is 3308 (not 3307) to avoid conflict with the orchestrator. Override with `BEADS_DOLT_SERVER_PORT` or `dolt.port` in config.yaml
 
 **Important:** Each project on a shared server **must have a unique prefix** (database name).
 Two projects with the same prefix share the same database — if this happens accidentally,
@@ -368,15 +368,14 @@ bd dolt status
 bd dolt show
 ```
 
-### Data Location (Gas Town)
+### Data Location (Orchestrator)
 
 ```
-~/gt/.dolt-data/
+<town-root>/.dolt-data/
 ├── hq/                  # Town beads (hq-*)
-├── gastown/             # Gastown rig (gt-*)
+├── my-project/          # Project rig (mp-*)
 ├── beads/               # Beads rig (bd-*)
-├── wyvern/              # Wyvern rig (wy-*)
-└── sky/                 # Sky rig (sky-*)
+└── other-project/       # Other rig (op-*)
 ```
 
 ## Migration Cleanup

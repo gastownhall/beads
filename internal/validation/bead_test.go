@@ -219,7 +219,7 @@ func TestParseIssueType(t *testing.T) {
 		{"chore type", "chore", types.TypeChore, false, ""},
 		// Molecule is now a core type (used by swarm create)
 		{"molecule type", "molecule", types.TypeMolecule, false, ""},
-		// Gas Town types require types.custom configuration (invalid without config)
+		// Orchestrator types require types.custom configuration (invalid without config)
 		{"merge-request type", "merge-request", types.TypeTask, true, "invalid issue type"},
 		{"gate type", "gate", types.TypeTask, true, "invalid issue type"},
 		{"event type", "event", types.TypeTask, true, "invalid issue type"},
@@ -305,7 +305,7 @@ func TestValidatePrefixWithAllowed(t *testing.T) {
 		{"mismatched with force", "foo", "bd", "", true, false},
 		{"mismatched without force", "foo", "bd", "", false, true},
 
-		// Multi-prefix cases (Gas Town use case)
+		// Multi-prefix cases (multi-rig use case)
 		{"allowed prefix gt", "gt", "hq", "gt,hmc", false, false},
 		{"allowed prefix hmc", "hmc", "hq", "gt,hmc", false, false},
 		{"primary prefix still works", "hq", "hq", "gt,hmc", false, false},

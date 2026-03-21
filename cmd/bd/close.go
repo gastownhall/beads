@@ -8,11 +8,14 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/audit"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 var closeCmd = &cobra.Command{
@@ -60,6 +63,19 @@ create, update, show, or close operation).`,
 		if reason == "" {
 			reason = "Closed"
 		}
+
+		// Validate close reason if configured
+		closeValidation := config.GetString("validation.on-close")
+		if closeValidation == "error" || closeValidation == "warn" {
+			if err := validation.ValidateCloseReason(reason); err != nil {
+				if closeValidation == "error" {
+					FatalErrorRespectJSON("%v", err)
+				}
+				// warn mode: print warning but proceed
+				fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
+			}
+		}
+
 		force, _ := cmd.Flags().GetBool("force")
 		continueFlag, _ := cmd.Flags().GetBool("continue")
 		noAuto, _ := cmd.Flags().GetBool("no-auto")
@@ -149,6 +165,13 @@ create, update, show, or close operation).`,
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
+
+			// Audit log the close (survives Dolt GC flatten)
+			oldStatus := "open"
+			if issue != nil {
+				oldStatus = string(issue.Status)
+			}
+			audit.LogFieldChange(id, "status", oldStatus, "closed", actor)
 
 			closedCount++
 
@@ -316,6 +339,14 @@ create, update, show, or close operation).`,
 				})
 			} else {
 				outputJSON(closedIssues)
+			}
+		}
+
+		// Embedded mode: flush Dolt commit. DoltStore commits
+		// inline during CloseIssue so this is only needed for EmbeddedDoltStore.
+		if isEmbeddedDolt && closedCount > 0 && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
 			}
 		}
 

@@ -87,32 +87,15 @@ type Issue struct {
 	// ===== Bonding Fields (compound molecule lineage) =====
 	BondedFrom []BondRef `json:"bonded_from,omitempty"` // For compounds: constituent protos
 
-	// ===== HOP Fields (entity tracking for CV chains) =====
-	Creator      *EntityRef   `json:"creator,omitempty"`       // Who created (human, agent, or org)
-	Validations  []Validation `json:"validations,omitempty"`   // Who validated/approved
-	QualityScore *float32     `json:"quality_score,omitempty"` // Aggregate quality (0.0-1.0), set by Refineries on merge
-	Crystallizes bool         `json:"crystallizes,omitempty"`  // Work that compounds (true: code, features) vs evaporates (false: ops, support) - affects CV weighting per Decision 006
-
 	// ===== Gate Fields (async coordination primitives) =====
 	AwaitType string        `json:"await_type,omitempty"` // Condition type: gh:run, gh:pr, timer, human, mail
 	AwaitID   string        `json:"await_id,omitempty"`   // Condition identifier (run ID, PR number, etc.)
 	Timeout   time.Duration `json:"timeout,omitempty"`    // Max wait time before escalation
 	Waiters   []string      `json:"waiters,omitempty"`    // Mail addresses to notify when gate clears
 
-	// ===== Slot Fields (exclusive access primitives) =====
-	Holder string `json:"holder,omitempty"` // Who currently holds the slot (empty = available)
-
 	// ===== Source Tracing Fields (formula cooking origin) =====
 	SourceFormula  string `json:"source_formula,omitempty"`  // Formula name where step was defined
 	SourceLocation string `json:"source_location,omitempty"` // Path: "steps[0]", "advice[0].after"
-
-	// ===== Agent Identity Fields (agent-as-bead support) =====
-	HookBead     string     `json:"hook_bead,omitempty"`     // Current work on agent's hook (0..1)
-	RoleBead     string     `json:"role_bead,omitempty"`     // Role definition bead (required for agents)
-	AgentState   AgentState `json:"agent_state,omitempty"`   // Agent state: idle|running|stuck|stopped
-	LastActivity *time.Time `json:"last_activity,omitempty"` // Updated on each action (timeout detection)
-	RoleType     string     `json:"role_type,omitempty"`     // Agent role type (application-defined)
-	Rig          string     `json:"rig,omitempty"`           // Rig name (empty for town-level agents)
 
 	// ===== Molecule Type Fields (swarm coordination) =====
 	MolType MolType `json:"mol_type,omitempty"` // Molecule type: swarm|patrol|work (empty = work)
@@ -162,21 +145,6 @@ func (i *Issue) ComputeContentHash() string {
 		w.str(br.BondPoint)
 	}
 
-	// HOP entity tracking
-	w.entityRef(i.Creator)
-
-	// HOP validations
-	for _, v := range i.Validations {
-		w.entityRef(v.Validator)
-		w.str(v.Outcome)
-		w.str(v.Timestamp.Format(time.RFC3339))
-		w.float32Ptr(v.Score)
-	}
-
-	// HOP aggregate quality score and crystallizes
-	w.float32Ptr(i.QualityScore)
-	w.flag(i.Crystallizes, "crystallizes")
-
 	// Gate fields for async coordination
 	w.str(i.AwaitType)
 	w.str(i.AwaitID)
@@ -184,16 +152,6 @@ func (i *Issue) ComputeContentHash() string {
 	for _, waiter := range i.Waiters {
 		w.str(waiter)
 	}
-
-	// Slot fields for exclusive access
-	w.str(i.Holder)
-
-	// Agent identity fields
-	w.str(i.HookBead)
-	w.str(i.RoleBead)
-	w.str(string(i.AgentState))
-	w.str(i.RoleType)
-	w.str(i.Rig)
 
 	// Molecule type
 	w.str(string(i.MolType))
@@ -233,13 +191,6 @@ func (w hashFieldWriter) strPtr(p *string) {
 	w.h.Write([]byte{0})
 }
 
-func (w hashFieldWriter) float32Ptr(p *float32) {
-	if p != nil {
-		w.h.Write([]byte(fmt.Sprintf("%f", *p)))
-	}
-	w.h.Write([]byte{0})
-}
-
 func (w hashFieldWriter) duration(d time.Duration) {
 	w.h.Write([]byte(fmt.Sprintf("%d", d)))
 	w.h.Write([]byte{0})
@@ -250,15 +201,6 @@ func (w hashFieldWriter) flag(b bool, label string) {
 		w.h.Write([]byte(label))
 	}
 	w.h.Write([]byte{0})
-}
-
-func (w hashFieldWriter) entityRef(e *EntityRef) {
-	if e != nil {
-		w.str(e.Name)
-		w.str(e.Platform)
-		w.str(e.Org)
-		w.str(e.ID)
-	}
 }
 
 // Validate checks if the issue has valid field values (built-in statuses only)
@@ -299,10 +241,6 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	}
 	if i.Status != StatusClosed && i.ClosedAt != nil {
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
-	}
-	// Validate agent state if set
-	if !i.AgentState.IsValid() {
-		return fmt.Errorf("invalid agent state: %s", i.AgentState)
 	}
 	// Validate metadata is well-formed JSON if set (GH#1406)
 	if len(i.Metadata) > 0 {
@@ -352,10 +290,6 @@ func (i *Issue) ValidateForImport(customStatuses []string) error {
 	if i.Status != StatusClosed && i.ClosedAt != nil {
 		return fmt.Errorf("non-closed issues cannot have closed_at timestamp")
 	}
-	// Validate agent state if set
-	if !i.AgentState.IsValid() {
-		return fmt.Errorf("invalid agent state: %s", i.AgentState)
-	}
 	// Validate metadata is well-formed JSON if set (GH#1406)
 	if len(i.Metadata) > 0 {
 		if !json.Valid(i.Metadata) {
@@ -394,7 +328,7 @@ const (
 	StatusDeferred   Status = "deferred" // Deliberately put on ice for later
 	StatusClosed     Status = "closed"
 	StatusPinned     Status = "pinned" // Persistent bead that stays open indefinitely
-	StatusHooked     Status = "hooked" // Work attached to an agent's hook (GUPP)
+	StatusHooked     Status = "hooked" // Work actively claimed by a worker
 )
 
 // IsValid checks if the status value is valid (built-in statuses only)
@@ -439,15 +373,15 @@ const (
 )
 
 // TypeEvent is a system-internal type used by set-state for audit trail beads.
-// Originally a Gas Town type, promoted to built-in internal type. It is not a
+// Originally an orchestrator type, promoted to built-in internal type. It is not a
 // core work type (not in IsValid) but is accepted by IsValidWithCustom /
 // ValidateWithCustom and treated as built-in for hydration trust (GH#1356).
 const TypeEvent IssueType = "event"
 
-// Note: Gas Town types (molecule, gate, convoy, merge-request, slot, agent, role, rig)
+// Note: Orchestrator types (molecule, gate, convoy, merge-request, slot, agent, role, rig)
 // were removed from beads core. They are now purely custom types with no built-in constants.
 // Use string literals like types.IssueType("molecule") if needed, and configure types.custom.
-// (event was also a Gas Town type but was promoted to a built-in internal type above.)
+// (event was also an orchestrator type but was promoted to a built-in internal type above.)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
 // IsValid checks if the issue type is a core work type.
@@ -534,38 +468,14 @@ func (t IssueType) RequiredSections() []RequiredSection {
 	}
 }
 
-// AgentState represents the self-reported state of an agent
-type AgentState string
-
-// Agent state constants
-const (
-	StateIdle     AgentState = "idle"     // Agent is waiting for work
-	StateSpawning AgentState = "spawning" // Agent is starting up
-	StateRunning  AgentState = "running"  // Agent is executing (general)
-	StateWorking  AgentState = "working"  // Agent is actively working on a task
-	StateStuck    AgentState = "stuck"    // Agent is blocked and needs help
-	StateDone     AgentState = "done"     // Agent completed its current work
-	StateStopped  AgentState = "stopped"  // Agent has cleanly shut down
-	StateDead     AgentState = "dead"     // Agent died without clean shutdown (timeout detection)
-)
-
-// IsValid checks if the agent state value is valid
-func (s AgentState) IsValid() bool {
-	switch s {
-	case StateIdle, StateSpawning, StateRunning, StateWorking, StateStuck, StateDone, StateStopped, StateDead, "":
-		return true // empty is valid (non-agent beads)
-	}
-	return false
-}
-
 // MolType categorizes the molecule type for swarm coordination
 type MolType string
 
 // MolType constants
 const (
-	MolTypeSwarm  MolType = "swarm"  // Swarm molecule: coordinated multi-polecat work
-	MolTypePatrol MolType = "patrol" // Patrol molecule: recurring operational work (Witness, Deacon, etc.)
-	MolTypeWork   MolType = "work"   // Work molecule: regular polecat work (default)
+	MolTypeSwarm  MolType = "swarm"  // Swarm molecule: coordinated multi-worker work
+	MolTypePatrol MolType = "patrol" // Patrol molecule: recurring operational work
+	MolTypeWork   MolType = "work"   // Work molecule: regular assigned work (default)
 )
 
 // IsValid checks if the mol type value is valid
@@ -1059,6 +969,11 @@ type WorkFilter struct {
 	// Set to true to include them (e.g., for merge-request processing).
 	IncludeEphemeral bool
 
+	// Type exclusion: exclude issues with these types from results.
+	// Appended to the default exclusion list (merge-request, gate, molecule, etc.).
+	// When Type is set, ExcludeTypes is ignored (explicit type inclusion wins).
+	ExcludeTypes []IssueType
+
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
@@ -1113,127 +1028,4 @@ func (i *Issue) IsCompound() bool {
 // Returns nil for non-compound issues.
 func (i *Issue) GetConstituents() []BondRef {
 	return i.BondedFrom
-}
-
-// EntityRef is a structured reference to an entity (human, agent, or org).
-// This is the foundation for HOP entity tracking and CV chains.
-// Can be rendered as a URI: hop://<platform>/<org>/<id>
-//
-// Example usage:
-//
-//	ref := &EntityRef{
-//	    Name:     "polecat/Nux",
-//	    Platform: "gastown",
-//	    Org:      "steveyegge",
-//	    ID:       "polecat-nux",
-//	}
-//	uri := ref.URI() // "hop://gastown/steveyegge/polecat-nux"
-type EntityRef struct {
-	// Name is the human-readable identifier (e.g., "polecat/Nux", "mayor")
-	Name string `json:"name,omitempty"`
-
-	// Platform identifies the execution context (e.g., "gastown", "github")
-	Platform string `json:"platform,omitempty"`
-
-	// Org identifies the organization (e.g., "steveyegge", "anthropics")
-	Org string `json:"org,omitempty"`
-
-	// ID is the unique identifier within the platform/org (e.g., "polecat-nux")
-	ID string `json:"id,omitempty"`
-}
-
-// IsEmpty returns true if all fields are empty.
-func (e *EntityRef) IsEmpty() bool {
-	if e == nil {
-		return true
-	}
-	return e.Name == "" && e.Platform == "" && e.Org == "" && e.ID == ""
-}
-
-// URI returns the entity as a HOP URI.
-// Format: hop://<platform>/<org>/<id>
-// Returns empty string if Platform, Org, or ID is missing.
-func (e *EntityRef) URI() string {
-	if e == nil || e.Platform == "" || e.Org == "" || e.ID == "" {
-		return ""
-	}
-	return fmt.Sprintf("hop://%s/%s/%s", e.Platform, e.Org, e.ID)
-}
-
-// String returns a human-readable representation.
-// Prefers Name if set, otherwise returns URI or ID.
-func (e *EntityRef) String() string {
-	if e == nil {
-		return ""
-	}
-	if e.Name != "" {
-		return e.Name
-	}
-	if uri := e.URI(); uri != "" {
-		return uri
-	}
-	return e.ID
-}
-
-// Validation records who validated/approved work completion.
-// This is core to HOP's proof-of-stake concept - validators stake
-// their reputation on approvals.
-type Validation struct {
-	// Validator is who approved/rejected the work
-	Validator *EntityRef `json:"validator"`
-
-	// Outcome is the validation result: accepted, rejected, revision_requested
-	Outcome string `json:"outcome"`
-
-	// Timestamp is when the validation occurred
-	Timestamp time.Time `json:"timestamp"`
-
-	// Score is an optional quality score (0.0-1.0)
-	Score *float32 `json:"score,omitempty"`
-}
-
-// Validation outcome constants
-const (
-	ValidationAccepted          = "accepted"
-	ValidationRejected          = "rejected"
-	ValidationRevisionRequested = "revision_requested"
-)
-
-// IsValidOutcome checks if the outcome is a known validation outcome.
-func (v *Validation) IsValidOutcome() bool {
-	switch v.Outcome {
-	case ValidationAccepted, ValidationRejected, ValidationRevisionRequested:
-		return true
-	}
-	return false
-}
-
-// ParseEntityURI parses a HOP entity URI into an EntityRef.
-// Format: hop://<platform>/<org>/<id>
-// Also accepts legacy entity://hop/<platform>/<org>/<id> for backward compatibility.
-// Returns nil and error if the URI is invalid.
-func ParseEntityURI(uri string) (*EntityRef, error) {
-	const hopPrefix = "hop://"
-	const legacyPrefix = "entity://hop/"
-
-	var rest string
-	switch {
-	case strings.HasPrefix(uri, hopPrefix):
-		rest = uri[len(hopPrefix):]
-	case strings.HasPrefix(uri, legacyPrefix):
-		rest = uri[len(legacyPrefix):]
-	default:
-		return nil, fmt.Errorf("invalid entity URI: must start with %q (or legacy %q)", hopPrefix, legacyPrefix)
-	}
-
-	parts := strings.SplitN(rest, "/", 3)
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return nil, fmt.Errorf("invalid entity URI: expected hop://<platform>/<org>/<id>, got %q", uri)
-	}
-
-	return &EntityRef{
-		Platform: parts[0],
-		Org:      parts[1],
-		ID:       parts[2],
-	}, nil
 }

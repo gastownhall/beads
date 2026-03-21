@@ -137,6 +137,16 @@ func TestInitCancel_E2E(t *testing.T) {
 	}
 }
 
+func runGitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed in %s: %v\n%s", args, dir, err, output)
+	}
+}
+
 func filteredEnv(keys ...string) []string {
 	strip := make(map[string]struct{}, len(keys))
 	for _, key := range keys {

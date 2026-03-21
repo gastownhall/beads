@@ -3,7 +3,7 @@ package dolt
 // currentSchemaVersion is bumped whenever the schema or migrations change.
 // initSchemaOnDB checks this against the stored version and skips re-initialization
 // when they match, avoiding ~20 DDL statements per bd invocation.
-const currentSchemaVersion = 8
+const currentSchemaVersion = 9
 
 // schema defines the MySQL-compatible database schema for Dolt.
 const schema = `
@@ -44,14 +44,10 @@ CREATE TABLE IF NOT EXISTS issues (
     pinned TINYINT(1) DEFAULT 0,
     -- Template field
     is_template TINYINT(1) DEFAULT 0,
-    -- Work economics field (HOP Decision 006)
-    crystallizes TINYINT(1) DEFAULT 0,
     -- Molecule type field
     mol_type VARCHAR(32) DEFAULT '',
-    -- Work type field (Decision 006: mutex vs open_competition)
+    -- Work type field (mutex vs open_competition)
     work_type VARCHAR(32) DEFAULT 'mutex',
-    -- HOP quality score field (0.0-1.0)
-    quality_score DOUBLE,
     -- Federation source system field
     source_system VARCHAR(255) DEFAULT '',
     -- Custom metadata field (GH#1406)
@@ -70,13 +66,6 @@ CREATE TABLE IF NOT EXISTS issues (
     await_id VARCHAR(255) DEFAULT '',
     timeout_ns BIGINT DEFAULT 0,
     waiters TEXT DEFAULT '',
-    -- Agent fields
-    hook_bead VARCHAR(255) DEFAULT '',
-    role_bead VARCHAR(255) DEFAULT '',
-    agent_state VARCHAR(32) DEFAULT '',
-    last_activity DATETIME,
-    role_type VARCHAR(32) DEFAULT '',
-    rig VARCHAR(255) DEFAULT '',
     -- Time-based scheduling fields
     due_at DATETIME,
     defer_until DATETIME,
@@ -234,7 +223,7 @@ CREATE TABLE IF NOT EXISTS interactions (
 );
 
 -- Federation peers table (for SQL user authentication)
--- Stores credentials for peer-to-peer Dolt remotes between Gas Towns
+-- Stores credentials for peer-to-peer Dolt remotes between workspaces
 CREATE TABLE IF NOT EXISTS federation_peers (
     name VARCHAR(255) PRIMARY KEY,
     remote_url VARCHAR(1024) NOT NULL,

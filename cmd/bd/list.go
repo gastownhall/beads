@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -29,8 +28,9 @@ func withStorage(ctx context.Context, store storage.DoltStorage, dbPath string, 
 	if store != nil {
 		return fn(store)
 	} else if dbPath != "" {
-		// Open read-only connection
-		roStore, err := dolt.New(ctx, &dolt.Config{Path: dbPath, ReadOnly: true})
+		// Open read-only connection using repo metadata when available so
+		// helper paths keep the correct Dolt database and server endpoint.
+		roStore, err := openReadOnlyStoreForDBPath(ctx, dbPath)
 		if err != nil {
 			return err
 		}
@@ -264,6 +264,13 @@ var listCmd = &cobra.Command{
 		limit, _ := cmd.Flags().GetInt("limit")
 		allFlag, _ := cmd.Flags().GetBool("all")
 		formatStr, _ := cmd.Flags().GetString("format")
+		// Handle --format json: the local --format flag shadows the hidden
+		// persistent --format on rootCmd, so "json" arrives here instead of
+		// setting jsonOutput via PersistentPreRun. Route it explicitly.
+		if strings.EqualFold(formatStr, "json") {
+			jsonOutput = true
+			formatStr = ""
+		}
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		labelPattern, _ := cmd.Flags().GetString("label-pattern")
@@ -310,6 +317,9 @@ var listCmd = &cobra.Command{
 		// Infra type filtering: exclude agent/rig/role/message by default
 		includeInfra, _ := cmd.Flags().GetBool("include-infra")
 
+		// Explicit type exclusion (--exclude-type)
+		excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
+
 		// Parent filtering (--filter-parent is alias for --parent)
 		parentID, _ := cmd.Flags().GetString("parent")
 		if parentID == "" {
@@ -355,7 +365,8 @@ var listCmd = &cobra.Command{
 		if flatFormat {
 			treeFormat = false
 		}
-		prettyFormat = (prettyFormat || treeFormat) && !jsonOutput // --tree is alias for --pretty; JSON wins
+		// --tree is alias for --pretty; JSON and explicit --format win
+		prettyFormat = (prettyFormat || treeFormat) && !jsonOutput && formatStr == ""
 		watchMode, _ := cmd.Flags().GetBool("watch")
 
 		// Pager control (bd-jdz3)
@@ -615,7 +626,7 @@ var listCmd = &cobra.Command{
 		// Infra type filtering: exclude configured infra types by default.
 		// These types live in the wisps table after migration 007.
 		// Use --include-infra or --type=agent to show infra beads.
-		infraTypes := dolt.DefaultInfraTypes()
+		infraTypes := storage.DefaultInfraTypes()
 		if store != nil {
 			infraSet := store.GetInfraTypes(rootCtx)
 			infraTypes = make([]string, 0, len(infraSet))
@@ -627,11 +638,21 @@ var listCmd = &cobra.Command{
 			if store != nil {
 				return store.IsInfraTypeCtx(rootCtx, types.IssueType(t))
 			}
-			return dolt.IsInfraType(types.IssueType(t))
+			return storage.IsInfraType(types.IssueType(t))
 		}
 		if !includeInfra && !isInfra(issueType) {
 			for _, t := range infraTypes {
 				filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(t))
+			}
+		}
+
+		// Explicit type exclusion from --exclude-type flag.
+		for _, raw := range excludeTypeStrs {
+			for _, t := range strings.Split(raw, ",") {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(utils.NormalizeIssueType(t)))
+				}
 			}
 		}
 
@@ -801,7 +822,7 @@ var listCmd = &cobra.Command{
 			return
 		}
 
-		// Handle format flag
+		// Handle format flag (non-json presets handled here; json handled earlier)
 		if formatStr != "" {
 			if err := outputFormattedList(ctx, activeStore, issues, formatStr); err != nil {
 				FatalError("%v", err)
@@ -968,6 +989,9 @@ func init() {
 	// Infra type filtering: exclude agent/rig/role/message by default
 	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/rig/role/message) in output")
 
+	// Explicit type exclusion
+	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
+
 	// Parent filtering: filter children by parent issue
 	listCmd.Flags().String("parent", "", "Filter by parent issue ID (shows children of specified issue)")
 	listCmd.Flags().String("filter-parent", "", "Alias for --parent")
@@ -1005,7 +1029,7 @@ func init() {
 	listCmd.Flags().Bool("ready", false, "Show only ready issues (status=open, excludes hooked/in_progress/blocked/deferred)")
 
 	// Cross-rig routing: query a different rig's database (bd-rgdjr)
-	listCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig gastown, --rig gt-, --rig gt)")
+	listCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig my-project, --rig gt-, --rig gt)")
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

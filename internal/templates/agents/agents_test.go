@@ -18,7 +18,7 @@ func TestEmbeddedDefault(t *testing.T) {
 		"bd onboard",
 		"BEGIN BEADS INTEGRATION",
 		"END BEADS INTEGRATION",
-		"## Landing the Plane",
+		"## Session Completion",
 		"git push",
 	}
 	for _, want := range required {
@@ -60,8 +60,8 @@ func TestEmbeddedBeadsSection(t *testing.T) {
 
 func TestBeadsSectionContainsLanding(t *testing.T) {
 	section := EmbeddedBeadsSection()
-	if !strings.Contains(section, "Landing the Plane") {
-		t.Error("beads section should contain landing-the-plane content within markers")
+	if !strings.Contains(section, "Session Completion") {
+		t.Error("beads section should contain session completion content within markers")
 	}
 }
 
@@ -69,15 +69,15 @@ func TestDefaultContainsBothSections(t *testing.T) {
 	content := EmbeddedDefault()
 
 	beadsIdx := strings.Index(content, "BEGIN BEADS INTEGRATION")
-	landingIdx := strings.Index(content, "Landing the Plane")
+	completionIdx := strings.Index(content, "Session Completion")
 
 	if beadsIdx == -1 {
 		t.Fatal("missing beads integration section")
 	}
-	if landingIdx == -1 {
-		t.Fatal("missing landing the plane section")
+	if completionIdx == -1 {
+		t.Fatal("missing session completion section")
 	}
-	if beadsIdx > landingIdx {
-		t.Error("beads section should come before landing-the-plane section")
+	if beadsIdx > completionIdx {
+		t.Error("beads section should come before session completion section")
 	}
 }

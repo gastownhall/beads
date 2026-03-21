@@ -88,7 +88,7 @@ var (
 		Dark:  "#d2a6ff",
 	}
 	ColorStatusHooked = lipgloss.AdaptiveColor{
-		Light: "#59c2ff", // cyan - actively worked by agent (GUPP)
+		Light: "#59c2ff", // cyan - actively worked
 		Dark:  "#59c2ff",
 	}
 
@@ -139,7 +139,7 @@ var (
 		Light: "", // standard text color
 		Dark:  "",
 	}
-	// Note: Gas Town-specific types (agent, role, rig) have been removed.
+	// Note: Orchestrator-specific types (agent, role, rig) have been removed.
 	// Use labels (gt:agent, gt:role, gt:rig) with custom styling if needed.
 
 	// === Issue ID Color ===
@@ -188,7 +188,7 @@ var (
 	TypeTaskStyle    = lipgloss.NewStyle().Foreground(ColorTypeTask)
 	TypeEpicStyle    = lipgloss.NewStyle().Foreground(ColorTypeEpic)
 	TypeChoreStyle   = lipgloss.NewStyle().Foreground(ColorTypeChore)
-	// Note: Gas Town-specific type styles (agent, role, rig) have been removed.
+	// Note: Orchestrator-specific type styles (agent, role, rig) have been removed.
 )
 
 // CategoryStyle for section headers - bold with accent color
@@ -426,7 +426,7 @@ func RenderPriorityCompact(priority int) string {
 
 // RenderType renders an issue type with semantic styling
 // bugs and epics get color; all other types use standard text
-// Note: Gas Town-specific types (agent, role, rig) now fall through to default
+// Note: Orchestrator-specific types (agent, role, rig) now fall through to default
 func RenderType(issueType string) string {
 	switch issueType {
 	case "bug":
