@@ -46,10 +46,11 @@ func (m ServerMode) String() string {
 //
 // Decision logic (checked in order):
 //  1. metadata.json dolt_mode == "embedded"       -> ServerModeEmbedded
-//  2. BEADS_DOLT_SHARED_SERVER env var is set      -> ServerModeExternal
-//  3. metadata.json has explicit dolt_server_port  -> ServerModeExternal
-//  4. BEADS_DOLT_SERVER_MODE=1 env var             -> ServerModeExternal
-//  5. default                                      -> ServerModeOwned
+//  2. BEADS_DOLT_AUTO_START=0 or config disabled  -> ServerModeExternal
+//  3. BEADS_DOLT_SHARED_SERVER env var is set      -> ServerModeExternal
+//  4. metadata.json has explicit dolt_server_port  -> ServerModeExternal
+//  5. BEADS_DOLT_SERVER_MODE=1 env var             -> ServerModeExternal
+//  6. default                                      -> ServerModeOwned
 //
 // The function loads metadata.json only if the file exists, to avoid
 // triggering the legacy config.json -> metadata.json migration side effect.
@@ -70,21 +71,26 @@ func ResolveServerMode(beadsDir string) ServerMode {
 		return ServerModeEmbedded
 	}
 
-	// 2. Shared server mode (env var or config.yaml) -> external
+	// 2. Auto-start disabled (env var or config) -> external
+	if IsAutoStartDisabled() {
+		return ServerModeExternal
+	}
+
+	// 3. Shared server mode (env var or config.yaml) -> external
 	if IsSharedServerMode() {
 		return ServerModeExternal
 	}
 
-	// 3. Explicit server port in metadata.json -> external
+	// 4. Explicit server port in metadata.json -> external
 	if fileCfg != nil && fileCfg.DoltServerPort > 0 {
 		return ServerModeExternal
 	}
 
-	// 4. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
+	// 5. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
 	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
 		return ServerModeExternal
 	}
 
-	// 5. Default: beads owns the server
+	// 6. Default: beads owns the server
 	return ServerModeOwned
 }
