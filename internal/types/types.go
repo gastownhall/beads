@@ -87,12 +87,6 @@ type Issue struct {
 	// ===== Bonding Fields (compound molecule lineage) =====
 	BondedFrom []BondRef `json:"bonded_from,omitempty"` // For compounds: constituent protos
 
-	// ===== HOP Fields (entity tracking for CV chains) =====
-	Creator      *EntityRef   `json:"creator,omitempty"`       // Who created (human, agent, or org)
-	Validations  []Validation `json:"validations,omitempty"`   // Who validated/approved
-	QualityScore *float32     `json:"quality_score,omitempty"` // Aggregate quality (0.0-1.0), set by Refineries on merge
-	Crystallizes bool         `json:"crystallizes,omitempty"`  // Work that compounds (true: code, features) vs evaporates (false: ops, support) - affects CV weighting per Decision 006
-
 	// ===== Gate Fields (async coordination primitives) =====
 	AwaitType string        `json:"await_type,omitempty"` // Condition type: gh:run, gh:pr, timer, human, mail
 	AwaitID   string        `json:"await_id,omitempty"`   // Condition identifier (run ID, PR number, etc.)
@@ -162,21 +156,6 @@ func (i *Issue) ComputeContentHash() string {
 		w.str(br.BondPoint)
 	}
 
-	// HOP entity tracking
-	w.entityRef(i.Creator)
-
-	// HOP validations
-	for _, v := range i.Validations {
-		w.entityRef(v.Validator)
-		w.str(v.Outcome)
-		w.str(v.Timestamp.Format(time.RFC3339))
-		w.float32Ptr(v.Score)
-	}
-
-	// HOP aggregate quality score and crystallizes
-	w.float32Ptr(i.QualityScore)
-	w.flag(i.Crystallizes, "crystallizes")
-
 	// Gate fields for async coordination
 	w.str(i.AwaitType)
 	w.str(i.AwaitID)
@@ -233,13 +212,6 @@ func (w hashFieldWriter) strPtr(p *string) {
 	w.h.Write([]byte{0})
 }
 
-func (w hashFieldWriter) float32Ptr(p *float32) {
-	if p != nil {
-		w.h.Write([]byte(fmt.Sprintf("%f", *p)))
-	}
-	w.h.Write([]byte{0})
-}
-
 func (w hashFieldWriter) duration(d time.Duration) {
 	w.h.Write([]byte(fmt.Sprintf("%d", d)))
 	w.h.Write([]byte{0})
@@ -250,15 +222,6 @@ func (w hashFieldWriter) flag(b bool, label string) {
 		w.h.Write([]byte(label))
 	}
 	w.h.Write([]byte{0})
-}
-
-func (w hashFieldWriter) entityRef(e *EntityRef) {
-	if e != nil {
-		w.str(e.Name)
-		w.str(e.Platform)
-		w.str(e.Org)
-		w.str(e.ID)
-	}
 }
 
 // Validate checks if the issue has valid field values (built-in statuses only)
@@ -1118,127 +1081,4 @@ func (i *Issue) IsCompound() bool {
 // Returns nil for non-compound issues.
 func (i *Issue) GetConstituents() []BondRef {
 	return i.BondedFrom
-}
-
-// EntityRef is a structured reference to an entity (human, agent, or org).
-// This is the foundation for HOP entity tracking and CV chains.
-// Can be rendered as a URI: hop://<platform>/<org>/<id>
-//
-// Example usage:
-//
-//	ref := &EntityRef{
-//	    Name:     "worker/Alice",
-//	    Platform: "github",
-//	    Org:      "acme-corp",
-//	    ID:       "worker-alice",
-//	}
-//	uri := ref.URI() // "hop://github/acme-corp/worker-alice"
-type EntityRef struct {
-	// Name is the human-readable identifier (e.g., "worker/Alice", "admin")
-	Name string `json:"name,omitempty"`
-
-	// Platform identifies the execution context (e.g., "github", "gitlab")
-	Platform string `json:"platform,omitempty"`
-
-	// Org identifies the organization (e.g., "steveyegge", "anthropics")
-	Org string `json:"org,omitempty"`
-
-	// ID is the unique identifier within the platform/org (e.g., "worker-alice")
-	ID string `json:"id,omitempty"`
-}
-
-// IsEmpty returns true if all fields are empty.
-func (e *EntityRef) IsEmpty() bool {
-	if e == nil {
-		return true
-	}
-	return e.Name == "" && e.Platform == "" && e.Org == "" && e.ID == ""
-}
-
-// URI returns the entity as a HOP URI.
-// Format: hop://<platform>/<org>/<id>
-// Returns empty string if Platform, Org, or ID is missing.
-func (e *EntityRef) URI() string {
-	if e == nil || e.Platform == "" || e.Org == "" || e.ID == "" {
-		return ""
-	}
-	return fmt.Sprintf("hop://%s/%s/%s", e.Platform, e.Org, e.ID)
-}
-
-// String returns a human-readable representation.
-// Prefers Name if set, otherwise returns URI or ID.
-func (e *EntityRef) String() string {
-	if e == nil {
-		return ""
-	}
-	if e.Name != "" {
-		return e.Name
-	}
-	if uri := e.URI(); uri != "" {
-		return uri
-	}
-	return e.ID
-}
-
-// Validation records who validated/approved work completion.
-// This is core to HOP's proof-of-stake concept - validators stake
-// their reputation on approvals.
-type Validation struct {
-	// Validator is who approved/rejected the work
-	Validator *EntityRef `json:"validator"`
-
-	// Outcome is the validation result: accepted, rejected, revision_requested
-	Outcome string `json:"outcome"`
-
-	// Timestamp is when the validation occurred
-	Timestamp time.Time `json:"timestamp"`
-
-	// Score is an optional quality score (0.0-1.0)
-	Score *float32 `json:"score,omitempty"`
-}
-
-// Validation outcome constants
-const (
-	ValidationAccepted          = "accepted"
-	ValidationRejected          = "rejected"
-	ValidationRevisionRequested = "revision_requested"
-)
-
-// IsValidOutcome checks if the outcome is a known validation outcome.
-func (v *Validation) IsValidOutcome() bool {
-	switch v.Outcome {
-	case ValidationAccepted, ValidationRejected, ValidationRevisionRequested:
-		return true
-	}
-	return false
-}
-
-// ParseEntityURI parses a HOP entity URI into an EntityRef.
-// Format: hop://<platform>/<org>/<id>
-// Also accepts legacy entity://hop/<platform>/<org>/<id> for backward compatibility.
-// Returns nil and error if the URI is invalid.
-func ParseEntityURI(uri string) (*EntityRef, error) {
-	const hopPrefix = "hop://"
-	const legacyPrefix = "entity://hop/"
-
-	var rest string
-	switch {
-	case strings.HasPrefix(uri, hopPrefix):
-		rest = uri[len(hopPrefix):]
-	case strings.HasPrefix(uri, legacyPrefix):
-		rest = uri[len(legacyPrefix):]
-	default:
-		return nil, fmt.Errorf("invalid entity URI: must start with %q (or legacy %q)", hopPrefix, legacyPrefix)
-	}
-
-	parts := strings.SplitN(rest, "/", 3)
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return nil, fmt.Errorf("invalid entity URI: expected hop://<platform>/<org>/<id>, got %q", uri)
-	}
-
-	return &EntityRef{
-		Platform: parts[0],
-		Org:      parts[1],
-		ID:       parts[2],
-	}, nil
 }

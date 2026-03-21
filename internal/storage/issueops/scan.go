@@ -15,12 +15,12 @@ const IssueSelectColumns = `id, content_hash, title, description, design, accept
 	       status, priority, issue_type, assignee, estimated_minutes,
 	       created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
 	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-	       sender, ephemeral, no_history, wisp_type, pinned, is_template, crystallizes,
+	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
 	       await_type, await_id, timeout_ns, waiters,
 	       hook_bead, role_bead, agent_state, last_activity, role_type, rig, mol_type,
 	       event_kind, actor, target, payload,
 	       due_at, defer_until,
-	       quality_score, work_type, source_system, metadata`
+	       work_type, source_system, metadata`
 
 // IssueScanner is the common interface between *sql.Row and *sql.Rows,
 // allowing a single scan function to work with both single-row and
@@ -43,8 +43,7 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	var sender, wispType, molType, eventKind, actor, target, payload sql.NullString
 	var awaitType, awaitID, waiters sql.NullString
 	var hookBead, roleBead, agentState, roleType, rig sql.NullString
-	var ephemeral, noHistory, pinned, isTemplate, crystallizes sql.NullInt64
-	var qualityScore sql.NullFloat64
+	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
 
 	if err := s.Scan(
@@ -53,12 +52,12 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &createdBy, &owner, &updatedAtStr, &closedAt, &externalRef, &specID,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
-		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate, &crystallizes,
+		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
-		&qualityScore, &workType, &sourceSystem, &metadata,
+		&workType, &sourceSystem, &metadata,
 	); err != nil {
 		return nil, err
 	}
@@ -130,9 +129,6 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	if isTemplate.Valid && isTemplate.Int64 != 0 {
 		issue.IsTemplate = true
 	}
-	if crystallizes.Valid && crystallizes.Int64 != 0 {
-		issue.Crystallizes = true
-	}
 	if awaitType.Valid {
 		issue.AwaitType = awaitType.String
 	}
@@ -183,10 +179,6 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	}
 	if deferUntil.Valid {
 		issue.DeferUntil = &deferUntil.Time
-	}
-	if qualityScore.Valid {
-		qs := float32(qualityScore.Float64)
-		issue.QualityScore = &qs
 	}
 	if workType.Valid {
 		issue.WorkType = types.WorkType(workType.String)
