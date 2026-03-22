@@ -65,7 +65,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	} else {
 		// Exclude workflow/identity types from ready work by default.
 		// These are internal items, not actionable work for agents to claim:
-		// - merge-request: processed by Refinery
+		// - merge-request: processed by automation
 		// - gate: async wait conditions
 		// - molecule: workflow containers
 		// - message: mail/communication items

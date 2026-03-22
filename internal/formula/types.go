@@ -317,10 +317,10 @@ type LoopSpec struct {
 //
 //	step: survey-workers
 //	on_complete:
-//	  for_each: output.polecats
-//	  bond: mol-polecat-arm
+//	  for_each: output.workers
+//	  bond: mol-worker-arm
 //	  vars:
-//	    polecat_name: "{item.name}"
+//	    worker_name: "{item.name}"
 //	    rig: "{item.rig}"
 //	  parallel: true
 type OnCompleteSpec struct {

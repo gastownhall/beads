@@ -170,28 +170,30 @@ func scanBeadsDir(beadsDir string, report *ArtifactReport) {
 }
 
 // isRedirectExpectedDir returns true if this .beads directory should contain
-// only a redirect file (i.e., it's in a worktree, polecat, crew, or refinery subdirectory).
+// only a redirect file (i.e., it's in a worktree or orchestrator subdirectory).
+// NOTE: The polecats/crew/refinery patterns are retained for backwards compatibility
+// with existing orchestrator installations.
 func isRedirectExpectedDir(beadsDir string) bool {
 	// The parent of .beads is the project dir
 	// We need to determine if this is a "leaf" .beads that should redirect
-	// to a "canonical" .beads (typically in mayor/rig/ or main worktree)
+	// to a "canonical" .beads (typically in the main rig or main worktree)
 
 	parent := filepath.Dir(beadsDir)
 	parentName := filepath.Base(parent)
 	grandparent := filepath.Dir(parent)
 	grandparentName := filepath.Base(grandparent)
 
-	// Pattern: */polecats/*/.beads/ (polecat worktree)
+	// Pattern: */polecats/*/.beads/ (orchestrator worker worktree — backwards compat)
 	if grandparentName == "polecats" {
 		return true
 	}
 
-	// Pattern: */crew/*/.beads/ (crew workspace)
+	// Pattern: */crew/*/.beads/ (orchestrator assistant workspace — backwards compat)
 	if grandparentName == "crew" {
 		return true
 	}
 
-	// Pattern: */refinery/rig/.beads/ (refinery rig)
+	// Pattern: */refinery/rig/.beads/ (orchestrator processor — backwards compat)
 	if parentName == "rig" && grandparentName == "refinery" {
 		return true
 	}
