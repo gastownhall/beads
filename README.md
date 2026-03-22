@@ -36,7 +36,6 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 * **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.
 * **Messaging:** Message issue type with threading (`--thread`), ephemeral lifecycle, and mail delegation.
 * **Graph Links:** `relates_to`, `duplicates`, `supersedes`, and `replies_to` for knowledge graphs.
-* **Notion Sync:** Optional issue sync with Notion. See [docs/QUICKSTART.md](docs/QUICKSTART.md#optional-notion-sync).
 
 ## 📖 Essential Commands
 
