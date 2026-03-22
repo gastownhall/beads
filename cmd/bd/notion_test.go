@@ -21,7 +21,7 @@ import (
 func TestNotionCommandsRegistered(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"init", "connect", "status", "sync"} {
+	for _, name := range []string{"login", "logout", "whoami", "init", "connect", "status", "sync"} {
 		if _, _, err := notionCmd.Find([]string{name}); err != nil {
 			t.Fatalf("missing subcommand %q: %v", name, err)
 		}
@@ -50,7 +50,7 @@ func TestGetNotionConfigPrefersStoreOverEnv(t *testing.T) {
 	t.Setenv("NOTION_VIEW_URL", "https://env/view")
 
 	cfg := getNotionConfig()
-	if cfg.Token != "store-token" || cfg.DataSourceID != "store-ds" || cfg.ViewURL != "https://store/view" {
+	if cfg.DataSourceID != "store-ds" || cfg.ViewURL != "https://store/view" {
 		t.Fatalf("config = %+v", cfg)
 	}
 }
@@ -80,7 +80,7 @@ func TestRunNotionStatusJSONWithMissingConfig(t *testing.T) {
 	if resp.Configured {
 		t.Fatal("expected configured=false")
 	}
-	if !strings.Contains(resp.Error, "notion.token") {
+	if !strings.Contains(resp.Error, "bd notion login") {
 		t.Fatalf("error = %q", resp.Error)
 	}
 }
@@ -268,6 +268,105 @@ func TestRunNotionStatusUsesHTTPClient(t *testing.T) {
 	if resp.Auth == nil || !resp.Auth.OK || resp.Auth.User == nil || resp.Auth.User.Email != "osamu@example.com" {
 		t.Fatalf("auth = %+v", resp.Auth)
 	}
+	if resp.Auth.Source != "env" {
+		t.Fatalf("auth source = %q", resp.Auth.Source)
+	}
+}
+
+func TestResolveNotionAuthPrefersConfigTokenOverOAuthAndEnv(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	ctx := context.Background()
+	testStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	store = testStore
+	if err := store.SetConfig(ctx, "notion.token", "config-token"); err != nil {
+		t.Fatalf("SetConfig(notion.token): %v", err)
+	}
+	if err := store.SetConfig(ctx, "notion.oauth.access_token", "oauth-token"); err != nil {
+		t.Fatalf("SetConfig(notion.oauth.access_token): %v", err)
+	}
+	t.Setenv("NOTION_TOKEN", "env-token")
+
+	auth, err := resolveNotionAuth(ctx)
+	if err != nil {
+		t.Fatalf("resolveNotionAuth returned error: %v", err)
+	}
+	if auth == nil || auth.Token != "config-token" || auth.Source != notion.AuthSourceConfigToken {
+		t.Fatalf("auth = %+v", auth)
+	}
+}
+
+func TestRunNotionWhoAmIUsesResolvedAuth(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	originalFactory := newNotionStatusClient
+	t.Cleanup(func() { newNotionStatusClient = originalFactory })
+	jsonOutput = true
+	store = nil
+	dbPath = ""
+	t.Setenv("NOTION_TOKEN", "env-token")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/users/me" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer env-token" {
+			t.Fatalf("authorization = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"id":"user-1","name":"Osamu","type":"person","person":{"email":"osamu@example.com"}}`)
+	}))
+	defer server.Close()
+	newNotionStatusClient = func(token string) *notion.Client {
+		return notion.NewClient(token).WithBaseURL(server.URL)
+	}
+
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetContext(context.Background())
+
+	if err := runNotionWhoAmI(cmd, nil); err != nil {
+		t.Fatalf("runNotionWhoAmI returned error: %v", err)
+	}
+
+	var resp notionAuthResult
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal whoami json: %v\n%s", err, stdout.String())
+	}
+	if resp.AuthSource != "env" {
+		t.Fatalf("auth_source = %q", resp.AuthSource)
+	}
+	if resp.User == nil || resp.User.Email != "osamu@example.com" {
+		t.Fatalf("user = %+v", resp.User)
+	}
+}
+
+func TestRunNotionLogoutDeletesSavedOAuthToken(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	ctx := context.Background()
+	testStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	store = testStore
+	if err := store.SetConfig(ctx, "notion.oauth.access_token", "oauth-token"); err != nil {
+		t.Fatalf("SetConfig(notion.oauth.access_token): %v", err)
+	}
+	if err := store.SetConfig(ctx, "notion.oauth.refresh_token", "refresh-token"); err != nil {
+		t.Fatalf("SetConfig(notion.oauth.refresh_token): %v", err)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	if err := runNotionLogout(cmd, nil); err != nil {
+		t.Fatalf("runNotionLogout returned error: %v", err)
+	}
+
+	if value, _ := store.GetConfig(ctx, "notion.oauth.access_token"); value != "" {
+		t.Fatalf("notion.oauth.access_token = %q, want empty", value)
+	}
+	if value, _ := store.GetConfig(ctx, "notion.oauth.refresh_token"); value != "" {
+		t.Fatalf("notion.oauth.refresh_token = %q, want empty", value)
+	}
 }
 
 func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
@@ -309,11 +408,11 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 func TestValidateNotionConfigMessages(t *testing.T) {
 	t.Parallel()
 
-	err := validateNotionConfig(notionConfig{})
-	if err == nil || !strings.Contains(err.Error(), "notion.token") {
+	err := validateNotionConfig(notionConfig{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "bd notion login") {
 		t.Fatalf("err = %v", err)
 	}
-	err = validateNotionConfig(notionConfig{Token: "token"})
+	err = validateNotionConfig(notionConfig{}, &notion.ResolvedAuth{Token: "token", Source: notion.AuthSourceConfigToken})
 	if err == nil || !strings.Contains(err.Error(), "bd notion init") {
 		t.Fatalf("err = %v", err)
 	}
@@ -341,7 +440,7 @@ func TestGetNotionConfigReadsDBPathWhenStoreUnset(t *testing.T) {
 	t.Setenv("NOTION_VIEW_URL", "")
 
 	cfg := getNotionConfig()
-	if cfg.Token != "path-token" || cfg.DataSourceID != "path-ds" {
+	if cfg.DataSourceID != "path-ds" {
 		t.Fatalf("config = %+v", cfg)
 	}
 }

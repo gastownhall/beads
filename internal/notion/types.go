@@ -50,8 +50,9 @@ type StatusResponse struct {
 
 // StatusAuth describes authentication state.
 type StatusAuth struct {
-	OK   bool        `json:"ok"`
-	User *StatusUser `json:"user,omitempty"`
+	OK     bool        `json:"ok"`
+	Source string      `json:"source,omitempty"`
+	User   *StatusUser `json:"user,omitempty"`
 }
 
 // StatusUser describes the authenticated Notion user.

@@ -10,12 +10,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/notion"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 type notionConfig struct {
-	Token        string
 	DataSourceID string
 	ViewURL      string
 }
@@ -26,6 +26,17 @@ type notionSetupResult struct {
 	DataSourceID string `json:"data_source_id,omitempty"`
 	ViewURL      string `json:"view_url,omitempty"`
 	Message      string `json:"message,omitempty"`
+}
+
+type notionAuthResult struct {
+	AuthSource    string             `json:"auth_source,omitempty"`
+	WorkspaceID   string             `json:"workspace_id,omitempty"`
+	WorkspaceName string             `json:"workspace_name,omitempty"`
+	User          *notion.StatusUser `json:"user,omitempty"`
+}
+
+type notionLogoutResult struct {
+	Status string `json:"status"`
 }
 
 var (
@@ -49,6 +60,24 @@ var notionCmd = &cobra.Command{
 	Use:   "notion",
 	Short: "Notion integration commands",
 	Long:  "Commands for syncing issues between beads and Notion.",
+}
+
+var notionLoginCmd = &cobra.Command{
+	Use:   "login",
+	Short: "Authenticate with Notion via OAuth",
+	RunE:  runNotionLogin,
+}
+
+var notionLogoutCmd = &cobra.Command{
+	Use:   "logout",
+	Short: "Remove saved Notion OAuth credentials",
+	RunE:  runNotionLogout,
+}
+
+var notionWhoAmICmd = &cobra.Command{
+	Use:   "whoami",
+	Short: "Show the current Notion identity",
+	RunE:  runNotionWhoAmI,
 }
 
 var notionStatusCmd = &cobra.Command{
@@ -93,14 +122,21 @@ func init() {
 	notionSyncCmd.Flags().BoolVar(&notionCreateOnly, "create-only", false, "Only create missing remote pages, do not update existing ones")
 	notionSyncCmd.Flags().StringVar(&notionSyncState, "state", "all", "Issue state to sync: open, closed, or all")
 
-	notionCmd.AddCommand(notionInitCmd, notionConnectCmd, notionStatusCmd, notionSyncCmd)
+	notionCmd.AddCommand(
+		notionLoginCmd,
+		notionLogoutCmd,
+		notionWhoAmICmd,
+		notionInitCmd,
+		notionConnectCmd,
+		notionStatusCmd,
+		notionSyncCmd,
+	)
 	rootCmd.AddCommand(notionCmd)
 }
 
 func getNotionConfig() notionConfig {
 	ctx := context.Background()
 	return notionConfig{
-		Token:        getNotionConfigValue(ctx, "notion.token", "NOTION_TOKEN"),
 		DataSourceID: getNotionConfigValue(ctx, "notion.data_source_id", "NOTION_DATA_SOURCE_ID"),
 		ViewURL:      getNotionConfigValue(ctx, "notion.view_url", "NOTION_VIEW_URL"),
 	}
@@ -128,9 +164,26 @@ func getNotionConfigValue(ctx context.Context, key, envVar string) string {
 	return ""
 }
 
-func validateNotionConfig(cfg notionConfig) error {
-	if cfg.Token == "" {
-		return fmt.Errorf("notion.token is not configured. Set via bd config set notion.token <token> or NOTION_TOKEN")
+func resolveNotionAuth(ctx context.Context) (*notion.ResolvedAuth, error) {
+	if store != nil {
+		return notion.ResolveAuth(ctx, store)
+	}
+	if dbPath != "" {
+		tempStore, err := openReadOnlyStoreForDBPath(ctx, dbPath)
+		if err == nil {
+			defer func() { _ = tempStore.Close() }()
+			return notion.ResolveAuth(ctx, tempStore)
+		}
+	}
+	if token := strings.TrimSpace(os.Getenv("NOTION_TOKEN")); token != "" {
+		return &notion.ResolvedAuth{Token: token, Source: notion.AuthSourceEnv}, nil
+	}
+	return nil, nil
+}
+
+func validateNotionConfig(cfg notionConfig, auth *notion.ResolvedAuth) error {
+	if auth == nil || strings.TrimSpace(auth.Token) == "" {
+		return fmt.Errorf("Notion authentication is not configured. Run 'bd notion login', set notion.token with 'bd config set notion.token <token>', or export NOTION_TOKEN")
 	}
 	if cfg.DataSourceID == "" {
 		return fmt.Errorf("notion.data_source_id is not configured. Run 'bd notion init --parent <page-id>' or 'bd notion connect --url <notion-url>', or set it directly via bd config set notion.data_source_id <id> or NOTION_DATA_SOURCE_ID")
@@ -138,56 +191,142 @@ func validateNotionConfig(cfg notionConfig) error {
 	return nil
 }
 
-func validateNotionToken(cfg notionConfig) error {
-	if cfg.Token == "" {
-		return fmt.Errorf("notion.token is not configured. Set via bd config set notion.token <token> or NOTION_TOKEN")
+func validateNotionToken(auth *notion.ResolvedAuth) error {
+	if auth == nil || strings.TrimSpace(auth.Token) == "" {
+		return fmt.Errorf("Notion authentication is not configured. Run 'bd notion login', set notion.token with 'bd config set notion.token <token>', or export NOTION_TOKEN")
 	}
 	return nil
 }
 
-func maskNotionToken(token string) string {
-	if token == "" {
+func maskNotionAuth(auth *notion.ResolvedAuth) string {
+	if auth == nil || strings.TrimSpace(auth.Token) == "" {
 		return "(not set)"
 	}
+	if auth.Source == notion.AuthSourceOAuth {
+		return "oauth"
+	}
+	token := auth.Token
 	if len(token) <= 4 {
 		return "****"
 	}
 	return token[:4] + "****"
 }
 
+func runNotionLogin(cmd *cobra.Command, _ []string) error {
+	CheckReadonly("notion login")
+	if err := ensureStoreActive(); err != nil {
+		return fmt.Errorf("database not available: %w", err)
+	}
+	loginResult, err := notion.Login(cmd.Context(), store)
+	if err != nil {
+		return err
+	}
+	response := notionAuthResult{
+		AuthSource: string(loginResult.Auth.Source),
+		User:       statusUserFromNotionUser(loginResult.User),
+	}
+	if loginResult.Auth != nil && loginResult.Auth.OAuth != nil {
+		response.WorkspaceID = loginResult.Auth.OAuth.WorkspaceID
+		response.WorkspaceName = loginResult.Auth.OAuth.WorkspaceName
+	}
+	if jsonOutput {
+		return writeNotionJSON(cmd, response)
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "✓ Logged in to Notion via OAuth\n")
+	if response.WorkspaceName != "" {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Workspace: %s\n", response.WorkspaceName)
+	}
+	if response.User != nil && response.User.Name != "" {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "User: %s\n", response.User.Name)
+	}
+	return nil
+}
+
+func runNotionLogout(cmd *cobra.Command, _ []string) error {
+	CheckReadonly("notion logout")
+	if err := ensureStoreActive(); err != nil {
+		return fmt.Errorf("database not available: %w", err)
+	}
+	if err := notion.Logout(cmd.Context(), store); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeNotionJSON(cmd, notionLogoutResult{Status: "logged_out"})
+	}
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "✓ Removed saved Notion OAuth credentials")
+	return nil
+}
+
+func runNotionWhoAmI(cmd *cobra.Command, _ []string) error {
+	auth, err := resolveNotionAuth(cmd.Context())
+	if err != nil {
+		return err
+	}
+	if err := validateNotionToken(auth); err != nil {
+		return err
+	}
+	user, err := newNotionStatusClient(auth.Token).GetCurrentUser(cmd.Context())
+	if err != nil {
+		return err
+	}
+	response := notionAuthResult{
+		AuthSource: string(auth.Source),
+		User:       statusUserFromNotionUser(user),
+	}
+	if auth.OAuth != nil {
+		response.WorkspaceID = auth.OAuth.WorkspaceID
+		response.WorkspaceName = auth.OAuth.WorkspaceName
+	}
+	if jsonOutput {
+		return writeNotionJSON(cmd, response)
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Auth source: %s\n", response.AuthSource)
+	if response.User != nil {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "User: %s\n", firstNonEmpty(response.User.Name, response.User.Email, response.User.ID))
+	}
+	if response.WorkspaceName != "" {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Workspace: %s\n", response.WorkspaceName)
+	}
+	return nil
+}
+
 func runNotionStatus(cmd *cobra.Command, _ []string) error {
 	cfg := getNotionConfig()
+	auth, err := resolveNotionAuth(cmd.Context())
+	if err != nil {
+		return err
+	}
 	result := notion.StatusResponse{
-		Configured:   cfg.Token != "" && cfg.DataSourceID != "",
+		Configured:   auth != nil && strings.TrimSpace(auth.Token) != "" && cfg.DataSourceID != "",
 		DataSourceID: cfg.DataSourceID,
 		ViewURL:      cfg.ViewURL,
-		Auth:         &notion.StatusAuth{OK: cfg.Token != ""},
+	}
+	if auth != nil && strings.TrimSpace(auth.Token) != "" {
+		result.Auth = &notion.StatusAuth{OK: true, Source: string(auth.Source)}
+	} else {
+		result.Auth = &notion.StatusAuth{OK: false}
 	}
 	if !result.Configured {
-		if err := validateNotionConfig(cfg); err != nil {
+		if err := validateNotionConfig(cfg, auth); err != nil {
 			result.Error = err.Error()
 		}
 		if jsonOutput {
 			return writeNotionJSON(cmd, result)
 		}
-		return renderNotionStatus(cmd, cfg, &result)
+		return renderNotionStatus(cmd, auth, cfg, &result)
 	}
 
-	client := newNotionStatusClient(cfg.Token)
+	client := newNotionStatusClient(auth.Token)
 	ctx := cmd.Context()
 	user, err := client.GetCurrentUser(ctx)
 	if err != nil {
 		result.Error = err.Error()
-		result.Auth = &notion.StatusAuth{OK: false}
+		result.Auth = &notion.StatusAuth{OK: false, Source: string(auth.Source)}
 	} else {
 		result.Auth = &notion.StatusAuth{
-			OK: true,
-			User: &notion.StatusUser{
-				ID:    user.ID,
-				Name:  user.Name,
-				Type:  user.Type,
-				Email: userEmail(user),
-			},
+			OK:     true,
+			Source: string(auth.Source),
+			User:   statusUserFromNotionUser(user),
 		}
 	}
 
@@ -209,7 +348,7 @@ func runNotionStatus(cmd *cobra.Command, _ []string) error {
 	if jsonOutput {
 		return writeNotionJSON(cmd, result)
 	}
-	return renderNotionStatus(cmd, cfg, &result)
+	return renderNotionStatus(cmd, auth, cfg, &result)
 }
 
 func runNotionInit(cmd *cobra.Command, _ []string) error {
@@ -217,12 +356,15 @@ func runNotionInit(cmd *cobra.Command, _ []string) error {
 	if err := ensureStoreActive(); err != nil {
 		return fmt.Errorf("database not available: %w", err)
 	}
-	cfg := getNotionConfig()
-	if err := validateNotionToken(cfg); err != nil {
+	auth, err := resolveNotionAuth(cmd.Context())
+	if err != nil {
+		return err
+	}
+	if err := validateNotionToken(auth); err != nil {
 		return err
 	}
 
-	client := newNotionSetupClient(cfg.Token)
+	client := newNotionSetupClient(auth.Token)
 	db, err := client.CreateDatabase(cmd.Context(), notionInitParent, notionInitTitle)
 	if err != nil {
 		return err
@@ -256,12 +398,15 @@ func runNotionConnect(cmd *cobra.Command, _ []string) error {
 	if err := ensureStoreActive(); err != nil {
 		return fmt.Errorf("database not available: %w", err)
 	}
-	cfg := getNotionConfig()
-	if err := validateNotionToken(cfg); err != nil {
+	auth, err := resolveNotionAuth(cmd.Context())
+	if err != nil {
+		return err
+	}
+	if err := validateNotionToken(auth); err != nil {
 		return err
 	}
 
-	client := newNotionSetupClient(cfg.Token)
+	client := newNotionSetupClient(auth.Token)
 	resolved, err := notion.ResolveDataSourceReference(cmd.Context(), client, notionConnectURL)
 	if err != nil {
 		return err
@@ -293,11 +438,14 @@ func runNotionConnect(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func renderNotionStatus(cmd *cobra.Command, cfg notionConfig, result *notion.StatusResponse) error {
+func renderNotionStatus(cmd *cobra.Command, auth *notion.ResolvedAuth, cfg notionConfig, result *notion.StatusResponse) error {
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintln(out, "Notion Configuration")
 	_, _ = fmt.Fprintln(out, "====================")
-	_, _ = fmt.Fprintf(out, "Token:       %s\n", maskNotionToken(cfg.Token))
+	_, _ = fmt.Fprintf(out, "Auth:        %s\n", maskNotionAuth(auth))
+	if auth != nil && auth.Source != "" {
+		_, _ = fmt.Fprintf(out, "Auth source: %s\n", auth.Source)
+	}
 	_, _ = fmt.Fprintf(out, "Data source: %s\n", cfg.DataSourceID)
 	if cfg.ViewURL != "" {
 		_, _ = fmt.Fprintf(out, "View URL:    %s\n", cfg.ViewURL)
@@ -329,7 +477,11 @@ func renderNotionStatus(cmd *cobra.Command, cfg notionConfig, result *notion.Sta
 
 func runNotionSync(cmd *cobra.Command, _ []string) error {
 	cfg := getNotionConfig()
-	if err := validateNotionConfig(cfg); err != nil {
+	auth, err := resolveNotionAuth(cmd.Context())
+	if err != nil {
+		return err
+	}
+	if err := validateNotionConfig(cfg, auth); err != nil {
 		return err
 	}
 	if !notionSyncDryRun {
@@ -445,7 +597,11 @@ func saveNotionTargetConfig(ctx context.Context, dataSourceID, viewURL string) e
 	}
 	viewURL = strings.TrimSpace(viewURL)
 	if viewURL == "" {
-		if err := store.DeleteConfig(ctx, "notion.view_url"); err != nil {
+		deleter, ok := store.(storage.ConfigMetadataStore)
+		if !ok {
+			return fmt.Errorf("store does not support config deletion")
+		}
+		if err := deleter.DeleteConfig(ctx, "notion.view_url"); err != nil {
 			return fmt.Errorf("clear notion.view_url: %w", err)
 		}
 		return nil
@@ -469,6 +625,18 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func statusUserFromNotionUser(user *notion.User) *notion.StatusUser {
+	if user == nil {
+		return nil
+	}
+	return &notion.StatusUser{
+		ID:    user.ID,
+		Name:  user.Name,
+		Type:  user.Type,
+		Email: userEmail(user),
+	}
 }
 
 func userEmail(user *notion.User) string {
