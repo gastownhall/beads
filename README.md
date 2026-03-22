@@ -36,7 +36,7 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 * **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.
 * **Messaging:** Message issue type with threading (`--thread`), ephemeral lifecycle, and mail delegation.
 * **Graph Links:** `relates_to`, `duplicates`, `supersedes`, and `replies_to` for knowledge graphs.
-* **Notion Sync:** Configure a Notion integration token, then use `bd notion init` or `bd notion connect` before `bd notion status` and `bd notion sync`.
+* **Notion Sync:** Optional issue sync with Notion. See [docs/QUICKSTART.md](docs/QUICKSTART.md#optional-notion-sync).
 
 ## 📖 Essential Commands
 
@@ -123,23 +123,4 @@ For daemon mode without git, use `bd daemon start --local`
 
 ## Notion Sync
 
-Configure Notion once with an integration token:
-
-```bash
-bd config set notion.token <your-token>
-```
-
-Create a new Beads database under a parent page, or connect to an existing target:
-
-```bash
-bd notion init --parent <page-id>
-# or
-bd notion connect --url <notion-database-or-data-source-url>
-```
-
-Then verify the target and preview a sync:
-
-```bash
-bd notion status
-bd notion sync --dry-run
-```
+See [docs/QUICKSTART.md](docs/QUICKSTART.md#optional-notion-sync) for the full setup guide covering OAuth login, CI tokens, target setup, and sync commands.
