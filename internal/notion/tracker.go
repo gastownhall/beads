@@ -191,6 +191,14 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 }
 
 func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*itracker.BatchPushResult, error) {
+	return t.executeBatchPush(ctx, issues, forceIDs, false)
+}
+
+func (t *Tracker) BatchPushDryRun(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*itracker.BatchPushResult, error) {
+	return t.executeBatchPush(ctx, issues, forceIDs, true)
+}
+
+func (t *Tracker) executeBatchPush(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool, dryRun bool) (*itracker.BatchPushResult, error) {
 	if err := t.ensureRemoteIndex(ctx); err != nil {
 		return nil, err
 	}
@@ -216,7 +224,7 @@ func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue, forceIDs
 		go func() {
 			defer wg.Done()
 			for issue := range jobs {
-				outcomes <- t.pushOne(ctx, issue, forceIDs[issue.ID])
+				outcomes <- t.pushOne(ctx, issue, forceIDs[issue.ID], dryRun)
 			}
 		}()
 	}
@@ -254,7 +262,7 @@ func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue, forceIDs
 	return result, nil
 }
 
-func (t *Tracker) pushOne(ctx context.Context, issue *types.Issue, force bool) pushOutcome {
+func (t *Tracker) pushOne(ctx context.Context, issue *types.Issue, force, dryRun bool) pushOutcome {
 	if issue == nil {
 		return pushOutcome{}
 	}
@@ -287,6 +295,11 @@ func (t *Tracker) pushOne(ctx context.Context, issue *types.Issue, force bool) p
 	}
 
 	if create {
+		if dryRun {
+			return pushOutcome{
+				created: &itracker.BatchPushItem{LocalID: issue.ID},
+			}
+		}
 		page, err := t.client.CreatePage(ctx, t.dataSourceID, BuildPageProperties(pushIssue))
 		if err != nil {
 			return pushOutcome{err: &itracker.BatchPushError{LocalID: issue.ID, Message: err.Error()}}
@@ -299,6 +312,13 @@ func (t *Tracker) pushOne(ctx context.Context, issue *types.Issue, force bool) p
 		return pushOutcome{
 			created:      &itracker.BatchPushItem{LocalID: issue.ID, ExternalRef: ref},
 			trackerIssue: trackerIssue,
+		}
+	}
+
+	if dryRun {
+		ref := firstNonEmpty(t.BuildExternalRef(remote), remote.URL)
+		return pushOutcome{
+			updated: &itracker.BatchPushItem{LocalID: issue.ID, ExternalRef: ref},
 		}
 	}
 

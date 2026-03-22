@@ -76,8 +76,10 @@ type mockExternalRefTracker struct {
 type mockBatchTracker struct {
 	*mockTracker
 	batchResult   *BatchPushResult
+	batchDryRun   *BatchPushResult
 	batchErr      error
 	batchCalls    int
+	batchDryCalls int
 	batchIssues   []*types.Issue
 	batchForceIDs map[string]bool
 }
@@ -139,6 +141,19 @@ func (m *mockBatchTracker) BatchPush(_ context.Context, issues []*types.Issue, f
 	m.batchForceIDs = forceIDs
 	if m.batchResult != nil {
 		return m.batchResult, nil
+	}
+	return &BatchPushResult{}, nil
+}
+
+func (m *mockBatchTracker) BatchPushDryRun(_ context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error) {
+	if m.batchErr != nil {
+		return nil, m.batchErr
+	}
+	m.batchDryCalls++
+	m.batchIssues = append(m.batchIssues, issues...)
+	m.batchForceIDs = forceIDs
+	if m.batchDryRun != nil {
+		return m.batchDryRun, nil
 	}
 	return &BatchPushResult{}, nil
 }
@@ -356,6 +371,67 @@ func TestEnginePushUsesBatchTrackerWhenAvailable(t *testing.T) {
 	}
 	if storedUpdated.ExternalRef == nil || *storedUpdated.ExternalRef != "https://notion.so/existing" {
 		t.Fatalf("updated external_ref = %#v, want batch-updated ref", storedUpdated.ExternalRef)
+	}
+}
+
+func TestEngineDryRunUsesBatchPreviewWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:          "bd-batch-preview",
+		Title:       "Preview me",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://notion.so/existing"),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := &mockBatchTracker{
+		mockTracker: newMockTracker("notion"),
+		batchDryRun: &BatchPushResult{
+			Skipped:  []string{"bd-batch-preview"},
+			Warnings: []string{"Skipped bd-batch-preview: Notion external_ref points outside the current target"},
+		},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+	var msgs []string
+	var warns []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+	engine.OnWarning = func(msg string) { warns = append(warns, msg) }
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if tracker.batchDryCalls != 1 {
+		t.Fatalf("batchDryCalls = %d, want 1", tracker.batchDryCalls)
+	}
+	if tracker.batchCalls != 0 {
+		t.Fatalf("batchCalls = %d, want 0", tracker.batchCalls)
+	}
+	if result.PushStats.Updated != 0 || result.PushStats.Created != 0 {
+		t.Fatalf("PushStats = %+v, want zero create/update", result.PushStats)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "outside the current target") {
+		t.Fatalf("warnings = %#v", result.Warnings)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("msgs = %#v, want no create/update preview lines", msgs)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "outside the current target") {
+		t.Fatalf("warns = %#v", warns)
+	}
+	stored, err := store.GetIssue(ctx, "bd-batch-preview")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if stored.ExternalRef == nil || *stored.ExternalRef != "https://notion.so/existing" {
+		t.Fatalf("external_ref mutated in dry-run: %#v", stored.ExternalRef)
 	}
 }
 

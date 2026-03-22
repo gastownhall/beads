@@ -64,6 +64,12 @@ type BatchPushTracker interface {
 	BatchPush(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error)
 }
 
+// BatchPushDryRunner is an optional capability for trackers that can preview
+// batch push decisions without mutating the remote system.
+type BatchPushDryRunner interface {
+	BatchPushDryRun(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error)
+}
+
 // FieldMapper handles bidirectional conversion of issue fields between
 // an external tracker and beads. Each tracker provides its own mapper.
 type FieldMapper interface {

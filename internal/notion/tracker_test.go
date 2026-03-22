@@ -365,3 +365,38 @@ func TestTrackerBatchPushSkipsStaleExternalRefOutsideCurrentTarget(t *testing.T)
 		t.Fatalf("unexpected mutation create=%q update=%q", api.lastCreateDSID, api.lastUpdatePageID)
 	}
 }
+
+func TestTrackerBatchPushDryRunSkipsStaleExternalRefOutsideCurrentTarget(t *testing.T) {
+	t.Parallel()
+
+	api := &fakeAPI{}
+	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+	foreignRef := "https://www.notion.so/foreign-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	result, err := tracker.BatchPushDryRun(context.Background(), []*types.Issue{
+		{
+			ID:          "bd-1",
+			Title:       "Stale ref",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			ExternalRef: &foreignRef,
+			UpdatedAt:   time.Now().UTC(),
+		},
+	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPushDryRun returned error: %v", err)
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "bd-1" {
+		t.Fatalf("skipped = %+v", result.Skipped)
+	}
+	if len(result.Updated) != 0 || len(result.Created) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "outside the current target") {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+	if api.lastCreateDSID != "" || api.lastUpdatePageID != "" {
+		t.Fatalf("unexpected mutation create=%q update=%q", api.lastCreateDSID, api.lastUpdatePageID)
+	}
+}

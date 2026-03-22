@@ -381,6 +381,9 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 
 	err := renderNotionSyncResult(cmd, &tracker.SyncResult{
 		Stats: tracker.SyncStats{Pulled: 2, Pushed: 3, Conflicts: 1},
+		Warnings: []string{
+			"Skipped unsupported Notion issue types: event=2",
+		},
 		PullStats: tracker.PullStats{
 			Created: 1,
 			Updated: 1,
@@ -399,6 +402,7 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 		"Pulled 2 issues (1 created, 1 updated)",
 		"Pushed 3 issues (2 created, 1 updated)",
 		"Resolved 1 conflicts",
+		"Warning: Skipped unsupported Notion issue types: event=2",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q\n%s", want, out)

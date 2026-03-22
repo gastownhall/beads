@@ -600,6 +600,12 @@ func renderNotionSyncResult(cmd *cobra.Command, result *tracker.SyncResult) erro
 	if result.Stats.Conflicts > 0 {
 		_, _ = fmt.Fprintf(out, "◐ Resolved %d conflicts\n", result.Stats.Conflicts)
 	}
+	for _, warning := range result.Warnings {
+		if strings.TrimSpace(warning) == "" {
+			continue
+		}
+		_, _ = fmt.Fprintf(out, "Warning: %s\n", warning)
+	}
 	if notionSyncDryRun {
 		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
 	}

@@ -458,13 +458,34 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		return nil, fmt.Errorf("searching local issues: %w", err)
 	}
 
-	if !opts.DryRun {
-		if batchTracker, ok := e.Tracker.(BatchPushTracker); ok {
-			pushIssues, skipped := e.collectBatchPushIssues(issues, opts, skipIDs, forceIDs)
-			stats.Skipped += skipped
-			if len(pushIssues) == 0 {
+	if batchTracker, ok := e.Tracker.(BatchPushTracker); ok {
+		pushIssues, skipped := e.collectBatchPushIssues(issues, opts, skipIDs, forceIDs)
+		stats.Skipped += skipped
+		if len(pushIssues) == 0 {
+			return stats, nil
+		}
+		if opts.DryRun {
+			if dryRunner, ok := e.Tracker.(BatchPushDryRunner); ok {
+				batchResult, err := dryRunner.BatchPushDryRun(ctx, pushIssues, forceIDs)
+				if err != nil {
+					return nil, fmt.Errorf("previewing batch push: %w", err)
+				}
+				e.renderBatchDryRun(pushIssues, batchResult)
+				stats.Created += len(batchResult.Created)
+				stats.Updated += len(batchResult.Updated)
+				stats.Skipped += len(batchResult.Skipped)
+				stats.Errors += len(batchResult.Errors)
+				stats.Warnings = append(stats.Warnings, batchResult.Warnings...)
+				for _, item := range batchResult.Errors {
+					if item.LocalID != "" {
+						e.warn("Failed to preview push %s in %s: %s", item.LocalID, e.Tracker.DisplayName(), item.Message)
+						continue
+					}
+					e.warn("Failed to preview pushes in %s: %s", e.Tracker.DisplayName(), item.Message)
+				}
 				return stats, nil
 			}
+		} else {
 			batchResult, err := batchTracker.BatchPush(ctx, pushIssues, forceIDs)
 			if err != nil {
 				return nil, fmt.Errorf("batch pushing issues: %w", err)
@@ -640,6 +661,28 @@ func (e *Engine) applyBatchPushResult(ctx context.Context, result *BatchPushResu
 		if err := e.Store.UpdateIssue(ctx, item.LocalID, updates, e.Actor); err != nil {
 			e.warn("Failed to update external_ref for %s: %v", item.LocalID, err)
 		}
+	}
+}
+
+func (e *Engine) renderBatchDryRun(issues []*types.Issue, result *BatchPushResult) {
+	if result == nil {
+		return
+	}
+	titles := make(map[string]string, len(issues))
+	for _, issue := range issues {
+		if issue == nil || issue.ID == "" {
+			continue
+		}
+		titles[issue.ID] = issue.Title
+	}
+	for _, item := range result.Created {
+		e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), titles[item.LocalID])
+	}
+	for _, item := range result.Updated {
+		e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), titles[item.LocalID])
+	}
+	for _, warning := range result.Warnings {
+		e.warn("%s", warning)
 	}
 }
 
