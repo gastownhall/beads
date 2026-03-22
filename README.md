@@ -120,7 +120,3 @@ For daemon mode without git, use `bd daemon start --local`
 
 * [Installing](docs/INSTALLING.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot Setup](docs/COPILOT_INTEGRATION.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [Troubleshooting](docs/TROUBLESHOOTING.md) | [FAQ](docs/FAQ.md)
 * [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/steveyegge/beads)
-
-## Notion Sync
-
-See [docs/QUICKSTART.md](docs/QUICKSTART.md#optional-notion-sync) for the full setup guide covering token setup, target setup, and sync commands.
