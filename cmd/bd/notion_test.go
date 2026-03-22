@@ -488,14 +488,20 @@ func TestShouldPushNotionIssue(t *testing.T) {
 			want: false,
 		},
 		{
-			name:  "unlinked issue needs configured label",
+			name:  "unlinked issue is allowed when no gate is configured",
 			issue: &types.Issue{ID: "beads-1"},
-			want:  false,
+			want:  true,
 		},
 		{
-			name:       "prefix alone does not opt issue in",
+			name:       "prefix alone narrows issue set when no label gate is configured",
 			issue:      &types.Issue{ID: "beads-1"},
 			pushPrefix: "beads",
+			want:       true,
+		},
+		{
+			name:       "prefix mismatch still rejects issue without label gate",
+			issue:      &types.Issue{ID: "beads-1"},
+			pushPrefix: "proj",
 			want:       false,
 		},
 		{
@@ -503,6 +509,12 @@ func TestShouldPushNotionIssue(t *testing.T) {
 			issue:     &types.Issue{ID: "beads-1", Labels: []string{"notion-sync"}},
 			pushLabel: "notion-sync",
 			want:      true,
+		},
+		{
+			name:      "configured label still gates unlinked issue",
+			issue:     &types.Issue{ID: "beads-1"},
+			pushLabel: "notion-sync",
+			want:      false,
 		},
 		{
 			name:      "configured label is case insensitive",

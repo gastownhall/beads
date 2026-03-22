@@ -675,7 +675,7 @@ func shouldPushNotionIssue(issue *types.Issue, tr tracker.IssueTracker, pushPref
 		return tr.IsExternalRef(*issue.ExternalRef)
 	}
 
-	if !matchesNotionPushLabel(issue, pushLabel) {
+	if strings.TrimSpace(pushLabel) != "" && !matchesNotionPushLabel(issue, pushLabel) {
 		return false
 	}
 
