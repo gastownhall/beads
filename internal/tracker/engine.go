@@ -118,9 +118,22 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	skipPushIDs := make(map[string]bool)
 	forcePushIDs := make(map[string]bool)
 
-	// Phase 1: Pull
+	allowPullOverwriteIDs := make(map[string]bool)
+
+	// Phase 1: Detect conflicts (only for bidirectional sync)
+	if opts.Pull && opts.Push {
+		conflicts, err := e.DetectConflicts(ctx)
+		if err != nil {
+			e.warn("Failed to detect conflicts: %v", err)
+		} else if len(conflicts) > 0 {
+			result.Stats.Conflicts = len(conflicts)
+			e.resolveConflicts(opts, conflicts, skipPushIDs, forcePushIDs, allowPullOverwriteIDs)
+		}
+	}
+
+	// Phase 2: Pull
 	if opts.Pull {
-		pullStats, err := e.doPull(ctx, opts)
+		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs)
 		if err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("pull failed: %v", err)
@@ -133,17 +146,6 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Created += pullStats.Created
 		result.Stats.Updated += pullStats.Updated
 		result.Stats.Skipped += pullStats.Skipped
-	}
-
-	// Phase 2: Detect conflicts (only for bidirectional sync)
-	if opts.Pull && opts.Push {
-		conflicts, err := e.DetectConflicts(ctx)
-		if err != nil {
-			e.warn("Failed to detect conflicts: %v", err)
-		} else if len(conflicts) > 0 {
-			result.Stats.Conflicts = len(conflicts)
-			e.resolveConflicts(ctx, opts, conflicts, skipPushIDs, forcePushIDs)
-		}
 	}
 
 	// Phase 3: Push
@@ -256,7 +258,7 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 }
 
 // doPull imports issues from the external tracker into beads.
-func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, error) {
+func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs map[string]bool) (*PullStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.pull",
 		trace.WithAttributes(
 			attribute.String("sync.tracker", e.Tracker.DisplayName()),
@@ -368,7 +370,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 			// handle these per the configured resolution strategy.
 			// Without this guard, pull silently overwrites local changes
 			// before conflict detection can compare timestamps.
-			if lastSync != nil && existing.UpdatedAt.After(*lastSync) {
+			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] {
 				stats.Skipped++
 				continue
 			}
@@ -463,7 +465,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if len(pushIssues) == 0 {
 				return stats, nil
 			}
-			batchResult, err := batchTracker.BatchPush(ctx, pushIssues)
+			batchResult, err := batchTracker.BatchPush(ctx, pushIssues, forceIDs)
 			if err != nil {
 				return nil, fmt.Errorf("batch pushing issues: %w", err)
 			}
@@ -641,7 +643,7 @@ func (e *Engine) applyBatchPushResult(ctx context.Context, result *BatchPushResu
 }
 
 // resolveConflicts applies the configured conflict resolution strategy.
-func (e *Engine) resolveConflicts(ctx context.Context, opts SyncOptions, conflicts []Conflict, skipIDs, forceIDs map[string]bool) {
+func (e *Engine) resolveConflicts(opts SyncOptions, conflicts []Conflict, skipIDs, forceIDs, allowPullOverwriteIDs map[string]bool) {
 	for _, c := range conflicts {
 		switch opts.ConflictResolution {
 		case ConflictLocal:
@@ -650,7 +652,7 @@ func (e *Engine) resolveConflicts(ctx context.Context, opts SyncOptions, conflic
 
 		case ConflictExternal:
 			skipIDs[c.IssueID] = true
-			e.reimportIssue(ctx, c)
+			allowPullOverwriteIDs[c.IssueID] = true
 			e.msg("Conflict on %s: keeping external version", c.IssueID)
 
 		default: // ConflictTimestamp or unset
@@ -659,7 +661,7 @@ func (e *Engine) resolveConflicts(ctx context.Context, opts SyncOptions, conflic
 				e.msg("Conflict on %s: local is newer, pushing", c.IssueID)
 			} else {
 				skipIDs[c.IssueID] = true
-				e.reimportIssue(ctx, c)
+				allowPullOverwriteIDs[c.IssueID] = true
 				e.msg("Conflict on %s: external is newer, importing", c.IssueID)
 			}
 		}

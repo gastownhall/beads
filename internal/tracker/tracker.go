@@ -61,7 +61,7 @@ type IssueTracker interface {
 // BatchPushTracker is an optional capability for trackers that can export
 // multiple issues in one remote call.
 type BatchPushTracker interface {
-	BatchPush(ctx context.Context, issues []*types.Issue) (*BatchPushResult, error)
+	BatchPush(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error)
 }
 
 // FieldMapper handles bidirectional conversion of issue fields between

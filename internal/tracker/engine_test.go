@@ -75,10 +75,11 @@ type mockExternalRefTracker struct {
 
 type mockBatchTracker struct {
 	*mockTracker
-	batchResult *BatchPushResult
-	batchErr    error
-	batchCalls  int
-	batchIssues []*types.Issue
+	batchResult   *BatchPushResult
+	batchErr      error
+	batchCalls    int
+	batchIssues   []*types.Issue
+	batchForceIDs map[string]bool
 }
 
 func newMockTracker(name string) *mockTracker {
@@ -129,12 +130,13 @@ func (m *mockTracker) BuildExternalRef(issue *TrackerIssue) string {
 	return fmt.Sprintf("https://%s.test/%s", m.name, issue.Identifier)
 }
 
-func (m *mockBatchTracker) BatchPush(_ context.Context, issues []*types.Issue) (*BatchPushResult, error) {
+func (m *mockBatchTracker) BatchPush(_ context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error) {
 	if m.batchErr != nil {
 		return nil, m.batchErr
 	}
 	m.batchCalls++
 	m.batchIssues = append(m.batchIssues, issues...)
+	m.batchForceIDs = forceIDs
 	if m.batchResult != nil {
 		return m.batchResult, nil
 	}
@@ -645,6 +647,62 @@ func TestEngineConflictResolution(t *testing.T) {
 	}
 	if conflicts[0].IssueID != "bd-conflict1" {
 		t.Errorf("conflict issue ID = %q, want %q", conflicts[0].IssueID, "bd-conflict1")
+	}
+}
+
+func TestEngineSyncDoesNotCreateFalseConflictsAfterPull(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	lastSync := time.Now().UTC().Add(-1 * time.Hour)
+	if err := store.SetConfig(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetConfig() error: %v", err)
+	}
+
+	issue := &types.Issue{
+		ID:          "bd-sync1",
+		Title:       "Local title",
+		Description: "Local description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://test.test/EXT-1"),
+		UpdatedAt:   lastSync.Add(-10 * time.Minute),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{
+			ID:          "EXT-1",
+			Identifier:  "EXT-1",
+			URL:         "https://test.test/EXT-1",
+			Title:       "Remote title",
+			Description: "Remote description",
+			UpdatedAt:   lastSync.Add(30 * time.Minute),
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Conflicts != 0 {
+		t.Fatalf("conflicts = %d, want 0", result.Stats.Conflicts)
+	}
+	if len(tracker.updated) != 0 {
+		t.Fatalf("tracker.updated = %d, want 0", len(tracker.updated))
+	}
+	stored, err := store.GetIssue(ctx, "bd-sync1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if stored.Title != "Remote title" {
+		t.Fatalf("title = %q, want remote title", stored.Title)
 	}
 }
 

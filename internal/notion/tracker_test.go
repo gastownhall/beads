@@ -16,6 +16,7 @@ type fakeAPI struct {
 	createdPage      *Page
 	updatedPage      *Page
 	archivePage      *Page
+	queryCalls       int
 	lastCreateDSID   string
 	lastCreateProps  map[string]interface{}
 	lastUpdatePageID string
@@ -27,6 +28,7 @@ func (f *fakeAPI) RetrieveDataSource(context.Context, string) (*DataSource, erro
 	return f.dataSource, nil
 }
 func (f *fakeAPI) QueryDataSource(context.Context, string) ([]Page, error) {
+	f.queryCalls++
 	return append([]Page(nil), f.pages...), nil
 }
 func (f *fakeAPI) ArchivePage(context.Context, string, bool) (*Page, error) {
@@ -41,6 +43,10 @@ func (f *fakeAPI) UpdatePage(_ context.Context, pageID string, properties map[st
 	f.lastUpdatePageID = pageID
 	f.lastUpdateProps = properties
 	return f.updatedPage, nil
+}
+
+func strPtr(value string) *string {
+	return &value
 }
 
 func TestTrackerFetchIssuesFiltersArchivedAndState(t *testing.T) {
@@ -179,5 +185,89 @@ func TestTrackerBuildExternalRefFallbacks(t *testing.T) {
 	tracker := &Tracker{}
 	if got := tracker.BuildExternalRef(&itracker.TrackerIssue{ID: "01234567-89ab-cdef-0123-456789abcdef"}); got != "https://www.notion.so/0123456789abcdef0123456789abcdef" {
 		t.Fatalf("got = %q", got)
+	}
+}
+
+func TestTrackerBatchPushReusesRemoteInventory(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, 3, 19, 14, 0, 0, 0, time.UTC)
+	remotePage := Page{
+		ID:             "01234567-89ab-cdef-0123-456789abcdef",
+		URL:            "https://www.notion.so/Task-0123456789abcdef0123456789abcdef",
+		CreatedTime:    createdAt,
+		LastEditedTime: createdAt.Add(5 * time.Minute),
+		Properties: map[string]PageProperty{
+			PropertyTitle:    {Title: []RichText{{PlainText: "Existing remote"}}},
+			PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
+			PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+			PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+			PropertyType:     {Select: &SelectOption{Name: "Task"}},
+		},
+	}
+	api := &fakeAPI{
+		pages: []Page{remotePage},
+		createdPage: &Page{
+			ID:             "11111111-2222-3333-4444-555555555555",
+			URL:            "https://www.notion.so/New-11111111222233334444555555555555",
+			CreatedTime:    createdAt,
+			LastEditedTime: createdAt.Add(10 * time.Minute),
+			Properties: map[string]PageProperty{
+				PropertyTitle:    {Title: []RichText{{PlainText: "Create me"}}},
+				PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-2"}}},
+				PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+				PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+				PropertyType:     {Select: &SelectOption{Name: "Task"}},
+			},
+		},
+		updatedPage: &Page{
+			ID:             remotePage.ID,
+			URL:            remotePage.URL,
+			CreatedTime:    remotePage.CreatedTime,
+			LastEditedTime: remotePage.LastEditedTime.Add(10 * time.Minute),
+			Properties: map[string]PageProperty{
+				PropertyTitle:    {Title: []RichText{{PlainText: "Updated local"}}},
+				PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
+				PropertyStatus:   {Select: &SelectOption{Name: "In Progress"}},
+				PropertyPriority: {Select: &SelectOption{Name: "High"}},
+				PropertyType:     {Select: &SelectOption{Name: "Feature"}},
+			},
+		},
+	}
+	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+	result, err := tracker.BatchPush(context.Background(), []*types.Issue{
+		{
+			ID:          "bd-1",
+			Title:       "Updated local",
+			Status:      types.StatusInProgress,
+			Priority:    1,
+			IssueType:   types.TypeFeature,
+			ExternalRef: strPtr("https://www.notion.so/Task-0123456789abcdef0123456789abcdef"),
+			UpdatedAt:   remotePage.LastEditedTime.Add(30 * time.Minute),
+		},
+		{
+			ID:        "bd-2",
+			Title:     "Create me",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			UpdatedAt: remotePage.LastEditedTime.Add(30 * time.Minute),
+		},
+	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPush returned error: %v", err)
+	}
+	if api.queryCalls != 1 {
+		t.Fatalf("queryCalls = %d, want 1", api.queryCalls)
+	}
+	if len(result.Updated) != 1 || len(result.Created) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if api.lastUpdatePageID != "01234567-89ab-cdef-0123-456789abcdef" {
+		t.Fatalf("lastUpdatePageID = %q", api.lastUpdatePageID)
+	}
+	if api.lastCreateDSID != "ds_123" {
+		t.Fatalf("lastCreateDSID = %q", api.lastCreateDSID)
 	}
 }
