@@ -123,4 +123,4 @@ For daemon mode without git, use `bd daemon start --local`
 
 ## Notion Sync
 
-See [docs/QUICKSTART.md](docs/QUICKSTART.md#optional-notion-sync) for the full setup guide covering OAuth login, CI tokens, target setup, and sync commands.
+See [docs/QUICKSTART.md](docs/QUICKSTART.md#optional-notion-sync) for the full setup guide covering token setup, target setup, and sync commands.

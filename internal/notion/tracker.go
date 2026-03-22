@@ -71,7 +71,7 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 		return err
 	}
 	if auth == nil || strings.TrimSpace(auth.Token) == "" {
-		return fmt.Errorf("Notion authentication is not configured (run 'bd notion login', set notion.token, or export NOTION_TOKEN)")
+		return fmt.Errorf("Notion authentication is not configured (set notion.token or export NOTION_TOKEN)")
 	}
 	if t.dataSourceID == "" {
 		return fmt.Errorf("Notion data source not configured (run 'bd notion init --parent <page-id>', 'bd notion connect --url <notion-url>', or set notion.data_source_id)")

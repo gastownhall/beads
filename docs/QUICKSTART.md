@@ -199,19 +199,7 @@ See [DOLT-BACKEND.md](DOLT-BACKEND.md#dolt-remotes) for remote configuration det
 
 ## Optional: Notion Sync
 
-If you keep project issues in Notion, choose one authentication path first.
-
-For interactive human setup, configure your Notion public integration credentials and log in with OAuth:
-
-```bash
-bd config set notion.oauth.client_id <your-client-id>
-bd config set notion.oauth.client_secret <your-client-secret>
-# Optional if you use a custom callback URL
-bd config set notion.oauth.redirect_uri http://127.0.0.1:38652/callback
-bd notion login
-```
-
-For CI, agents, or other headless workflows, save an integration token instead:
+If you keep project issues in Notion, save an integration token first:
 
 ```bash
 bd config set notion.token <your-token>
@@ -225,12 +213,11 @@ bd notion init --parent <page-id>
 bd notion connect --url <notion-database-or-data-source-url>
 ```
 
-The same auth values can also come from `NOTION_TOKEN`, `NOTION_OAUTH_CLIENT_ID`, `NOTION_OAUTH_CLIENT_SECRET`, and `NOTION_OAUTH_REDIRECT_URI`. Directly setting `notion.data_source_id` remains available as an escape hatch for advanced setups.
+The same auth value can also come from `NOTION_TOKEN`. Directly setting `notion.data_source_id` remains available as an escape hatch for advanced setups.
 
 Check which auth source is active and whether the target schema is ready:
 
 ```bash
-bd notion whoami
 bd notion status
 bd notion status --json
 ```
