@@ -1,76 +1,82 @@
-# Beads v0.60.0 — The Shared Server Release
+# Beads v0.62.0 — Standalone & The Road to 1.0
 
-**March 12, 2026**
+**March 21, 2026**
 
-Beads v0.60 is an infrastructure and reliability release. The headline feature is shared Dolt server mode — multiple repos and agents can now share a single Dolt instance — but the real story is the dozens of fixes that make Dolt operations safe under concurrency. Port collisions are gone, metadata merge conflicts are auto-resolved, and journal corruption from concurrent server kills is prevented by design.
+Beads v0.62 is the release where beads becomes fully standalone. Gas Town-specific concepts have been systematically removed from the codebase — no more GUPP references, polecat terminology, HOP fields, or hardcoded `~/gt/` paths. Beads is beads. It works with Gas Town, but it doesn't need it.
 
-## Shared Dolt Server Mode
+The other headline: embedded Dolt support has made dramatic progress. DoltHub's coffeegoddd landed 73 commits advancing in-process Dolt — the last major gate before v1.0.0.
 
-The most-requested infrastructure feature lands in v0.60. Previously, each project auto-started its own Dolt server on a hash-derived port. This worked for solo developers but created problems for multi-repo setups (port collisions) and agent workflows (resource waste from dozens of idle servers).
+## The Road to v1.0.0
 
-`bd init --server` now supports pointing multiple projects at a single Dolt instance. Each project gets its own database on the shared server, with full isolation. The shared server config flows through `BEADS_DOLT_*` environment variables or `config.yaml` settings.
+We're actively targeting Beads v1.0.0. The gate is embedded Dolt completion — running Dolt in-process without a separate server. This matters because standalone users (the majority) should get a zero-config experience: `bd init`, `bd create`, done. No server to manage.
 
-Combined with this, Dolt port allocation has moved from deterministic hash-derived ports to OS-assigned ephemeral ports stored in a repo-local state file. The hash-derived scheme suffered from birthday-problem collisions as installations scaled; ephemeral ports eliminate this class of bug entirely.
+The embedded Dolt work is making excellent progress. 73 commits from the Dolt team landed in this release alone, covering create, list, update, close, show, delete, search, query, label, gate, graph, views, and more. A shared `issueops` package now provides transaction-based operations used by both the server and embedded backends.
 
-## Bootstrap Gets Hands-Free
+Once embedded Dolt covers the full command surface and standalone users report a smooth experience, we ship 1.0. We estimate this is weeks away, not months.
 
-`bd bootstrap` previously printed a list of things you should do. Now it does them. When `bd doctor` detects a fixable problem — missing `metadata.json`, stale hook sidecars, project ID gaps — `bd bootstrap` executes the recovery actions directly. This matters most for agent workflows where printing advice to a terminal nobody reads is useless.
+## Beads Is Now Standalone
 
-The new `bd context` command complements this with safe-first error guidance: when something goes wrong, it surfaces the relevant context so agents (and humans) can diagnose without guessing.
+The biggest internal change in v0.62 is the systematic removal of Gas Town-specific concepts:
 
-## New Commands and Flags
+- **GUPP references** removed from all code and docs
+- **Polecat/crew/overseer terminology** replaced with generic types
+- **HOP schema fields** removed from the database schema
+- **Agent-as-bead subsystem** removed entirely
+- **Patrol molecule references** removed from commands
+- **Role templates** (deacon, witness, refinery) removed
+- **Hardcoded `~/gt/` paths** replaced with config-driven paths
+- **`BEADS_ACTOR`** is now the primary env var (`BD_ACTOR` remains as deprecated fallback)
 
-**`bd done`** is now an alias for `bd close`, and `bd done <id> <message>` treats the last argument as the close reason. This aligns with orchestrator vocabulary — agents run `gt done` to finish sessions, and now `bd done` works the same way for beads.
+Beads integrates with Gas Town through clean interfaces, not internal coupling. This separation is prerequisite for a credible 1.0 — beads should work identically whether you're running a full Gas Town, using it with another orchestrator, or just tracking issues solo.
 
-**`bd help --list` and `bd help --doc`** produce machine-readable command listings and full documentation. Useful for generating docs, feeding to agents, or building tooling.
+## Custom Status Categories
 
-**`--design-file`** lets you pass design documents from files instead of piping through stdin. Community contribution from Matthew Endsley.
+Beads has always let you define custom statuses. Now you can assign them to categories that control behavior:
 
-**`--destroy-token`** enables safe non-interactive re-initialization — you must provide the exact token to confirm destruction, preventing accidental data loss in scripts.
+```bash
+bd config set status.custom "in_review:active,qa_testing:wip,archived:done,on_hold:frozen"
+```
 
-**`bd search`** now searches the `external_ref` field, so you can find beads by their GitHub issue URL or Linear ID.
+- **active** statuses appear in `bd ready` (available for claiming)
+- **wip** statuses are in-progress (shown in lists, excluded from ready)
+- **done** statuses are excluded from `bd list` by default
+- **frozen** statuses are excluded from both
 
-## GitHub Issues Integration
+The new `bd statuses` command lists all statuses with their icons and categories. `--json` for programmatic use.
 
-A new tracker plugin syncs GitHub Issues with beads. This is the third tracker integration (after Linear and Jira) and follows the same plugin pattern: configure a repo, and issues flow bidirectionally. `bd` becomes your unified interface regardless of where your team tracks work.
+## Azure DevOps Integration
 
-## Global PRIME.md
+The fifth tracker plugin: `bd ado sync`, `bd ado status`, `bd ado projects`. Follows the same pattern as GitHub, GitLab, Jira, and Linear — configure your ADO org and project, and work items sync bidirectionally. This was a community-requested integration driven by enterprise users.
 
-`~/.config/beads/PRIME.md` is now a fallback when no project-level `PRIME.md` exists. If you use the same priming context across projects, write it once and it applies everywhere. Project-level files still take precedence.
+## New Commands
 
-## Epic Close Guards
+**`bd note <id> <text>`** — Shorthand for appending notes without `bd update --note` ceremony. Small ergonomic win that adds up.
 
-Accidentally closing an epic with open children was a common footgun. v0.60 adds guards: closing an epic with open children now requires explicit confirmation. The close operation also shows a progress summary and handles merge re-parenting — if you close a parent, its children are re-parented to the grandparent instead of becoming orphans.
+**`bd statuses`** — Lists all built-in and custom statuses with icons, categories, and descriptions.
 
-## 35+ Dolt Reliability Fixes
+## Audit Logging
 
-This release is dense with Dolt stability work:
+Status, assignee, and priority changes are now logged to `.beads/interactions.jsonl`. Close reasons are captured in the audit trail. This log survives Dolt GC flatten — even if you aggressively compact your database history, the audit trail persists as a flat file.
 
-- **Journal corruption prevention** — `KillStaleServers` now runs inside `flock`, preventing concurrent server kills from corrupting the Dolt journal
-- **Config corruption** — explicit `DOLT_ADD` prevents config corruption from stale working set state
-- **Pull safety** — pending changes are auto-committed before pull, and `DOLT_PULL` runs in an explicit transaction for autocommit compatibility
-- **Metadata merge conflicts** — auto-resolved during `bd dolt pull` by moving auto-push state to a local file
-- **Remote directory** — `bd dolt remote add/list/remove` now operate on the correct CLI directory
-- **Endpoint drift detection** — warns when auto-started server endpoint doesn't match config
-- **CLI remotes synced** — CLI-managed remotes are synced into the SQL server on store open
+## Dolt Reliability
 
-## Embedded Dolt Storage Interfaces
+- **ServerMode enum** consolidates Dolt server ownership inference into four clean modes (Auto, External, Shared, Embedded), replacing ad-hoc string checks
+- **Windows lifecycle** — stale PID/port files cleaned up; false "failed to stop" warnings eliminated
+- **Hook preservation** — `bd init` preserves ALL pre-existing git hooks, not just beads-managed ones
+- **Shim timeout** increased from 30s to 300s (configurable via `BEADS_HOOK_TIMEOUT`) for chained hooks
+- **Concurrent schema init** serialized with `GET_LOCK` to prevent journal corruption in multi-agent environments
+- **External server safety** — `KillStaleServers` respects server ownership, won't kill externally-managed servers
+- **Doctor infinite loop** — no longer triggers infinite Dolt server restart cycles
 
-DoltHub engineer coffeegoddd contributed a new storage abstraction layer with interfaces, schema migrations, and tests. This is groundwork for potential future embedded Dolt support — running Dolt in-process without a separate server. The interfaces are internal and don't affect the public API, but they represent the first step toward making the storage layer pluggable.
+## Embedded Dolt Progress
 
-## Legacy Cleanup
+73 commits from DoltHub engineer coffeegoddd. Commands now working in embedded mode: create, list, update, close, show, delete, search, query, label, gate, promote, move, merge-slot, quick, diff, count, find-duplicates, graph, dep, duplicate, epic, supersede, swarm, and views/reports. The `issueops` package extraction means both server and embedded backends share the same transactional logic.
 
-The final remnants of three removed subsystems are now gone:
+This is the most active area of development and the primary gate for v1.0.0.
 
-- **Daemon infrastructure** — the last idle monitor and activity signal code has been removed
-- **3-way merge engine** — leftover merge strategy code cleaned up
-- **Sync mode scaffolding** — dead code from the JSONL era removed
+## Community
 
-The Charm library stack has been upgraded to v2: `glamour` (terminal markdown rendering) and `huh` (interactive forms) are both on their latest major versions.
-
-## Community Contributions
-
-This release includes work from 10+ external contributors. Matt Wilkie (maphew) contributed 11 commits: WSL/MINGW detection in the installer, stale doc purges across the entire codebase, and CI doc validation to catch stale references going forward. DoltHub's coffeegoddd delivered the embedded Dolt storage interfaces across 5 PRs. MelsovCOZY added global PRIME.md fallback. Matthew Endsley contributed the `--design-file` flag. Weselow added community fork listings.
+Contributors: coffeegoddd (Dustin Brown / DoltHub), matt wilkie (maphew), harry-miller-trimble, gzur, Algorune, sfncore, angelamayxie, paf0186, Patrick Farrell, Tim Visher.
 
 ## Upgrade
 
@@ -80,6 +86,6 @@ brew upgrade bd
 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
 ```
 
-No breaking changes. If you're running multiple Dolt servers per machine, consider consolidating to a shared server with `bd init --server` for reduced resource usage.
+**Breaking change**: `BD_ACTOR` is deprecated in favor of `BEADS_ACTOR`. The old variable still works as a fallback but will be removed in a future release.
 
-Full changelog: [CHANGELOG.md](CHANGELOG.md) | GitHub release: [v0.60.0](https://github.com/steveyegge/beads/releases/tag/v0.60.0)
+Full changelog: [CHANGELOG.md](CHANGELOG.md) | GitHub release: [v0.62.0](https://github.com/steveyegge/beads/releases/tag/v0.62.0)
