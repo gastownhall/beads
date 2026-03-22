@@ -9,7 +9,7 @@ SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
 endif
 endif
 
-.PHONY: all build test test-full-cgo test-regression bench bench-quick clean install install-force help check-up-to-date fmt fmt-check
+.PHONY: all build test test-full-cgo test-regression bench bench-quick clean install install-force help check-up-to-date fmt fmt-check setup
 
 # Default target
 all: build
@@ -140,6 +140,11 @@ endif
 	@git config core.hooksPath .githooks 2>/dev/null && echo "Configured git hooks (.githooks/)" || true
 
 install: check-up-to-date
+
+## setup: configure git hooks (alias for developers who don't need to build)
+setup:
+	git config core.hooksPath .githooks
+	@echo "Done. Pre-commit hook active."
 
 # Format all Go files
 fmt:
