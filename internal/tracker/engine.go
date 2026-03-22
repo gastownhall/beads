@@ -393,24 +393,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 
-			updates := make(map[string]interface{})
-			updates["title"] = conv.Issue.Title
-			updates["description"] = conv.Issue.Description
-			updates["priority"] = conv.Issue.Priority
-			updates["status"] = string(conv.Issue.Status)
-			updates["issue_type"] = string(conv.Issue.IssueType)
-			updates["assignee"] = conv.Issue.Assignee
-			if ref != "" {
-				if existing.ExternalRef == nil || strings.TrimSpace(*existing.ExternalRef) != ref {
-					updates["external_ref"] = ref
-				}
-			}
-
-			// Preserve metadata from tracker
-			if extIssue.Metadata != nil {
-				if raw, err := json.Marshal(extIssue.Metadata); err == nil {
-					updates["metadata"] = json.RawMessage(raw)
-				}
+			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
+			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
+				updates["metadata"] = raw
 			}
 
 			if err := e.Store.RunInTransaction(ctx, fmt.Sprintf("bd: pull update %s", existing.ID), func(tx storage.Transaction) error {
@@ -426,10 +411,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
-			if extIssue.Metadata != nil {
-				if raw, err := json.Marshal(extIssue.Metadata); err == nil {
-					conv.Issue.Metadata = json.RawMessage(raw)
-				}
+			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
+				conv.Issue.Metadata = raw
 			}
 			if err := e.Store.CreateIssue(ctx, conv.Issue, e.Actor); err != nil {
 				e.warn("Failed to create issue for %s: %v", extIssue.Identifier, err)
@@ -470,6 +453,36 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 		localRef = strings.TrimSpace(*local.ExternalRef)
 	}
 	return localRef == strings.TrimSpace(ref)
+}
+
+func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string) map[string]interface{} {
+	updates := map[string]interface{}{
+		"title":       remote.Title,
+		"description": remote.Description,
+		"priority":    remote.Priority,
+		"status":      string(remote.Status),
+		"issue_type":  string(remote.IssueType),
+		"assignee":    remote.Assignee,
+	}
+	trimmedRef := strings.TrimSpace(ref)
+	if trimmedRef == "" {
+		return updates
+	}
+	if existing.ExternalRef == nil || strings.TrimSpace(*existing.ExternalRef) != trimmedRef {
+		updates["external_ref"] = trimmedRef
+	}
+	return updates
+}
+
+func marshalTrackerMetadata(metadata interface{}) (json.RawMessage, bool) {
+	if metadata == nil {
+		return nil, false
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(raw), true
 }
 
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {

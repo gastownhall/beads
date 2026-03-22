@@ -456,26 +456,21 @@ func (t *Tracker) ensureRemoteIndex(ctx context.Context) error {
 }
 
 func (t *Tracker) lookupRemoteByPageID(pageID string) (*itracker.TrackerIssue, bool) {
-	if strings.TrimSpace(pageID) == "" {
-		return nil, false
-	}
-	t.cacheMu.RLock()
-	defer t.cacheMu.RUnlock()
-	issue, ok := t.remoteByPageID[strings.TrimSpace(pageID)]
-	if !ok {
-		return nil, false
-	}
-	cloned := cloneTrackerIssue(issue)
-	return &cloned, true
+	return t.lookupRemoteIssue(t.remoteByPageID, pageID)
 }
 
 func (t *Tracker) lookupRemoteByLocalID(localID string) (*itracker.TrackerIssue, bool) {
-	if strings.TrimSpace(localID) == "" {
+	return t.lookupRemoteIssue(t.remoteByLocalID, localID)
+}
+
+func (t *Tracker) lookupRemoteIssue(index map[string]itracker.TrackerIssue, identifier string) (*itracker.TrackerIssue, bool) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
 		return nil, false
 	}
 	t.cacheMu.RLock()
 	defer t.cacheMu.RUnlock()
-	issue, ok := t.remoteByLocalID[strings.TrimSpace(localID)]
+	issue, ok := index[identifier]
 	if !ok {
 		return nil, false
 	}
@@ -487,19 +482,20 @@ func (t *Tracker) upsertRemoteIssue(issue *itracker.TrackerIssue) {
 	if issue == nil {
 		return
 	}
+	cloned := cloneTrackerIssue(*issue)
 	t.cacheMu.Lock()
 	defer t.cacheMu.Unlock()
 
 	replaced := false
 	for i := range t.issueCache {
 		if sameTrackerIssue(t.issueCache[i], *issue) {
-			t.issueCache[i] = cloneTrackerIssue(*issue)
+			t.issueCache[i] = cloned
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		t.issueCache = append(t.issueCache, cloneTrackerIssue(*issue))
+		t.issueCache = append(t.issueCache, cloned)
 	}
 	if t.remoteByPageID == nil {
 		t.remoteByPageID = make(map[string]itracker.TrackerIssue)
@@ -508,13 +504,13 @@ func (t *Tracker) upsertRemoteIssue(issue *itracker.TrackerIssue) {
 		t.remoteByLocalID = make(map[string]itracker.TrackerIssue)
 	}
 	if id := strings.TrimSpace(issue.ID); id != "" {
-		t.remoteByPageID[id] = cloneTrackerIssue(*issue)
+		t.remoteByPageID[id] = cloned
 	}
 	if identifier := strings.TrimSpace(ExtractNotionIdentifier(issue.URL)); identifier != "" {
-		t.remoteByPageID[identifier] = cloneTrackerIssue(*issue)
+		t.remoteByPageID[identifier] = cloned
 	}
 	if raw, ok := issue.Raw.(*PulledIssue); ok && raw != nil && strings.TrimSpace(raw.ID) != "" {
-		t.remoteByLocalID[strings.TrimSpace(raw.ID)] = cloneTrackerIssue(*issue)
+		t.remoteByLocalID[strings.TrimSpace(raw.ID)] = cloned
 	}
 }
 
