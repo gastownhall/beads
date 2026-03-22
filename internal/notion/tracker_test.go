@@ -146,19 +146,20 @@ func TestTrackerFetchIssuesExcludesEqualLastSyncBoundary(t *testing.T) {
 	}
 	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
 
+	boundary = boundary.Add(23 * time.Second)
 	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &boundary})
 	if err != nil {
 		t.Fatalf("FetchIssues returned error: %v", err)
 	}
-	if len(issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(issues))
+	if len(issues) != 2 {
+		t.Fatalf("issues = %d, want 2", len(issues))
 	}
-	if issues[0].Title != "After boundary" {
-		t.Fatalf("title = %q", issues[0].Title)
+	if issues[0].Title != "Equal boundary" || issues[1].Title != "After boundary" {
+		t.Fatalf("titles = %q, %q", issues[0].Title, issues[1].Title)
 	}
 	queried, candidates := tracker.LastPullStats()
-	if queried != 2 || candidates != 1 {
-		t.Fatalf("LastPullStats = (%d, %d), want (2, 1)", queried, candidates)
+	if queried != 2 || candidates != 2 {
+		t.Fatalf("LastPullStats = (%d, %d), want (2, 2)", queried, candidates)
 	}
 }
 

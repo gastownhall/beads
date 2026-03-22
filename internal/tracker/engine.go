@@ -106,7 +106,6 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	defer span.End()
 
 	result := &SyncResult{Success: true}
-	now := time.Now().UTC()
 
 	// Default to bidirectional if neither specified
 	if !opts.Pull && !opts.Push {
@@ -180,7 +179,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	// Update last_sync timestamp
 	if !opts.DryRun {
-		lastSync := now.Format(time.RFC3339)
+		lastSync := time.Now().UTC().Format(time.RFC3339Nano)
 		key := e.Tracker.ConfigPrefix() + ".last_sync"
 		if err := e.Store.SetConfig(ctx, key, lastSync); err != nil {
 			e.warn("Failed to update last_sync: %v", err)
@@ -206,7 +205,7 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 		return nil, nil // No previous sync, no conflicts possible
 	}
 
-	lastSync, err := time.Parse(time.RFC3339, lastSyncStr)
+	lastSync, err := parseSyncTime(lastSyncStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid last_sync timestamp %q: %w", lastSyncStr, err)
 	}
@@ -274,7 +273,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	var lastSync *time.Time
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	if lastSyncStr, err := e.Store.GetConfig(ctx, key); err == nil && lastSyncStr != "" {
-		if t, err := time.Parse(time.RFC3339, lastSyncStr); err == nil {
+		if t, err := parseSyncTime(lastSyncStr); err == nil {
 			fetchOpts.Since = &t
 			lastSync = &t
 			stats.Incremental = true
@@ -287,7 +286,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		return nil, fmt.Errorf("searching local issues: %w", err)
 	}
 	localByExternalIdentifier := make(map[string]*types.Issue, len(localIssues))
+	localByID := make(map[string]*types.Issue, len(localIssues))
 	for _, localIssue := range localIssues {
+		if localIssue == nil {
+			continue
+		}
+		if localID := strings.TrimSpace(localIssue.ID); localID != "" {
+			localByID[localID] = localIssue
+		}
 		if localIssue == nil || localIssue.ExternalRef == nil {
 			continue
 		}
@@ -334,22 +340,15 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				existing = localByExternalIdentifier[identifier]
 			}
 		}
-
-		if opts.DryRun {
-			if existing != nil {
-				e.msg("[dry-run] Would update local issue: %s - %s", extIssue.Identifier, extIssue.Title)
-				stats.Updated++
-			} else {
-				e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
-				stats.Created++
-			}
-			continue
-		}
-
 		conv := mapper.IssueToBeads(&extIssue)
 		if conv == nil || conv.Issue == nil {
 			stats.Skipped++
 			continue
+		}
+		if existing == nil {
+			if localID := strings.TrimSpace(conv.Issue.ID); localID != "" {
+				existing = localByID[localID]
+			}
 		}
 
 		// TransformIssue hook: description formatting, field normalization
@@ -364,6 +363,22 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				stats.Skipped++
 				continue
 			}
+		}
+
+		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+			stats.Skipped++
+			continue
+		}
+
+		if opts.DryRun {
+			if existing != nil {
+				e.msg("[dry-run] Would update local issue: %s - %s", extIssue.Identifier, extIssue.Title)
+				stats.Updated++
+			} else {
+				e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
+				stats.Created++
+			}
+			continue
 		}
 
 		if existing != nil {
@@ -383,6 +398,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			updates["description"] = conv.Issue.Description
 			updates["priority"] = conv.Issue.Priority
 			updates["status"] = string(conv.Issue.Status)
+			updates["issue_type"] = string(conv.Issue.IssueType)
+			updates["assignee"] = conv.Issue.Assignee
 			if ref != "" {
 				if existing.ExternalRef == nil || strings.TrimSpace(*existing.ExternalRef) != ref {
 					updates["external_ref"] = ref
@@ -428,6 +445,35 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
+}
+
+func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+	if local.Title != remote.Title ||
+		local.Description != remote.Description ||
+		local.Priority != remote.Priority ||
+		local.Status != remote.Status ||
+		local.IssueType != remote.IssueType ||
+		strings.TrimSpace(local.Assignee) != strings.TrimSpace(remote.Assignee) {
+		return false
+	}
+	localRef := ""
+	if local.ExternalRef != nil {
+		localRef = strings.TrimSpace(*local.ExternalRef)
+	}
+	return localRef == strings.TrimSpace(ref)
+}
+
+func parseSyncTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, fmt.Errorf("empty sync timestamp")
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed, nil
+	}
+	return time.Parse(time.RFC3339, value)
 }
 
 // doPush exports beads issues to the external tracker.

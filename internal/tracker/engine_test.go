@@ -203,7 +203,9 @@ func (m *mockTracker) UpdateIssue(_ context.Context, externalID string, issue *t
 }
 
 // mockMapper implements FieldMapper for testing.
-type mockMapper struct{}
+type mockMapper struct {
+	issueToBeads func(*TrackerIssue) *IssueConversion
+}
 
 func (m *mockMapper) PriorityToBeads(p interface{}) int {
 	if v, ok := p.(int); ok {
@@ -224,6 +226,9 @@ func (m *mockMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {
 }
 
 func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
+	if m.issueToBeads != nil {
+		return m.issueToBeads(ti)
+	}
 	return &IssueConversion{
 		Issue: &types.Issue{
 			Title:       ti.Title,
@@ -232,6 +237,193 @@ func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
 			Status:      types.StatusOpen,
 			IssueType:   types.TypeTask,
 		},
+	}
+}
+
+func TestEnginePullMatchesExistingIssueByLocalID(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Local title",
+		Description: "Local description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         "https://test.test/EXT-1",
+		Title:       "Remote title",
+		Description: "Remote description",
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+				},
+			}
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Created != 0 || result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want Created=0 Updated=1", result.PullStats)
+	}
+	updated, err := store.GetIssue(ctx, "bd-local")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if updated.Title != "Remote title" || updated.Description != "Remote description" {
+		t.Fatalf("issue = %+v", updated)
+	}
+}
+
+func TestEnginePullSkipsNoopUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://www.notion.so/32be5bf97fae804d9e07f93af6c79467"
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Remote title",
+		Description: "Remote description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		Assignee:    "Osamu",
+		ExternalRef: &extRef,
+		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title",
+		Description: "Remote description",
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+					Assignee:    "Osamu",
+				},
+			}
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Created != 0 || result.PullStats.Updated != 0 || result.PullStats.Skipped != 1 {
+		t.Fatalf("PullStats = %+v, want Created=0 Updated=0 Skipped=1", result.PullStats)
+	}
+}
+
+func TestEnginePullDoesNotTreatPreviousPullAsLocalConflict(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://www.notion.so/32be5bf97fae804d9e07f93af6c79467"
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Local title",
+		Description: "Local description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: &extRef,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+				},
+			}
+		},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title 1",
+		Description: "Remote description 1",
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	if _, err := engine.Sync(ctx, SyncOptions{Pull: true}); err != nil {
+		t.Fatalf("first Sync() error: %v", err)
+	}
+
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title 2",
+		Description: "Remote description 2",
+		UpdatedAt:   time.Now().UTC().Add(time.Second),
+	}}
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("second Sync() error: %v", err)
+	}
+	if result.PullStats.Updated != 1 {
+		t.Fatalf("second PullStats = %+v, want Updated=1", result.PullStats)
+	}
+	updated, err := store.GetIssue(ctx, "bd-local")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if updated.Description != "Remote description 2" {
+		t.Fatalf("description = %q, want %q", updated.Description, "Remote description 2")
 	}
 }
 
