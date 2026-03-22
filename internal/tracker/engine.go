@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -392,7 +393,6 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 
-			// Update existing issue
 			updates := make(map[string]interface{})
 			updates["title"] = conv.Issue.Title
 			updates["description"] = conv.Issue.Description
@@ -413,7 +413,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				}
 			}
 
-			if err := e.Store.UpdateIssue(ctx, existing.ID, updates, e.Actor); err != nil {
+			if err := e.Store.RunInTransaction(ctx, fmt.Sprintf("bd: pull update %s", existing.ID), func(tx storage.Transaction) error {
+				if err := tx.UpdateIssue(ctx, existing.ID, updates, e.Actor); err != nil {
+					return err
+				}
+				return syncIssueLabels(ctx, tx, existing.ID, conv.Issue.Labels, e.Actor)
+			}); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
 				continue
 			}
@@ -456,7 +461,8 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 		local.Priority != remote.Priority ||
 		local.Status != remote.Status ||
 		local.IssueType != remote.IssueType ||
-		strings.TrimSpace(local.Assignee) != strings.TrimSpace(remote.Assignee) {
+		strings.TrimSpace(local.Assignee) != strings.TrimSpace(remote.Assignee) ||
+		!equalNormalizedStrings(local.Labels, remote.Labels) {
 		return false
 	}
 	localRef := ""
@@ -464,6 +470,68 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 		localRef = strings.TrimSpace(*local.ExternalRef)
 	}
 	return localRef == strings.TrimSpace(ref)
+}
+
+func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {
+	current, err := tx.GetLabels(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	currentSet := normalizedStringSet(current)
+	desiredSet := normalizedStringSet(desired)
+	for label := range currentSet {
+		if _, ok := desiredSet[label]; ok {
+			continue
+		}
+		if err := tx.RemoveLabel(ctx, issueID, label, actor); err != nil {
+			return err
+		}
+	}
+	for label := range desiredSet {
+		if _, ok := currentSet[label]; ok {
+			continue
+		}
+		if err := tx.AddLabel(ctx, issueID, label, actor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func equalNormalizedStrings(a, b []string) bool {
+	an := normalizedStringSlice(a)
+	bn := normalizedStringSlice(b)
+	if len(an) != len(bn) {
+		return false
+	}
+	for i := range an {
+		if an[i] != bn[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizedStringSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func normalizedStringSlice(values []string) []string {
+	set := normalizedStringSet(values)
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func parseSyncTime(value string) (time.Time, error) {

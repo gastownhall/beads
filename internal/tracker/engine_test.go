@@ -313,6 +313,7 @@ func TestEnginePullSkipsNoopUpdate(t *testing.T) {
 		IssueType:   types.TypeTask,
 		Priority:    2,
 		Assignee:    "Osamu",
+		Labels:      []string{"alpha", "beta"},
 		ExternalRef: &extRef,
 		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
 	}
@@ -340,6 +341,7 @@ func TestEnginePullSkipsNoopUpdate(t *testing.T) {
 					Status:      types.StatusOpen,
 					IssueType:   types.TypeTask,
 					Assignee:    "Osamu",
+					Labels:      []string{"beta", "alpha"},
 				},
 			}
 		},
@@ -352,6 +354,138 @@ func TestEnginePullSkipsNoopUpdate(t *testing.T) {
 	}
 	if result.PullStats.Created != 0 || result.PullStats.Updated != 0 || result.PullStats.Skipped != 1 {
 		t.Fatalf("PullStats = %+v, want Created=0 Updated=0 Skipped=1", result.PullStats)
+	}
+}
+
+func TestEnginePullUpdatesLabelsOnExistingIssue(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://www.notion.so/32be5bf97fae804d9e07f93af6c79467"
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Remote title",
+		Description: "Remote description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		Assignee:    "Osamu",
+		Labels:      []string{"old-label"},
+		ExternalRef: &extRef,
+		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title",
+		Description: "Remote description",
+		Labels:      []string{"new-a", "new-b"},
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+					Assignee:    "Osamu",
+					Labels:      append([]string(nil), ti.Labels...),
+				},
+			}
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want Updated=1", result.PullStats)
+	}
+	labels, err := store.GetLabels(ctx, "bd-local")
+	if err != nil {
+		t.Fatalf("GetLabels() error: %v", err)
+	}
+	if !equalNormalizedStrings(labels, []string{"new-a", "new-b"}) {
+		t.Fatalf("labels = %v, want [new-a new-b]", labels)
+	}
+}
+
+func TestEnginePullDryRunTreatsLabelOnlyChangeAsUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://www.notion.so/32be5bf97fae804d9e07f93af6c79467"
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Remote title",
+		Description: "Remote description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		Assignee:    "Osamu",
+		Labels:      []string{"old-label"},
+		ExternalRef: &extRef,
+		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title",
+		Description: "Remote description",
+		Labels:      []string{"new-label"},
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+					Assignee:    "Osamu",
+					Labels:      append([]string(nil), ti.Labels...),
+				},
+			}
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Updated != 1 || result.PullStats.Created != 0 {
+		t.Fatalf("PullStats = %+v, want Updated=1 Created=0", result.PullStats)
+	}
+	labels, err := store.GetLabels(ctx, "bd-local")
+	if err != nil {
+		t.Fatalf("GetLabels() error: %v", err)
+	}
+	if !equalNormalizedStrings(labels, []string{"old-label"}) {
+		t.Fatalf("labels = %v, want [old-label]", labels)
 	}
 }
 
