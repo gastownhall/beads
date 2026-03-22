@@ -423,8 +423,8 @@ func TestEngineDryRunUsesBatchPreviewWhenAvailable(t *testing.T) {
 	if len(msgs) != 0 {
 		t.Fatalf("msgs = %#v, want no create/update preview lines", msgs)
 	}
-	if len(warns) != 1 || !strings.Contains(warns[0], "outside the current target") {
-		t.Fatalf("warns = %#v", warns)
+	if len(warns) != 0 {
+		t.Fatalf("warns = %#v, want no immediate warning spam", warns)
 	}
 	stored, err := store.GetIssue(ctx, "bd-batch-preview")
 	if err != nil {

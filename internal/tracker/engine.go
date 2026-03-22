@@ -681,9 +681,6 @@ func (e *Engine) renderBatchDryRun(issues []*types.Issue, result *BatchPushResul
 	for _, item := range result.Updated {
 		e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), titles[item.LocalID])
 	}
-	for _, warning := range result.Warnings {
-		e.warn("%s", warning)
-	}
 }
 
 // resolveConflicts applies the configured conflict resolution strategy.

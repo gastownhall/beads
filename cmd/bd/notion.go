@@ -600,16 +600,34 @@ func renderNotionSyncResult(cmd *cobra.Command, result *tracker.SyncResult) erro
 	if result.Stats.Conflicts > 0 {
 		_, _ = fmt.Fprintf(out, "◐ Resolved %d conflicts\n", result.Stats.Conflicts)
 	}
-	for _, warning := range result.Warnings {
-		if strings.TrimSpace(warning) == "" {
-			continue
-		}
-		_, _ = fmt.Fprintf(out, "Warning: %s\n", warning)
+	for _, line := range summarizeNotionSyncWarnings(result.Warnings) {
+		_, _ = fmt.Fprintln(out, line)
 	}
 	if notionSyncDryRun {
 		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
 	}
 	return nil
+}
+
+func summarizeNotionSyncWarnings(warnings []string) []string {
+	staleTargetCount := 0
+	for _, warning := range warnings {
+		warning = strings.TrimSpace(warning)
+		switch {
+		case warning == "":
+			continue
+		case strings.HasPrefix(warning, "Skipped unsupported Notion issue types:"):
+			continue
+		case strings.Contains(warning, "outside the current target"):
+			staleTargetCount++
+		}
+	}
+	if staleTargetCount == 0 {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("Skipped %d linked issues that still point at a different Notion target. Clear external_ref to recreate them in this data source.", staleTargetCount),
+	}
 }
 
 func buildNotionPullHooks(ctx context.Context) *tracker.PullHooks {

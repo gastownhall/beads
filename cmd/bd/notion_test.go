@@ -383,6 +383,8 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 		Stats: tracker.SyncStats{Pulled: 2, Pushed: 3, Conflicts: 1},
 		Warnings: []string{
 			"Skipped unsupported Notion issue types: event=2",
+			"Skipped bd-1: Notion external_ref points outside the current target; clear external_ref to recreate it in this data source",
+			"Skipped bd-2: Notion external_ref points outside the current target; clear external_ref to recreate it in this data source",
 		},
 		PullStats: tracker.PullStats{
 			Created: 1,
@@ -402,10 +404,19 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 		"Pulled 2 issues (1 created, 1 updated)",
 		"Pushed 3 issues (2 created, 1 updated)",
 		"Resolved 1 conflicts",
-		"Warning: Skipped unsupported Notion issue types: event=2",
+		"Skipped 2 linked issues that still point at a different Notion target. Clear external_ref to recreate them in this data source.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{
+		"event=2",
+		"bd-1",
+		"bd-2",
+	} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("stdout unexpectedly contained %q\n%s", unwanted, out)
 		}
 	}
 }
