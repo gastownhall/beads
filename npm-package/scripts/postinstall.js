@@ -172,7 +172,20 @@ async function extractZip(zipPath, destDir, binaryName) {
       // The binary should now be in destDir
       const extractedBinary = path.join(destDir, binaryName);
 
-      if (!fs.existsSync(extractedBinary)) {
+      // Windows NTFS metadata visibility lag: fs.existsSync may return false
+      // immediately after Expand-Archive returns (GH#2741, same class as #1683).
+      // Poll with short delay before concluding the binary is missing.
+      let found = fs.existsSync(extractedBinary);
+      if (!found && os.platform() === 'win32') {
+        for (let poll = 0; poll < 10; poll++) {
+          await sleep(200);
+          if (fs.existsSync(extractedBinary)) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) {
         throw new Error(`Binary not found after extraction: ${extractedBinary}`);
       }
 
