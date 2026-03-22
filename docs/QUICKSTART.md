@@ -197,6 +197,34 @@ When a teammate clones the repo, `bd bootstrap` auto-detects the existing databa
 
 See [DOLT-BACKEND.md](DOLT-BACKEND.md#dolt-remotes) for remote configuration details and [FEDERATION-SETUP.md](../FEDERATION-SETUP.md) for multi-team sync.
 
+## Optional: Notion Sync
+
+If you keep project issues in Notion, configure a Notion integration token and the target data source:
+
+```bash
+bd config notion.token <your-pat>
+bd config notion.data_source_id <data-source-id>
+bd config notion.view_url <optional-view-url>
+```
+
+You can also provide the same values through `NOTION_TOKEN`, `NOTION_DATA_SOURCE_ID`, and `NOTION_VIEW_URL`.
+
+Check connectivity and schema readiness:
+
+```bash
+bd notion status
+bd notion status --json
+```
+
+Preview or run sync:
+
+```bash
+bd notion sync --dry-run
+bd notion sync
+bd notion sync --pull
+bd notion sync --push
+```
+
 ## Database Location
 
 By default, data is stored in `.beads/dolt/` within your repository.

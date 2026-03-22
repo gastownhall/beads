@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -127,6 +128,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 			span.SetStatus(codes.Error, result.Error)
 			return result, err
 		}
+		result.PullStats = *pullStats
 		result.Stats.Pulled = pullStats.Created + pullStats.Updated
 		result.Stats.Created += pullStats.Created
 		result.Stats.Updated += pullStats.Updated
@@ -154,11 +156,13 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 			span.SetStatus(codes.Error, result.Error)
 			return result, err
 		}
+		result.PushStats = *pushStats
 		result.Stats.Pushed = pushStats.Created + pushStats.Updated
 		result.Stats.Created += pushStats.Created
 		result.Stats.Updated += pushStats.Updated
 		result.Stats.Skipped += pushStats.Skipped
 		result.Stats.Errors += pushStats.Errors
+		result.Warnings = append(result.Warnings, pushStats.Warnings...)
 	}
 
 	// Record final stats as span attributes.
@@ -276,6 +280,26 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 		}
 	}
 
+	localIssues, err := e.Store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("searching local issues: %w", err)
+	}
+	localByExternalIdentifier := make(map[string]*types.Issue, len(localIssues))
+	for _, localIssue := range localIssues {
+		if localIssue == nil || localIssue.ExternalRef == nil {
+			continue
+		}
+		localRef := strings.TrimSpace(*localIssue.ExternalRef)
+		if localRef == "" || !e.Tracker.IsExternalRef(localRef) {
+			continue
+		}
+		identifier := e.Tracker.ExtractIdentifier(localRef)
+		if identifier == "" {
+			continue
+		}
+		localByExternalIdentifier[identifier] = localIssue
+	}
+
 	// Fetch issues from external tracker
 	extIssues, err := e.Tracker.FetchIssues(ctx, fetchOpts)
 	if err != nil {
@@ -296,15 +320,27 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 			}
 		}
 
-		if opts.DryRun {
-			e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
-			stats.Created++
-			continue
-		}
-
-		// Check if we already have this issue
+		// Check if we already have this issue before dry-run so preview stats
+		// distinguish creates from updates.
 		ref := e.Tracker.BuildExternalRef(&extIssue)
 		existing, _ := e.Store.GetIssueByExternalRef(ctx, ref)
+		if existing == nil && ref != "" {
+			identifier := e.Tracker.ExtractIdentifier(ref)
+			if identifier != "" {
+				existing = localByExternalIdentifier[identifier]
+			}
+		}
+
+		if opts.DryRun {
+			if existing != nil {
+				e.msg("[dry-run] Would update local issue: %s - %s", extIssue.Identifier, extIssue.Title)
+				stats.Updated++
+			} else {
+				e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
+				stats.Created++
+			}
+			continue
+		}
 
 		conv := mapper.IssueToBeads(&extIssue)
 		if conv == nil || conv.Issue == nil {
@@ -343,6 +379,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions) (*PullStats, erro
 			updates["description"] = conv.Issue.Description
 			updates["priority"] = conv.Issue.Priority
 			updates["status"] = string(conv.Issue.Status)
+			if ref != "" {
+				if existing.ExternalRef == nil || strings.TrimSpace(*existing.ExternalRef) != ref {
+					updates["external_ref"] = ref
+				}
+			}
 
 			// Preserve metadata from tracker
 			if extIssue.Metadata != nil {
@@ -415,6 +456,34 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		return nil, fmt.Errorf("searching local issues: %w", err)
 	}
 
+	if !opts.DryRun {
+		if batchTracker, ok := e.Tracker.(BatchPushTracker); ok {
+			pushIssues, skipped := e.collectBatchPushIssues(issues, opts, skipIDs, forceIDs)
+			stats.Skipped += skipped
+			if len(pushIssues) == 0 {
+				return stats, nil
+			}
+			batchResult, err := batchTracker.BatchPush(ctx, pushIssues)
+			if err != nil {
+				return nil, fmt.Errorf("batch pushing issues: %w", err)
+			}
+			e.applyBatchPushResult(ctx, batchResult)
+			stats.Created += len(batchResult.Created)
+			stats.Updated += len(batchResult.Updated)
+			stats.Skipped += len(batchResult.Skipped)
+			stats.Errors += len(batchResult.Errors)
+			stats.Warnings = append(stats.Warnings, batchResult.Warnings...)
+			for _, item := range batchResult.Errors {
+				if item.LocalID != "" {
+					e.warn("Failed to push %s in %s: %s", item.LocalID, e.Tracker.DisplayName(), item.Message)
+					continue
+				}
+				e.warn("Failed to push issues in %s: %s", e.Tracker.DisplayName(), item.Message)
+			}
+			return stats, nil
+		}
+	}
+
 	for _, issue := range issues {
 		// Skip filtered types/states/ephemeral
 		if !e.shouldPushIssue(issue, opts) {
@@ -437,9 +506,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		}
 
 		extRef := derefStr(issue.ExternalRef)
+		willCreate := extRef == "" || !e.Tracker.IsExternalRef(extRef)
 
 		if opts.DryRun {
-			if extRef == "" {
+			if willCreate {
 				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), issue.Title)
 				stats.Created++
 			} else {
@@ -457,7 +527,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			pushIssue = &copy
 		}
 
-		if extRef == "" || !e.Tracker.IsExternalRef(extRef) {
+		if willCreate {
 			// Create in external tracker
 			created, err := e.Tracker.CreateIssue(ctx, pushIssue)
 			if err != nil {
@@ -516,6 +586,58 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		attribute.Int("sync.errors", stats.Errors),
 	)
 	return stats, nil
+}
+
+func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions, skipIDs, forceIDs map[string]bool) ([]*types.Issue, int) {
+	pushIssues := make([]*types.Issue, 0, len(issues))
+	skipped := 0
+	for _, issue := range issues {
+		if !e.shouldPushIssue(issue, opts) {
+			skipped++
+			continue
+		}
+		if e.PushHooks != nil && e.PushHooks.ShouldPush != nil && !e.PushHooks.ShouldPush(issue) {
+			skipped++
+			continue
+		}
+		if skipIDs[issue.ID] {
+			skipped++
+			continue
+		}
+
+		extRef := derefStr(issue.ExternalRef)
+		willCreate := extRef == "" || !e.Tracker.IsExternalRef(extRef)
+		if !willCreate && opts.CreateOnly && !forceIDs[issue.ID] {
+			skipped++
+			continue
+		}
+		pushIssues = append(pushIssues, e.formatPushIssue(issue))
+	}
+	return pushIssues, skipped
+}
+
+func (e *Engine) formatPushIssue(issue *types.Issue) *types.Issue {
+	if e.PushHooks == nil || e.PushHooks.FormatDescription == nil {
+		return issue
+	}
+	copy := *issue
+	copy.Description = e.PushHooks.FormatDescription(issue)
+	return &copy
+}
+
+func (e *Engine) applyBatchPushResult(ctx context.Context, result *BatchPushResult) {
+	if result == nil {
+		return
+	}
+	for _, item := range result.Created {
+		if item.LocalID == "" || strings.TrimSpace(item.ExternalRef) == "" {
+			continue
+		}
+		updates := map[string]interface{}{"external_ref": strings.TrimSpace(item.ExternalRef)}
+		if err := e.Store.UpdateIssue(ctx, item.LocalID, updates, e.Actor); err != nil {
+			e.warn("Failed to update external_ref for %s: %v", item.LocalID, err)
+		}
+	}
 }
 
 // resolveConflicts applies the configured conflict resolution strategy.

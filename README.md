@@ -36,6 +36,7 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 * **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.
 * **Messaging:** Message issue type with threading (`--thread`), ephemeral lifecycle, and mail delegation.
 * **Graph Links:** `relates_to`, `duplicates`, `supersedes`, and `replies_to` for knowledge graphs.
+* **Notion Sync:** Configure a Notion PAT plus data source ID, then use `bd notion status` and `bd notion sync` for bidirectional issue sync.
 
 ## 📖 Essential Commands
 
@@ -119,3 +120,20 @@ For daemon mode without git, use `bd daemon start --local`
 
 * [Installing](docs/INSTALLING.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot Setup](docs/COPILOT_INTEGRATION.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [Troubleshooting](docs/TROUBLESHOOTING.md) | [FAQ](docs/FAQ.md)
 * [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/steveyegge/beads)
+
+## Notion Sync
+
+Configure Notion once with a PAT and data source ID:
+
+```bash
+bd config notion.token <your-pat>
+bd config notion.data_source_id <data-source-id>
+bd config notion.view_url <optional-view-url>
+```
+
+Then verify the target and preview a sync:
+
+```bash
+bd notion status
+bd notion sync --dry-run
+```

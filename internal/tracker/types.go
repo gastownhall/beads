@@ -88,11 +88,13 @@ type SyncOptions struct {
 
 // SyncResult is the complete result of a sync operation.
 type SyncResult struct {
-	Success  bool      `json:"success"`
-	Stats    SyncStats `json:"stats"`
-	LastSync string    `json:"last_sync,omitempty"` // RFC3339 timestamp
-	Error    string    `json:"error,omitempty"`
-	Warnings []string  `json:"warnings,omitempty"`
+	Success   bool      `json:"success"`
+	Stats     SyncStats `json:"stats"`
+	LastSync  string    `json:"last_sync,omitempty"` // RFC3339 timestamp
+	Error     string    `json:"error,omitempty"`
+	Warnings  []string  `json:"warnings,omitempty"`
+	PullStats PullStats `json:"-"`
+	PushStats PushStats `json:"-"`
 }
 
 // SyncStats accumulates sync statistics.
@@ -117,10 +119,32 @@ type PullStats struct {
 
 // PushStats tracks push operation results.
 type PushStats struct {
-	Created int
-	Updated int
-	Skipped int
-	Errors  int
+	Created  int
+	Updated  int
+	Skipped  int
+	Errors   int
+	Warnings []string
+}
+
+// BatchPushItem describes one local issue handled by a tracker batch push.
+type BatchPushItem struct {
+	LocalID     string
+	ExternalRef string
+}
+
+// BatchPushError describes one issue-level failure from a tracker batch push.
+type BatchPushError struct {
+	LocalID string
+	Message string
+}
+
+// BatchPushResult is the normalized result of a tracker batch push.
+type BatchPushResult struct {
+	Created  []BatchPushItem
+	Updated  []BatchPushItem
+	Skipped  []string
+	Errors   []BatchPushError
+	Warnings []string
 }
 
 // Conflict represents a bidirectional modification conflict.
