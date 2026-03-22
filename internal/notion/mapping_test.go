@@ -33,6 +33,9 @@ func TestBuildPagePropertiesAndPulledIssueRoundTrip(t *testing.T) {
 	if pushIssue.ExternalRef != "https://www.notion.so/0123456789abcdef0123456789abcdef" {
 		t.Fatalf("external_ref = %q", pushIssue.ExternalRef)
 	}
+	if len(pushIssue.Labels) != 2 {
+		t.Fatalf("push labels = %v, want 2 labels", pushIssue.Labels)
+	}
 
 	properties := BuildPageProperties(pushIssue)
 	statusProp, ok := properties[PropertyStatus].(map[string]interface{})
@@ -42,6 +45,14 @@ func TestBuildPagePropertiesAndPulledIssueRoundTrip(t *testing.T) {
 	selectProp, ok := statusProp["select"].(map[string]interface{})
 	if !ok || selectProp["name"] != "In Progress" {
 		t.Fatalf("status select = %#v", statusProp["select"])
+	}
+	labelsProp, ok := properties[PropertyLabels].(map[string]interface{})
+	if !ok {
+		t.Fatalf("labels property type = %T", properties[PropertyLabels])
+	}
+	multiSelect, ok := labelsProp["multi_select"].([]map[string]interface{})
+	if !ok || len(multiSelect) != 2 {
+		t.Fatalf("labels multi_select = %#v", labelsProp["multi_select"])
 	}
 
 	createdAt := time.Date(2026, 3, 19, 14, 0, 0, 0, time.UTC)

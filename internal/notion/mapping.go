@@ -177,6 +177,7 @@ func PushIssueFromIssue(issue *types.Issue, config *MappingConfig) (*PushIssue, 
 		Priority:    priority,
 		IssueType:   issueType,
 		Assignee:    issue.Assignee,
+		Labels:      append([]string(nil), issue.Labels...),
 	}
 
 	if issue.ExternalRef != nil && strings.TrimSpace(*issue.ExternalRef) != "" {
