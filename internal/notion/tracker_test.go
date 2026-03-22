@@ -504,3 +504,95 @@ func TestTrackerBatchPushDryRunSkipsStaleExternalRefOutsideCurrentTarget(t *test
 		t.Fatalf("unexpected mutation create=%q update=%q", api.lastCreateDSID, api.lastUpdatePageID)
 	}
 }
+
+func TestTrackerBatchPushDryRunTreatsLabelOnlyChangeAsUpdate(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, 3, 19, 14, 0, 0, 0, time.UTC)
+	remotePage := Page{
+		ID:             "01234567-89ab-cdef-0123-456789abcdef",
+		URL:            "https://www.notion.so/Task-0123456789abcdef0123456789abcdef",
+		CreatedTime:    createdAt,
+		LastEditedTime: createdAt.Add(5 * time.Minute),
+		Properties: map[string]PageProperty{
+			PropertyTitle:    {Title: []RichText{{PlainText: "Existing remote"}}},
+			PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
+			PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+			PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+			PropertyType:     {Select: &SelectOption{Name: "Task"}},
+			PropertyLabels:   {MultiSelect: []SelectOption{{Name: "matrix-a"}, {Name: "matrix-b"}}},
+		},
+	}
+	api := &fakeAPI{pages: []Page{remotePage}}
+	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+	result, err := tracker.BatchPushDryRun(context.Background(), []*types.Issue{
+		{
+			ID:        "bd-1",
+			Title:     "Existing remote",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Labels:    []string{"matrix-a", "matrix-c"},
+			UpdatedAt: remotePage.LastEditedTime.Add(30 * time.Minute),
+		},
+	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPushDryRun returned error: %v", err)
+	}
+	if len(result.Updated) != 1 || result.Updated[0].LocalID != "bd-1" {
+		t.Fatalf("updated = %+v", result.Updated)
+	}
+	if len(result.Skipped) != 0 {
+		t.Fatalf("skipped = %+v", result.Skipped)
+	}
+	if api.lastCreateDSID != "" || api.lastUpdatePageID != "" {
+		t.Fatalf("unexpected mutation create=%q update=%q", api.lastCreateDSID, api.lastUpdatePageID)
+	}
+}
+
+func TestTrackerBatchPushDryRunSkipsLabelOrderOnlyDifference(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, 3, 19, 14, 0, 0, 0, time.UTC)
+	remotePage := Page{
+		ID:             "01234567-89ab-cdef-0123-456789abcdef",
+		URL:            "https://www.notion.so/Task-0123456789abcdef0123456789abcdef",
+		CreatedTime:    createdAt,
+		LastEditedTime: createdAt.Add(5 * time.Minute),
+		Properties: map[string]PageProperty{
+			PropertyTitle:    {Title: []RichText{{PlainText: "Existing remote"}}},
+			PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
+			PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+			PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+			PropertyType:     {Select: &SelectOption{Name: "Task"}},
+			PropertyLabels:   {MultiSelect: []SelectOption{{Name: "matrix-b"}, {Name: "matrix-a"}}},
+		},
+	}
+	api := &fakeAPI{pages: []Page{remotePage}}
+	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+	result, err := tracker.BatchPushDryRun(context.Background(), []*types.Issue{
+		{
+			ID:        "bd-1",
+			Title:     "Existing remote",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Labels:    []string{"matrix-a", "matrix-b"},
+			UpdatedAt: remotePage.LastEditedTime.Add(30 * time.Minute),
+		},
+	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPushDryRun returned error: %v", err)
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "bd-1" {
+		t.Fatalf("skipped = %+v", result.Skipped)
+	}
+	if len(result.Updated) != 0 || len(result.Created) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if api.lastCreateDSID != "" || api.lastUpdatePageID != "" {
+		t.Fatalf("unexpected mutation create=%q update=%q", api.lastCreateDSID, api.lastUpdatePageID)
+	}
+}

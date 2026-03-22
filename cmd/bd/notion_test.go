@@ -349,6 +349,45 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 	}
 }
 
+func TestRenderNotionSyncResultOmitsMutationSummaryForSameMinuteNoopDryRun(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	notionSyncDryRun = true
+	t.Cleanup(func() { notionSyncDryRun = false })
+
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+
+	err := renderNotionSyncResult(cmd, &tracker.SyncResult{
+		PullStats: tracker.PullStats{
+			Queried:    49,
+			Candidates: 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("renderNotionSyncResult returned error: %v", err)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Dry run mode",
+		"Queried 49 pages from Notion (3 pull candidates)",
+		"Run without --dry-run to apply changes",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout missing %q\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{
+		"Pulled ",
+		"Pushed ",
+		"Resolved ",
+	} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("stdout unexpectedly contained %q\n%s", unwanted, out)
+		}
+	}
+}
+
 func TestValidateNotionConfigMessages(t *testing.T) {
 	t.Parallel()
 
