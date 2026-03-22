@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
 	"github.com/steveyegge/beads/internal/tracker"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestNotionCommandsRegistered(t *testing.T) {
@@ -442,5 +443,80 @@ func TestGetNotionConfigReadsDBPathWhenStoreUnset(t *testing.T) {
 	cfg := getNotionConfig()
 	if cfg.DataSourceID != "path-ds" {
 		t.Fatalf("config = %+v", cfg)
+	}
+}
+
+func TestShouldPushNotionIssue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		issue      *types.Issue
+		pushPrefix string
+		pushLabel  string
+		want       bool
+	}{
+		{
+			name: "existing notion ref is allowed",
+			issue: func() *types.Issue {
+				extRef := "https://www.notion.so/Test-0123456789abcdef0123456789abcdef"
+				return &types.Issue{ID: "beads-1", ExternalRef: &extRef}
+			}(),
+			want: true,
+		},
+		{
+			name: "other tracker ref is rejected",
+			issue: func() *types.Issue {
+				extRef := "https://github.com/example/repo/issues/1"
+				return &types.Issue{ID: "beads-1", ExternalRef: &extRef}
+			}(),
+			want: false,
+		},
+		{
+			name:  "unlinked issue needs configured label",
+			issue: &types.Issue{ID: "beads-1"},
+			want:  false,
+		},
+		{
+			name:       "prefix alone does not opt issue in",
+			issue:      &types.Issue{ID: "beads-1"},
+			pushPrefix: "beads",
+			want:       false,
+		},
+		{
+			name:      "configured label opts issue in",
+			issue:     &types.Issue{ID: "beads-1", Labels: []string{"notion-sync"}},
+			pushLabel: "notion-sync",
+			want:      true,
+		},
+		{
+			name:      "configured label is case insensitive",
+			issue:     &types.Issue{ID: "beads-1", Labels: []string{"Notion-Sync"}},
+			pushLabel: "notion-sync",
+			want:      true,
+		},
+		{
+			name:       "label plus matching prefix allows issue",
+			issue:      &types.Issue{ID: "beads-1", Labels: []string{"notion-sync"}},
+			pushPrefix: "beads",
+			pushLabel:  "notion-sync",
+			want:       true,
+		},
+		{
+			name:       "label plus wrong prefix rejects issue",
+			issue:      &types.Issue{ID: "beads-1", Labels: []string{"notion-sync"}},
+			pushPrefix: "proj",
+			pushLabel:  "notion-sync",
+			want:       false,
+		},
+	}
+
+	tr := &notion.Tracker{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldPushNotionIssue(tt.issue, tr, tt.pushPrefix, tt.pushLabel); got != tt.want {
+				t.Fatalf("shouldPushNotionIssue() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

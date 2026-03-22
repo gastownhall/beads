@@ -134,3 +134,23 @@ func TestValidateDataSourceSchemaMatchesInitSchema(t *testing.T) {
 		t.Fatalf("missing = %v", schema.Missing)
 	}
 }
+
+func TestPushIssueFromIssueRejectsUnsupportedIssueType(t *testing.T) {
+	t.Parallel()
+
+	issue := &types.Issue{
+		ID:        "bd-event-1",
+		Title:     "State change: progress -> in_progress",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEvent,
+	}
+
+	if SupportsIssueType(issue.IssueType, nil) {
+		t.Fatal("expected event to be unsupported for Notion schema")
+	}
+
+	if _, err := PushIssueFromIssue(issue, nil); err == nil {
+		t.Fatal("expected unsupported issue type error")
+	}
+}

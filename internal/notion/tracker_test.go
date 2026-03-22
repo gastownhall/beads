@@ -2,6 +2,7 @@ package notion
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -269,5 +270,98 @@ func TestTrackerBatchPushReusesRemoteInventory(t *testing.T) {
 	}
 	if api.lastCreateDSID != "ds_123" {
 		t.Fatalf("lastCreateDSID = %q", api.lastCreateDSID)
+	}
+}
+
+func TestTrackerBatchPushMatchesCurrentTargetByLocalID(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, 3, 19, 14, 0, 0, 0, time.UTC)
+	remotePage := Page{
+		ID:             "01234567-89ab-cdef-0123-456789abcdef",
+		URL:            "https://www.notion.so/Task-0123456789abcdef0123456789abcdef",
+		CreatedTime:    createdAt,
+		LastEditedTime: createdAt.Add(5 * time.Minute),
+		Properties: map[string]PageProperty{
+			PropertyTitle:    {Title: []RichText{{PlainText: "Existing remote"}}},
+			PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
+			PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+			PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+			PropertyType:     {Select: &SelectOption{Name: "Task"}},
+		},
+	}
+	api := &fakeAPI{
+		pages: []Page{remotePage},
+		updatedPage: &Page{
+			ID:             remotePage.ID,
+			URL:            remotePage.URL,
+			CreatedTime:    remotePage.CreatedTime,
+			LastEditedTime: remotePage.LastEditedTime.Add(10 * time.Minute),
+			Properties: map[string]PageProperty{
+				PropertyTitle:    {Title: []RichText{{PlainText: "Updated local"}}},
+				PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
+				PropertyStatus:   {Select: &SelectOption{Name: "In Progress"}},
+				PropertyPriority: {Select: &SelectOption{Name: "High"}},
+				PropertyType:     {Select: &SelectOption{Name: "Feature"}},
+			},
+		},
+	}
+	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+	foreignRef := "https://www.notion.so/foreign-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	result, err := tracker.BatchPush(context.Background(), []*types.Issue{
+		{
+			ID:          "bd-1",
+			Title:       "Updated local",
+			Status:      types.StatusInProgress,
+			Priority:    1,
+			IssueType:   types.TypeFeature,
+			ExternalRef: &foreignRef,
+			UpdatedAt:   remotePage.LastEditedTime.Add(30 * time.Minute),
+		},
+	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPush returned error: %v", err)
+	}
+	if len(result.Updated) != 1 || len(result.Created) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if api.lastUpdatePageID != remotePage.ID {
+		t.Fatalf("lastUpdatePageID = %q, want %q", api.lastUpdatePageID, remotePage.ID)
+	}
+	if api.lastCreateDSID != "" {
+		t.Fatalf("lastCreateDSID = %q, want empty", api.lastCreateDSID)
+	}
+}
+
+func TestTrackerBatchPushSkipsStaleExternalRefOutsideCurrentTarget(t *testing.T) {
+	t.Parallel()
+
+	api := &fakeAPI{}
+	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+	foreignRef := "https://www.notion.so/foreign-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	result, err := tracker.BatchPush(context.Background(), []*types.Issue{
+		{
+			ID:          "bd-1",
+			Title:       "Stale ref",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			ExternalRef: &foreignRef,
+			UpdatedAt:   time.Now().UTC(),
+		},
+	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPush returned error: %v", err)
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "bd-1" {
+		t.Fatalf("skipped = %+v", result.Skipped)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "outside the current target") {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+	if api.lastCreateDSID != "" || api.lastUpdatePageID != "" {
+		t.Fatalf("unexpected mutation create=%q update=%q", api.lastCreateDSID, api.lastUpdatePageID)
 	}
 }

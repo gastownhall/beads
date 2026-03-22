@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -18,6 +19,36 @@ import (
 type notionConfig struct {
 	DataSourceID string
 	ViewURL      string
+}
+
+type notionUnsupportedPushStats struct {
+	counts map[types.IssueType]int
+}
+
+func newNotionUnsupportedPushStats() *notionUnsupportedPushStats {
+	return &notionUnsupportedPushStats{counts: make(map[types.IssueType]int)}
+}
+
+func (s *notionUnsupportedPushStats) record(issueType types.IssueType) {
+	if s == nil || strings.TrimSpace(string(issueType)) == "" {
+		return
+	}
+	s.counts[issueType]++
+}
+
+func (s *notionUnsupportedPushStats) warningText() string {
+	if s == nil || len(s.counts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(s.counts))
+	for issueType, count := range s.counts {
+		parts = append(parts, fmt.Sprintf("%s=%d", issueType, count))
+	}
+	sort.Strings(parts)
+	return fmt.Sprintf(
+		"Skipped unsupported Notion issue types: %s (supported: bug, feature, task, epic, chore)",
+		strings.Join(parts, ", "),
+	)
 }
 
 type notionSetupResult struct {
@@ -505,6 +536,8 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 
 	engine := tracker.NewEngine(nt, store, actor)
 	engine.PullHooks = buildNotionPullHooks(ctx)
+	unsupportedStats := newNotionUnsupportedPushStats()
+	engine.PushHooks = buildNotionPushHooks(ctx, nt, unsupportedStats)
 	if jsonOutput {
 		engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(cmd.ErrOrStderr(), "  "+msg) }
 	} else {
@@ -535,10 +568,14 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		DryRun:             notionSyncDryRun,
 		CreateOnly:         notionCreateOnly,
 		State:              notionSyncState,
+		ExcludeEphemeral:   true,
 		ConflictResolution: conflictResolution,
 	})
 	if err != nil {
 		return err
+	}
+	if warning := unsupportedStats.warningText(); warning != "" {
+		result.Warnings = append(result.Warnings, warning)
 	}
 
 	if jsonOutput {
@@ -586,6 +623,77 @@ func buildNotionPullHooks(ctx context.Context) *tracker.PullHooks {
 			return nil
 		},
 	}
+}
+
+func buildNotionPushHooks(ctx context.Context, tr tracker.IssueTracker, stats *notionUnsupportedPushStats) *tracker.PushHooks {
+	return &tracker.PushHooks{
+		ShouldPush: func(issue *types.Issue) bool {
+			if issue == nil || tr == nil {
+				return false
+			}
+			if notion.SupportsIssueType(issue.IssueType, nil) {
+				pushPrefix, _ := store.GetConfig(ctx, "notion.push_prefix")
+				pushLabel, _ := store.GetConfig(ctx, "notion.push_label")
+				return shouldPushNotionIssue(issue, tr, pushPrefix, pushLabel)
+			}
+			stats.record(issue.IssueType)
+			return false
+		},
+	}
+}
+
+func shouldPushNotionIssue(issue *types.Issue, tr tracker.IssueTracker, pushPrefix, pushLabel string) bool {
+	if issue == nil || tr == nil {
+		return false
+	}
+
+	if issue.ExternalRef != nil && strings.TrimSpace(*issue.ExternalRef) != "" {
+		return tr.IsExternalRef(*issue.ExternalRef)
+	}
+
+	if !matchesNotionPushLabel(issue, pushLabel) {
+		return false
+	}
+
+	if strings.TrimSpace(pushPrefix) == "" {
+		return true
+	}
+
+	for _, prefix := range strings.Split(pushPrefix, ",") {
+		prefix = strings.TrimSpace(prefix)
+		prefix = strings.TrimSuffix(prefix, "-")
+		if prefix != "" && strings.HasPrefix(issue.ID, prefix+"-") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func matchesNotionPushLabel(issue *types.Issue, pushLabel string) bool {
+	if issue == nil || strings.TrimSpace(pushLabel) == "" {
+		return false
+	}
+
+	configured := make(map[string]struct{})
+	for _, raw := range strings.Split(pushLabel, ",") {
+		label := strings.ToLower(strings.TrimSpace(raw))
+		if label != "" {
+			configured[label] = struct{}{}
+		}
+	}
+	if len(configured) == 0 {
+		return false
+	}
+
+	for _, raw := range issue.Labels {
+		label := strings.ToLower(strings.TrimSpace(raw))
+		if _, ok := configured[label]; ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 func saveNotionTargetConfig(ctx context.Context, dataSourceID, viewURL string) error {

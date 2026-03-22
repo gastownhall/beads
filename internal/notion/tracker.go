@@ -19,6 +19,7 @@ type pushOutcome struct {
 	created      *itracker.BatchPushItem
 	updated      *itracker.BatchPushItem
 	skipped      string
+	warning      string
 	err          *itracker.BatchPushError
 	trackerIssue *itracker.TrackerIssue
 }
@@ -240,6 +241,9 @@ func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue, forceIDs
 		if strings.TrimSpace(outcome.skipped) != "" {
 			result.Skipped = append(result.Skipped, outcome.skipped)
 		}
+		if strings.TrimSpace(outcome.warning) != "" {
+			result.Warnings = append(result.Warnings, outcome.warning)
+		}
 		if outcome.err != nil {
 			result.Errors = append(result.Errors, *outcome.err)
 		}
@@ -262,7 +266,16 @@ func (t *Tracker) pushOne(ctx context.Context, issue *types.Issue, force bool) p
 	extRef := derefStr(issue.ExternalRef)
 	pageID := ExtractNotionIdentifier(extRef)
 	remote, hasRemote := t.lookupRemoteByPageID(pageID)
-	create := pageID == "" || !hasRemote
+	if !hasRemote {
+		remote, hasRemote = t.lookupRemoteByLocalID(issue.ID)
+	}
+	if !hasRemote && strings.TrimSpace(extRef) != "" && pageID != "" {
+		return pushOutcome{
+			skipped: issue.ID,
+			warning: fmt.Sprintf("Skipped %s: Notion external_ref points outside the current target; clear external_ref to recreate it in this data source", issue.ID),
+		}
+	}
+	create := !hasRemote
 
 	if !create && !force {
 		if trackerIssueEqual(issue, remote) {
@@ -380,6 +393,20 @@ func (t *Tracker) lookupRemoteByPageID(pageID string) (*itracker.TrackerIssue, b
 	t.cacheMu.RLock()
 	defer t.cacheMu.RUnlock()
 	issue, ok := t.remoteByPageID[strings.TrimSpace(pageID)]
+	if !ok {
+		return nil, false
+	}
+	cloned := cloneTrackerIssue(issue)
+	return &cloned, true
+}
+
+func (t *Tracker) lookupRemoteByLocalID(localID string) (*itracker.TrackerIssue, bool) {
+	if strings.TrimSpace(localID) == "" {
+		return nil, false
+	}
+	t.cacheMu.RLock()
+	defer t.cacheMu.RUnlock()
+	issue, ok := t.remoteByLocalID[strings.TrimSpace(localID)]
 	if !ok {
 		return nil, false
 	}

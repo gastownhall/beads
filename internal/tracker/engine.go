@@ -631,7 +631,8 @@ func (e *Engine) applyBatchPushResult(ctx context.Context, result *BatchPushResu
 	if result == nil {
 		return
 	}
-	for _, item := range result.Created {
+	items := append(append([]BatchPushItem(nil), result.Created...), result.Updated...)
+	for _, item := range items {
 		if item.LocalID == "" || strings.TrimSpace(item.ExternalRef) == "" {
 			continue
 		}

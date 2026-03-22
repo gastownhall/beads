@@ -350,6 +350,13 @@ func TestEnginePushUsesBatchTrackerWhenAvailable(t *testing.T) {
 	if stored.ExternalRef == nil || *stored.ExternalRef != "https://notion.so/new-page" {
 		t.Fatalf("external_ref = %#v, want batch-created ref", stored.ExternalRef)
 	}
+	storedUpdated, err := store.GetIssue(ctx, "bd-batch-2")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if storedUpdated.ExternalRef == nil || *storedUpdated.ExternalRef != "https://notion.so/existing" {
+		t.Fatalf("updated external_ref = %#v, want batch-updated ref", storedUpdated.ExternalRef)
+	}
 }
 
 func TestEnginePushCountsCreateErrors(t *testing.T) {

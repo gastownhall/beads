@@ -161,6 +161,9 @@ func PushIssueFromIssue(issue *types.Issue, config *MappingConfig) (*PushIssue, 
 	if config == nil {
 		config = DefaultMappingConfig()
 	}
+	if !SupportsIssueType(issue.IssueType, config) {
+		return nil, fmt.Errorf("unsupported Notion issue type %q", issue.IssueType)
+	}
 
 	status := statusToNotion(issue.Status, config)
 	priority := priorityToNotion(issue.Priority, config)
@@ -301,6 +304,14 @@ func typeToNotion(issueType types.IssueType, config *MappingConfig) string {
 		return "Task"
 	}
 	return value
+}
+
+func SupportsIssueType(issueType types.IssueType, config *MappingConfig) bool {
+	if config == nil {
+		config = DefaultMappingConfig()
+	}
+	_, ok := config.TypeToNotion[issueType]
+	return ok
 }
 
 func parseMappingTimestamp(raw string) (time.Time, bool, error) {
