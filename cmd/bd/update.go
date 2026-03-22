@@ -453,6 +453,10 @@ create, update, show, or close operation).`,
 			updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID) // Best effort: nil issue handled by subsequent nil check
 			if updatedIssue != nil && hookRunner != nil {
 				hookRunner.Run(hooks.EventUpdate, updatedIssue)
+				// Also fire on_close hook when status actually transitions to closed (GH#2630)
+				if updatedIssue.Status == types.StatusClosed && issue.Status != types.StatusClosed {
+					hookRunner.Run(hooks.EventClose, updatedIssue)
+				}
 			}
 
 			updateTitle := ""
