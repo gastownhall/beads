@@ -1,131 +1,159 @@
+//go:build cgo
+
 package main
 
 import (
 	"context"
-	"os"
-	"syscall"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
+	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestWatchIssueInitialization tests that watchIssue sets up correctly
-// TestWatchIssueDebounceTimer tests debounce delay constant
-func TestWatchIssueDebounceTimer(t *testing.T) {
-	// Verify debounce delay is reasonable (500ms as defined)
-	debounceDelay := 500 // milliseconds
-	if debounceDelay < 100 || debounceDelay > 2000 {
-		t.Errorf("Debounce delay should be between 100ms-2000ms, got %dms", debounceDelay)
+// TestSingleIssueSnapshot tests that the snapshot captures status and update time.
+func TestSingleIssueSnapshot(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	issue := &types.Issue{
+		ID:        "test-001",
+		Status:    types.StatusOpen,
+		UpdatedAt: now,
+	}
+
+	snap1 := singleIssueSnapshot(issue)
+	expected := fmt.Sprintf("test-001:open:%d", now.UnixNano())
+	if snap1 != expected {
+		t.Errorf("snapshot = %q, want %q", snap1, expected)
+	}
+
+	// Changing status changes the snapshot
+	issue.Status = types.StatusClosed
+	snap2 := singleIssueSnapshot(issue)
+	if snap1 == snap2 {
+		t.Error("snapshot should change when status changes from open to closed")
+	}
+
+	// Changing UpdatedAt changes the snapshot
+	issue.UpdatedAt = now.Add(time.Second)
+	snap3 := singleIssueSnapshot(issue)
+	if snap2 == snap3 {
+		t.Error("snapshot should change when UpdatedAt changes")
 	}
 }
 
-// TestWatchIssueSignals tests signal handling setup
-func TestWatchIssueSignals(t *testing.T) {
-	// Verify signal channel can be created
-	sigChan := make(chan os.Signal, 1)
-	if sigChan == nil {
-		t.Error("Signal channel should be allocatable")
-	}
-	close(sigChan)
-}
-
-// TestWatchIssueFileEvents tests fsnotify event types
-func TestWatchIssueFileEvents(t *testing.T) {
-	// Verify fsnotify is importable and event types are accessible
-	_ = fsnotify.Write
-	_ = fsnotify.Remove
-	_ = fsnotify.Rename
-	_ = fsnotify.Chmod
-}
-
-// TestWatchIssueFlags tests that watch flag is properly registered
+// TestWatchIssueFlags tests that watch flag is properly registered.
 func TestWatchIssueFlags(t *testing.T) {
-	// Verify the watch flag exists in showCmd
 	flag := showCmd.Flags().Lookup("watch")
 	if flag == nil {
-		t.Error("watch flag should be registered in showCmd")
+		t.Fatal("watch flag should be registered in showCmd")
 	}
-
-	// Verify the flag has correct help text
-	expectedHelp := "Watch for changes and auto-refresh display"
-	if flag.Usage != expectedHelp {
-		t.Errorf("watch flag help should be '%s', got '%s'", expectedHelp, flag.Usage)
+	if flag.DefValue != "false" {
+		t.Errorf("watch flag default should be 'false', got '%s'", flag.DefValue)
 	}
 }
 
-// TestWatchIssueDefaultValue tests watch flag default is false
-func TestWatchIssueDefaultValue(t *testing.T) {
-	flag := showCmd.Flags().Lookup("watch")
-	if flag == nil {
-		t.Fatal("watch flag not found")
-	}
+// TestWatchIssueDetectsStatusChange is a regression test for the bug where
+// bd show --watch used fsnotify (file watching) instead of polling. Dolt stores
+// data in a server-side database, not files, so file watchers never fired and
+// the display never updated — even when the underlying bead changed to closed.
+//
+// This test creates an issue, takes a snapshot, closes the issue, takes another
+// snapshot, and verifies the watch loop would detect the change.
+func TestWatchIssueDetectsStatusChange(t *testing.T) {
+	t.Parallel()
+	ensureTestMode(t)
 
-	defaultValue := flag.DefValue
-	if defaultValue != "false" {
-		t.Errorf("watch flag default should be 'false', got '%s'", defaultValue)
-	}
-}
-
-// TestDisplayShowIssueFunctionExists tests displayShowIssue is callable
-func TestDisplayShowIssueFunctionExists(t *testing.T) {
-	_ = displayShowIssue
-}
-
-// TestWatchIssueHelpText tests help text is descriptive
-func TestWatchIssueHelpText(t *testing.T) {
-	flag := showCmd.Flags().Lookup("watch")
-	if flag == nil {
-		t.Fatal("watch flag not found")
-	}
-
-	usage := flag.Usage
-	if usage == "" {
-		t.Error("watch flag should have usage text")
-	}
-}
-
-// TestWatchIssueRequiresDirectMode tests that watch mode requires direct mode
-func TestWatchIssueRequiresDirectMode(t *testing.T) {
-	// This verifies the validation logic exists in the command handler
 	ctx := context.Background()
-	_ = ctx
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "test.db")
+	s := newTestStore(t, dbPath)
 
-	// Verify ensureDirectMode is accessible (used in watch mode)
-	_ = ensureDirectMode
-}
-
-// TestWatchIssueDebounceBehavior tests debounce timer behavior
-func TestWatchIssueDebounceBehavior(t *testing.T) {
-	debounceDelay := 500 * time.Millisecond
-
-	// Create a channel to simulate events
-	events := make(chan bool, 3)
-	go func() {
-		events <- true // Event 1
-		time.Sleep(100 * time.Millisecond)
-		events <- true // Event 2 (within debounce)
-		time.Sleep(600 * time.Millisecond)
-		events <- true // Event 3 (after debounce)
-		close(events)
-	}()
-
-	count := 0
-	for range events {
-		count++
+	// Create an open issue
+	issue := &types.Issue{
+		ID:        generateUniqueTestID(t, "test", 0),
+		Title:     "watch regression test",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := s.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
 	}
 
-	// With proper debouncing, rapid events within 500ms should be coalesced
-	// This test verifies the debounce delay is set appropriately
-	if debounceDelay < 100*time.Millisecond {
-		t.Error("Debounce delay should be at least 100ms")
+	// Fetch and snapshot the open issue
+	got, err := s.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	snapBefore := singleIssueSnapshot(got)
+
+	// Close the issue (simulates another agent finishing work)
+	if err := s.CloseIssue(ctx, issue.ID, "done", "test-actor", ""); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+
+	// Fetch and snapshot the closed issue
+	got, err = s.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue after close: %v", err)
+	}
+	snapAfter := singleIssueSnapshot(got)
+
+	// The polling-based watch loop detects changes by comparing snapshots.
+	// This must differ — the old fsnotify implementation would never see this
+	// because Dolt writes don't produce filesystem events in .beads/.
+	if snapBefore == snapAfter {
+		t.Errorf("snapshot did not change after closing issue: before=%q after=%q", snapBefore, snapAfter)
+	}
+	if got.Status != types.StatusClosed {
+		t.Errorf("issue status = %q, want %q", got.Status, types.StatusClosed)
 	}
 }
 
-// TestWatchIssueCtrlCHandling tests Ctrl+C signal handling setup
-func TestWatchIssueCtrlCHandling(t *testing.T) {
-	// Verify os.Signal is importable for Ctrl+C handling
-	_ = os.Interrupt
-	// Verify syscall constants are accessible
-	_ = syscall.SIGTERM
+// TestWatchIssueDetectsFieldUpdate verifies that non-status field updates
+// (e.g., title change) are also detected by the polling snapshot.
+func TestWatchIssueDetectsFieldUpdate(t *testing.T) {
+	t.Parallel()
+	ensureTestMode(t)
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "test.db")
+	s := newTestStore(t, dbPath)
+
+	issue := &types.Issue{
+		ID:        generateUniqueTestID(t, "test", 0),
+		Title:     "original title",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := s.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	got, err := s.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	snapBefore := singleIssueSnapshot(got)
+
+	// Update title (which bumps UpdatedAt)
+	if err := s.UpdateIssue(ctx, issue.ID, map[string]interface{}{"title": "updated title"}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+
+	got, err = s.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue after update: %v", err)
+	}
+	snapAfter := singleIssueSnapshot(got)
+
+	if snapBefore == snapAfter {
+		t.Errorf("snapshot did not change after title update: before=%q after=%q", snapBefore, snapAfter)
+	}
 }
