@@ -22,6 +22,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 		// Use global jsonOutput set by PersistentPreRun
 		ctx := rootCtx
 		reopenedIssues := []*types.Issue{}
+		hadError := false
 		// Direct storage access
 		if store == nil {
 			FatalErrorWithHint("database not initialized",
@@ -31,6 +32,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				hadError = true
 				continue
 			}
 			fullID := result.ResolvedID
@@ -53,6 +55,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 			if err := issueStore.UpdateIssue(ctx, fullID, updates, actor); err != nil {
 				result.Close()
 				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
+				hadError = true
 				continue
 			}
 			// Add reason as a comment if provided
@@ -85,6 +88,10 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 
 		if jsonOutput && len(reopenedIssues) > 0 {
 			outputJSON(reopenedIssues)
+		}
+
+		if hadError {
+			os.Exit(1)
 		}
 	},
 }
