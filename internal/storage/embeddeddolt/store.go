@@ -238,7 +238,13 @@ func (s *EmbeddedDoltStore) GetDependents(ctx context.Context, issueID string) (
 // GetDependentsWithMetadata is implemented in dependencies.go.
 
 func (s *EmbeddedDoltStore) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
-	panic("embeddeddolt: GetDependencyTree not implemented")
+	var result []*types.TreeNode
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependencyTreeInTx(ctx, tx, issueID, maxDepth, showAllPaths, reverse)
+		return err
+	})
+	return result, err
 }
 
 // AddLabel is implemented in labels.go.
@@ -258,7 +264,13 @@ func (s *EmbeddedDoltStore) GetBlockedIssues(ctx context.Context, filter types.W
 }
 
 func (s *EmbeddedDoltStore) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
-	panic("embeddeddolt: GetEpicsEligibleForClosure not implemented")
+	var result []*types.EpicStatus
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetEpicsEligibleForClosureInTx(ctx, tx)
+		return err
+	})
+	return result, err
 }
 
 func (s *EmbeddedDoltStore) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {

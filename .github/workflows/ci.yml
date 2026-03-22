@@ -173,7 +173,7 @@ jobs:
       - name: Test (embedded dolt - cmd)
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
-        run: go test -tags embeddeddolt -v -race -count=1 -run TestEmbedded ./cmd/bd/
+        run: go test -tags embeddeddolt -v -race -count=1 -timeout 20m -run TestEmbedded ./cmd/bd/
 
   # Windows smoke tests only - full test suite times out (see bd-bmev)
   # Linux/macOS run comprehensive tests; Windows just verifies binary works

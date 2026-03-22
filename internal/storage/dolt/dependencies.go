@@ -269,52 +269,13 @@ func (s *DoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) 
 
 // GetDependencyTree returns a dependency tree for visualization
 func (s *DoltStore) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
-
-	// Simple implementation - can be optimized with CTE
-	visited := make(map[string]bool)
-	return s.buildDependencyTree(ctx, issueID, 0, maxDepth, reverse, visited, "")
-}
-
-func (s *DoltStore) buildDependencyTree(ctx context.Context, issueID string, depth, maxDepth int, reverse bool, visited map[string]bool, parentID string) ([]*types.TreeNode, error) {
-	if depth >= maxDepth || visited[issueID] {
-		return nil, nil
-	}
-	visited[issueID] = true
-
-	issue, err := s.GetIssue(ctx, issueID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Use GetDependencies/GetDependents which handle wisp routing,
-	// instead of querying the dependencies table directly (GH#2145).
-	var related []*types.Issue
-	if reverse {
-		related, err = s.GetDependents(ctx, issueID)
-	} else {
-		related, err = s.GetDependencies(ctx, issueID)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	node := &types.TreeNode{
-		Issue:    *issue,
-		Depth:    depth,
-		ParentID: parentID,
-	}
-
-	// TreeNode doesn't have Children field - return flat list
-	nodes := []*types.TreeNode{node}
-	for _, rel := range related {
-		children, err := s.buildDependencyTree(ctx, rel.ID, depth+1, maxDepth, reverse, visited, issueID)
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, children...)
-	}
-
-	return nodes, nil
+	var result []*types.TreeNode
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependencyTreeInTx(ctx, tx, issueID, maxDepth, showAllPaths, reverse)
+		return err
+	})
+	return result, err
 }
 
 // DetectCycles finds circular dependencies.

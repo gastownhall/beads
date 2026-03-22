@@ -105,6 +105,12 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to close duplicate: %w", err)
 	}
 
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			return fmt.Errorf("failed to commit: %w", err)
+		}
+	}
+
 	if jsonOutput {
 		result := map[string]interface{}{
 			"duplicate": duplicateID,
@@ -165,6 +171,12 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 	}
 	if err := store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
 		return fmt.Errorf("failed to close superseded issue: %w", err)
+	}
+
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			return fmt.Errorf("failed to commit: %w", err)
+		}
 	}
 
 	if jsonOutput {

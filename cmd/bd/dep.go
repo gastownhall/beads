@@ -162,6 +162,12 @@ Examples:
 			// Check for cycles after adding dependency
 			warnIfCyclesExist(fromStore)
 
+			if isEmbeddedDolt && fromStore != nil {
+				if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+					FatalErrorRespectJSON("failed to commit: %v", err)
+				}
+			}
+
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
 					"status":     "added",
@@ -309,6 +315,12 @@ Examples:
 
 		// Check for cycles after adding dependency
 		warnIfCyclesExist(fromStore)
+
+		if isEmbeddedDolt && fromStore != nil {
+			if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -511,6 +523,12 @@ var depRemoveCmd = &cobra.Command{
 
 		if err := fromStore.RemoveDependency(ctx, fullFromID, fullToID, actor); err != nil {
 			FatalErrorRespectJSON("%v", err)
+		}
+
+		if isEmbeddedDolt && fromStore != nil {
+			if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
 		}
 
 		if jsonOutput {
