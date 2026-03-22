@@ -110,6 +110,57 @@ func TestTrackerFetchIssuesFiltersArchivedAndState(t *testing.T) {
 	}
 }
 
+func TestTrackerFetchIssuesBackfillStillHonorsClosedState(t *testing.T) {
+	t.Parallel()
+
+	api := &fakeAPI{
+		pages: []Page{
+			{
+				ID:             "01234567-89ab-cdef-0123-456789abcdef",
+				URL:            "https://www.notion.so/Open-0123456789abcdef0123456789abcdef",
+				CreatedTime:    time.Now().UTC().Add(-2 * time.Hour),
+				LastEditedTime: time.Now().UTC().Add(-2 * time.Hour),
+				Properties: map[string]PageProperty{
+					PropertyTitle:    {Title: []RichText{{PlainText: "Open"}}},
+					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-open"}}},
+					PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+					PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+					PropertyType:     {Select: &SelectOption{Name: "Task"}},
+				},
+			},
+			{
+				ID:             "fedcba98-7654-3210-fedc-ba9876543210",
+				URL:            "https://www.notion.so/Closed-fedcba9876543210fedcba9876543210",
+				CreatedTime:    time.Now().UTC().Add(-2 * time.Hour),
+				LastEditedTime: time.Now().UTC().Add(-2 * time.Hour),
+				Properties: map[string]PageProperty{
+					PropertyTitle:    {Title: []RichText{{PlainText: "Closed"}}},
+					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-closed"}}},
+					PropertyStatus:   {Select: &SelectOption{Name: "Closed"}},
+					PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+					PropertyType:     {Select: &SelectOption{Name: "Task"}},
+				},
+			},
+		},
+	}
+	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+	since := time.Now().UTC().Add(-30 * time.Minute)
+	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{
+		State: "closed",
+		Since: &since,
+	})
+	if err != nil {
+		t.Fatalf("FetchIssues returned error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("issues = %d, want 1", len(issues))
+	}
+	if issues[0].Title != "Closed" {
+		t.Fatalf("title = %q, want Closed", issues[0].Title)
+	}
+}
+
 func TestTrackerFetchIssuesExcludesEqualLastSyncBoundary(t *testing.T) {
 	t.Parallel()
 

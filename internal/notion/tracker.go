@@ -115,7 +115,10 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 	result := make([]itracker.TrackerIssue, 0, len(t.issueCache))
 	for _, issue := range t.issueCache {
 		candidate := cloneTrackerIssue(issue)
-		if !matchesFetchOptions(&candidate, opts) && !shouldBackfillNotionIssue(&candidate, localByExternalIdentifier, localByID) {
+		if !matchesFetchState(&candidate, opts.State) {
+			continue
+		}
+		if !matchesFetchSince(&candidate, opts.Since) && !shouldBackfillNotionIssue(&candidate, localByExternalIdentifier, localByID) {
 			continue
 		}
 		result = append(result, candidate)
@@ -612,18 +615,29 @@ func cloneTrackerIssue(issue itracker.TrackerIssue) itracker.TrackerIssue {
 }
 
 func matchesFetchOptions(issue *itracker.TrackerIssue, opts itracker.FetchOptions) bool {
+	return matchesFetchState(issue, opts.State) && matchesFetchSince(issue, opts.Since)
+}
+
+func matchesFetchSince(issue *itracker.TrackerIssue, since *time.Time) bool {
 	if issue == nil {
 		return false
 	}
-	if opts.Since != nil && !issue.UpdatedAt.IsZero() {
+	if since != nil && !issue.UpdatedAt.IsZero() {
 		// Notion page timestamps are minute-precision. Revisit the boundary minute
 		// so edits made later in the same minute as last_sync are not lost.
-		cutoff := opts.Since.UTC().Truncate(time.Minute)
+		cutoff := since.UTC().Truncate(time.Minute)
 		if issue.UpdatedAt.Before(cutoff) {
 			return false
 		}
 	}
-	switch strings.TrimSpace(strings.ToLower(opts.State)) {
+	return true
+}
+
+func matchesFetchState(issue *itracker.TrackerIssue, stateFilter string) bool {
+	if issue == nil {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(stateFilter)) {
 	case "", "all":
 		return true
 	case "open":
