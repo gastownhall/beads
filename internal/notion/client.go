@@ -50,7 +50,7 @@ func (c *Client) WithBaseURL(baseURL string) *Client {
 }
 
 func (c *Client) GetCurrentUser(ctx context.Context) (*User, error) {
-	body, _, err := c.doRequest(ctx, http.MethodGet, "/users/me", nil)
+	body, err := c.doRequest(ctx, http.MethodGet, "/users/me", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func (c *Client) GetCurrentUser(ctx context.Context) (*User, error) {
 }
 
 func (c *Client) RetrieveDataSource(ctx context.Context, dataSourceID string) (*DataSource, error) {
-	body, _, err := c.doRequest(ctx, http.MethodGet, "/data_sources/"+url.PathEscape(dataSourceID), nil)
+	body, err := c.doRequest(ctx, http.MethodGet, "/data_sources/"+url.PathEscape(dataSourceID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +74,7 @@ func (c *Client) RetrieveDataSource(ctx context.Context, dataSourceID string) (*
 }
 
 func (c *Client) RetrieveDatabase(ctx context.Context, databaseID string) (*Database, error) {
-	body, _, err := c.doRequest(ctx, http.MethodGet, "/databases/"+url.PathEscape(databaseID), nil)
+	body, err := c.doRequest(ctx, http.MethodGet, "/databases/"+url.PathEscape(databaseID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (c *Client) CreateDatabase(ctx context.Context, parentPageID, title string)
 			"properties": BuildInitialDataSourceProperties(),
 		},
 	}
-	body, _, err := c.doRequest(ctx, http.MethodPost, "/databases", request)
+	body, err := c.doRequest(ctx, http.MethodPost, "/databases", request)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Pa
 			request["start_cursor"] = cursor
 		}
 
-		body, _, err := c.doRequest(ctx, http.MethodPost, "/data_sources/"+url.PathEscape(dataSourceID)+"/query", request)
+		body, err := c.doRequest(ctx, http.MethodPost, "/data_sources/"+url.PathEscape(dataSourceID)+"/query", request)
 		if err != nil {
 			return nil, err
 		}
@@ -155,7 +155,7 @@ func (c *Client) CreatePage(ctx context.Context, dataSourceID string, properties
 		},
 		"properties": properties,
 	}
-	body, _, err := c.doRequest(ctx, http.MethodPost, "/pages", request)
+	body, err := c.doRequest(ctx, http.MethodPost, "/pages", request)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ func (c *Client) CreatePage(ctx context.Context, dataSourceID string, properties
 
 func (c *Client) UpdatePage(ctx context.Context, pageID string, properties map[string]interface{}) (*Page, error) {
 	request := map[string]interface{}{"properties": properties}
-	body, _, err := c.doRequest(ctx, http.MethodPatch, "/pages/"+url.PathEscape(pageID), request)
+	body, err := c.doRequest(ctx, http.MethodPatch, "/pages/"+url.PathEscape(pageID), request)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +180,7 @@ func (c *Client) UpdatePage(ctx context.Context, pageID string, properties map[s
 }
 
 func (c *Client) ArchivePage(ctx context.Context, pageID string, inTrash bool) (*Page, error) {
-	body, _, err := c.doRequest(ctx, http.MethodPatch, "/pages/"+url.PathEscape(pageID), map[string]interface{}{"in_trash": inTrash})
+	body, err := c.doRequest(ctx, http.MethodPatch, "/pages/"+url.PathEscape(pageID), map[string]interface{}{"in_trash": inTrash})
 	if err != nil {
 		return nil, err
 	}
@@ -242,12 +242,12 @@ func ResolveDataSourceReference(ctx context.Context, client DataSourceResolver, 
 	}
 }
 
-func (c *Client) doRequest(ctx context.Context, method, path string, requestBody interface{}) ([]byte, http.Header, error) {
+func (c *Client) doRequest(ctx context.Context, method, path string, requestBody interface{}) ([]byte, error) {
 	if c == nil {
-		return nil, nil, fmt.Errorf("notion client is nil")
+		return nil, fmt.Errorf("notion client is nil")
 	}
 	if strings.TrimSpace(c.Token) == "" {
-		return nil, nil, fmt.Errorf("Notion token not configured")
+		return nil, fmt.Errorf("Notion token not configured")
 	}
 	httpClient := c.HTTPClient
 	if httpClient == nil {
@@ -258,7 +258,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 	if requestBody != nil {
 		payload, err := json.Marshal(requestBody)
 		if err != nil {
-			return nil, nil, fmt.Errorf("marshal request body: %w", err)
+			return nil, fmt.Errorf("marshal request body: %w", err)
 		}
 		bodyReader = bytes.NewReader(payload)
 	}
@@ -269,7 +269,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 	}
 	req, err := http.NewRequestWithContext(ctx, method, requestURL, bodyReader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Notion-Version", c.NotionVersion)
@@ -280,16 +280,16 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read response: %w", err)
+		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return body, resp.Header, nil
+		return body, nil
 	}
 
 	var apiErr struct {
@@ -297,7 +297,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
-		return nil, nil, fmt.Errorf("Notion API error %s (%d): %s", apiErr.Code, resp.StatusCode, apiErr.Message)
+		return nil, fmt.Errorf("Notion API error %s (%d): %s", apiErr.Code, resp.StatusCode, apiErr.Message)
 	}
-	return nil, nil, fmt.Errorf("Notion API error (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	return nil, fmt.Errorf("Notion API error (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }
