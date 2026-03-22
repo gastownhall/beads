@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -17,7 +17,7 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 	allChildren := make(map[string][]*types.IssueWithDependencyMetadata)
 
 	// Process each issue to get its children
-	processIssue := func(issueID string, issueStore *dolt.DoltStore) error {
+	processIssue := func(issueID string, issueStore storage.DoltStorage) error {
 		// Initialize entry so "no children" message can be shown
 		if _, exists := allChildren[issueID]; !exists {
 			allChildren[issueID] = []*types.IssueWithDependencyMetadata{}

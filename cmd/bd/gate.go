@@ -35,7 +35,7 @@ Gate types:
   gh:pr   - Waits for PR merge (Phase 3)
   bead    - Waits for cross-rig bead to close (Phase 4)
 
-For bead gates, await_id format is <rig>:<bead-id> (e.g., "gastown:gt-abc123").
+For bead gates, await_id format is <rig>:<bead-id> (e.g., "other-project:op-abc123").
 
 Examples:
   bd gate list           # Show all open gates
@@ -168,7 +168,7 @@ var gateAddWaiterCmd = &cobra.Command{
 	Long: `Register an agent as a waiter on a gate bead.
 
 When the gate closes, the waiter will receive a wake notification via 'gt gate wake'.
-The waiter is typically the polecat's address (e.g., "gastown/polecats/Toast").
+The waiter is typically the worker's address (e.g., "my-project/workers/agent-1").
 
 This is used by 'gt done --phase-complete' to register for gate wake notifications.`,
 	Args: cobra.ExactArgs(2),
@@ -209,6 +209,13 @@ This is used by 'gt done --phase-complete' to register for gate wake notificatio
 		}
 		if err := store.UpdateIssue(ctx, gateID, updates, actor); err != nil {
 			FatalError("updating gate: %v", err)
+		}
+
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalError("failed to commit: %v", err)
+			}
 		}
 
 		fmt.Printf("%s Added waiter to gate %s: %s\n", ui.RenderPass("✓"), gateID, waiter)
@@ -304,6 +311,13 @@ Use --reason to provide context for why the gate was resolved.`,
 		// Close the gate
 		if err := store.CloseIssue(ctx, gateID, reason, actor, ""); err != nil {
 			FatalError("closing gate: %v", err)
+		}
+
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalError("failed to commit: %v", err)
+			}
 		}
 
 		fmt.Printf("%s Gate resolved: %s\n", ui.RenderPass("✓"), gateID)
@@ -713,7 +727,7 @@ func checkTimer(gate *types.Issue, now time.Time) (resolved, escalated bool, rea
 }
 
 // checkBeadGate checks if a cross-rig bead gate is satisfied.
-// await_id format: <rig>:<bead-id> (e.g., "gastown:gt-abc123")
+// await_id format: <rig>:<bead-id> (e.g., "other-project:op-abc123")
 // Returns (satisfied, reason).
 func checkBeadGate(ctx context.Context, awaitID string) (bool, string) {
 	// Parse await_id format: <rig>:<bead-id>
@@ -764,6 +778,12 @@ func checkBeadGate(ctx context.Context, awaitID string) (bool, string) {
 func closeGate(_ interface{}, gateID, reason string) error {
 	if err := store.CloseIssue(rootCtx, gateID, reason, actor, ""); err != nil {
 		return err
+	}
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(rootCtx, actor); err != nil {
+			return err
+		}
 	}
 	return nil
 }

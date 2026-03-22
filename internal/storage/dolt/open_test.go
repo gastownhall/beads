@@ -96,9 +96,9 @@ func TestResolveAutoStart(t *testing.T) {
 			t.Setenv("BEADS_TEST_MODE", tc.testMode)
 			t.Setenv("BEADS_DOLT_AUTO_START", tc.autoStartEnv)
 
-			got := resolveAutoStart(tc.currentValue, tc.doltAutoStartCfg, false)
+			got := resolveAutoStart(tc.currentValue, tc.doltAutoStartCfg, ServerModeOwned)
 			if got != tc.wantAutoStart {
-				t.Errorf("resolveAutoStart(current=%v, configVal=%q) = %v, want %v",
+				t.Errorf("resolveAutoStart(current=%v, configVal=%q, mode=Owned) = %v, want %v",
 					tc.currentValue, tc.doltAutoStartCfg, got, tc.wantAutoStart)
 			}
 		})

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestRenderBasicStyles(t *testing.T) {
@@ -98,7 +100,7 @@ func TestRenderTypeVariants(t *testing.T) {
 		{"task", TypeTaskStyle.Render("task")},
 		{"epic", TypeEpicStyle.Render("epic")},
 		{"chore", TypeChoreStyle.Render("chore")},
-		// Gas Town types (agent, role, rig) have been removed - they now fall through to default
+		// Orchestrator types (agent, role, rig) have been removed - they now fall through to default
 		{"agent", "agent"}, // Falls through to default (no styling)
 		{"role", "role"},   // Falls through to default (no styling)
 		{"rig", "rig"},     // Falls through to default (no styling)
@@ -158,6 +160,149 @@ func TestRenderCommandAndCategoryAreUppercaseSafe(t *testing.T) {
 	cmd := RenderCommand("bd prime")
 	if !strings.Contains(cmd, "bd prime") {
 		t.Fatalf("command output missing text: %q", cmd)
+	}
+}
+
+func TestGetStatusIconWithCategory(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   string
+		category types.StatusCategory
+		want     string
+	}{
+		// Built-in statuses always return their own icon regardless of category
+		{"open", "open", "", StatusIconOpen},
+		{"in_progress", "in_progress", "", StatusIconInProgress},
+		{"blocked", "blocked", "", StatusIconBlocked},
+		{"closed", "closed", "", StatusIconClosed},
+		{"deferred", "deferred", "", StatusIconDeferred},
+		{"pinned", "pinned", "", StatusIconPinned},
+		// Custom statuses inherit icon from category
+		{"custom active", "review", types.CategoryActive, StatusIconOpen},
+		{"custom wip", "testing", types.CategoryWIP, StatusIconInProgress},
+		{"custom done", "archived", types.CategoryDone, StatusIconClosed},
+		{"custom frozen", "on-hold", types.CategoryFrozen, StatusIconDeferred},
+		{"custom unspecified", "legacy", types.CategoryUnspecified, StatusIconCustom},
+		{"custom no category", "mystery", "", StatusIconCustom},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetStatusIconWithCategory(tt.status, tt.category)
+			if got != tt.want {
+				t.Errorf("GetStatusIconWithCategory(%q, %q) = %q, want %q",
+					tt.status, tt.category, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderStatusIconBuiltIns(t *testing.T) {
+	// All built-in statuses should return non-empty strings
+	builtIns := []string{"open", "in_progress", "blocked", "closed", "deferred", "pinned"}
+	for _, status := range builtIns {
+		icon := RenderStatusIcon(status)
+		if icon == "" {
+			t.Errorf("RenderStatusIcon(%q) returned empty string", status)
+		}
+	}
+	// Unknown status should get custom icon
+	icon := RenderStatusIcon("totally_unknown")
+	if icon != StatusIconCustom {
+		t.Errorf("RenderStatusIcon(unknown) = %q, want %q", icon, StatusIconCustom)
+	}
+}
+
+func TestGetStatusIconBuiltIns(t *testing.T) {
+	expected := map[string]string{
+		"open":        StatusIconOpen,
+		"in_progress": StatusIconInProgress,
+		"blocked":     StatusIconBlocked,
+		"closed":      StatusIconClosed,
+		"deferred":    StatusIconDeferred,
+		"pinned":      StatusIconPinned,
+	}
+	for status, want := range expected {
+		got := GetStatusIcon(status)
+		if got != want {
+			t.Errorf("GetStatusIcon(%q) = %q, want %q", status, got, want)
+		}
+	}
+	// Unknown gives custom diamond
+	got := GetStatusIcon("unknown_status")
+	if got != StatusIconCustom {
+		t.Errorf("GetStatusIcon(unknown) = %q, want %q", got, StatusIconCustom)
+	}
+}
+
+func TestRenderStatusIconWithCategory(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   string
+		category types.StatusCategory
+	}{
+		// Built-in statuses return non-empty styled strings
+		{"open", "open", ""},
+		{"in_progress", "in_progress", ""},
+		{"blocked", "blocked", ""},
+		{"closed", "closed", ""},
+		{"deferred", "deferred", ""},
+		{"pinned", "pinned", ""},
+		// Custom statuses with categories
+		{"custom active", "review", types.CategoryActive},
+		{"custom wip", "testing", types.CategoryWIP},
+		{"custom done", "archived", types.CategoryDone},
+		{"custom frozen", "on-hold", types.CategoryFrozen},
+		{"custom unspecified", "legacy", types.CategoryUnspecified},
+		{"custom no category", "mystery", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RenderStatusIconWithCategory(tt.status, tt.category)
+			if got == "" {
+				t.Errorf("RenderStatusIconWithCategory(%q, %q) returned empty string",
+					tt.status, tt.category)
+			}
+		})
+	}
+
+	// Category-active custom status should use the same icon as "open"
+	reviewActive := RenderStatusIconWithCategory("review", types.CategoryActive)
+	openIcon := RenderStatusIconWithCategory("open", "")
+	if reviewActive != openIcon {
+		t.Errorf("active custom icon %q != open icon %q", reviewActive, openIcon)
+	}
+
+	// Category-wip custom status should use the same icon as "in_progress"
+	testingWIP := RenderStatusIconWithCategory("testing", types.CategoryWIP)
+	inProgressIcon := RenderStatusIconWithCategory("in_progress", "")
+	if testingWIP != inProgressIcon {
+		t.Errorf("wip custom icon %q != in_progress icon %q", testingWIP, inProgressIcon)
+	}
+
+	// Category-done custom status should use the same icon as "closed"
+	archivedDone := RenderStatusIconWithCategory("archived", types.CategoryDone)
+	closedIcon := RenderStatusIconWithCategory("closed", "")
+	if archivedDone != closedIcon {
+		t.Errorf("done custom icon %q != closed icon %q", archivedDone, closedIcon)
+	}
+
+	// Category-frozen custom status should use the same icon as "deferred"
+	onHoldFrozen := RenderStatusIconWithCategory("on-hold", types.CategoryFrozen)
+	deferredIcon := RenderStatusIconWithCategory("deferred", "")
+	if onHoldFrozen != deferredIcon {
+		t.Errorf("frozen custom icon %q != deferred icon %q", onHoldFrozen, deferredIcon)
+	}
+
+	// Unspecified/unknown category returns StatusIconCustom (unstyled diamond)
+	legacyIcon := RenderStatusIconWithCategory("legacy", types.CategoryUnspecified)
+	if legacyIcon != StatusIconCustom {
+		t.Errorf("unspecified custom icon %q != StatusIconCustom %q", legacyIcon, StatusIconCustom)
+	}
+	noCategory := RenderStatusIconWithCategory("mystery", "")
+	if noCategory != StatusIconCustom {
+		t.Errorf("no-category custom icon %q != StatusIconCustom %q", noCategory, StatusIconCustom)
 	}
 }
 

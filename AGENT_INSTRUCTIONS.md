@@ -101,6 +101,18 @@ bd hooks install
 
 **Merge conflicts**: Rare with hash IDs. Dolt uses cell-level 3-way merge for conflict resolution.
 
+## Git Workflow: Push to Main, Never PR
+
+Crew workers push directly to main. **Never create pull requests.**
+
+- `git push` to main is the only way to land work
+- `gh pr create` is forbidden — PRs are for external contributors, not crew
+- Do not create feature branches for your own work — commit and push to main
+- When handling external PRs, use fix-merge: checkout the PR branch locally,
+  fix/rebase onto main, merge locally, `git push`, then close the PR
+
+This is enforced by pre-use hooks. If you try `gh pr create`, it will be blocked.
+
 ## Landing the Plane
 
 **When the user says "let's land the plane"**, you MUST complete ALL steps below. The plane is NOT landed until `git push` succeeds. NEVER stop before pushing. NEVER say "ready to push when you are!" - that is a FAILURE.

@@ -21,6 +21,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -75,7 +76,7 @@ const windowsOS = "windows"
 // main.go's init() calls config.Initialize() which picks up the real .beads/config.yaml.
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
 // This helper ensures viper is reset after the test completes, preventing state pollution
-// (e.g., sync.mode=dolt-native leaking into JSONL export tests).
+// (e.g., repo config values leaking into JSONL export tests).
 func initConfigForTest(t *testing.T) {
 	t.Helper()
 	config.ResetForTesting()
@@ -104,7 +105,7 @@ func ensureCleanGlobalState(t *testing.T) {
 // Used by saveAndRestoreGlobals to ensure test isolation.
 type savedGlobals struct {
 	dbPath      string
-	store       *dolt.DoltStore
+	store       storage.DoltStorage
 	storeActive bool
 }
 

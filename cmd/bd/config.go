@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // gitSSHRemotePattern matches standard git SSH remote URLs (user@host:path)
@@ -123,6 +124,14 @@ var configSetCmd = &cobra.Command{
 		}
 
 		ctx := rootCtx
+
+		// Validate status.custom config before writing
+		if key == "status.custom" && value != "" {
+			if _, err := types.ParseCustomStatusConfig(value); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid status.custom value: %v\n", err)
+				os.Exit(1)
+			}
+		}
 
 		if err := store.SetConfig(ctx, key, value); err != nil {
 			fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
@@ -287,12 +296,13 @@ func showConfigYAMLOverrides(dbConfig map[string]string) {
 	yamlKeys := []string{
 		"no-db", "json", "actor", "identity",
 		"routing.mode", "routing.default", "routing.maintainer", "routing.contributor",
-		"sync.mode", "sync.git-remote", "no-push", "no-git-ops",
+		"sync.git-remote", "no-push", "no-git-ops",
 		"git.author", "git.no-gpg-sign",
 		"create.require-description",
-		"validation.on-create", "validation.on-sync",
+		"validation.on-create", "validation.on-close", "validation.on-sync",
 		"hierarchy.max-depth",
-		"dolt.idle-timeout",
+		"backup.enabled", "backup.interval", "backup.git-push", "backup.git-repo",
+		"dolt.idle-timeout", "dolt.shared-server",
 	}
 
 	var yamlOverrides []string
@@ -324,13 +334,50 @@ var configUnsetCmd = &cobra.Command{
 	Short: "Delete a configuration value",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		// Config operations work in direct mode only
+		key := args[0]
+
+		// Check if this is a yaml-only key (startup settings like backup.*, routing.*, etc.)
+		// These must be removed from config.yaml, not the database. (GH#2727)
+		if config.IsYamlOnlyKey(key) {
+			if err := config.UnsetYamlConfig(key); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unsetting config: %v\n", err)
+				os.Exit(1)
+			}
+
+			if jsonOutput {
+				outputJSON(map[string]interface{}{
+					"key":      key,
+					"location": "config.yaml",
+				})
+			} else {
+				fmt.Printf("Unset %s (in config.yaml)\n", key)
+			}
+			return
+		}
+
+		// beads.role is stored in git config, not the database (GH#1531).
+		if key == "beads.role" {
+			gitCmd := exec.Command("git", "config", "--unset", "beads.role")
+			if err := gitCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error unsetting beads.role in git config: %v\n", err)
+				os.Exit(1)
+			}
+			if jsonOutput {
+				outputJSON(map[string]interface{}{
+					"key":      key,
+					"location": "git config",
+				})
+			} else {
+				fmt.Printf("Unset %s (in git config)\n", key)
+			}
+			return
+		}
+
+		// Database-stored config requires direct mode
 		if err := ensureDirectMode("config unset requires direct database access"); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-
-		key := args[0]
 
 		ctx := rootCtx
 		if err := store.DeleteConfig(ctx, key); err != nil {
@@ -354,9 +401,8 @@ var configValidateCmd = &cobra.Command{
 	Long: `Validate sync-related configuration settings.
 
 Checks:
-  - sync.mode is a valid value (dolt-native)
   - federation.sovereignty is valid (T1, T2, T3, T4, or empty)
-  - federation.remote is set when sync.mode requires it
+  - federation.remote is set for Dolt sync
   - Remote URL format is valid (dolthub://, gs://, s3://, file://)
   - routing.mode is valid (auto, maintainer, contributor, explicit)
 

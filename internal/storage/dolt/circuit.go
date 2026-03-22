@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,13 @@ const (
 	// circuitCooldown is how long to stay open before allowing a half-open probe.
 	// Keep this short — planned restarts (e.g. gt dolt sync) only take 2-3s.
 	circuitCooldown = 5 * time.Second
+
+	// circuitStaleTTL is the maximum age of an open circuit breaker state file
+	// before it is considered stale and auto-reset to closed. This prevents old
+	// breaker files from poisoning fresh inits when the server was stopped long
+	// ago or the machine was rebooted. The TTL is based on the TrippedAt timestamp
+	// (or LastFailure if TrippedAt is zero).
+	circuitStaleTTL = 5 * time.Minute
 )
 
 // circuitState is the shared file-based circuit breaker state.
@@ -229,6 +237,9 @@ func (cb *circuitBreaker) Reset() {
 
 // readState reads the circuit state from the shared file.
 // Returns closed state if the file doesn't exist or can't be read.
+// Stale open/half-open states (older than circuitStaleTTL) are auto-reset
+// to closed so that leftover breaker files from previous sessions don't
+// poison fresh inits (GH#2598).
 func (cb *circuitBreaker) readState() circuitState {
 	data, err := os.ReadFile(cb.filePath)
 	if err != nil {
@@ -241,6 +252,24 @@ func (cb *circuitBreaker) readState() circuitState {
 	if state.State == "" {
 		state.State = circuitClosed
 	}
+
+	// Auto-expire stale open/half-open breaker state. Use TrippedAt as the
+	// reference timestamp; fall back to LastFailure if TrippedAt is zero
+	// (e.g. from an older breaker format).
+	if state.State == circuitOpen || state.State == circuitHalfOpen {
+		ref := state.TrippedAt
+		if ref.IsZero() {
+			ref = state.LastFailure
+		}
+		if !ref.IsZero() && time.Since(ref) > circuitStaleTTL {
+			log.Printf("[circuit-breaker] %s:%d: stale %s state (age %s > TTL %s), auto-resetting to closed",
+				cb.host, cb.port, state.State, time.Since(ref).Round(time.Second), circuitStaleTTL)
+			reset := circuitState{State: circuitClosed}
+			cb.writeState(reset)
+			return reset
+		}
+	}
+
 	return state
 }
 
@@ -256,6 +285,60 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 		return
 	}
 	_ = os.Rename(tmp, cb.filePath)
+}
+
+// CleanStaleCircuitBreakerFiles removes stale circuit breaker files from /tmp.
+// This cleans up leftover files that could poison fresh inits:
+//   - Legacy port-0 files (beads-dolt-circuit-0.json) from before the port-0 fix
+//   - Any breaker file whose open/half-open state is older than circuitStaleTTL
+//
+// Called during init to ensure a clean starting state (GH#2598).
+func CleanStaleCircuitBreakerFiles() {
+	cleanStaleCircuitBreakerFilesIn("/tmp")
+}
+
+// cleanStaleCircuitBreakerFilesIn is the testable implementation of
+// CleanStaleCircuitBreakerFiles that accepts a directory parameter.
+func cleanStaleCircuitBreakerFilesIn(dir string) {
+	pattern := filepath.Join(dir, "beads-dolt-circuit-*.json")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return
+	}
+	for _, path := range matches {
+		// Always remove legacy port-0 files — they should never exist
+		// (the port-0 fix prevents creating them, but old ones may linger).
+		base := filepath.Base(path)
+		if base == "beads-dolt-circuit-0.json" {
+			_ = os.Remove(path)
+			log.Printf("[circuit-breaker] removed legacy port-0 breaker file: %s", path)
+			continue
+		}
+
+		// For other breaker files, check if the state is stale.
+		data, err := os.ReadFile(path) //nolint:gosec // G304: path is from filepath.Glob with controlled pattern
+		if err != nil {
+			continue
+		}
+		var state circuitState
+		if err := json.Unmarshal(data, &state); err != nil {
+			// Corrupt file — remove it
+			_ = os.Remove(path)
+			continue
+		}
+		if state.State != circuitOpen && state.State != circuitHalfOpen {
+			continue
+		}
+		ref := state.TrippedAt
+		if ref.IsZero() {
+			ref = state.LastFailure
+		}
+		if !ref.IsZero() && time.Since(ref) > circuitStaleTTL {
+			_ = os.Remove(path)
+			log.Printf("[circuit-breaker] removed stale breaker file: %s (age %s)",
+				path, time.Since(ref).Round(time.Second))
+		}
+	}
 }
 
 // isConnectionError returns true if the error indicates the Dolt server is

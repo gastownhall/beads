@@ -298,3 +298,95 @@ func TestValidateYamlConfigValue_SharedServer(t *testing.T) {
 		t.Error("expected '1' to be invalid (not a boolean string)")
 	}
 }
+
+func TestCommentOutYamlKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		key      string
+		expected string
+	}{
+		{
+			name:     "comment out existing key",
+			content:  "backup.enabled: false\nother: value",
+			key:      "backup.enabled",
+			expected: "# backup.enabled: false\nother: value",
+		},
+		{
+			name:     "already commented - no change",
+			content:  "# backup.enabled: false\nother: value",
+			key:      "backup.enabled",
+			expected: "# backup.enabled: false\nother: value",
+		},
+		{
+			name:     "key not found - no change",
+			content:  "other: value",
+			key:      "backup.enabled",
+			expected: "other: value",
+		},
+		{
+			name:     "preserve indentation",
+			content:  "  backup.enabled: true\nother: value",
+			key:      "backup.enabled",
+			expected: "  # backup.enabled: true\nother: value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := commentOutYamlKey(tt.content, tt.key)
+			if got != tt.expected {
+				t.Errorf("commentOutYamlKey() =\n%q\nwant:\n%q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestUnsetYamlConfig(t *testing.T) {
+	// Create a temp directory with .beads/config.yaml
+	tmpDir, err := os.MkdirTemp("", "beads-yaml-unset-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create .beads dir: %v", err)
+	}
+
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	initialConfig := `# Beads Config
+backup.enabled: false
+other-setting: value
+`
+	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
+		t.Fatalf("Failed to write config.yaml: %v", err)
+	}
+
+	// Change to temp directory for the test
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	// Test UnsetYamlConfig
+	if err := UnsetYamlConfig("backup.enabled"); err != nil {
+		t.Fatalf("UnsetYamlConfig() error = %v", err)
+	}
+
+	// Read back and verify
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("Failed to read config.yaml: %v", err)
+	}
+
+	contentStr := string(content)
+	if !strings.Contains(contentStr, "# backup.enabled: false") {
+		t.Errorf("config.yaml should contain commented-out backup.enabled, got:\n%s", contentStr)
+	}
+	if !strings.Contains(contentStr, "other-setting: value") {
+		t.Errorf("config.yaml should preserve other settings, got:\n%s", contentStr)
+	}
+}

@@ -121,6 +121,11 @@ var closeEligibleEpicsCmd = &cobra.Command{
 			}
 			closedIDs = append(closedIDs, epicStatus.Epic.ID)
 		}
+		if isEmbeddedDolt && len(closedIDs) > 0 && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"closed": closedIDs,

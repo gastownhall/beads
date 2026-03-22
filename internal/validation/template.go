@@ -110,3 +110,16 @@ func LintIssue(issue *types.Issue) error {
 	templateErr.Missing = remaining
 	return templateErr
 }
+
+// ValidateCloseReason checks if a close reason meets minimum quality standards.
+// Returns nil if the reason is acceptable. Used by validation.on-close config.
+func ValidateCloseReason(reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || strings.EqualFold(reason, "closed") {
+		return fmt.Errorf("close reason is empty or default; provide a summary of what was done")
+	}
+	if len(reason) < 20 {
+		return fmt.Errorf("close reason is terse (%d chars); aim for 20+ characters describing what was done", len(reason))
+	}
+	return nil
+}

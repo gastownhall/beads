@@ -617,7 +617,7 @@ bd list --label breaking-change --label needs-docs
 
 ## Operational State Pattern (Labels as Cache)
 
-For orchestration systems like Gas Town, labels can cache the current operational state of "role beads" (issues representing agents or system components). This enables fast state queries without scanning event history.
+For orchestration systems, labels can cache the current operational state of "role beads" (issues representing agents or system components). This enables fast state queries without scanning event history.
 
 ### Convention: `<dimension>:<value>`
 

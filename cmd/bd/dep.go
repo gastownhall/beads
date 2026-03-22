@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/routing"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -28,7 +29,7 @@ func getBeadsDir() string {
 // If the issue routes to a different database, a routed store is returned
 // and must be closed by the caller via the returned cleanup function.
 // If the issue is in the local store, cleanup is a no-op.
-func resolveIDWithRouting(ctx context.Context, localStore *dolt.DoltStore, id string) (resolvedID string, targetStore *dolt.DoltStore, cleanup func(), err error) {
+func resolveIDWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (resolvedID string, targetStore storage.DoltStorage, cleanup func(), err error) {
 	result, err := resolveAndGetIssueWithRouting(ctx, localStore, id)
 	if err != nil {
 		return "", nil, func() {}, fmt.Errorf("resolving issue ID %s: %w", id, err)
@@ -61,7 +62,7 @@ func isChildOf(childID, parentID string) bool {
 }
 
 // warnIfCyclesExist checks for dependency cycles and prints a warning if found.
-func warnIfCyclesExist(s *dolt.DoltStore) {
+func warnIfCyclesExist(s storage.DoltStorage) {
 	if s == nil {
 		return // Skip cycle check if store is not available
 	}
@@ -160,6 +161,12 @@ Examples:
 
 			// Check for cycles after adding dependency
 			warnIfCyclesExist(fromStore)
+
+			if isEmbeddedDolt && fromStore != nil {
+				if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+					FatalErrorRespectJSON("failed to commit: %v", err)
+				}
+			}
 
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
@@ -309,6 +316,12 @@ Examples:
 		// Check for cycles after adding dependency
 		warnIfCyclesExist(fromStore)
 
+		if isEmbeddedDolt && fromStore != nil {
+			if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
+
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"status":        "added",
@@ -345,7 +358,7 @@ Examples:
 
 		// Resolve partial ID with cross-rig routing support
 		var fullID string
-		var depStore *dolt.DoltStore // store to query dependencies from
+		var depStore storage.DoltStorage // store to query dependencies from
 		var routedResult *RoutedResult
 		defer func() {
 			if routedResult != nil {
@@ -512,6 +525,12 @@ var depRemoveCmd = &cobra.Command{
 			FatalErrorRespectJSON("%v", err)
 		}
 
+		if isEmbeddedDolt && fromStore != nil {
+			if _, err := fromStore.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
+
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"status":        "removed",
@@ -558,6 +577,13 @@ Examples:
 		direction, _ := cmd.Flags().GetString("direction")
 		statusFilter, _ := cmd.Flags().GetString("status")
 		formatStr, _ := cmd.Flags().GetString("format")
+		// Handle --format json: the local --format flag shadows the hidden
+		// persistent --format on rootCmd, so "json" arrives here instead of
+		// setting jsonOutput via PersistentPreRun. Route it explicitly.
+		if strings.EqualFold(formatStr, "json") {
+			jsonOutput = true
+			formatStr = ""
+		}
 
 		// Handle --direction flag (takes precedence over deprecated --reverse)
 		if direction == "" && reverse {
@@ -607,7 +633,7 @@ Examples:
 			tree = filterTreeByStatus(tree, types.Status(statusFilter))
 		}
 
-		// Handle mermaid format
+		// Handle format presets (json handled earlier, near flag read)
 		if formatStr == "mermaid" {
 			outputMermaidTree(tree, args[0])
 			return
@@ -1044,7 +1070,7 @@ func ParseExternalRef(ref string) (project, capability string) {
 
 // resolveExternalDependencies fetches issue metadata for external (cross-rig) dependencies.
 // It queries raw dependency records, finds external refs, and resolves them via routing.
-func resolveExternalDependencies(ctx context.Context, depStore *dolt.DoltStore, issueID string, typeFilter string) []*types.IssueWithDependencyMetadata {
+func resolveExternalDependencies(ctx context.Context, depStore storage.DoltStorage, issueID string, typeFilter string) []*types.IssueWithDependencyMetadata {
 	if depStore == nil {
 		return nil
 	}

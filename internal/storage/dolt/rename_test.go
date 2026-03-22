@@ -75,7 +75,7 @@ func TestUpdateIssueIDUpdatesWispTables(t *testing.T) {
 	}
 
 	// Add a wisp label for the old issue ID
-	if err := store.addWispLabel(ctx, "test-old1", "bug", "test"); err != nil {
+	if err := store.AddLabel(ctx, "test-old1", "bug", "test"); err != nil {
 		t.Fatalf("failed to add wisp label: %v", err)
 	}
 
@@ -211,7 +211,7 @@ func TestUpdateIssueIDRenamesWisp(t *testing.T) {
 	}
 
 	// Add a label to the wisp
-	if err := store.addWispLabel(ctx, oldID, "test-label", "tester"); err != nil {
+	if err := store.AddLabel(ctx, oldID, "test-label", "tester"); err != nil {
 		t.Fatalf("failed to add wisp label: %v", err)
 	}
 

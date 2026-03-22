@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 var expectedBackupSnapshotFiles = []string{
@@ -256,11 +258,12 @@ func setupBackupExportGitHarness(t *testing.T) *backupExportGitHarness {
 
 func insertBackupExportGitIssue(t *testing.T, ctx context.Context, id, title string) {
 	t.Helper()
-	if _, err := store.DB().ExecContext(ctx, `INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	db := store.(storage.RawDBAccessor).DB()
+	if _, err := db.ExecContext(ctx, `INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, title, "desc", "", "", "", "open", 2, "task"); err != nil {
 		t.Fatalf("insert issue %s: %v", id, err)
 	}
-	if _, err := store.DB().ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", fmt.Sprintf("add %s", id)); err != nil {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", fmt.Sprintf("add %s", id)); err != nil {
 		t.Fatalf("dolt commit for %s: %v", id, err)
 	}
 }

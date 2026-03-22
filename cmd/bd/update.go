@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
@@ -92,6 +93,9 @@ create, update, show, or close operation).`,
 		}
 		description, descChanged := getDescriptionFlag(cmd)
 		if descChanged {
+			if err := validateDescriptionUpdate(cmd, description, descChanged); err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
 			updates["description"] = description
 		}
 		design, designChanged := getDesignFlag(cmd)
@@ -291,7 +295,7 @@ create, update, show, or close operation).`,
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
 		for _, id := range args {
-			// Resolve and get issue with routing (e.g., gt-xyz routes to gastown)
+			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
 			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
 				if result != nil {
@@ -365,6 +369,16 @@ create, update, show, or close operation).`,
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 					result.Close()
 					continue
+				}
+				// Audit log key field changes (survives Dolt GC flatten)
+				if s, ok := regularUpdates["status"].(string); ok {
+					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor, "")
+				}
+				if a, ok := regularUpdates["assignee"].(string); ok {
+					audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, a, actor, "")
+				}
+				if p, ok := regularUpdates["priority"].(int); ok {
+					audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", p), actor, "")
 				}
 			}
 
@@ -459,6 +473,14 @@ create, update, show, or close operation).`,
 				firstUpdatedID = result.ResolvedID
 			}
 			result.Close()
+		}
+
+		// Embedded mode: flush Dolt commit. DoltStore commits
+		// inline during UpdateIssue so this is only needed for EmbeddedDoltStore.
+		if isEmbeddedDolt && firstUpdatedID != "" && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
 		}
 
 		// Set last touched after all updates complete
@@ -578,6 +600,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision); custom types require types.custom config")
 	registerCommonIssueFlags(updateCmd)
+	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)

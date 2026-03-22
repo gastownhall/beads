@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
@@ -231,7 +232,12 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		if msg == "" {
 			// No explicit message — use CommitPending which generates a
 			// descriptive summary of accumulated changes.
-			committed, err := st.CommitPending(ctx, getActor())
+			pc, ok := st.(storage.PendingCommitter)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "Error: storage backend does not support pending commits\n")
+				os.Exit(1)
+			}
+			committed, err := pc.CommitPending(ctx, getActor())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -366,7 +372,7 @@ var doltKillallCmd = &cobra.Command{
 	Long: `Find and kill orphan dolt sql-server processes not tracked by the
 canonical PID file for the current repo's Dolt data directory.
 
-Under Gas Town, the canonical server lives at $GT_ROOT/.beads/. Any other
+Under an orchestrator, the canonical server lives at $GT_ROOT/.beads/. Any other
 dolt sql-server processes using that shared data directory are considered
 orphans and will be killed.
 
@@ -399,8 +405,8 @@ servers are preserved.`,
 // - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
 // - doctest_*: doctor test helpers
 // - doctortest_*: doctor test helpers
-// - beads_pt*: gastown patrol_helpers_test.go random prefixes
-// - beads_vr*: gastown mail/router_test.go random prefixes
+// - beads_pt*: orchestrator patrol_helpers_test.go random prefixes
+// - beads_vr*: orchestrator mail/router_test.go random prefixes
 // - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
 var staleDatabasePrefixes = []string{"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t"}
 
@@ -563,7 +569,12 @@ var doltRemoteAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		name, url := args[0], args[1]
-		dbPath := st.CLIDir()
+		locator, ok := st.(storage.StoreLocator)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
+			os.Exit(1)
+		}
+		dbPath := locator.CLIDir()
 
 		// Check existing remotes on both surfaces
 		sqlRemotes, _ := st.ListRemotes(ctx)
@@ -648,7 +659,12 @@ var doltRemoteListCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
 			os.Exit(1)
 		}
-		dbPath := st.CLIDir()
+		locator, ok := st.(storage.StoreLocator)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
+			os.Exit(1)
+		}
+		dbPath := locator.CLIDir()
 
 		sqlRemotes, sqlErr := st.ListRemotes(ctx)
 		if sqlErr != nil {
@@ -759,7 +775,12 @@ var doltRemoteRemoveCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		name := args[0]
-		dbPath := st.CLIDir()
+		locator, ok := st.(storage.StoreLocator)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
+			os.Exit(1)
+		}
+		dbPath := locator.CLIDir()
 
 		// Check both surfaces for conflicts
 		sqlRemotes, _ := st.ListRemotes(ctx)
@@ -1379,7 +1400,10 @@ func openDoltServerConnection() (*sql.DB, func()) {
 // Includes the beadsDir path for debugging worktree config pollution (bd-la2cl).
 func logDoltConfigChange(beadsDir, key, value string) {
 	logPath := filepath.Join(beadsDir, "dolt-config.log")
-	actor := os.Getenv("BD_ACTOR")
+	actor := os.Getenv("BEADS_ACTOR")
+	if actor == "" {
+		actor = os.Getenv("BD_ACTOR") // deprecated fallback
+	}
 	if actor == "" {
 		actor = "unknown"
 	}

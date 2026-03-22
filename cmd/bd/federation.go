@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
 )
@@ -25,10 +24,10 @@ var (
 var federationCmd = &cobra.Command{
 	Use:     "federation",
 	GroupID: "sync",
-	Short:   "Manage peer-to-peer federation with other Gas Towns",
+	Short:   "Manage peer-to-peer federation with other workspaces",
 	Long: `Manage peer-to-peer federation between Dolt-backed beads databases.
 
-Federation enables synchronized issue tracking across multiple Gas Towns,
+Federation enables synchronized issue tracking across multiple workspaces,
 each maintaining their own Dolt database while sharing updates via remotes.
 
 Requires the Dolt storage backend.`,
@@ -130,7 +129,7 @@ func init() {
 	rootCmd.AddCommand(federationCmd)
 }
 
-func getFederatedStore() (*dolt.DoltStore, error) {
+func getFederatedStore() (storage.DoltStorage, error) {
 	if store == nil {
 		return nil, fmt.Errorf("no store available")
 	}
@@ -173,7 +172,7 @@ func runFederationSync(cmd *cobra.Command, args []string) {
 	}
 
 	// Sync with each peer
-	var results []*dolt.SyncResult
+	var results []*storage.SyncResult
 	for _, peer := range peers {
 		if !jsonOutput {
 			fmt.Printf("%s Syncing with %s...\n", ui.RenderAccent("🔄"), peer)

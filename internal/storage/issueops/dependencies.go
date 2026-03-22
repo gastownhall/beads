@@ -174,3 +174,310 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	}
 	return nil
 }
+
+// RemoveDependencyInTx removes a dependency between two issues within an
+// existing transaction. Automatically routes to wisp_dependencies if the
+// source issue is an active wisp.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID string) error {
+	isWisp := IsActiveWispInTx(ctx, tx, issueID)
+	_, _, _, depTable := WispTableRouting(isWisp)
+
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		`DELETE FROM %s WHERE issue_id = ? AND depends_on_id = ?`, depTable),
+		issueID, dependsOnID); err != nil {
+		return fmt.Errorf("remove dependency: %w", err)
+	}
+	return nil
+}
+
+// GetIssuesByIDsInTx retrieves multiple issues by ID within an existing
+// transaction, including labels. Automatically routes each ID to the correct
+// table (issues/wisps). Uses batched IN clauses.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string) ([]*types.Issue, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// Partition IDs by wisp status.
+	var wispIDs, permIDs []string
+	for _, id := range ids {
+		if IsActiveWispInTx(ctx, tx, id) {
+			wispIDs = append(wispIDs, id)
+		} else {
+			permIDs = append(permIDs, id)
+		}
+	}
+
+	var allIssues []*types.Issue
+	for _, pair := range []struct {
+		table    string
+		labelTbl string
+		ids      []string
+	}{
+		{"issues", "labels", permIDs},
+		{"wisps", "wisp_labels", wispIDs},
+	} {
+		if len(pair.ids) == 0 {
+			continue
+		}
+		for start := 0; start < len(pair.ids); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(pair.ids) {
+				end = len(pair.ids)
+			}
+			batch := pair.ids[start:end]
+
+			placeholders := make([]string, len(batch))
+			args := make([]any, len(batch))
+			for i, id := range batch {
+				placeholders[i] = "?"
+				args[i] = id
+			}
+			inClause := strings.Join(placeholders, ",")
+
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT %s FROM %s WHERE id IN (%s)`,
+				IssueSelectColumns, pair.table, inClause), args...)
+			if err != nil {
+				return nil, fmt.Errorf("get issues by IDs from %s: %w", pair.table, err)
+			}
+			issueMap := make(map[string]*types.Issue)
+			for rows.Next() {
+				issue, scanErr := ScanIssueFrom(rows)
+				if scanErr != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("get issues by IDs: scan: %w", scanErr)
+				}
+				allIssues = append(allIssues, issue)
+				issueMap[issue.ID] = issue
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("get issues by IDs: rows: %w", err)
+			}
+
+			// Hydrate labels.
+			if len(issueMap) > 0 {
+				labelRows, err := tx.QueryContext(ctx, fmt.Sprintf(
+					`SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label`,
+					pair.labelTbl, inClause), args...)
+				if err != nil {
+					return nil, fmt.Errorf("get issues by IDs: labels from %s: %w", pair.labelTbl, err)
+				}
+				for labelRows.Next() {
+					var issueID, label string
+					if scanErr := labelRows.Scan(&issueID, &label); scanErr != nil {
+						_ = labelRows.Close()
+						return nil, fmt.Errorf("get issues by IDs: scan label: %w", scanErr)
+					}
+					if issue, ok := issueMap[issueID]; ok {
+						issue.Labels = append(issue.Labels, label)
+					}
+				}
+				_ = labelRows.Close()
+				if err := labelRows.Err(); err != nil {
+					return nil, fmt.Errorf("get issues by IDs: label rows: %w", err)
+				}
+			}
+		}
+	}
+
+	return allIssues, nil
+}
+
+// GetDependenciesWithMetadataInTx returns issues that the given issueID depends on,
+// along with the dependency type. Works within an existing transaction.
+// Queries both dependency tables to handle cross-table dependencies.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func GetDependenciesWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	type depMeta struct {
+		depID, depType string
+	}
+
+	// Query both dependency tables to find all dependencies.
+	var deps []depMeta
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT depends_on_id, type FROM %s WHERE issue_id = ?`, depTable), issueID)
+		if err != nil {
+			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var d depMeta
+			if scanErr := rows.Scan(&d.depID, &d.depType); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
+			}
+			deps = append(deps, d)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(deps) == 0 {
+		return nil, nil
+	}
+
+	// Fetch all dependency target issues.
+	ids := make([]string, len(deps))
+	for i, d := range deps {
+		ids[i] = d.depID
+	}
+	issues, err := GetIssuesByIDsInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("get dependencies: fetch issues: %w", err)
+	}
+	issueMap := make(map[string]*types.Issue, len(issues))
+	for _, iss := range issues {
+		issueMap[iss.ID] = iss
+	}
+
+	var results []*types.IssueWithDependencyMetadata
+	for _, d := range deps {
+		issue, ok := issueMap[d.depID]
+		if !ok {
+			continue
+		}
+		results = append(results, &types.IssueWithDependencyMetadata{
+			Issue:          *issue,
+			DependencyType: types.DependencyType(d.depType),
+		})
+	}
+	return results, nil
+}
+
+// GetDependentsWithMetadataInTx returns issues that depend on the given issueID
+// along with the dependency type. Works within an existing transaction.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func GetDependentsWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	type depMeta struct {
+		depID, depType string
+	}
+
+	// Query both dependency tables to find all dependents.
+	var deps []depMeta
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT issue_id, type FROM %s WHERE depends_on_id = ?`, depTable), issueID)
+		if err != nil {
+			return nil, fmt.Errorf("get dependents from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var d depMeta
+			if scanErr := rows.Scan(&d.depID, &d.depType); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get dependents: scan: %w", scanErr)
+			}
+			deps = append(deps, d)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get dependents: rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(deps) == 0 {
+		return nil, nil
+	}
+
+	// Fetch all dependent issues.
+	ids := make([]string, len(deps))
+	for i, d := range deps {
+		ids[i] = d.depID
+	}
+	issues, err := GetIssuesByIDsInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("get dependents: fetch issues: %w", err)
+	}
+	issueMap := make(map[string]*types.Issue, len(issues))
+	for _, iss := range issues {
+		issueMap[iss.ID] = iss
+	}
+
+	var results []*types.IssueWithDependencyMetadata
+	for _, d := range deps {
+		issue, ok := issueMap[d.depID]
+		if !ok {
+			continue
+		}
+		results = append(results, &types.IssueWithDependencyMetadata{
+			Issue:          *issue,
+			DependencyType: types.DependencyType(d.depType),
+		})
+	}
+	return results, nil
+}
+
+// GetDependenciesInTx returns issues that the given issueID depends on.
+// Queries both dependencies and wisp_dependencies tables.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func GetDependenciesInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
+	var ids []string
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT depends_on_id FROM %s WHERE issue_id = ?`, depTable), issueID)
+		if err != nil {
+			return nil, fmt.Errorf("get dependencies from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get dependencies: scan: %w", scanErr)
+			}
+			ids = append(ids, id)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get dependencies: rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	return GetIssuesByIDsInTx(ctx, tx, ids)
+}
+
+// GetDependentsInTx returns issues that depend on the given issueID.
+// Queries both dependencies and wisp_dependencies tables.
+//
+//nolint:gosec // G201: table names come from hardcoded constants
+func GetDependentsInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Issue, error) {
+	var ids []string
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT issue_id FROM %s WHERE depends_on_id = ?`, depTable), issueID)
+		if err != nil {
+			return nil, fmt.Errorf("get dependents from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("get dependents: scan: %w", scanErr)
+			}
+			ids = append(ids, id)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("get dependents: rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	return GetIssuesByIDsInTx(ctx, tx, ids)
+}

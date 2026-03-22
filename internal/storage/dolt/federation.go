@@ -14,7 +14,7 @@ import (
 )
 
 // FederatedStorage implementation for DoltStore
-// These methods enable peer-to-peer synchronization between Gas Towns.
+// These methods enable peer-to-peer synchronization between workspaces.
 
 // PushTo pushes commits to a specific peer remote.
 // If credentials are stored for this peer, they are used automatically.

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // Tip represents a contextual hint that can be shown to users after successful commands
@@ -60,7 +60,7 @@ func initTipRand() {
 
 // maybeShowTip selects and displays an eligible tip based on priority and probability
 // Respects --json and --quiet flags
-func maybeShowTip(store *dolt.DoltStore) {
+func maybeShowTip(store storage.DoltStorage) {
 	// Skip tips in JSON output mode or quiet mode
 	if jsonOutput || quietFlag {
 		return
@@ -84,7 +84,7 @@ func maybeShowTip(store *dolt.DoltStore) {
 
 // selectNextTip finds the next tip to show based on conditions, frequency, priority, and probability
 // Returns nil if no tip should be shown
-func selectNextTip(store *dolt.DoltStore) *Tip {
+func selectNextTip(store storage.DoltStorage) *Tip {
 	if store == nil {
 		return nil
 	}
@@ -134,7 +134,7 @@ func selectNextTip(store *dolt.DoltStore) *Tip {
 
 // getLastShown retrieves the timestamp when a tip was last shown
 // Returns zero time if never shown
-func getLastShown(store *dolt.DoltStore, tipID string) time.Time {
+func getLastShown(store storage.DoltStorage, tipID string) time.Time {
 	key := fmt.Sprintf("tip_%s_last_shown", tipID)
 	value, err := store.GetMetadata(context.Background(), key)
 	if err != nil || value == "" {
@@ -151,7 +151,7 @@ func getLastShown(store *dolt.DoltStore, tipID string) time.Time {
 }
 
 // recordTipShown records the timestamp when a tip was shown
-func recordTipShown(store *dolt.DoltStore, tipID string) {
+func recordTipShown(store storage.DoltStorage, tipID string) {
 	if store == nil || tipID == "" {
 		return
 	}

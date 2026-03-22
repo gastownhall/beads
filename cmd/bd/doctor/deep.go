@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // DeepValidationResult holds all deep validation check results
@@ -18,7 +17,6 @@ type DeepValidationResult struct {
 	ParentConsistency   DoctorCheck   `json:"parent_consistency"`
 	DependencyIntegrity DoctorCheck   `json:"dependency_integrity"`
 	EpicCompleteness    DoctorCheck   `json:"epic_completeness"`
-	AgentBeadIntegrity  DoctorCheck   `json:"agent_bead_integrity"`
 	MailThreadIntegrity DoctorCheck   `json:"mail_thread_integrity"`
 	MoleculeIntegrity   DoctorCheck   `json:"molecule_integrity"`
 	AllChecks           []DoctorCheck `json:"all_checks"`
@@ -106,12 +104,6 @@ func RunDeepValidation(path string) DeepValidationResult {
 	result.AllChecks = append(result.AllChecks, result.EpicCompleteness)
 	if result.EpicCompleteness.Status == StatusWarning {
 		// Epic completeness is informational, not an error
-	}
-
-	result.AgentBeadIntegrity = checkAgentBeadIntegrity(db)
-	result.AllChecks = append(result.AllChecks, result.AgentBeadIntegrity)
-	if result.AgentBeadIntegrity.Status == StatusError {
-		result.OverallOK = false
 	}
 
 	result.MailThreadIntegrity = checkMailThreadIntegrity(db)
@@ -291,104 +283,6 @@ func checkEpicCompleteness(db *sql.DB) DoctorCheck {
 	check.Message = fmt.Sprintf("Found %d epics ready to close", len(completedEpics))
 	check.Detail = fmt.Sprintf("Examples: %s", strings.Join(completedEpics[:min(5, len(completedEpics))], ", "))
 	check.Fix = "Run 'bd close <epic-id>' to close completed epics"
-	return check
-}
-
-// agentBeadInfo holds info about an agent bead for integrity checking
-type agentBeadInfo struct {
-	ID         string
-	Title      string
-	RoleBead   string
-	AgentState string
-	RoleType   string
-}
-
-// checkAgentBeadIntegrity verifies that agent beads have required fields
-func checkAgentBeadIntegrity(db *sql.DB) DoctorCheck {
-	check := DoctorCheck{
-		Name:     "Agent Bead Integrity",
-		Category: CategoryMetadata,
-	}
-
-	// Check if the notes column exists (agent metadata stored as JSON in notes)
-	var hasNotes bool
-	err := db.QueryRow(`
-		SELECT COUNT(*) > 0 FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'issues' AND COLUMN_NAME = 'notes'
-	`).Scan(&hasNotes)
-	if err != nil || !hasNotes {
-		check.Status = StatusOK
-		check.Message = "N/A (schema doesn't support agent beads)"
-		return check
-	}
-
-	// Find agent beads and validate their metadata from the notes JSON field
-	query := `
-		SELECT id, title,
-		       COALESCE(JSON_UNQUOTE(JSON_EXTRACT(notes, '$.role_bead')), '') as role_bead,
-		       COALESCE(JSON_UNQUOTE(JSON_EXTRACT(notes, '$.agent_state')), '') as agent_state,
-		       COALESCE(JSON_UNQUOTE(JSON_EXTRACT(notes, '$.role_type')), '') as role_type
-		FROM issues
-		WHERE issue_type = 'agent'
-		LIMIT 100`
-
-	rows, err := db.Query(query)
-	if err != nil {
-		// Try alternate approach without JSON extraction
-		query = `
-			SELECT id, title, '', '', ''
-			FROM issues
-			WHERE issue_type = 'agent'
-			LIMIT 100`
-		rows, err = db.Query(query)
-		if err != nil {
-			check.Status = StatusOK
-			check.Message = "No agent beads found"
-			return check
-		}
-	}
-	defer rows.Close()
-
-	var agents []agentBeadInfo
-	var invalidAgents []string
-
-	for rows.Next() {
-		var agent agentBeadInfo
-		if err := rows.Scan(&agent.ID, &agent.Title, &agent.RoleBead, &agent.AgentState, &agent.RoleType); err == nil {
-			agents = append(agents, agent)
-
-			// Validate agent state
-			if agent.AgentState != "" {
-				state := types.AgentState(agent.AgentState)
-				if !state.IsValid() {
-					invalidAgents = append(invalidAgents, fmt.Sprintf("%s (invalid state: %s)", agent.ID, agent.AgentState))
-				}
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		check.Status = StatusWarning
-		check.Message = "Row iteration error checking agent bead integrity"
-		check.Detail = err.Error()
-		return check
-	}
-
-	if len(agents) == 0 {
-		check.Status = StatusOK
-		check.Message = "No agent beads to validate"
-		return check
-	}
-
-	if len(invalidAgents) > 0 {
-		check.Status = StatusError
-		check.Message = fmt.Sprintf("Found %d agents with invalid data", len(invalidAgents))
-		check.Detail = fmt.Sprintf("Examples: %s", strings.Join(invalidAgents[:min(3, len(invalidAgents))], ", "))
-		check.Fix = "Update agent beads with valid agent_state values"
-		return check
-	}
-
-	check.Status = StatusOK
-	check.Message = fmt.Sprintf("%d agent beads validated", len(agents))
 	return check
 }
 

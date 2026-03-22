@@ -181,7 +181,7 @@ func FreshCloneImport(path string, bdVersion string) error {
 
 // importJSONLIntoStore reads a JSONL file and imports all issues into the Dolt store.
 // Used by both the Database fix (new store creation) and Fresh Clone fix (empty store).
-func importJSONLIntoStore(ctx context.Context, store *dolt.DoltStore, jsonlPath string) (int, error) {
+func importJSONLIntoStore(ctx context.Context, store storage.DoltStorage, jsonlPath string) (int, error) {
 	f, err := os.Open(jsonlPath) // #nosec G304 - workspace-controlled path
 	if err != nil {
 		return 0, fmt.Errorf("failed to open JSONL file: %w", err)
@@ -241,11 +241,11 @@ func importJSONLIntoStore(ctx context.Context, store *dolt.DoltStore, jsonlPath 
 
 // detectActor returns the best available actor name for automated operations.
 func detectActor() string {
-	if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
-		return bdActor
-	}
 	if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
 		return beadsActor
+	}
+	if bdActor := os.Getenv("BD_ACTOR"); bdActor != "" {
+		return bdActor
 	}
 	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
 		if gitUser := strings.TrimSpace(string(out)); gitUser != "" {

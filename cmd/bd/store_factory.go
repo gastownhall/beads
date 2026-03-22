@@ -25,7 +25,13 @@ func acquireEmbeddedLock(_ string) (*embeddeddolt.Lock, error) {
 }
 
 // newDoltStoreFromConfig creates a storage backend from the beads directory's
-// persisted metadata.json configuration. Used by direct_mode.go.
+// persisted metadata.json configuration.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	return dolt.NewFromConfig(ctx, beadsDir)
+}
+
+// newReadOnlyStoreFromConfig creates a read-only storage backend from the beads
+// directory's persisted metadata.json configuration.
+func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 }

@@ -32,6 +32,9 @@ push-state.json
 # Lock files (various runtime locks)
 *.lock
 
+# Credential key (encryption key for federation peer auth — never commit)
+.beads-credential-key
+
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
 
@@ -55,12 +58,16 @@ dolt-server.pid
 dolt-server.log
 dolt-server.lock
 dolt-server.port
+dolt-server.activity
 
 # Corrupt backup directories (created by bd doctor --fix recovery)
 *.corrupt.backup/
 
 # Backup data (auto-exported JSONL, local-only)
 backup/
+
+# Per-project environment file (Dolt connection config, GH#2520)
+.env
 
 # Legacy files (from pre-Dolt versions)
 *.db
@@ -77,18 +84,20 @@ bd.db
 `
 
 // ProjectGitignorePatterns are patterns that should be in the project-root .gitignore
-// to prevent accidentally committing Dolt database files.
+// to prevent accidentally committing Dolt database files and credential keys.
 var ProjectGitignorePatterns = []string{
 	".dolt/",
 	"*.db",
+	".beads-credential-key",
 }
 
 // projectGitignoreComment is the section header added to the project .gitignore
-const projectGitignoreComment = "# Dolt database files (added by bd init)"
+const projectGitignoreComment = "# Beads / Dolt files (added by bd init)"
 
 // requiredPatterns are patterns that MUST be in .beads/.gitignore
 var requiredPatterns = []string{
 	"*.db?*",
+	".env",
 	"redirect",
 	"last-touched",
 	"bd.sock.startlock",
@@ -101,10 +110,12 @@ var requiredPatterns = []string{
 	"dolt-server.log",
 	"dolt-server.lock",
 	"dolt-server.port",
+	"dolt-server.activity",
 	"daemon.*",
 	"interactions.jsonl",
 	"*.lock",
 	"*.corrupt.backup/",
+	".beads-credential-key",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
@@ -618,7 +629,7 @@ func FixLastTouchedTracking(repoPath string) error {
 }
 
 // CheckProjectGitignore checks if the project-root .gitignore contains patterns
-// to prevent accidentally committing Dolt database files (.dolt/ and *.db).
+// to prevent accidentally committing Dolt database files and credential keys.
 // repoPath is the project root directory.
 func CheckProjectGitignore(repoPath string) DoctorCheck {
 	gitignorePath := filepath.Join(repoPath, ".gitignore")
@@ -629,7 +640,7 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 			return DoctorCheck{
 				Name:    "Project Gitignore",
 				Status:  StatusWarning,
-				Message: "No project .gitignore found — Dolt files may be committed accidentally",
+				Message: "No project .gitignore found — Dolt/credential files may be committed accidentally",
 				Fix:     "Run: bd init (safe to re-run) or bd doctor --fix",
 			}
 		}
@@ -652,7 +663,7 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 		return DoctorCheck{
 			Name:    "Project Gitignore",
 			Status:  StatusWarning,
-			Message: "Project .gitignore missing Dolt exclusion patterns",
+			Message: "Project .gitignore missing required exclusion patterns",
 			Detail:  "Missing: " + strings.Join(missing, ", "),
 			Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
 		}
@@ -661,13 +672,14 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Project Gitignore",
 		Status:  StatusOK,
-		Message: "Dolt files excluded",
+		Message: "Dolt and credential files excluded",
 	}
 }
 
-// EnsureProjectGitignore adds .dolt/ and *.db patterns to the project-root
-// .gitignore if they are not already present. Creates the file if it doesn't exist.
-// This prevents users from accidentally committing Dolt database files.
+// EnsureProjectGitignore adds .dolt/, *.db, and .beads-credential-key patterns
+// to the project-root .gitignore if they are not already present. Creates the
+// file if it doesn't exist. This prevents users from accidentally committing
+// Dolt database files or the credential encryption key.
 // repoPath is the project root directory.
 func EnsureProjectGitignore(repoPath string) error {
 	gitignorePath := filepath.Join(repoPath, ".gitignore")

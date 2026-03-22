@@ -22,7 +22,7 @@ type Config struct {
 
 	// Dolt connection mode configuration (bd-dolt.2.2)
 	// "embedded" (default for standalone) runs Dolt in-process.
-	// "server" connects to an external dolt sql-server (required for Gas Town / multi-writer).
+	// "server" connects to an external dolt sql-server (required for orchestrator / multi-writer).
 	DoltMode           string `json:"dolt_mode,omitempty"`            // "embedded" (default) or "server"
 	DoltServerHost     string `json:"dolt_server_host,omitempty"`     // Server host (default: 127.0.0.1)
 	DoltServerPort     int    `json:"dolt_server_port,omitempty"`     // Server port (default: 3307)
@@ -260,7 +260,7 @@ func (c *Config) GetDoltServerHost() string {
 // Kept for backward compatibility with external consumers.
 //
 // GetDoltServerPort returns the Dolt server port.
-// Checks BEADS_DOLT_SERVER_PORT env var first, then BEADS_DOLT_PORT (Gas Town sets this),
+// Checks BEADS_DOLT_SERVER_PORT env var first, then BEADS_DOLT_PORT (orchestrator sets this),
 // then config, then default.
 //
 // BEADS_DOLT_PORT is only applied when the config host is localhost (127.0.0.1 or

@@ -30,6 +30,7 @@ var migrationsList = []Migration{
 	{"cleanup_autopush_metadata", migrations.MigrateCleanupAutopushMetadata},
 	{"uuid_primary_keys", migrations.MigrateUUIDPrimaryKeys},
 	{"add_no_history_column", migrations.MigrateAddNoHistoryColumn},
+	{"drop_hop_columns", migrations.MigrateDropHOPColumns},
 	{"issues_type_status_index", migrations.MigrateIssuesTypeStatusIndex},
 	{"sync_wisps_schema", migrations.MigrateSyncWispsSchema},
 }

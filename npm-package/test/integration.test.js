@@ -174,7 +174,7 @@ async function testBasicWorkflow(npmPrefix) {
   const env = {
     ...process.env,
     PATH: `${path.join(npmPrefix, 'bin')}:${process.env.PATH}`,
-    BD_ACTOR: 'integration-test'
+    BEADS_ACTOR: 'integration-test'
   };
 
   try {
@@ -276,7 +276,7 @@ async function testClaudeCodeWebSimulation(npmPrefix) {
     const env = {
       ...process.env,
       PATH: `${path.join(npmPrefix, 'bin')}:${process.env.PATH}`,
-      BD_ACTOR: 'claude-agent'
+      BEADS_ACTOR: 'claude-agent'
     };
 
     // First session: initialize and create an issue

@@ -191,6 +191,22 @@ bd hooks install --beads
 **post-merge hook:**
 - Ensures Dolt database is current after pull/merge operations
 
+### Hook Timeout
+
+The beads hook shim wraps `bd hooks run` with an OS-level `timeout` to prevent hooks from hanging git operations indefinitely. The default timeout is **300 seconds** (5 minutes), which accommodates repos with chained pre-commit pipelines (e.g., eslint, prettier, TypeScript compilation).
+
+If your chained hooks need more time, override the timeout with the `BEADS_HOOK_TIMEOUT` environment variable:
+
+```bash
+# Set a longer timeout (in seconds)
+export BEADS_HOOK_TIMEOUT=600  # 10 minutes
+
+# Or set it per-invocation
+BEADS_HOOK_TIMEOUT=600 git commit -m "..."
+```
+
+When the timeout is reached, beads prints a warning and allows the git operation to proceed (the commit/push is not blocked).
+
 ### Hook Implementation Details
 
 #### Hook Installation (`cmd/bd/hooks.go`)

@@ -59,7 +59,7 @@ func Initialize() error {
 	// 1. Project: walk up from CWD to find .beads/config.yaml
 	cwd, err := os.Getwd()
 	if err == nil {
-		// In the beads repo, `.beads/config.yaml` is tracked and may set sync.mode=dolt-native.
+		// In the beads repo, `.beads/config.yaml` is tracked and may set non-default config values.
 		// In `go test` (especially for `cmd/bd`), we want to avoid unintentionally picking up
 		// the repo-local config, while still allowing tests to load config.yaml from temp repos.
 		//
@@ -110,7 +110,7 @@ func Initialize() error {
 
 	// Automatic environment variable binding
 	// Environment variables take precedence over config file
-	// E.g., BD_JSON, BD_NO_DAEMON, BD_ACTOR, BD_DB
+	// E.g., BD_JSON, BD_NO_DAEMON, BD_DB (BD_ACTOR deprecated in favor of BEADS_ACTOR)
 	v.SetEnvPrefix("BD")
 
 	// Replace hyphens and dots with underscores for env var mapping
@@ -158,6 +158,7 @@ func Initialize() error {
 	// - "warn": validate and print warnings but proceed
 	// - "error": validate and fail on missing sections
 	v.SetDefault("validation.on-create", "none")
+	v.SetDefault("validation.on-close", "none")
 	v.SetDefault("validation.on-sync", "none")
 
 	// Metadata schema validation (GH#1416 Phase 2)
@@ -420,7 +421,7 @@ func SaveConfigValue(key string, value interface{}, beadsDir string) error {
 		_ = yaml.Unmarshal(data, &existing)
 	}
 
-	// Set the single key using dot-path splitting for nested keys (e.g. "sync.mode").
+	// Set the single key using dot-path splitting for nested keys (e.g. "routing.mode").
 	setNestedKey(existing, key, value)
 
 	out, err := yaml.Marshal(existing)
@@ -641,7 +642,7 @@ func GetMultiRepoConfig() *MultiRepoConfig {
 //
 //	external_projects:
 //	  beads: ../beads
-//	  gastown: /absolute/path/to/gastown
+//	  other-project: /absolute/path/to/other-project
 func GetExternalProjects() map[string]string {
 	return GetStringMapString("external_projects")
 }
@@ -752,31 +753,6 @@ func GetInfraTypesFromYAML() []string {
 // Returns nil if no custom statuses are configured in config.yaml.
 func GetCustomStatusesFromYAML() []string {
 	return getConfigList("status.custom")
-}
-
-// ===== Agent Role Configuration =====
-// These functions return agent role types from config.yaml for agent ID parsing.
-// Each role category has different parsing semantics:
-//   - Town-level: <prefix>-<role> (singleton, no rig)
-//   - Rig-level: <prefix>-<rig>-<role> (singleton per rig)
-//   - Named: <prefix>-<rig>-<role>-<name> (multiple per rig)
-
-// GetTownLevelRoles returns roles that are town-level singletons.
-// These roles have no rig association and appear as: <prefix>-<role>
-func GetTownLevelRoles() []string {
-	return getConfigList("agent_roles.town_level")
-}
-
-// GetRigLevelRoles returns roles that are rig-level singletons.
-// These roles have one instance per rig: <prefix>-<rig>-<role>
-func GetRigLevelRoles() []string {
-	return getConfigList("agent_roles.rig_level")
-}
-
-// GetNamedRoles returns roles that can have multiple named instances per rig.
-// These roles include a name suffix: <prefix>-<rig>-<role>-<name>
-func GetNamedRoles() []string {
-	return getConfigList("agent_roles.named")
 }
 
 // MetadataValidationMode returns the metadata schema validation mode.

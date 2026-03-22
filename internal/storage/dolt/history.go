@@ -7,13 +7,9 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
-
-// validRefPattern matches valid Dolt commit hashes (32 hex chars) or branch names.
-// Allows dots and slashes for branch names like "release/v2.0" or "feature/auth.flow".
-var validRefPattern = regexp.MustCompile(`^[a-zA-Z0-9_./-]+$`)
 
 // validTablePattern matches valid table names
 var validTablePattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -21,18 +17,10 @@ var validTablePattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 // validDatabasePattern matches valid MySQL database names (alphanumeric, underscore, hyphen)
 var validDatabasePattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_\-]*$`)
 
-// validateRef checks if a ref is safe to use in queries
+// validateRef checks if a ref is safe to use in queries.
+// Delegates to issueops.ValidateRef.
 func validateRef(ref string) error {
-	if ref == "" {
-		return fmt.Errorf("ref cannot be empty")
-	}
-	if len(ref) > 128 {
-		return fmt.Errorf("ref too long")
-	}
-	if !validRefPattern.MatchString(ref) {
-		return fmt.Errorf("invalid ref format: %s", ref)
-	}
-	return nil
+	return issueops.ValidateRef(ref)
 }
 
 // ValidateDatabaseName checks if a database name is safe to use in queries.
@@ -158,63 +146,13 @@ func (s *DoltStore) getIssueHistory(ctx context.Context, issueID string) ([]*iss
 
 // getIssueAsOf returns an issue as it existed at a specific commit or time
 func (s *DoltStore) getIssueAsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
-	// Validate ref to prevent SQL injection
-	if err := validateRef(ref); err != nil {
-		return nil, fmt.Errorf("invalid ref: %w", err)
-	}
-
-	var issue types.Issue
-	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
-	var closedAt sql.NullTime
-	var assignee, owner, contentHash sql.NullString
-	var estimatedMinutes sql.NullInt64
-
-	// nolint:gosec // G201: ref is validated by validateRef() above - AS OF requires literal
-	query := fmt.Sprintf(`
-		SELECT id, content_hash, title, description, status, priority, issue_type, assignee, estimated_minutes,
-		       created_at, created_by, owner, updated_at, closed_at
-		FROM issues AS OF '%s'
-		WHERE id = ?
-	`, ref)
-
-	err := s.db.QueryRowContext(ctx, query, issueID).Scan(
-		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Status, &issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("%w: issue %s as of %s", storage.ErrNotFound, issueID, ref)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get issue as of %s: %w", ref, err)
-	}
-
-	// Parse timestamp strings (TEXT columns require manual parsing)
-	if createdAtStr.Valid {
-		issue.CreatedAt = parseTimeString(createdAtStr.String)
-	}
-	if updatedAtStr.Valid {
-		issue.UpdatedAt = parseTimeString(updatedAtStr.String)
-	}
-
-	if contentHash.Valid {
-		issue.ContentHash = contentHash.String
-	}
-	if closedAt.Valid {
-		issue.ClosedAt = &closedAt.Time
-	}
-	if assignee.Valid {
-		issue.Assignee = assignee.String
-	}
-	if owner.Valid {
-		issue.Owner = owner.String
-	}
-	if estimatedMinutes.Valid {
-		mins := int(estimatedMinutes.Int64)
-		issue.EstimatedMinutes = &mins
-	}
-
-	return &issue, nil
+	var result *types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.AsOfInTx(ctx, tx, issueID, ref)
+		return err
+	})
+	return result, err
 }
 
 // getInternalConflicts returns any merge conflicts in the current state (internal format).

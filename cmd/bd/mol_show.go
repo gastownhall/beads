@@ -459,8 +459,15 @@ func showMoleculeWithParallel(subgraph *MoleculeSubgraph) {
 	fmt.Println()
 }
 
-// printMoleculeTreeWithParallel prints the molecule structure with parallel annotations
+// printMoleculeTreeWithParallel prints the molecule structure with parallel annotations.
+// Uses a visited set to detect cycles (GH#2719) and avoid infinite recursion.
 func printMoleculeTreeWithParallel(subgraph *MoleculeSubgraph, analysis *ParallelAnalysis, parentID string, depth int, isRoot bool) {
+	visited := make(map[string]bool)
+	printMoleculeTreeWithParallelVisited(subgraph, analysis, parentID, depth, isRoot, visited)
+}
+
+// printMoleculeTreeWithParallelVisited is the internal recursive implementation with cycle tracking.
+func printMoleculeTreeWithParallelVisited(subgraph *MoleculeSubgraph, analysis *ParallelAnalysis, parentID string, depth int, isRoot bool, visited map[string]bool) {
 	indent := strings.Repeat("  ", depth)
 
 	// Print root with parallel info
@@ -468,6 +475,7 @@ func printMoleculeTreeWithParallel(subgraph *MoleculeSubgraph, analysis *Paralle
 		rootInfo := analysis.Steps[subgraph.Root.ID]
 		annotation := getParallelAnnotation(rootInfo)
 		fmt.Printf("%s   %s%s\n", indent, subgraph.Root.Title, annotation)
+		visited[parentID] = true
 	}
 
 	// Find children of this parent
@@ -490,8 +498,14 @@ func printMoleculeTreeWithParallel(subgraph *MoleculeSubgraph, analysis *Paralle
 		info := analysis.Steps[child.ID]
 		annotation := getParallelAnnotation(info)
 
+		// Cycle detection (GH#2719)
+		if visited[child.ID] {
+			fmt.Printf("%s   %s %s%s (cycle detected, skipping)\n", indent, connector, child.Title, annotation)
+			continue
+		}
 		fmt.Printf("%s   %s %s%s\n", indent, connector, child.Title, annotation)
-		printMoleculeTreeWithParallel(subgraph, analysis, child.ID, depth+1, false)
+		visited[child.ID] = true
+		printMoleculeTreeWithParallelVisited(subgraph, analysis, child.ID, depth+1, false, visited)
 	}
 }
 

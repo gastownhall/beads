@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.62.0] - 2026-03-21
+
+### Added
+
+- **Custom status categories** — `bd config set status.custom "in_review:active,qa_testing:wip,archived:done,on_hold:frozen"` assigns categories to custom statuses that control behavior in `bd ready` (active statuses included) and `bd list` (done/frozen statuses excluded by default). Backward compatible — old flat format `"foo,bar"` still works with no behavior change. ([PR #2665](https://github.com/steveyegge/beads/pull/2665))
+- **`bd statuses` command** — Lists all built-in and custom statuses with their icons, categories, and descriptions. Supports `--json` for programmatic use.
+- **`bd note` command** — Shorthand for appending notes to issues without the `bd update --note` ceremony.
+- **Audit logging** — Status, assignee, and priority changes are logged to `.beads/interactions.jsonl` with close reasons. Survives Dolt GC flatten, so you can recover context after aggressive cleanup.
+- **`--exclude-type` flag** — `bd ready --exclude-type wisp` and `bd list --exclude-type wisp` filter issues by type.
+- **`--agents-profile` flag** — `bd init --agents-profile minimal` controls the default AGENTS.md profile (full/minimal).
+- **Memories in export/import** — `bd export`/`bd import` now round-trip agent memories.
+- **Azure DevOps integration** — New `bd ado` commands for syncing work items with Azure DevOps (`bd ado sync`, `bd ado status`, `bd ado projects`).
+- **MCP `ready` tool filter** — `issue_type` filter exposed on the MCP ready tool for agent use.
+- **Quality/lifecycle commands in prime** — `bd prime`, templates, and `bd doctor` now surface quality and lifecycle commands.
+
+### Changed
+
+- **BEADS_ACTOR replaces BD_ACTOR** — `BEADS_ACTOR` is now the primary environment variable for agent identity; `BD_ACTOR` remains as a deprecated fallback.
+- **ServerMode enum** — Dolt server ownership inference consolidated into a clean `ServerMode` enum (Auto, External, Shared, Embedded), replacing ad-hoc string checks.
+- **dolthub/driver v1.83.8** — Updated from v0.2.1, picking up Dolt engine improvements and bug fixes.
+- **anthropic-sdk-go v1.27.1** — Updated from v1.27.0.
+- **Internal cleanup** — Removed Gas Town-specific concepts from beads types and code: GUPP references, polecat/crew/overseer terminology, HOP fields, agent-as-bead subsystem, patrol molecule references, role templates, hardcoded `~/gt/` paths. Beads is now fully standalone.
+
+### Fixed
+
+- **Windows Dolt server lifecycle** — `ErrServerNotRunning` sentinel error prevents false "failed to stop" warnings; stale PID/port files cleaned up even when server is already dead. ([GH#2670](https://github.com/steveyegge/beads/issues/2670))
+- **Hook preservation** — `bd init` now preserves ALL pre-existing hooks (not just beads-managed ones) when overriding `core.hooksPath`. ([PR #2738](https://github.com/steveyegge/beads/pull/2738))
+- **Shim timeout** — Hook shim timeout increased from 30s to 300s, preventing premature termination of chained pre-commit pipelines (linters, formatters, type-checkers). Configurable via `BEADS_HOOK_TIMEOUT`. ([GH#2732](https://github.com/steveyegge/beads/issues/2732))
+- **GetNextChildIDTx query** — Replaced broken `CAST(SUBSTRING_INDEX(...) AS UNSIGNED)` with Go-side `ParseHierarchicalID`, fixing child ID reconciliation for non-numeric IDs after JSONL imports. ([GH#2721](https://github.com/steveyegge/beads/issues/2721))
+- **Credential key in .gitignore** — `.beads-credential-key` added to project-root `.gitignore` template as defense-in-depth for the AES-256 encryption key. ([GH#2695](https://github.com/steveyegge/beads/issues/2695))
+- **SQL stored procedures for flatten/compact** — `bd flatten` and `bd compact` now use SQL stored procedures in server mode, fixing failures on shared Dolt servers.
+- **`--format json` collision** — Resolved flag collision between `rootCmd` persistent `--format` flag and `list`/`dep-tree` local `--json` flags.
+- **Concurrent schema init** — `initSchemaOnDB` serialized with `GET_LOCK` to prevent Dolt journal corruption in multi-agent environments. ([GH#2672](https://github.com/steveyegge/beads/issues/2672))
+- **External Dolt server safety** — `KillStaleServers` respects `IsAutoStartDisabled` and server ownership, preventing accidental kills of externally-managed servers. ([GH#2641](https://github.com/steveyegge/beads/issues/2641))
+- **Doctor infinite restart loop** — Doctor no longer triggers infinite Dolt server restart cycles. ([GH#2636](https://github.com/steveyegge/beads/issues/2636))
+- **Schema version 8** — Dolt schema bumped to version 8 with proper commit of version update. ([PR #2635](https://github.com/steveyegge/beads/pull/2635))
+- **Repo-local servers** — Auto-started Dolt servers kept alive across sequential `bd` commands within the same repo.
+- **Store config preservation** — Reopening stores by path no longer drops repo-specific config. ([PR #2628](https://github.com/steveyegge/beads/pull/2628))
+- **Validation on close** — `--validate` now checks `--acceptance` field; `validation.on-close` config controls enforcement. ([PR #2654](https://github.com/steveyegge/beads/pull/2654))
+- **`.beads/.env` load order** — Environment file loaded before `noDbCommands` early return, fixing env-dependent non-DB commands. ([GH#2677](https://github.com/steveyegge/beads/issues/2677))
+- **Update description safety** — Empty stdin/file no longer silently erases descriptions; requires explicit opt-in.
+- **Bootstrap JSONL imports** — Correctly imports from git-tracked `.beads/issues.jsonl`.
+- **Doctor fail-closed** — Server-mode integrity recovery now fails closed instead of silently passing.
+
+### Embedded Dolt
+
+- **73 commits** from the Dolt team (coffeegoddd) advancing embedded Dolt support: create, list, update, close, show, delete, search, query, label, gate, promote, move, merge-slot, quick, diff, count, find-duplicates, graph, and views/reports commands now work in embedded mode. Includes shared `issueops` package extraction for transaction-based operations used by both server and embedded backends.
+
+### Community
+
+Contributors: coffeegoddd (Dustin Brown), matt wilkie (maphew), harry-miller-trimble, gzur, Algorune, sfncore, angelamayxie, paf0186, Patrick Farrell, Tim Visher.
+
 ## [0.61.0] - 2026-03-15
 
 ### Added
@@ -2983,7 +3035,7 @@ and muscle memory before v1.0.0 to avoid breakage.
   - Add project notes that won't be committed
   - Gitignored by default
 
-- **Auto-add "landing the plane" instructions to AGENTS.md**
+- **Auto-add session completion instructions to AGENTS.md**
   - New projects get session-close protocol guidance
 
 - **Inline tombstones for soft-delete**
@@ -4254,7 +4306,7 @@ This release represents a major stability and performance improvement with **179
   - Pre-configured Go environment with bd pre-installed
   - Auto-detects existing `.beads/` and imports on startup
 
-- **Landing the Plane Protocol** (095e40d): Session-ending checklist for AI agents
+- **Session Completion Protocol** (095e40d): Session-ending checklist for AI agents
   - Quality gates, sync procedures, git cleanup
   - Ensures clean handoff between sessions
 

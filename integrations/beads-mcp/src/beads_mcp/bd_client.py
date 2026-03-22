@@ -409,6 +409,8 @@ class BdCliClient(BdClientBase):
         params = params or ReadyWorkParams()
         args = ["ready", "--limit", str(params.limit)]
 
+        if params.issue_type:
+            args.extend(["--type", params.issue_type])
         if params.priority is not None:
             args.extend(["--priority", str(params.priority)])
         if params.assignee:

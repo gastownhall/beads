@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/routing"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -24,9 +25,9 @@ This command:
 3. Closes the source issue with a redirect note
 
 The target rig can be specified as:
-  - A rig name: beads, gastown
-  - A prefix: bd-, gt-
-  - A prefix without hyphen: bd, gt
+  - A rig name: beads, my-project
+  - A prefix: bd-, mp-
+  - A prefix without hyphen: bd, mp
 
 Dependency handling for cross-rig moves:
   - Issues that depend ON the moved issue: updated to external refs
@@ -35,9 +36,9 @@ Dependency handling for cross-rig moves:
 Note: Labels are copied. Comments and event history are not transferred.
 
 Examples:
-  bd move hq-c21fj --to beads     # Move to beads by rig name
-  bd move hq-q3tki --to gt-       # Move to gastown by prefix
-  bd move hq-1h2to --to gt        # Move to gastown (prefix without hyphen)`,
+  bd move hq-c21fj --to beads       # Move to beads by rig name
+  bd move hq-q3tki --to mp-         # Move to my-project by prefix
+  bd move hq-1h2to --to mp          # Move to my-project (prefix without hyphen)`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("move")
@@ -124,8 +125,6 @@ Examples:
 			SourceRepo:         sourceIssue.SourceRepo,
 			Ephemeral:          sourceIssue.Ephemeral,
 			MolType:            sourceIssue.MolType,
-			RoleType:           sourceIssue.RoleType,
-			Rig:                sourceIssue.Rig,
 			DueAt:              sourceIssue.DueAt,
 			DeferUntil:         sourceIssue.DeferUntil,
 			CreatedBy:          actor,
@@ -171,6 +170,20 @@ Examples:
 			}
 		}
 
+		// Embedded mode: flush Dolt commits on both stores.
+		if isEmbeddedDolt {
+			if sourceStore != nil {
+				if _, err := sourceStore.CommitPending(ctx, actor); err != nil {
+					WarnError("failed to commit source store: %v", err)
+				}
+			}
+			if targetStore != nil {
+				if _, err := targetStore.CommitPending(ctx, actor); err != nil {
+					WarnError("failed to commit target store: %v", err)
+				}
+			}
+		}
+
 		// Output
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
@@ -196,7 +209,7 @@ Examples:
 // converted to external references. Dependencies FROM the old ID are removed since they
 // can't be recreated in the source store.
 // Returns the number of dependencies remapped.
-func remapDependencies(ctx context.Context, s *dolt.DoltStore, oldID, newID, targetRig, actor string) (int, error) {
+func remapDependencies(ctx context.Context, s storage.DoltStorage, oldID, newID, targetRig, actor string) (int, error) {
 	count := 0
 
 	// Get dependencies where oldID is the issue (oldID depends on something)

@@ -108,7 +108,7 @@ type orphanIssueOutput struct {
 	LatestCommitMessage string `json:"latest_commit_message,omitempty"`
 }
 
-// doltStoreProvider wraps *dolt.DoltStore to implement types.IssueProvider.
+// doltStoreProvider wraps storage.DoltStorage to implement types.IssueProvider.
 type doltStoreProvider struct{}
 
 func (p *doltStoreProvider) GetOpenIssues(ctx context.Context) ([]*types.Issue, error) {

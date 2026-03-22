@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 type backupFetchGitOptions struct {
@@ -74,7 +74,7 @@ func init() {
 	backupCmd.AddCommand(backupFetchGitCmd)
 }
 
-func runBackupFetchGit(ctx context.Context, s *dolt.DoltStore, opts backupFetchGitOptions) (_ *backupFetchGitResult, retErr error) {
+func runBackupFetchGit(ctx context.Context, s storage.DoltStorage, opts backupFetchGitOptions) (_ *backupFetchGitResult, retErr error) {
 	opts = normalizeBackupFetchGitOptions(opts)
 
 	repoRoot, err := findGitRoot(".")

@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -163,7 +162,7 @@ Use --limit or --range to view specific steps:
 }
 
 // getMoleculeProgress loads a molecule and computes progress
-func getMoleculeProgress(ctx context.Context, s *dolt.DoltStore, moleculeID string) (*MoleculeProgress, error) {
+func getMoleculeProgress(ctx context.Context, s storage.DoltStorage, moleculeID string) (*MoleculeProgress, error) {
 	subgraph, err := loadTemplateSubgraph(ctx, s, moleculeID)
 	if err != nil {
 		return nil, err
@@ -179,7 +178,7 @@ func getMoleculeProgress(ctx context.Context, s *dolt.DoltStore, moleculeID stri
 	// Compute step readiness from within-molecule dependencies.
 	// Uses analyzeMoleculeParallel instead of GetReadyWork because GetReadyWork
 	// excludes ephemeral issues (wisp steps are ephemeral by definition).
-	// See: https://github.com/steveyegge/gastown/issues/1276
+	// See: https://github.com/steveyegge/gastown/issues/1276 (historical reference)
 	analysis := analyzeMoleculeParallel(subgraph)
 	readyIDs := make(map[string]bool)
 	for id, info := range analysis.Steps {
@@ -242,7 +241,7 @@ func getMoleculeProgress(ctx context.Context, s *dolt.DoltStore, moleculeID stri
 }
 
 // findInProgressMolecules finds molecules with in_progress steps for an agent
-func findInProgressMolecules(ctx context.Context, s *dolt.DoltStore, agent string) []*MoleculeProgress {
+func findInProgressMolecules(ctx context.Context, s storage.DoltStorage, agent string) []*MoleculeProgress {
 	var inProgressIssues []*types.Issue
 
 	status := types.StatusInProgress
@@ -298,7 +297,7 @@ func findInProgressMolecules(ctx context.Context, s *dolt.DoltStore, agent strin
 // findHookedMolecules finds molecules bonded to hooked issues for an agent.
 // This is a fallback when no in_progress steps exist but a molecule is attached
 // to the agent's hooked work via a "blocks" dependency.
-func findHookedMolecules(ctx context.Context, s *dolt.DoltStore, agent string) []*MoleculeProgress {
+func findHookedMolecules(ctx context.Context, s storage.DoltStorage, agent string) []*MoleculeProgress {
 	// Query for hooked issues assigned to the agent
 	status := types.StatusHooked
 	filter := types.IssueFilter{Status: &status}
@@ -385,7 +384,7 @@ func findHookedMolecules(ctx context.Context, s *dolt.DoltStore, agent string) [
 // in a loop, issuing GetDependencyRecords + GetIssue per level per issue.
 // Instead, this walks parent-child chains level-by-level using batch queries,
 // reducing O(N * depth) round-trips to O(depth). (bd-hn4q)
-func findParentMolecules(ctx context.Context, s *dolt.DoltStore, issueIDs []string) map[string]string {
+func findParentMolecules(ctx context.Context, s storage.DoltStorage, issueIDs []string) map[string]string {
 	if len(issueIDs) == 0 {
 		return nil
 	}
@@ -487,7 +486,7 @@ func findParentMolecules(ctx context.Context, s *dolt.DoltStore, issueIDs []stri
 
 // findParentMolecule walks up the parent-child chain to find the root molecule
 // for a single issue. Returns "" if the issue is not part of a molecule.
-func findParentMolecule(ctx context.Context, s *dolt.DoltStore, issueID string) string {
+func findParentMolecule(ctx context.Context, s storage.DoltStorage, issueID string) string {
 	roots := findParentMolecules(ctx, s, []string{issueID})
 	return roots[issueID]
 }
@@ -587,7 +586,7 @@ type ContinueResult struct {
 // guard against TOCTOU races where multiple agents identify and try to claim the
 // same step concurrently.
 // Returns nil if the issue is not part of a molecule.
-func AdvanceToNextStep(ctx context.Context, s *dolt.DoltStore, closedStepID string, autoClaim bool, actorName string) (*ContinueResult, error) {
+func AdvanceToNextStep(ctx context.Context, s storage.DoltStorage, closedStepID string, autoClaim bool, actorName string) (*ContinueResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
