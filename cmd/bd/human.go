@@ -39,7 +39,7 @@ SUBCOMMANDS:
 		printCmd("update <id>", "Update an issue (--status, --priority, --assignee)")
 		printCmd("close <id>", "Close one or more issues")
 		printCmd("reopen <id>", "Reopen a closed issue")
-		printCmd("comment <id>", "Add a comment to an issue")
+		printCmd("note <id> <text>", "Add a note to an issue (or: comments add <id>)")
 		fmt.Println()
 
 		// Workflow
