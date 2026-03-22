@@ -1,5 +1,8 @@
 version: "2"
 
+severity:
+  default: error
+
 run:
   timeout: 5m
   tests: false
@@ -155,3 +158,5 @@ linters:
 
 issues:
   uniq-by-line: true
+  max-issues-per-linter: 0
+  max-same-issues: 0
