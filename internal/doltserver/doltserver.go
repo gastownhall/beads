@@ -361,8 +361,8 @@ func ReadPortFile(beadsDir string) int {
 }
 
 // DefaultConfig returns config with sensible defaults.
-// Priority: env var > explicit remote config (config.yaml host+port) >
-// port file > config.yaml port-only > metadata.json.
+// Priority: env var > explicit remote config (config.yaml OR metadata.json
+// with non-local host+port) > port file > config.yaml port-only > metadata.json.
 // Returns port 0 when no source provides a port, meaning Start() should
 // allocate an ephemeral port from the OS.
 //
@@ -370,7 +370,7 @@ func ReadPortFile(beadsDir string) int {
 // the server is listening on. Consulting it here ensures that commands
 // connecting to an already-running server use the correct port.
 //
-// When config.yaml has an explicit dolt.host (non-local), it indicates
+// When config.yaml or metadata.json specifies a non-local host, it indicates
 // intentional remote server configuration and takes precedence over the
 // port file, which only tracks locally auto-discovered servers.
 func DefaultConfig(beadsDir string) *Config {
@@ -414,6 +414,22 @@ func DefaultConfig(beadsDir string) *Config {
 		}
 	}
 
+	// Check metadata.json for explicit remote server configuration.
+	// Same logic as config.yaml remote check above: when dolt_server_host
+	// is non-local and dolt_server_port is set, use that port instead of
+	// the port file. The port file only tracks locally auto-started servers
+	// and is wrong for remote connections (aegis-mihjp).
+	if metaCfg, err := configfile.Load(beadsDir); err == nil && metaCfg != nil {
+		metaHost := metaCfg.GetDoltServerHost()
+		if metaHost != "" && metaHost != "127.0.0.1" && metaHost != "localhost" {
+			cfg.Host = metaHost
+			if metaCfg.DoltServerPort > 0 {
+				cfg.Port = metaCfg.DoltServerPort
+				return cfg
+			}
+		}
+	}
+
 	// Check the port file (gitignored, local-only) — this is the primary
 	// persistent source for LOCAL servers. Start() writes the actual
 	// listening port here. Elevated to top priority (after env var and
@@ -434,10 +450,12 @@ func DefaultConfig(beadsDir string) *Config {
 		}
 	}
 
-	// Deprecated: metadata.json DoltServerPort is git-tracked and propagates
-	// to all contributors, causing cross-project data leakage (GH#2372).
-	// Emit a one-time warning but still use the value as a fallback so
-	// existing setups don't break silently.
+	// Deprecated: metadata.json DoltServerPort with LOCAL host is git-tracked
+	// and propagates to all contributors, causing cross-project data leakage
+	// (GH#2372). Emit a one-time warning but still use the value as a fallback
+	// so existing setups don't break silently.
+	// Note: non-local metadata.json host+port is handled above (aegis-mihjp)
+	// and won't reach this point.
 	if cfg.Port == 0 {
 		if metaCfg, err := configfile.Load(beadsDir); err == nil && metaCfg != nil {
 			if metaCfg.DoltServerPort > 0 {

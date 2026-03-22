@@ -1057,6 +1057,67 @@ func TestDefaultConfigPortFileTakesPrecedence(t *testing.T) {
 	}
 }
 
+// TestDefaultConfig_MetadataRemoteHostOverridesPortFile verifies that when
+// metadata.json specifies a non-local host (e.g., dolt.lan) with a port,
+// it takes precedence over the port file. The port file only tracks locally
+// auto-started servers and is wrong for remote connections (aegis-mihjp).
+func TestDefaultConfig_MetadataRemoteHostOverridesPortFile(t *testing.T) {
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	dir := t.TempDir()
+
+	// Write a port file with local dolt port (simulating local dolt restart)
+	if err := writePortFile(dir, 3307); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write metadata.json with remote host + port
+	metaCfg := &configfile.Config{
+		DoltServerHost: "dolt.lan",
+		DoltServerPort: 3306,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig(dir)
+	if cfg.Host != "dolt.lan" {
+		t.Errorf("expected host dolt.lan, got %q", cfg.Host)
+	}
+	if cfg.Port != 3306 {
+		t.Errorf("expected remote port 3306, got %d (port file leaked)", cfg.Port)
+	}
+}
+
+// TestDefaultConfig_MetadataLocalHostUsesPortFile verifies that when
+// metadata.json has a local host (127.0.0.1), the port file still wins.
+func TestDefaultConfig_MetadataLocalHostUsesPortFile(t *testing.T) {
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	dir := t.TempDir()
+
+	// Write port file
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write metadata.json with local host + different port
+	metaCfg := &configfile.Config{
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3306,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig(dir)
+	if cfg.Port != 14567 {
+		t.Errorf("expected port file port 14567, got %d", cfg.Port)
+	}
+}
+
 func TestReadPortFile_Empty(t *testing.T) {
 	// ReadPortFile on a directory with no port file should return 0.
 	dir := t.TempDir()
