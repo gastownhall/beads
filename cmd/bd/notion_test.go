@@ -21,7 +21,7 @@ import (
 func TestNotionCommandsRegistered(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"status", "sync"} {
+	for _, name := range []string{"init", "connect", "status", "sync"} {
 		if _, _, err := notionCmd.Find([]string{name}); err != nil {
 			t.Fatalf("missing subcommand %q: %v", name, err)
 		}
@@ -82,6 +82,137 @@ func TestRunNotionStatusJSONWithMissingConfig(t *testing.T) {
 	}
 	if !strings.Contains(resp.Error, "notion.token") {
 		t.Fatalf("error = %q", resp.Error)
+	}
+}
+
+func TestRunNotionInitPersistsTargetConfig(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	ctx := context.Background()
+	testStore, cleanup := setupTestDB(t)
+	defer cleanup()
+	store = testStore
+	jsonOutput = true
+	notionInitParent = "329e5bf9-7fae-8080-bb4a-d94e1387655d"
+	notionInitTitle = "Beads Issues"
+	t.Setenv("NOTION_TOKEN", "env-token")
+	originalFactory := newNotionSetupClient
+	t.Cleanup(func() { newNotionSetupClient = originalFactory })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/databases" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		for _, want := range []string{
+			`"page_id":"329e5bf9-7fae-8080-bb4a-d94e1387655d"`,
+			`"initial_data_source"`,
+			`"Beads ID"`,
+			`"Status"`,
+		} {
+			if !strings.Contains(string(body), want) {
+				t.Fatalf("request body missing %q\n%s", want, body)
+			}
+		}
+		_, _ = io.WriteString(w, `{"id":"db_123","url":"https://www.notion.so/db123","data_sources":[{"id":"ds_123","name":"Beads Issues"}]}`)
+	}))
+	defer server.Close()
+	newNotionSetupClient = func(token string) *notion.Client {
+		return notion.NewClient(token).WithBaseURL(server.URL)
+	}
+
+	cmd := &cobra.Command{}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetContext(ctx)
+
+	if err := runNotionInit(cmd, nil); err != nil {
+		t.Fatalf("runNotionInit returned error: %v", err)
+	}
+
+	dataSourceID, err := store.GetConfig(ctx, "notion.data_source_id")
+	if err != nil || dataSourceID != "ds_123" {
+		t.Fatalf("notion.data_source_id = %q, err=%v", dataSourceID, err)
+	}
+	viewURL, err := store.GetConfig(ctx, "notion.view_url")
+	if err != nil || viewURL != "https://www.notion.so/db123" {
+		t.Fatalf("notion.view_url = %q, err=%v", viewURL, err)
+	}
+}
+
+func TestRunNotionConnectResolvesDataSourceURL(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	ctx := context.Background()
+	testStore, cleanup := setupTestDB(t)
+	defer cleanup()
+	store = testStore
+	t.Setenv("NOTION_TOKEN", "env-token")
+	notionConnectURL = "https://www.notion.so/workspace/329e5bf97fae8080bb4ad94e1387655d"
+	originalFactory := newNotionSetupClient
+	t.Cleanup(func() { newNotionSetupClient = originalFactory })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/data_sources/329e5bf9-7fae-8080-bb4a-d94e1387655d":
+			_, _ = io.WriteString(w, `{"id":"329e5bf9-7fae-8080-bb4a-d94e1387655d","properties":{"Name":{"type":"title"},"Beads ID":{"type":"rich_text"},"Status":{"type":"select"},"Priority":{"type":"select"},"Type":{"type":"select"},"Description":{"type":"rich_text"},"Assignee":{"type":"rich_text"},"Labels":{"type":"multi_select"}}}`)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	newNotionSetupClient = func(token string) *notion.Client {
+		return notion.NewClient(token).WithBaseURL(server.URL)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	if err := runNotionConnect(cmd, nil); err != nil {
+		t.Fatalf("runNotionConnect returned error: %v", err)
+	}
+
+	dataSourceID, err := store.GetConfig(ctx, "notion.data_source_id")
+	if err != nil || dataSourceID != "329e5bf9-7fae-8080-bb4a-d94e1387655d" {
+		t.Fatalf("notion.data_source_id = %q, err=%v", dataSourceID, err)
+	}
+}
+
+func TestRunNotionConnectResolvesDatabaseURL(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	ctx := context.Background()
+	testStore, cleanup := setupTestDB(t)
+	defer cleanup()
+	store = testStore
+	t.Setenv("NOTION_TOKEN", "env-token")
+	notionConnectURL = "https://www.notion.so/workspace/429e5bf97fae8080bb4ad94e1387655d"
+	originalFactory := newNotionSetupClient
+	t.Cleanup(func() { newNotionSetupClient = originalFactory })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/data_sources/429e5bf9-7fae-8080-bb4a-d94e1387655d":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"code":"object_not_found","message":"not found"}`)
+		case "/databases/429e5bf9-7fae-8080-bb4a-d94e1387655d":
+			_, _ = io.WriteString(w, `{"id":"429e5bf9-7fae-8080-bb4a-d94e1387655d","data_sources":[{"id":"529e5bf9-7fae-8080-bb4a-d94e1387655d","name":"Beads Issues"}]}`)
+		case "/data_sources/529e5bf9-7fae-8080-bb4a-d94e1387655d":
+			_, _ = io.WriteString(w, `{"id":"529e5bf9-7fae-8080-bb4a-d94e1387655d","properties":{"Name":{"type":"title"},"Beads ID":{"type":"rich_text"},"Status":{"type":"select"},"Priority":{"type":"select"},"Type":{"type":"select"},"Description":{"type":"rich_text"},"Assignee":{"type":"rich_text"},"Labels":{"type":"multi_select"}}}`)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	newNotionSetupClient = func(token string) *notion.Client {
+		return notion.NewClient(token).WithBaseURL(server.URL)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	if err := runNotionConnect(cmd, nil); err != nil {
+		t.Fatalf("runNotionConnect returned error: %v", err)
+	}
+
+	dataSourceID, err := store.GetConfig(ctx, "notion.data_source_id")
+	if err != nil || dataSourceID != "529e5bf9-7fae-8080-bb4a-d94e1387655d" {
+		t.Fatalf("notion.data_source_id = %q, err=%v", dataSourceID, err)
 	}
 }
 
@@ -183,7 +314,7 @@ func TestValidateNotionConfigMessages(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	err = validateNotionConfig(notionConfig{Token: "token"})
-	if err == nil || !strings.Contains(err.Error(), "notion.data_source_id") {
+	if err == nil || !strings.Contains(err.Error(), "bd notion init") {
 		t.Fatalf("err = %v", err)
 	}
 }

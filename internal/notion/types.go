@@ -7,6 +7,8 @@ import (
 )
 
 const (
+	DefaultDatabaseTitle = "Beads Issues"
+
 	PropertyTitle       = "Name"
 	PropertyBeadsID     = "Beads ID"
 	PropertyStatus      = "Status"
@@ -180,6 +182,20 @@ type DataSource struct {
 	Properties map[string]DataSourceProperty `json:"properties,omitempty"`
 }
 
+type Database struct {
+	Object      string                `json:"object,omitempty"`
+	ID          string                `json:"id,omitempty"`
+	URL         string                `json:"url,omitempty"`
+	Title       []RichText            `json:"title,omitempty"`
+	DataSources []DataSourceReference `json:"data_sources,omitempty"`
+	Properties  map[string]any        `json:"properties,omitempty"`
+}
+
+type DataSourceReference struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
 type DataSourceProperty struct {
 	ID   string `json:"id,omitempty"`
 	Type string `json:"type,omitempty"`
@@ -251,4 +267,29 @@ func richTextRequest(content string) []map[string]interface{} {
 			},
 		},
 	}
+}
+
+func BuildInitialDataSourceProperties() map[string]interface{} {
+	return map[string]interface{}{
+		PropertyTitle:       map[string]interface{}{"title": map[string]interface{}{}},
+		PropertyBeadsID:     map[string]interface{}{"rich_text": map[string]interface{}{}},
+		PropertyStatus:      map[string]interface{}{"select": map[string]interface{}{"options": selectOptions("Open", "In Progress", "Blocked", "Deferred", "Closed")}},
+		PropertyPriority:    map[string]interface{}{"select": map[string]interface{}{"options": selectOptions("Critical", "High", "Medium", "Low", "Backlog")}},
+		PropertyType:        map[string]interface{}{"select": map[string]interface{}{"options": selectOptions("Bug", "Feature", "Task", "Epic", "Chore")}},
+		PropertyDescription: map[string]interface{}{"rich_text": map[string]interface{}{}},
+		PropertyAssignee:    map[string]interface{}{"rich_text": map[string]interface{}{}},
+		PropertyLabels:      map[string]interface{}{"multi_select": map[string]interface{}{}},
+	}
+}
+
+func selectOptions(names ...string) []map[string]interface{} {
+	options := make([]map[string]interface{}, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		options = append(options, map[string]interface{}{"name": name})
+	}
+	return options
 }

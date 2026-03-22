@@ -73,6 +73,50 @@ func (c *Client) RetrieveDataSource(ctx context.Context, dataSourceID string) (*
 	return &ds, nil
 }
 
+func (c *Client) RetrieveDatabase(ctx context.Context, databaseID string) (*Database, error) {
+	body, _, err := c.doRequest(ctx, http.MethodGet, "/databases/"+url.PathEscape(databaseID), nil)
+	if err != nil {
+		return nil, err
+	}
+	var db Database
+	if err := json.Unmarshal(body, &db); err != nil {
+		return nil, fmt.Errorf("parse database response: %w", err)
+	}
+	return &db, nil
+}
+
+func (c *Client) CreateDatabase(ctx context.Context, parentPageID, title string) (*Database, error) {
+	parentPageID = strings.TrimSpace(parentPageID)
+	if parentPageID == "" {
+		return nil, fmt.Errorf("parent page ID is required")
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = DefaultDatabaseTitle
+	}
+	request := map[string]interface{}{
+		"parent": map[string]interface{}{
+			"type":    "page_id",
+			"page_id": parentPageID,
+		},
+		"title":     richTextRequest(title),
+		"is_inline": false,
+		"initial_data_source": map[string]interface{}{
+			"title":      richTextRequest(title),
+			"properties": BuildInitialDataSourceProperties(),
+		},
+	}
+	body, _, err := c.doRequest(ctx, http.MethodPost, "/databases", request)
+	if err != nil {
+		return nil, err
+	}
+	var db Database
+	if err := json.Unmarshal(body, &db); err != nil {
+		return nil, fmt.Errorf("parse create database response: %w", err)
+	}
+	return &db, nil
+}
+
 func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Page, error) {
 	var pages []Page
 	var cursor string
@@ -145,6 +189,57 @@ func (c *Client) ArchivePage(ctx context.Context, pageID string, inTrash bool) (
 		return nil, fmt.Errorf("parse archive page response: %w", err)
 	}
 	return &page, nil
+}
+
+type DataSourceResolver interface {
+	RetrieveDataSource(ctx context.Context, dataSourceID string) (*DataSource, error)
+	RetrieveDatabase(ctx context.Context, databaseID string) (*Database, error)
+}
+
+type ResolvedDataSource struct {
+	InputID      string
+	DataSourceID string
+	DataSource   *DataSource
+	Database     *Database
+	ViewURL      string
+}
+
+func ResolveDataSourceReference(ctx context.Context, client DataSourceResolver, ref string) (*ResolvedDataSource, error) {
+	if client == nil {
+		return nil, fmt.Errorf("notion client is nil")
+	}
+	identifier := ExtractNotionIdentifier(ref)
+	if identifier == "" {
+		return nil, fmt.Errorf("could not extract a Notion ID from %q", ref)
+	}
+	if ds, err := client.RetrieveDataSource(ctx, identifier); err == nil {
+		return &ResolvedDataSource{
+			InputID:      identifier,
+			DataSourceID: ds.ID,
+			DataSource:   ds,
+			ViewURL:      strings.TrimSpace(ref),
+		}, nil
+	} else {
+		db, dbErr := client.RetrieveDatabase(ctx, identifier)
+		if dbErr != nil {
+			return nil, fmt.Errorf("resolve %q as data source: %w; as database: %v", ref, err, dbErr)
+		}
+		if len(db.DataSources) == 0 || strings.TrimSpace(db.DataSources[0].ID) == "" {
+			return nil, fmt.Errorf("database %s has no child data sources", db.ID)
+		}
+		resolvedID := strings.TrimSpace(db.DataSources[0].ID)
+		resolvedDS, err := client.RetrieveDataSource(ctx, resolvedID)
+		if err != nil {
+			return nil, fmt.Errorf("retrieve child data source %s: %w", resolvedID, err)
+		}
+		return &ResolvedDataSource{
+			InputID:      identifier,
+			DataSourceID: resolvedID,
+			DataSource:   resolvedDS,
+			Database:     db,
+			ViewURL:      strings.TrimSpace(ref),
+		}, nil
+	}
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path string, requestBody interface{}) ([]byte, http.Header, error) {

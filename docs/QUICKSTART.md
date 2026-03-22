@@ -199,15 +199,21 @@ See [DOLT-BACKEND.md](DOLT-BACKEND.md#dolt-remotes) for remote configuration det
 
 ## Optional: Notion Sync
 
-If you keep project issues in Notion, configure a Notion integration token and the target data source:
+If you keep project issues in Notion, configure a Notion integration token first:
 
 ```bash
-bd config notion.token <your-pat>
-bd config notion.data_source_id <data-source-id>
-bd config notion.view_url <optional-view-url>
+bd config set notion.token <your-token>
 ```
 
-You can also provide the same values through `NOTION_TOKEN`, `NOTION_DATA_SOURCE_ID`, and `NOTION_VIEW_URL`.
+Then either create a new Beads database under a parent page or connect to an existing target:
+
+```bash
+bd notion init --parent <page-id>
+# or
+bd notion connect --url <notion-database-or-data-source-url>
+```
+
+You can also provide the same values through `NOTION_TOKEN`, `NOTION_DATA_SOURCE_ID`, and `NOTION_VIEW_URL`. Directly setting `notion.data_source_id` remains available as an escape hatch for advanced setups.
 
 Check connectivity and schema readiness:
 

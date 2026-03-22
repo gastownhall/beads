@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -19,7 +20,19 @@ type notionConfig struct {
 	ViewURL      string
 }
 
+type notionSetupResult struct {
+	Action       string `json:"action"`
+	DatabaseID   string `json:"database_id,omitempty"`
+	DataSourceID string `json:"data_source_id,omitempty"`
+	ViewURL      string `json:"view_url,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
 var (
+	notionInitParent string
+	notionInitTitle  string
+	notionConnectURL string
+
 	notionSyncPull     bool
 	notionSyncPush     bool
 	notionSyncDryRun   bool
@@ -30,6 +43,7 @@ var (
 )
 
 var newNotionStatusClient = notion.NewClient
+var newNotionSetupClient = notion.NewClient
 
 var notionCmd = &cobra.Command{
 	Use:   "notion",
@@ -43,6 +57,18 @@ var notionStatusCmd = &cobra.Command{
 	RunE:  runNotionStatus,
 }
 
+var notionInitCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Create a dedicated Beads database in Notion",
+	RunE:  runNotionInit,
+}
+
+var notionConnectCmd = &cobra.Command{
+	Use:   "connect",
+	Short: "Connect bd to an existing Notion database or data source",
+	RunE:  runNotionConnect,
+}
+
 var notionSyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Sync issues with Notion",
@@ -52,6 +78,13 @@ var notionSyncCmd = &cobra.Command{
 }
 
 func init() {
+	notionInitCmd.Flags().StringVar(&notionInitParent, "parent", "", "Parent page ID")
+	notionInitCmd.Flags().StringVar(&notionInitTitle, "title", notion.DefaultDatabaseTitle, "Database title")
+	_ = notionInitCmd.MarkFlagRequired("parent")
+
+	notionConnectCmd.Flags().StringVar(&notionConnectURL, "url", "", "Existing Notion database or data source URL")
+	_ = notionConnectCmd.MarkFlagRequired("url")
+
 	notionSyncCmd.Flags().BoolVar(&notionSyncPull, "pull", false, "Only pull issues from Notion")
 	notionSyncCmd.Flags().BoolVar(&notionSyncPush, "push", false, "Only push issues to Notion")
 	notionSyncCmd.Flags().BoolVar(&notionSyncDryRun, "dry-run", false, "Preview changes without making mutations")
@@ -60,7 +93,7 @@ func init() {
 	notionSyncCmd.Flags().BoolVar(&notionCreateOnly, "create-only", false, "Only create missing remote pages, do not update existing ones")
 	notionSyncCmd.Flags().StringVar(&notionSyncState, "state", "all", "Issue state to sync: open, closed, or all")
 
-	notionCmd.AddCommand(notionStatusCmd, notionSyncCmd)
+	notionCmd.AddCommand(notionInitCmd, notionConnectCmd, notionStatusCmd, notionSyncCmd)
 	rootCmd.AddCommand(notionCmd)
 }
 
@@ -97,10 +130,17 @@ func getNotionConfigValue(ctx context.Context, key, envVar string) string {
 
 func validateNotionConfig(cfg notionConfig) error {
 	if cfg.Token == "" {
-		return fmt.Errorf("notion.token is not configured. Set via bd config notion.token <token> or NOTION_TOKEN")
+		return fmt.Errorf("notion.token is not configured. Set via bd config set notion.token <token> or NOTION_TOKEN")
 	}
 	if cfg.DataSourceID == "" {
-		return fmt.Errorf("notion.data_source_id is not configured. Set via bd config notion.data_source_id <id> or NOTION_DATA_SOURCE_ID")
+		return fmt.Errorf("notion.data_source_id is not configured. Run 'bd notion init --parent <page-id>' or 'bd notion connect --url <notion-url>', or set it directly via bd config set notion.data_source_id <id> or NOTION_DATA_SOURCE_ID")
+	}
+	return nil
+}
+
+func validateNotionToken(cfg notionConfig) error {
+	if cfg.Token == "" {
+		return fmt.Errorf("notion.token is not configured. Set via bd config set notion.token <token> or NOTION_TOKEN")
 	}
 	return nil
 }
@@ -128,8 +168,7 @@ func runNotionStatus(cmd *cobra.Command, _ []string) error {
 			result.Error = err.Error()
 		}
 		if jsonOutput {
-			outputJSON(result)
-			return nil
+			return writeNotionJSON(cmd, result)
 		}
 		return renderNotionStatus(cmd, cfg, &result)
 	}
@@ -168,10 +207,90 @@ func runNotionStatus(cmd *cobra.Command, _ []string) error {
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-		return nil
+		return writeNotionJSON(cmd, result)
 	}
 	return renderNotionStatus(cmd, cfg, &result)
+}
+
+func runNotionInit(cmd *cobra.Command, _ []string) error {
+	CheckReadonly("notion init")
+	if err := ensureStoreActive(); err != nil {
+		return fmt.Errorf("database not available: %w", err)
+	}
+	cfg := getNotionConfig()
+	if err := validateNotionToken(cfg); err != nil {
+		return err
+	}
+
+	client := newNotionSetupClient(cfg.Token)
+	db, err := client.CreateDatabase(cmd.Context(), notionInitParent, notionInitTitle)
+	if err != nil {
+		return err
+	}
+	if len(db.DataSources) == 0 || strings.TrimSpace(db.DataSources[0].ID) == "" {
+		return fmt.Errorf("Notion create database response did not include a child data source")
+	}
+	result := notionSetupResult{
+		Action:       "init",
+		DatabaseID:   strings.TrimSpace(db.ID),
+		DataSourceID: strings.TrimSpace(db.DataSources[0].ID),
+		ViewURL:      strings.TrimSpace(db.URL),
+		Message:      "Notion target initialized",
+	}
+	if err := saveNotionTargetConfig(cmd.Context(), result.DataSourceID, result.ViewURL); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeNotionJSON(cmd, result)
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "✓ Created Notion database %s\n", firstNonEmpty(result.DatabaseID, "(unknown)"))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Saved data source: %s\n", result.DataSourceID)
+	if result.ViewURL != "" {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Launch URL: %s\n", result.ViewURL)
+	}
+	return nil
+}
+
+func runNotionConnect(cmd *cobra.Command, _ []string) error {
+	CheckReadonly("notion connect")
+	if err := ensureStoreActive(); err != nil {
+		return fmt.Errorf("database not available: %w", err)
+	}
+	cfg := getNotionConfig()
+	if err := validateNotionToken(cfg); err != nil {
+		return err
+	}
+
+	client := newNotionSetupClient(cfg.Token)
+	resolved, err := notion.ResolveDataSourceReference(cmd.Context(), client, notionConnectURL)
+	if err != nil {
+		return err
+	}
+	schema := notion.ValidateDataSourceSchema(resolved.DataSource)
+	if len(schema.Missing) > 0 {
+		return fmt.Errorf("target is missing required Notion properties: %s", strings.Join(schema.Missing, ", "))
+	}
+	result := notionSetupResult{
+		Action:       "connect",
+		DatabaseID:   "",
+		DataSourceID: resolved.DataSourceID,
+		ViewURL:      strings.TrimSpace(notionConnectURL),
+		Message:      "Notion target connected",
+	}
+	if resolved.Database != nil {
+		result.DatabaseID = strings.TrimSpace(resolved.Database.ID)
+	}
+	if err := saveNotionTargetConfig(cmd.Context(), result.DataSourceID, result.ViewURL); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeNotionJSON(cmd, result)
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "✓ Connected Notion data source %s\n", result.DataSourceID)
+	if result.ViewURL != "" {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Launch URL: %s\n", result.ViewURL)
+	}
+	return nil
 }
 
 func renderNotionStatus(cmd *cobra.Command, cfg notionConfig, result *notion.StatusResponse) error {
@@ -271,8 +390,7 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-		return nil
+		return writeNotionJSON(cmd, result)
 	}
 	return renderNotionSyncResult(cmd, result)
 }
@@ -316,6 +434,41 @@ func buildNotionPullHooks(ctx context.Context) *tracker.PullHooks {
 			return nil
 		},
 	}
+}
+
+func saveNotionTargetConfig(ctx context.Context, dataSourceID, viewURL string) error {
+	if store == nil {
+		return fmt.Errorf("database not available")
+	}
+	if err := store.SetConfig(ctx, "notion.data_source_id", strings.TrimSpace(dataSourceID)); err != nil {
+		return fmt.Errorf("save notion.data_source_id: %w", err)
+	}
+	viewURL = strings.TrimSpace(viewURL)
+	if viewURL == "" {
+		if err := store.DeleteConfig(ctx, "notion.view_url"); err != nil {
+			return fmt.Errorf("clear notion.view_url: %w", err)
+		}
+		return nil
+	}
+	if err := store.SetConfig(ctx, "notion.view_url", viewURL); err != nil {
+		return fmt.Errorf("save notion.view_url: %w", err)
+	}
+	return nil
+}
+
+func writeNotionJSON(cmd *cobra.Command, value interface{}) error {
+	encoder := json.NewEncoder(cmd.OutOrStdout())
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func userEmail(user *notion.User) string {

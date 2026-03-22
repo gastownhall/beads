@@ -109,3 +109,28 @@ func TestValidateDataSourceSchema(t *testing.T) {
 		t.Fatalf("missing = %v, want [%q]", schema.Missing, PropertyLabels)
 	}
 }
+
+func TestValidateDataSourceSchemaMatchesInitSchema(t *testing.T) {
+	t.Parallel()
+
+	properties := BuildInitialDataSourceProperties()
+	ds := &DataSource{Properties: map[string]DataSourceProperty{}}
+	for name, raw := range properties {
+		property, ok := raw.(map[string]interface{})
+		if !ok {
+			t.Fatalf("property %q type = %T", name, raw)
+		}
+		for key := range property {
+			if key == "type" {
+				continue
+			}
+			ds.Properties[name] = DataSourceProperty{Type: key}
+			break
+		}
+	}
+
+	schema := ValidateDataSourceSchema(ds)
+	if len(schema.Missing) != 0 {
+		t.Fatalf("missing = %v", schema.Missing)
+	}
+}

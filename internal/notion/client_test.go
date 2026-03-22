@@ -108,3 +108,117 @@ func TestClientReturnsStructuredAPIError(t *testing.T) {
 		t.Fatalf("error = %q", err)
 	}
 }
+
+func TestClientCreateDatabaseSendsInitialDataSource(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/databases" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		for _, want := range []string{
+			`"page_id":"329e5bf9-7fae-8080-bb4a-d94e1387655d"`,
+			`"initial_data_source"`,
+			`"Beads ID"`,
+			`"Status"`,
+			`"Type"`,
+		} {
+			if !strings.Contains(string(body), want) {
+				t.Fatalf("request body missing %q\n%s", want, body)
+			}
+		}
+		_, _ = io.WriteString(w, `{"id":"db_123","url":"https://www.notion.so/db123","data_sources":[{"id":"ds_123","name":"Beads Issues"}]}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	db, err := client.CreateDatabase(context.Background(), "329e5bf9-7fae-8080-bb4a-d94e1387655d", DefaultDatabaseTitle)
+	if err != nil {
+		t.Fatalf("CreateDatabase returned error: %v", err)
+	}
+	if db.ID != "db_123" {
+		t.Fatalf("id = %q", db.ID)
+	}
+	if len(db.DataSources) != 1 || db.DataSources[0].ID != "ds_123" {
+		t.Fatalf("data_sources = %+v", db.DataSources)
+	}
+}
+
+func TestClientRetrieveDatabase(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/databases/db_123" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"id":"db_123","url":"https://www.notion.so/db123","data_sources":[{"id":"ds_123","name":"Beads Issues"}]}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	db, err := client.RetrieveDatabase(context.Background(), "db_123")
+	if err != nil {
+		t.Fatalf("RetrieveDatabase returned error: %v", err)
+	}
+	if db.ID != "db_123" {
+		t.Fatalf("id = %q", db.ID)
+	}
+	if len(db.DataSources) != 1 || db.DataSources[0].ID != "ds_123" {
+		t.Fatalf("data_sources = %+v", db.DataSources)
+	}
+}
+
+func TestResolveDataSourceReferencePrefersDataSource(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/data_sources/329e5bf9-7fae-8080-bb4a-d94e1387655d":
+			_, _ = io.WriteString(w, `{"id":"329e5bf9-7fae-8080-bb4a-d94e1387655d","properties":{"Name":{"type":"title"}}}`)
+		default:
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	resolved, err := ResolveDataSourceReference(context.Background(), client, "https://www.notion.so/workspace/329e5bf97fae8080bb4ad94e1387655d")
+	if err != nil {
+		t.Fatalf("ResolveDataSourceReference returned error: %v", err)
+	}
+	if resolved.DataSourceID != "329e5bf9-7fae-8080-bb4a-d94e1387655d" {
+		t.Fatalf("data_source_id = %q", resolved.DataSourceID)
+	}
+}
+
+func TestResolveDataSourceReferenceFallsBackToDatabase(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/data_sources/429e5bf9-7fae-8080-bb4a-d94e1387655d":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"code":"object_not_found","message":"not found"}`)
+		case "/databases/429e5bf9-7fae-8080-bb4a-d94e1387655d":
+			_, _ = io.WriteString(w, `{"id":"429e5bf9-7fae-8080-bb4a-d94e1387655d","data_sources":[{"id":"529e5bf9-7fae-8080-bb4a-d94e1387655d","name":"Beads Issues"}]}`)
+		case "/data_sources/529e5bf9-7fae-8080-bb4a-d94e1387655d":
+			_, _ = io.WriteString(w, `{"id":"529e5bf9-7fae-8080-bb4a-d94e1387655d","properties":{"Name":{"type":"title"}}}`)
+		default:
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	resolved, err := ResolveDataSourceReference(context.Background(), client, "https://www.notion.so/workspace/429e5bf97fae8080bb4ad94e1387655d")
+	if err != nil {
+		t.Fatalf("ResolveDataSourceReference returned error: %v", err)
+	}
+	if resolved.DataSourceID != "529e5bf9-7fae-8080-bb4a-d94e1387655d" {
+		t.Fatalf("data_source_id = %q", resolved.DataSourceID)
+	}
+	if resolved.Database == nil || resolved.Database.ID != "429e5bf9-7fae-8080-bb4a-d94e1387655d" {
+		t.Fatalf("database = %+v", resolved.Database)
+	}
+}
