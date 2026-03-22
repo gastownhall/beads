@@ -307,8 +307,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	if err != nil {
 		return nil, fmt.Errorf("fetching issues: %w", err)
 	}
-
-	e.msg("Fetched %d issues from %s", len(extIssues), e.Tracker.DisplayName())
+	stats.Candidates = len(extIssues)
+	if provider, ok := e.Tracker.(PullStatsProvider); ok {
+		stats.Queried, stats.Candidates = provider.LastPullStats()
+	}
 
 	mapper := e.Tracker.FieldMapper()
 	var pendingDeps []DependencyInfo

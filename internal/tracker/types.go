@@ -110,6 +110,8 @@ type SyncStats struct {
 
 // PullStats tracks pull operation results.
 type PullStats struct {
+	Queried     int
+	Candidates  int
 	Created     int
 	Updated     int
 	Skipped     int

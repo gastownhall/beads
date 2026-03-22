@@ -55,6 +55,8 @@ type Tracker struct {
 	issueCache      []itracker.TrackerIssue
 	remoteByPageID  map[string]itracker.TrackerIssue
 	remoteByLocalID map[string]itracker.TrackerIssue
+	lastQueried     int
+	lastCandidates  int
 }
 
 func (t *Tracker) Name() string         { return "notion" }
@@ -104,7 +106,6 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 		return nil, err
 	}
 	t.cacheMu.RLock()
-	defer t.cacheMu.RUnlock()
 
 	result := make([]itracker.TrackerIssue, 0, len(t.issueCache))
 	for _, issue := range t.issueCache {
@@ -117,7 +118,20 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 			break
 		}
 	}
+	queried := len(t.issueCache)
+	candidates := len(result)
+	t.cacheMu.RUnlock()
+	t.cacheMu.Lock()
+	t.lastQueried = queried
+	t.lastCandidates = candidates
+	t.cacheMu.Unlock()
 	return result, nil
+}
+
+func (t *Tracker) LastPullStats() (queried int, candidates int) {
+	t.cacheMu.RLock()
+	defer t.cacheMu.RUnlock()
+	return t.lastQueried, t.lastCandidates
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*itracker.TrackerIssue, error) {
@@ -569,7 +583,7 @@ func matchesFetchOptions(issue *itracker.TrackerIssue, opts itracker.FetchOption
 	if issue == nil {
 		return false
 	}
-	if opts.Since != nil && !issue.UpdatedAt.IsZero() && issue.UpdatedAt.Before(*opts.Since) {
+	if opts.Since != nil && !issue.UpdatedAt.IsZero() && !issue.UpdatedAt.After(*opts.Since) {
 		return false
 	}
 	switch strings.TrimSpace(strings.ToLower(opts.State)) {

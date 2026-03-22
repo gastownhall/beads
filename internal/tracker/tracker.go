@@ -70,6 +70,12 @@ type BatchPushDryRunner interface {
 	BatchPushDryRun(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error)
 }
 
+// PullStatsProvider is an optional capability for trackers that can report
+// raw fetch counts separately from incremental pull candidates.
+type PullStatsProvider interface {
+	LastPullStats() (queried int, candidates int)
+}
+
 // FieldMapper handles bidirectional conversion of issue fields between
 // an external tracker and beads. Each tracker provides its own mapper.
 type FieldMapper interface {

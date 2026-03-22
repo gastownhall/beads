@@ -110,6 +110,58 @@ func TestTrackerFetchIssuesFiltersArchivedAndState(t *testing.T) {
 	}
 }
 
+func TestTrackerFetchIssuesExcludesEqualLastSyncBoundary(t *testing.T) {
+	t.Parallel()
+
+	boundary := time.Date(2026, 3, 22, 9, 54, 51, 0, time.UTC)
+	api := &fakeAPI{
+		pages: []Page{
+			{
+				ID:             "01234567-89ab-cdef-0123-456789abcdef",
+				URL:            "https://www.notion.so/Task-0123456789abcdef0123456789abcdef",
+				CreatedTime:    boundary.Add(-10 * time.Minute),
+				LastEditedTime: boundary,
+				Properties: map[string]PageProperty{
+					PropertyTitle:    {Title: []RichText{{PlainText: "Equal boundary"}}},
+					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
+					PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+					PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+					PropertyType:     {Select: &SelectOption{Name: "Task"}},
+				},
+			},
+			{
+				ID:             "11111111-2222-3333-4444-555555555555",
+				URL:            "https://www.notion.so/Task-11111111222233334444555555555555",
+				CreatedTime:    boundary.Add(-5 * time.Minute),
+				LastEditedTime: boundary.Add(time.Second),
+				Properties: map[string]PageProperty{
+					PropertyTitle:    {Title: []RichText{{PlainText: "After boundary"}}},
+					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-2"}}},
+					PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+					PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+					PropertyType:     {Select: &SelectOption{Name: "Task"}},
+				},
+			},
+		},
+	}
+	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &boundary})
+	if err != nil {
+		t.Fatalf("FetchIssues returned error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("issues = %d, want 1", len(issues))
+	}
+	if issues[0].Title != "After boundary" {
+		t.Fatalf("title = %q", issues[0].Title)
+	}
+	queried, candidates := tracker.LastPullStats()
+	if queried != 2 || candidates != 1 {
+		t.Fatalf("LastPullStats = (%d, %d), want (2, 1)", queried, candidates)
+	}
+}
+
 func TestTrackerCreateAndUpdateIssue(t *testing.T) {
 	t.Parallel()
 

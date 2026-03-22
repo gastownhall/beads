@@ -476,6 +476,10 @@ func renderNotionSyncResult(cmd *cobra.Command, result *tracker.SyncResult) erro
 	if notionSyncDryRun {
 		_, _ = fmt.Fprintln(out, "Dry run mode")
 	}
+	if result.PullStats.Queried > 0 || result.PullStats.Candidates > 0 {
+		_, _ = fmt.Fprintf(out, "Queried %d pages from Notion (%d pull candidates)\n",
+			result.PullStats.Queried, result.PullStats.Candidates)
+	}
 	if result.PullStats.Created > 0 || result.PullStats.Updated > 0 {
 		_, _ = fmt.Fprintf(out, "✓ Pulled %d issues (%d created, %d updated)\n",
 			result.Stats.Pulled, result.PullStats.Created, result.PullStats.Updated)

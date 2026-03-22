@@ -312,8 +312,10 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 			"Skipped bd-2: Notion external_ref points outside the current target; clear external_ref to recreate it in this data source",
 		},
 		PullStats: tracker.PullStats{
-			Created: 1,
-			Updated: 1,
+			Queried:    12,
+			Candidates: 2,
+			Created:    1,
+			Updated:    1,
 		},
 		PushStats: tracker.PushStats{
 			Created: 2,
@@ -326,6 +328,7 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"Dry run mode",
+		"Queried 12 pages from Notion (2 pull candidates)",
 		"Pulled 2 issues (1 created, 1 updated)",
 		"Pushed 3 issues (2 created, 1 updated)",
 		"Resolved 1 conflicts",
