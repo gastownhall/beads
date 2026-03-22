@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -45,7 +46,7 @@ type agentsIntegration struct {
 
 func defaultAgentsEnv() agentsEnv {
 	return agentsEnv{
-		agentsPath: "AGENTS.md",
+		agentsPath: config.SafeAgentsFile(),
 		stdout:     os.Stdout,
 		stderr:     os.Stderr,
 	}
