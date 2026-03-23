@@ -397,6 +397,36 @@ func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg st
 	return err
 }
 
+// ── MergeSlot ────────────────────────────────────────────────────────────────
+
+func (s *InstrumentedStorage) MergeSlotCreate(ctx context.Context, actor string) (*types.Issue, error) {
+	ctx, span, t := s.op(ctx, "MergeSlotCreate")
+	v, err := s.inner.MergeSlotCreate(ctx, actor)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) MergeSlotCheck(ctx context.Context) (*storage.MergeSlotStatus, error) {
+	ctx, span, t := s.op(ctx, "MergeSlotCheck")
+	v, err := s.inner.MergeSlotCheck(ctx)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) MergeSlotAcquire(ctx context.Context, holder, actor string, wait bool) (*storage.MergeSlotResult, error) {
+	ctx, span, t := s.op(ctx, "MergeSlotAcquire", attribute.String("slot.holder", holder))
+	v, err := s.inner.MergeSlotAcquire(ctx, holder, actor, wait)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) MergeSlotRelease(ctx context.Context, holder, actor string) error {
+	ctx, span, t := s.op(ctx, "MergeSlotRelease", attribute.String("slot.holder", holder))
+	err := s.inner.MergeSlotRelease(ctx, holder, actor)
+	s.done(ctx, span, t, err)
+	return err
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) Close() error {

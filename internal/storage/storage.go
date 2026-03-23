@@ -80,8 +80,41 @@ type Storage interface {
 	// Transactions
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 
+	// MergeSlot — serialized conflict resolution primitive.
+	// Each rig has one merge slot bead (<prefix>-merge-slot, labeled gt:slot).
+	// The slot ID is derived from the issue_prefix config key.
+	MergeSlotCreate(ctx context.Context, actor string) (*types.Issue, error)
+	MergeSlotCheck(ctx context.Context) (*MergeSlotStatus, error)
+	MergeSlotAcquire(ctx context.Context, holder, actor string, wait bool) (*MergeSlotResult, error)
+	MergeSlotRelease(ctx context.Context, holder, actor string) error
+
 	// Lifecycle
 	Close() error
+}
+
+// MergeSlotStatus is returned by MergeSlotCheck and describes the current
+// state of the merge slot bead.
+type MergeSlotStatus struct {
+	SlotID    string
+	Available bool
+	Holder    string
+	Waiters   []string
+}
+
+// MergeSlotResult is returned by MergeSlotAcquire.
+type MergeSlotResult struct {
+	// SlotID is the bead ID of the merge slot.
+	SlotID string
+	// Acquired is true when the slot was successfully acquired by the caller.
+	Acquired bool
+	// Waiting is true when --wait was passed and the caller was added to the
+	// waiters queue (the slot was held by someone else).
+	Waiting bool
+	// Holder is the current holder of the slot. When Acquired is true this
+	// is the caller; when Waiting is true this is the previous holder.
+	Holder string
+	// Position is the 1-based position in the waiters queue when Waiting is true.
+	Position int
 }
 
 // DoltStorage is the full interface for Dolt-backed stores, composing the core
