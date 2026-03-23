@@ -16,6 +16,7 @@ func TestSchemaAfterInit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}
+	t.Parallel()
 
 	ctx := t.Context()
 	tmpDir := t.TempDir()

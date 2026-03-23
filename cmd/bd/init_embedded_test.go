@@ -197,6 +197,7 @@ func TestEmbeddedInit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 
@@ -542,6 +543,7 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 	dir := t.TempDir()
