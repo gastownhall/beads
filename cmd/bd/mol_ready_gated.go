@@ -37,7 +37,7 @@ This command discovers molecules waiting at a gate step where:
 4. No agent currently has this molecule hooked
 
 This enables discovery-based resume without explicit waiter tracking.
-The Deacon patrol uses this to find and dispatch gate-ready molecules.
+The patrol system uses this to find and dispatch gate-ready molecules.
 
 Examples:
   bd mol ready --gated           # Find all gate-ready molecules
@@ -92,7 +92,7 @@ func runMolReadyGated(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Println("To dispatch a molecule:")
-	fmt.Println("  gt sling <agent> --mol <molecule-id>")
+	fmt.Println("  bd sling <agent> --mol <molecule-id>")
 }
 
 // findGateReadyMolecules finds molecules where a gate has closed and work can resume.

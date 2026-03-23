@@ -51,7 +51,7 @@ Dynamic bonding (Christmas Ornament pattern):
   This creates IDs like "parent.child-ref" instead of random hashes.
 
   Example:
-    bd mol bond mol-polecat-arm bd-patrol --ref arm-{{polecat_name}} --var polecat_name=ace
+    bd mol bond mol-worker-arm bd-patrol --ref arm-{{worker_name}} --var worker_name=ace
     # Creates: bd-patrol.arm-ace (and children like bd-patrol.arm-ace.capture)
 
 Use cases:

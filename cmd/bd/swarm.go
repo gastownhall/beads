@@ -890,9 +890,9 @@ If given a single issue (not an epic), it will be auto-wrapped:
 - Then creates the swarm molecule for that epic
 
 Examples:
-  bd swarm create gt-epic-123                          # Create swarm for epic
-  bd swarm create gt-epic-123 --coordinator=witness/   # With specific coordinator
-  bd swarm create gt-task-456                          # Auto-wrap single issue`,
+  bd swarm create bd-epic-123                          # Create swarm for epic
+  bd swarm create bd-epic-123 --coordinator=observer/   # With specific coordinator
+  bd swarm create bd-task-456                          # Auto-wrap single issue`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("swarm create")

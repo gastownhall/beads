@@ -883,7 +883,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	// All writers operate on main — transaction isolation via RunInTransaction
-	// replaces the former branch-per-polecat approach (BD_BRANCH).
+	// replaces the former branch-per-worker approach (BD_BRANCH).
 	store.branch = "main"
 
 	// GH#2315: Sync CLI remotes into SQL server on store open.
