@@ -41,6 +41,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -521,6 +522,21 @@ func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) 
 // Use sparingly — prefer the store's typed methods for normal operations.
 func (s *DoltStore) DB() *sql.DB {
 	return s.db
+}
+
+// BackupAdd registers a Dolt backup destination.
+func (s *DoltStore) BackupAdd(ctx context.Context, name, url string) error {
+	return versioncontrolops.BackupAdd(ctx, s.db, name, url)
+}
+
+// BackupSync pushes the database to the named backup destination.
+func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
+	return versioncontrolops.BackupSync(ctx, s.db, name)
+}
+
+// BackupRemove removes a configured Dolt backup destination.
+func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
+	return versioncontrolops.BackupRemove(ctx, s.db, name)
 }
 
 // QueryContext wraps s.db.QueryContext with retry for transient errors.

@@ -127,6 +127,14 @@ type PendingCommitter interface {
 	CommitPending(ctx context.Context, actor string) (bool, error)
 }
 
+// BackupStore provides Dolt backup operations (CALL DOLT_BACKUP).
+// Callers that need backup functionality should type-assert to this interface.
+type BackupStore interface {
+	BackupAdd(ctx context.Context, name, url string) error
+	BackupSync(ctx context.Context, name string) error
+	BackupRemove(ctx context.Context, name string) error
+}
+
 // Transaction provides atomic multi-operation support within a single database transaction.
 //
 // The Transaction interface exposes a subset of storage methods that execute within
