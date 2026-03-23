@@ -178,9 +178,13 @@ create, update, show, or close operation).`,
 			// Auto-close parent molecule if all steps are now complete
 			autoCloseCompletedMolecule(ctx, store, id, actor, session)
 
-			// Run close hook (best effort: hook runs only if re-fetch succeeds)
+			// Run hooks (best effort: hooks run only if re-fetch succeeds)
 			closedIssue, _ := store.GetIssue(ctx, id)
 			if closedIssue != nil && hookRunner != nil {
+				// Fire on_update only if status actually changed (GH#2630)
+				if issue == nil || issue.Status != types.StatusClosed {
+					hookRunner.Run(hooks.EventUpdate, closedIssue)
+				}
 				hookRunner.Run(hooks.EventClose, closedIssue)
 			}
 
@@ -249,9 +253,13 @@ create, update, show, or close operation).`,
 			// Auto-close parent molecule if all steps are now complete
 			autoCloseCompletedMolecule(ctx, result.Store, result.ResolvedID, actor, session)
 
-			// Get updated issue for hook (best effort: hook runs only if re-fetch succeeds)
+			// Run hooks (best effort: hooks run only if re-fetch succeeds)
 			closedIssue, _ := result.Store.GetIssue(ctx, result.ResolvedID)
 			if closedIssue != nil && hookRunner != nil {
+				// Fire on_update only if status actually changed (GH#2630)
+				if result.Issue == nil || result.Issue.Status != types.StatusClosed {
+					hookRunner.Run(hooks.EventUpdate, closedIssue)
+				}
 				hookRunner.Run(hooks.EventClose, closedIssue)
 			}
 
