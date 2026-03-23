@@ -11,14 +11,14 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-// addAgentsInstructions creates or updates AGENTS.md with embedded template content.
+// addAgentsInstructions creates or updates the agents file with embedded template content.
+// agentFile is the target filename (e.g. "AGENTS.md" or "BEADS.md").
 // If templatePath is non-empty, the custom template file is used instead of the embedded default.
 // profile controls which template variant to render (full or minimal); defaults to minimal.
-func addAgentsInstructions(verbose bool, templatePath string, profile agents.Profile) {
+func addAgentsInstructions(agentFile string, verbose bool, templatePath string, profile agents.Profile) {
 	if profile == "" {
 		profile = agents.ProfileMinimal
 	}
-	agentFile := "AGENTS.md"
 
 	if err := updateAgentFile(agentFile, verbose, templatePath, profile); err != nil {
 		// Non-fatal - continue with other files
@@ -35,7 +35,7 @@ func addAgentsInstructions(verbose bool, templatePath string, profile agents.Pro
 // profile is preserved to avoid information loss.
 func updateAgentFile(filename string, verbose bool, templatePath string, profile agents.Profile) error {
 	// Check if file exists
-	//nolint:gosec // G304: filename comes from hardcoded list in addAgentsInstructions
+	//nolint:gosec // G304: filename validated by config.ValidateAgentsFile or defaulted to AGENTS.md
 	content, err := os.ReadFile(filename)
 	if os.IsNotExist(err) {
 		// File doesn't exist - create from template
