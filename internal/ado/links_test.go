@@ -3,6 +3,7 @@ package ado
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +15,20 @@ import (
 	"github.com/steveyegge/beads/internal/tracker"
 )
 
+// testAPIURL returns an ADO API URL for a work item ID used in tests.
+func testAPIURL(id int) string {
+	return fmt.Sprintf("https://dev.azure.com/org/proj/_apis/wit/workItems/%d", id)
+}
+
+// testWebURL returns an ADO web URL for a work item ID used in tests.
+func testWebURL(id int) string {
+	return fmt.Sprintf("https://dev.azure.com/org/proj/_workitems/edit/%d", id)
+}
+
 func TestPullLinks_DirectRelations(t *testing.T) {
 	wi := &WorkItem{
-		ID: 100,
+		ID:  100,
+		URL: testAPIURL(100),
 		Relations: []WorkItemRelation{
 			{
 				Rel: RelDependsOn,
@@ -46,16 +58,17 @@ func TestPullLinks_DirectRelations(t *testing.T) {
 	})
 
 	// Dependency-Forward: 100 blocks 200 (no swap)
-	assertDep(t, deps[0], "100", "200", "blocks")
+	assertDep(t, deps[0], testWebURL(100), testWebURL(200), "blocks")
 	// Hierarchy-Forward: 100 is parent of 300 (no swap)
-	assertDep(t, deps[1], "100", "300", "parent")
+	assertDep(t, deps[1], testWebURL(100), testWebURL(300), "parent")
 	// Related: 100 related to 400
-	assertDep(t, deps[2], "100", "400", "related")
+	assertDep(t, deps[2], testWebURL(100), testWebURL(400), "related")
 }
 
 func TestPullLinks_ReverseDirectionNormalization(t *testing.T) {
 	wi := &WorkItem{
-		ID: 100,
+		ID:  100,
+		URL: testAPIURL(100),
 		Relations: []WorkItemRelation{
 			{
 				Rel: RelDependencyOf, // Dependency-Reverse: target blocks this → swap
@@ -80,14 +93,15 @@ func TestPullLinks_ReverseDirectionNormalization(t *testing.T) {
 	})
 
 	// Dependency-Reverse swapped: 200 blocks 100
-	assertDep(t, deps[0], "200", "100", "blocks")
+	assertDep(t, deps[0], testWebURL(200), testWebURL(100), "blocks")
 	// Hierarchy-Reverse swapped: 300 is parent of 100
-	assertDep(t, deps[1], "300", "100", "parent")
+	assertDep(t, deps[1], testWebURL(300), testWebURL(100), "parent")
 }
 
 func TestPullLinks_DiscoveredFrom(t *testing.T) {
 	wi := &WorkItem{
-		ID: 100,
+		ID:  100,
+		URL: testAPIURL(100),
 		Relations: []WorkItemRelation{
 			{
 				Rel: RelRelated,
@@ -105,12 +119,13 @@ func TestPullLinks_DiscoveredFrom(t *testing.T) {
 	if len(deps) != 1 {
 		t.Fatalf("got %d deps, want 1", len(deps))
 	}
-	assertDep(t, deps[0], "100", "500", "discovered-from")
+	assertDep(t, deps[0], testWebURL(100), testWebURL(500), "discovered-from")
 }
 
 func TestPullLinks_SkipNonLinks(t *testing.T) {
 	wi := &WorkItem{
-		ID: 100,
+		ID:  100,
+		URL: testAPIURL(100),
 		Relations: []WorkItemRelation{
 			{
 				Rel: "AttachedFile",
@@ -133,7 +148,7 @@ func TestPullLinks_SkipNonLinks(t *testing.T) {
 	if len(deps) != 1 {
 		t.Fatalf("got %d deps, want 1 (non-links should be skipped)", len(deps))
 	}
-	assertDep(t, deps[0], "100", "200", "related")
+	assertDep(t, deps[0], testWebURL(100), testWebURL(200), "related")
 }
 
 func TestPullLinks_EmptyRelations(t *testing.T) {
@@ -612,7 +627,8 @@ func TestHasDiscoveredFromAttribute(t *testing.T) {
 
 func TestPullLinks_BadURL(t *testing.T) {
 	wi := &WorkItem{
-		ID: 100,
+		ID:  100,
+		URL: testAPIURL(100),
 		Relations: []WorkItemRelation{
 			{
 				Rel: RelDependsOn,
@@ -631,12 +647,13 @@ func TestPullLinks_BadURL(t *testing.T) {
 	if len(deps) != 1 {
 		t.Fatalf("got %d deps, want 1 (bad URL should be skipped)", len(deps))
 	}
-	assertDep(t, deps[0], "100", "200", "related")
+	assertDep(t, deps[0], testWebURL(100), testWebURL(200), "related")
 }
 
 func TestPullLinks_UnknownRelType(t *testing.T) {
 	wi := &WorkItem{
-		ID: 100,
+		ID:  100,
+		URL: testAPIURL(100),
 		Relations: []WorkItemRelation{
 			{
 				Rel: "System.LinkTypes.SomethingNew",
@@ -655,12 +672,13 @@ func TestPullLinks_UnknownRelType(t *testing.T) {
 	if len(deps) != 1 {
 		t.Fatalf("got %d deps, want 1 (unknown rel type should be skipped)", len(deps))
 	}
-	assertDep(t, deps[0], "100", "300", "related")
+	assertDep(t, deps[0], testWebURL(100), testWebURL(300), "related")
 }
 
 func TestPullLinks_NilAttributes(t *testing.T) {
 	wi := &WorkItem{
-		ID: 100,
+		ID:  100,
+		URL: testAPIURL(100),
 		Relations: []WorkItemRelation{
 			{
 				Rel:        RelRelated,
@@ -676,7 +694,7 @@ func TestPullLinks_NilAttributes(t *testing.T) {
 	if len(deps) != 1 {
 		t.Fatalf("got %d deps, want 1", len(deps))
 	}
-	assertDep(t, deps[0], "100", "200", "related")
+	assertDep(t, deps[0], testWebURL(100), testWebURL(200), "related")
 }
 
 func TestPushLinks_InvalidExternalID(t *testing.T) {
