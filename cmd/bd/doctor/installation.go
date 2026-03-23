@@ -93,7 +93,10 @@ func CheckPermissions(path string) DoctorCheck {
 // CheckPermissionsWithStore verifies permissions using a shared store (GH#2636).
 // If the shared store was opened successfully, the database is accessible.
 func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
+	if ss != nil && ss.BeadsDir() != "" {
+		beadsDir = ss.BeadsDir()
+	}
 
 	// Check if .beads/ is writable
 	testFile := filepath.Join(beadsDir, ".doctor-test-write")
@@ -111,6 +114,21 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
 		doltPath := getDatabasePath(beadsDir)
+		if cfg.IsDoltServerMode() {
+			if ss == nil || ss.Store() == nil {
+				return DoctorCheck{
+					Name:    "Permissions",
+					Status:  StatusError,
+					Message: "Unable to verify Dolt server-backed database permissions",
+					Fix:     "Check 'bd dolt status' for server availability, then re-run 'bd doctor'",
+				}
+			}
+			return DoctorCheck{
+				Name:    "Permissions",
+				Status:  StatusOK,
+				Message: "All permissions OK",
+			}
+		}
 		if info, err := os.Stat(doltPath); err == nil {
 			if !info.IsDir() {
 				return DoctorCheck{

@@ -91,9 +91,24 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 
 // CheckDatabaseVersionWithStore checks the database version using a shared store (GH#2636).
 func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorCheck {
+	beadsDir := ""
+	if ss != nil {
+		beadsDir = ss.BeadsDir()
+	}
 	store := ss.Store()
 	if store == nil {
-		doltPath := getDatabasePath(ss.BeadsDir())
+		cfg, err := configfile.Load(beadsDir)
+		if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+			return DoctorCheck{
+				Name:    "Database",
+				Status:  StatusError,
+				Message: "Unable to open database",
+				Detail:  "Storage: Dolt",
+				Fix:     "Check 'bd dolt status' for server availability and configured database name, then re-run 'bd doctor'",
+			}
+		}
+
+		doltPath := getDatabasePath(beadsDir)
 		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 			return DoctorCheck{
 				Name:    "Database",
