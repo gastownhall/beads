@@ -360,6 +360,13 @@ func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) erro
 	return wrapTransactionError("commit claim wisp", tx.Commit())
 }
 
+// ListWisps returns ephemeral issues matching the filter.
+// It always queries the wisps table (Ephemeral=true); callers do not need to set that flag.
+func (s *DoltStore) ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error) {
+	issueFilter := issueops.WispFilterToIssueFilter(filter)
+	return s.searchWisps(ctx, "", issueFilter)
+}
+
 // searchWisps searches for issues in the wisps table.
 func (s *DoltStore) searchWisps(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	s.mu.RLock()

@@ -63,6 +63,11 @@ type Storage interface {
 	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 
+	// Wisp queries
+	// ListWisps returns ephemeral issues matching the filter.
+	// It always restricts to Ephemeral=true; callers do not need to set that flag.
+	ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error)
+
 	// Comments and events
 	AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error)
 	GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error)

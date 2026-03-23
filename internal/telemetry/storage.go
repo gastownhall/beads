@@ -397,6 +397,15 @@ func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg st
 	return err
 }
 
+// ── Wisp queries ─────────────────────────────────────────────────────────────
+
+func (s *InstrumentedStorage) ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error) {
+	ctx, span, t := s.op(ctx, "ListWisps")
+	v, err := s.inner.ListWisps(ctx, filter)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) Close() error {

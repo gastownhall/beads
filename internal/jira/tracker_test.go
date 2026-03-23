@@ -594,6 +594,9 @@ func (s *configStore) GetAllEventsSince(_ context.Context, _ time.Time) ([]*type
 	return nil, nil
 }
 func (s *configStore) GetStatistics(_ context.Context) (*types.Statistics, error) { return nil, nil }
+func (s *configStore) ListWisps(_ context.Context, _ types.WispFilter) ([]*types.Issue, error) {
+	return nil, nil
+}
 func (s *configStore) RunInTransaction(_ context.Context, _ string, _ func(tx storage.Transaction) error) error {
 	return nil
 }
