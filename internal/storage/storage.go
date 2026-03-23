@@ -84,6 +84,14 @@ type Storage interface {
 	GetConfig(ctx context.Context, key string) (string, error)
 	GetAllConfig(ctx context.Context) (map[string]string, error)
 
+	// Slots — named key/value pairs stored in an issue's metadata JSON field.
+	// SlotSet stores value at key in the issue's metadata, overwriting any prior value.
+	// SlotGet retrieves the value at key; returns ErrNotFound if key is absent.
+	// SlotClear removes key from the issue's metadata.
+	SlotSet(ctx context.Context, issueID, key, value, actor string) error
+	SlotGet(ctx context.Context, issueID, key string) (string, error)
+	SlotClear(ctx context.Context, issueID, key, actor string) error
+
 	// Transactions
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 

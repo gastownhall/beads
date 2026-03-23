@@ -611,8 +611,11 @@ func (s *configStore) MergeSlotCheck(_ context.Context) (*storage.MergeSlotStatu
 func (s *configStore) MergeSlotAcquire(_ context.Context, _, _ string, _ bool) (*storage.MergeSlotResult, error) {
 	return nil, nil
 }
-func (s *configStore) MergeSlotRelease(_ context.Context, _, _ string) error { return nil }
-func (s *configStore) Close() error                                          { return nil }
+func (s *configStore) MergeSlotRelease(_ context.Context, _, _ string) error              { return nil }
+func (s *configStore) SlotGet(_ context.Context, _, _ string) (string, error)             { return "", nil }
+func (s *configStore) SlotSet(_ context.Context, _, _, _, _ string) error                 { return nil }
+func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error                  { return nil }
+func (s *configStore) Close() error                                                       { return nil }
 
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	var capturedJQL string

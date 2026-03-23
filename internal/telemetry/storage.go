@@ -459,6 +459,41 @@ func (s *InstrumentedStorage) MergeSlotRelease(ctx context.Context, holder, acto
 	return err
 }
 
+// ── Slots ─────────────────────────────────────────────────────────────────────
+
+func (s *InstrumentedStorage) SlotGet(ctx context.Context, issueID, key string) (string, error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", issueID),
+		attribute.String("bd.slot.key", key),
+	}
+	ctx, span, t := s.op(ctx, "SlotGet", attrs...)
+	v, err := s.inner.SlotGet(ctx, issueID, key)
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
+func (s *InstrumentedStorage) SlotSet(ctx context.Context, issueID, key, value, actor string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", issueID),
+		attribute.String("bd.slot.key", key),
+	}
+	ctx, span, t := s.op(ctx, "SlotSet", attrs...)
+	err := s.inner.SlotSet(ctx, issueID, key, value, actor)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
+func (s *InstrumentedStorage) SlotClear(ctx context.Context, issueID, key, actor string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", issueID),
+		attribute.String("bd.slot.key", key),
+	}
+	ctx, span, t := s.op(ctx, "SlotClear", attrs...)
+	err := s.inner.SlotClear(ctx, issueID, key, actor)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) Close() error {
