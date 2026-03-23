@@ -406,6 +406,13 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID stri
 	for _, d := range deps {
 		issue, ok := issueMap[d.depID]
 		if !ok {
+			// Cross-rig dependent: issue lives in a different database.
+			// Return a stub so the dep is visible rather than silently
+			// dropped (GH#2624).
+			results = append(results, &types.IssueWithDependencyMetadata{
+				Issue:          types.Issue{ID: d.depID},
+				DependencyType: types.DependencyType(d.depType),
+			})
 			continue
 		}
 		results = append(results, &types.IssueWithDependencyMetadata{

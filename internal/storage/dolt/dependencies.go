@@ -174,6 +174,13 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 	for _, d := range deps {
 		issue, ok := issueMap[d.depID]
 		if !ok {
+			// Cross-rig dependency: target issue lives in a different database.
+			// Return a stub issue with the ID so the dep is visible in results
+			// rather than being silently dropped (GH#2624).
+			results = append(results, &types.IssueWithDependencyMetadata{
+				Issue:          types.Issue{ID: d.depID},
+				DependencyType: types.DependencyType(d.depType),
+			})
 			continue
 		}
 		results = append(results, &types.IssueWithDependencyMetadata{

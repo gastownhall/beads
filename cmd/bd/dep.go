@@ -312,6 +312,7 @@ Examples:
 		if err := fromStore.AddDependency(ctx, dep, actor); err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
+		commandDidWrite.Store(true)
 
 		// Check for cycles after adding dependency
 		warnIfCyclesExist(fromStore)
@@ -524,6 +525,7 @@ var depRemoveCmd = &cobra.Command{
 		if err := fromStore.RemoveDependency(ctx, fullFromID, fullToID, actor); err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
+		commandDidWrite.Store(true)
 
 		if isEmbeddedDolt && fromStore != nil {
 			if _, err := fromStore.CommitPending(ctx, actor); err != nil {
