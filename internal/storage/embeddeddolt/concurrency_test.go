@@ -23,6 +23,7 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt concurrency tests")
 	}
+	t.Parallel()
 
 	procs := envInt("BEADS_EMBEDDED_DOLT_PROCS", 10)
 	iters := envInt("BEADS_EMBEDDED_DOLT_ITERS", 5)
