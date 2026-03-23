@@ -75,6 +75,12 @@ func maybeNewCircuitBreaker(host string, port int) *circuitBreaker {
 	return newCircuitBreaker(host, port)
 }
 
+// circuitBreakerDir is the dedicated directory for circuit breaker state files.
+// Using a subdirectory avoids scanning the entire /tmp directory (which can
+// contain millions of files) during stale breaker cleanup — the root cause of
+// 3+ second startup delays on busy systems (aegis-u5tg0).
+const circuitBreakerDir = "/tmp/beads-circuit"
+
 // newCircuitBreaker creates a circuit breaker for the given Dolt server host:port.
 func newCircuitBreaker(host string, port int) *circuitBreaker {
 	// Sanitize host for use in filename (replace dots/colons with dashes)
@@ -82,7 +88,7 @@ func newCircuitBreaker(host string, port int) *circuitBreaker {
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
-		filePath: fmt.Sprintf("/tmp/beads-dolt-circuit-%s-%d.json", safeHost, port),
+		filePath: filepath.Join(circuitBreakerDir, fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)),
 	}
 }
 
@@ -280,6 +286,8 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 	if err != nil {
 		return
 	}
+	// Ensure parent directory exists (handles first write after directory change).
+	_ = os.MkdirAll(filepath.Dir(cb.filePath), 0755)
 	tmp := cb.filePath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return
@@ -287,14 +295,22 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 	_ = os.Rename(tmp, cb.filePath)
 }
 
-// CleanStaleCircuitBreakerFiles removes stale circuit breaker files from /tmp.
+// CleanStaleCircuitBreakerFiles removes stale circuit breaker files.
 // This cleans up leftover files that could poison fresh inits:
 //   - Legacy port-0 files (beads-dolt-circuit-0.json) from before the port-0 fix
 //   - Any breaker file whose open/half-open state is older than circuitStaleTTL
 //
 // Called during init to ensure a clean starting state (GH#2598).
+//
+// Uses a dedicated subdirectory (/tmp/beads-circuit/) to avoid scanning the
+// entire /tmp directory, which caused 3+ second delays on systems with millions
+// of temp files (aegis-u5tg0). Legacy files in /tmp/ are not migrated — they
+// are harmlessly ignored and will be cleaned by the OS eventually.
 func CleanStaleCircuitBreakerFiles() {
-	cleanStaleCircuitBreakerFilesIn("/tmp")
+	// Ensure the dedicated directory exists.
+	_ = os.MkdirAll(circuitBreakerDir, 0755)
+
+	cleanStaleCircuitBreakerFilesIn(circuitBreakerDir)
 }
 
 // cleanStaleCircuitBreakerFilesIn is the testable implementation of
