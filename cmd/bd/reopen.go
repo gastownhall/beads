@@ -49,23 +49,9 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				fmt.Fprintf(os.Stderr, "%s is already open\n", fullID)
 				continue
 			}
-			// UpdateIssue automatically clears closed_at when status changes from closed.
-			// Also clear defer_until so the issue appears in bd ready immediately.
-			// Without this, a deferred issue that was closed and reopened stays
-			// hidden from bd ready despite being "open".
-			updates := map[string]interface{}{
-				"status":      string(types.StatusOpen),
-				"defer_until": nil,
-			}
-			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+			if err := store.ReopenIssue(ctx, fullID, reason, actor); err != nil {
 				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
 				continue
-			}
-			// Add reason as a comment if provided
-			if reason != "" {
-				if err := store.AddComment(ctx, fullID, actor, reason); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to add comment to %s: %v\n", fullID, err)
-				}
 			}
 			if jsonOutput {
 				issue, _ := store.GetIssue(ctx, fullID)
