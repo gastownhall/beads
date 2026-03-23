@@ -11,7 +11,6 @@ import (
 
 func TestAddDependency(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	t.Parallel()
 
 	t.Run("basic_blocks", func(t *testing.T) {
 		te := newTestEnv(t, "db")

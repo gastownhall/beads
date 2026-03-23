@@ -11,7 +11,6 @@ import (
 
 func TestGetNextChildID(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	t.Parallel()
 
 	t.Run("first_child", func(t *testing.T) {
 		te := newTestEnv(t, "nc")

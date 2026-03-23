@@ -149,7 +149,6 @@ func skipUnlessEmbeddedDolt(t *testing.T) {
 
 func TestCreateIssue(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	t.Parallel()
 
 	t.Run("basic", func(t *testing.T) {
 		te := newTestEnv(t, "ci")
@@ -763,7 +762,6 @@ func TestCreateIssue(t *testing.T) {
 
 func TestCreateIssues(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	t.Parallel()
 
 	t.Run("empty_slice", func(t *testing.T) {
 		te := newTestEnv(t, "es")

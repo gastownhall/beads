@@ -12,7 +12,6 @@ import (
 
 func TestGetIssue(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	t.Parallel()
 
 	t.Run("round_trip", func(t *testing.T) {
 		te := newTestEnv(t, "gi")
@@ -108,7 +107,6 @@ func TestGetIssue(t *testing.T) {
 
 func TestGetLabels(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	t.Parallel()
 
 	t.Run("empty", func(t *testing.T) {
 		te := newTestEnv(t, "gl")
@@ -175,7 +173,6 @@ func TestGetLabels(t *testing.T) {
 
 func TestAddLabel(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	t.Parallel()
 
 	t.Run("idempotent", func(t *testing.T) {
 		te := newTestEnv(t, "al")
