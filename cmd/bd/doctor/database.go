@@ -91,14 +91,10 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 
 // CheckDatabaseVersionWithStore checks the database version using a shared store (GH#2636).
 func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorCheck {
-	beadsDir := ""
-	if ss != nil {
-		beadsDir = ss.BeadsDir()
-	}
+	beadsDir := sharedStoreBeadsDir(ss)
 	store := ss.Store()
 	if store == nil {
-		cfg, err := configfile.Load(beadsDir)
-		if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+		if !sharedStoreNeedsLocalDoltDir(beadsDir) {
 			return DoctorCheck{
 				Name:    "Database",
 				Status:  StatusError,
