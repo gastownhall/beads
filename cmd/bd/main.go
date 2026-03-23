@@ -157,25 +157,24 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return ""
 	}
 
-	guessedBeadsDir := filepath.Dir(dbPath)
-
 	// BEADS_DB is an explicit database override, so preserve its legacy
 	// filepath.Dir behavior instead of trying to rediscover a repo-local .beads.
 	if os.Getenv("BEADS_DB") != "" {
-		return guessedBeadsDir
+		return filepath.Dir(dbPath)
 	}
 
-	if cfg, err := configfile.Load(guessedBeadsDir); err == nil && cfg != nil {
-		if utils.PathsEqual(cfg.DatabasePath(guessedBeadsDir), dbPath) {
-			return guessedBeadsDir
-		}
+	// Use the same validated candidate logic as the helper/reopen path
+	// (GH#2627). This checks filepath.Dir, canonicalized paths, AND
+	// FindBeadsDir — but only returns a candidate whose metadata.json
+	// actually points to dbPath, preventing CWD discovery from overriding
+	// an explicit --db flag.
+	if beadsDir := resolveBeadsDirForDBPath(dbPath); beadsDir != "" {
+		return beadsDir
 	}
 
-	if discoveredBeadsDir := beads.FindBeadsDir(); discoveredBeadsDir != "" {
-		return discoveredBeadsDir
-	}
-
-	return guessedBeadsDir
+	// No candidate matched — fall back to parent directory of the db path.
+	// This handles bootstrap/init where no metadata.json exists yet.
+	return filepath.Dir(dbPath)
 }
 
 // getActorWithGit returns the actor for audit trails with git config fallback.
