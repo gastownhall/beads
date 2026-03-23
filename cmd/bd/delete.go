@@ -88,18 +88,22 @@ Force: Delete and orphan dependents
 		// Single issue deletion (legacy behavior)
 		issueID := issueIDs[0]
 		ctx := rootCtx
-		// Get the issue to be deleted
-		issue, err := store.GetIssue(ctx, issueID)
+		// Get the issue to be deleted, using prefix-based routing
+		routedResult, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
 		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
+			if isNotFoundErr(err) {
 				FatalError("issue %s not found", issueID)
 			}
 			FatalError("%v", err)
 		}
+		defer routedResult.Close()
+		issue := routedResult.Issue
+		issueID = routedResult.ResolvedID
+		activeStore := routedResult.Store
 		// Find all connected issues (dependencies in both directions)
 		connectedIssues := make(map[string]*types.Issue)
 		// Get dependencies (issues this one depends on)
-		deps, err := store.GetDependencies(ctx, issueID)
+		deps, err := activeStore.GetDependencies(ctx, issueID)
 		if err != nil {
 			FatalError("getting dependencies: %v", err)
 		}
@@ -107,7 +111,7 @@ Force: Delete and orphan dependents
 			connectedIssues[dep.ID] = dep
 		}
 		// Get dependents (issues that depend on this one)
-		dependents, err := store.GetDependents(ctx, issueID)
+		dependents, err := activeStore.GetDependents(ctx, issueID)
 		if err != nil {
 			FatalError("getting dependents: %v", err)
 		}
@@ -115,7 +119,7 @@ Force: Delete and orphan dependents
 			connectedIssues[dependent.ID] = dependent
 		}
 		// Get dependency records (outgoing) to count how many we'll remove
-		depRecords, err := store.GetDependencyRecords(ctx, issueID)
+		depRecords, err := activeStore.GetDependencyRecords(ctx, issueID)
 		if err != nil {
 			FatalError("getting dependency records: %v", err)
 		}
@@ -164,7 +168,7 @@ Force: Delete and orphan dependents
 		// Actually delete — all writes in a single transaction
 		updatedIssueCount := 0
 		totalDepsRemoved := 0
-		deleteErr := transact(ctx, store, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
+		deleteErr := transact(ctx, activeStore, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
 			// 1. Update text references in connected issues
 			for id, connIssue := range connectedIssues {
 				updates := make(map[string]interface{})
@@ -212,8 +216,8 @@ Force: Delete and orphan dependents
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
+		if isEmbeddedDolt && activeStore != nil {
+			if _, err := activeStore.CommitPending(ctx, actor); err != nil {
 				FatalError("failed to commit: %v", err)
 			}
 		}
@@ -248,27 +252,41 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		}
 	}
 	ctx := rootCtx
-	// Verify all issues exist
+	// Verify all issues exist (using routing for prefix resolution)
 	issues := make(map[string]*types.Issue)
 	notFound := []string{}
+	var routedStore storage.DoltStorage
 	for _, id := range issueIDs {
-		issue, err := store.GetIssue(ctx, id)
+		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
+			if isNotFoundErr(err) {
 				notFound = append(notFound, id)
 			} else {
 				FatalError("getting issue %s: %v", id, err)
 			}
 		} else {
-			issues[id] = issue
+			issues[result.ResolvedID] = result.Issue
+			if result.Routed && routedStore == nil {
+				routedStore = result.Store
+			} else {
+				result.Close()
+			}
 		}
+	}
+	if routedStore != nil {
+		defer func() { _ = routedStore.Close() }()
 	}
 	if len(notFound) > 0 {
 		FatalError("issues not found: %s", strings.Join(notFound, ", "))
 	}
+	// Use the routed store if available, otherwise the local store
+	batchStore := store
+	if routedStore != nil {
+		batchStore = routedStore
+	}
 	// Dry-run or preview mode
 	if dryRun || !force {
-		result, err := store.DeleteIssues(ctx, issueIDs, cascade, false, true)
+		result, err := batchStore.DeleteIssues(ctx, issueIDs, cascade, false, true)
 		if err != nil {
 			// Try to show preview even if there are dependency issues
 			showDeletionPreview(issueIDs, issues, cascade, err)
@@ -303,7 +321,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	}
 	for _, id := range issueIDs {
 		// Get dependencies (issues this one depends on)
-		deps, err := store.GetDependencies(ctx, id)
+		deps, err := batchStore.GetDependencies(ctx, id)
 		if err == nil {
 			for _, dep := range deps {
 				if !idSet[dep.ID] {
@@ -312,7 +330,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			}
 		}
 		// Get dependents (issues that depend on this one)
-		dependents, err := store.GetDependents(ctx, id)
+		dependents, err := batchStore.GetDependents(ctx, id)
 		if err == nil {
 			for _, dep := range dependents {
 				if !idSet[dep.ID] {
@@ -322,7 +340,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		}
 	}
 	// Actually delete
-	result, err := store.DeleteIssues(ctx, issueIDs, cascade, force, false)
+	result, err := batchStore.DeleteIssues(ctx, issueIDs, cascade, force, false)
 	if err != nil {
 		FatalError("%v", err)
 	}
