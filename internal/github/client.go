@@ -127,7 +127,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 			// Only add jitter to our own exponential backoff, not server-mandated delays
 			if !useServerDelay {
 				if half := int64(delay / 2); half > 0 {
-					delay += time.Duration(rand.Int64N(half))
+					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
 				}
 			}
 

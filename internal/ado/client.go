@@ -209,7 +209,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 			if attempt < maxAttempts {
 				delay := RetryDelay * time.Duration(1<<uint(attempt))
 				if half := int64(delay / 2); half > 0 {
-					delay += time.Duration(rand.Int64N(half))
+					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
 				}
 				select {
 				case <-ctx.Done():
@@ -253,7 +253,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 			// Only add jitter to our own exponential backoff, not server-mandated delays
 			if !useServerDelay {
 				if half := int64(delay / 2); half > 0 {
-					delay += time.Duration(rand.Int64N(half))
+					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
 				}
 			}
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, maxAttempts+1)

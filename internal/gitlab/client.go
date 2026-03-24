@@ -144,7 +144,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 		if retriable {
 			delay := RetryDelay * time.Duration(1<<attempt)
 			if half := int64(delay / 2); half > 0 {
-				delay += time.Duration(rand.Int64N(half))
+				delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
 			}
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, MaxRetries+1)
 			select {
