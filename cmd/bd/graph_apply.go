@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -25,7 +26,6 @@ type GraphApplyNode struct {
 	Description       string            `json:"description,omitempty"`
 	Assignee          string            `json:"assignee,omitempty"`
 	AssignAfterCreate bool              `json:"assign_after_create,omitempty"`
-	From              string            `json:"from,omitempty"`
 	Labels            []string          `json:"labels,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
 	MetadataRefs      map[string]string `json:"metadata_refs,omitempty"`
@@ -35,12 +35,11 @@ type GraphApplyNode struct {
 
 // GraphApplyEdge describes a dependency edge.
 type GraphApplyEdge struct {
-	FromKey  string `json:"from_key,omitempty"`
-	FromID   string `json:"from_id,omitempty"`
-	ToKey    string `json:"to_key,omitempty"`
-	ToID     string `json:"to_id,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Metadata string `json:"metadata,omitempty"`
+	FromKey string `json:"from_key,omitempty"`
+	FromID  string `json:"from_id,omitempty"`
+	ToKey   string `json:"to_key,omitempty"`
+	ToID    string `json:"to_id,omitempty"`
+	Type    string `json:"type,omitempty"`
 }
 
 // GraphApplyResult returns the concrete bead IDs assigned to each symbolic key.
@@ -75,16 +74,16 @@ all issues are created in a single database transaction.`,
 			FatalError("parsing plan file: %v", err)
 		}
 
-		if len(plan.Nodes) == 0 {
-			FatalError("plan has no nodes")
-		}
-
 		if store == nil {
 			FatalErrorWithHint("database not initialized",
 				"run 'bd doctor' to diagnose, or 'bd init' to create a new database")
 		}
 		if actor == "" {
 			actor = "bd"
+		}
+
+		if err := validateGraphApplyPlan(&plan); err != nil {
+			FatalError("invalid plan: %v", err)
 		}
 
 		result, err := executeGraphApply(rootCtx, &plan)
@@ -103,174 +102,210 @@ all issues are created in a single database transaction.`,
 	},
 }
 
+// validateGraphApplyPlan checks the plan for structural errors before any writes.
+func validateGraphApplyPlan(plan *GraphApplyPlan) error {
+	if len(plan.Nodes) == 0 {
+		return fmt.Errorf("plan has no nodes")
+	}
+
+	seenKeys := make(map[string]bool, len(plan.Nodes))
+	for i, node := range plan.Nodes {
+		if node.Key == "" {
+			return fmt.Errorf("node %d has empty key", i)
+		}
+		if seenKeys[node.Key] {
+			return fmt.Errorf("duplicate node key %q", node.Key)
+		}
+		seenKeys[node.Key] = true
+		if node.Title == "" {
+			return fmt.Errorf("node %q has empty title", node.Key)
+		}
+		// Validate MetadataRefs point to known keys.
+		for metaKey, refKey := range node.MetadataRefs {
+			if !seenKeys[refKey] {
+				// Check if it's a forward ref (key defined later in the plan).
+				found := false
+				for _, other := range plan.Nodes {
+					if other.Key == refKey {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("node %q: metadata ref %q references unknown key %q", node.Key, metaKey, refKey)
+				}
+			}
+		}
+		// Validate ParentKey points to a known key.
+		if node.ParentKey != "" && !seenKeys[node.ParentKey] {
+			found := false
+			for _, other := range plan.Nodes {
+				if other.Key == node.ParentKey {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, node.ParentKey)
+			}
+		}
+	}
+
+	// Validate edge refs.
+	for i, edge := range plan.Edges {
+		if edge.FromKey != "" && !seenKeys[edge.FromKey] {
+			return fmt.Errorf("edge %d: from key %q not found in plan", i, edge.FromKey)
+		}
+		if edge.ToKey != "" && !seenKeys[edge.ToKey] {
+			return fmt.Errorf("edge %d: to key %q not found in plan", i, edge.ToKey)
+		}
+		if edge.FromKey == "" && edge.FromID == "" {
+			return fmt.Errorf("edge %d: must specify from_key or from_id", i)
+		}
+		if edge.ToKey == "" && edge.ToID == "" {
+			return fmt.Errorf("edge %d: must specify to_key or to_id", i)
+		}
+	}
+
+	return nil
+}
+
 func executeGraphApply(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
 	keyToID := make(map[string]string, len(plan.Nodes))
 
-	// Build issues from nodes.
-	issues := make([]*types.Issue, 0, len(plan.Nodes))
-	pendingAssignees := make(map[int]string)
-
-	for i, node := range plan.Nodes {
-		if node.Key == "" {
-			return nil, fmt.Errorf("node %d has empty key", i)
-		}
-		if node.Title == "" {
-			return nil, fmt.Errorf("node %q has empty title", node.Key)
-		}
-
-		issueType := types.IssueType(node.Type)
-		if issueType == "" {
-			issueType = types.TypeTask
-		}
-
-		// Build metadata JSON from the string map.
-		var metadataJSON json.RawMessage
-		meta := make(map[string]string, len(node.Metadata))
-		for k, v := range node.Metadata {
-			meta[k] = v
-		}
-		// Resolve backward MetadataRefs (keys already created).
-		for metaKey, refKey := range node.MetadataRefs {
-			if resolvedID, ok := keyToID[refKey]; ok {
-				meta[metaKey] = resolvedID
-			}
-		}
-		if len(meta) > 0 {
-			raw, err := json.Marshal(meta)
-			if err != nil {
-				return nil, fmt.Errorf("node %q: marshaling metadata: %w", node.Key, err)
-			}
-			metadataJSON = raw
-		}
-
-		issue := &types.Issue{
-			Title:     node.Title,
-			IssueType: issueType,
-			Status:    types.StatusOpen,
-			Labels:    node.Labels,
-			Metadata:  metadataJSON,
-		}
-		if node.Description != "" {
-			issue.Description = node.Description
-		}
-		if node.Assignee != "" {
-			if node.AssignAfterCreate {
-				pendingAssignees[i] = node.Assignee
-			} else {
-				issue.Assignee = node.Assignee
-			}
-		}
-
-		issues = append(issues, issue)
-	}
-
-	// Batch-create all issues in a single transaction.
-	if err := store.CreateIssues(ctx, issues, actor); err != nil {
-		return nil, fmt.Errorf("batch create: %w", err)
-	}
-
-	// Build key -> ID mapping from created issues.
-	for i, node := range plan.Nodes {
-		keyToID[node.Key] = issues[i].ID
-	}
-
-	// Second pass: resolve forward MetadataRefs (keys created after the referencing node).
-	for i, node := range plan.Nodes {
-		if len(node.MetadataRefs) == 0 {
-			continue
-		}
-		needsUpdate := false
-		mergedMeta := make(map[string]string)
-		if issues[i].Metadata != nil {
-			if err := json.Unmarshal(issues[i].Metadata, &mergedMeta); err != nil {
-				return nil, fmt.Errorf("node %q: re-parsing metadata: %w", node.Key, err)
-			}
-		}
-		for metaKey, refKey := range node.MetadataRefs {
-			resolvedID, ok := keyToID[refKey]
-			if !ok {
-				return nil, fmt.Errorf("node %q: metadata ref %q references unknown key %q", node.Key, metaKey, refKey)
-			}
-			if mergedMeta[metaKey] != resolvedID {
-				mergedMeta[metaKey] = resolvedID
-				needsUpdate = true
-			}
-		}
-		if needsUpdate {
-			metaJSON, err := json.Marshal(mergedMeta)
-			if err != nil {
-				return nil, fmt.Errorf("node %q: marshaling updated metadata: %w", node.Key, err)
-			}
-			updates := map[string]interface{}{
-				"metadata": json.RawMessage(metaJSON),
-			}
-			if err := store.UpdateIssue(ctx, issues[i].ID, updates, actor); err != nil {
-				return nil, fmt.Errorf("node %q: updating metadata refs: %w", node.Key, err)
-			}
-		}
-	}
-
-	// Add dependencies from edges.
-	for _, edge := range plan.Edges {
-		fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
-		toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
-		if fromID == "" || toID == "" {
-			return nil, fmt.Errorf("edge has unresolved refs: from=%q/%q to=%q/%q",
-				edge.FromKey, edge.FromID, edge.ToKey, edge.ToID)
-		}
-		depType := types.DependencyType(edge.Type)
-		if depType == "" {
-			depType = types.DepBlocks
-		}
-		dep := &types.Dependency{
-			IssueID:     fromID,
-			DependsOnID: toID,
-			Type:        depType,
-		}
-		if err := store.AddDependency(ctx, dep, actor); err != nil {
-			return nil, fmt.Errorf("adding edge %s->%s: %w", fromID, toID, err)
-		}
-	}
-
-	// Add parent-child dependencies.
-	for i, node := range plan.Nodes {
-		parentID := node.ParentID
-		if node.ParentKey != "" {
-			resolved, ok := keyToID[node.ParentKey]
-			if !ok {
-				return nil, fmt.Errorf("node %q: parent key %q not found", node.Key, node.ParentKey)
-			}
-			parentID = resolved
-		}
-		if parentID != "" {
-			dep := &types.Dependency{
-				IssueID:     issues[i].ID,
-				DependsOnID: parentID,
-				Type:        types.DepParentChild,
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				return nil, fmt.Errorf("node %q: adding parent-child dep: %w", node.Key, err)
-			}
-		}
-	}
-
-	// Apply deferred assignees.
-	for i, assignee := range pendingAssignees {
-		updates := map[string]interface{}{
-			"assignee": assignee,
-		}
-		if err := store.UpdateIssue(ctx, issues[i].ID, updates, actor); err != nil {
-			return nil, fmt.Errorf("node %q: setting assignee: %w", plan.Nodes[i].Key, err)
-		}
-	}
-
-	// Commit the full batch.
 	commitMsg := plan.CommitMessage
 	if commitMsg == "" {
 		commitMsg = fmt.Sprintf("bd: graph-apply %d nodes", len(plan.Nodes))
 	}
-	if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-		return nil, fmt.Errorf("commit: %w", err)
+
+	if err := store.RunInTransaction(ctx, commitMsg, func(tx storage.Transaction) error {
+		// Build issues from nodes.
+		issues := make([]*types.Issue, 0, len(plan.Nodes))
+		pendingAssignees := make(map[int]string)
+
+		for i, node := range plan.Nodes {
+			issueType := types.IssueType(node.Type)
+			if issueType == "" {
+				issueType = types.TypeTask
+			}
+
+			// Build metadata JSON. MetadataRefs are resolved in a second pass
+			// after IDs are assigned by CreateIssues.
+			var metadataJSON json.RawMessage
+			if len(node.Metadata) > 0 {
+				raw, err := json.Marshal(node.Metadata)
+				if err != nil {
+					return fmt.Errorf("node %q: marshaling metadata: %w", node.Key, err)
+				}
+				metadataJSON = raw
+			}
+
+			issue := &types.Issue{
+				Title:     node.Title,
+				IssueType: issueType,
+				Status:    types.StatusOpen,
+				Labels:    node.Labels,
+				Metadata:  metadataJSON,
+			}
+			if node.Description != "" {
+				issue.Description = node.Description
+			}
+			if node.Assignee != "" {
+				if node.AssignAfterCreate {
+					pendingAssignees[i] = node.Assignee
+				} else {
+					issue.Assignee = node.Assignee
+				}
+			}
+
+			issues = append(issues, issue)
+		}
+
+		// Batch-create all issues in a single transaction.
+		if err := tx.CreateIssues(ctx, issues, actor); err != nil {
+			return fmt.Errorf("batch create: %w", err)
+		}
+
+		// Build key -> ID mapping from created issues.
+		for i, node := range plan.Nodes {
+			keyToID[node.Key] = issues[i].ID
+		}
+
+		// Resolve MetadataRefs now that all IDs are known.
+		for i, node := range plan.Nodes {
+			if len(node.MetadataRefs) == 0 {
+				continue
+			}
+			mergedMeta := make(map[string]string)
+			if issues[i].Metadata != nil {
+				if err := json.Unmarshal(issues[i].Metadata, &mergedMeta); err != nil {
+					return fmt.Errorf("node %q: re-parsing metadata: %w", node.Key, err)
+				}
+			}
+			for metaKey, refKey := range node.MetadataRefs {
+				mergedMeta[metaKey] = keyToID[refKey]
+			}
+			metaJSON, err := json.Marshal(mergedMeta)
+			if err != nil {
+				return fmt.Errorf("node %q: marshaling updated metadata: %w", node.Key, err)
+			}
+			updates := map[string]interface{}{
+				"metadata": json.RawMessage(metaJSON),
+			}
+			if err := tx.UpdateIssue(ctx, issues[i].ID, updates, actor); err != nil {
+				return fmt.Errorf("node %q: updating metadata refs: %w", node.Key, err)
+			}
+		}
+
+		// Add dependencies from edges.
+		for _, edge := range plan.Edges {
+			fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
+			toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
+			depType := types.DependencyType(edge.Type)
+			if depType == "" {
+				depType = types.DepBlocks
+			}
+			dep := &types.Dependency{
+				IssueID:     fromID,
+				DependsOnID: toID,
+				Type:        depType,
+			}
+			if err := tx.AddDependency(ctx, dep, actor); err != nil {
+				return fmt.Errorf("adding edge %s->%s: %w", fromID, toID, err)
+			}
+		}
+
+		// Add parent-child dependencies.
+		for i, node := range plan.Nodes {
+			parentID := node.ParentID
+			if node.ParentKey != "" {
+				parentID = keyToID[node.ParentKey]
+			}
+			if parentID != "" {
+				dep := &types.Dependency{
+					IssueID:     issues[i].ID,
+					DependsOnID: parentID,
+					Type:        types.DepParentChild,
+				}
+				if err := tx.AddDependency(ctx, dep, actor); err != nil {
+					return fmt.Errorf("node %q: adding parent-child dep: %w", node.Key, err)
+				}
+			}
+		}
+
+		// Apply deferred assignees.
+		for i, assignee := range pendingAssignees {
+			updates := map[string]interface{}{
+				"assignee": assignee,
+			}
+			if err := tx.UpdateIssue(ctx, issues[i].ID, updates, actor); err != nil {
+				return fmt.Errorf("node %q: setting assignee: %w", plan.Nodes[i].Key, err)
+			}
+		}
+
+		return nil // Triggers commit with commitMsg
+	}); err != nil {
+		return nil, err
 	}
 
 	return &GraphApplyResult{IDs: keyToID}, nil
