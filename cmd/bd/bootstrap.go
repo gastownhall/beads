@@ -49,6 +49,30 @@ Examples:
 		// Find beads directory
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
+			// No .beads directory exists yet. Before giving up, probe the
+			// git remote for existing Beads data (refs/dolt/data). This is
+			// the "fresh second clone" case: clone1 pushed Beads state to
+			// origin, and clone2 needs to bootstrap from it. (GH#2792)
+			//
+			// If found, synthesize the theoretical .beads path and fall
+			// through to the normal detectBootstrapAction + executeBootstrapPlan
+			// flow. Actual directory creation is deferred to executeSyncAction
+			// to preserve --dry-run semantics.
+			if isGitRepo() && !isBareGitRepo() {
+				if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
+					if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+						cwd, err := os.Getwd()
+						if err != nil {
+							FatalError("failed to get working directory: %v", err)
+						}
+						beadsDir = filepath.Join(cwd, ".beads")
+					}
+				}
+			}
+		}
+
+		if beadsDir == "" {
+			// No .beads and no remote data — nothing to bootstrap from.
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
 					"action":     "none",
@@ -86,8 +110,7 @@ Examples:
 
 		// Execute the plan
 		if err := executeBootstrapPlan(plan, cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "Bootstrap failed: %v\n", err)
-			os.Exit(1)
+			FatalError("Bootstrap failed: %v", err)
 		}
 	},
 }
@@ -328,6 +351,13 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 }
 
 func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+	// Ensure .beads directory exists — it may not in the "fresh clone"
+	// bootstrap path where we detected remote data before .beads was
+	// created. Deferred here to preserve --dry-run semantics. (GH#2792)
+	if err := os.MkdirAll(plan.BeadsDir, 0o750); err != nil {
+		return fmt.Errorf("create beads directory: %w", err)
+	}
+
 	dbName := cfg.GetDoltDatabase()
 
 	if isEmbeddedMode() {
