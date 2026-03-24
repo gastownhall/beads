@@ -454,49 +454,7 @@ func runReadyExplain(cmd *cobra.Command) {
 	// Detect cycles
 	cycles, _ := activeStore.DetectCycles(ctx)
 
-	// Build ready items with explanations
-	readyItems := make([]types.ReadyItem, 0, len(readyIssues))
-	for _, issue := range readyIssues {
-		counts := depCounts[issue.ID]
-		if counts == nil {
-			counts = &types.DependencyCounts{}
-		}
-
-		// Find resolved blockers (closed issues that this depended on)
-		var resolvedBlockers []string
-		reason := "no blocking dependencies"
-		deps := allDeps[issue.ID]
-		for _, dep := range deps {
-			if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks || dep.Type == types.DepWaitsFor {
-				resolvedBlockers = append(resolvedBlockers, dep.DependsOnID)
-			}
-		}
-		if len(resolvedBlockers) > 0 {
-			reason = fmt.Sprintf("%d blocker(s) resolved", len(resolvedBlockers))
-		}
-
-		// Compute parent
-		var parent *string
-		for _, dep := range deps {
-			if dep.Type == types.DepParentChild {
-				parent = &dep.DependsOnID
-				break
-			}
-		}
-
-		readyItems = append(readyItems, types.ReadyItem{
-			Issue:            issue,
-			Reason:           reason,
-			ResolvedBlockers: resolvedBlockers,
-			DependencyCount:  counts.DependencyCount,
-			DependentCount:   counts.DependentCount,
-			Parent:           parent,
-		})
-	}
-
-	// Build blocked items with blocker details
-	blockedItems := make([]types.BlockedItem, 0, len(blockedIssues))
-	// Collect all blocker IDs to batch-fetch
+	// Collect all blocker IDs to batch-fetch blocker details
 	allBlockerIDs := make(map[string]bool)
 	for _, bi := range blockedIssues {
 		for _, blockerID := range bi.BlockedBy {
@@ -507,50 +465,15 @@ func runReadyExplain(cmd *cobra.Command) {
 	for id := range allBlockerIDs {
 		blockerIDList = append(blockerIDList, id)
 	}
+
+	// Build ready items with explanations
 	blockerIssues, _ := activeStore.GetIssuesByIDs(ctx, blockerIDList)
 	blockerMap := make(map[string]*types.Issue, len(blockerIssues))
 	for _, issue := range blockerIssues {
 		blockerMap[issue.ID] = issue
 	}
 
-	for _, bi := range blockedIssues {
-		blockers := make([]types.BlockerInfo, 0, len(bi.BlockedBy))
-		for _, blockerID := range bi.BlockedBy {
-			info := types.BlockerInfo{ID: blockerID}
-			if blocker, ok := blockerMap[blockerID]; ok {
-				info.Title = blocker.Title
-				info.Status = blocker.Status
-				info.Priority = blocker.Priority
-			}
-			blockers = append(blockers, info)
-		}
-		blockedItems = append(blockedItems, types.BlockedItem{
-			Issue:          bi.Issue,
-			BlockedBy:      blockers,
-			BlockedByCount: bi.BlockedByCount,
-		})
-	}
-
-	// Build cycle info
-	var cycleIDs [][]string
-	for _, cycle := range cycles {
-		ids := make([]string, len(cycle))
-		for i, issue := range cycle {
-			ids[i] = issue.ID
-		}
-		cycleIDs = append(cycleIDs, ids)
-	}
-
-	explanation := types.ReadyExplanation{
-		Ready:   readyItems,
-		Blocked: blockedItems,
-		Cycles:  cycleIDs,
-		Summary: types.ExplainSummary{
-			TotalReady:   len(readyItems),
-			TotalBlocked: len(blockedItems),
-			CycleCount:   len(cycleIDs),
-		},
-	}
+	explanation := types.BuildReadyExplanation(readyIssues, blockedIssues, depCounts, allDeps, blockerMap, cycles)
 
 	if jsonOutput {
 		outputJSON(explanation)

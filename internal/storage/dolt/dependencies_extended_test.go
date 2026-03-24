@@ -1145,4 +1145,251 @@ func TestAddDependency_SelfDependencyRejected(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Conditional-Blocks Cycle Detection Tests
+// =============================================================================
+
+func TestDetectCycles_ConditionalBlocksCycle(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Conditional-blocks should also be detected as cycles
+	issueA := &types.Issue{ID: "cb-cycle-a", Title: "A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueB := &types.Issue{ID: "cb-cycle-b", Title: "B", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+
+	for _, issue := range []*types.Issue{issueA, issueB} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	// A conditional-blocks B
+	dep1 := &types.Dependency{IssueID: issueA.ID, DependsOnID: issueB.ID, Type: types.DepConditionalBlocks}
+	if err := store.AddDependency(ctx, dep1, "tester"); err != nil {
+		t.Fatalf("failed to add dependency A->B: %v", err)
+	}
+
+	// B conditional-blocks A would create cycle — should be rejected
+	dep2 := &types.Dependency{IssueID: issueB.ID, DependsOnID: issueA.ID, Type: types.DepConditionalBlocks}
+	err := store.AddDependency(ctx, dep2, "tester")
+	if err == nil {
+		t.Fatal("expected AddDependency to reject conditional-blocks cycle, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected error containing 'cycle', got: %v", err)
+	}
+}
+
+func TestDetectCycles_MixedBlocksAndConditionalBlocks(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Mixed: A blocks B, B conditional-blocks C, C blocks A = cycle
+	issueA := &types.Issue{ID: "mixed-cycle-a", Title: "A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueB := &types.Issue{ID: "mixed-cycle-b", Title: "B", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueC := &types.Issue{ID: "mixed-cycle-c", Title: "C", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+
+	for _, issue := range []*types.Issue{issueA, issueB, issueC} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	dep1 := &types.Dependency{IssueID: issueA.ID, DependsOnID: issueB.ID, Type: types.DepBlocks}
+	if err := store.AddDependency(ctx, dep1, "tester"); err != nil {
+		t.Fatalf("failed to add A->B blocks: %v", err)
+	}
+
+	dep2 := &types.Dependency{IssueID: issueB.ID, DependsOnID: issueC.ID, Type: types.DepConditionalBlocks}
+	if err := store.AddDependency(ctx, dep2, "tester"); err != nil {
+		t.Fatalf("failed to add B->C conditional-blocks: %v", err)
+	}
+
+	// C->A would close the cycle through mixed types
+	dep3 := &types.Dependency{IssueID: issueC.ID, DependsOnID: issueA.ID, Type: types.DepBlocks}
+	err := store.AddDependency(ctx, dep3, "tester")
+	if err == nil {
+		t.Fatal("expected AddDependency to reject mixed blocks/conditional-blocks cycle")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected error containing 'cycle', got: %v", err)
+	}
+}
+
+func TestDetectCycles_WaitsForDoesNotCreateCycle(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// waits-for should NOT trigger cycle detection (gate semantics)
+	issueA := &types.Issue{ID: "wf-nocycle-a", Title: "A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueB := &types.Issue{ID: "wf-nocycle-b", Title: "B", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+
+	for _, issue := range []*types.Issue{issueA, issueB} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	// A waits-for B
+	dep1 := &types.Dependency{IssueID: issueA.ID, DependsOnID: issueB.ID, Type: types.DepWaitsFor}
+	if err := store.AddDependency(ctx, dep1, "tester"); err != nil {
+		t.Fatalf("failed to add A waits-for B: %v", err)
+	}
+
+	// B waits-for A should succeed (waits-for doesn't create blocking cycles)
+	dep2 := &types.Dependency{IssueID: issueB.ID, DependsOnID: issueA.ID, Type: types.DepWaitsFor}
+	if err := store.AddDependency(ctx, dep2, "tester"); err != nil {
+		t.Fatalf("expected waits-for cycle to be allowed, got error: %v", err)
+	}
+
+	// DetectCycles should find nothing (waits-for excluded from cycle detection)
+	cycles, err := store.DetectCycles(ctx)
+	if err != nil {
+		t.Fatalf("DetectCycles failed: %v", err)
+	}
+	if len(cycles) != 0 {
+		t.Errorf("expected no cycles (waits-for excluded), found %d", len(cycles))
+	}
+}
+
+func TestAddDependency_SelfDependencyAllTypes(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "self-dep-all",
+		Title:     "Self Dep All Types",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Self-dependency should be rejected for all dependency types
+	for _, depType := range []types.DependencyType{
+		types.DepBlocks,
+		types.DepConditionalBlocks,
+		types.DepWaitsFor,
+	} {
+		dep := &types.Dependency{
+			IssueID:     issue.ID,
+			DependsOnID: issue.ID,
+			Type:        depType,
+		}
+		err := store.AddDependency(ctx, dep, "tester")
+		if err == nil {
+			t.Errorf("expected self-dependency to be rejected for type %q", depType)
+		}
+		if !strings.Contains(err.Error(), "self-dependency") {
+			t.Errorf("expected 'self-dependency' in error for type %q, got: %v", depType, err)
+		}
+	}
+}
+
+// =============================================================================
+// Ready Work + Blocked Issues Integration Tests
+// =============================================================================
+
+func TestGetReadyWork_WithConditionalBlocks(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// A conditional-blocks B: B should be blocked, A should be ready
+	issueA := &types.Issue{ID: "cb-ready-a", Title: "Blocker", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueB := &types.Issue{ID: "cb-ready-b", Title: "Blocked", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+
+	for _, issue := range []*types.Issue{issueA, issueB} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	dep := &types.Dependency{IssueID: issueB.ID, DependsOnID: issueA.ID, Type: types.DepConditionalBlocks}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	readyIssues, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed: %v", err)
+	}
+
+	// A should be ready, B should not
+	readyIDs := make(map[string]bool)
+	for _, issue := range readyIssues {
+		readyIDs[issue.ID] = true
+	}
+
+	if !readyIDs["cb-ready-a"] {
+		t.Error("expected issue A to be ready")
+	}
+	if readyIDs["cb-ready-b"] {
+		t.Error("expected issue B to be blocked, but it appeared in ready work")
+	}
+}
+
+func TestGetBlockedIssues_WithBlockerDetails(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	blocker := &types.Issue{ID: "blk-detail-a", Title: "The Blocker", Status: types.StatusOpen, Priority: 0, IssueType: types.TypeBug}
+	blocked := &types.Issue{ID: "blk-detail-b", Title: "Waiting on fix", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+
+	for _, issue := range []*types.Issue{blocker, blocked} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	dep := &types.Dependency{IssueID: blocked.ID, DependsOnID: blocker.ID, Type: types.DepBlocks}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	blockedIssues, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues failed: %v", err)
+	}
+
+	var found *types.BlockedIssue
+	for _, bi := range blockedIssues {
+		if bi.ID == "blk-detail-b" {
+			found = bi
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected blocked issue 'blk-detail-b' not found")
+	}
+	if found.BlockedByCount < 1 {
+		t.Errorf("expected BlockedByCount >= 1, got %d", found.BlockedByCount)
+	}
+	if len(found.BlockedBy) == 0 {
+		t.Fatal("expected BlockedBy to contain blocker ID")
+	}
+	if found.BlockedBy[0] != "blk-detail-a" {
+		t.Errorf("expected BlockedBy[0] = 'blk-detail-a', got %q", found.BlockedBy[0])
+	}
+}
+
 // Note: testContext is already defined in dolt_test.go for this package

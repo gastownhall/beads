@@ -1942,3 +1942,146 @@ func TestEngineSyncCollectsWarnings(t *testing.T) {
 		t.Errorf("expected warning containing 'API timeout', got: %v", result.Warnings)
 	}
 }
+
+func TestEngineCreateDependencies(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create two issues that will be the dependency endpoints
+	issue1 := &types.Issue{
+		ID:        "bd-dep1",
+		Title:     "Dependency source",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	issue2 := &types.Issue{
+		ID:        "bd-dep2",
+		Title:     "Dependency target",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	for _, issue := range []*types.Issue{issue1, issue2} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+	}
+
+	// Set external refs so GetIssueByExternalRef can find them
+	store.UpdateIssue(ctx, issue1.ID, map[string]interface{}{"external_ref": "https://test.test/EXT-1"}, "test-actor")
+	store.UpdateIssue(ctx, issue2.ID, map[string]interface{}{"external_ref": "https://test.test/EXT-2"}, "test-actor")
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	// Valid dependency
+	deps := []DependencyInfo{
+		{FromExternalID: "https://test.test/EXT-1", ToExternalID: "https://test.test/EXT-2", Type: string(types.DepBlocks)},
+	}
+	errCount := engine.createDependencies(ctx, deps)
+	if errCount != 0 {
+		t.Errorf("createDependencies returned errCount=%d, want 0", errCount)
+	}
+
+	// Verify dependency was actually created
+	depRecords, err := store.GetDependencyRecords(ctx, issue1.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords error: %v", err)
+	}
+	if len(depRecords) == 0 {
+		t.Fatal("expected at least one dependency record, got none")
+	}
+}
+
+func TestEngineCreateDependencies_UnresolvableRef(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	// Both external refs don't exist — should generate warnings
+	deps := []DependencyInfo{
+		{FromExternalID: "https://test.test/MISSING-1", ToExternalID: "https://test.test/MISSING-2", Type: string(types.DepBlocks)},
+	}
+	errCount := engine.createDependencies(ctx, deps)
+	if errCount == 0 {
+		t.Error("expected errCount > 0 for unresolvable external refs")
+	}
+
+	// Warnings should be collected
+	if len(engine.warnings) == 0 {
+		t.Error("expected warnings for unresolvable refs, got none")
+	}
+	found := false
+	for _, w := range engine.warnings {
+		if strings.Contains(w, "MISSING-1") || strings.Contains(w, "resolve") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about unresolvable ref, got: %v", engine.warnings)
+	}
+}
+
+func TestEngineCreateDependencies_Empty(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	// Empty deps list should return 0
+	errCount := engine.createDependencies(ctx, nil)
+	if errCount != 0 {
+		t.Errorf("createDependencies(nil) returned %d, want 0", errCount)
+	}
+	errCount = engine.createDependencies(ctx, []DependencyInfo{})
+	if errCount != 0 {
+		t.Errorf("createDependencies([]) returned %d, want 0", errCount)
+	}
+}
+
+func TestEngineWarnCollectsMessages(t *testing.T) {
+	tracker := newMockTracker("test")
+	engine := &Engine{
+		Tracker: tracker,
+		Actor:   "test-actor",
+	}
+
+	// Verify warn() collects messages
+	engine.warn("warning %d", 1)
+	engine.warn("warning %d", 2)
+
+	if len(engine.warnings) != 2 {
+		t.Fatalf("expected 2 warnings, got %d", len(engine.warnings))
+	}
+	if engine.warnings[0] != "warning 1" {
+		t.Errorf("warnings[0] = %q, want %q", engine.warnings[0], "warning 1")
+	}
+	if engine.warnings[1] != "warning 2" {
+		t.Errorf("warnings[1] = %q, want %q", engine.warnings[1], "warning 2")
+	}
+
+	// Verify OnWarning callback is also called
+	var callbackMsgs []string
+	engine.OnWarning = func(msg string) {
+		callbackMsgs = append(callbackMsgs, msg)
+	}
+	engine.warn("warning %d", 3)
+
+	if len(callbackMsgs) != 1 {
+		t.Fatalf("expected 1 callback message, got %d", len(callbackMsgs))
+	}
+	if callbackMsgs[0] != "warning 3" {
+		t.Errorf("callback got %q, want %q", callbackMsgs[0], "warning 3")
+	}
+	if len(engine.warnings) != 3 {
+		t.Errorf("expected 3 total warnings, got %d", len(engine.warnings))
+	}
+}
