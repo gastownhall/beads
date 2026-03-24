@@ -1108,4 +1108,41 @@ func TestAddDependency_ParentChild_CrossType_Allowed(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Self-Dependency Rejection Tests (bd-2qr)
+// =============================================================================
+
+func TestAddDependency_SelfDependencyRejected(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "self-dep-issue",
+		Title:     "Self Dependency Test",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// Try to add a dependency from the issue to itself
+	dep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: issue.ID,
+		Type:        types.DepBlocks,
+	}
+	err := store.AddDependency(ctx, dep, "tester")
+	if err == nil {
+		t.Fatal("expected AddDependency to reject self-dependency, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "self-dependency") {
+		t.Errorf("expected error containing 'self-dependency', got: %v", err)
+	}
+}
+
 // Note: testContext is already defined in dolt_test.go for this package

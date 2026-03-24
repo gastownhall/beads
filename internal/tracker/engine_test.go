@@ -56,14 +56,15 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 
 // mockTracker implements IssueTracker for testing.
 type mockTracker struct {
-	name        string
-	issues      []TrackerIssue
-	created     []*types.Issue
-	updated     map[string]*types.Issue
-	fetchErr    error
-	createErr   error
-	updateErr   error
-	fieldMapper FieldMapper
+	name            string
+	issues          []TrackerIssue
+	created         []*types.Issue
+	updated         map[string]*types.Issue
+	fetchErr        error
+	createErr       error
+	createFailAfter int // fail after this many successful creates (0 = fail immediately)
+	updateErr       error
+	fieldMapper     FieldMapper
 }
 
 type mockExternalRefTracker struct {
@@ -179,7 +180,11 @@ func (m *mockTracker) FetchIssue(_ context.Context, identifier string) (*Tracker
 
 func (m *mockTracker) CreateIssue(_ context.Context, issue *types.Issue) (*TrackerIssue, error) {
 	if m.createErr != nil {
-		return nil, m.createErr
+		if m.createFailAfter > 0 && len(m.created) < m.createFailAfter {
+			// Allow first N creates to succeed
+		} else {
+			return nil, m.createErr
+		}
 	}
 	m.created = append(m.created, issue)
 	return &TrackerIssue{
@@ -1822,5 +1827,118 @@ func TestEnginePushWithParentFilterDryRun(t *testing.T) {
 	}
 	if len(tk.created) != 0 {
 		t.Errorf("dry-run sent %d issues to tracker, want 0", len(tk.created))
+	}
+}
+
+func TestEnginePushPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create 3 local issues
+	for i, id := range []string{"bd-pf1", "bd-pf2", "bd-pf3"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     fmt.Sprintf("Partial failure issue %d", i+1),
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	tracker.createFailAfter = 2
+	tracker.createErr = fmt.Errorf("rate limit exceeded")
+
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+
+	// Partial failure doesn't abort the sync
+	if !result.Success {
+		t.Errorf("Sync() should succeed on partial failure, got Success=false: %s", result.Error)
+	}
+	if result.Stats.Created != 2 {
+		t.Errorf("Stats.Created = %d, want 2", result.Stats.Created)
+	}
+	if result.Stats.Errors != 1 {
+		t.Errorf("Stats.Errors = %d, want 1", result.Stats.Errors)
+	}
+
+	// Warnings should contain the failure message
+	if len(result.Warnings) == 0 {
+		t.Fatal("expected warnings for partial failure, got none")
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "rate limit exceeded") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning containing 'rate limit exceeded', got: %v", result.Warnings)
+	}
+}
+
+func TestEngineSyncCollectsWarnings(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create 2 local issues — one will succeed, one will fail
+	for _, tc := range []struct {
+		id    string
+		title string
+	}{
+		{"bd-warn1", "Succeeds"},
+		{"bd-warn2", "Fails"},
+	} {
+		issue := &types.Issue{
+			ID:        tc.id,
+			Title:     tc.title,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", tc.id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	tracker.createFailAfter = 1
+	tracker.createErr = fmt.Errorf("API timeout")
+
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+
+	// result.Warnings should be non-nil and contain the failure message
+	if result.Warnings == nil {
+		t.Fatal("result.Warnings is nil, expected warning messages")
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("result.Warnings is empty, expected at least one warning")
+	}
+
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "API timeout") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected warning containing 'API timeout', got: %v", result.Warnings)
 	}
 }
