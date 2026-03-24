@@ -62,8 +62,8 @@ func RestoreFromDir(ctx context.Context, db DBConn, cfgStore ConfigSetter, dir, 
 				if err := json.Unmarshal(line, &c); err != nil {
 					return "", "", nil, err
 				}
-				return c.IssueID, `INSERT IGNORE INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)`,
-					[]interface{}{c.IssueID, c.Author, c.Text, parseTimeOrNow(c.CreatedAt)}, nil
+				return c.IssueID, `INSERT IGNORE INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, ?)`,
+					[]interface{}{c.ID, c.IssueID, c.Author, c.Text, parseTimeOrNow(c.CreatedAt)}, nil
 			})
 		if err != nil {
 			return nil, fmt.Errorf("restore comments: %w", err)
@@ -160,8 +160,8 @@ func RestoreFromDir(ctx context.Context, db DBConn, cfgStore ConfigSetter, dir, 
 					return "", "", nil, nil
 				}
 				return e.IssueID,
-					`INSERT IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-					[]interface{}{e.IssueID, e.EventType, e.Actor, e.OldValue, e.NewValue, e.Comment, parseTimeOrNow(e.CreatedAt)}, nil
+					`INSERT IGNORE INTO events (id, issue_id, event_type, actor, old_value, new_value, comment, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					[]interface{}{e.ID, e.IssueID, e.EventType, e.Actor, e.OldValue, e.NewValue, e.Comment, parseTimeOrNow(e.CreatedAt)}, nil
 			})
 		if err != nil {
 			return nil, fmt.Errorf("restore events: %w", err)

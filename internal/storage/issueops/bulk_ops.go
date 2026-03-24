@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -17,7 +19,7 @@ func GetIssueByExternalRefInTx(ctx context.Context, tx *sql.Tx, externalRef stri
 	var id string
 	err := tx.QueryRowContext(ctx, "SELECT id FROM issues WHERE external_ref = ?", externalRef).Scan(&id)
 	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("not found: external_ref %s", externalRef)
+		return "", fmt.Errorf("%w: external_ref %s", storage.ErrNotFound, externalRef)
 	}
 	if err != nil {
 		return "", fmt.Errorf("get issue by external_ref: %w", err)
@@ -40,25 +42,34 @@ func GetIssuesByLabelInTx(ctx context.Context, tx *sql.Tx, label string) ([]stri
 	if err != nil {
 		return nil, fmt.Errorf("get issues by label: %w", err)
 	}
+	defer rows.Close()
+
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
 			return nil, fmt.Errorf("scan issue id: %w", err)
 		}
 		ids = append(ids, id)
 	}
-	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate issues by label: %w", err)
+	}
 
 	wispRows, err := tx.QueryContext(ctx, `SELECT issue_id FROM wisp_labels WHERE label = ?`, label)
-	if err == nil {
-		for wispRows.Next() {
-			var id string
-			if err := wispRows.Scan(&id); err == nil {
-				ids = append(ids, id)
-			}
+	if err != nil {
+		return nil, fmt.Errorf("get wisp issues by label: %w", err)
+	}
+	defer wispRows.Close()
+
+	for wispRows.Next() {
+		var id string
+		if err := wispRows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan wisp issue id: %w", err)
 		}
-		_ = wispRows.Close()
+		ids = append(ids, id)
+	}
+	if err := wispRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate wisp issues by label: %w", err)
 	}
 
 	return ids, nil
@@ -414,10 +425,15 @@ func expandAndAbsPath(p string) string {
 		home, err := os.UserHomeDir()
 		if err == nil {
 			if p == "~" {
-				return home
+				p = home
+			} else {
+				p = filepath.Join(home, p[2:])
 			}
-			p = home + p[1:]
 		}
 	}
-	return p
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
 }

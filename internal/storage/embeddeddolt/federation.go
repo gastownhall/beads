@@ -269,23 +269,27 @@ func (s *EmbeddedDoltStore) SyncStatus(ctx context.Context, peer string) (*stora
 	}
 
 	// Get ahead/behind counts by comparing refs.
-	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		query := `
+	// Dolt's AS OF requires a literal ref, not a parameterized expression.
+	remoteRef := peer + "/" + s.branch
+	if err := issueops.ValidateRef(remoteRef); err != nil {
+		status.LocalAhead = -1
+		status.LocalBehind = -1
+	} else if err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		query := fmt.Sprintf(`
 			SELECT
 				(SELECT COUNT(*) FROM dolt_log WHERE commit_hash NOT IN
-					(SELECT commit_hash FROM dolt_log AS OF CONCAT(?, '/', ?))) as ahead,
-				(SELECT COUNT(*) FROM dolt_log AS OF CONCAT(?, '/', ?) WHERE commit_hash NOT IN
+					(SELECT commit_hash FROM dolt_log AS OF '%s')) as ahead,
+				(SELECT COUNT(*) FROM dolt_log AS OF '%s' WHERE commit_hash NOT IN
 					(SELECT commit_hash FROM dolt_log)) as behind
-		`
-		if err := db.QueryRowContext(ctx, query, peer, s.branch, peer, s.branch).
+		`, remoteRef, remoteRef)
+		if err := db.QueryRowContext(ctx, query).
 			Scan(&status.LocalAhead, &status.LocalBehind); err != nil {
 			// Remote branch may not exist locally yet.
 			status.LocalAhead = -1
 			status.LocalBehind = -1
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
 
