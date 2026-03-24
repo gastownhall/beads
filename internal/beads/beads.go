@@ -563,6 +563,20 @@ func FindBeadsDir() string {
 		}
 	}
 
+	// 1b. Check cwd for .beads/ before git-worktree resolution.
+	// This handles rigs (subdirectories with their own .beads/) inside a
+	// git repo that also has .beads/. Without this, step 2b grabs the
+	// git root's .beads/ and the rig's local one is never found.
+	if cwd, err := os.Getwd(); err == nil {
+		cwdBeadsDir := filepath.Join(cwd, ".beads")
+		if info, err := os.Stat(cwdBeadsDir); err == nil && info.IsDir() {
+			cwdBeadsDir = FollowRedirect(cwdBeadsDir)
+			if hasBeadsProjectFiles(cwdBeadsDir) {
+				return cwdBeadsDir
+			}
+		}
+	}
+
 	// 2. For worktrees, check worktree-local redirect first, then own .beads, then main repo
 	var mainRepoRoot string
 	if git.IsWorktree() {
@@ -733,6 +747,18 @@ func findDatabaseInTree() string {
 	// This prevents issues when repos are accessed via symlinks (e.g. /Users/user/Code -> /Users/user/Documents/Code)
 	if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolvedDir
+	}
+
+	// Check cwd first — a rig subdirectory with its own .beads/ takes
+	// priority over the git root's .beads/ (same fix as FindBeadsDir step 1b).
+	{
+		cwdBeadsDir := filepath.Join(dir, ".beads")
+		if info, err := os.Stat(cwdBeadsDir); err == nil && info.IsDir() {
+			cwdBeadsDir = FollowRedirect(cwdBeadsDir)
+			if dbPath := findDatabaseInBeadsDir(cwdBeadsDir, true); dbPath != "" {
+				return dbPath
+			}
+		}
 	}
 
 	// Check if we're in a git worktree
