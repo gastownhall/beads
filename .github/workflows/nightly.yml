@@ -18,6 +18,15 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
+      - name: Install Dolt
+        run: |
+          curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"
