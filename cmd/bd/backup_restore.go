@@ -1,5 +1,3 @@
-// TODO: This is not the correct approach for "restoring" a backup. The
-// CALL DOLT_BACKUP('restore', ...) stored procedure should be used instead.
 package main
 
 import (

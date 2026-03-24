@@ -1,8 +1,3 @@
-// TODO: This is not the correct approach for "exporting" a backup of a Dolt
-// database. What should happen instead is a local file remote should be added
-// and synced to, and then that resulting backup could be tar'd up. This current
-// approach is not a sufficient backup and likely is left-over of the old sqlite
-// + git backend implementation.
 package main
 
 import (
