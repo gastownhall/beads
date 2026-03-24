@@ -10,6 +10,7 @@ jobs:
   full-test:
     name: Full Test Suite
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 

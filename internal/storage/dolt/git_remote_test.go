@@ -180,21 +180,6 @@ func sourceInsertIssueDesc(t *testing.T, dir, id, title, desc string) {
 	runDoltSQL(t, dir, q)
 }
 
-// escapeSQL escapes single quotes for SQL string literals.
-func escapeSQL(s string) string {
-	result := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\'' {
-			result = append(result, '\'', '\'')
-		} else if s[i] == '\\' {
-			result = append(result, '\\', '\\')
-		} else {
-			result = append(result, s[i])
-		}
-	}
-	return string(result)
-}
-
 // sourceCommitAndPush commits all changes and pushes to origin.
 func sourceCommitAndPush(t *testing.T, dir, msg string) {
 	t.Helper()
