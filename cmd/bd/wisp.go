@@ -243,21 +243,33 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 		)
 	}
 
-	if dryRun {
-		fmt.Printf("\nDry run: would create wisp with %d issues from proto %s\n\n", len(subgraph.Issues), protoID)
-		fmt.Printf("Storage: main database (ephemeral=true, not synced via git)\n\n")
-		for _, issue := range subgraph.Issues {
-			newTitle := substituteVariables(issue.Title, vars)
-			fmt.Printf("  - %s (from %s)\n", newTitle, issue.ID)
-		}
-		return
-	}
-
 	// Wisps are vapor (ephemeral) by default — only create the root issue.
 	// Materializing child step issues is the "pour" path (bd pour), not wisps.
 	// Formulas that explicitly set pour=true get children even as wisps.
 	if !rootOnly && subgraph != nil && !subgraph.Pour {
 		rootOnly = true
+	}
+
+	if dryRun {
+		if rootOnly {
+			skipped := len(subgraph.Issues) - 1
+			fmt.Printf("\nDry run: would create wisp with 1 issue (root only) from proto %s\n", protoID)
+			if skipped > 0 {
+				fmt.Printf("  Note: %d child step(s) skipped — set pour=true in formula to materialize them\n", skipped)
+			}
+		} else {
+			fmt.Printf("\nDry run: would create wisp with %d issues from proto %s\n\n", len(subgraph.Issues), protoID)
+		}
+		fmt.Printf("Storage: main database (ephemeral=true, not synced via git)\n\n")
+		issuesToShow := subgraph.Issues
+		if rootOnly && len(issuesToShow) > 0 {
+			issuesToShow = issuesToShow[:1]
+		}
+		for _, issue := range issuesToShow {
+			newTitle := substituteVariables(issue.Title, vars)
+			fmt.Printf("  - %s (from %s)\n", newTitle, issue.ID)
+		}
+		return
 	}
 
 	// Spawn as ephemeral in main database (Ephemeral=true, not synced via git)
