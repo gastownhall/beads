@@ -378,6 +378,24 @@ func TestCleanStaleCircuitBreakerFiles(t *testing.T) {
 	}
 }
 
+func TestCircuitBreakerDir_UsesSubdirectory(t *testing.T) {
+	// Verify that circuit breaker files are created in the dedicated
+	// subdirectory, not directly in /tmp (which can have millions of entries).
+	cb := newCircuitBreaker("127.0.0.1", 44444)
+	t.Cleanup(func() { os.Remove(cb.filePath) })
+
+	if filepath.Dir(cb.filePath) != circuitBreakerDir {
+		t.Errorf("circuit breaker file should be in %s, got dir %s",
+			circuitBreakerDir, filepath.Dir(cb.filePath))
+	}
+
+	// Write state and verify file lands in the subdirectory
+	cb.writeState(circuitState{State: circuitClosed})
+	if _, err := os.Stat(cb.filePath); err != nil {
+		t.Errorf("circuit breaker file should exist at %s: %v", cb.filePath, err)
+	}
+}
+
 func TestIsConnectionError(t *testing.T) {
 	tests := []struct {
 		name     string
