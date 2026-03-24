@@ -167,6 +167,12 @@ func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) 
 	maxResults := 100
 
 	for {
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
 		params := url.Values{
 			"jql":        {jql},
 			"fields":     {searchFields},

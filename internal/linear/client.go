@@ -261,7 +261,14 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 		}
 	}
 
+	page := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
 		variables := map[string]interface{}{
 			"filter": filter,
 			"first":  MaxPageSize,
@@ -291,6 +298,10 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 			break
 		}
 		cursor = issuesResp.Issues.PageInfo.EndCursor
+		page++
+		if page >= MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
 	}
 
 	return allIssues, nil
@@ -343,7 +354,14 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 		}
 	}
 
+	page := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
 		variables := map[string]interface{}{
 			"filter": filter,
 			"first":  MaxPageSize,
@@ -373,6 +391,10 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 			break
 		}
 		cursor = issuesResp.Issues.PageInfo.EndCursor
+		page++
+		if page >= MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
 	}
 
 	return allIssues, nil
