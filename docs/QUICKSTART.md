@@ -256,5 +256,6 @@ bd admin cleanup --force
 - Search issues: `./bd list --status open`
 - Detect cycles: `./bd dep cycles`
 - Use gates for PR/CI sync: See [DEPENDENCIES.md](DEPENDENCIES.md)
+- Sync across computers: See [SYNC_SETUP.md](SYNC_SETUP.md)
 
 See [README.md](../README.md) for full documentation.

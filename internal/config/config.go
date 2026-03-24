@@ -788,6 +788,53 @@ func MetadataSchemaFields() map[string]interface{} {
 	return nil
 }
 
+// DefaultAgentsFile is the default filename for agent instructions.
+const DefaultAgentsFile = "AGENTS.md"
+
+// AgentsFile returns the configured agents instruction filename.
+// Returns DefaultAgentsFile ("AGENTS.md") if no custom value is set.
+// Note: Use SafeAgentsFile() when the value will be used for file I/O,
+// as config.yaml may be manually edited with invalid values.
+func AgentsFile() string {
+	if name := GetString("agents.file"); name != "" {
+		return name
+	}
+	return DefaultAgentsFile
+}
+
+// SafeAgentsFile returns the configured agents filename after validation.
+// If the stored config value is invalid (e.g. manually edited with traversal
+// paths), it falls back to DefaultAgentsFile and logs a warning.
+func SafeAgentsFile() string {
+	name := AgentsFile()
+	if err := ValidateAgentsFile(name); err != nil {
+		debug.Logf("config: agents.file %q failed validation (%v), using default", name, err)
+		return DefaultAgentsFile
+	}
+	return name
+}
+
+// ValidateAgentsFile checks that filename is safe to use as an agents file path.
+// It rejects absolute paths, path separators, names longer than 255 characters,
+// and non-markdown extensions. This is a pure string validation function — I/O
+// checks (e.g. symlink detection) are deferred to the file write layer.
+func ValidateAgentsFile(filename string) error {
+	if filename == "" {
+		return fmt.Errorf("agents file name must not be empty")
+	}
+	if len(filename) > 255 {
+		return fmt.Errorf("agents file name exceeds 255 characters")
+	}
+	if strings.ContainsAny(filename, "/\\") {
+		return fmt.Errorf("agents file must be a simple filename without path separators, got %q", filename)
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext != ".md" {
+		return fmt.Errorf("agents file must have .md extension, got %q", ext)
+	}
+	return nil
+}
+
 // getConfigList is a helper that retrieves a comma-separated list from config.yaml.
 func getConfigList(key string) []string {
 	if v == nil {

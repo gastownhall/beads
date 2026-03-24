@@ -76,6 +76,7 @@ func TestEmbeddedGate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tg")
@@ -354,6 +355,7 @@ func TestEmbeddedGateConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 	dir, gxBeads, _ := bdInit(t, bd, "--prefix", "gx")

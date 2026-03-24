@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -53,7 +54,8 @@ func renderOnboardInstructions(w io.Writer) error {
 	if err := writef("\n%s\n\n", ui.RenderBold("bd Onboarding")); err != nil {
 		return err
 	}
-	if err := writeln("Add this minimal snippet to AGENTS.md (or create it):"); err != nil {
+	agentsFile := config.AgentsFile()
+	if err := writeln("Add this minimal snippet to " + agentsFile + " (or create it):"); err != nil {
 		return err
 	}
 	if err := writeBlank(); err != nil {
@@ -89,14 +91,14 @@ func renderOnboardInstructions(w io.Writer) error {
 	if err := writef("   • %s auto-injects bd prime at session start\n", ui.RenderAccent("bd hooks install")); err != nil {
 		return err
 	}
-	if err := writeln("   • AGENTS.md only needs this minimal pointer, not full instructions"); err != nil {
+	if err := writeln("   • " + agentsFile + " only needs this minimal pointer, not full instructions"); err != nil {
 		return err
 	}
 	if err := writeBlank(); err != nil {
 		return err
 	}
 
-	if err := writef("%s\n\n", ui.RenderPass("This keeps AGENTS.md lean while bd prime provides up-to-date workflow details.")); err != nil {
+	if err := writef("%s\n\n", ui.RenderPass("This keeps "+agentsFile+" lean while bd prime provides up-to-date workflow details.")); err != nil {
 		return err
 	}
 
@@ -106,14 +108,17 @@ func renderOnboardInstructions(w io.Writer) error {
 var onboardCmd = &cobra.Command{
 	Use:     "onboard",
 	GroupID: "setup",
-	Short:   "Display minimal snippet for AGENTS.md",
-	Long: `Display a minimal snippet to add to AGENTS.md for bd integration.
+	Short:   "Display minimal snippet for agent instructions file",
+	Long: `Display a minimal snippet to add to your agent instructions file for bd integration.
+
+By default, the agent instructions file is AGENTS.md. Use 'bd init --agents-file'
+to configure a different filename (e.g. BEADS.md).
 
 This outputs a small (~10 line) snippet that points to 'bd prime' for full
 workflow context. This is the same minimal profile that 'bd init' generates
 by default. This approach:
 
-  • Keeps AGENTS.md lean (doesn't bloat with instructions)
+  • Keeps your agent file lean (doesn't bloat with instructions)
   • bd prime provides dynamic, always-current workflow details
   • Hooks auto-inject bd prime at session start
 

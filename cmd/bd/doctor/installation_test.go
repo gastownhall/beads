@@ -58,6 +58,27 @@ func TestCheckPermissions(t *testing.T) {
 			t.Fatalf("expected StatusOK for bare-parent fallback, got %s: %s", check.Status, check.Message)
 		}
 	})
+
+	t.Run("with store bare parent worktree fallback", func(t *testing.T) {
+		clearResolveBeadsDirCache()
+		t.Cleanup(clearResolveBeadsDirCache)
+
+		bareDir, worktreeDir := setupDoctorBareParentWorktree(t)
+		bareBeadsDir := filepath.Join(bareDir, ".beads")
+		if err := os.MkdirAll(bareBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		ss := &SharedStore{beadsDir: bareBeadsDir}
+		check := CheckPermissionsWithStore(worktreeDir, ss)
+
+		if check.Status != StatusOK {
+			t.Fatalf("expected StatusOK for bare-parent fallback with store, got %s: %s", check.Status, check.Message)
+		}
+		if _, err := os.Stat(filepath.Join(worktreeDir, ".beads")); !os.IsNotExist(err) {
+			t.Fatalf("expected no local .beads in worktree, got err=%v", err)
+		}
+	})
 }
 
 func TestCheckPermissions_TempFileUsesSecurePerms(t *testing.T) {

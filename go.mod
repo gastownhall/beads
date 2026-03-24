@@ -6,11 +6,11 @@ require (
 	charm.land/glamour/v2 v2.0.0
 	charm.land/huh/v2 v2.0.3
 	github.com/BurntSushi/toml v1.6.0
+	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0
 	github.com/anthropics/anthropic-sdk-go v1.27.1
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/dolthub/driver v1.83.8
-	github.com/fsnotify/fsnotify v1.9.0
+	github.com/dolthub/driver v1.84.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/muesli/termenv v0.16.0
 	github.com/olebedev/when v1.1.0
@@ -36,7 +36,7 @@ require (
 
 require (
 	github.com/JohannesKaufmann/dom v0.2.0 // indirect
-	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0 // indirect
+	github.com/fsnotify/fsnotify v1.9.0 // indirect
 )
 
 require (
@@ -125,12 +125,12 @@ require (
 	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dolthub/aws-sdk-go-ini-parser v0.0.0-20250305001723-2821c37f6c12 // indirect
-	github.com/dolthub/dolt/go v0.40.5-0.20260318200444-c790f75d992d // indirect
+	github.com/dolthub/dolt/go v0.40.5-0.20260323192425-7781d0de1e77 // indirect
 	github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69 // indirect
 	github.com/dolthub/flatbuffers/v23 v23.3.3-dh.2 // indirect
 	github.com/dolthub/fslock v0.0.3 // indirect
 	github.com/dolthub/go-icu-regex v0.0.0-20250916051405-78a38d478790 // indirect
-	github.com/dolthub/go-mysql-server v0.20.1-0.20260316223625-fdcf3f20a2bc // indirect
+	github.com/dolthub/go-mysql-server v0.20.1-0.20260323191635-3ba1fd7740a3 // indirect
 	github.com/dolthub/gozstd v0.0.0-20240423170813-23a2903bca63 // indirect
 	github.com/dolthub/ishell v0.0.0-20240701202509-2b217167d718 // indirect
 	github.com/dolthub/jsonpath v0.0.2-0.20240227200619-19675ab05c71 // indirect
@@ -179,7 +179,7 @@ require (
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.20 // indirect
-	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
+	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.2.0 // indirect
@@ -228,7 +228,7 @@ require (
 	github.com/xitongsys/parquet-go-source v0.0.0-20240122235623-d6294584ab18 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/xtaci/smux v1.5.56 // indirect
-	github.com/yuin/goldmark v1.7.16 // indirect
+	github.com/yuin/goldmark v1.7.16
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect

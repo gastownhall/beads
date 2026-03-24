@@ -399,9 +399,9 @@ servers are preserved.`,
 	},
 }
 
-// staleDatabasePrefixes identifies test/polecat databases that should not persist
+// staleDatabasePrefixes identifies test/agent databases that should not persist
 // on the production Dolt server. These accumulate from interrupted test runs and
-// terminated polecats, wasting server memory.
+// terminated agents, wasting server memory.
 // - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
 // - doctest_*: doctor test helpers
 // - doctortest_*: doctor test helpers
@@ -412,9 +412,9 @@ var staleDatabasePrefixes = []string{"testdb_", "doctest_", "doctortest_", "bead
 
 var doltCleanDatabasesCmd = &cobra.Command{
 	Use:   "clean-databases",
-	Short: "Drop stale test/polecat databases from the Dolt server",
-	Long: `Identify and drop leftover test and polecat databases that accumulate
-on the shared Dolt server from interrupted test runs and terminated polecats.
+	Short: "Drop stale test databases from the Dolt server",
+	Long: `Identify and drop leftover test and agent databases that accumulate
+on the shared Dolt server from interrupted test runs and terminated agents.
 
 Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*, beads_t*
 
