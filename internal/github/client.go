@@ -114,16 +114,21 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 
 		if retriable {
 			delay := RetryDelay * time.Duration(1<<attempt)
+			useServerDelay := false
 
-			// Use Retry-After header if present (GitHub rate limiting)
+			// Use Retry-After header if present (no jitter — respect server-mandated delay)
 			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
 				if seconds, err := strconv.Atoi(retryAfter); err == nil {
 					delay = time.Duration(seconds) * time.Second
+					useServerDelay = true
 				}
 			}
 
-			if half := int64(delay / 2); half > 0 {
-				delay += time.Duration(rand.Int64N(half))
+			// Only add jitter to our own exponential backoff, not server-mandated delays
+			if !useServerDelay {
+				if half := int64(delay / 2); half > 0 {
+					delay += time.Duration(rand.Int64N(half))
+				}
 			}
 
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, MaxRetries+1)
