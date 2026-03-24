@@ -40,6 +40,7 @@ type Client struct {
 	Token      string       // GitLab personal access token or OAuth token
 	BaseURL    string       // GitLab instance URL (e.g., "https://gitlab.com/api/v4")
 	ProjectID  string       // Project ID or URL-encoded path (e.g., "group/project")
+	GroupID    string       // Optional group ID or path for group-level issue fetching
 	HTTPClient *http.Client // Optional custom HTTP client
 }
 

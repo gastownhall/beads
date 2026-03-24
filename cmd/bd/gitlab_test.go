@@ -49,13 +49,28 @@ func TestGitLabConfigValidation(t *testing.T) {
 			wantError: "gitlab.token",
 		},
 		{
-			name:      "missing project_id",
+			name:      "missing project_id and group_id",
 			config:    GitLabConfig{URL: "https://gitlab.com", Token: "tok"},
-			wantError: "gitlab.project_id",
+			wantError: "gitlab.project_id or gitlab.group_id",
 		},
 		{
 			name:      "all present",
 			config:    GitLabConfig{URL: "https://gitlab.com", Token: "tok", ProjectID: "1"},
+			wantError: "",
+		},
+		{
+			name:      "group_id only (no project_id) is valid",
+			config:    GitLabConfig{URL: "https://gitlab.com", Token: "tok", GroupID: "mygroup"},
+			wantError: "",
+		},
+		{
+			name:      "group_id with default_project_id is valid",
+			config:    GitLabConfig{URL: "https://gitlab.com", Token: "tok", GroupID: "mygroup", DefaultProjectID: "123"},
+			wantError: "",
+		},
+		{
+			name:      "both project_id and group_id is valid",
+			config:    GitLabConfig{URL: "https://gitlab.com", Token: "tok", ProjectID: "1", GroupID: "mygroup"},
 			wantError: "",
 		},
 		{
@@ -131,6 +146,8 @@ func TestGitLabConfigEnvVar(t *testing.T) {
 		{"gitlab.url", "GITLAB_URL"},
 		{"gitlab.token", "GITLAB_TOKEN"},
 		{"gitlab.project_id", "GITLAB_PROJECT_ID"},
+		{"gitlab.group_id", "GITLAB_GROUP_ID"},
+		{"gitlab.default_project_id", "GITLAB_DEFAULT_PROJECT_ID"},
 		{"gitlab.unknown", ""},
 	}
 
@@ -163,6 +180,49 @@ func TestGitLabClientCreation(t *testing.T) {
 	}
 	if client.Token != "test-token-abc" {
 		t.Errorf("client.Token = %q, want %q", client.Token, "test-token-abc")
+	}
+	if client.ProjectID != "99" {
+		t.Errorf("client.ProjectID = %q, want %q", client.ProjectID, "99")
+	}
+}
+
+// TestGitLabConfigFromEnv_GroupID verifies group config is read from environment variables.
+func TestGitLabConfigFromEnv_GroupID(t *testing.T) {
+	oldDBPath, oldStore := dbPath, store
+	dbPath, store = "", nil
+	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
+
+	t.Setenv("GITLAB_URL", "https://gitlab.example.com")
+	t.Setenv("GITLAB_TOKEN", "test-token-123")
+	t.Setenv("GITLAB_GROUP_ID", "mygroup")
+	t.Setenv("GITLAB_DEFAULT_PROJECT_ID", "456")
+
+	config := getGitLabConfig()
+
+	if config.GroupID != "mygroup" {
+		t.Errorf("GroupID = %q, want %q", config.GroupID, "mygroup")
+	}
+	if config.DefaultProjectID != "456" {
+		t.Errorf("DefaultProjectID = %q, want %q", config.DefaultProjectID, "456")
+	}
+}
+
+// TestGitLabClientCreation_WithGroupID verifies client is created with GroupID when configured.
+func TestGitLabClientCreation_WithGroupID(t *testing.T) {
+	oldDBPath, oldStore := dbPath, store
+	dbPath, store = "", nil
+	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
+
+	t.Setenv("GITLAB_URL", "https://gitlab.test.com")
+	t.Setenv("GITLAB_TOKEN", "test-token-abc")
+	t.Setenv("GITLAB_PROJECT_ID", "99")
+	t.Setenv("GITLAB_GROUP_ID", "mygroup")
+
+	config := getGitLabConfig()
+	client := getGitLabClient(config)
+
+	if client.GroupID != "mygroup" {
+		t.Errorf("client.GroupID = %q, want %q", client.GroupID, "mygroup")
 	}
 	if client.ProjectID != "99" {
 		t.Errorf("client.ProjectID = %q, want %q", client.ProjectID, "99")

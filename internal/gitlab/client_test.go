@@ -954,3 +954,145 @@ func TestFetchIssuesSince_ContextCancellation(t *testing.T) {
 	// was caught by our loop check (returns partial) or by doRequest (returns nil)
 	t.Logf("Loop stopped after %d requests, %d issues returned, error: %v", requestCount.Load(), len(issues), err)
 }
+
+// TestWithGroupID verifies the builder pattern for group-level issue fetching.
+func TestWithGroupID(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123").
+		WithGroupID("mygroup")
+
+	if client.GroupID != "mygroup" {
+		t.Errorf("GroupID = %q, want %q", client.GroupID, "mygroup")
+	}
+	if client.ProjectID != "123" {
+		t.Errorf("ProjectID = %q, want %q", client.ProjectID, "123")
+	}
+	if client.Token != "token" {
+		t.Errorf("Token = %q, want %q", client.Token, "token")
+	}
+}
+
+// TestWithGroupID_PreservesGroupID verifies that WithHTTPClient and WithEndpoint preserve GroupID.
+func TestWithGroupID_PreservesGroupID(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123").
+		WithGroupID("mygroup").
+		WithHTTPClient(&http.Client{Timeout: 60 * time.Second}).
+		WithEndpoint("https://custom.gitlab.com")
+
+	if client.GroupID != "mygroup" {
+		t.Errorf("GroupID = %q after chaining, want %q", client.GroupID, "mygroup")
+	}
+}
+
+// TestIssuesBasePath_Project verifies issuesBasePath returns project path when no GroupID.
+func TestIssuesBasePath_Project(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123")
+	got := client.issuesBasePath()
+	want := "/projects/123/issues"
+	if got != want {
+		t.Errorf("issuesBasePath() = %q, want %q", got, want)
+	}
+}
+
+// TestIssuesBasePath_Group verifies issuesBasePath returns group path when GroupID is set.
+func TestIssuesBasePath_Group(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123").
+		WithGroupID("mygroup")
+	got := client.issuesBasePath()
+	want := "/groups/mygroup/issues"
+	if got != want {
+		t.Errorf("issuesBasePath() = %q, want %q", got, want)
+	}
+}
+
+// TestIssuesBasePath_GroupPathEncoded verifies group paths with slashes are URL-encoded.
+func TestIssuesBasePath_GroupPathEncoded(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123").
+		WithGroupID("parent/child")
+	got := client.issuesBasePath()
+	want := "/groups/parent%2Fchild/issues"
+	if got != want {
+		t.Errorf("issuesBasePath() = %q, want %q", got, want)
+	}
+}
+
+// TestFetchIssues_GroupLevel verifies FetchIssues uses group endpoint when GroupID is set.
+func TestFetchIssues_GroupLevel(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{
+			{ID: 1, IID: 1, ProjectID: 10, Title: "Group issue 1"},
+			{ID: 2, IID: 5, ProjectID: 20, Title: "Group issue 2"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123").WithGroupID("42")
+	ctx := context.Background()
+
+	issues, err := client.FetchIssues(ctx, "opened")
+	if err != nil {
+		t.Fatalf("FetchIssues() error = %v", err)
+	}
+
+	// Should use /groups/42/issues, not /projects/123/issues
+	if !strings.Contains(capturedPath, "/groups/42/issues") {
+		t.Errorf("URL path = %s, want to contain /groups/42/issues", capturedPath)
+	}
+	if strings.Contains(capturedPath, "/projects/") {
+		t.Errorf("URL path = %s, should NOT contain /projects/ in group mode", capturedPath)
+	}
+	if len(issues) != 2 {
+		t.Errorf("FetchIssues() returned %d issues, want 2", len(issues))
+	}
+}
+
+// TestFetchIssuesSince_GroupLevel verifies FetchIssuesSince uses group endpoint.
+func TestFetchIssuesSince_GroupLevel(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123").WithGroupID("mygroup")
+	ctx := context.Background()
+
+	_, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("FetchIssuesSince() error = %v", err)
+	}
+
+	if !strings.Contains(capturedPath, "/groups/mygroup/issues") {
+		t.Errorf("URL path = %s, want to contain /groups/mygroup/issues", capturedPath)
+	}
+}
+
+// TestCreateIssue_StillUsesProject verifies CreateIssue always uses project endpoint,
+// even when GroupID is set (issues are created at project level).
+func TestCreateIssue_StillUsesProject(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Issue{ID: 1, IID: 1, Title: "New"})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "456").WithGroupID("mygroup")
+	ctx := context.Background()
+
+	_, err := client.CreateIssue(ctx, "New", "Desc", nil)
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+
+	// CreateIssue should still use /projects/ endpoint
+	if !strings.Contains(capturedPath, "/projects/456/issues") {
+		t.Errorf("CreateIssue URL path = %s, want to contain /projects/456/issues", capturedPath)
+	}
+}

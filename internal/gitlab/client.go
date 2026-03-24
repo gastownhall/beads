@@ -25,6 +25,19 @@ func NewClient(token, baseURL, projectID string) *Client {
 	}
 }
 
+// WithGroupID returns a new client configured to fetch issues at the group level.
+// When GroupID is set, FetchIssues and FetchIssuesSince use /groups/:id/issues
+// instead of /projects/:id/issues. Issue creation still uses the project endpoint.
+func (c *Client) WithGroupID(groupID string) *Client {
+	return &Client{
+		Token:      c.Token,
+		BaseURL:    c.BaseURL,
+		ProjectID:  c.ProjectID,
+		GroupID:    groupID,
+		HTTPClient: c.HTTPClient,
+	}
+}
+
 // WithHTTPClient returns a new client configured to use the specified HTTP client.
 // This is useful for testing or customizing timeouts and transport settings.
 func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
@@ -32,6 +45,7 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 		Token:      c.Token,
 		BaseURL:    c.BaseURL,
 		ProjectID:  c.ProjectID,
+		GroupID:    c.GroupID,
 		HTTPClient: httpClient,
 	}
 }
@@ -43,6 +57,7 @@ func (c *Client) WithEndpoint(endpoint string) *Client {
 		Token:      c.Token,
 		BaseURL:    endpoint,
 		ProjectID:  c.ProjectID,
+		GroupID:    c.GroupID,
 		HTTPClient: c.HTTPClient,
 	}
 }
@@ -51,6 +66,16 @@ func (c *Client) WithEndpoint(endpoint string) *Client {
 // This handles both numeric IDs (e.g., "123") and path-based IDs (e.g., "group/project").
 func (c *Client) projectPath() string {
 	return url.PathEscape(c.ProjectID)
+}
+
+// issuesBasePath returns the API path prefix for listing issues.
+// When GroupID is set, returns /groups/:id/issues (group-level).
+// Otherwise, returns /projects/:id/issues (project-level).
+func (c *Client) issuesBasePath() string {
+	if c.GroupID != "" {
+		return "/groups/" + url.PathEscape(c.GroupID) + "/issues"
+	}
+	return "/projects/" + c.projectPath() + "/issues"
 }
 
 // buildURL constructs a full API URL from path and optional query parameters.
@@ -163,7 +188,7 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 			params["state"] = state
 		}
 
-		urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues", params)
+		urlStr := c.buildURL(c.issuesBasePath(), params)
 		respBody, headers, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch issues: %w", err)
@@ -217,7 +242,7 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 			params["state"] = state
 		}
 
-		urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues", params)
+		urlStr := c.buildURL(c.issuesBasePath(), params)
 		respBody, headers, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch issues since %s: %w", sinceStr, err)

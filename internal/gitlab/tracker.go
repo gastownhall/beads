@@ -46,12 +46,28 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 		baseURL = "https://gitlab.com"
 	}
 
-	projectID, err := t.getConfig(ctx, "gitlab.project_id", "GITLAB_PROJECT_ID")
-	if err != nil || projectID == "" {
+	projectID, _ := t.getConfig(ctx, "gitlab.project_id", "GITLAB_PROJECT_ID")
+	groupID, _ := t.getConfig(ctx, "gitlab.group_id", "GITLAB_GROUP_ID")
+	defaultProjectID, _ := t.getConfig(ctx, "gitlab.default_project_id", "GITLAB_DEFAULT_PROJECT_ID")
+
+	// When group_id is set, default_project_id is used for creating issues.
+	// When group_id is not set, project_id is required.
+	if groupID == "" && projectID == "" {
 		return fmt.Errorf("GitLab project ID not configured (set gitlab.project_id or GITLAB_PROJECT_ID)")
 	}
 
+	// For group mode, use default_project_id as the project for creating issues.
+	// If default_project_id is not set, fall back to project_id.
+	if groupID != "" && projectID == "" {
+		if defaultProjectID != "" {
+			projectID = defaultProjectID
+		}
+	}
+
 	t.client = NewClient(token, baseURL, projectID)
+	if groupID != "" {
+		t.client = t.client.WithGroupID(groupID)
+	}
 	t.config = DefaultMappingConfig()
 	return nil
 }
