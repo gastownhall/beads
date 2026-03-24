@@ -143,9 +143,6 @@ environment variable.`,
 					expectedToken := fmt.Sprintf("DESTROY-%s", prefix)
 					if destroyToken == expectedToken {
 						fmt.Fprintf(os.Stderr, "Destroy token accepted. Proceeding with re-initialization.\n")
-					} else if quiet {
-						// Legacy --quiet behavior (deprecated path)
-						fmt.Fprintf(os.Stderr, "Warning: --force --quiet bypasses safety checks. Use --destroy-token=%s instead.\n", expectedToken)
 					} else {
 						fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
 						fmt.Fprintf(os.Stderr, "To proceed, use: bd init --force --destroy-token=%s\n", expectedToken)
