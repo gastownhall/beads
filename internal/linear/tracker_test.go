@@ -100,6 +100,69 @@ func TestFieldMapperStatus(t *testing.T) {
 	}
 }
 
+func TestTrackerMultiTeamValidate(t *testing.T) {
+	// Empty tracker should fail validation.
+	tr := &Tracker{}
+	if err := tr.Validate(); err == nil {
+		t.Error("expected Validate() to fail on uninitialized tracker")
+	}
+
+	// Tracker with clients should pass.
+	tr.clients = map[string]*Client{
+		"team-1": NewClient("key", "team-1"),
+	}
+	if err := tr.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil", err)
+	}
+}
+
+func TestTrackerSetTeamIDs(t *testing.T) {
+	tr := &Tracker{}
+	ids := []string{"id-1", "id-2", "id-3"}
+	tr.SetTeamIDs(ids)
+
+	if len(tr.teamIDs) != 3 {
+		t.Fatalf("expected 3 team IDs, got %d", len(tr.teamIDs))
+	}
+	for i, want := range ids {
+		if tr.teamIDs[i] != want {
+			t.Errorf("teamIDs[%d] = %q, want %q", i, tr.teamIDs[i], want)
+		}
+	}
+}
+
+func TestTrackerTeamIDsAccessor(t *testing.T) {
+	tr := &Tracker{teamIDs: []string{"a", "b"}}
+	got := tr.TeamIDs()
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("TeamIDs() = %v, want [a b]", got)
+	}
+}
+
+func TestTrackerPrimaryClient(t *testing.T) {
+	tr := &Tracker{
+		teamIDs: []string{"team-1", "team-2"},
+		clients: map[string]*Client{
+			"team-1": NewClient("key", "team-1"),
+			"team-2": NewClient("key", "team-2"),
+		},
+	}
+
+	client := tr.PrimaryClient()
+	if client == nil {
+		t.Fatal("PrimaryClient() returned nil")
+	}
+	if client.TeamID != "team-1" {
+		t.Errorf("PrimaryClient().TeamID = %q, want %q", client.TeamID, "team-1")
+	}
+
+	// Empty tracker should return nil.
+	empty := &Tracker{}
+	if empty.PrimaryClient() != nil {
+		t.Error("PrimaryClient() should return nil for empty tracker")
+	}
+}
+
 func TestLinearToTrackerIssue(t *testing.T) {
 	li := &Issue{
 		ID:          "uuid-123",

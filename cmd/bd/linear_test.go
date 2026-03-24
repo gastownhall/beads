@@ -1691,6 +1691,84 @@ func TestLinearClientFetchTeams(t *testing.T) {
 	}
 }
 
+func TestParseCommaSeparated(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"single value", "abc", []string{"abc"}},
+		{"two values", "abc,def", []string{"abc", "def"}},
+		{"whitespace trimmed", " abc , def , ghi ", []string{"abc", "def", "ghi"}},
+		{"empty elements filtered", "abc,,def,", []string{"abc", "def"}},
+		{"empty string", "", []string{}},
+		{"only commas", ",,,", []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseCommaSeparated(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("parseCommaSeparated(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("parseCommaSeparated(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestDeduplicateStrings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{"no duplicates", []string{"a", "b", "c"}, []string{"a", "b", "c"}},
+		{"with duplicates", []string{"a", "b", "a", "c", "b"}, []string{"a", "b", "c"}},
+		{"all same", []string{"x", "x", "x"}, []string{"x"}},
+		{"empty", []string{}, []string{}},
+		{"single", []string{"a"}, []string{"a"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deduplicateStrings(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("deduplicateStrings(%v) = %v, want %v", tt.input, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("deduplicateStrings(%v)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestLinearConfigToEnvVar(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"linear.api_key", "LINEAR_API_KEY"},
+		{"linear.team_id", "LINEAR_TEAM_ID"},
+		{"linear.team_ids", "LINEAR_TEAM_IDS"},
+		{"linear.unknown", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			got := linearConfigToEnvVar(tt.key)
+			if got != tt.want {
+				t.Errorf("linearConfigToEnvVar(%q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsValidUUID(t *testing.T) {
 	tests := []struct {
 		name  string

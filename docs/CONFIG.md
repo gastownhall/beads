@@ -655,7 +655,15 @@ bd config set linear.api_key "lin_api_YOUR_API_KEY"
 
 # Team ID (find in Linear team settings or URL)
 bd config set linear.team_id "team-uuid-here"
+
+# Multiple team IDs (comma-separated; can also use LINEAR_TEAM_IDS env var)
+bd config set linear.team_ids "uuid-team-1,uuid-team-2"
 ```
+
+When `linear.team_ids` is set, `bd linear sync` fetches issues from all listed
+teams. For push operations with multiple teams, use the `--team` flag to specify
+the target. The singular `linear.team_id` is still supported for backward
+compatibility.
 
 **Getting your Linear credentials:**
 
