@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
@@ -26,6 +27,7 @@ type GraphApplyNode struct {
 	Description       string            `json:"description,omitempty"`
 	Assignee          string            `json:"assignee,omitempty"`
 	AssignAfterCreate bool              `json:"assign_after_create,omitempty"`
+	Priority          *int              `json:"priority,omitempty"` // nil defaults to P2
 	Labels            []string          `json:"labels,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
 	MetadataRefs      map[string]string `json:"metadata_refs,omitempty"`
@@ -95,8 +97,13 @@ all issues are created in a single database transaction.`,
 			outputJSON(result)
 		} else {
 			fmt.Printf("Created %d issues\n", len(result.IDs))
-			for key, id := range result.IDs {
-				fmt.Printf("  %s -> %s\n", key, id)
+			keys := make([]string, 0, len(result.IDs))
+			for key := range result.IDs {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				fmt.Printf("  %s -> %s\n", key, result.IDs[key])
 			}
 		}
 	},
@@ -119,6 +126,12 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 		seenKeys[node.Key] = true
 		if node.Title == "" {
 			return fmt.Errorf("node %q has empty title", node.Key)
+		}
+		if node.Type != "" {
+			it := types.IssueType(node.Type)
+			if !it.IsValid() {
+				return fmt.Errorf("node %q: invalid type %q", node.Key, node.Type)
+			}
 		}
 		// Validate MetadataRefs point to known keys.
 		for metaKey, refKey := range node.MetadataRefs {
@@ -165,6 +178,12 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 		if edge.ToKey == "" && edge.ToID == "" {
 			return fmt.Errorf("edge %d: must specify to_key or to_id", i)
 		}
+		if edge.Type != "" {
+			dt := types.DependencyType(edge.Type)
+			if !dt.IsValid() {
+				return fmt.Errorf("edge %d: invalid dependency type %q", i, edge.Type)
+			}
+		}
 	}
 
 	return nil
@@ -200,10 +219,16 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyRe
 				metadataJSON = raw
 			}
 
+			priority := 2 // Default P2
+			if node.Priority != nil {
+				priority = *node.Priority
+			}
+
 			issue := &types.Issue{
 				Title:     node.Title,
 				IssueType: issueType,
 				Status:    types.StatusOpen,
+				Priority:  priority,
 				Labels:    node.Labels,
 				Metadata:  metadataJSON,
 			}
@@ -229,6 +254,15 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyRe
 		// Build key -> ID mapping from created issues.
 		for i, node := range plan.Nodes {
 			keyToID[node.Key] = issues[i].ID
+		}
+
+		// Persist labels (CreateIssues may not persist them via the tx path).
+		for i, node := range plan.Nodes {
+			for _, label := range node.Labels {
+				if err := tx.AddLabel(ctx, issues[i].ID, label, actor); err != nil {
+					return fmt.Errorf("node %q: adding label %q: %w", node.Key, label, err)
+				}
+			}
 		}
 
 		// Resolve MetadataRefs now that all IDs are known.
