@@ -218,7 +218,7 @@ func SaveUserRecipe(beadsDir, name, path string) error {
 	}
 
 	// Ensure directory exists
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		return fmt.Errorf("create beads dir: %w", err)
 	}
 

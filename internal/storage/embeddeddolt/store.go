@@ -55,7 +55,7 @@ func New(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltS
 		return nil, fmt.Errorf("embeddeddolt: resolving beads dir: %w", err)
 	}
 	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
-	if err := os.MkdirAll(dataDir, 0750); err != nil {
+	if err := os.MkdirAll(dataDir, config.BeadsDirPerm); err != nil {
 		return nil, fmt.Errorf("embeddeddolt: creating data directory: %w", err)
 	}
 

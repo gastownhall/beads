@@ -286,8 +286,8 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 		useLocalBeads := !hasExplicitBeadsDir || filepath.Clean(initDBDirAbs) == filepath.Clean(beadsDirAbs)
 
 		if useLocalBeads {
-			// Create .beads directory
-			if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			// Create .beads directory with owner-only permissions (0700).
+			if err := os.MkdirAll(beadsDir, config.BeadsDirPerm); err != nil {
 				FatalError("failed to create .beads directory: %v", err)
 			}
 
@@ -351,7 +351,7 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 		// In embedded mode the engine creates its own directories under .beads/embeddeddolt/,
 		// so skip this to avoid leaving an empty .beads/dolt/ artifact (GH#2903).
 		if initServerMode {
-			if err := os.MkdirAll(initDBPath, 0750); err != nil {
+			if err := os.MkdirAll(initDBPath, config.BeadsDirPerm); err != nil {
 				FatalError("failed to create storage directory %s: %v", initDBPath, err)
 			}
 		}
