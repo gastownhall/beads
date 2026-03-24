@@ -113,13 +113,22 @@ Add cycle detection for dependency graphs
 - Update documentation with examples
 ```
 
-### Pull Requests
+### Pull Request Hygiene
+
+**One issue per PR, and one PR per issue.** No piggybacking or riders — each PR should address exactly one thing.
 
 - Keep PRs focused on a single feature or fix
+- Do not include unrelated changes, cleanup, or "while I'm here" improvements
+- Do not include `.beads/` data (database, JSONL) in your PR
+- Make sure there are no extra generated or garbage files in your diff
 - Include tests for new functionality
 - Update documentation as needed
 - Ensure CI passes before requesting review
 - Respond to review feedback promptly
+
+### ZFC (Zero Framework Cognition)
+
+If you are contributing code that involves AI decision-making or orchestration, understand and follow the [ZFC principles](https://steve-yegge.medium.com/zero-framework-cognition-a-way-to-build-resilient-ai-applications-56b090ed3e69). In short: keep the smarts in the AI models, keep the code as dumb orchestration. Do not add heuristics, keyword matching, ranking logic, or semantic analysis in application code — delegate cognitive decisions to AI.
 
 ## Testing Guidelines
 
