@@ -27,6 +27,12 @@ jobs:
         run: |
           curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
 
+      - name: Pull Dolt Docker image
+        run: |
+          IMG=$(grep 'DoltDockerImage' internal/testutil/testdoltcommon.go | grep -oP '"[^"]+"' | tr -d '"')
+          echo "Pulling $IMG"
+          docker pull "$IMG"
+
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"
