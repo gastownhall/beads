@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -183,6 +184,9 @@ func (c *Client) Execute(ctx context.Context, req *GraphQLRequest) (json.RawMess
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			delay := RetryDelay * time.Duration(1<<attempt) // Exponential backoff
+			if half := int64(delay / 2); half > 0 {
+				delay += time.Duration(rand.Int64N(half))
+			}
 			lastErr = fmt.Errorf("rate limited (attempt %d/%d), retrying after %v", attempt+1, MaxRetries+1, delay)
 			select {
 			case <-ctx.Done():

@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -317,39 +319,86 @@ func (c *Client) doRequest(ctx context.Context, method, apiURL string, body []by
 		bodyReader = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, apiURL, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
+	var lastErr error
+	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, apiURL, bodyReader)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
 
-	c.setAuth(req)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "bd-jira-sync/1.0")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+		c.setAuth(req)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "bd-jira-sync/1.0")
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
 
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, MaxRetries+1, err)
+			continue
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
+		_ = resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read response (attempt %d/%d): %w", attempt+1, MaxRetries+1, err)
+			continue
+		}
 
-	// PUT returns 204 No Content on success
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
+		// PUT returns 204 No Content on success
+		if resp.StatusCode == http.StatusNoContent {
+			return nil, nil
+		}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return respBody, nil
+		}
+
+		// Permanent failures — no retry.
+		switch resp.StatusCode {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+			return nil, fmt.Errorf("jira API returned %d: %s", resp.StatusCode, string(respBody))
+		}
+
+		// Retry on rate-limiting and server errors with exponential backoff.
+		retriable := resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode == http.StatusInternalServerError ||
+			resp.StatusCode == http.StatusBadGateway ||
+			resp.StatusCode == http.StatusServiceUnavailable ||
+			resp.StatusCode == http.StatusGatewayTimeout
+
+		if retriable {
+			delay := RetryDelay * time.Duration(1<<uint(attempt))
+
+			// Use Retry-After header if present
+			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+				if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
+					delay = time.Duration(seconds) * time.Second
+				}
+			}
+
+			if half := int64(delay / 2); half > 0 {
+				delay += time.Duration(rand.Int64N(half))
+			}
+
+			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, MaxRetries+1)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+				// Reset body reader for retry
+				if body != nil {
+					bodyReader = bytes.NewReader(body)
+				}
+				continue
+			}
+		}
+
 		return nil, fmt.Errorf("jira API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return respBody, nil
+	return nil, fmt.Errorf("max retries (%d) exceeded: %w", MaxRetries+1, lastErr)
 }
 
 // setAuth sets the appropriate authentication header on the request.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -142,6 +143,9 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 
 		if retriable {
 			delay := RetryDelay * time.Duration(1<<attempt)
+			if half := int64(delay / 2); half > 0 {
+				delay += time.Duration(rand.Int64N(half))
+			}
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, MaxRetries+1)
 			select {
 			case <-ctx.Done():

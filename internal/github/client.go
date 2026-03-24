@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -119,6 +120,10 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 				if seconds, err := strconv.Atoi(retryAfter); err == nil {
 					delay = time.Duration(seconds) * time.Second
 				}
+			}
+
+			if half := int64(delay / 2); half > 0 {
+				delay += time.Duration(rand.Int64N(half))
 			}
 
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, MaxRetries+1)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -207,6 +208,9 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, maxAttempts+1, err)
 			if attempt < maxAttempts {
 				delay := RetryDelay * time.Duration(1<<uint(attempt))
+				if half := int64(delay / 2); half > 0 {
+					delay += time.Duration(rand.Int64N(half))
+				}
 				select {
 				case <-ctx.Done():
 					return nil, ctx.Err()
@@ -243,6 +247,9 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 				if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
 					delay = time.Duration(seconds) * time.Second
 				}
+			}
+			if half := int64(delay / 2); half > 0 {
+				delay += time.Duration(rand.Int64N(half))
 			}
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, maxAttempts+1)
 			select {
