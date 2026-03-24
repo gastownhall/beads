@@ -13,11 +13,10 @@ import (
 var vcCmd = &cobra.Command{
 	Use:     "vc",
 	GroupID: "sync",
-	Short:   "Version control operations (requires Dolt backend)",
+	Short:   "Version control operations",
 	Long: `Version control operations for the beads database.
 
-These commands require the Dolt storage backend. They provide git-like
-version control for your issue data, including branching, merging, and
+These commands provide git-like version control for your issue data, including branching, merging, and
 viewing history.
 
 Note: 'bd history', 'bd diff', and 'bd branch' also work for quick access.

@@ -155,9 +155,11 @@ func validateBackupRestoreDir(dir string) error {
 		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
 	}
 
+	// For embedded Dolt, the backup is a native Dolt backup (not JSONL).
+	// Skip JSONL-specific validation when no issues.jsonl exists.
 	issuesPath := filepath.Join(dir, "issues.jsonl")
 	if _, err := os.Stat(issuesPath); os.IsNotExist(err) {
-		return fmt.Errorf("no issues.jsonl found in %s\nThis doesn't look like a valid backup directory", dir)
+		return nil // Assume Dolt-native backup format
 	}
 
 	if err := validateIssueJSONLSchema(issuesPath); err != nil {

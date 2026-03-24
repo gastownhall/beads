@@ -10,7 +10,7 @@ import (
 var branchCmd = &cobra.Command{
 	Use:     "branch [name]",
 	GroupID: "sync",
-	Short:   "List or create branches (requires Dolt backend)",
+	Short:   "List or create branches",
 	Long: `List all branches or create a new branch.
 
 This command requires the Dolt storage backend. Without arguments,
