@@ -336,8 +336,23 @@ func (c *Client) FetchWorkItems(ctx context.Context, ids []int) ([]WorkItem, err
 // buildPullWIQL constructs a safe WIQL query from validated filter fields.
 // All values are escaped via escapeWIQL before interpolation.
 func (c *Client) buildPullWIQL(since *time.Time, filters *PullFilters) string {
+	return c.buildPullWIQLMulti([]string{c.Project}, since, filters)
+}
+
+// buildPullWIQLMulti builds a WIQL query that can filter across multiple projects.
+func (c *Client) buildPullWIQLMulti(projects []string, since *time.Time, filters *PullFilters) string {
+	var projectClause string
+	if len(projects) == 1 {
+		projectClause = fmt.Sprintf("[System.TeamProject] = '%s'", escapeWIQL(projects[0]))
+	} else {
+		quoted := make([]string, len(projects))
+		for i, p := range projects {
+			quoted[i] = "'" + escapeWIQL(p) + "'"
+		}
+		projectClause = fmt.Sprintf("[System.TeamProject] IN (%s)", strings.Join(quoted, ", "))
+	}
 	clauses := []string{
-		fmt.Sprintf("[System.TeamProject] = '%s'", escapeWIQL(c.Project)),
+		projectClause,
 		"[System.IsDeleted] = false",
 	}
 	if since != nil {
@@ -410,24 +425,34 @@ func (c *Client) fetchWorkItemsByWIQL(ctx context.Context, query string) ([]Work
 // FetchWorkItemsSince retrieves work items changed since the given time using WIQL.
 // Pass nil for filters to fetch all work item types and states.
 func (c *Client) FetchWorkItemsSince(ctx context.Context, since time.Time, filters *PullFilters) ([]WorkItem, error) {
+	return c.FetchWorkItemsSinceMulti(ctx, since, []string{c.Project}, filters)
+}
+
+// FetchWorkItemsSinceMulti retrieves work items from multiple projects changed since the given time.
+func (c *Client) FetchWorkItemsSinceMulti(ctx context.Context, since time.Time, projects []string, filters *PullFilters) ([]WorkItem, error) {
 	if filters != nil {
 		if err := filters.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid pull filters: %w", err)
 		}
 	}
-	query := c.buildPullWIQL(&since, filters)
+	query := c.buildPullWIQLMulti(projects, &since, filters)
 	return c.fetchWorkItemsByWIQL(ctx, query)
 }
 
 // FetchAllWorkItems retrieves all work items matching the given filters.
 // Used for initial sync or reconciliation.
 func (c *Client) FetchAllWorkItems(ctx context.Context, filters *PullFilters) ([]WorkItem, error) {
+	return c.FetchAllWorkItemsMulti(ctx, []string{c.Project}, filters)
+}
+
+// FetchAllWorkItemsMulti retrieves all work items from multiple projects.
+func (c *Client) FetchAllWorkItemsMulti(ctx context.Context, projects []string, filters *PullFilters) ([]WorkItem, error) {
 	if filters != nil {
 		if err := filters.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid pull filters: %w", err)
 		}
 	}
-	query := c.buildPullWIQL(nil, filters)
+	query := c.buildPullWIQLMulti(projects, nil, filters)
 	return c.fetchWorkItemsByWIQL(ctx, query)
 }
 

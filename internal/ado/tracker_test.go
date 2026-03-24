@@ -80,8 +80,8 @@ func TestTracker_InitFromEnv(t *testing.T) {
 	if tr.org != "myorg" {
 		t.Errorf("org = %q, want %q", tr.org, "myorg")
 	}
-	if tr.project != "myproject" {
-		t.Errorf("project = %q, want %q", tr.project, "myproject")
+	if tr.PrimaryProject() != "myproject" {
+		t.Errorf("project = %q, want %q", tr.PrimaryProject(), "myproject")
 	}
 	if tr.mapper == nil {
 		t.Fatal("Init() did not create field mapper")
@@ -102,8 +102,8 @@ func TestTracker_InitFromConfig(t *testing.T) {
 	if tr.org != "configorg" {
 		t.Errorf("org = %q, want %q", tr.org, "configorg")
 	}
-	if tr.project != "configproject" {
-		t.Errorf("project = %q, want %q", tr.project, "configproject")
+	if tr.PrimaryProject() != "configproject" {
+		t.Errorf("project = %q, want %q", tr.PrimaryProject(), "configproject")
 	}
 }
 
@@ -342,7 +342,7 @@ func TestTracker_BuildExternalRef(t *testing.T) {
 	}{
 		{
 			name:    "uses issue URL if set",
-			tracker: &Tracker{org: "myorg", project: "myproj"},
+			tracker: &Tracker{org: "myorg", projects: []string{"myproj"}},
 			issue: &tracker.TrackerIssue{
 				Identifier: "42",
 				URL:        "https://dev.azure.com/myorg/myproj/_workitems/edit/42",
@@ -351,13 +351,13 @@ func TestTracker_BuildExternalRef(t *testing.T) {
 		},
 		{
 			name:    "constructs cloud URL from org and project",
-			tracker: &Tracker{org: "myorg", project: "myproj"},
+			tracker: &Tracker{org: "myorg", projects: []string{"myproj"}},
 			issue:   &tracker.TrackerIssue{Identifier: "99"},
 			want:    "https://dev.azure.com/myorg/myproj/_workitems/edit/99",
 		},
 		{
 			name:    "constructs on-prem URL from baseURL",
-			tracker: &Tracker{baseURL: "https://tfs.corp.com/DefaultCollection", project: "proj"},
+			tracker: &Tracker{baseURL: "https://tfs.corp.com/DefaultCollection", projects: []string{"proj"}},
 			issue:   &tracker.TrackerIssue{Identifier: "55"},
 			want:    "https://tfs.corp.com/DefaultCollection/proj/_workitems/edit/55",
 		},
@@ -369,13 +369,13 @@ func TestTracker_BuildExternalRef(t *testing.T) {
 		},
 		{
 			name:    "URL-encodes project with spaces",
-			tracker: &Tracker{org: "myorg", project: "My Project"},
+			tracker: &Tracker{org: "myorg", projects: []string{"My Project"}},
 			issue:   &tracker.TrackerIssue{Identifier: "88"},
 			want:    "https://dev.azure.com/myorg/My%20Project/_workitems/edit/88",
 		},
 		{
 			name:    "URL-encodes on-prem project with spaces",
-			tracker: &Tracker{baseURL: "https://tfs.corp.com/col", project: "My Project"},
+			tracker: &Tracker{baseURL: "https://tfs.corp.com/col", projects: []string{"My Project"}},
 			issue:   &tracker.TrackerIssue{Identifier: "66"},
 			want:    "https://tfs.corp.com/col/My%20Project/_workitems/edit/66",
 		},
@@ -702,7 +702,7 @@ func newTestTracker(t *testing.T, handler http.Handler) (*Tracker, *httptest.Ser
 		mapper:  NewFieldMapper(nil, nil),
 		baseURL: server.URL,
 		org:     "testorg",
-		project: "testproject",
+		projects: []string{"testproject"},
 	}, server
 }
 

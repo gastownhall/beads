@@ -627,7 +627,7 @@ func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	tr := &Tracker{
 		client:     newTestClient(srv.URL, "3"),
 		store:      store,
-		projectKey: "TEST",
+		projectKeys: []string{"TEST"},
 		apiVersion: "3",
 	}
 
@@ -667,7 +667,7 @@ func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
 	tr := &Tracker{
 		client:     newTestClient(srv.URL, "3"),
 		store:      store,
-		projectKey: "TEST",
+		projectKeys: []string{"TEST"},
 		apiVersion: "3",
 	}
 
