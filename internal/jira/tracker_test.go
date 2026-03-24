@@ -625,10 +625,10 @@ func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	}
 
 	tr := &Tracker{
-		client:     newTestClient(srv.URL, "3"),
-		store:      store,
-		projectKey: "TEST",
-		apiVersion: "3",
+		client:      newTestClient(srv.URL, "3"),
+		store:       store,
+		projectKeys: []string{"TEST"},
+		apiVersion:  "3",
 	}
 
 	_, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{State: "open"})
@@ -665,10 +665,10 @@ func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
 	}
 
 	tr := &Tracker{
-		client:     newTestClient(srv.URL, "3"),
-		store:      store,
-		projectKey: "TEST",
-		apiVersion: "3",
+		client:      newTestClient(srv.URL, "3"),
+		store:       store,
+		projectKeys: []string{"TEST"},
+		apiVersion:  "3",
 	}
 
 	_, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{State: "open"})

@@ -1691,6 +1691,27 @@ func TestLinearClientFetchTeams(t *testing.T) {
 	}
 }
 
+func TestLinearConfigToEnvVar(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"linear.api_key", "LINEAR_API_KEY"},
+		{"linear.team_id", "LINEAR_TEAM_ID"},
+		{"linear.team_ids", "LINEAR_TEAM_IDS"},
+		{"linear.unknown", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			got := linearConfigToEnvVar(tt.key)
+			if got != tt.want {
+				t.Errorf("linearConfigToEnvVar(%q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsValidUUID(t *testing.T) {
 	tests := []struct {
 		name  string

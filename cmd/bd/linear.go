@@ -26,11 +26,13 @@ var linearCmd = &cobra.Command{
 Configuration:
   bd config set linear.api_key "YOUR_API_KEY"
   bd config set linear.team_id "TEAM_ID"
+  bd config set linear.team_ids "TEAM_ID1,TEAM_ID2"  # Multiple teams (comma-separated)
   bd config set linear.project_id "PROJECT_ID"  # Optional: sync only this project
 
 Environment variables (alternative to config):
-  LINEAR_API_KEY - Linear API key
-  LINEAR_TEAM_ID - Linear team ID (UUID)
+  LINEAR_API_KEY  - Linear API key
+  LINEAR_TEAM_ID  - Linear team ID (UUID, singular)
+  LINEAR_TEAM_IDS - Linear team IDs (comma-separated UUIDs)
 
 Data Mapping (optional, sensible defaults provided):
   Priority mapping (Linear 0-4 to Beads 0-4):
@@ -81,6 +83,12 @@ Modes:
   --pull         Import issues from Linear into beads
   --push         Export issues from beads to Linear
   (no flags)     Bidirectional sync: pull then push, with conflict resolution
+
+Team Selection:
+  --team ID1,ID2  Override configured team IDs for this sync
+  Multiple teams can be configured via linear.team_ids (comma-separated).
+  Falls back to linear.team_id for backward compatibility.
+  Push requires explicit --team when multiple teams are configured.
 
 Type Filtering (--push only):
   --type task,feature       Only sync issues of these types
@@ -140,6 +148,7 @@ func init() {
 	linearSyncCmd.Flags().StringSlice("type", nil, "Only sync issues of these types (can be repeated)")
 	linearSyncCmd.Flags().StringSlice("exclude-type", nil, "Exclude issues of these types (can be repeated)")
 	linearSyncCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps, etc.) when pushing to Linear")
+	linearSyncCmd.Flags().StringSlice("team", nil, "Team ID(s) to sync (overrides configured team_id/team_ids)")
 
 	linearCmd.AddCommand(linearSyncCmd)
 	linearCmd.AddCommand(linearStatusCmd)
@@ -158,6 +167,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	typeFilters, _ := cmd.Flags().GetStringSlice("type")
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
 	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
+	cliTeams, _ := cmd.Flags().GetStringSlice("team")
 
 	if !dryRun {
 		CheckReadonly("linear sync")
@@ -171,14 +181,22 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 		FatalError("database not available: %v", err)
 	}
 
-	if err := validateLinearConfig(); err != nil {
+	if err := validateLinearConfig(cliTeams); err != nil {
 		FatalError("%v", err)
 	}
 
 	ctx := rootCtx
+	teamIDs := getLinearTeamIDs(ctx, cliTeams)
+
+	// Require explicit --team for push when multiple teams are configured.
+	if push && len(teamIDs) > 1 && len(cliTeams) == 0 {
+		FatalError("push requires explicit --team flag when multiple teams are configured\n" +
+			"Use: bd linear sync --push --team <TEAM_ID>")
+	}
 
 	// Create and initialize the Linear tracker
 	lt := &linear.Tracker{}
+	lt.SetTeamIDs(teamIDs)
 	if err := lt.Init(ctx, store); err != nil {
 		FatalError("initializing Linear tracker: %v", err)
 	}
@@ -360,10 +378,10 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 	}
 
 	apiKey, _ := getLinearConfig(ctx, "linear.api_key")
-	teamID, _ := getLinearConfig(ctx, "linear.team_id")
+	teamIDs := getLinearTeamIDs(ctx, nil)
 	lastSync, _ := store.GetConfig(ctx, "linear.last_sync")
 
-	configured := apiKey != "" && teamID != ""
+	configured := apiKey != "" && len(teamIDs) > 0
 
 	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
@@ -382,10 +400,16 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 
 	if jsonOutput {
 		hasAPIKey := apiKey != ""
+		// Backward compat: include team_id as first team, plus full list.
+		teamID := ""
+		if len(teamIDs) > 0 {
+			teamID = teamIDs[0]
+		}
 		outputJSON(map[string]interface{}{
 			"configured":      configured,
 			"has_api_key":     hasAPIKey,
 			"team_id":         teamID,
+			"team_ids":        teamIDs,
 			"last_sync":       lastSync,
 			"total_issues":    len(allIssues),
 			"with_linear_ref": withLinearRef,
@@ -404,6 +428,7 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 		fmt.Println("To configure Linear integration:")
 		fmt.Println("  bd config set linear.api_key \"YOUR_API_KEY\"")
 		fmt.Println("  bd config set linear.team_id \"TEAM_ID\"")
+		fmt.Println("  bd config set linear.team_ids \"TEAM_ID1,TEAM_ID2\"  # multiple teams")
 		fmt.Println()
 		fmt.Println("Or use environment variables:")
 		fmt.Println("  export LINEAR_API_KEY=\"YOUR_API_KEY\"")
@@ -411,7 +436,11 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	fmt.Printf("Team ID:      %s\n", teamID)
+	if len(teamIDs) == 1 {
+		fmt.Printf("Team ID:      %s\n", teamIDs[0])
+	} else {
+		fmt.Printf("Team IDs:     %s (%d teams)\n", strings.Join(teamIDs, ", "), len(teamIDs))
+	}
 	fmt.Printf("API Key:      %s\n", maskAPIKey(apiKey))
 	if lastSync != "" {
 		fmt.Printf("Last Sync:    %s\n", lastSync)
@@ -470,6 +499,7 @@ func runLinearTeams(cmd *cobra.Command, args []string) {
 	fmt.Println()
 	fmt.Println("To configure:")
 	fmt.Println("  bd config set linear.team_id \"<ID>\"")
+	fmt.Println("  bd config set linear.team_ids \"<ID1>,<ID2>\"  # multiple teams")
 }
 
 // uuidRegex matches valid UUID format (with or without hyphens).
@@ -480,7 +510,8 @@ func isValidUUID(s string) bool {
 }
 
 // validateLinearConfig checks that required Linear configuration is present.
-func validateLinearConfig() error {
+// cliTeams is the list of team IDs from the --team flag (may be nil).
+func validateLinearConfig(cliTeams []string) error {
 	if err := ensureStoreActive(); err != nil {
 		return fmt.Errorf("database not available: %w", err)
 	}
@@ -492,13 +523,15 @@ func validateLinearConfig() error {
 		return fmt.Errorf("Linear API key not configured\nRun: bd config set linear.api_key \"YOUR_API_KEY\"\nOr: export LINEAR_API_KEY=YOUR_API_KEY")
 	}
 
-	teamID, _ := getLinearConfig(ctx, "linear.team_id")
-	if teamID == "" {
-		return fmt.Errorf("linear.team_id not configured\nRun: bd config set linear.team_id \"TEAM_ID\"\nOr: export LINEAR_TEAM_ID=TEAM_ID")
+	teamIDs := getLinearTeamIDs(ctx, cliTeams)
+	if len(teamIDs) == 0 {
+		return fmt.Errorf("no Linear team ID configured\nRun: bd config set linear.team_id \"TEAM_ID\"\nOr:  bd config set linear.team_ids \"TEAM_ID1,TEAM_ID2\"\nOr: export LINEAR_TEAM_ID=TEAM_ID")
 	}
 
-	if !isValidUUID(teamID) {
-		return fmt.Errorf("linear.team_id appears invalid (expected UUID format like '12345678-1234-1234-1234-123456789abc')\nCurrent value: %s", teamID)
+	for _, id := range teamIDs {
+		if !isValidUUID(id) {
+			return fmt.Errorf("invalid Linear team ID (expected UUID format like '12345678-1234-1234-1234-123456789abc')\nInvalid value: %s", id)
+		}
 	}
 
 	return nil
@@ -552,24 +585,35 @@ func linearConfigToEnvVar(key string) string {
 		return "LINEAR_API_KEY"
 	case "linear.team_id":
 		return "LINEAR_TEAM_ID"
+	case "linear.team_ids":
+		return "LINEAR_TEAM_IDS"
 	default:
 		return ""
 	}
 }
 
+// getLinearTeamIDs resolves the effective team IDs from all config sources.
+// Precedence: cliTeams (--team flag) > linear.team_ids > LINEAR_TEAM_IDS > linear.team_id > LINEAR_TEAM_ID
+func getLinearTeamIDs(ctx context.Context, cliTeams []string) []string {
+	pluralVal, _ := getLinearConfig(ctx, "linear.team_ids")
+	singularVal, _ := getLinearConfig(ctx, "linear.team_id")
+	return tracker.ResolveProjectIDs(cliTeams, pluralVal, singularVal)
+}
+
 // getLinearClient creates a configured Linear client from beads config.
+// Uses the first configured team ID for operations that require a single team.
 func getLinearClient(ctx context.Context) (*linear.Client, error) {
 	apiKey, _ := getLinearConfig(ctx, "linear.api_key")
 	if apiKey == "" {
 		return nil, fmt.Errorf("Linear API key not configured")
 	}
 
-	teamID, _ := getLinearConfig(ctx, "linear.team_id")
-	if teamID == "" {
+	teamIDs := getLinearTeamIDs(ctx, nil)
+	if len(teamIDs) == 0 {
 		return nil, fmt.Errorf("Linear team ID not configured")
 	}
 
-	client := linear.NewClient(apiKey, teamID)
+	client := linear.NewClient(apiKey, teamIDs[0])
 
 	if store != nil {
 		if endpoint, _ := store.GetConfig(ctx, "linear.api_endpoint"); endpoint != "" {
