@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -990,110 +989,14 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 }
 
 // GetMoleculeLastActivity returns the most recent activity timestamp for a molecule.
-// It checks updated_at and closed_at across all child steps to find the latest activity.
 func (s *DoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID string) (*types.MoleculeLastActivity, error) {
-	// Route to correct table based on whether molecule is a wisp
-	issueTable := "issues"
-	depTable := "dependencies"
-	if s.isActiveWisp(ctx, moleculeID) {
-		issueTable = "wisps"
-		depTable = "wisp_dependencies"
-	}
-
-	// Get child IDs via parent-child dependencies
-	//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-	depRows, err := s.queryContext(ctx, fmt.Sprintf(`
-		SELECT issue_id FROM %s
-		WHERE depends_on_id = ? AND type = 'parent-child'
-	`, depTable), moleculeID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get molecule children: %w", err)
-	}
-	var childIDs []string
-	for depRows.Next() {
-		var id string
-		if err := depRows.Scan(&id); err != nil {
-			_ = depRows.Close()
-			return nil, wrapScanError("last-activity: scan child", err)
-		}
-		childIDs = append(childIDs, id)
-	}
-	_ = depRows.Close()
-
-	if len(childIDs) == 0 {
-		// No children — fall back to molecule's own updated_at
-		var updatedAt time.Time
-		//nolint:gosec // G201: issueTable is hardcoded
-		err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT updated_at FROM %s WHERE id = ?", issueTable), moleculeID).Scan(&updatedAt)
-		if err != nil {
-			return nil, fmt.Errorf("molecule %s not found: %w", moleculeID, err)
-		}
-		return &types.MoleculeLastActivity{
-			MoleculeID:   moleculeID,
-			LastActivity: updatedAt,
-			Source:       "molecule_updated",
-		}, nil
-	}
-
-	// Find max(updated_at) and max(closed_at) with corresponding step IDs.
-	// Uses batched IN clauses (queryBatchSize) to avoid full table scans on Dolt.
-	var lastUpdatedAt time.Time
-	var lastUpdatedID string
-	var lastClosedAt sql.NullTime
-	var lastClosedID sql.NullString
-
-	for start := 0; start < len(childIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(childIDs) {
-			end = len(childIDs)
-		}
-		batch := childIDs[start:end]
-		placeholders, args := doltBuildSQLInClause(batch)
-
-		// Query for the most recently updated child in this batch
-		//nolint:gosec // G201: issueTable is hardcoded, placeholders contains only ? markers
-		var batchUpdatedAt time.Time
-		var batchUpdatedID string
-		scanErr := s.db.QueryRowContext(ctx, fmt.Sprintf(
-			"SELECT id, updated_at FROM %s WHERE id IN (%s) ORDER BY updated_at DESC LIMIT 1",
-			issueTable, placeholders), args...).Scan(&batchUpdatedID, &batchUpdatedAt)
-		if scanErr == nil && batchUpdatedAt.After(lastUpdatedAt) {
-			lastUpdatedAt = batchUpdatedAt
-			lastUpdatedID = batchUpdatedID
-		}
-
-		// Query for the most recently closed child in this batch
-		var batchClosedAt sql.NullTime
-		var batchClosedID sql.NullString
-		//nolint:gosec // G201: issueTable is hardcoded
-		_ = s.db.QueryRowContext(ctx, fmt.Sprintf(
-			"SELECT id, closed_at FROM %s WHERE id IN (%s) AND closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1",
-			issueTable, placeholders), args...).Scan(&batchClosedID, &batchClosedAt)
-		if batchClosedAt.Valid && (!lastClosedAt.Valid || batchClosedAt.Time.After(lastClosedAt.Time)) {
-			lastClosedAt = batchClosedAt
-			lastClosedID = batchClosedID
-		}
-	}
-
-	if lastUpdatedID == "" {
-		return nil, fmt.Errorf("failed to query last updated child: no children found")
-	}
-
-	// Pick the most recent between updated_at and closed_at
-	result := &types.MoleculeLastActivity{
-		MoleculeID:   moleculeID,
-		LastActivity: lastUpdatedAt,
-		Source:       "step_updated",
-		SourceStepID: lastUpdatedID,
-	}
-
-	if lastClosedAt.Valid && lastClosedAt.Time.After(lastUpdatedAt) {
-		result.LastActivity = lastClosedAt.Time
-		result.Source = "step_closed"
-		result.SourceStepID = lastClosedID.String
-	}
-
-	return result, nil
+	var result *types.MoleculeLastActivity
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetMoleculeLastActivityInTx(ctx, tx, moleculeID)
+		return err
+	})
+	return result, err
 }
 
 // GetNextChildID returns the next available child ID for a parent.

@@ -2042,10 +2042,7 @@ func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	if _, err := s.db.ExecContext(ctx, "CALL DOLT_BRANCH(?)", name); err != nil {
-		return fmt.Errorf("failed to create branch %s: %w", name, err)
-	}
-	return nil
+	return versioncontrolops.CreateBranch(ctx, s.db, name)
 }
 
 // Checkout switches to the specified branch
@@ -2057,8 +2054,8 @@ func (s *DoltStore) Checkout(ctx context.Context, branch string) (retErr error) 
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	if _, err := s.db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
-		return fmt.Errorf("failed to checkout branch %s: %w", branch, err)
+	if err := versioncontrolops.CheckoutBranch(ctx, s.db, branch); err != nil {
+		return err
 	}
 	s.branch = branch
 	return nil
@@ -2075,61 +2072,26 @@ func (s *DoltStore) Merge(ctx context.Context, branch string) (conflicts []stora
 	)
 	defer func() { endSpan(span, retErr) }()
 
-	// DOLT_MERGE may create a merge commit; pass explicit author for determinism.
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_MERGE('--author', ?, ?)", s.commitAuthorString(), branch)
-	if err != nil {
-		// Check if the error is due to conflicts
-		mergeConflicts, conflictErr := s.GetConflicts(ctx)
-		if conflictErr == nil && len(mergeConflicts) > 0 {
-			span.SetAttributes(attribute.Int("dolt.conflicts", len(mergeConflicts)))
-			return mergeConflicts, nil
-		}
-		retErr = fmt.Errorf("failed to merge branch %s: %w", branch, err)
-		return nil, retErr
+	conflicts, err := versioncontrolops.Merge(ctx, s.db, branch, s.commitAuthorString())
+	if len(conflicts) > 0 {
+		span.SetAttributes(attribute.Int("dolt.conflicts", len(conflicts)))
 	}
-	return nil, nil
+	return conflicts, err
 }
 
 // CurrentBranch returns the current branch name
 func (s *DoltStore) CurrentBranch(ctx context.Context) (string, error) {
-	var branch string
-	err := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch)
-	if err != nil {
-		return "", fmt.Errorf("failed to get current branch: %w", err)
-	}
-	return branch, nil
+	return versioncontrolops.CurrentBranch(ctx, s.db)
 }
 
 // DeleteBranch deletes a branch (used to clean up import branches)
 func (s *DoltStore) DeleteBranch(ctx context.Context, branch string) error {
-	_, err := s.db.ExecContext(ctx, "CALL DOLT_BRANCH('-D', ?)", branch)
-	if err != nil {
-		return fmt.Errorf("failed to delete branch %s: %w", branch, err)
-	}
-	return nil
+	return versioncontrolops.DeleteBranch(ctx, s.db, branch)
 }
 
 // Log returns recent commit history
 func (s *DoltStore) Log(ctx context.Context, limit int) ([]CommitInfo, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT commit_hash, committer, email, date, message
-		FROM dolt_log
-		LIMIT ?
-	`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get log: %w", err)
-	}
-	defer rows.Close()
-
-	var commits []CommitInfo
-	for rows.Next() {
-		var c CommitInfo
-		if err := rows.Scan(&c.Hash, &c.Author, &c.Email, &c.Date, &c.Message); err != nil {
-			return nil, fmt.Errorf("failed to scan commit: %w", err)
-		}
-		commits = append(commits, c)
-	}
-	return commits, rows.Err()
+	return versioncontrolops.Log(ctx, s.db, limit)
 }
 
 // CommitInfo is an alias for storage.CommitInfo.
@@ -2167,32 +2129,7 @@ func (s *DoltStore) AddRemote(ctx context.Context, name, url string) error {
 
 // Status returns the current Dolt status (staged/unstaged changes)
 func (s *DoltStore) Status(ctx context.Context) (*DoltStatus, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT table_name, staged, status FROM dolt_status")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get status: %w", err)
-	}
-	defer rows.Close()
-
-	status := &DoltStatus{
-		Staged:   make([]StatusEntry, 0),
-		Unstaged: make([]StatusEntry, 0),
-	}
-
-	for rows.Next() {
-		var tableName string
-		var staged bool
-		var statusStr string
-		if err := rows.Scan(&tableName, &staged, &statusStr); err != nil {
-			return nil, fmt.Errorf("failed to scan status: %w", err)
-		}
-		entry := StatusEntry{Table: tableName, Status: statusStr}
-		if staged {
-			status.Staged = append(status.Staged, entry)
-		} else {
-			status.Unstaged = append(status.Unstaged, entry)
-		}
-	}
-	return status, rows.Err()
+	return versioncontrolops.Status(ctx, s.db)
 }
 
 // DoltStatus is an alias for storage.Status.

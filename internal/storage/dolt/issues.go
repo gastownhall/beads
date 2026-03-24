@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -115,18 +113,15 @@ func (s *DoltStore) GetIssue(ctx context.Context, id string) (*types.Issue, erro
 // GetIssueByExternalRef retrieves an issue by external reference.
 // Returns storage.ErrNotFound (wrapped) if no issue with the given external reference exists.
 func (s *DoltStore) GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	var id string
-	err := s.db.QueryRowContext(ctx, "SELECT id FROM issues WHERE external_ref = ?", externalRef).Scan(&id)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("%w: external_ref %s", storage.ErrNotFound, externalRef)
-	}
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		id, err = issueops.GetIssueByExternalRefInTx(ctx, tx, externalRef)
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get issue by external_ref: %w", err)
+		return nil, err
 	}
-
 	return s.GetIssue(ctx, id)
 }
 
@@ -579,128 +574,40 @@ var (
 // It also cleans up related data: dependencies, labels, comments, and events.
 // Returns the number of issues deleted.
 func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo string) (int, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	var count int
+	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		count, err = issueops.DeleteIssuesBySourceRepoInTx(ctx, tx, sourceRepo)
+		return err
+	})
+	if err == nil {
+		s.invalidateBlockedIDsCache()
 	}
-	defer func() { _ = tx.Rollback() }() // No-op after successful commit
-
-	// Get the list of issue IDs to delete
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM issues WHERE source_repo = ?`, sourceRepo)
-	if err != nil {
-		return 0, fmt.Errorf("failed to query issues: %w", err)
-	}
-	var issueIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close() // Best effort cleanup on error path
-			return 0, fmt.Errorf("failed to scan issue ID: %w", err)
-		}
-		issueIDs = append(issueIDs, id)
-	}
-	_ = rows.Close() // Redundant close for safety (rows already iterated)
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("failed to iterate issues: %w", err)
-	}
-
-	if len(issueIDs) == 0 {
-		if err := tx.Commit(); err != nil {
-			return 0, fmt.Errorf("failed to commit empty transaction: %w", err)
-		}
-		return 0, nil
-	}
-
-	// Delete related data for all affected issues
-	tables := []string{"dependencies", "events", "comments", "labels"}
-	for _, table := range tables {
-		if err := validateTableName(table); err != nil {
-			return 0, fmt.Errorf("invalid table name %q: %w", table, err)
-		}
-		for _, id := range issueIDs {
-			if table == "dependencies" {
-				_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? OR depends_on_id = ?", table), id, id) //nolint:gosec // G201: table validated by validateTableName above
-			} else {
-				_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ?", table), id) //nolint:gosec // G201: table validated by validateTableName above
-			}
-			if err != nil {
-				return 0, fmt.Errorf("failed to delete from %s for %s: %w", table, id, err)
-			}
-		}
-	}
-
-	// Delete the issues themselves
-	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
-	if err != nil {
-		return 0, fmt.Errorf("failed to delete issues: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("failed to check rows affected: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	s.invalidateBlockedIDsCache()
-	return int(rowsAffected), nil
+	return count, err
 }
 
 // ClearRepoMtime removes the mtime cache entry for a repository.
-// This is used when a repo is removed from the multi-repo configuration.
 func (s *DoltStore) ClearRepoMtime(ctx context.Context, repoPath string) error {
-	// Expand tilde in path to match how it's stored
-	expandedPath := repoPath
-	if strings.HasPrefix(repoPath, "~") {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("failed to get home directory: %w", err)
-		}
-		if repoPath == "~" {
-			expandedPath = homeDir
-		} else {
-			expandedPath = filepath.Join(homeDir, repoPath[1:])
-		}
-	}
-
-	// Get absolute path to match how it's stored in repo_mtimes
-	absRepoPath, err := filepath.Abs(expandedPath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
-	}
-
-	_, err = s.execContext(ctx, `DELETE FROM repo_mtimes WHERE repo_path = ?`, absRepoPath)
-	if err != nil {
-		return fmt.Errorf("failed to delete mtime cache: %w", err)
-	}
-
-	return nil
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.ClearRepoMtimeInTx(ctx, tx, repoPath)
+	})
 }
 
 // GetRepoMtime returns the cached mtime (in nanoseconds) for a repository's data file.
 // Returns 0 if no cache entry exists.
 func (s *DoltStore) GetRepoMtime(ctx context.Context, repoPath string) (int64, error) {
-	var mtimeNs int64
-	err := s.db.QueryRowContext(ctx,
-		`SELECT mtime_ns FROM repo_mtimes WHERE repo_path = ?`, repoPath,
-	).Scan(&mtimeNs)
-	if err != nil {
-		return 0, nil // No cache entry
-	}
-	return mtimeNs, nil
+	var result int64
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetRepoMtimeInTx(ctx, tx, repoPath)
+		return err
+	})
+	return result, err
 }
 
 // SetRepoMtime updates the mtime cache for a repository's data file.
 func (s *DoltStore) SetRepoMtime(ctx context.Context, repoPath, jsonlPath string, mtimeNs int64) error {
-	_, err := s.execContext(ctx, `
-		INSERT INTO repo_mtimes (repo_path, jsonl_path, mtime_ns, last_checked)
-		VALUES (?, ?, ?, NOW())
-		ON DUPLICATE KEY UPDATE
-			jsonl_path = VALUES(jsonl_path),
-			mtime_ns = VALUES(mtime_ns),
-			last_checked = NOW()
-	`, repoPath, jsonlPath, mtimeNs)
-	return wrapExecError("set repo mtime", err)
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.SetRepoMtimeInTx(ctx, tx, repoPath, jsonlPath, mtimeNs)
+	})
 }
