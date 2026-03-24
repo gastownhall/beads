@@ -55,6 +55,33 @@ export DOLT_DISABLE_EVENT_FLUSH=1
 To verify, block `doltremoteapi.dolthub.com` in your firewall or DNS — beads
 continues working normally with no degradation.
 
+### Tracker Integration Trust Model
+
+When syncing with external trackers (GitHub Issues, Jira, Linear, GitLab, Azure DevOps), all data crossing the integration boundary is treated as **untrusted input**.
+
+**Trust boundaries:**
+- Issue titles and descriptions from external trackers may contain arbitrary content, including ANSI escape sequences, control characters, or prompt injection payloads targeting AI agents
+- External content is sanitized before terminal display (ANSI stripping, control character removal)
+- API responses are size-limited to prevent out-of-memory conditions from malformed responses
+- External issue identifiers are validated before use in SQL queries
+
+**Credential handling:**
+- Tracker API tokens stored in beads config (`bd config set`) are **plaintext** in the Dolt database
+- Prefer platform-native authentication when available (`gh auth`, `glab auth`, Azure CLI) — these use the platform's secure credential store
+- Never store tokens in environment variables in shared environments
+- Tokens are scoped to the permissions you grant — use minimal required scopes
+
+**Sync security model:**
+- Sync is always **user-initiated** — no background daemons, no inbound webhooks, no listening ports
+- No data is sent to external trackers unless the user explicitly runs `bd push` or `bd sync`
+- Conflict resolution strategies are deterministic and auditable via Dolt history
+
+**Content safety for AI agents:**
+- Issue descriptions imported from external trackers may contain prompt injection payloads
+- Consuming agents should treat all issue content as untrusted input
+- The `--json` output flag provides structured data that separates metadata from free-text content
+- beads does not execute or interpret issue content — it is stored and displayed only
+
 ### Command Injection Protection
 
 bd uses parameterized SQL queries to prevent SQL injection. However:
@@ -69,7 +96,7 @@ bd has minimal dependencies:
 - Dolt (version-controlled SQL database)
 - Cobra CLI framework
 
-All dependencies are regularly updated. Run `go mod verify` to check integrity.
+All dependencies are pinned via `go.sum` and verified with `go mod verify`. Renovate (or Dependabot) monitors for known vulnerabilities. Run `go mod verify` locally to check integrity.
 
 ## Supported Versions
 
