@@ -120,7 +120,10 @@ func ExtractLinkDeps(workItem *WorkItem) []tracker.DependencyInfo {
 		return nil
 	}
 
-	sourceID := strconv.Itoa(workItem.ID)
+	sourceRef := buildExternalRef(workItem)
+	if sourceRef == "" {
+		return nil
+	}
 	var deps []tracker.DependencyInfo
 
 	for _, rel := range workItem.Relations {
@@ -138,23 +141,33 @@ func ExtractLinkDeps(workItem *WorkItem) []tracker.DependencyInfo {
 			continue
 		}
 
-		targetIDStr := strconv.Itoa(targetID)
+		targetRef := apiURLToWebURL(rel.URL, targetID)
 
 		dep := tracker.DependencyInfo{
 			Type: depType,
 		}
 		if swap {
-			dep.FromExternalID = targetIDStr
-			dep.ToExternalID = sourceID
+			dep.FromExternalID = targetRef
+			dep.ToExternalID = sourceRef
 		} else {
-			dep.FromExternalID = sourceID
-			dep.ToExternalID = targetIDStr
+			dep.FromExternalID = sourceRef
+			dep.ToExternalID = targetRef
 		}
 
 		deps = append(deps, dep)
 	}
 
 	return deps
+}
+
+// apiURLToWebURL converts an ADO API URL to its web URL equivalent.
+// API:  https://dev.azure.com/org/proj/_apis/wit/workItems/123?api-version=7.1
+// Web:  https://dev.azure.com/org/proj/_workitems/edit/123
+func apiURLToWebURL(apiURL string, id int) string {
+	if idx := strings.Index(apiURL, "/_apis/"); idx > 0 {
+		return fmt.Sprintf("%s/_workitems/edit/%d", apiURL[:idx], id)
+	}
+	return apiURL
 }
 
 // PullLinks extracts beads dependency information from an ADO work item's relations.

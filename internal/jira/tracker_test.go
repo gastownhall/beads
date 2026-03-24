@@ -717,3 +717,52 @@ func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
+	store := &configStore{
+		data: map[string]string{
+			"jira.url":              "https://example.atlassian.net",
+			"jira.project":          "PROJ",
+			"jira.api_token":        "token123",
+			"jira.type_map.story":   "User Story",
+			"jira.type_map.feature": "Feature",
+		},
+	}
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), store); err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	mapper := tr.FieldMapper()
+
+	// Custom "story" type should map from Jira "User Story"
+	got := mapper.TypeToBeads("User Story")
+	if got != "story" {
+		t.Errorf("TypeToBeads(\"User Story\") = %q, want %q", got, "story")
+	}
+
+	// Custom "feature" should map from Jira "Feature"
+	got = mapper.TypeToBeads("Feature")
+	if got != "feature" {
+		t.Errorf("TypeToBeads(\"Feature\") = %q, want %q", got, "feature")
+	}
+
+	// Unmapped Jira types fall back to defaults
+	got = mapper.TypeToBeads("Bug")
+	if got != types.TypeBug {
+		t.Errorf("TypeToBeads(\"Bug\") = %q, want %q", got, types.TypeBug)
+	}
+
+	// Reverse: custom "story" → "User Story"
+	gotTracker, _ := mapper.TypeToTracker("story").(string)
+	if gotTracker != "User Story" {
+		t.Errorf("TypeToTracker(\"story\") = %q, want %q", gotTracker, "User Story")
+	}
+
+	// Reverse: unmapped "epic" falls back to default "Epic"
+	gotTracker, _ = mapper.TypeToTracker(types.TypeEpic).(string)
+	if gotTracker != "Epic" {
+		t.Errorf("TypeToTracker(epic) = %q, want %q", gotTracker, "Epic")
+	}
+}
