@@ -5,26 +5,27 @@ import (
 	"path/filepath"
 )
 
-// isOrchestratorRoot returns true when path looks like an orchestrator workspace root.
+// isOrchestratorRoot returns true when path looks like a multi-project
+// orchestrator workspace root (not a single-project beads repo).
 //
-// We require both:
-//  1. mayor/town.json (town identity/config), and
-//  2. .beads/routes.jsonl (town-level routing config)
+// Detection: presence of both:
+//  1. .beads/routes.jsonl (cross-project routing config)
+//  2. mayor/ directory (orchestrator agent workspace)
 //
-// This keeps detection strict and avoids blocking normal repos that merely
-// contain a .beads directory.
+// This prevents bd doctor --fix from running at the workspace root,
+// where repairs should go through the orchestrator's own doctor command.
 func isOrchestratorRoot(path string) bool {
 	if path == "" {
 		return false
 	}
 
-	townConfig := filepath.Join(path, "mayor", "town.json")
 	routes := filepath.Join(path, ".beads", "routes.jsonl")
+	mayorDir := filepath.Join(path, "mayor")
 
-	if _, err := os.Stat(townConfig); err != nil {
+	if _, err := os.Stat(routes); err != nil {
 		return false
 	}
-	if _, err := os.Stat(routes); err != nil {
+	if fi, err := os.Stat(mayorDir); err != nil || !fi.IsDir() {
 		return false
 	}
 
