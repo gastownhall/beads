@@ -20,13 +20,32 @@ func init() {
 
 // Tracker implements tracker.IssueTracker for Jira.
 type Tracker struct {
-	client     *Client
-	store      storage.Storage
-	jiraURL    string
-	projectKey string
-	apiVersion string            // "2" or "3" (default: "3")
-	statusMap  map[string]string // beads status → Jira status name (from jira.status_map.* config)
-	typeMap    map[string]string // beads type → Jira type (from jira.type_map.* config)
+	client      *Client
+	store       storage.Storage
+	jiraURL     string
+	projectKeys []string          // one or more project keys (first is primary)
+	apiVersion  string            // "2" or "3" (default: "3")
+	statusMap   map[string]string // beads status → Jira status name (from jira.status_map.* config)
+	typeMap     map[string]string // beads type → Jira type (from jira.type_map.* config)
+}
+
+// SetProjectKeys sets project keys before Init(). When set, Init() uses these
+// instead of reading from config. This supports the --project CLI flag.
+func (t *Tracker) SetProjectKeys(keys []string) {
+	t.projectKeys = keys
+}
+
+// ProjectKeys returns the list of configured project keys.
+func (t *Tracker) ProjectKeys() []string {
+	return t.projectKeys
+}
+
+// PrimaryProjectKey returns the first configured project key.
+func (t *Tracker) PrimaryProjectKey() string {
+	if len(t.projectKeys) == 0 {
+		return ""
+	}
+	return t.projectKeys[0]
 }
 
 func (t *Tracker) Name() string         { return "jira" }
@@ -42,11 +61,15 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	}
 	t.jiraURL = jiraURL
 
-	projectKey, err := t.getConfig(ctx, "jira.project", "JIRA_PROJECT")
-	if err != nil || projectKey == "" {
-		return fmt.Errorf("Jira project not configured (set jira.project or JIRA_PROJECT)")
+	// Resolve project keys: use pre-set keys (from CLI), or fall back to config.
+	if len(t.projectKeys) == 0 {
+		pluralVal, _ := t.getConfig(ctx, "jira.projects", "JIRA_PROJECTS")
+		singularVal, _ := t.getConfig(ctx, "jira.project", "JIRA_PROJECT")
+		t.projectKeys = tracker.ResolveProjectIDs(nil, pluralVal, singularVal)
 	}
-	t.projectKey = projectKey
+	if len(t.projectKeys) == 0 {
+		return fmt.Errorf("Jira project not configured (set jira.project, jira.projects, or JIRA_PROJECT)")
+	}
 
 	username, _ := t.getConfig(ctx, "jira.username", "JIRA_USERNAME")
 	apiToken, err := t.getConfig(ctx, "jira.api_token", "JIRA_API_TOKEN")
@@ -102,8 +125,17 @@ func (t *Tracker) Validate() error {
 func (t *Tracker) Close() error { return nil }
 
 func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
-	// Build JQL query
-	jql := fmt.Sprintf("project = %q", t.projectKey)
+	// Build JQL query — use IN clause for multi-project.
+	var jql string
+	if len(t.projectKeys) == 1 {
+		jql = fmt.Sprintf("project = %q", t.projectKeys[0])
+	} else {
+		quoted := make([]string, len(t.projectKeys))
+		for i, k := range t.projectKeys {
+			quoted[i] = fmt.Sprintf("%q", k)
+		}
+		jql = fmt.Sprintf("project IN (%s)", strings.Join(quoted, ", "))
+	}
 
 	// User-configured pull_jql filter (e.g. 'labels = "agent-ready"')
 	if pullJQL, _ := t.getConfig(ctx, "jira.pull_jql", "JIRA_PULL_JQL"); pullJQL != "" {
@@ -153,8 +185,8 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	mapper := t.FieldMapper()
 	fields := mapper.IssueToTracker(issue)
 
-	// Set project
-	fields["project"] = map[string]string{"key": t.projectKey}
+	// Set project to primary (first) project key.
+	fields["project"] = map[string]string{"key": t.PrimaryProjectKey()}
 
 	created, err := t.client.CreateIssue(ctx, fields)
 	if err != nil {

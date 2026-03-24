@@ -630,6 +630,7 @@ bd config set sync.require_confirmation_on_mass_delete "true"
 # Configure Jira connection
 bd config set jira.url "https://company.atlassian.net"
 bd config set jira.project "PROJ"
+bd config set jira.projects "PROJ1,PROJ2"   # Multiple projects (comma-separated)
 bd config set jira.api_token "YOUR_TOKEN"
 
 # Map bd statuses to Jira statuses
@@ -655,7 +656,15 @@ bd config set linear.api_key "lin_api_YOUR_API_KEY"
 
 # Team ID (find in Linear team settings or URL)
 bd config set linear.team_id "team-uuid-here"
+
+# Multiple team IDs (comma-separated; can also use LINEAR_TEAM_IDS env var)
+bd config set linear.team_ids "uuid-team-1,uuid-team-2"
 ```
+
+When `linear.team_ids` is set, `bd linear sync` fetches issues from all listed
+teams. For push operations with multiple teams, use the `--team` flag to specify
+the target. The singular `linear.team_id` is still supported for backward
+compatibility.
 
 **Getting your Linear credentials:**
 
@@ -775,7 +784,14 @@ bd config set ado.org "myorg"
 
 # Project name (can also use AZURE_DEVOPS_PROJECT environment variable)
 bd config set ado.project "MyProject"
+
+# Multiple projects (comma-separated; can also use AZURE_DEVOPS_PROJECTS env var)
+bd config set ado.projects "Project1,Project2"
 ```
+
+When `ado.projects` is set, `bd ado sync` fetches work items from all listed
+projects in a single WIQL query. The singular `ado.project` is still supported
+for backward compatibility.
 
 **Optional configuration:**
 
@@ -848,12 +864,13 @@ Priority mapping is not configurable — it is handled automatically.
 
 All ADO config keys have environment variable equivalents:
 
-| Config Key    | Environment Variable     |
-|---------------|--------------------------|
-| `ado.pat`     | `AZURE_DEVOPS_PAT`       |
-| `ado.org`     | `AZURE_DEVOPS_ORG`       |
-| `ado.project` | `AZURE_DEVOPS_PROJECT`   |
-| `ado.url`     | `AZURE_DEVOPS_URL`       |
+| Config Key     | Environment Variable     |
+|----------------|--------------------------|
+| `ado.pat`      | `AZURE_DEVOPS_PAT`       |
+| `ado.org`      | `AZURE_DEVOPS_ORG`       |
+| `ado.project`  | `AZURE_DEVOPS_PROJECT`   |
+| `ado.projects` | `AZURE_DEVOPS_PROJECTS`  |
+| `ado.url`      | `AZURE_DEVOPS_URL`       |
 
 Environment variables take effect when the corresponding `bd config` key is not set.
 

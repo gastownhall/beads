@@ -71,26 +71,26 @@ func TestADOConfigValidation(t *testing.T) {
 	}{
 		{
 			name:      "missing PAT",
-			config:    ADOConfig{Org: "org", Project: "proj"},
+			config:    ADOConfig{Org: "org", Projects: []string{"proj"}},
 			wantError: "ado.pat",
 		},
 		{
 			name:      "missing org and URL",
-			config:    ADOConfig{PAT: "tok", Project: "proj"},
+			config:    ADOConfig{PAT: "tok", Projects: []string{"proj"}},
 			wantError: "ado.org",
 		},
 		{
 			name:      "missing project",
 			config:    ADOConfig{PAT: "tok", Org: "org"},
-			wantError: "ado.project",
+			wantError: "no ADO project",
 		},
 		{
 			name:   "all present",
-			config: ADOConfig{PAT: "tok", Org: "org", Project: "proj"},
+			config: ADOConfig{PAT: "tok", Org: "org", Project: "proj", Projects: []string{"proj"}},
 		},
 		{
 			name:   "URL substitutes for org",
-			config: ADOConfig{PAT: "tok", URL: "https://tfs.corp.com", Project: "proj"},
+			config: ADOConfig{PAT: "tok", URL: "https://tfs.corp.com", Project: "proj", Projects: []string{"proj"}},
 		},
 	}
 

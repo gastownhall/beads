@@ -21,14 +21,16 @@ var jiraCmd = &cobra.Command{
 Configuration:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
+  bd config set jira.projects "PROJ1,PROJ2"   # Multiple projects
   bd config set jira.api_token "YOUR_TOKEN"
   bd config set jira.username "your_email@company.com"  # For Jira Cloud
   bd config set jira.push_prefix "hippo"       # Only push hippo-* issues to Jira
   bd config set jira.push_prefix "proj1,proj2" # Multiple prefixes (comma-separated)
 
 Environment variables (alternative to config):
-  JIRA_API_TOKEN - Jira API token
-  JIRA_USERNAME  - Jira username/email
+  JIRA_API_TOKEN  - Jira API token
+  JIRA_USERNAME   - Jira username/email
+  JIRA_PROJECTS   - Comma-separated project keys
 
 Examples:
   bd jira sync --pull         # Import issues from Jira
@@ -80,6 +82,7 @@ func init() {
 	jiraSyncCmd.Flags().Bool("prefer-jira", false, "Prefer Jira version on conflicts")
 	jiraSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
 	jiraSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
+	jiraSyncCmd.Flags().StringSlice("project", nil, "Project key(s) to sync (overrides configured project/projects)")
 
 	jiraCmd.AddCommand(jiraSyncCmd)
 	jiraCmd.AddCommand(jiraStatusCmd)
@@ -115,6 +118,10 @@ func runJiraSync(cmd *cobra.Command, args []string) {
 
 	// Create and initialize the Jira tracker
 	jt := &jira.Tracker{}
+	cliProjects, _ := cmd.Flags().GetStringSlice("project")
+	if len(cliProjects) > 0 {
+		jt.SetProjectKeys(tracker.DeduplicateStrings(cliProjects))
+	}
 	if err := jt.Init(ctx, store); err != nil {
 		FatalError("initializing Jira tracker: %v", err)
 	}
@@ -210,10 +217,14 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 	}
 
 	jiraURL, _ := store.GetConfig(ctx, "jira.url")
-	jiraProject, _ := store.GetConfig(ctx, "jira.project")
 	lastSync, _ := store.GetConfig(ctx, "jira.last_sync")
 
-	configured := jiraURL != "" && jiraProject != ""
+	// Resolve project keys from all config sources.
+	pluralProjects, _ := store.GetConfig(ctx, "jira.projects")
+	singularProject, _ := store.GetConfig(ctx, "jira.project")
+	projectKeys := tracker.ResolveProjectIDs(nil, pluralProjects, singularProject)
+
+	configured := jiraURL != "" && len(projectKeys) > 0
 
 	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
@@ -231,10 +242,16 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 	}
 
 	if jsonOutput {
+		// Backward compat: include jira_project as first project, plus full list.
+		primaryProject := ""
+		if len(projectKeys) > 0 {
+			primaryProject = projectKeys[0]
+		}
 		outputJSON(map[string]interface{}{
 			"configured":    configured,
 			"jira_url":      jiraURL,
-			"jira_project":  jiraProject,
+			"jira_project":  primaryProject,
+			"jira_projects": projectKeys,
 			"last_sync":     lastSync,
 			"total_issues":  len(allIssues),
 			"with_jira_ref": withJiraRef,
@@ -253,13 +270,18 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 		fmt.Println("To configure Jira integration:")
 		fmt.Println("  bd config set jira.url \"https://company.atlassian.net\"")
 		fmt.Println("  bd config set jira.project \"PROJ\"")
+		fmt.Println("  bd config set jira.projects \"PROJ1,PROJ2\"  # multiple projects")
 		fmt.Println("  bd config set jira.api_token \"YOUR_TOKEN\"")
 		fmt.Println("  bd config set jira.username \"your@email.com\"")
 		return
 	}
 
 	fmt.Printf("Jira URL:     %s\n", jiraURL)
-	fmt.Printf("Project:      %s\n", jiraProject)
+	if len(projectKeys) == 1 {
+		fmt.Printf("Project:      %s\n", projectKeys[0])
+	} else {
+		fmt.Printf("Projects:     %s (%d projects)\n", strings.Join(projectKeys, ", "), len(projectKeys))
+	}
 	if lastSync != "" {
 		fmt.Printf("Last Sync:    %s\n", lastSync)
 	} else {
@@ -284,13 +306,17 @@ func validateJiraConfig() error {
 
 	ctx := rootCtx
 	jiraURL, _ := store.GetConfig(ctx, "jira.url")
-	jiraProject, _ := store.GetConfig(ctx, "jira.project")
 
 	if jiraURL == "" {
 		return fmt.Errorf("jira.url not configured\nRun: bd config set jira.url \"https://company.atlassian.net\"")
 	}
-	if jiraProject == "" {
-		return fmt.Errorf("jira.project not configured\nRun: bd config set jira.project \"PROJ\"")
+
+	// Check for project configuration (singular or plural).
+	pluralProjects, _ := store.GetConfig(ctx, "jira.projects")
+	singularProject, _ := store.GetConfig(ctx, "jira.project")
+	projectKeys := tracker.ResolveProjectIDs(nil, pluralProjects, singularProject)
+	if len(projectKeys) == 0 {
+		return fmt.Errorf("no Jira project configured\nRun: bd config set jira.project \"PROJ\"\nOr:  bd config set jira.projects \"PROJ1,PROJ2\"")
 	}
 
 	apiToken, _ := store.GetConfig(ctx, "jira.api_token")
