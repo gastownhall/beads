@@ -30,6 +30,9 @@ const (
 	// MaxPages is the maximum number of pages to fetch before stopping.
 	// This prevents infinite loops from malformed API responses.
 	MaxPages = 1000
+
+	// MaxResponseSize is the maximum allowed HTTP response body size (50MB).
+	MaxResponseSize = 50 * 1024 * 1024
 )
 
 // Client provides methods to interact with the Linear GraphQL API.

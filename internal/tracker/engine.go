@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // syncTracer is the OTel tracer for tracker sync spans.
@@ -373,10 +374,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 		if opts.DryRun {
 			if existing != nil {
-				e.msg("[dry-run] Would update local issue: %s - %s", extIssue.Identifier, extIssue.Title)
+				e.msg("[dry-run] Would update local issue: %s - %s", extIssue.Identifier, ui.SanitizeForTerminal(extIssue.Title))
 				stats.Updated++
 			} else {
-				e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
+				e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, ui.SanitizeForTerminal(extIssue.Title))
 				stats.Created++
 			}
 			continue
@@ -676,10 +677,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 
 		if opts.DryRun {
 			if willCreate {
-				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), issue.Title)
+				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Created++
 			} else {
-				e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), issue.Title)
+				e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Updated++
 			}
 			continue
