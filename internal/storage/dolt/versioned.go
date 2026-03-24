@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -45,21 +46,7 @@ func (s *DoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]*storage
 // ListBranches returns the names of all branches.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) ListBranches(ctx context.Context) ([]string, error) {
-	rows, err := s.queryContext(ctx, "SELECT name FROM dolt_branches ORDER BY name")
-	if err != nil {
-		return nil, fmt.Errorf("failed to list branches: %w", err)
-	}
-	defer rows.Close()
-
-	var branches []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("failed to scan branch: %w", err)
-		}
-		branches = append(branches, name)
-	}
-	return branches, rows.Err()
+	return versioncontrolops.ListBranches(ctx, s.db)
 }
 
 // GetCurrentCommit returns the hash of the current HEAD commit.
@@ -76,44 +63,11 @@ func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
 // GetConflicts returns any merge conflicts in the current state.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {
-	internal, err := s.getInternalConflicts(ctx)
-	if err != nil {
-		return nil, wrapQueryError("get conflicts", err)
-	}
-
-	conflicts := make([]storage.Conflict, 0, len(internal))
-	for _, c := range internal {
-		conflicts = append(conflicts, storage.Conflict{
-			Field: c.TableName,
-		})
-	}
-	return conflicts, nil
+	return versioncontrolops.GetConflicts(ctx, s.db)
 }
 
 // CommitExists checks whether a commit hash exists in the repository.
 // Returns false for empty strings, malformed input, or non-existent commits.
 func (s *DoltStore) CommitExists(ctx context.Context, commitHash string) (bool, error) {
-	// Empty string is not a valid commit
-	if commitHash == "" {
-		return false, nil
-	}
-
-	// Validate format to reject malformed input
-	if err := validateRef(commitHash); err != nil {
-		return false, nil
-	}
-
-	// Query dolt_log to check if the commit exists.
-	// Supports both full hashes and short prefixes (like git's short SHA).
-	// The exact match handles full hashes; LIKE handles prefixes.
-	var count int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM dolt_log
-		WHERE commit_hash = ? OR commit_hash LIKE ?
-	`, commitHash, commitHash+"%").Scan(&count)
-	if err != nil {
-		return false, fmt.Errorf("failed to check commit existence: %w", err)
-	}
-
-	return count > 0, nil
+	return versioncontrolops.CommitExists(ctx, s.db, commitHash)
 }

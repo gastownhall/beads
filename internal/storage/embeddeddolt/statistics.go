@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -33,7 +34,7 @@ func (s *EmbeddedDoltStore) GetStatistics(ctx context.Context) (*types.Statistic
 			return err
 		}
 
-		blockedIDs, err := computeBlockedIDs(ctx, tx, true)
+		blockedIDs, _, err := issueops.ComputeBlockedIDsInTx(ctx, tx, true)
 		if err != nil {
 			return err
 		}

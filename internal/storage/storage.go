@@ -127,6 +127,44 @@ type PendingCommitter interface {
 	CommitPending(ctx context.Context, actor string) (bool, error)
 }
 
+// BackupStore provides Dolt backup operations (CALL DOLT_BACKUP) and
+// JSONL table export/restore for disaster recovery.
+// Callers that need backup functionality should type-assert to this interface.
+type BackupStore interface {
+	BackupAdd(ctx context.Context, name, url string) error
+	BackupSync(ctx context.Context, name string) error
+	BackupRemove(ctx context.Context, name string) error
+	// BackupExportTables exports issues, events, comments, dependencies,
+	// labels, and config to JSONL files in dir. When prefix is non-empty,
+	// only issues matching "prefix-%" are exported.
+	BackupExportTables(ctx context.Context, dir, prefix string) (*BackupCounts, error)
+	// BackupRestoreFromDir restores all JSONL tables from dir. When prefix
+	// is non-empty, only entries matching the prefix are imported. Config is
+	// restored via the store's SetConfig; all other tables use raw INSERT IGNORE.
+	BackupRestoreFromDir(ctx context.Context, dir, prefix string, dryRun bool) (*BackupRestoreResult, error)
+}
+
+// BackupCounts tracks the number of rows exported per table.
+type BackupCounts struct {
+	Issues       int
+	Events       int
+	Comments     int
+	Dependencies int
+	Labels       int
+	Config       int
+}
+
+// BackupRestoreResult tracks what a restore operation did.
+type BackupRestoreResult struct {
+	Issues       int
+	Comments     int
+	Dependencies int
+	Labels       int
+	Events       int
+	Config       int
+	Warnings     int
+}
+
 // Transaction provides atomic multi-operation support within a single database transaction.
 //
 // The Transaction interface exposes a subset of storage methods that execute within
