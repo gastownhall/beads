@@ -56,21 +56,18 @@ Under the hood this calls DOLT_BACKUP('add', ...) to register the destination.`,
 		// DoltHub URLs are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
-		accessor, ok := st.(storage.RawDBAccessor)
+		bs, ok := st.(storage.BackupStore)
 		if !ok {
-			return fmt.Errorf("storage backend does not support raw DB access")
+			return fmt.Errorf("storage backend does not support backup operations")
 		}
-		db := accessor.DB()
 
 		// Register the backup with Dolt
-		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('add', ?, ?)",
-			defaultDoltBackupName, backupURL); err != nil {
+		if err := bs.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
 			// Check if backup already exists
 			if strings.Contains(err.Error(), "already exists") {
 				// Remove and re-add to update the URL
-				_, _ = db.ExecContext(ctx, "CALL DOLT_BACKUP('rm', ?)", defaultDoltBackupName)
-				if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('add', ?, ?)",
-					defaultDoltBackupName, backupURL); err != nil {
+				_ = bs.BackupRemove(ctx, defaultDoltBackupName)
+				if err := bs.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
 					return fmt.Errorf("failed to update backup destination: %w", err)
 				}
 			} else {
@@ -118,11 +115,10 @@ Run 'bd backup init <path>' first to configure a destination.`,
 			return fmt.Errorf("no store available")
 		}
 
-		accessor, ok := st.(storage.RawDBAccessor)
+		bs, ok := st.(storage.BackupStore)
 		if !ok {
-			return fmt.Errorf("storage backend does not support raw DB access")
+			return fmt.Errorf("storage backend does not support backup operations")
 		}
-		db := accessor.DB()
 
 		// First, commit any pending changes so they're included in the backup
 		committer, ok := st.(storage.PendingCommitter)
@@ -140,8 +136,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		start := time.Now()
 
 		// Sync to the configured backup
-		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('sync', ?)",
-			defaultDoltBackupName); err != nil {
+		if err := bs.BackupSync(ctx, defaultDoltBackupName); err != nil {
 			if strings.Contains(err.Error(), "no backup") ||
 				strings.Contains(err.Error(), "not found") {
 				return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")

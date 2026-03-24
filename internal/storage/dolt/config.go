@@ -71,11 +71,9 @@ func (s *DoltStore) GetAllConfig(ctx context.Context) (map[string]string, error)
 
 // DeleteConfig removes a configuration value
 func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
-	_, err := s.execContext(ctx, "DELETE FROM config WHERE `key` = ?", key)
-	if err != nil {
-		return fmt.Errorf("failed to delete config %s: %w", key, err)
-	}
-	return nil
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.DeleteConfigInTx(ctx, tx, key)
+	})
 }
 
 // SetMetadata sets a metadata value

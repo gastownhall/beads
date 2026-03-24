@@ -707,57 +707,11 @@ func (s *DoltStore) getWispDependenciesWithMetadata(ctx context.Context, issueID
 // efficiency. Returns the set of all discovered dependent IDs (excluding the
 // input IDs). Capped at maxRecursiveResults to prevent runaway traversal.
 func (s *DoltStore) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	seen := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		seen[id] = true
-	}
-
-	toProcess := make([]string, len(ids))
-	copy(toProcess, ids)
-
-	discovered := make(map[string]bool)
-
-	for len(toProcess) > 0 {
-		if len(seen) > maxRecursiveResults {
-			return discovered, fmt.Errorf("wisp cascade traversal discovered over %d issues; aborting", maxRecursiveResults)
-		}
-
-		batchEnd := deleteBatchSize
-		if batchEnd > len(toProcess) {
-			batchEnd = len(toProcess)
-		}
-		batch := toProcess[:batchEnd]
-		toProcess = toProcess[batchEnd:]
-
-		inClause, args := doltBuildSQLInClause(batch)
-		rows, err := s.queryContext(ctx,
-			fmt.Sprintf(`SELECT issue_id FROM wisp_dependencies WHERE depends_on_id IN (%s)`, inClause),
-			args...)
-		if err != nil {
-			return discovered, fmt.Errorf("failed to query wisp dependents for batch: %w", err)
-		}
-
-		for rows.Next() {
-			var depID string
-			if err := rows.Scan(&depID); err != nil {
-				_ = rows.Close()
-				return discovered, fmt.Errorf("failed to scan wisp dependent: %w", err)
-			}
-			if !seen[depID] {
-				seen[depID] = true
-				discovered[depID] = true
-				toProcess = append(toProcess, depID)
-			}
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return discovered, fmt.Errorf("failed to iterate wisp dependents: %w", err)
-		}
-	}
-
-	return discovered, nil
+	var result map[string]bool
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.FindWispDependentsRecursiveInTx(ctx, tx, ids)
+		return err
+	})
+	return result, err
 }

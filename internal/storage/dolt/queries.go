@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -248,165 +247,13 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 // (slice bounds out of range at join_iters.go:192).
 // Same fix pattern as GetStatistics blocked count (fc16065c, a4a21958).
 func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Step 1: Get all open/active issue IDs into a set (scan both tables — bd-w2w)
-	activeIDs := make(map[string]bool)
-	for _, table := range []string{"issues", "wisps"} {
-		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
-		activeRows, err := s.queryContext(ctx, fmt.Sprintf(`
-			SELECT id FROM %s
-			WHERE status NOT IN ('closed', 'pinned')
-		`, table))
-		if err != nil {
-			if isTableNotExistError(err) {
-				continue // wisps table may not exist on pre-migration databases (GH#2271)
-			}
-			return nil, fmt.Errorf("failed to get active issues from %s: %w", table, err)
-		}
-		for activeRows.Next() {
-			var id string
-			if err := activeRows.Scan(&id); err != nil {
-				_ = activeRows.Close() // Best effort cleanup on error path
-				return nil, wrapScanError("get blocked issues: scan active ID", err)
-			}
-			activeIDs[id] = true
-		}
-		_ = activeRows.Close() // Redundant close for safety (rows already iterated)
-		if err := activeRows.Err(); err != nil {
-			return nil, wrapQueryError("get blocked issues: active rows", err)
-		}
-	}
-
-	// Step 2: Get canonical blocked set via computeBlockedIDs, which handles
-	// both 'blocks' and 'waits-for' dependencies with full gate evaluation.
-	blockedIDList, err := s.computeBlockedIDs(ctx, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute blocked IDs: %w", err)
-	}
-	blockedSet := make(map[string]bool, len(blockedIDList))
-	for _, id := range blockedIDList {
-		blockedSet[id] = true
-	}
-
-	// Step 2b: Include children of blocked parents (GH#1495).
-	// Mirrors GetReadyWork() exclusion: if a parent is blocked, its children
-	// are excluded from ready work and should appear in blocked output.
-	childToParent, childErr := s.getChildrenWithParents(ctx, blockedIDList)
-	if childErr == nil {
-		for childID := range childToParent {
-			// Only include active children not already directly blocked
-			if activeIDs[childID] && !blockedSet[childID] {
-				blockedSet[childID] = true
-				blockedIDList = append(blockedIDList, childID)
-			}
-		}
-	}
-
-	// Step 3: Get blocking + waits-for + conditional-blocks deps to build BlockedBy lists
-	// Scan both dependencies and wisp_dependencies tables (bd-w2w)
-	blockerMap := make(map[string][]string)
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-		depRows, err := s.queryContext(ctx, fmt.Sprintf(`
-			SELECT issue_id, depends_on_id FROM %s
-			WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
-		`, depTable))
-		if err != nil {
-			return nil, fmt.Errorf("failed to get blocking dependencies from %s: %w", depTable, err)
-		}
-
-		for depRows.Next() {
-			var issueID, blockerID string
-			if err := depRows.Scan(&issueID, &blockerID); err != nil {
-				_ = depRows.Close() // Best effort cleanup on error path
-				return nil, wrapScanError("get blocked issues: scan dependency", err)
-			}
-			// Only include if computeBlockedIDs confirmed this issue is blocked
-			if blockedSet[issueID] && activeIDs[blockerID] {
-				blockerMap[issueID] = append(blockerMap[issueID], blockerID)
-			}
-		}
-		_ = depRows.Close() // Redundant close for safety (rows already iterated)
-		if err := depRows.Err(); err != nil {
-			return nil, wrapQueryError("get blocked issues: dependency rows", err)
-		}
-	}
-
-	// Step 3b: Add transitively blocked children to blockerMap (GH#1495).
-	// Children of blocked parents have their parent as the "blocker".
-	if childErr == nil {
-		for childID, parentID := range childToParent {
-			if activeIDs[childID] && blockedSet[childID] {
-				if _, hasDirectBlocker := blockerMap[childID]; !hasDirectBlocker {
-					blockerMap[childID] = []string{parentID}
-				}
-			}
-		}
-	}
-
-	// Step 4: Batch-fetch all blocked issues and build results
-	blockedIDs := make([]string, 0, len(blockerMap))
-	for id := range blockerMap {
-		blockedIDs = append(blockedIDs, id)
-	}
-	issues, err := s.GetIssuesByIDs(ctx, blockedIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to batch-fetch blocked issues: %w", err)
-	}
-	issueMap := make(map[string]*types.Issue, len(issues))
-	for _, issue := range issues {
-		issueMap[issue.ID] = issue
-	}
-
-	// Parent filtering: restrict to children of specified parent (GH#2009)
-	var parentChildSet map[string]bool
-	if filter.ParentID != nil {
-		parentChildSet = make(map[string]bool)
-		parentID := *filter.ParentID
-		children, childErr := s.getChildrenOfIssues(ctx, []string{parentID})
-		if childErr == nil {
-			for _, childID := range children {
-				parentChildSet[childID] = true
-			}
-		}
-		// Also include dotted-ID children (e.g., "parent.1.2")
-		for id := range blockerMap {
-			if strings.HasPrefix(id, parentID+".") {
-				parentChildSet[id] = true
-			}
-		}
-	}
-
-	var results []*types.BlockedIssue
-	for id, blockerIDs := range blockerMap {
-		// Skip issues not under requested parent (GH#2009)
-		if parentChildSet != nil && !parentChildSet[id] {
-			continue
-		}
-
-		issue, ok := issueMap[id]
-		if !ok || issue == nil {
-			continue
-		}
-
-		results = append(results, &types.BlockedIssue{
-			Issue:          *issue,
-			BlockedByCount: len(blockerIDs),
-			BlockedBy:      blockerIDs,
-		})
-	}
-
-	// Sort by priority ASC, then created_at DESC (matching original SQL ORDER BY)
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Issue.Priority != results[j].Issue.Priority {
-			return results[i].Issue.Priority < results[j].Issue.Priority
-		}
-		return results[i].Issue.CreatedAt.After(results[j].Issue.CreatedAt)
+	var result []*types.BlockedIssue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetBlockedIssuesInTx(ctx, tx, filter)
+		return err
 	})
-
-	return results, nil
+	return result, err
 }
 
 // GetEpicsEligibleForClosure returns epics whose children are all closed
@@ -501,247 +348,24 @@ func (s *DoltStore) computeBlockedIDs(ctx context.Context, includeWisps bool) ([
 	}
 	s.cacheMu.Unlock()
 
-	// Build table lists based on includeWisps flag.
-	issueTables := []string{"issues"}
-	depTables := []string{"dependencies"}
-	if includeWisps {
-		issueTables = append(issueTables, "wisps")
-		depTables = append(depTables, "wisp_dependencies")
-	}
-
-	// Step 1: Get all active issue IDs
-	activeIDs := make(map[string]bool)
-	for _, table := range issueTables {
-		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
-		activeRows, err := s.queryContext(ctx, fmt.Sprintf(`
-			SELECT id FROM %s
-			WHERE status NOT IN ('closed', 'pinned')
-		`, table))
+	var result []string
+	var blockedSet map[string]bool
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var activeIDs map[string]bool
+		var err error
+		result, activeIDs, err = issueops.ComputeBlockedIDsInTx(ctx, tx, includeWisps)
 		if err != nil {
-			if isTableNotExistError(err) {
-				continue // wisps table may not exist on pre-migration databases (GH#2271)
-			}
-			return nil, wrapQueryError("compute blocked IDs: get active issues from "+table, err)
+			return err
 		}
-		for activeRows.Next() {
-			var id string
-			if err := activeRows.Scan(&id); err != nil {
-				_ = activeRows.Close() // Best effort cleanup on error path
-				return nil, wrapScanError("compute blocked IDs: scan active issue", err)
-			}
-			activeIDs[id] = true
+		blockedSet = make(map[string]bool, len(result))
+		for _, id := range result {
+			blockedSet[id] = true
 		}
-		_ = activeRows.Close() // Redundant close for safety (rows already iterated)
-		if err := activeRows.Err(); err != nil {
-			return nil, wrapQueryError("compute blocked IDs: active rows", err)
-		}
-	}
-
-	// Step 2: Get blocking deps, waits-for gates, and conditional-blocks
-	type depRecord struct {
-		issueID, dependsOnID, depType string
-		metadata                      sql.NullString
-	}
-	var allDeps []depRecord
-	for _, depTable := range depTables {
-		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-		depRows, err := s.queryContext(ctx, fmt.Sprintf(`
-			SELECT issue_id, depends_on_id, type, metadata FROM %s
-			WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')
-		`, depTable))
-		if err != nil {
-			if isTableNotExistError(err) {
-				continue // wisp_dependencies table may not exist on pre-migration databases (GH#2271)
-			}
-			return nil, wrapQueryError("compute blocked IDs: get dependencies from "+depTable, err)
-		}
-		for depRows.Next() {
-			var rec depRecord
-			if err := depRows.Scan(&rec.issueID, &rec.dependsOnID, &rec.depType, &rec.metadata); err != nil {
-				_ = depRows.Close()
-				return nil, wrapScanError("compute blocked IDs: scan dependency", err)
-			}
-			allDeps = append(allDeps, rec)
-		}
-		_ = depRows.Close()
-		if err := depRows.Err(); err != nil {
-			return nil, wrapQueryError("compute blocked IDs: dependency rows from "+depTable, err)
-		}
-	}
-
-	type waitsForDep struct {
-		issueID   string
-		spawnerID string
-		gate      string
-	}
-	var waitsForDeps []waitsForDep
-	needsClosedChildren := false
-
-	// Step 3: Filter direct blockers in Go; collect waits-for edges
-	blockedSet := make(map[string]bool)
-	for _, rec := range allDeps {
-		switch rec.depType {
-		case string(types.DepBlocks), string(types.DepConditionalBlocks):
-			// Both blocks and conditional-blocks gate readiness while the
-			// blocker is active. For conditional-blocks ("B runs only if A
-			// fails"), B cannot be ready while A's outcome is still unknown.
-			if activeIDs[rec.issueID] && activeIDs[rec.dependsOnID] {
-				blockedSet[rec.issueID] = true
-			}
-		case string(types.DepWaitsFor):
-			// waits-for only matters for active gate issues
-			if !activeIDs[rec.issueID] {
-				continue
-			}
-			gate := types.ParseWaitsForGateMetadata(rec.metadata.String)
-			if gate == types.WaitsForAnyChildren {
-				needsClosedChildren = true
-			}
-			waitsForDeps = append(waitsForDeps, waitsForDep{
-				issueID: rec.issueID,
-				// depends_on_id is the canonical spawner ID for waits-for edges.
-				// metadata.spawner_id is parsed for compatibility but not required here.
-				spawnerID: rec.dependsOnID,
-				gate:      gate,
-			})
-		}
-	}
-
-	if len(waitsForDeps) > 0 {
-		// Step 4: Load direct children for each waits-for spawner.
-		spawnerIDs := make(map[string]struct{})
-		for _, dep := range waitsForDeps {
-			spawnerIDs[dep.spawnerID] = struct{}{}
-		}
-
-		allSpawnerIDs := make([]string, 0, len(spawnerIDs))
-		for spawnerID := range spawnerIDs {
-			allSpawnerIDs = append(allSpawnerIDs, spawnerID)
-		}
-
-		spawnerChildren := make(map[string][]string)
-		childIDs := make(map[string]struct{})
-		for _, depTbl := range depTables {
-			// Batch spawner ID queries to avoid oversized IN clauses (GH#2179).
-			for start := 0; start < len(allSpawnerIDs); start += queryBatchSize {
-				end := start + queryBatchSize
-				if end > len(allSpawnerIDs) {
-					end = len(allSpawnerIDs)
-				}
-				placeholders, args := doltBuildSQLInClause(allSpawnerIDs[start:end])
-
-				// nolint:gosec // G201: depTbl is hardcoded, placeholders are generated values
-				childQuery := fmt.Sprintf(`
-					SELECT issue_id, depends_on_id FROM %s
-					WHERE type = 'parent-child' AND depends_on_id IN (%s)
-				`, depTbl, placeholders)
-				childRows, err := s.queryContext(ctx, childQuery, args...)
-				if err != nil {
-					if isTableNotExistError(err) {
-						continue // wisp_dependencies table may not exist on pre-migration databases (GH#2271)
-					}
-					return nil, wrapQueryError("compute blocked IDs: get spawner children from "+depTbl, err)
-				}
-
-				for childRows.Next() {
-					var childID, parentID string
-					if err := childRows.Scan(&childID, &parentID); err != nil {
-						_ = childRows.Close() // Best effort cleanup on error path
-						return nil, wrapScanError("compute blocked IDs: scan child", err)
-					}
-					spawnerChildren[parentID] = append(spawnerChildren[parentID], childID)
-					childIDs[childID] = struct{}{}
-				}
-				_ = childRows.Close()
-				if err := childRows.Err(); err != nil {
-					return nil, wrapQueryError("compute blocked IDs: child rows from "+depTbl, err)
-				}
-			}
-		}
-
-		closedChildren := make(map[string]bool)
-		if needsClosedChildren && len(childIDs) > 0 {
-			allChildIDs := make([]string, 0, len(childIDs))
-			for childID := range childIDs {
-				allChildIDs = append(allChildIDs, childID)
-			}
-
-			// Check closed status in issue/wisp tables.
-			// Batch queries to avoid oversized IN clauses (GH#2179).
-			for _, issueTbl := range issueTables {
-				for start := 0; start < len(allChildIDs); start += queryBatchSize {
-					end := start + queryBatchSize
-					if end > len(allChildIDs) {
-						end = len(allChildIDs)
-					}
-					placeholders, args := doltBuildSQLInClause(allChildIDs[start:end])
-
-					// nolint:gosec // G201: issueTbl is hardcoded, placeholders are generated values
-					closedQuery := fmt.Sprintf(`
-						SELECT id FROM %s
-						WHERE status = 'closed' AND id IN (%s)
-					`, issueTbl, placeholders)
-					closedRows, err := s.queryContext(ctx, closedQuery, args...)
-					if err != nil {
-						if isTableNotExistError(err) {
-							continue // wisps table may not exist on pre-migration databases (GH#2271)
-						}
-						return nil, wrapQueryError("compute blocked IDs: get closed children from "+issueTbl, err)
-					}
-					for closedRows.Next() {
-						var childID string
-						if err := closedRows.Scan(&childID); err != nil {
-							_ = closedRows.Close() // Best effort cleanup on error path
-							return nil, wrapScanError("compute blocked IDs: scan closed child", err)
-						}
-						closedChildren[childID] = true
-					}
-					_ = closedRows.Close()
-					if err := closedRows.Err(); err != nil {
-						return nil, wrapQueryError("compute blocked IDs: closed child rows from "+issueTbl, err)
-					}
-				}
-			}
-		}
-
-		// Step 5: Evaluate waits-for gates against current child states.
-		for _, dep := range waitsForDeps {
-			children := spawnerChildren[dep.spawnerID]
-			switch dep.gate {
-			case types.WaitsForAnyChildren:
-				// Block only while spawned children are active and none have completed.
-				if len(children) == 0 {
-					continue
-				}
-				hasClosedChild := false
-				hasActiveChild := false
-				for _, childID := range children {
-					if closedChildren[childID] {
-						hasClosedChild = true
-						break
-					}
-					if activeIDs[childID] {
-						hasActiveChild = true
-					}
-				}
-				if !hasClosedChild && hasActiveChild {
-					blockedSet[dep.issueID] = true
-				}
-			default:
-				// all-children / children-of(step): block while any child remains active.
-				for _, childID := range children {
-					if activeIDs[childID] {
-						blockedSet[dep.issueID] = true
-						break
-					}
-				}
-			}
-		}
-	}
-
-	result := make([]string, 0, len(blockedSet))
-	for id := range blockedSet {
-		result = append(result, id)
+		_ = activeIDs // activeIDs not needed for cache
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	s.cacheMu.Lock()
@@ -800,96 +424,26 @@ func (s *DoltStore) getChildrenOfDeferredParents(ctx context.Context) ([]string,
 }
 
 // getChildrenOfIssues returns IDs of direct children (parent-child deps) of the given issue IDs.
-// Used to propagate blocked status from parents to children (GH#1495).
-// Batches queries to avoid oversized IN clauses (GH#2179).
-// Scans both dependencies and wisp_dependencies tables (bd-8qc5).
 func (s *DoltStore) getChildrenOfIssues(ctx context.Context, parentIDs []string) ([]string, error) {
-	if len(parentIDs) == 0 {
-		return nil, nil
-	}
-	var children []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		for start := 0; start < len(parentIDs); start += queryBatchSize {
-			end := start + queryBatchSize
-			if end > len(parentIDs) {
-				end = len(parentIDs)
-			}
-			placeholders, args := doltBuildSQLInClause(parentIDs[start:end])
-
-			//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-			query := fmt.Sprintf(`
-				SELECT issue_id FROM %s
-				WHERE type = 'parent-child' AND depends_on_id IN (%s)
-			`, depTable, placeholders)
-			rows, err := s.queryContext(ctx, query, args...)
-			if err != nil {
-				if isTableNotExistError(err) {
-					break // wisp_dependencies table may not exist on pre-migration databases (GH#2271)
-				}
-				return nil, wrapQueryError("get children of issues from "+depTable, err)
-			}
-			for rows.Next() {
-				var childID string
-				if err := rows.Scan(&childID); err != nil {
-					_ = rows.Close()
-					return nil, wrapScanError("get children of issues", err)
-				}
-				children = append(children, childID)
-			}
-			_ = rows.Close()
-			if err := rows.Err(); err != nil {
-				return nil, wrapQueryError("get children of issues: rows from "+depTable, err)
-			}
-		}
-	}
-	return children, nil
+	var result []string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetChildrenOfIssuesInTx(ctx, tx, parentIDs)
+		return err
+	})
+	return result, err
 }
 
 // getChildrenWithParents returns a map of childID -> parentID for direct children
-// (parent-child deps) of the given parent IDs. Used by GetBlockedIssues to show
-// transitively blocked children with their parent as the reason (GH#1495).
-// Batches queries to avoid oversized IN clauses (GH#2179).
-// Scans both dependencies and wisp_dependencies tables (bd-8qc5).
+// (parent-child deps) of the given parent IDs.
 func (s *DoltStore) getChildrenWithParents(ctx context.Context, parentIDs []string) (map[string]string, error) {
-	if len(parentIDs) == 0 {
-		return nil, nil
-	}
-	result := make(map[string]string)
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		for start := 0; start < len(parentIDs); start += queryBatchSize {
-			end := start + queryBatchSize
-			if end > len(parentIDs) {
-				end = len(parentIDs)
-			}
-			placeholders, args := doltBuildSQLInClause(parentIDs[start:end])
-
-			//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-			query := fmt.Sprintf(`
-				SELECT issue_id, depends_on_id FROM %s
-				WHERE type = 'parent-child' AND depends_on_id IN (%s)
-			`, depTable, placeholders)
-			rows, err := s.queryContext(ctx, query, args...)
-			if err != nil {
-				if isTableNotExistError(err) {
-					break // wisp_dependencies table may not exist on pre-migration databases (GH#2271)
-				}
-				return nil, wrapQueryError("get children with parents from "+depTable, err)
-			}
-			for rows.Next() {
-				var childID, parentID string
-				if err := rows.Scan(&childID, &parentID); err != nil {
-					_ = rows.Close()
-					return nil, wrapScanError("get children with parents", err)
-				}
-				result[childID] = parentID
-			}
-			_ = rows.Close()
-			if err := rows.Err(); err != nil {
-				return nil, wrapQueryError("get children with parents: rows from "+depTable, err)
-			}
-		}
-	}
-	return result, nil
+	var result map[string]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetChildrenWithParentsInTx(ctx, tx, parentIDs)
+		return err
+	})
+	return result, err
 }
 
 // GetMoleculeProgress returns progress stats for a molecule
@@ -990,110 +544,14 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 }
 
 // GetMoleculeLastActivity returns the most recent activity timestamp for a molecule.
-// It checks updated_at and closed_at across all child steps to find the latest activity.
 func (s *DoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID string) (*types.MoleculeLastActivity, error) {
-	// Route to correct table based on whether molecule is a wisp
-	issueTable := "issues"
-	depTable := "dependencies"
-	if s.isActiveWisp(ctx, moleculeID) {
-		issueTable = "wisps"
-		depTable = "wisp_dependencies"
-	}
-
-	// Get child IDs via parent-child dependencies
-	//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-	depRows, err := s.queryContext(ctx, fmt.Sprintf(`
-		SELECT issue_id FROM %s
-		WHERE depends_on_id = ? AND type = 'parent-child'
-	`, depTable), moleculeID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get molecule children: %w", err)
-	}
-	var childIDs []string
-	for depRows.Next() {
-		var id string
-		if err := depRows.Scan(&id); err != nil {
-			_ = depRows.Close()
-			return nil, wrapScanError("last-activity: scan child", err)
-		}
-		childIDs = append(childIDs, id)
-	}
-	_ = depRows.Close()
-
-	if len(childIDs) == 0 {
-		// No children — fall back to molecule's own updated_at
-		var updatedAt time.Time
-		//nolint:gosec // G201: issueTable is hardcoded
-		err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT updated_at FROM %s WHERE id = ?", issueTable), moleculeID).Scan(&updatedAt)
-		if err != nil {
-			return nil, fmt.Errorf("molecule %s not found: %w", moleculeID, err)
-		}
-		return &types.MoleculeLastActivity{
-			MoleculeID:   moleculeID,
-			LastActivity: updatedAt,
-			Source:       "molecule_updated",
-		}, nil
-	}
-
-	// Find max(updated_at) and max(closed_at) with corresponding step IDs.
-	// Uses batched IN clauses (queryBatchSize) to avoid full table scans on Dolt.
-	var lastUpdatedAt time.Time
-	var lastUpdatedID string
-	var lastClosedAt sql.NullTime
-	var lastClosedID sql.NullString
-
-	for start := 0; start < len(childIDs); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(childIDs) {
-			end = len(childIDs)
-		}
-		batch := childIDs[start:end]
-		placeholders, args := doltBuildSQLInClause(batch)
-
-		// Query for the most recently updated child in this batch
-		//nolint:gosec // G201: issueTable is hardcoded, placeholders contains only ? markers
-		var batchUpdatedAt time.Time
-		var batchUpdatedID string
-		scanErr := s.db.QueryRowContext(ctx, fmt.Sprintf(
-			"SELECT id, updated_at FROM %s WHERE id IN (%s) ORDER BY updated_at DESC LIMIT 1",
-			issueTable, placeholders), args...).Scan(&batchUpdatedID, &batchUpdatedAt)
-		if scanErr == nil && batchUpdatedAt.After(lastUpdatedAt) {
-			lastUpdatedAt = batchUpdatedAt
-			lastUpdatedID = batchUpdatedID
-		}
-
-		// Query for the most recently closed child in this batch
-		var batchClosedAt sql.NullTime
-		var batchClosedID sql.NullString
-		//nolint:gosec // G201: issueTable is hardcoded
-		_ = s.db.QueryRowContext(ctx, fmt.Sprintf(
-			"SELECT id, closed_at FROM %s WHERE id IN (%s) AND closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1",
-			issueTable, placeholders), args...).Scan(&batchClosedID, &batchClosedAt)
-		if batchClosedAt.Valid && (!lastClosedAt.Valid || batchClosedAt.Time.After(lastClosedAt.Time)) {
-			lastClosedAt = batchClosedAt
-			lastClosedID = batchClosedID
-		}
-	}
-
-	if lastUpdatedID == "" {
-		return nil, fmt.Errorf("failed to query last updated child: no children found")
-	}
-
-	// Pick the most recent between updated_at and closed_at
-	result := &types.MoleculeLastActivity{
-		MoleculeID:   moleculeID,
-		LastActivity: lastUpdatedAt,
-		Source:       "step_updated",
-		SourceStepID: lastUpdatedID,
-	}
-
-	if lastClosedAt.Valid && lastClosedAt.Time.After(lastUpdatedAt) {
-		result.LastActivity = lastClosedAt.Time
-		result.Source = "step_closed"
-		result.SourceStepID = lastClosedID.String
-	}
-
-	return result, nil
+	var result *types.MoleculeLastActivity
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetMoleculeLastActivityInTx(ctx, tx, moleculeID)
+		return err
+	})
+	return result, err
 }
 
 // GetNextChildID returns the next available child ID for a parent.
