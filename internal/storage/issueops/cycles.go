@@ -10,7 +10,7 @@ import (
 
 // DetectCyclesInTx finds dependency cycles across both the dependencies and
 // wisp_dependencies tables. Returns slices of issues forming each cycle.
-// Only considers "blocks" dependencies for cycle detection.
+// Only considers "blocks" and "conditional-blocks" dependencies for cycle detection.
 //
 //nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
 func DetectCyclesInTx(ctx context.Context, tx *sql.Tx) ([][]*types.Issue, error) {
@@ -31,7 +31,7 @@ func DetectCyclesInTx(ctx context.Context, tx *sql.Tx) ([][]*types.Issue, error)
 				_ = rows.Close()
 				return nil, fmt.Errorf("detect cycles: scan %s: %w", depTable, err)
 			}
-			if types.DependencyType(depType) == types.DepBlocks {
+			if types.DependencyType(depType) == types.DepBlocks || types.DependencyType(depType) == types.DepConditionalBlocks {
 				graph[issueID] = append(graph[issueID], dependsOnID)
 			}
 		}

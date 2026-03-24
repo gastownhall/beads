@@ -114,13 +114,18 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 	}
 
+	// Self-dependency check
+	if dep.IssueID == dep.DependsOnID {
+		return fmt.Errorf("cannot add self-dependency: %s cannot depend on itself", dep.IssueID)
+	}
+
 	// Cycle detection for blocking deps via recursive CTE.
-	if dep.Type == types.DepBlocks {
+	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
 		// Build UNION ALL across all dep tables for the CTE.
 		var unions []string
 		for _, t := range depTables {
 			//nolint:gosec // G201: depTables are caller-controlled constants
-			unions = append(unions, fmt.Sprintf("SELECT issue_id, depends_on_id FROM %s WHERE type = 'blocks'", t))
+			unions = append(unions, fmt.Sprintf("SELECT issue_id, depends_on_id FROM %s WHERE type IN ('blocks', 'conditional-blocks')", t))
 		}
 		unionQuery := strings.Join(unions, " UNION ALL ")
 
