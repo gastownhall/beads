@@ -46,6 +46,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return
 		}
 
+		// Handle --explain flag (dependency-aware reasoning)
+		explain, _ := cmd.Flags().GetBool("explain")
+		if explain {
+			runReadyExplain(cmd)
+			return
+		}
+
 		limit, _ := cmd.Flags().GetInt("limit")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		unassigned, _ := cmd.Flags().GetBool("unassigned")
@@ -395,6 +402,221 @@ func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
 }
 
+// runReadyExplain shows dependency-aware reasoning for why issues are ready or blocked.
+func runReadyExplain(cmd *cobra.Command) {
+	ctx := rootCtx
+
+	// Get the active store (respect --rig flag)
+	activeStore := store
+	rigOverride, _ := cmd.Flags().GetString("rig")
+	if rigOverride != "" {
+		rigStore, err := openStoreForRig(ctx, rigOverride)
+		if err != nil {
+			FatalError("%v", err)
+		}
+		defer func() { _ = rigStore.Close() }()
+		activeStore = rigStore
+	} else {
+		routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+		if err != nil {
+			FatalError("%v", err)
+		}
+		if routed {
+			defer func() { _ = routedStore.Close() }()
+			activeStore = routedStore
+		}
+	}
+
+	// Get ready issues (no limit for explain mode — show everything)
+	filter := types.WorkFilter{
+		Status:     types.StatusOpen,
+		SortPolicy: types.SortPolicyPriority,
+	}
+	readyIssues, err := activeStore.GetReadyWork(ctx, filter)
+	if err != nil {
+		FatalErrorRespectJSON("%v", err)
+	}
+
+	// Get blocked issues
+	blockedIssues, err := activeStore.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		FatalErrorRespectJSON("%v", err)
+	}
+
+	// Get dependency records for ready issues to find resolved blockers
+	readyIDs := make([]string, len(readyIssues))
+	for i, issue := range readyIssues {
+		readyIDs[i] = issue.ID
+	}
+	depCounts, _ := activeStore.GetDependencyCounts(ctx, readyIDs)
+	allDeps, _ := activeStore.GetDependencyRecordsForIssues(ctx, readyIDs)
+
+	// Detect cycles
+	cycles, _ := activeStore.DetectCycles(ctx)
+
+	// Build ready items with explanations
+	readyItems := make([]types.ReadyItem, 0, len(readyIssues))
+	for _, issue := range readyIssues {
+		counts := depCounts[issue.ID]
+		if counts == nil {
+			counts = &types.DependencyCounts{}
+		}
+
+		// Find resolved blockers (closed issues that this depended on)
+		var resolvedBlockers []string
+		reason := "no blocking dependencies"
+		deps := allDeps[issue.ID]
+		for _, dep := range deps {
+			if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks || dep.Type == types.DepWaitsFor {
+				resolvedBlockers = append(resolvedBlockers, dep.DependsOnID)
+			}
+		}
+		if len(resolvedBlockers) > 0 {
+			reason = fmt.Sprintf("%d blocker(s) resolved", len(resolvedBlockers))
+		}
+
+		// Compute parent
+		var parent *string
+		for _, dep := range deps {
+			if dep.Type == types.DepParentChild {
+				parent = &dep.DependsOnID
+				break
+			}
+		}
+
+		readyItems = append(readyItems, types.ReadyItem{
+			Issue:            issue,
+			Reason:           reason,
+			ResolvedBlockers: resolvedBlockers,
+			DependencyCount:  counts.DependencyCount,
+			DependentCount:   counts.DependentCount,
+			Parent:           parent,
+		})
+	}
+
+	// Build blocked items with blocker details
+	blockedItems := make([]types.BlockedItem, 0, len(blockedIssues))
+	// Collect all blocker IDs to batch-fetch
+	allBlockerIDs := make(map[string]bool)
+	for _, bi := range blockedIssues {
+		for _, blockerID := range bi.BlockedBy {
+			allBlockerIDs[blockerID] = true
+		}
+	}
+	blockerIDList := make([]string, 0, len(allBlockerIDs))
+	for id := range allBlockerIDs {
+		blockerIDList = append(blockerIDList, id)
+	}
+	blockerIssues, _ := activeStore.GetIssuesByIDs(ctx, blockerIDList)
+	blockerMap := make(map[string]*types.Issue, len(blockerIssues))
+	for _, issue := range blockerIssues {
+		blockerMap[issue.ID] = issue
+	}
+
+	for _, bi := range blockedIssues {
+		blockers := make([]types.BlockerInfo, 0, len(bi.BlockedBy))
+		for _, blockerID := range bi.BlockedBy {
+			info := types.BlockerInfo{ID: blockerID}
+			if blocker, ok := blockerMap[blockerID]; ok {
+				info.Title = blocker.Title
+				info.Status = blocker.Status
+				info.Priority = blocker.Priority
+			}
+			blockers = append(blockers, info)
+		}
+		blockedItems = append(blockedItems, types.BlockedItem{
+			Issue:          bi.Issue,
+			BlockedBy:      blockers,
+			BlockedByCount: bi.BlockedByCount,
+		})
+	}
+
+	// Build cycle info
+	var cycleIDs [][]string
+	for _, cycle := range cycles {
+		ids := make([]string, len(cycle))
+		for i, issue := range cycle {
+			ids[i] = issue.ID
+		}
+		cycleIDs = append(cycleIDs, ids)
+	}
+
+	explanation := types.ReadyExplanation{
+		Ready:   readyItems,
+		Blocked: blockedItems,
+		Cycles:  cycleIDs,
+		Summary: types.ExplainSummary{
+			TotalReady:   len(readyItems),
+			TotalBlocked: len(blockedItems),
+			CycleCount:   len(cycleIDs),
+		},
+	}
+
+	if jsonOutput {
+		outputJSON(explanation)
+		return
+	}
+
+	// Human-readable output
+	fmt.Printf("\n%s Ready Work Explanation\n\n", ui.RenderAccent("📊"))
+
+	// Ready section
+	if len(explanation.Ready) > 0 {
+		fmt.Printf("%s Ready (%d issues):\n\n", ui.RenderPass("●"), len(explanation.Ready))
+		for _, item := range explanation.Ready {
+			fmt.Printf("  %s [%s] %s\n",
+				ui.RenderID(item.ID),
+				ui.RenderPriority(item.Priority),
+				item.Title)
+			fmt.Printf("    Reason: %s\n", item.Reason)
+			if len(item.ResolvedBlockers) > 0 {
+				fmt.Printf("    Resolved blockers: %s\n", strings.Join(item.ResolvedBlockers, ", "))
+			}
+			if item.DependentCount > 0 {
+				fmt.Printf("    Unblocks: %d issue(s)\n", item.DependentCount)
+			}
+			fmt.Println()
+		}
+	} else {
+		fmt.Printf("%s No ready work\n\n", ui.RenderWarn("○"))
+	}
+
+	// Blocked section
+	if len(explanation.Blocked) > 0 {
+		fmt.Printf("%s Blocked (%d issues):\n\n", ui.RenderFail("●"), len(explanation.Blocked))
+		for _, item := range explanation.Blocked {
+			fmt.Printf("  %s [%s] %s\n",
+				ui.RenderID(item.ID),
+				ui.RenderPriority(item.Priority),
+				item.Title)
+			for _, blocker := range item.BlockedBy {
+				fmt.Printf("    ← blocked by %s: %s [%s]\n",
+					ui.RenderID(blocker.ID), blocker.Title, blocker.Status)
+			}
+			fmt.Println()
+		}
+	}
+
+	// Cycles section
+	if len(explanation.Cycles) > 0 {
+		fmt.Printf("%s Cycles detected (%d):\n\n", ui.RenderFail("⚠"), len(explanation.Cycles))
+		for _, cycle := range explanation.Cycles {
+			fmt.Printf("  %s → %s\n", strings.Join(cycle, " → "), cycle[0])
+		}
+		fmt.Println()
+	}
+
+	// Summary
+	fmt.Printf("%s Summary: %d ready, %d blocked",
+		ui.RenderMuted("─"),
+		explanation.Summary.TotalReady,
+		explanation.Summary.TotalBlocked)
+	if explanation.Summary.CycleCount > 0 {
+		fmt.Printf(", %d cycle(s)", explanation.Summary.CycleCount)
+	}
+	fmt.Printf("\n\n")
+}
+
 // runMoleculeReady shows ready steps within a specific molecule
 func runMoleculeReady(_ *cobra.Command, molIDArg string) {
 	ctx := rootCtx
@@ -538,6 +760,8 @@ func init() {
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
+	readyCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig my-project, --rig gt-, --rig gt)")
+	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")

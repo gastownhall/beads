@@ -945,6 +945,46 @@ type BlockedIssue struct {
 	BlockedBy      []string `json:"blocked_by"`
 }
 
+// ReadyExplanation provides reasoning for why issues are ready or blocked.
+type ReadyExplanation struct {
+	Ready   []ReadyItem    `json:"ready"`
+	Blocked []BlockedItem  `json:"blocked"`
+	Cycles  [][]string     `json:"cycles,omitempty"`
+	Summary ExplainSummary `json:"summary"`
+}
+
+// ReadyItem explains why a specific issue is ready for work.
+type ReadyItem struct {
+	*Issue
+	Reason           string   `json:"reason"`
+	ResolvedBlockers []string `json:"resolved_blockers"`
+	DependencyCount  int      `json:"dependency_count"`
+	DependentCount   int      `json:"dependent_count"`
+	Parent           *string  `json:"parent,omitempty"`
+}
+
+// BlockedItem explains why a specific issue is blocked.
+type BlockedItem struct {
+	Issue
+	BlockedBy      []BlockerInfo `json:"blocked_by"`
+	BlockedByCount int           `json:"blocked_by_count"`
+}
+
+// BlockerInfo provides details about a single blocker.
+type BlockerInfo struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Status   Status `json:"status"`
+	Priority int    `json:"priority"`
+}
+
+// ExplainSummary provides aggregate statistics.
+type ExplainSummary struct {
+	TotalReady   int `json:"total_ready"`
+	TotalBlocked int `json:"total_blocked"`
+	CycleCount   int `json:"cycle_count"`
+}
+
 // TreeNode represents a node in a dependency tree
 type TreeNode struct {
 	Issue
