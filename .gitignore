@@ -24,8 +24,10 @@ pkg/
 *.swo
 *~
 
-# Claude Code local state (skills, settings, etc.)
+# Agent local state (skills, settings, etc.)
+.amp/
 .claude/
+
 
 # OS
 .DS_Store
