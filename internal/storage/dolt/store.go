@@ -539,6 +539,16 @@ func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
 	return versioncontrolops.BackupRemove(ctx, s.db, name)
 }
 
+// BackupExportTables exports all tables to JSONL files in dir.
+func (s *DoltStore) BackupExportTables(ctx context.Context, dir, prefix string) (*storage.BackupCounts, error) {
+	return versioncontrolops.ExportTables(ctx, s.db, dir, prefix)
+}
+
+// BackupRestoreFromDir restores all JSONL tables from dir.
+func (s *DoltStore) BackupRestoreFromDir(ctx context.Context, dir, prefix string, dryRun bool) (*storage.BackupRestoreResult, error) {
+	return versioncontrolops.RestoreFromDir(ctx, s.db, s, dir, prefix, dryRun)
+}
+
 // QueryContext wraps s.db.QueryContext with retry for transient errors.
 // Exported so callers (e.g. backup) can run ad-hoc queries with retry
 // instead of going through the raw *sql.DB.

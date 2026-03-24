@@ -283,72 +283,9 @@ func (s *EmbeddedDoltStore) GetIssuesByLabel(ctx context.Context, label string) 
 func (s *EmbeddedDoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	var result []*types.BlockedIssue
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		blockedIDList, err := computeBlockedIDs(ctx, tx, true)
-		if err != nil {
-			return err
-		}
-		if len(blockedIDList) == 0 {
-			return nil
-		}
-
-		// Build blocker map from dependencies.
-		blockedSet := make(map[string]bool, len(blockedIDList))
-		for _, id := range blockedIDList {
-			blockedSet[id] = true
-		}
-
-		activeIDs, err := getActiveIDs(ctx, tx, []string{"issues", "wisps"})
-		if err != nil {
-			return err
-		}
-
-		blockerMap := make(map[string][]string)
-		for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-			//nolint:gosec // G201: depTable is hardcoded
-			depRows, qErr := tx.QueryContext(ctx, fmt.Sprintf(
-				`SELECT issue_id, depends_on_id FROM %s
-				 WHERE type IN ('blocks', 'waits-for', 'conditional-blocks')`, depTable))
-			if qErr != nil {
-				return qErr
-			}
-			for depRows.Next() {
-				var issueID, blockerID string
-				if err := depRows.Scan(&issueID, &blockerID); err != nil {
-					depRows.Close()
-					return err
-				}
-				if blockedSet[issueID] && activeIDs[blockerID] {
-					blockerMap[issueID] = append(blockerMap[issueID], blockerID)
-				}
-			}
-			depRows.Close()
-		}
-
-		blockedIDs := make([]string, 0, len(blockerMap))
-		for id := range blockerMap {
-			blockedIDs = append(blockedIDs, id)
-		}
-		issues, err := issueops.GetIssuesByIDsInTx(ctx, tx, blockedIDs)
-		if err != nil {
-			return err
-		}
-		issueMap := make(map[string]*types.Issue, len(issues))
-		for _, issue := range issues {
-			issueMap[issue.ID] = issue
-		}
-
-		for id, blockerIDs := range blockerMap {
-			issue, ok := issueMap[id]
-			if !ok || issue == nil {
-				continue
-			}
-			result = append(result, &types.BlockedIssue{
-				Issue:          *issue,
-				BlockedByCount: len(blockerIDs),
-				BlockedBy:      blockerIDs,
-			})
-		}
-		return nil
+		var err error
+		result, err = issueops.GetBlockedIssuesInTx(ctx, tx, filter)
+		return err
 	})
 	return result, err
 }

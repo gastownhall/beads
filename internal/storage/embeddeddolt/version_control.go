@@ -266,3 +266,23 @@ func (s *EmbeddedDoltStore) BackupRemove(ctx context.Context, name string) error
 		return versioncontrolops.BackupRemove(ctx, db, name)
 	})
 }
+
+func (s *EmbeddedDoltStore) BackupExportTables(ctx context.Context, dir, prefix string) (*storage.BackupCounts, error) {
+	var result *storage.BackupCounts
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		result, err = versioncontrolops.ExportTables(ctx, db, dir, prefix)
+		return err
+	})
+	return result, err
+}
+
+func (s *EmbeddedDoltStore) BackupRestoreFromDir(ctx context.Context, dir, prefix string, dryRun bool) (*storage.BackupRestoreResult, error) {
+	var result *storage.BackupRestoreResult
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		result, err = versioncontrolops.RestoreFromDir(ctx, db, s, dir, prefix, dryRun)
+		return err
+	})
+	return result, err
+}
