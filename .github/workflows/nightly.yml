@@ -28,12 +28,6 @@ jobs:
         run: |
           curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
 
-      - name: Pull Dolt Docker image
-        run: |
-          IMG=$(grep 'DoltDockerImage' internal/testutil/testdoltcommon.go | grep -oP '"[^"]+"' | tr -d '"')
-          echo "Pulling $IMG"
-          docker pull "$IMG"
-
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"
@@ -43,6 +37,11 @@ jobs:
         run: go build -v ./cmd/bd
 
       - name: Full Test Suite (including integration tests)
+        env:
+          # Skip Docker-based Dolt testcontainer tests — they hang in
+          # GitHub Actions (known issue, see scripts/repro-dolt-hang/).
+          # Non-Docker integration tests still run via the installed dolt binary.
+          BEADS_TEST_SKIP: dolt
         run: go test -v -race -tags=integration -coverprofile=coverage.out -timeout=30m ./...
 
       - name: Check coverage threshold
