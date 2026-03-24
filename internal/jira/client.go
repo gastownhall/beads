@@ -165,12 +165,18 @@ func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) 
 	var allIssues []Issue
 	startAt := 0
 	maxResults := 100
+	page := 0
 
 	for {
 		select {
 		case <-ctx.Done():
 			return allIssues, ctx.Err()
 		default:
+		}
+
+		page++
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
 		}
 
 		params := url.Values{
@@ -199,7 +205,7 @@ func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) 
 
 		allIssues = append(allIssues, result.Issues...)
 
-		if startAt+len(result.Issues) >= result.Total {
+		if len(result.Issues) == 0 || startAt+len(result.Issues) >= result.Total {
 			break
 		}
 		startAt += len(result.Issues)
@@ -376,16 +382,21 @@ func (c *Client) doRequest(ctx context.Context, method, apiURL string, body []by
 
 		if retriable {
 			delay := RetryDelay * time.Duration(1<<uint(attempt))
+			useServerDelay := false
 
-			// Use Retry-After header if present
+			// Use Retry-After header if present (no jitter — respect server-mandated delay)
 			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
 				if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
 					delay = time.Duration(seconds) * time.Second
+					useServerDelay = true
 				}
 			}
 
-			if half := int64(delay / 2); half > 0 {
-				delay += time.Duration(rand.Int64N(half))
+			// Only add jitter to our own exponential backoff, not server-mandated delays
+			if !useServerDelay {
+				if half := int64(delay / 2); half > 0 {
+					delay += time.Duration(rand.Int64N(half))
+				}
 			}
 
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, MaxRetries+1)

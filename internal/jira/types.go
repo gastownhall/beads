@@ -13,4 +13,7 @@ const (
 
 	// MaxResponseSize is the maximum response body size (50 MB).
 	MaxResponseSize = 50 * 1024 * 1024
+
+	// MaxPages is the maximum number of pagination requests to prevent infinite loops.
+	MaxPages = 1000
 )
