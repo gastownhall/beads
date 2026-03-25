@@ -128,6 +128,96 @@ func TestEpicCommandInit(t *testing.T) {
 	}
 }
 
+func TestEpicEligibleForCloseWithWispChildren(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	sqliteStore := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	// Create an epic with one regular child and one wisp child.
+	epic := &types.Issue{
+		ID:          "test-epic-wisp",
+		Title:       "Epic with wisp child",
+		Description: "Tests that wisp children are counted for closure eligibility",
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   types.TypeEpic,
+		CreatedAt:   time.Now(),
+	}
+	if err := sqliteStore.CreateIssue(ctx, epic, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Regular child (closed)
+	regularChild := &types.Issue{
+		Title:     "Regular child",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+		ClosedAt:  ptrTime(time.Now()),
+	}
+	if err := sqliteStore.CreateIssue(ctx, regularChild, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wisp child (still open) — stored in wisps table
+	wispChild := &types.Issue{
+		Title:     "Wisp child",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+		CreatedAt: time.Now(),
+	}
+	if err := sqliteStore.CreateIssue(ctx, wispChild, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add parent-child dependencies
+	if err := sqliteStore.AddDependency(ctx, &types.Dependency{
+		IssueID:     regularChild.ID,
+		DependsOnID: epic.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqliteStore.AddDependency(ctx, &types.Dependency{
+		IssueID:     wispChild.ID,
+		DependsOnID: epic.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Epic should NOT be eligible — wisp child is still open
+	epics, err := sqliteStore.GetEpicsEligibleForClosure(ctx)
+	if err != nil {
+		t.Fatalf("GetEpicsEligibleForClosure failed: %v", err)
+	}
+
+	var epicStatus *types.EpicStatus
+	for _, e := range epics {
+		if e.Epic.ID == "test-epic-wisp" {
+			epicStatus = e
+			break
+		}
+	}
+
+	if epicStatus == nil {
+		t.Fatal("Epic test-epic-wisp not found in results")
+	}
+	if epicStatus.TotalChildren != 2 {
+		t.Errorf("Expected 2 total children (1 regular + 1 wisp), got %d", epicStatus.TotalChildren)
+	}
+	if epicStatus.ClosedChildren != 1 {
+		t.Errorf("Expected 1 closed child, got %d", epicStatus.ClosedChildren)
+	}
+	if epicStatus.EligibleForClose {
+		t.Error("Epic should NOT be eligible for close with open wisp child")
+	}
+}
+
 func TestEpicEligibleForClose(t *testing.T) {
 	tmpDir := t.TempDir()
 	testDB := filepath.Join(tmpDir, ".beads", "beads.db")

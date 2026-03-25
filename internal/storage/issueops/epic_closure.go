@@ -38,31 +38,37 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx *sql.Tx) ([]*types.E
 		return nil, nil
 	}
 
-	// Step 2: Get parent-child dependencies (single-table scan)
-	depRows, err := tx.QueryContext(ctx, `
-		SELECT depends_on_id, issue_id FROM dependencies
-		WHERE type = 'parent-child'
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get parent-child deps: %w", err)
-	}
-	// Map: parent_id -> list of child IDs
+	// Step 2: Get parent-child dependencies from both tables (bd-w2w)
+	// Wisp children store their parent-child deps in wisp_dependencies,
+	// so we must check both tables to find all children of an epic.
 	epicChildMap := make(map[string][]string)
 	epicSet := make(map[string]bool, len(epicIDs))
 	for _, id := range epicIDs {
 		epicSet[id] = true
 	}
-	for depRows.Next() {
-		var parentID, childID string
-		if err := depRows.Scan(&parentID, &childID); err != nil {
-			depRows.Close()
-			return nil, fmt.Errorf("scan parent-child dep: %w", err)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT depends_on_id, issue_id FROM %s
+			WHERE type = 'parent-child'
+		`, depTable))
+		if err != nil {
+			if isTableNotExistError(err) {
+				continue // wisp_dependencies may not exist on pre-migration databases
+			}
+			return nil, fmt.Errorf("failed to get parent-child deps from %s: %w", depTable, err)
 		}
-		if epicSet[parentID] {
-			epicChildMap[parentID] = append(epicChildMap[parentID], childID)
+		for depRows.Next() {
+			var parentID, childID string
+			if err := depRows.Scan(&parentID, &childID); err != nil {
+				depRows.Close()
+				return nil, fmt.Errorf("scan parent-child dep from %s: %w", depTable, err)
+			}
+			if epicSet[parentID] {
+				epicChildMap[parentID] = append(epicChildMap[parentID], childID)
+			}
 		}
+		depRows.Close()
 	}
-	depRows.Close()
 
 	// Step 3: Batch-fetch statuses for all child issues across all epics
 	allChildIDs := make([]string, 0)
