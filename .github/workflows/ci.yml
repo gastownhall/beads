@@ -223,7 +223,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v6
 
@@ -255,7 +255,7 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_BD_BINARY: /tmp/bd-embedded-test
-        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 8
+        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 20
 
   # Windows smoke tests only - full test suite times out (see bd-bmev)
   # Linux/macOS run comprehensive tests; Windows just verifies binary works
