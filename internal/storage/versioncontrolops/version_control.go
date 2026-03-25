@@ -48,10 +48,10 @@ func Log(ctx context.Context, db DBConn, limit int) ([]storage.CommitInfo, error
 	var query string
 	var args []interface{}
 	if limit > 0 {
-		query = "SELECT commit_hash, committer, email, date, message FROM dolt_log LIMIT ?"
+		query = "SELECT commit_hash, committer, email, date, message FROM dolt_log ORDER BY date DESC LIMIT ?"
 		args = []interface{}{limit}
 	} else {
-		query = "SELECT commit_hash, committer, email, date, message FROM dolt_log"
+		query = "SELECT commit_hash, committer, email, date, message FROM dolt_log ORDER BY date DESC"
 	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {

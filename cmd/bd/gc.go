@@ -142,7 +142,9 @@ Examples:
 
 		commitCount := 0
 		logEntries, logErr := store.Log(ctx, 0)
-		if logErr == nil {
+		if logErr != nil {
+			WarnError("could not read Dolt commit log: %v", logErr)
+		} else {
 			commitCount = len(logEntries)
 		}
 

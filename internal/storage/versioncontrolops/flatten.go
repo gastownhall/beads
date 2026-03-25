@@ -14,10 +14,11 @@ import (
 //  5. Checkout main
 //  6. Hard-reset main to the flattened branch
 //  7. Delete temp branch
-//  8. Run garbage collection
 //
-// conn must be a non-transactional database connection since the stored
-// procedures manipulate branches and cannot run inside explicit transactions.
+// Callers should run DoltGC afterward to reclaim disk space from orphaned history.
+//
+// conn must be a single database connection (not a pooled *sql.DB) since the
+// stored procedures rely on session-scoped state (current branch, working set).
 func Flatten(ctx context.Context, conn DBConn) error {
 	// Find the initial commit hash (oldest ancestor).
 	var initialHash string
