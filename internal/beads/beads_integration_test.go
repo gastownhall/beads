@@ -376,6 +376,9 @@ func TestBatchCreateIssues(t *testing.T) {
 
 // TestFindDatabasePathIntegration tests the database discovery
 func TestFindDatabasePathIntegration(t *testing.T) {
+	if testDoltPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	// Create temporary directory with .beads
 	tmpDir, err := os.MkdirTemp("", "beads-find-*")
 	if err != nil {

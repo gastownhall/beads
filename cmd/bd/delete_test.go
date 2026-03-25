@@ -333,6 +333,9 @@ func TestDeleteIssueUnsupportedStorage(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 
 	oldStore := store
 	defer func() { store = oldStore }()

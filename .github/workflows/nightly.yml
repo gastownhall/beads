@@ -28,10 +28,12 @@ jobs:
         run: |
           curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
 
-      - name: Configure Git
+      - name: Configure Git and Dolt identity
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
 
       - name: Build
         run: go build -v ./cmd/bd
