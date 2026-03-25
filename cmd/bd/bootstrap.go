@@ -42,6 +42,10 @@ Examples:
   bd bootstrap --json       # Output plan as JSON
 `,
 	Run: func(cmd *cobra.Command, args []string) {
+		if isEmbeddedDolt {
+			fmt.Fprintln(os.Stderr, "Error: 'bd bootstrap' is not yet supported in embedded mode")
+			os.Exit(1)
+		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 		// Find beads directory

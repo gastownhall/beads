@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
@@ -127,27 +126,19 @@ func (s *DoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.Cust
 	}
 	s.cacheMu.Unlock()
 
-	value, err := s.GetConfig(ctx, "status.custom")
-	if err != nil {
-		// On database error, try fallback to config.yaml
-		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-			return parseStatusFallback(yamlStatuses), nil
-		}
-		return nil, err
-	}
-
 	var detailed []types.CustomStatus
-	if value != "" {
-		parsed, parseErr := types.ParseCustomStatusConfig(value)
-		if parseErr != nil {
-			// Degraded mode: log warning, return empty (CLI remains operable)
-			log.Printf("warning: invalid status.custom config: %v. Custom statuses disabled. Fix with: bd config set status.custom \"valid,values\"", parseErr)
-			detailed = nil
-		} else {
-			detailed = parsed
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var txErr error
+		detailed, txErr = issueops.ResolveCustomStatusesDetailedInTx(ctx, tx)
+		return txErr
+	})
+	if err != nil {
+		// DB unavailable — fall back to config.yaml before giving up.
+		log.Printf("warning: failed to resolve custom statuses: %v. Custom statuses disabled. Fix with: bd config set status.custom \"valid,values\"", err)
+		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
+			return issueops.ParseStatusFallback(yamlStatuses), nil
 		}
-	} else if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-		detailed = parseStatusFallback(yamlStatuses)
+		return nil, nil
 	}
 
 	s.cacheMu.Lock()
@@ -159,25 +150,6 @@ func (s *DoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.Cust
 	s.cacheMu.Unlock()
 
 	return detailed, nil
-}
-
-// parseStatusFallback converts legacy []string status names (from YAML) to []CustomStatus.
-// All statuses get CategoryUnspecified since YAML fallback may use flat format.
-func parseStatusFallback(names []string) []types.CustomStatus {
-	// Try parsing as new format first (YAML might have "name:category" entries)
-	joined := strings.Join(names, ",")
-	if parsed, err := types.ParseCustomStatusConfig(joined); err == nil {
-		return parsed
-	}
-	// Fall back to treating each as an untyped name
-	result := make([]types.CustomStatus, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name != "" {
-			result = append(result, types.CustomStatus{Name: name, Category: types.CategoryUnspecified})
-		}
-	}
-	return result
 }
 
 // GetCustomTypes returns custom issue type values from config.
@@ -196,20 +168,18 @@ func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
 	}
 	s.cacheMu.Unlock()
 
-	value, err := s.GetConfig(ctx, "types.custom")
+	var result []string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var txErr error
+		result, txErr = issueops.ResolveCustomTypesInTx(ctx, tx)
+		return txErr
+	})
 	if err != nil {
-		// On database error, try fallback to config.yaml
+		// DB unavailable — fall back to config.yaml.
 		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
 			return yamlTypes, nil
 		}
-		return nil, err
-	}
-
-	var result []string
-	if value != "" {
-		result = parseCommaSeparatedList(value)
-	} else if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
-		result = yamlTypes
+		return nil, nil
 	}
 
 	s.cacheMu.Lock()
@@ -236,26 +206,22 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	}
 	s.cacheMu.Unlock()
 
-	var types []string
-
-	value, err := s.GetConfig(ctx, "types.infra")
-	if err == nil && value != "" {
-		types = parseCommaSeparatedList(value)
-	}
-
-	if len(types) == 0 {
+	var result map[string]bool
+	if err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		result = issueops.ResolveInfraTypesInTx(ctx, tx)
+		return nil
+	}); err != nil || result == nil {
+		// DB unavailable — fall back to YAML then defaults.
+		var typeList []string
 		if yamlTypes := config.GetInfraTypesFromYAML(); len(yamlTypes) > 0 {
-			types = yamlTypes
+			typeList = yamlTypes
+		} else {
+			typeList = storage.DefaultInfraTypes()
 		}
-	}
-
-	if len(types) == 0 {
-		types = storage.DefaultInfraTypes()
-	}
-
-	result := make(map[string]bool, len(types))
-	for _, t := range types {
-		result[t] = true
+		result = make(map[string]bool, len(typeList))
+		for _, t := range typeList {
+			result[t] = true
+		}
 	}
 
 	s.cacheMu.Lock()
@@ -263,22 +229,5 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	s.infraTypeCached = true
 	s.cacheMu.Unlock()
 
-	return result
-}
-
-// parseCommaSeparatedList splits a comma-separated string into a slice of trimmed entries.
-// Empty entries are filtered out.
-func parseCommaSeparatedList(value string) []string {
-	if value == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		trimmed := strings.TrimSpace(p)
-		if trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
 	return result
 }

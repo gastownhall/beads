@@ -12,9 +12,12 @@
 
 set -euo pipefail
 
-SHARD_INDEX="${1:?usage: $0 <shard_index> <total_shards>}"
-TOTAL_SHARDS="${2:?usage: $0 <shard_index> <total_shards>}"
+SHARD_NUMBER="${1:?usage: $0 <shard_number> <total_shards>}"
+TOTAL_SHARDS="${2:?usage: $0 <shard_number> <total_shards>}"
 shift 2
+
+# Convert 1-indexed shard number to 0-indexed for modulo arithmetic.
+SHARD_INDEX=$(( SHARD_NUMBER - 1 ))
 
 # Discover all top-level TestEmbedded* functions.
 ALL_TESTS=$(grep -rh '^func TestEmbedded' cmd/bd/*_embedded_test.go \
@@ -37,14 +40,14 @@ while IFS= read -r name; do
 done <<< "$ALL_TESTS"
 
 if [ ${#SHARD_TESTS[@]} -eq 0 ]; then
-  echo "Shard ${SHARD_INDEX}/${TOTAL_SHARDS}: no tests assigned (all hashed to other shards)"
+  echo "Shard ${SHARD_NUMBER}/${TOTAL_SHARDS}: no tests assigned (all hashed to other shards)"
   exit 0
 fi
 
 # Build the -run regex: "^(TestA|TestB|TestC)$"
 RUN_REGEX="^($(IFS='|'; echo "${SHARD_TESTS[*]}"))$"
 
-echo "Shard ${SHARD_INDEX}/${TOTAL_SHARDS}: running ${#SHARD_TESTS[@]} test(s)"
+echo "Shard ${SHARD_NUMBER}/${TOTAL_SHARDS}: running ${#SHARD_TESTS[@]} test(s)"
 printf "  %s\n" "${SHARD_TESTS[@]}"
 echo ""
 
