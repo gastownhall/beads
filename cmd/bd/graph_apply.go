@@ -7,7 +7,6 @@ import (
 	"os"
 	"sort"
 
-	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -49,64 +48,40 @@ type GraphApplyResult struct {
 	IDs map[string]string `json:"ids"`
 }
 
-var graphApplyCmd = &cobra.Command{
-	Use:   "graph-apply",
-	Short: "Apply a symbolic issue graph atomically",
-	Long: `Create a batch of issues with dependencies in a single transaction.
+// createIssuesFromGraph handles `bd create --graph <plan-file>`.
+func createIssuesFromGraph(planFile string) {
+	data, err := os.ReadFile(planFile) // #nosec G304 -- user-provided path is intentional
+	if err != nil {
+		FatalError("reading graph plan: %v", err)
+	}
 
-Reads a JSON plan file describing nodes (issues to create) and edges
-(dependencies between them). Nodes reference each other by symbolic keys;
-the command resolves them to real issue IDs after creation.
+	var plan GraphApplyPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		FatalError("parsing graph plan: %v", err)
+	}
 
-This is much faster than sequential bd create + bd dep add calls because
-all issues are created in a single database transaction.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		planFile, _ := cmd.Flags().GetString("plan-file")
-		if planFile == "" {
-			FatalError("--plan-file is required")
-		}
+	if err := validateGraphApplyPlan(&plan); err != nil {
+		FatalError("invalid graph plan: %v", err)
+	}
 
-		data, err := os.ReadFile(planFile) // #nosec G304 -- user-provided path is intentional
-		if err != nil {
-			FatalError("reading plan file: %v", err)
-		}
+	result, err := executeGraphApply(rootCtx, &plan)
+	if err != nil {
+		FatalError("graph create: %v", err)
+	}
 
-		var plan GraphApplyPlan
-		if err := json.Unmarshal(data, &plan); err != nil {
-			FatalError("parsing plan file: %v", err)
+	if jsonOutput {
+		outputJSON(result)
+	} else {
+		fmt.Printf("Created %d issues\n", len(result.IDs))
+		keys := make([]string, 0, len(result.IDs))
+		for key := range result.IDs {
+			keys = append(keys, key)
 		}
-
-		if store == nil {
-			FatalErrorWithHint("database not initialized",
-				"run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+		sort.Strings(keys)
+		for _, key := range keys {
+			fmt.Printf("  %s -> %s\n", key, result.IDs[key])
 		}
-		if actor == "" {
-			actor = "bd"
-		}
-
-		if err := validateGraphApplyPlan(&plan); err != nil {
-			FatalError("invalid plan: %v", err)
-		}
-
-		result, err := executeGraphApply(rootCtx, &plan)
-		if err != nil {
-			FatalError("graph-apply: %v", err)
-		}
-
-		if jsonOutput {
-			outputJSON(result)
-		} else {
-			fmt.Printf("Created %d issues\n", len(result.IDs))
-			keys := make([]string, 0, len(result.IDs))
-			for key := range result.IDs {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
-				fmt.Printf("  %s -> %s\n", key, result.IDs[key])
-			}
-		}
-	},
+	}
 }
 
 // validateGraphApplyPlan checks the plan for structural errors before any writes.
@@ -136,7 +111,6 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 		// Validate MetadataRefs point to known keys.
 		for metaKey, refKey := range node.MetadataRefs {
 			if !seenKeys[refKey] {
-				// Check if it's a forward ref (key defined later in the plan).
 				found := false
 				for _, other := range plan.Nodes {
 					if other.Key == refKey {
@@ -149,7 +123,6 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 				}
 			}
 		}
-		// Validate ParentKey points to a known key.
 		if node.ParentKey != "" && !seenKeys[node.ParentKey] {
 			found := false
 			for _, other := range plan.Nodes {
@@ -164,7 +137,6 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 		}
 	}
 
-	// Validate edge refs.
 	for i, edge := range plan.Edges {
 		if edge.FromKey != "" && !seenKeys[edge.FromKey] {
 			return fmt.Errorf("edge %d: from key %q not found in plan", i, edge.FromKey)
@@ -198,7 +170,6 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyRe
 	}
 
 	if err := store.RunInTransaction(ctx, commitMsg, func(tx storage.Transaction) error {
-		// Build issues from nodes.
 		issues := make([]*types.Issue, 0, len(plan.Nodes))
 		pendingAssignees := make(map[int]string)
 
@@ -208,8 +179,6 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyRe
 				issueType = types.TypeTask
 			}
 
-			// Build metadata JSON. MetadataRefs are resolved in a second pass
-			// after IDs are assigned by CreateIssues.
 			var metadataJSON json.RawMessage
 			if len(node.Metadata) > 0 {
 				raw, err := json.Marshal(node.Metadata)
@@ -246,17 +215,15 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyRe
 			issues = append(issues, issue)
 		}
 
-		// Batch-create all issues in a single transaction.
 		if err := tx.CreateIssues(ctx, issues, actor); err != nil {
 			return fmt.Errorf("batch create: %w", err)
 		}
 
-		// Build key -> ID mapping from created issues.
 		for i, node := range plan.Nodes {
 			keyToID[node.Key] = issues[i].ID
 		}
 
-		// Persist labels (CreateIssues may not persist them via the tx path).
+		// Persist labels.
 		for i, node := range plan.Nodes {
 			for _, label := range node.Labels {
 				if err := tx.AddLabel(ctx, issues[i].ID, label, actor); err != nil {
@@ -337,7 +304,7 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyRe
 			}
 		}
 
-		return nil // Triggers commit with commitMsg
+		return nil
 	}); err != nil {
 		return nil, err
 	}
@@ -353,9 +320,4 @@ func resolveEdgeRef(key, id string, keyToID map[string]string) string {
 		return keyToID[key]
 	}
 	return ""
-}
-
-func init() {
-	graphApplyCmd.Flags().String("plan-file", "", "Path to graph apply JSON plan")
-	rootCmd.AddCommand(graphApplyCmd)
 }

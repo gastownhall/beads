@@ -28,14 +28,18 @@ var createCmd = &cobra.Command{
 	Use:     "create [title]",
 	GroupID: "issues",
 	Aliases: []string{"new"},
-	Short:   "Create a new issue (or multiple issues from markdown file)",
+	Short:   "Create a new issue (or batch from markdown/graph JSON)",
 	Args:    cobra.MinimumNArgs(0), // Changed to allow no args when using -f
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("create")
 		file, _ := cmd.Flags().GetString("file")
+		graphFile, _ := cmd.Flags().GetString("graph")
 
 		// If file flag is provided, parse markdown and create multiple issues
 		if file != "" {
+			if graphFile != "" {
+				FatalError("cannot specify both --file and --graph")
+			}
 			if len(args) > 0 {
 				FatalError("cannot specify both title and --file flag")
 			}
@@ -45,6 +49,15 @@ var createCmd = &cobra.Command{
 				FatalError("--dry-run is not supported with --file flag")
 			}
 			createIssuesFromMarkdown(cmd, file)
+			return
+		}
+
+		// If graph flag is provided, batch-create a graph of issues atomically
+		if graphFile != "" {
+			if len(args) > 0 {
+				FatalError("cannot specify both title and --graph flag")
+			}
+			createIssuesFromGraph(graphFile)
 			return
 		}
 
@@ -794,6 +807,7 @@ var createCmd = &cobra.Command{
 
 func init() {
 	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
+	createCmd.Flags().String("graph", "", "Create a graph of issues with dependencies from JSON plan file")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	createCmd.Flags().Bool("dry-run", false, "Preview what would be created without actually creating")
