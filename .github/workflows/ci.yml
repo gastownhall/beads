@@ -188,6 +188,8 @@ jobs:
     needs: build-embedded
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
+
       - name: Install ICU4C
         run: |
           sudo apt-get update
@@ -210,6 +212,7 @@ jobs:
       - name: Test
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
+          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
         run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=10m
 
   test-embedded-cmd:
