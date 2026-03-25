@@ -28,3 +28,12 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 	}
 	return nil
 }
+
+// BackupRestore restores a database from a backup at the given URL into
+// the named database. Mirrors the CLI: dolt backup restore <url> <db_name>
+func BackupRestore(ctx context.Context, db DBConn, url, dbName string) error {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', ?, ?)", url, dbName); err != nil {
+		return fmt.Errorf("restore from backup %s: %w", url, err)
+	}
+	return nil
+}
