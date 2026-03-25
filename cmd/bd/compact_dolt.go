@@ -47,6 +47,10 @@ Examples:
   bd compact --days 7 --force        # Keep only last 7 days of history
   bd compact --days 90 --force       # Conservative: squash 90+ day old commits`,
 	Run: func(_ *cobra.Command, _ []string) {
+		if isEmbeddedDolt {
+			fmt.Fprintln(os.Stderr, "Error: 'bd compact' is not yet supported in embedded mode")
+			os.Exit(1)
+		}
 		if !compactDoltDryRun {
 			CheckReadonly("compact")
 		}

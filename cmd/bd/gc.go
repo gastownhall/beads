@@ -2,13 +2,9 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -52,12 +48,6 @@ Examples:
 		if gcOlderThan < 0 {
 			FatalError("--older-than must be non-negative")
 		}
-
-		beadsDir := beads.FindBeadsDir()
-		if beadsDir == "" {
-			FatalError("could not find .beads directory")
-		}
-		doltPath := filepath.Join(beadsDir, "dolt")
 
 		// Phase tracking for summary
 		type phaseResult struct {
@@ -131,6 +121,13 @@ Examples:
 						fmt.Println(detail)
 					}
 					results = append(results, phaseResult{name: "Decay", detail: fmt.Sprintf("%d issues deleted", deleted)})
+
+					// Embedded mode: flush Dolt commit after deletes.
+					if isEmbeddedDolt && deleted > 0 && store != nil {
+						if _, err := store.CommitPending(ctx, actor); err != nil {
+							WarnError("failed to commit after decay: %v", err)
+						}
+					}
 				}
 			}
 			if !jsonOutput {
@@ -138,20 +135,17 @@ Examples:
 			}
 		}
 
-		// ── Phase 2: COMPACT (Dolt commit history) ──
+		// ── Phase 2: COMPACT (report only — actual squashing is bd flatten) ──
 		if !jsonOutput {
-			fmt.Println("Phase 2/3: Compact (squash old Dolt commits)")
+			fmt.Println("Phase 2/3: Compact (Dolt commit history info)")
 		}
 
-		// Count commits to see if compaction would help
-		accessor, ok := store.(storage.RawDBAccessor)
-		if !ok {
-			FatalError("storage backend does not support raw DB access")
-		}
-		var commitCount int
-		if err := accessor.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
-			WarnError("could not count Dolt commits: %v", err)
-			commitCount = 0
+		commitCount := 0
+		logEntries, logErr := store.Log(ctx, 0)
+		if logErr != nil {
+			WarnError("could not read Dolt commit log: %v", logErr)
+		} else {
+			commitCount = len(logEntries)
 		}
 
 		if commitCount <= 1 {
@@ -166,7 +160,6 @@ Examples:
 				}
 				results = append(results, phaseResult{name: "Compact", detail: fmt.Sprintf("%d commits (dry-run)", commitCount)})
 			} else {
-				// For gc, we report commit count; actual squashing is bd flatten
 				if !jsonOutput {
 					fmt.Printf("  %d commits in history\n", commitCount)
 					fmt.Printf("  Tip: use 'bd flatten' to squash all history to one commit\n\n")
@@ -183,47 +176,26 @@ Examples:
 				fmt.Println("Phase 3/3: Dolt GC (reclaim disk space)")
 			}
 
-			if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+			gc, ok := store.(storage.GarbageCollector)
+			if !ok {
 				if !jsonOutput {
-					fmt.Println("  No Dolt directory found, skipping")
+					fmt.Println("  Storage backend does not support GC, skipping")
 				}
-				results = append(results, phaseResult{name: "Dolt GC", detail: "no Dolt directory"})
-			} else if _, err := exec.LookPath("dolt"); err != nil {
+				results = append(results, phaseResult{name: "Dolt GC", detail: "not supported"})
+			} else if gcDryRun {
 				if !jsonOutput {
-					fmt.Println("  dolt command not found, skipping")
+					fmt.Println("  Would run DOLT_GC()")
 				}
-				results = append(results, phaseResult{name: "Dolt GC", detail: "dolt not in PATH"})
+				results = append(results, phaseResult{name: "Dolt GC", detail: "dry-run"})
 			} else {
-				sizeBefore, _ := getDirSize(doltPath)
-
-				if gcDryRun {
-					if !jsonOutput {
-						fmt.Printf("  Dolt directory: %s (%s)\n", doltPath, formatBytes(sizeBefore))
-						fmt.Println("  Would run dolt gc")
-					}
-					results = append(results, phaseResult{name: "Dolt GC", detail: fmt.Sprintf("%s (dry-run)", formatBytes(sizeBefore))})
+				if err := gc.DoltGC(ctx); err != nil {
+					WarnError("dolt gc failed: %v", err)
+					results = append(results, phaseResult{name: "Dolt GC", detail: "failed"})
 				} else {
-					doltCmd := exec.Command("dolt", "gc") // #nosec G204 -- fixed command
-					doltCmd.Dir = doltPath
-					output, err := doltCmd.CombinedOutput()
-					if err != nil {
-						WarnError("dolt gc failed: %v", err)
-						if len(output) > 0 {
-							fmt.Fprintf(os.Stderr, "Output: %s\n", string(output))
-						}
-						results = append(results, phaseResult{name: "Dolt GC", detail: "failed"})
-					} else {
-						sizeAfter, _ := getDirSize(doltPath)
-						freed := sizeBefore - sizeAfter
-						if freed < 0 {
-							freed = 0
-						}
-						detail := fmt.Sprintf("%s → %s (freed %s)", formatBytes(sizeBefore), formatBytes(sizeAfter), formatBytes(freed))
-						if !jsonOutput {
-							fmt.Printf("  %s\n", detail)
-						}
-						results = append(results, phaseResult{name: "Dolt GC", detail: detail})
+					if !jsonOutput {
+						fmt.Println("  Done")
 					}
+					results = append(results, phaseResult{name: "Dolt GC", detail: "complete"})
 				}
 			}
 			if !jsonOutput {

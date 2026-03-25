@@ -31,6 +31,10 @@ report the number of rows affected.
 WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		if isEmbeddedDolt {
+			fmt.Fprintln(os.Stderr, "Error: 'bd sql' is not yet supported in embedded mode")
+			os.Exit(1)
+		}
 		query := args[0]
 		csvOutput, _ := cmd.Flags().GetBool("csv")
 
