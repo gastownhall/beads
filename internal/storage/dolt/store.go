@@ -145,6 +145,8 @@ var _ storage.RawDBAccessor = (*DoltStore)(nil)
 var _ storage.StoreLocator = (*DoltStore)(nil)
 var _ storage.LifecycleManager = (*DoltStore)(nil)
 var _ storage.PendingCommitter = (*DoltStore)(nil)
+var _ storage.GarbageCollector = (*DoltStore)(nil)
+var _ storage.Flattener = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -1451,6 +1453,16 @@ func (s *DoltStore) CLIDir() string {
 		return ""
 	}
 	return filepath.Join(s.dbPath, s.database)
+}
+
+// DoltGC runs Dolt garbage collection to reclaim disk space.
+func (s *DoltStore) DoltGC(ctx context.Context) error {
+	return versioncontrolops.DoltGC(ctx, s.db)
+}
+
+// Flatten squashes all Dolt commit history into a single commit.
+func (s *DoltStore) Flatten(ctx context.Context) error {
+	return versioncontrolops.Flatten(ctx, s.db)
 }
 
 // UnderlyingDB returns the underlying *sql.DB connection

@@ -15,12 +15,15 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // Compile-time interface checks.
 var _ storage.DoltStorage = (*EmbeddedDoltStore)(nil)
 var _ storage.StoreLocator = (*EmbeddedDoltStore)(nil)
+var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
+var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
 // Each method call opens a short-lived connection, executes within an explicit
@@ -347,6 +350,20 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 func (s *EmbeddedDoltStore) Close() error {
 	s.closed.Store(true)
 	return nil
+}
+
+// DoltGC runs Dolt garbage collection to reclaim disk space.
+func (s *EmbeddedDoltStore) DoltGC(ctx context.Context) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.DoltGC(ctx, db)
+	})
+}
+
+// Flatten squashes all Dolt commit history into a single commit.
+func (s *EmbeddedDoltStore) Flatten(ctx context.Context) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.Flatten(ctx, db)
+	})
 }
 
 // Path returns the embedded dolt data directory (.beads/embeddeddolt/).

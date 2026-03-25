@@ -28,6 +28,10 @@ Subcommands:
   sync        Set up sync.branch workflow for multi-clone setups
 `,
 	Run: func(cmd *cobra.Command, _ []string) {
+		if isEmbeddedDolt {
+			fmt.Fprintln(os.Stderr, "Error: 'bd migrate' is not yet supported in embedded mode")
+			os.Exit(1)
+		}
 		autoYes, _ := cmd.Flags().GetBool("yes")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		updateRepoID, _ := cmd.Flags().GetBool("update-repo-id")
