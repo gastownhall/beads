@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,9 +51,10 @@ func TestEmbeddedOrphans(t *testing.T) {
 
 	t.Run("orphans_json", func(t *testing.T) {
 		out := bdOrphans(t, bd, dir, "--json")
-		// Should produce valid output without crashing
-		if len(strings.TrimSpace(out)) == 0 {
-			t.Error("expected non-empty --json output")
+		s := strings.TrimSpace(out)
+		// orphans --json may return "null", "[]", or a JSON array/object
+		if !json.Valid([]byte(s)) {
+			t.Errorf("invalid JSON in orphans --json output: %s", s[:min(200, len(s))])
 		}
 	})
 

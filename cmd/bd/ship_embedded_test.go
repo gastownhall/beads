@@ -123,7 +123,10 @@ func TestEmbeddedShip(t *testing.T) {
 		cmd = exec.Command(bd, "label", "list", issue.ID, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		labelOut, _ := cmd.CombinedOutput()
+		labelOut, labelErr := cmd.CombinedOutput()
+		if labelErr != nil {
+			t.Fatalf("label list failed: %v\n%s", labelErr, labelOut)
+		}
 		if strings.Contains(string(labelOut), "provides:dry-cap") {
 			t.Errorf("dry-run should not have added provides label: %s", labelOut)
 		}

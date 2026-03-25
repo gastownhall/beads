@@ -164,19 +164,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
+      - name: Download modules
+        run: go mod download
+
       - name: Build embedded bd binary
         run: go build -tags embeddeddolt -race -o /tmp/bd-embedded-test ./cmd/bd/
 
       - name: Build embedded storage test binary
         run: go test -tags embeddeddolt -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
 
-      - name: Upload binaries
+      - name: Package module cache
+        run: tar -czf /tmp/gomodcache.tar.gz -C $(go env GOMODCACHE) .
+
+      - name: Upload binaries and module cache
         uses: actions/upload-artifact@v4
         with:
           name: embedded-test-binaries
           path: |
             /tmp/bd-embedded-test
             /tmp/embeddeddolt-test
+            /tmp/gomodcache.tar.gz
           retention-days: 1
 
   test-embedded-storage:
@@ -190,17 +197,23 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Install ICU4C
         run: |
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
-      - name: Download binaries
+      - name: Download binaries and module cache
         uses: actions/download-artifact@v4
         with:
           name: embedded-test-binaries
           path: /tmp/
+
+      - name: Restore module cache
+        run: |
+          mkdir -p $(go env GOMODCACHE)
+          tar -xzf /tmp/gomodcache.tar.gz -C $(go env GOMODCACHE)
 
       - name: Fix permissions
         run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
@@ -231,17 +244,23 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Install ICU4C
         run: |
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
-      - name: Download binaries
+      - name: Download binaries and module cache
         uses: actions/download-artifact@v4
         with:
           name: embedded-test-binaries
           path: /tmp/
+
+      - name: Restore module cache
+        run: |
+          mkdir -p $(go env GOMODCACHE)
+          tar -xzf /tmp/gomodcache.tar.gz -C $(go env GOMODCACHE)
 
       - name: Fix permissions
         run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test

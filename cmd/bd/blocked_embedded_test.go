@@ -73,10 +73,11 @@ func TestEmbeddedBlocked(t *testing.T) {
 		}
 		s := strings.TrimSpace(string(out))
 		start := strings.IndexAny(s, "[{")
-		if start >= 0 {
-			if !json.Valid([]byte(s[start:])) {
-				t.Errorf("invalid JSON in blocked output: %s", s[:min(200, len(s))])
-			}
+		if start < 0 {
+			t.Fatalf("no JSON in blocked --json output: %s", s)
+		}
+		if !json.Valid([]byte(s[start:])) {
+			t.Errorf("invalid JSON in blocked output: %s", s[:min(200, len(s))])
 		}
 	})
 }

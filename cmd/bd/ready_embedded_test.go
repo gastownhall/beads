@@ -49,10 +49,11 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 		s := strings.TrimSpace(string(out))
 		start := strings.IndexAny(s, "[{")
-		if start >= 0 {
-			if !json.Valid([]byte(s[start:])) {
-				t.Errorf("invalid JSON in ready output: %s", s[:min(200, len(s))])
-			}
+		if start < 0 {
+			t.Fatalf("no JSON in ready --json output: %s", s)
+		}
+		if !json.Valid([]byte(s[start:])) {
+			t.Errorf("invalid JSON in ready output: %s", s[:min(200, len(s))])
 		}
 	})
 
@@ -62,18 +63,12 @@ func TestEmbeddedReady(t *testing.T) {
 		blocker := bdCreate(t, bd, dir, "Blocker issue", "--type", "task")
 		blocked := bdCreate(t, bd, dir, "Blocked by blocker", "--type", "task")
 
-		// Add blocking dependency
-		cmd := exec.Command(bd, "dep", blocked.ID, "--blocks", blocker.ID)
+		// Add blocking dependency: blocked depends on blocker
+		cmd := exec.Command(bd, "dep", "add", blocked.ID, blocker.ID)
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			// dep --blocks may use different syntax; try positional
-			cmd2 := exec.Command(bd, "dep", "add", blocker.ID, blocked.ID)
-			cmd2.Dir = dir
-			cmd2.Env = bdEnv(dir)
-			if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-				t.Logf("dep add failed (non-fatal): %v\n%s\n%s", err, out, out2)
-			}
+			t.Fatalf("dep add failed: %v\n%s", err, out)
 		}
 
 		cmd = exec.Command(bd, "ready")
@@ -84,8 +79,9 @@ func TestEmbeddedReady(t *testing.T) {
 			t.Fatalf("bd ready failed: %v\n%s", err, out)
 		}
 		// The blocked issue should not appear in ready output
-		// (though the blocker might, depending on dep direction)
-		_ = out
+		if strings.Contains(string(out), "Blocked by blocker") {
+			t.Errorf("blocked issue should not appear in ready output: %s", out)
+		}
 	})
 }
 
