@@ -5,10 +5,7 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
-	"strings"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -59,32 +56,11 @@ func (s *EmbeddedDoltStore) SetMetadata(ctx context.Context, key, value string) 
 // to the wisps table. Reads from DB config "types.infra", falls back to YAML,
 // then to hardcoded defaults (agent, rig, role, message).
 func (s *EmbeddedDoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
-	var typeList []string
-
-	value, err := s.GetConfig(ctx, "types.infra")
-	if err == nil && value != "" {
-		for _, t := range strings.Split(value, ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				typeList = append(typeList, t)
-			}
-		}
-	}
-
-	if len(typeList) == 0 {
-		if yamlTypes := config.GetInfraTypesFromYAML(); len(yamlTypes) > 0 {
-			typeList = yamlTypes
-		}
-	}
-
-	if len(typeList) == 0 {
-		typeList = storage.DefaultInfraTypes()
-	}
-
-	result := make(map[string]bool, len(typeList))
-	for _, t := range typeList {
-		result[t] = true
-	}
+	var result map[string]bool
+	s.withConn(ctx, false, func(tx *sql.Tx) error {
+		result = issueops.ResolveInfraTypesInTx(ctx, tx)
+		return nil
+	})
 	return result
 }
 
