@@ -19,7 +19,9 @@ type ClaimResult struct {
 
 // ClaimIssueInTx atomically claims an issue using compare-and-swap semantics.
 // It sets the assignee to actor and status to "in_progress" only if the issue
-// currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
+// currently has no assignee. Returns storage.ErrAlreadyClaimed if already
+// claimed by a different user. Idempotent: re-claiming by the same actor is
+// a no-op success (supports agent retry workflows).
 // Routes to the correct table (issues/wisps) automatically.
 // The caller is responsible for Dolt versioning (DOLT_ADD/COMMIT) if needed.
 //
@@ -58,6 +60,12 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 			`SELECT assignee FROM %s WHERE id = ?`, issueTable), id).Scan(&currentAssignee)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get current assignee: %w", err)
+		}
+		// Idempotent: if already claimed by the same actor, treat as success.
+		// This supports agent retry workflows where claim may be called multiple
+		// times after transient failures (GH#8).
+		if currentAssignee == actor {
+			return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 		}
 		return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, currentAssignee)
 	}
