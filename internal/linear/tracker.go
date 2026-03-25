@@ -250,6 +250,71 @@ func linearToTrackerIssue(li *Issue) tracker.TrackerIssue {
 	return ti
 }
 
+// FetchComments retrieves comments for an issue from Linear.
+// Implements tracker.CommentSyncer.
+func (t *Tracker) FetchComments(ctx context.Context, externalIssueID string, since time.Time) ([]tracker.TrackerComment, error) {
+	comments, err := t.client.FetchIssueComments(ctx, externalIssueID, since)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]tracker.TrackerComment, 0, len(comments))
+	for _, c := range comments {
+		tc := tracker.TrackerComment{
+			ID:   c.ID,
+			Body: c.Body,
+		}
+		if c.User != nil {
+			tc.Author = c.User.Name
+		}
+		if t, err := time.Parse(time.RFC3339, c.CreatedAt); err == nil {
+			tc.CreatedAt = t
+		}
+		if t, err := time.Parse(time.RFC3339, c.UpdatedAt); err == nil {
+			tc.UpdatedAt = t
+		}
+		result = append(result, tc)
+	}
+	return result, nil
+}
+
+// CreateComment creates a new comment on an issue in Linear.
+// Implements tracker.CommentSyncer.
+func (t *Tracker) CreateComment(ctx context.Context, externalIssueID, body string) (string, error) {
+	comment, err := t.client.CreateIssueComment(ctx, externalIssueID, body)
+	if err != nil {
+		return "", err
+	}
+	return comment.ID, nil
+}
+
+// FetchAttachments retrieves attachment metadata for an issue from Linear.
+// Implements tracker.AttachmentFetcher.
+func (t *Tracker) FetchAttachments(ctx context.Context, externalIssueID string) ([]tracker.TrackerAttachment, error) {
+	attachments, err := t.client.FetchIssueAttachments(ctx, externalIssueID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]tracker.TrackerAttachment, 0, len(attachments))
+	for _, a := range attachments {
+		ta := tracker.TrackerAttachment{
+			ID:       a.ID,
+			Filename: a.Title,
+			URL:      a.URL,
+			MimeType: a.Metadata.MimeType,
+		}
+		if a.Creator != nil {
+			ta.Creator = a.Creator.Name
+		}
+		if t, err := time.Parse(time.RFC3339, a.CreatedAt); err == nil {
+			ta.CreatedAt = t
+		}
+		result = append(result, ta)
+	}
+	return result, nil
+}
+
 // BuildStateCacheFromTracker builds a StateCache using the tracker's internal client.
 // This allows CLI code to set up PushHooks.BuildStateCache without accessing the client directly.
 func BuildStateCacheFromTracker(ctx context.Context, t *Tracker) (*StateCache, error) {

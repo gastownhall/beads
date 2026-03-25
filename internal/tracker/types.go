@@ -84,6 +84,12 @@ type SyncOptions struct {
 	ExcludeTypes []types.IssueType
 	// ExcludeEphemeral skips ephemeral/wisp issues from push (default behavior in CLI).
 	ExcludeEphemeral bool
+	// NoComments disables comment sync even if the tracker supports it.
+	NoComments bool
+	// NoAttachments disables attachment sync even if the tracker supports it.
+	NoAttachments bool
+	// CommentsOnly syncs only comments (skip issue sync).
+	CommentsOnly bool
 }
 
 // SyncResult is the complete result of a sync operation.
@@ -97,13 +103,16 @@ type SyncResult struct {
 
 // SyncStats accumulates sync statistics.
 type SyncStats struct {
-	Pulled    int `json:"pulled"`
-	Pushed    int `json:"pushed"`
-	Created   int `json:"created"`
-	Updated   int `json:"updated"`
-	Skipped   int `json:"skipped"`
-	Errors    int `json:"errors"`
-	Conflicts int `json:"conflicts"`
+	Pulled            int `json:"pulled"`
+	Pushed            int `json:"pushed"`
+	Created           int `json:"created"`
+	Updated           int `json:"updated"`
+	Skipped           int `json:"skipped"`
+	Errors            int `json:"errors"`
+	Conflicts         int `json:"conflicts"`
+	CommentsPulled    int `json:"comments_pulled,omitempty"`
+	CommentsPushed    int `json:"comments_pushed,omitempty"`
+	AttachmentsPulled int `json:"attachments_pulled,omitempty"`
 }
 
 // PullStats tracks pull operation results.

@@ -117,8 +117,8 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	skipPushIDs := make(map[string]bool)
 	forcePushIDs := make(map[string]bool)
 
-	// Phase 1: Pull
-	if opts.Pull {
+	// Phase 1: Pull (skip if CommentsOnly)
+	if opts.Pull && !opts.CommentsOnly {
 		pullStats, err := e.doPull(ctx, opts)
 		if err != nil {
 			result.Success = false
@@ -133,8 +133,8 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Skipped += pullStats.Skipped
 	}
 
-	// Phase 2: Detect conflicts (only for bidirectional sync)
-	if opts.Pull && opts.Push {
+	// Phase 2: Detect conflicts (only for bidirectional sync, skip if CommentsOnly)
+	if opts.Pull && opts.Push && !opts.CommentsOnly {
 		conflicts, err := e.DetectConflicts(ctx)
 		if err != nil {
 			e.warn("Failed to detect conflicts: %v", err)
@@ -144,8 +144,8 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		}
 	}
 
-	// Phase 3: Push
-	if opts.Push {
+	// Phase 3: Push (skip if CommentsOnly)
+	if opts.Push && !opts.CommentsOnly {
 		pushStats, err := e.doPush(ctx, opts, skipPushIDs, forcePushIDs)
 		if err != nil {
 			result.Success = false
@@ -161,6 +161,23 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Errors += pushStats.Errors
 	}
 
+	// Phase 4: Comment sync (if tracker supports it and not disabled)
+	if !opts.NoComments {
+		if syncer, ok := e.Tracker.(CommentSyncer); ok {
+			commentStats := e.doCommentSync(ctx, opts, syncer)
+			result.Stats.CommentsPulled += commentStats.Pulled
+			result.Stats.CommentsPushed += commentStats.Pushed
+		}
+	}
+
+	// Phase 5: Attachment pull (if tracker supports it and not disabled)
+	if !opts.NoAttachments {
+		if fetcher, ok := e.Tracker.(AttachmentFetcher); ok {
+			attachStats := e.doAttachmentPull(ctx, opts, fetcher)
+			result.Stats.AttachmentsPulled += attachStats.Pulled
+		}
+	}
+
 	// Record final stats as span attributes.
 	span.SetAttributes(
 		attribute.Int("sync.pulled", result.Stats.Pulled),
@@ -170,6 +187,9 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		attribute.Int("sync.updated", result.Stats.Updated),
 		attribute.Int("sync.skipped", result.Stats.Skipped),
 		attribute.Int("sync.errors", result.Stats.Errors),
+		attribute.Int("sync.comments_pulled", result.Stats.CommentsPulled),
+		attribute.Int("sync.comments_pushed", result.Stats.CommentsPushed),
+		attribute.Int("sync.attachments_pulled", result.Stats.AttachmentsPulled),
 	)
 
 	// Update last_sync timestamp
@@ -640,6 +660,297 @@ func (e *Engine) ResolveState(status types.Status) (string, bool) {
 		return "", false
 	}
 	return e.PushHooks.ResolveState(e.stateCache, status)
+}
+
+// commentSyncStats tracks comment sync results.
+type commentSyncStats struct {
+	Pulled int
+	Pushed int
+}
+
+// attachmentPullStats tracks attachment pull results.
+type attachmentPullStats struct {
+	Pulled int
+}
+
+// doCommentSync synchronizes comments between beads and the external tracker.
+// Pull: For issues with external_ref, fetch remote comments and create locally if not found.
+// Push: For local comments without external_ref, create in the tracker and store the returned ID.
+func (e *Engine) doCommentSync(ctx context.Context, opts SyncOptions, syncer CommentSyncer) commentSyncStats {
+	ctx, span := syncTracer.Start(ctx, "tracker.comment_sync",
+		trace.WithAttributes(attribute.String("sync.tracker", e.Tracker.DisplayName())),
+	)
+	defer span.End()
+
+	stats := commentSyncStats{}
+
+	// Get last comment sync time
+	var since time.Time
+	key := e.Tracker.ConfigPrefix() + ".last_comment_sync"
+	if lastSyncStr, err := e.Store.GetConfig(ctx, key); err == nil && lastSyncStr != "" {
+		if t, err := time.Parse(time.RFC3339, lastSyncStr); err == nil {
+			since = t
+		}
+	}
+
+	// Find issues with external refs for this tracker
+	filter := types.IssueFilter{}
+	issues, err := e.Store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		e.warn("Comment sync: failed to search issues: %v", err)
+		return stats
+	}
+
+	for _, issue := range issues {
+		extRef := derefStr(issue.ExternalRef)
+		if extRef == "" || !e.Tracker.IsExternalRef(extRef) {
+			continue
+		}
+
+		// Extract the external tracker's internal ID for API calls.
+		// For Linear, the external_ref is a URL — we need the tracker's UUID.
+		// We use TrackerIssue.ID which is the internal ID.
+		extID := e.Tracker.ExtractIdentifier(extRef)
+		if extID == "" {
+			continue
+		}
+
+		// Fetch the issue to get its internal tracker ID
+		extIssue, err := e.Tracker.FetchIssue(ctx, extID)
+		if err != nil || extIssue == nil {
+			continue
+		}
+
+		// PULL: Fetch remote comments and import missing ones
+		if opts.Pull || (!opts.Pull && !opts.Push) {
+			remoteComments, err := syncer.FetchComments(ctx, extIssue.ID, since)
+			if err != nil {
+				e.warn("Comment sync: failed to fetch comments for %s: %v", issue.ID, err)
+				continue
+			}
+
+			for _, rc := range remoteComments {
+				if opts.DryRun {
+					e.msg("[dry-run] Would import comment from %s on %s", rc.Author, issue.ID)
+					stats.Pulled++
+					continue
+				}
+
+				// Check if we already have this comment by external_ref
+				commentRef := e.Tracker.ConfigPrefix() + ":" + rc.ID
+				existing := e.getCommentByExternalRef(ctx, issue.ID, commentRef)
+				if existing != nil {
+					continue // Already imported
+				}
+
+				// Import the comment
+				if err := e.importComment(ctx, issue.ID, rc.Author, rc.Body, commentRef, rc.CreatedAt); err != nil {
+					e.warn("Comment sync: failed to import comment on %s: %v", issue.ID, err)
+					continue
+				}
+				stats.Pulled++
+			}
+		}
+
+		// PUSH: Push local comments without external_ref
+		if opts.Push || (!opts.Pull && !opts.Push) {
+			localComments, err := e.Store.GetIssueComments(ctx, issue.ID)
+			if err != nil {
+				e.warn("Comment sync: failed to get local comments for %s: %v", issue.ID, err)
+				continue
+			}
+
+			for _, lc := range localComments {
+				if lc.ExternalRef != "" {
+					continue // Already synced
+				}
+
+				if opts.DryRun {
+					e.msg("[dry-run] Would push comment from %s on %s", lc.Author, issue.ID)
+					stats.Pushed++
+					continue
+				}
+
+				// Create in external tracker
+				extCommentID, err := syncer.CreateComment(ctx, extIssue.ID, lc.Text)
+				if err != nil {
+					e.warn("Comment sync: failed to push comment on %s: %v", issue.ID, err)
+					continue
+				}
+
+				// Update local comment with external_ref
+				commentRef := e.Tracker.ConfigPrefix() + ":" + extCommentID
+				if err := e.updateCommentExternalRef(ctx, issue.ID, lc.ID, commentRef); err != nil {
+					e.warn("Comment sync: failed to update comment ref on %s: %v", issue.ID, err)
+				}
+				stats.Pushed++
+			}
+		}
+	}
+
+	// Update last_comment_sync timestamp
+	if !opts.DryRun && (stats.Pulled > 0 || stats.Pushed > 0) {
+		lastSync := time.Now().UTC().Format(time.RFC3339)
+		if err := e.Store.SetConfig(ctx, key, lastSync); err != nil {
+			e.warn("Failed to update last_comment_sync: %v", err)
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("sync.comments_pulled", stats.Pulled),
+		attribute.Int("sync.comments_pushed", stats.Pushed),
+	)
+	return stats
+}
+
+// doAttachmentPull fetches attachment metadata from the external tracker and stores locally.
+func (e *Engine) doAttachmentPull(ctx context.Context, opts SyncOptions, fetcher AttachmentFetcher) attachmentPullStats {
+	ctx, span := syncTracer.Start(ctx, "tracker.attachment_pull",
+		trace.WithAttributes(attribute.String("sync.tracker", e.Tracker.DisplayName())),
+	)
+	defer span.End()
+
+	stats := attachmentPullStats{}
+
+	// Find issues with external refs for this tracker
+	filter := types.IssueFilter{}
+	issues, err := e.Store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		e.warn("Attachment pull: failed to search issues: %v", err)
+		return stats
+	}
+
+	for _, issue := range issues {
+		extRef := derefStr(issue.ExternalRef)
+		if extRef == "" || !e.Tracker.IsExternalRef(extRef) {
+			continue
+		}
+
+		extID := e.Tracker.ExtractIdentifier(extRef)
+		if extID == "" {
+			continue
+		}
+
+		// Fetch the issue to get its internal tracker ID
+		extIssue, err := e.Tracker.FetchIssue(ctx, extID)
+		if err != nil || extIssue == nil {
+			continue
+		}
+
+		remoteAttachments, err := fetcher.FetchAttachments(ctx, extIssue.ID)
+		if err != nil {
+			e.warn("Attachment pull: failed to fetch attachments for %s: %v", issue.ID, err)
+			continue
+		}
+
+		for _, ra := range remoteAttachments {
+			if opts.DryRun {
+				e.msg("[dry-run] Would import attachment %q on %s", ra.Filename, issue.ID)
+				stats.Pulled++
+				continue
+			}
+
+			// Check if we already have this attachment by external_ref
+			attRef := e.Tracker.ConfigPrefix() + ":" + ra.ID
+			existing := e.getAttachmentByExternalRef(ctx, issue.ID, attRef)
+			if existing != nil {
+				continue // Already imported
+			}
+
+			// Store the attachment metadata
+			att := &types.Attachment{
+				IssueID:     issue.ID,
+				ExternalRef: attRef,
+				Filename:    ra.Filename,
+				URL:         ra.URL,
+				MimeType:    ra.MimeType,
+				SizeBytes:   ra.SizeBytes,
+				Source:      e.Tracker.Name(),
+				Creator:     ra.Creator,
+				CreatedAt:   ra.CreatedAt,
+			}
+			if err := e.createAttachment(ctx, att); err != nil {
+				e.warn("Attachment pull: failed to create attachment on %s: %v", issue.ID, err)
+				continue
+			}
+			stats.Pulled++
+		}
+	}
+
+	// Update last_attachment_sync timestamp
+	if !opts.DryRun && stats.Pulled > 0 {
+		key := e.Tracker.ConfigPrefix() + ".last_attachment_sync"
+		lastSync := time.Now().UTC().Format(time.RFC3339)
+		if err := e.Store.SetConfig(ctx, key, lastSync); err != nil {
+			e.warn("Failed to update last_attachment_sync: %v", err)
+		}
+	}
+
+	span.SetAttributes(attribute.Int("sync.attachments_pulled", stats.Pulled))
+	return stats
+}
+
+// getCommentByExternalRef looks up a comment by external_ref.
+// Uses CommentRefStore if available, otherwise falls back to iterating comments.
+func (e *Engine) getCommentByExternalRef(ctx context.Context, issueID, externalRef string) *types.Comment {
+	if crs, ok := e.Store.(storage.CommentRefStore); ok {
+		c, _ := crs.GetCommentByExternalRef(ctx, issueID, externalRef)
+		return c
+	}
+	// Fallback: iterate all comments and match by external_ref
+	comments, err := e.Store.GetIssueComments(ctx, issueID)
+	if err != nil {
+		return nil
+	}
+	for _, c := range comments {
+		if c.ExternalRef == externalRef {
+			return c
+		}
+	}
+	return nil
+}
+
+// importComment creates a comment with an external_ref.
+// Uses CommentRefStore if available, otherwise falls back to basic import.
+func (e *Engine) importComment(ctx context.Context, issueID, author, text, externalRef string, createdAt time.Time) error {
+	if crs, ok := e.Store.(storage.CommentRefStore); ok {
+		_, err := crs.ImportCommentWithRef(ctx, issueID, author, text, externalRef, createdAt)
+		return err
+	}
+	// Fallback: import without external_ref (dedup will rely on text matching)
+	return e.Store.RunInTransaction(ctx, "comment sync: import", func(tx storage.Transaction) error {
+		_, err := tx.ImportIssueComment(ctx, issueID, author, text, createdAt)
+		return err
+	})
+}
+
+// updateCommentExternalRef updates the external_ref field on a local comment.
+// Uses CommentRefStore if available, otherwise is a no-op.
+func (e *Engine) updateCommentExternalRef(ctx context.Context, issueID, commentID, externalRef string) error {
+	if crs, ok := e.Store.(storage.CommentRefStore); ok {
+		return crs.UpdateCommentExternalRef(ctx, issueID, commentID, externalRef)
+	}
+	return nil
+}
+
+// getAttachmentByExternalRef looks up an attachment by external_ref.
+// Uses AttachmentStore if available, otherwise returns nil.
+func (e *Engine) getAttachmentByExternalRef(ctx context.Context, issueID, externalRef string) *types.Attachment {
+	if as, ok := e.Store.(storage.AttachmentStore); ok {
+		att, _ := as.GetAttachmentByExternalRef(ctx, issueID, externalRef)
+		return att
+	}
+	return nil
+}
+
+// createAttachment stores attachment metadata in the database.
+// Uses AttachmentStore if available, otherwise returns nil (skips).
+func (e *Engine) createAttachment(ctx context.Context, att *types.Attachment) error {
+	if as, ok := e.Store.(storage.AttachmentStore); ok {
+		_, err := as.CreateAttachment(ctx, att)
+		return err
+	}
+	return nil
 }
 
 // strPtr returns a pointer to the given string.

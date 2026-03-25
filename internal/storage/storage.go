@@ -84,6 +84,22 @@ type Storage interface {
 	Close() error
 }
 
+// CommentRefStore is an optional interface for stores that support comment external_ref operations.
+// Used by the sync engine for bidirectional comment synchronization.
+type CommentRefStore interface {
+	GetCommentByExternalRef(ctx context.Context, issueID, externalRef string) (*types.Comment, error)
+	ImportCommentWithRef(ctx context.Context, issueID, author, text, externalRef string, createdAt time.Time) (*types.Comment, error)
+	UpdateCommentExternalRef(ctx context.Context, issueID, commentID, externalRef string) error
+}
+
+// AttachmentStore is an optional interface for stores that support attachment operations.
+// Used by the sync engine for pulling attachment metadata from external trackers.
+type AttachmentStore interface {
+	CreateAttachment(ctx context.Context, att *types.Attachment) (*types.Attachment, error)
+	GetIssueAttachments(ctx context.Context, issueID string) ([]*types.Attachment, error)
+	GetAttachmentByExternalRef(ctx context.Context, issueID, externalRef string) (*types.Attachment, error)
+}
+
 // DoltStorage is the full interface for Dolt-backed stores, composing the core
 // Storage interface with all capability sub-interfaces. Both DoltStore and
 // EmbeddedDoltStore satisfy this interface.

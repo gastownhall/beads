@@ -87,6 +87,12 @@ Type Filtering (--push only):
   --exclude-type wisp       Exclude issues of these types
   --include-ephemeral       Include ephemeral issues (wisps, etc.); default is to exclude
 
+Comment & Attachment Sync:
+  By default, comments are synced bidirectionally and attachments are pulled.
+  --no-comments       Disable comment sync
+  --no-attachments    Disable attachment metadata pull
+  --comments-only     Sync only comments (skip issue sync)
+
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
   --prefer-local    Always prefer local beads version
@@ -98,7 +104,9 @@ Examples:
   bd linear sync --push --type=task,feature     # Push only tasks and features
   bd linear sync --push --exclude-type=wisp     # Push all except wisps
   bd linear sync --dry-run                      # Preview without changes
-  bd linear sync --prefer-local                 # Bidirectional, local wins`,
+  bd linear sync --prefer-local                 # Bidirectional, local wins
+  bd linear sync --no-comments                  # Sync issues without comments
+  bd linear sync --comments-only                # Sync only comments`,
 	Run: runLinearSync,
 }
 
@@ -140,6 +148,9 @@ func init() {
 	linearSyncCmd.Flags().StringSlice("type", nil, "Only sync issues of these types (can be repeated)")
 	linearSyncCmd.Flags().StringSlice("exclude-type", nil, "Exclude issues of these types (can be repeated)")
 	linearSyncCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps, etc.) when pushing to Linear")
+	linearSyncCmd.Flags().Bool("no-comments", false, "Disable comment sync")
+	linearSyncCmd.Flags().Bool("no-attachments", false, "Disable attachment sync")
+	linearSyncCmd.Flags().Bool("comments-only", false, "Sync only comments (skip issue sync)")
 
 	linearCmd.AddCommand(linearSyncCmd)
 	linearCmd.AddCommand(linearStatusCmd)
@@ -158,6 +169,9 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	typeFilters, _ := cmd.Flags().GetStringSlice("type")
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
 	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
+	noComments, _ := cmd.Flags().GetBool("no-comments")
+	noAttachments, _ := cmd.Flags().GetBool("no-attachments")
+	commentsOnly, _ := cmd.Flags().GetBool("comments-only")
 
 	if !dryRun {
 		CheckReadonly("linear sync")
@@ -213,6 +227,9 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	if !includeEphemeral {
 		opts.ExcludeEphemeral = true
 	}
+	opts.NoComments = noComments
+	opts.NoAttachments = noAttachments
+	opts.CommentsOnly = commentsOnly
 
 	// Map conflict resolution
 	if preferLocal {
@@ -246,6 +263,12 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 		}
 		if result.Stats.Pushed > 0 {
 			fmt.Printf("✓ Pushed %d issues\n", result.Stats.Pushed)
+		}
+		if result.Stats.CommentsPulled > 0 || result.Stats.CommentsPushed > 0 {
+			fmt.Printf("✓ Comments: %d pulled, %d pushed\n", result.Stats.CommentsPulled, result.Stats.CommentsPushed)
+		}
+		if result.Stats.AttachmentsPulled > 0 {
+			fmt.Printf("✓ Attachments: %d pulled\n", result.Stats.AttachmentsPulled)
 		}
 		if result.Stats.Conflicts > 0 {
 			fmt.Printf("→ Resolved %d conflicts\n", result.Stats.Conflicts)

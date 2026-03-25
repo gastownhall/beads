@@ -208,6 +208,62 @@ type ProjectUpdateResponse struct {
 	} `json:"projectUpdate"`
 }
 
+// Comment represents a comment from the Linear API.
+type Comment struct {
+	ID        string `json:"id"`
+	Body      string `json:"body"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
+	User      *User  `json:"user"`
+}
+
+// CommentsResponse represents the response from issue comments query.
+type CommentsResponse struct {
+	Issue struct {
+		Comments struct {
+			Nodes    []Comment `json:"nodes"`
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
+		} `json:"comments"`
+	} `json:"issue"`
+}
+
+// CommentCreateResponse represents the response from commentCreate mutation.
+type CommentCreateResponse struct {
+	CommentCreate struct {
+		Success bool    `json:"success"`
+		Comment Comment `json:"comment"`
+	} `json:"commentCreate"`
+}
+
+// Attachment represents an attachment from the Linear API.
+type Attachment struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Subtitle string `json:"subtitle"`
+	URL      string `json:"url"`
+	Metadata struct {
+		MimeType string `json:"mimeType,omitempty"`
+	} `json:"metadata,omitempty"`
+	Creator   *User  `json:"creator,omitempty"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// AttachmentsResponse represents the response from issue attachments query.
+type AttachmentsResponse struct {
+	Issue struct {
+		Attachments struct {
+			Nodes    []Attachment `json:"nodes"`
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
+		} `json:"attachments"`
+	} `json:"issue"`
+}
+
 // SyncStats tracks statistics for a Linear sync operation.
 type SyncStats struct {
 	Pulled    int `json:"pulled"`

@@ -901,11 +901,28 @@ type Label struct {
 
 // Comment represents a comment on an issue
 type Comment struct {
-	ID        string    `json:"id"`
-	IssueID   string    `json:"issue_id"`
-	Author    string    `json:"author"`
-	Text      string    `json:"text"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string    `json:"id"`
+	IssueID     string    `json:"issue_id"`
+	Author      string    `json:"author"`
+	Text        string    `json:"text"`
+	CreatedAt   time.Time `json:"created_at"`
+	ExternalRef string    `json:"external_ref,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+
+// Attachment represents metadata for a file attached to an issue.
+// Only metadata (URL, filename, size) is stored — not file content.
+type Attachment struct {
+	ID          string    `json:"id"`
+	IssueID     string    `json:"issue_id"`
+	ExternalRef string    `json:"external_ref,omitempty"`
+	Filename    string    `json:"filename,omitempty"`
+	URL         string    `json:"url"`
+	MimeType    string    `json:"mime_type,omitempty"`
+	SizeBytes   int64     `json:"size_bytes,omitempty"`
+	Source      string    `json:"source,omitempty"`
+	Creator     string    `json:"creator,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // Event represents an audit trail entry

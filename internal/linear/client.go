@@ -662,6 +662,196 @@ func (sc *StateCache) FindStateForBeadsStatus(status types.Status) string {
 	return ""
 }
 
+// FetchIssueComments retrieves comments for a specific issue from Linear.
+// If since is non-zero, only comments created after that time are returned.
+func (c *Client) FetchIssueComments(ctx context.Context, issueID string, since time.Time) ([]Comment, error) {
+	var allComments []Comment
+	var cursor string
+
+	query := `
+		query IssueComments($issueId: String!, $first: Int!, $after: String) {
+			issue(id: $issueId) {
+				comments(first: $first, after: $after) {
+					nodes {
+						id
+						body
+						createdAt
+						updatedAt
+						user {
+							id
+							name
+							email
+							displayName
+						}
+					}
+					pageInfo {
+						hasNextPage
+						endCursor
+					}
+				}
+			}
+		}
+	`
+
+	for {
+		variables := map[string]interface{}{
+			"issueId": issueID,
+			"first":   MaxPageSize,
+		}
+		if cursor != "" {
+			variables["after"] = cursor
+		}
+
+		req := &GraphQLRequest{
+			Query:     query,
+			Variables: variables,
+		}
+
+		data, err := c.Execute(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch comments for issue %s: %w", issueID, err)
+		}
+
+		var resp CommentsResponse
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("failed to parse comments response: %w", err)
+		}
+
+		for _, comment := range resp.Issue.Comments.Nodes {
+			if !since.IsZero() {
+				createdAt, err := time.Parse(time.RFC3339, comment.CreatedAt)
+				if err == nil && !createdAt.After(since) {
+					continue
+				}
+			}
+			allComments = append(allComments, comment)
+		}
+
+		if !resp.Issue.Comments.PageInfo.HasNextPage {
+			break
+		}
+		cursor = resp.Issue.Comments.PageInfo.EndCursor
+	}
+
+	return allComments, nil
+}
+
+// CreateIssueComment creates a new comment on an issue in Linear.
+// Returns the created comment.
+func (c *Client) CreateIssueComment(ctx context.Context, issueID, body string) (*Comment, error) {
+	query := `
+		mutation CreateComment($input: CommentCreateInput!) {
+			commentCreate(input: $input) {
+				success
+				comment {
+					id
+					body
+					createdAt
+					updatedAt
+					user {
+						id
+						name
+						email
+						displayName
+					}
+				}
+			}
+		}
+	`
+
+	req := &GraphQLRequest{
+		Query: query,
+		Variables: map[string]interface{}{
+			"input": map[string]interface{}{
+				"issueId": issueID,
+				"body":    body,
+			},
+		},
+	}
+
+	data, err := c.Execute(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create comment: %w", err)
+	}
+
+	var resp CommentCreateResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse create comment response: %w", err)
+	}
+
+	if !resp.CommentCreate.Success {
+		return nil, fmt.Errorf("comment creation reported as unsuccessful")
+	}
+
+	return &resp.CommentCreate.Comment, nil
+}
+
+// FetchIssueAttachments retrieves attachment metadata for a specific issue from Linear.
+func (c *Client) FetchIssueAttachments(ctx context.Context, issueID string) ([]Attachment, error) {
+	var allAttachments []Attachment
+	var cursor string
+
+	query := `
+		query IssueAttachments($issueId: String!, $first: Int!, $after: String) {
+			issue(id: $issueId) {
+				attachments(first: $first, after: $after) {
+					nodes {
+						id
+						title
+						subtitle
+						url
+						creator {
+							id
+							name
+							email
+							displayName
+						}
+						createdAt
+					}
+					pageInfo {
+						hasNextPage
+						endCursor
+					}
+				}
+			}
+		}
+	`
+
+	for {
+		variables := map[string]interface{}{
+			"issueId": issueID,
+			"first":   MaxPageSize,
+		}
+		if cursor != "" {
+			variables["after"] = cursor
+		}
+
+		req := &GraphQLRequest{
+			Query:     query,
+			Variables: variables,
+		}
+
+		data, err := c.Execute(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch attachments for issue %s: %w", issueID, err)
+		}
+
+		var resp AttachmentsResponse
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("failed to parse attachments response: %w", err)
+		}
+
+		allAttachments = append(allAttachments, resp.Issue.Attachments.Nodes...)
+
+		if !resp.Issue.Attachments.PageInfo.HasNextPage {
+			break
+		}
+		cursor = resp.Issue.Attachments.PageInfo.EndCursor
+	}
+
+	return allAttachments, nil
+}
+
 // ExtractLinearIdentifier extracts the Linear issue identifier (e.g., "TEAM-123") from a Linear URL.
 func ExtractLinearIdentifier(url string) string {
 	// Linear URLs look like: https://linear.app/team/issue/TEAM-123/title

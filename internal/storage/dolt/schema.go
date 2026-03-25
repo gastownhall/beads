@@ -9,7 +9,7 @@ import (
 // currentSchemaVersion is bumped whenever the schema or migrations change.
 // initSchemaOnDB checks this against the stored version and skips re-initialization
 // when they match, avoiding ~20 DDL statements per bd invocation.
-const currentSchemaVersion = 9
+const currentSchemaVersion = 10
 
 // schema defines the MySQL-compatible database schema for Dolt.
 const schema = `
@@ -118,9 +118,29 @@ CREATE TABLE IF NOT EXISTS comments (
     author VARCHAR(255) NOT NULL,
     text TEXT NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    external_ref VARCHAR(255) DEFAULT '',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_comments_issue (issue_id),
     INDEX idx_comments_created_at (created_at),
+    INDEX idx_comments_external_ref (external_ref),
     CONSTRAINT fk_comments_issue FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+
+-- Attachments table (metadata only, no file content)
+CREATE TABLE IF NOT EXISTS attachments (
+    id CHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID()),
+    issue_id VARCHAR(255) NOT NULL,
+    external_ref VARCHAR(255) NOT NULL DEFAULT '',
+    filename VARCHAR(500) NOT NULL DEFAULT '',
+    url TEXT NOT NULL,
+    mime_type VARCHAR(255) NOT NULL DEFAULT '',
+    size_bytes BIGINT NOT NULL DEFAULT 0,
+    source VARCHAR(64) NOT NULL DEFAULT '',
+    creator VARCHAR(255) NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_attachments_issue (issue_id),
+    INDEX idx_attachments_external_ref (external_ref),
+    CONSTRAINT fk_attachments_issue FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
 );
 
 -- Events table (audit trail)

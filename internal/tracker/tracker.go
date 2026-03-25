@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -86,4 +87,46 @@ type FieldMapper interface {
 	// IssueToTracker builds update fields from a beads issue for the external tracker.
 	// Returns a map of field names to values in the tracker's format.
 	IssueToTracker(issue *types.Issue) map[string]interface{}
+}
+
+// CommentSyncer is an optional interface that tracker adapters can implement
+// to enable bidirectional comment synchronization. The sync engine checks for
+// this interface via type assertion — trackers that don't implement it simply
+// skip comment sync.
+type CommentSyncer interface {
+	// FetchComments retrieves comments for an issue from the external tracker.
+	// Only comments created/updated after `since` are returned (zero time = all).
+	FetchComments(ctx context.Context, externalIssueID string, since time.Time) ([]TrackerComment, error)
+
+	// CreateComment creates a new comment on an issue in the external tracker.
+	// Returns the external ID of the created comment.
+	CreateComment(ctx context.Context, externalIssueID, body string) (string, error)
+}
+
+// AttachmentFetcher is an optional interface that tracker adapters can implement
+// to enable pulling attachment metadata from the external tracker. This is
+// pull-only — beads does not push attachments to external trackers.
+type AttachmentFetcher interface {
+	// FetchAttachments retrieves attachment metadata for an issue from the external tracker.
+	FetchAttachments(ctx context.Context, externalIssueID string) ([]TrackerAttachment, error)
+}
+
+// TrackerComment represents a comment from an external tracker.
+type TrackerComment struct {
+	ID        string    // External tracker's comment ID
+	Body      string    // Comment text/body
+	Author    string    // Author name or email
+	CreatedAt time.Time // When the comment was created
+	UpdatedAt time.Time // When the comment was last updated
+}
+
+// TrackerAttachment represents attachment metadata from an external tracker.
+type TrackerAttachment struct {
+	ID        string    // External tracker's attachment ID
+	Filename  string    // Original filename
+	URL       string    // Download or reference URL
+	MimeType  string    // MIME type (e.g., "image/png")
+	SizeBytes int64     // File size in bytes
+	Creator   string    // Who created/uploaded the attachment
+	CreatedAt time.Time // When the attachment was created
 }
