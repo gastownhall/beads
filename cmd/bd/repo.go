@@ -274,9 +274,7 @@ Also triggers Dolt push/pull if a remote is configured.`,
 				}
 
 				issues, err := remoteStore.SearchIssues(ctx, "", types.IssueFilter{})
-				if closeErr := remoteStore.Close(); closeErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to close remote store for %s: %v\n", repoPath, closeErr)
-				}
+				_ = remoteStore.Close() // close eagerly — defer in a loop would leak connections
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to read issues from %s: %v\n", repoPath, err)
 					continue

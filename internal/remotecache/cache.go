@@ -26,7 +26,8 @@ type StoreOpener func(ctx context.Context, beadsDir string) (storage.DoltStorage
 // Cache manages local clones of remote Dolt databases.
 // Each remote URL maps to a directory under Dir named by CacheKey(url).
 type Cache struct {
-	Dir string // e.g., ~/.cache/beads/remotes
+	Dir      string        // e.g., ~/.cache/beads/remotes
+	FreshFor time.Duration // skip pull if last pull was within this duration; 0 means always pull
 }
 
 // CacheMeta stores metadata about a cached remote clone.
@@ -36,6 +37,10 @@ type CacheMeta struct {
 	LastPush  int64  `json:"last_push_ns"`
 }
 
+// defaultFreshFor is the default TTL for cached clones. Ensure() skips
+// pulling when the last pull was within this duration.
+const defaultFreshFor = 30 * time.Second
+
 // DefaultCache returns a Cache using the XDG-conventional cache directory.
 func DefaultCache() (*Cache, error) {
 	cacheDir, err := os.UserCacheDir()
@@ -43,7 +48,7 @@ func DefaultCache() (*Cache, error) {
 		return nil, fmt.Errorf("failed to determine cache directory: %w", err)
 	}
 	dir := filepath.Join(cacheDir, "beads", "remotes")
-	return &Cache{Dir: dir}, nil
+	return &Cache{Dir: dir, FreshFor: defaultFreshFor}, nil
 }
 
 // entryDir returns the cache entry directory for a remote URL.
@@ -93,7 +98,16 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 
 	target := c.cloneTarget(remoteURL)
 	if c.doltExists(target) {
-		// Warm start: pull
+		// Warm start: skip pull if the cache is still fresh
+		if c.FreshFor > 0 {
+			meta := c.readMeta(remoteURL)
+			age := time.Since(time.Unix(0, meta.LastPull))
+			if age < c.FreshFor {
+				debug.Logf("remotecache: skipping pull for %s (%.1fs old, fresh for %.0fs)\n",
+					remoteURL, age.Seconds(), c.FreshFor.Seconds())
+				return entry, nil
+			}
+		}
 		if err := c.doltPull(ctx, target); err != nil {
 			return "", fmt.Errorf("dolt pull failed for %s: %w", remoteURL, err)
 		}
@@ -144,6 +158,11 @@ func (c *Cache) Push(ctx context.Context, remoteURL string) error {
 // OpenStore opens a DoltStorage from the cached clone using the provided
 // StoreOpener. The cache entry directory is used as the beads directory.
 // The caller is responsible for calling Close() on the returned store.
+//
+// Note: OpenStore does not acquire a cache lock. The caller must ensure
+// no concurrent Ensure() or Push() is running against the same remoteURL,
+// as those modify the underlying dolt database. This is safe for single-
+// process CLI use but not for concurrent multi-process access.
 func (c *Cache) OpenStore(ctx context.Context, remoteURL string, opener StoreOpener) (storage.DoltStorage, error) {
 	entry := c.entryDir(remoteURL)
 	if !c.doltExists(c.cloneTarget(remoteURL)) {
