@@ -144,7 +144,7 @@ that came from the removed repository.`,
 
 		// Evict remote cache if applicable
 		if remotecache.IsRemoteURL(repoPath) {
-			if cache, cacheErr := remotecache.DefaultCache(); cacheErr == nil {
+			if cache, err := remotecache.DefaultCache(); err == nil {
 				_ = cache.Evict(repoPath)
 			}
 		}
@@ -258,27 +258,27 @@ Also triggers Dolt push/pull if a remote is configured.`,
 		for _, repoPath := range repos.Additional {
 			// Remote URL: pull into cache, read issues from SQL store
 			if remotecache.IsRemoteURL(repoPath) {
-				cache, cacheErr := remotecache.DefaultCache()
-				if cacheErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to init cache for %s: %v\n", repoPath, cacheErr)
+				cache, err := remotecache.DefaultCache()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to init cache for %s: %v\n", repoPath, err)
 					continue
 				}
-				if _, cacheErr = cache.Ensure(ctx, repoPath); cacheErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to sync remote %s: %v\n", repoPath, cacheErr)
+				if _, err = cache.Ensure(ctx, repoPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to sync remote %s: %v\n", repoPath, err)
 					continue
 				}
-				remoteStore, cacheErr := cache.OpenStore(ctx, repoPath, newDoltStoreFromConfig)
-				if cacheErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to open remote store %s: %v\n", repoPath, cacheErr)
+				remoteStore, err := cache.OpenStore(ctx, repoPath, newDoltStoreFromConfig)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to open remote store %s: %v\n", repoPath, err)
 					continue
 				}
 
-				issues, cacheErr := remoteStore.SearchIssues(ctx, "", types.IssueFilter{})
+				issues, err := remoteStore.SearchIssues(ctx, "", types.IssueFilter{})
 				if closeErr := remoteStore.Close(); closeErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to close remote store for %s: %v\n", repoPath, closeErr)
 				}
-				if cacheErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to read issues from %s: %v\n", repoPath, cacheErr)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to read issues from %s: %v\n", repoPath, err)
 					continue
 				}
 

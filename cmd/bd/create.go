@@ -765,7 +765,7 @@ var createCmd = &cobra.Command{
 		// which skips deferred functions.
 		if remoteCache != nil {
 			if pushErr := remoteCache.Push(rootCtx, repoPath); pushErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to push to %s: %v\n", repoPath, pushErr)
+				FatalError("failed to push to %s: %v\nThe issue was created locally but not synced to the remote.", repoPath, pushErr)
 			}
 		}
 

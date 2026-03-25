@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -88,7 +89,7 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to acquire cache lock: %w", err)
 	}
-	defer c.releaseLock(lock, remoteURL)
+	defer c.releaseLock(lock)
 
 	target := c.cloneTarget(remoteURL)
 	if c.doltExists(target) {
@@ -124,7 +125,7 @@ func (c *Cache) Push(ctx context.Context, remoteURL string) error {
 	if err != nil {
 		return fmt.Errorf("failed to acquire cache lock: %w", err)
 	}
-	defer c.releaseLock(lock, remoteURL)
+	defer c.releaseLock(lock)
 
 	cmd := exec.CommandContext(ctx, "dolt", "push", "origin", "main")
 	cmd.Dir = target
@@ -225,12 +226,14 @@ func (c *Cache) acquireLock(ctx context.Context, remoteURL string) (*os.File, er
 }
 
 // releaseLock releases a cache entry file lock.
-func (c *Cache) releaseLock(f *os.File, remoteURL string) {
+// The lock file is intentionally NOT removed: deleting it after unlock creates
+// a TOCTOU race where another process's newly-acquired lock gets deleted.
+// Stale lock files are cleaned up by acquireLock's age check instead.
+func (c *Cache) releaseLock(f *os.File) {
 	if f != nil {
 		_ = lockfile.FlockUnlock(f)
 		_ = f.Close()
 	}
-	_ = os.Remove(c.lockPath(remoteURL))
 }
 
 // readMeta reads the cache metadata for a remote URL.
@@ -250,7 +253,10 @@ func (c *Cache) readMeta(remoteURL string) *CacheMeta {
 func (c *Cache) writeMeta(remoteURL string, meta *CacheMeta) {
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
+		debug.Logf("remotecache: failed to marshal meta for %s: %v\n", remoteURL, err)
 		return
 	}
-	_ = os.WriteFile(c.metaPath(remoteURL), data, 0o600)
+	if err := os.WriteFile(c.metaPath(remoteURL), data, 0o600); err != nil {
+		debug.Logf("remotecache: failed to write meta for %s: %v\n", remoteURL, err)
+	}
 }
