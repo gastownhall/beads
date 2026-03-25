@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # embedded-test-shard.sh — run a shard of embedded dolt cmd/bd tests.
 #
-# Usage: embedded-test-shard.sh <shard_index> <total_shards> [extra go test flags...]
+# Usage: embedded-test-shard.sh <shard_number> <total_shards>
 #
 # Discovers all TestEmbedded* top-level functions from cmd/bd/*_embedded_test.go,
-# assigns each to a shard via hash(name) % total, and runs the matching subset.
+# assigns each to a shard via hash(name) % total, and runs the matching subset
+# using the pre-built test binary at BEADS_TEST_CMD_BINARY (or /tmp/bd-cmd-test).
 #
 # Environment:
 #   BEADS_TEST_EMBEDDED_DOLT=1    required (tests skip without it)
-#   BEADS_TEST_BD_BINARY=<path>   optional pre-built bd binary
+#   BEADS_TEST_BD_BINARY=<path>   optional pre-built bd binary (used by tests)
+#   BEADS_TEST_CMD_BINARY=<path>  pre-built cmd/bd test binary (default: /tmp/bd-cmd-test)
 
 set -euo pipefail
 
@@ -51,7 +53,16 @@ echo "Shard ${SHARD_NUMBER}/${TOTAL_SHARDS}: running ${#SHARD_TESTS[@]} test(s)"
 printf "  %s\n" "${SHARD_TESTS[@]}"
 echo ""
 
-exec go test -tags embeddeddolt -v -race -count=1 -timeout 20m \
-  -run "$RUN_REGEX" \
-  "$@" \
-  ./cmd/bd/
+# Use pre-built test binary if available, otherwise fall back to go test.
+CMD_BINARY="${BEADS_TEST_CMD_BINARY:-/tmp/bd-cmd-test}"
+if [ -x "$CMD_BINARY" ]; then
+  exec "$CMD_BINARY" -test.v -test.count=1 -test.timeout=20m \
+    -test.run "$RUN_REGEX" \
+    "$@"
+else
+  echo "Warning: pre-built test binary not found at $CMD_BINARY, falling back to go test"
+  exec go test -tags embeddeddolt -v -race -count=1 -timeout 20m \
+    -run "$RUN_REGEX" \
+    "$@" \
+    ./cmd/bd/
+fi

@@ -164,26 +164,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
-      - name: Download modules
-        run: go mod download
-
       - name: Build embedded bd binary
         run: go build -tags embeddeddolt -race -o /tmp/bd-embedded-test ./cmd/bd/
 
       - name: Build embedded storage test binary
         run: go test -tags embeddeddolt -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
 
-      - name: Package module cache
-        run: tar -czf /tmp/gomodcache.tar.gz -C $(go env GOMODCACHE) .
+      - name: Build embedded cmd test binary
+        run: go test -tags embeddeddolt -race -c -o /tmp/bd-cmd-test ./cmd/bd/
 
-      - name: Upload binaries and module cache
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: embedded-test-binaries
           path: |
             /tmp/bd-embedded-test
             /tmp/embeddeddolt-test
-            /tmp/gomodcache.tar.gz
+            /tmp/bd-cmd-test
           retention-days: 1
 
   test-embedded-storage:
@@ -191,32 +188,19 @@ jobs:
     needs: build-embedded
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
       - name: Install ICU4C
         run: |
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
-      - name: Download binaries and module cache
+      - name: Download binaries
         uses: actions/download-artifact@v4
         with:
           name: embedded-test-binaries
           path: /tmp/
 
-      - name: Restore module cache
-        run: |
-          mkdir -p $(go env GOMODCACHE)
-          tar -xzf /tmp/gomodcache.tar.gz -C $(go env GOMODCACHE)
-
       - name: Fix permissions
-        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
+        run: chmod +x /tmp/embeddeddolt-test
 
       - name: Configure Git
         run: |
@@ -226,8 +210,7 @@ jobs:
       - name: Test
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
-          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        run: go test -tags embeddeddolt -v -race -count=1 ./internal/storage/embeddeddolt/
+        run: /tmp/embeddeddolt-test -test.v -test.race -test.count=1 -test.timeout=10m
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
@@ -240,30 +223,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
       - name: Install ICU4C
         run: |
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
-      - name: Download binaries and module cache
+      - name: Download binaries
         uses: actions/download-artifact@v4
         with:
           name: embedded-test-binaries
           path: /tmp/
 
-      - name: Restore module cache
-        run: |
-          mkdir -p $(go env GOMODCACHE)
-          tar -xzf /tmp/gomodcache.tar.gz -C $(go env GOMODCACHE)
-
       - name: Fix permissions
-        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
+        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test /tmp/bd-cmd-test
 
       - name: Configure Git
         run: |
