@@ -654,9 +654,11 @@ var doltRemoteAddCmd = &cobra.Command{
 			}
 		}
 
-		// Add to CLI filesystem (skip if already correct)
+		// Add to CLI filesystem (skip if already correct).
+		// In embedded mode, SQL and CLI operate on the same directory,
+		// so the SQL add already wrote the remote config — skip CLI.
 		cliFailed := false
-		if cliURL != url {
+		if !isEmbeddedDolt && cliURL != url {
 			if err := doltutil.AddCLIRemote(dbPath, name, url); err != nil {
 				cliFailed = true
 				// Non-fatal: SQL remote was added successfully
@@ -847,9 +849,11 @@ var doltRemoteRemoveCmd = &cobra.Command{
 			}
 		}
 
-		// Remove from CLI filesystem
+		// Remove from CLI filesystem.
+		// In embedded mode, SQL and CLI operate on the same directory,
+		// so the SQL remove already cleared the remote config — skip CLI.
 		cliRemoveFailed := false
-		if cliURL != "" {
+		if !isEmbeddedDolt && cliURL != "" {
 			if err := doltutil.RemoveCLIRemote(dbPath, name); err != nil {
 				cliRemoveFailed = true
 				fmt.Fprintf(os.Stderr, "Warning: SQL remote removed but CLI remote failed: %v\n", err)

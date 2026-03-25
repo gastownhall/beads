@@ -11,20 +11,6 @@ import (
 	"testing"
 )
 
-// bdBootstrap runs "bd bootstrap" with the given args and returns stdout.
-func bdBootstrap(t *testing.T, bd, dir string, args ...string) string {
-	t.Helper()
-	fullArgs := append([]string{"bootstrap"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd bootstrap %s failed: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return string(out)
-}
-
 func TestEmbeddedBootstrap(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -34,37 +20,20 @@ func TestEmbeddedBootstrap(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "tb")
 
-	// ===== Bootstrap on existing DB =====
-
-	t.Run("bootstrap_existing_db", func(t *testing.T) {
-		out := bdBootstrap(t, bd, dir)
-		// Should detect existing database and report status
-		if len(strings.TrimSpace(out)) == 0 {
-			t.Error("expected non-empty bootstrap output on existing db")
+	t.Run("bootstrap_blocked", func(t *testing.T) {
+		cmd := exec.Command(bd, "bootstrap")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected bootstrap to fail in embedded mode, but succeeded:\n%s", out)
 		}
-	})
-
-	// ===== Dry Run =====
-
-	t.Run("bootstrap_dry_run", func(t *testing.T) {
-		out := bdBootstrap(t, bd, dir, "--dry-run")
-		if len(strings.TrimSpace(out)) == 0 {
-			t.Error("expected non-empty --dry-run output")
-		}
-	})
-
-	// ===== JSON Output =====
-
-	t.Run("bootstrap_json", func(t *testing.T) {
-		out := bdBootstrap(t, bd, dir, "--json")
-		// Should produce output without crashing
-		if len(strings.TrimSpace(out)) == 0 {
-			t.Error("expected non-empty --json output")
+		if !strings.Contains(string(out), "not yet supported in embedded mode") {
+			t.Errorf("expected 'not yet supported in embedded mode' in output: %s", out)
 		}
 	})
 }
 
-// TestEmbeddedBootstrapConcurrent exercises bootstrap concurrently.
 func TestEmbeddedBootstrapConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -75,12 +44,10 @@ func TestEmbeddedBootstrapConcurrent(t *testing.T) {
 	dir, _, _ := bdInit(t, bd, "--prefix", "bx")
 
 	const numWorkers = 8
-
 	type workerResult struct {
 		worker int
 		err    error
 	}
-
 	results := make([]workerResult, numWorkers)
 	var wg sync.WaitGroup
 	wg.Add(numWorkers)
@@ -89,22 +56,19 @@ func TestEmbeddedBootstrapConcurrent(t *testing.T) {
 		go func(worker int) {
 			defer wg.Done()
 			r := workerResult{worker: worker}
-
-			cmd := exec.Command(bd, "bootstrap", "--dry-run")
+			cmd := exec.Command(bd, "bootstrap")
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
 			out, err := cmd.CombinedOutput()
-			if err != nil {
-				r.err = fmt.Errorf("bootstrap --dry-run (worker %d): %v\n%s", worker, err, out)
-				results[worker] = r
-				return
+			if err == nil {
+				r.err = fmt.Errorf("expected bootstrap to fail in embedded mode")
+			} else if !strings.Contains(string(out), "not yet supported in embedded mode") {
+				r.err = fmt.Errorf("unexpected error: %s", out)
 			}
-
 			results[worker] = r
 		}(w)
 	}
 	wg.Wait()
-
 	for _, r := range results {
 		if r.err != nil {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
