@@ -18,8 +18,9 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Compile-time interface check.
+// Compile-time interface checks.
 var _ storage.DoltStorage = (*EmbeddedDoltStore)(nil)
+var _ storage.StoreLocator = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
 // Each method call opens a short-lived connection, executes within an explicit
@@ -346,6 +347,20 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 func (s *EmbeddedDoltStore) Close() error {
 	s.closed.Store(true)
 	return nil
+}
+
+// Path returns the embedded dolt data directory (.beads/embeddeddolt/).
+func (s *EmbeddedDoltStore) Path() string {
+	return s.dataDir
+}
+
+// CLIDir returns the directory for dolt CLI operations (push/pull/remote).
+// This is the actual database directory within the data dir.
+func (s *EmbeddedDoltStore) CLIDir() string {
+	if s.dataDir == "" {
+		return ""
+	}
+	return filepath.Join(s.dataDir, s.database)
 }
 
 // ---------------------------------------------------------------------------

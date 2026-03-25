@@ -200,7 +200,7 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	s.cacheMu.Unlock()
 
 	var result map[string]bool
-	s.withReadTx(ctx, func(tx *sql.Tx) error {
+	_ = s.withReadTx(ctx, func(tx *sql.Tx) error {
 		result = issueops.ResolveInfraTypesInTx(ctx, tx)
 		return nil
 	})
