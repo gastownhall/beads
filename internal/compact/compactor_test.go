@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func setupTestStorage(t *testing.T) *dolt.DoltStore {
 	t.Helper()
+	testutil.RequireDoltContainer(t)
 
 	store, err := dolt.New(context.Background(), &dolt.Config{Path: t.TempDir()})
 	if err != nil {

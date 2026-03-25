@@ -159,6 +159,9 @@ func (h *integrationTestHelper) assertCount(count, expected int, item string) {
 
 // TestLibraryIntegration tests the full public API that external users will use
 func TestLibraryIntegration(t *testing.T) {
+	if testDoltPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	// Setup: Create a temporary database
 	tmpDir, err := os.MkdirTemp("", "beads-integration-*")
 	if err != nil {
@@ -323,6 +326,9 @@ func TestIssueTypeConstants(t *testing.T) {
 
 // TestBatchCreateIssues tests creating multiple issues at once
 func TestBatchCreateIssues(t *testing.T) {
+	if testDoltPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	tmpDir, err := os.MkdirTemp("", "beads-batch-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -398,6 +404,9 @@ func TestFindDatabasePathIntegration(t *testing.T) {
 
 // TestRoundTripIssue tests creating, updating, and retrieving an issue
 func TestRoundTripIssue(t *testing.T) {
+	if testDoltPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	tmpDir, err := os.MkdirTemp("", "beads-roundtrip-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -436,6 +445,9 @@ func TestRoundTripIssue(t *testing.T) {
 // TestImportWithDeletedParent verifies parent resurrection during import
 // This tests the fix for bd-d19a (import failure on missing parent issues)
 func TestImportWithDeletedParent(t *testing.T) {
+	if testDoltPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	tmpDir, err := os.MkdirTemp("", "beads-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
