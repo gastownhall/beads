@@ -98,6 +98,13 @@ Examples:
 		if jsonOutput && len(deferredIssues) > 0 {
 			outputJSON(deferredIssues)
 		}
+
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && len(args) > 0 && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalError("failed to commit: %v", err)
+			}
+		}
 	},
 }
 
