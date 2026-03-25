@@ -37,8 +37,9 @@ func IsRemoteURL(s string) bool {
 }
 
 // CacheKey returns a filesystem-safe identifier for a remote URL.
-// It uses the first 16 hex characters of the SHA-256 hash, providing
-// sufficient uniqueness without excessive path length.
+// It uses the first 16 hex characters (64 bits) of the SHA-256 hash.
+// Birthday-bound collision risk is negligible for a local cache: 50% at
+// ~4.3 billion entries, well beyond any realistic number of remotes.
 func CacheKey(remoteURL string) string {
 	h := sha256.Sum256([]byte(remoteURL))
 	return fmt.Sprintf("%x", h[:8])

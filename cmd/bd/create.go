@@ -424,26 +424,22 @@ var createCmd = &cobra.Command{
 		// Switch to target repo for multi-repo support (bd-6x6g)
 		// When routing to a different repo, we use direct storage access
 		var targetStore storage.DoltStorage
+		var remoteCache *remotecache.Cache // non-nil when routing to a remote URL
 		if repoPath != "." {
 			if remotecache.IsRemoteURL(repoPath) {
-				// Remote URL: pull into cache, open store, push after create
-				cache, err := remotecache.DefaultCache()
+				// Remote URL: pull into cache, open store, push explicitly after create
+				var err error
+				remoteCache, err = remotecache.DefaultCache()
 				if err != nil {
 					FatalError("failed to initialize remote cache: %v", err)
 				}
-				if _, err := cache.Ensure(rootCtx, repoPath); err != nil {
+				if _, err := remoteCache.Ensure(rootCtx, repoPath); err != nil {
 					FatalError("failed to sync remote %s: %v", repoPath, err)
 				}
-				targetStore, err = cache.OpenStore(rootCtx, repoPath, newDoltStoreFromConfig)
+				targetStore, err = remoteCache.OpenStore(rootCtx, repoPath, newDoltStoreFromConfig)
 				if err != nil {
 					FatalError("failed to open remote store: %v", err)
 				}
-				// Push changes back to remote after issue creation
-				defer func() {
-					if pushErr := cache.Push(rootCtx, repoPath); pushErr != nil {
-						fmt.Fprintf(os.Stderr, "Warning: failed to push to %s: %v\n", repoPath, pushErr)
-					}
-				}()
 			} else {
 				targetBeadsDir := routing.ExpandPath(repoPath)
 				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
@@ -761,6 +757,15 @@ var createCmd = &cobra.Command{
 		if repoPath != "." && targetStore != nil {
 			if _, err := targetStore.CommitPending(ctx, actor); err != nil {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
+			}
+		}
+
+		// Push to remote if this was a remote-routed create.
+		// Done explicitly (not via defer) because FatalError calls os.Exit,
+		// which skips deferred functions.
+		if remoteCache != nil {
+			if pushErr := remoteCache.Push(rootCtx, repoPath); pushErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to push to %s: %v\n", repoPath, pushErr)
 			}
 		}
 

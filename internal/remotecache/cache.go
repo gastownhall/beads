@@ -84,7 +84,7 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 	}
 
 	// Acquire exclusive lock for clone/pull
-	lock, err := c.acquireLock(remoteURL)
+	lock, err := c.acquireLock(ctx, remoteURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to acquire cache lock: %w", err)
 	}
@@ -120,7 +120,7 @@ func (c *Cache) Push(ctx context.Context, remoteURL string) error {
 		return fmt.Errorf("no cached clone for %s", remoteURL)
 	}
 
-	lock, err := c.acquireLock(remoteURL)
+	lock, err := c.acquireLock(ctx, remoteURL)
 	if err != nil {
 		return fmt.Errorf("failed to acquire cache lock: %w", err)
 	}
@@ -184,7 +184,7 @@ func (c *Cache) doltPull(ctx context.Context, dbDir string) error {
 }
 
 // acquireLock acquires an exclusive file lock for a cache entry.
-func (c *Cache) acquireLock(remoteURL string) (*os.File, error) {
+func (c *Cache) acquireLock(ctx context.Context, remoteURL string) (*os.File, error) {
 	lp := c.lockPath(remoteURL)
 
 	// Clean up stale locks
@@ -215,7 +215,12 @@ func (c *Cache) acquireLock(remoteURL string) (*os.File, error) {
 			_ = f.Close()
 			return nil, fmt.Errorf("timeout waiting for cache lock on %s", remoteURL)
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, fmt.Errorf("interrupted waiting for cache lock on %s: %w", remoteURL, ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
 
@@ -247,5 +252,5 @@ func (c *Cache) writeMeta(remoteURL string, meta *CacheMeta) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(c.metaPath(remoteURL), data, 0o644)
+	_ = os.WriteFile(c.metaPath(remoteURL), data, 0o600)
 }
