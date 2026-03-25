@@ -137,6 +137,13 @@ that came from the removed repository.`,
 			return fmt.Errorf("failed to remove repository: %w", err)
 		}
 
+		// Embedded mode: flush Dolt commit before output.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				return fmt.Errorf("failed to commit: %w", err)
+			}
+		}
+
 		if jsonOutput {
 			result := map[string]interface{}{
 				"removed":        true,
@@ -149,13 +156,6 @@ that came from the removed repository.`,
 		fmt.Printf("Removed repository: %s\n", repoPath)
 		if deletedCount > 0 {
 			fmt.Printf("Deleted %d issue(s) from the database\n", deletedCount)
-		}
-
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				return fmt.Errorf("failed to commit: %w", err)
-			}
 		}
 		return nil
 	},
@@ -322,6 +322,13 @@ Also triggers Dolt push/pull if a remote is configured.`,
 		// Push is handled by periodic sync, not per-operation.
 		// Manual push available via: bd dolt push
 
+		// Embedded mode: flush Dolt commit before output.
+		if isEmbeddedDolt && totalImported > 0 && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				return fmt.Errorf("failed to commit: %w", err)
+			}
+		}
+
 		if jsonOutput {
 			result := map[string]interface{}{
 				"synced":          true,
@@ -339,13 +346,6 @@ Also triggers Dolt push/pull if a remote is configured.`,
 			fmt.Println("Multi-repo sync complete: all repos up to date")
 		} else {
 			fmt.Println("Multi-repo sync complete")
-		}
-
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && totalImported > 0 && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				return fmt.Errorf("failed to commit: %w", err)
-			}
 		}
 		return nil
 	},
