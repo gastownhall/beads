@@ -144,8 +144,12 @@ jobs:
 
   # Embedded Dolt tests - runs the embeddeddolt build tag tests
   # These test the in-process Dolt engine (no server required)
-  test-embedded-dolt:
-    name: Test (Embedded Dolt)
+  #
+  # Split into: build → storage tests + 4 parallel cmd test shards.
+  # Adding new *_embedded_test.go files auto-distributes via hash sharding.
+
+  build-embedded:
+    name: Build (Embedded Dolt)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -160,20 +164,98 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
+      - name: Build embedded bd binary
+        run: go build -tags embeddeddolt -race -o /tmp/bd-embedded-test ./cmd/bd/
+
+      - name: Build embedded storage test binary
+        run: go test -tags embeddeddolt -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-test-binaries
+          path: |
+            /tmp/bd-embedded-test
+            /tmp/embeddeddolt-test
+          retention-days: 1
+
+  test-embedded-storage:
+    name: Test (Embedded Dolt Storage)
+    needs: build-embedded
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
+
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
 
-      - name: Test (embedded dolt - storage)
+      - name: Test
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
+          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
         run: go test -tags embeddeddolt -v -race -count=1 ./internal/storage/embeddeddolt/
 
-      - name: Test (embedded dolt - cmd)
+  test-embedded-cmd:
+    name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: build-embedded
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Test
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
-        run: go test -tags embeddeddolt -v -race -count=1 -timeout 20m -run TestEmbedded ./cmd/bd/
+          BEADS_TEST_BD_BINARY: /tmp/bd-embedded-test
+        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 8
 
   # Windows smoke tests only - full test suite times out (see bd-bmev)
   # Linux/macOS run comprehensive tests; Windows just verifies binary works

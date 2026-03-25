@@ -47,8 +47,7 @@ Under the hood this calls DOLT_BACKUP('add', ...) to register the destination.`,
 		ctx := rootCtx
 		rawPath := args[0]
 
-		st := getStore()
-		if st == nil {
+		if store == nil {
 			return fmt.Errorf("no store available")
 		}
 
@@ -56,7 +55,7 @@ Under the hood this calls DOLT_BACKUP('add', ...) to register the destination.`,
 		// DoltHub URLs are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
-		bs, ok := st.(storage.BackupStore)
+		bs, ok := store.(storage.BackupStore)
 		if !ok {
 			return fmt.Errorf("storage backend does not support backup operations")
 		}
@@ -110,18 +109,17 @@ The backup is atomic — if the sync fails, the previous backup state is preserv
 Run 'bd backup init <path>' first to configure a destination.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := rootCtx
-		st := getStore()
-		if st == nil {
+		if store == nil {
 			return fmt.Errorf("no store available")
 		}
 
-		bs, ok := st.(storage.BackupStore)
+		bs, ok := store.(storage.BackupStore)
 		if !ok {
 			return fmt.Errorf("storage backend does not support backup operations")
 		}
 
 		// First, commit any pending changes so they're included in the backup
-		committer, ok := st.(storage.PendingCommitter)
+		committer, ok := store.(storage.PendingCommitter)
 		if !ok {
 			return fmt.Errorf("storage backend does not support pending commits")
 		}
