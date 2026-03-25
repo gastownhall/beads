@@ -150,6 +150,13 @@ that came from the removed repository.`,
 		if deletedCount > 0 {
 			fmt.Printf("Deleted %d issue(s) from the database\n", deletedCount)
 		}
+
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				return fmt.Errorf("failed to commit: %w", err)
+			}
+		}
 		return nil
 	},
 }
@@ -332,6 +339,13 @@ Also triggers Dolt push/pull if a remote is configured.`,
 			fmt.Println("Multi-repo sync complete: all repos up to date")
 		} else {
 			fmt.Println("Multi-repo sync complete")
+		}
+
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && totalImported > 0 && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				return fmt.Errorf("failed to commit: %w", err)
+			}
 		}
 		return nil
 	},
