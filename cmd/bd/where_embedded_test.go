@@ -66,10 +66,10 @@ func TestEmbeddedWhere(t *testing.T) {
 		if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
 			t.Fatalf("parse where JSON: %v\n%s", err, s)
 		}
-		// Verify path is present in JSON
-		if path, ok := m["beads_dir"]; ok {
-			if !strings.Contains(path.(string), ".beads") {
-				t.Errorf("expected .beads in beads_dir: %v", path)
+		// Verify path is present in JSON (WhereResult uses "path" key)
+		if path, ok := m["path"]; ok {
+			if p, ok := path.(string); ok && !strings.Contains(p, ".beads") {
+				t.Errorf("expected .beads in path: %v", path)
 			}
 		}
 	})

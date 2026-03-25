@@ -217,7 +217,7 @@ jobs:
         run: go test -tags embeddeddolt -v -race -count=1 ./internal/storage/embeddeddolt/
 
   test-embedded-cmd:
-    name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
+    name: Test (Embedded Dolt Cmd ${{ matrix.shard + 1 }}/${{ strategy.job-total }})
     needs: build-embedded
     runs-on: ubuntu-latest
     strategy:

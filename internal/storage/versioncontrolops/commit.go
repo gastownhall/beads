@@ -39,7 +39,7 @@ func (t *DirtyTableTracker) DirtyTables() map[string]bool {
 // If commitMsg is empty, no commit is created. "Nothing to commit" errors
 // are treated as benign (e.g., all writes were to dolt-ignored tables).
 func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
-	if commitMsg == "" {
+	if commitMsg == "" || len(dirtyTables) == 0 {
 		return nil
 	}
 

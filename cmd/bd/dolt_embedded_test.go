@@ -98,7 +98,8 @@ func TestEmbeddedDolt(t *testing.T) {
 	})
 
 	t.Run("remote_add_and_list", func(t *testing.T) {
-		bdDolt(t, bd, dir, "remote", "add", "test-remote", "file:///tmp/dolt-test-remote")
+		remoteDir := t.TempDir()
+		bdDolt(t, bd, dir, "remote", "add", "test-remote", "file://"+remoteDir)
 		out := bdDolt(t, bd, dir, "remote", "list")
 		if !strings.Contains(out, "test-remote") {
 			t.Errorf("expected 'test-remote' in remote list: %s", out)

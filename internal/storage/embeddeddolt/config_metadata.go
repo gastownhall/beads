@@ -6,6 +6,8 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -57,10 +59,22 @@ func (s *EmbeddedDoltStore) SetMetadata(ctx context.Context, key, value string) 
 // then to hardcoded defaults (agent, rig, role, message).
 func (s *EmbeddedDoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	var result map[string]bool
-	s.withConn(ctx, false, func(tx *sql.Tx) error {
+	if err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		result = issueops.ResolveInfraTypesInTx(ctx, tx)
 		return nil
-	})
+	}); err != nil || result == nil {
+		// DB unavailable — fall back to YAML then defaults.
+		var typeList []string
+		if yamlTypes := config.GetInfraTypesFromYAML(); len(yamlTypes) > 0 {
+			typeList = yamlTypes
+		} else {
+			typeList = storage.DefaultInfraTypes()
+		}
+		result = make(map[string]bool, len(typeList))
+		for _, t := range typeList {
+			result[t] = true
+		}
+	}
 	return result
 }
 

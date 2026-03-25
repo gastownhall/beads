@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -128,14 +130,15 @@ func (s *DoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.Cust
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var txErr error
 		detailed, txErr = issueops.ResolveCustomStatusesDetailedInTx(ctx, tx)
-		if txErr != nil {
-			return txErr
-		}
-		return nil
+		return txErr
 	})
 	if err != nil {
+		// DB unavailable — fall back to config.yaml before giving up.
 		log.Printf("warning: failed to resolve custom statuses: %v. Custom statuses disabled. Fix with: bd config set status.custom \"valid,values\"", err)
-		return nil, err
+		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
+			return issueops.ParseStatusFallback(yamlStatuses), nil
+		}
+		return nil, nil
 	}
 
 	s.cacheMu.Lock()
@@ -172,7 +175,11 @@ func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
 		return txErr
 	})
 	if err != nil {
-		return nil, err
+		// DB unavailable — fall back to config.yaml.
+		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
+			return yamlTypes, nil
+		}
+		return nil, nil
 	}
 
 	s.cacheMu.Lock()
@@ -200,10 +207,22 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	s.cacheMu.Unlock()
 
 	var result map[string]bool
-	_ = s.withReadTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		result = issueops.ResolveInfraTypesInTx(ctx, tx)
 		return nil
-	})
+	}); err != nil || result == nil {
+		// DB unavailable — fall back to YAML then defaults.
+		var typeList []string
+		if yamlTypes := config.GetInfraTypesFromYAML(); len(yamlTypes) > 0 {
+			typeList = yamlTypes
+		} else {
+			typeList = storage.DefaultInfraTypes()
+		}
+		result = make(map[string]bool, len(typeList))
+		for _, t := range typeList {
+			result[t] = true
+		}
+	}
 
 	s.cacheMu.Lock()
 	s.infraTypeCache = result

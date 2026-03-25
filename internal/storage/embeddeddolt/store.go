@@ -612,7 +612,14 @@ func (s *EmbeddedDoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]ty
 		result, txErr = issueops.ResolveCustomStatusesDetailedInTx(ctx, tx)
 		return txErr
 	})
-	return result, err
+	if err != nil {
+		// DB unavailable — fall back to config.yaml.
+		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
+			return issueops.ParseStatusFallback(yamlStatuses), nil
+		}
+		return nil, nil
+	}
+	return result, nil
 }
 
 func (s *EmbeddedDoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
@@ -622,7 +629,14 @@ func (s *EmbeddedDoltStore) GetCustomTypes(ctx context.Context) ([]string, error
 		result, txErr = issueops.ResolveCustomTypesInTx(ctx, tx)
 		return txErr
 	})
-	return result, err
+	if err != nil {
+		// DB unavailable — fall back to config.yaml.
+		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
+			return yamlTypes, nil
+		}
+		return nil, nil
+	}
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------
