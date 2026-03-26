@@ -170,6 +170,9 @@ jobs:
       - name: Build embedded storage test binary
         run: go test -tags embeddeddolt -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
 
+      - name: Build embedded cmd test binary
+        run: go test -tags embeddeddolt -race -c -o /tmp/bd-cmd-test ./cmd/bd/
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
@@ -177,6 +180,7 @@ jobs:
           path: |
             /tmp/bd-embedded-test
             /tmp/embeddeddolt-test
+            /tmp/bd-cmd-test
           retention-days: 1
 
   test-embedded-storage:
@@ -185,11 +189,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
 
       - name: Install ICU4C
         run: |
@@ -203,7 +202,7 @@ jobs:
           path: /tmp/
 
       - name: Fix permissions
-        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
+        run: chmod +x /tmp/embeddeddolt-test
 
       - name: Configure Git
         run: |
@@ -214,7 +213,7 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        run: go test -tags embeddeddolt -v -race -count=1 ./internal/storage/embeddeddolt/
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=10m
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
@@ -223,14 +222,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
 
       - name: Install ICU4C
         run: |
@@ -244,7 +238,7 @@ jobs:
           path: /tmp/
 
       - name: Fix permissions
-        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
+        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test /tmp/bd-cmd-test
 
       - name: Configure Git
         run: |
@@ -255,7 +249,7 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_BD_BINARY: /tmp/bd-embedded-test
-        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 8
+        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 20
 
   # Windows smoke tests only - full test suite times out (see bd-bmev)
   # Linux/macOS run comprehensive tests; Windows just verifies binary works

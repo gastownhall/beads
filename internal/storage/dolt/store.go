@@ -145,6 +145,8 @@ var _ storage.RawDBAccessor = (*DoltStore)(nil)
 var _ storage.StoreLocator = (*DoltStore)(nil)
 var _ storage.LifecycleManager = (*DoltStore)(nil)
 var _ storage.PendingCommitter = (*DoltStore)(nil)
+var _ storage.GarbageCollector = (*DoltStore)(nil)
+var _ storage.Flattener = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -1456,6 +1458,30 @@ func (s *DoltStore) CLIDir() string {
 		return ""
 	}
 	return filepath.Join(s.dbPath, s.database)
+}
+
+// DoltGC runs Dolt garbage collection to reclaim disk space.
+// Pins a single connection to avoid session state loss on pooled *sql.DB.
+func (s *DoltStore) DoltGC(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for gc: %w", err)
+	}
+	defer conn.Close()
+	return versioncontrolops.DoltGC(ctx, conn)
+}
+
+// Flatten squashes all Dolt commit history into a single commit.
+// Pins a single connection because the stored procedures (DOLT_CHECKOUT,
+// DOLT_RESET, etc.) rely on session-scoped state that would be lost if
+// steps execute on different pooled connections.
+func (s *DoltStore) Flatten(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for flatten: %w", err)
+	}
+	defer conn.Close()
+	return versioncontrolops.Flatten(ctx, conn)
 }
 
 // UnderlyingDB returns the underlying *sql.DB connection

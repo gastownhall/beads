@@ -9,18 +9,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Compile-time interface check.
+// Compile-time interface checks.
 var _ storage.DoltStorage = (*EmbeddedDoltStore)(nil)
+var _ storage.StoreLocator = (*EmbeddedDoltStore)(nil)
+var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
+var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
 // Each method call opens a short-lived connection, executes within an explicit
@@ -349,6 +352,34 @@ func (s *EmbeddedDoltStore) Close() error {
 	return nil
 }
 
+// DoltGC runs Dolt garbage collection to reclaim disk space.
+func (s *EmbeddedDoltStore) DoltGC(ctx context.Context) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.DoltGC(ctx, db)
+	})
+}
+
+// Flatten squashes all Dolt commit history into a single commit.
+func (s *EmbeddedDoltStore) Flatten(ctx context.Context) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.Flatten(ctx, db)
+	})
+}
+
+// Path returns the embedded dolt data directory (.beads/embeddeddolt/).
+func (s *EmbeddedDoltStore) Path() string {
+	return s.dataDir
+}
+
+// CLIDir returns the directory for dolt CLI operations (push/pull/remote).
+// This is the actual database directory within the data dir.
+func (s *EmbeddedDoltStore) CLIDir() string {
+	if s.dataDir == "" {
+		return ""
+	}
+	return filepath.Join(s.dataDir, s.database)
+}
+
 // ---------------------------------------------------------------------------
 // storage.VersionControl
 // ---------------------------------------------------------------------------
@@ -592,55 +623,35 @@ func (s *EmbeddedDoltStore) GetCustomStatuses(ctx context.Context) ([]string, er
 }
 
 func (s *EmbeddedDoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error) {
-	value, err := s.GetConfig(ctx, "status.custom")
+	var result []types.CustomStatus
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var txErr error
+		result, txErr = issueops.ResolveCustomStatusesDetailedInTx(ctx, tx)
+		return txErr
+	})
 	if err != nil {
-		// On database error, try fallback to config.yaml
+		// DB unavailable — fall back to config.yaml.
 		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-			return parseStatusFallbackEmbedded(yamlStatuses), nil
+			return issueops.ParseStatusFallback(yamlStatuses), nil
 		}
-		return nil, err
+		return nil, nil
 	}
-
-	if value != "" {
-		parsed, parseErr := types.ParseCustomStatusConfig(value)
-		if parseErr != nil {
-			// Degraded mode: return empty (CLI remains operable)
-			return nil, nil
-		}
-		return parsed, nil
-	}
-
-	if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-		return parseStatusFallbackEmbedded(yamlStatuses), nil
-	}
-	return nil, nil
-}
-
-// parseStatusFallbackEmbedded converts legacy []string status names to []CustomStatus.
-func parseStatusFallbackEmbedded(names []string) []types.CustomStatus {
-	joined := strings.Join(names, ",")
-	if parsed, err := types.ParseCustomStatusConfig(joined); err == nil {
-		return parsed
-	}
-	result := make([]types.CustomStatus, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name != "" {
-			result = append(result, types.CustomStatus{Name: name, Category: types.CategoryUnspecified})
-		}
-	}
-	return result
+	return result, nil
 }
 
 func (s *EmbeddedDoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
 	var result []string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetCustomTypesTx(ctx, tx)
-		return err
+		var txErr error
+		result, txErr = issueops.ResolveCustomTypesInTx(ctx, tx)
+		return txErr
 	})
-	if err != nil || len(result) == 0 {
-		return config.GetCustomTypesFromYAML(), nil
+	if err != nil {
+		// DB unavailable — fall back to config.yaml.
+		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
+			return yamlTypes, nil
+		}
+		return nil, nil
 	}
 	return result, nil
 }

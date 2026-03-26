@@ -671,6 +671,13 @@ func runADOSync(cmd *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
 	}
 
+	// Embedded mode: flush Dolt commit after sync writes.
+	if isEmbeddedDolt && !adoSyncDryRun && store != nil {
+		if _, commitErr := store.CommitPending(rootCtx, actor); commitErr != nil {
+			return fmt.Errorf("failed to commit: %w", commitErr)
+		}
+	}
+
 	return nil
 }
 

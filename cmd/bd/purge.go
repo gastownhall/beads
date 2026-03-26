@@ -200,6 +200,13 @@ EXAMPLES:
 				fmt.Printf("  Pinned (skipped):     %d\n", pinnedCount)
 			}
 		}
+
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedDolt && result.DeletedCount > 0 && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				FatalError("failed to commit: %v", err)
+			}
+		}
 	},
 }
 

@@ -137,6 +137,13 @@ that came from the removed repository.`,
 			return fmt.Errorf("failed to remove repository: %w", err)
 		}
 
+		// Embedded mode: flush Dolt commit before output.
+		if isEmbeddedDolt && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				return fmt.Errorf("failed to commit: %w", err)
+			}
+		}
+
 		if jsonOutput {
 			result := map[string]interface{}{
 				"removed":        true,
@@ -314,6 +321,13 @@ Also triggers Dolt push/pull if a remote is configured.`,
 
 		// Push is handled by periodic sync, not per-operation.
 		// Manual push available via: bd dolt push
+
+		// Embedded mode: flush Dolt commit before output.
+		if isEmbeddedDolt && totalImported > 0 && store != nil {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
+				return fmt.Errorf("failed to commit: %w", err)
+			}
+		}
 
 		if jsonOutput {
 			result := map[string]interface{}{

@@ -116,6 +116,18 @@ type StoreLocator interface {
 	CLIDir() string
 }
 
+// GarbageCollector provides Dolt garbage collection capability.
+// Callers that need to reclaim disk space should type-assert to this interface.
+type GarbageCollector interface {
+	DoltGC(ctx context.Context) error
+}
+
+// Flattener squashes all Dolt commit history into a single commit.
+// Callers should type-assert to this interface for history compaction.
+type Flattener interface {
+	Flatten(ctx context.Context) error
+}
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool

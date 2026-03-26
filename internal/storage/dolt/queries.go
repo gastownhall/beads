@@ -282,25 +282,9 @@ func (s *DoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter
 func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	stats := &types.Statistics{}
 
-	// Get counts per status.
-	// Important: COALESCE to avoid NULL scans when the table is empty.
-	err := s.db.QueryRowContext(ctx, `
-		SELECT
-			COUNT(*) as total,
-			COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) as open_count,
-			COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) as in_progress,
-			COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0) as closed,
-			COALESCE(SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END), 0) as deferred,
-			COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) as pinned
-		FROM issues
-	`).Scan(
-		&stats.TotalIssues,
-		&stats.OpenIssues,
-		&stats.InProgressIssues,
-		&stats.ClosedIssues,
-		&stats.DeferredIssues,
-		&stats.PinnedIssues,
-	)
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		return issueops.ScanIssueCountsInTx(ctx, tx, stats)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get statistics: %w", err)
 	}
