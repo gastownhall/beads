@@ -420,7 +420,6 @@ var rootCmd = &cobra.Command{
 			"human",
 			"init",
 			"merge",
-			"migrate", // manages its own store lifecycle (#1668)
 			"onboard",
 			"powershell",
 			"prime",

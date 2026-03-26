@@ -28,10 +28,6 @@ Subcommands:
   sync        Set up sync.branch workflow for multi-clone setups
 `,
 	Run: func(cmd *cobra.Command, _ []string) {
-		if isEmbeddedDolt {
-			fmt.Fprintln(os.Stderr, "Error: 'bd migrate' is not yet supported in embedded mode")
-			os.Exit(1)
-		}
 		autoYes, _ := cmd.Flags().GetBool("yes")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		updateRepoID, _ := cmd.Flags().GetBool("update-repo-id")
@@ -88,37 +84,19 @@ Subcommands:
 
 // handleDoltMetadataUpdate handles version metadata updates for Dolt backends.
 func handleDoltMetadataUpdate(cfg *configfile.Config, beadsDir string, dryRun bool) {
-	doltPath := cfg.DatabasePath(beadsDir)
-
-	// Check if Dolt database directory exists
-	info, err := os.Stat(doltPath)
-	if err != nil || !info.IsDir() {
+	ctx := rootCtx
+	store := getStore()
+	if store == nil {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"status":  "no_databases",
 				"message": "No Dolt database found in .beads/",
 			})
 		} else {
-			fmt.Fprintf(os.Stderr, "No Dolt database found at %s\n", doltPath)
-			fmt.Fprintf(os.Stderr, "Run 'bd doctor' to diagnose, or 'bd init' to create a new database.\n")
+			fmt.Fprintf(os.Stderr, "No Dolt database found. Run 'bd init' to create a new database.\n")
 		}
 		return
 	}
-
-	// Open database
-	ctx := rootCtx
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
-	if err != nil {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "open_failed",
-				"message": err.Error(),
-			})
-			os.Exit(1)
-		}
-		FatalError("failed to open Dolt database: %v", err)
-	}
-	defer func() { _ = store.Close() }()
 
 	// Check current state of all metadata fields
 	currentVersion, _ := store.GetMetadata(ctx, "bd_version")
@@ -273,6 +251,13 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, beadsDir string, dryRun bo
 	} else {
 		fmt.Printf("\nDolt database: %s (version %s)\n", cfg.Database, Version)
 	}
+
+	// Embedded mode: flush Dolt commit after metadata writes.
+	if isEmbeddedDolt && (versionUpdated || repoIDSet || cloneIDSet) && store != nil {
+		if _, err := store.CommitPending(ctx, "migrate"); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to commit: %v\n", err)
+		}
+	}
 }
 
 // truncateID safely truncates an ID string to maxLen characters.
@@ -325,19 +310,10 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 		FatalError("failed to compute repository ID: %v", err)
 	}
 
-	// Open database
-	store, err := dolt.NewFromConfig(rootCtx, beadsDir)
-	if err != nil {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "open_failed",
-				"message": err.Error(),
-			})
-			os.Exit(1)
-		}
-		FatalError("failed to open database: %v", err)
+	store := getStore()
+	if store == nil {
+		FatalError("no database — run 'bd init' first")
 	}
-	defer func() { _ = store.Close() }()
 
 	// Get old repo ID
 	ctx := rootCtx
@@ -411,6 +387,13 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 		fmt.Printf("  Old: %s\n", oldDisplay)
 		fmt.Printf("  New: %s\n", truncateID(newRepoID, 8))
 	}
+
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(rootCtx, "migrate"); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to commit: %v\n", err)
+		}
+	}
 }
 
 // handleInspect shows migration plan and database state for AI agent analysis
@@ -428,34 +411,8 @@ func handleInspect() {
 		FatalErrorWithHint("no .beads directory found", "run 'bd doctor' to diagnose, or 'bd init' to create a new database")
 	}
 
-	// Load config
-	cfg, err := loadOrCreateConfig(beadsDir)
-	if err != nil {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "config_load_failed",
-				"message": err.Error(),
-			})
-			os.Exit(1)
-		}
-		FatalError("failed to load config: %v", err)
-	}
-
-	// Check if database exists (don't create it)
-	targetPath := cfg.DatabasePath(beadsDir)
-	dbExists := false
-	if _, err := os.Stat(targetPath); err == nil {
-		dbExists = true
-	} else if !os.IsNotExist(err) {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "database_stat_failed",
-				"message": err.Error(),
-			})
-			os.Exit(1)
-		}
-		FatalError("failed to check database: %v", err)
-	}
+	// Check if database is available via the global store
+	dbExists := getStore() != nil
 
 	// If database doesn't exist, return inspection with defaults
 	if !dbExists {
@@ -483,19 +440,10 @@ func handleInspect() {
 		return
 	}
 
-	// Open database in read-only mode for inspection
-	store, err := dolt.NewFromConfigWithOptions(rootCtx, beadsDir, &dolt.Config{ReadOnly: true})
-	if err != nil {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "database_open_failed",
-				"message": err.Error(),
-			})
-			os.Exit(1)
-		}
-		FatalError("failed to open database: %v", err)
+	store := getStore()
+	if store == nil {
+		FatalError("no database — run 'bd init' first")
 	}
-	defer func() { _ = store.Close() }()
 
 	ctx := rootCtx
 
@@ -608,45 +556,10 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 		FatalErrorWithHint("no .beads directory found", "run 'bd doctor' to diagnose, or 'bd init' to create a new database")
 	}
 
-	// Load config
-	cfg, err := loadOrCreateConfig(beadsDir)
-	if err != nil {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "config_load_failed",
-				"message": err.Error(),
-			})
-			os.Exit(1)
-		}
-		FatalError("failed to load config: %v", err)
+	store := getStore()
+	if store == nil {
+		FatalError("no database — run 'bd init' first")
 	}
-
-	// Check database exists
-	targetPath := cfg.DatabasePath(beadsDir)
-	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "database_missing",
-				"message": "Database not found. Run 'bd doctor' to diagnose, or 'bd init' to create a new database.",
-			})
-			os.Exit(1)
-		}
-		FatalErrorWithHint(fmt.Sprintf("database not found: %s", targetPath), "run 'bd doctor' to diagnose, or 'bd init' to create a new database")
-	}
-
-	// Open database
-	store, err := dolt.NewFromConfig(rootCtx, beadsDir)
-	if err != nil {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"error":   "database_open_failed",
-				"message": err.Error(),
-			})
-			os.Exit(1)
-		}
-		FatalError("failed to open database: %v", err)
-	}
-	defer func() { _ = store.Close() }()
 
 	// Get current sync.branch config
 	ctx := rootCtx
@@ -715,6 +628,13 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 		fmt.Printf("     bd dolt push\n\n")
 		fmt.Println("  2. Your existing data is preserved - no changes to git history")
 		fmt.Println("  3. Future issue updates are stored in Dolt directly")
+	}
+
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt && !dryRun && store != nil {
+		if _, commitErr := store.CommitPending(rootCtx, "migrate"); commitErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to commit: %v\n", commitErr)
+		}
 	}
 }
 
