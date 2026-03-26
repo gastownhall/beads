@@ -26,16 +26,16 @@ bd init --team
 ```
 
 The wizard will:
-- Create `.beads/` directory and Dolt database
+- Create `.beads/` directory and embedded Dolt database
 - **Prompt for your role** (maintainer or contributor) unless a flag is provided
 - Import existing issues from git (if any)
 - Prompt to install git hooks (recommended)
 - Prompt to configure git merge driver (recommended)
-- Auto-start Dolt server for database operations
 
 Notes:
-- Dolt is the default (and only) storage backend. Data is stored in `.beads/dolt/`.
-- Dolt uses a `dolt sql-server` for database operations.
+- Dolt is the default (and only) storage backend. Data is stored in `.beads/embeddeddolt/`.
+- By default, Dolt runs in **embedded mode** (in-process, no server needed).
+- For multi-writer setups, use `bd init --server` to connect to a `dolt sql-server` instead.
 - To import issues from an older installation, run `bd init --from-jsonl`.
 
 ### Role Configuration
@@ -233,7 +233,8 @@ bd notion sync --push
 
 ## Database Location
 
-By default, data is stored in `.beads/dolt/` within your repository.
+By default (embedded mode), data is stored in `.beads/embeddeddolt/` within your repository.
+In server mode, data is managed by the external `dolt sql-server`.
 
 ## Migrating Databases
 
