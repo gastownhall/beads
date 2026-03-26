@@ -78,12 +78,12 @@ Subcommands:
 		}
 
 		// Handle Dolt metadata update
-		handleDoltMetadataUpdate(cfg, beadsDir, dryRun)
+		handleDoltMetadataUpdate(cfg, dryRun)
 	},
 }
 
 // handleDoltMetadataUpdate handles version metadata updates for Dolt backends.
-func handleDoltMetadataUpdate(cfg *configfile.Config, beadsDir string, dryRun bool) {
+func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 	ctx := rootCtx
 	store := getStore()
 	if store == nil {

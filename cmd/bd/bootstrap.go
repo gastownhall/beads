@@ -14,6 +14,8 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"golang.org/x/term"
 )
 
@@ -42,10 +44,6 @@ Examples:
   bd bootstrap --json       # Output plan as JSON
 `,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
-			fmt.Fprintln(os.Stderr, "Error: 'bd bootstrap' is not yet supported in embedded mode")
-			os.Exit(1)
-		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 		// Find beads directory
@@ -112,14 +110,19 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		Database: cfg.GetDoltDatabase(),
 	}
 
-	// Check for existing database
-	doltPath := doltserver.ResolveDoltDir(beadsDir)
-	if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
-		entries, _ := os.ReadDir(doltPath)
+	// Check for existing database (path differs between server and embedded mode)
+	var dbPath string
+	if isEmbeddedDolt {
+		dbPath = filepath.Join(beadsDir, "embeddeddolt")
+	} else {
+		dbPath = doltserver.ResolveDoltDir(beadsDir)
+	}
+	if info, err := os.Stat(dbPath); err == nil && info.IsDir() {
+		entries, _ := os.ReadDir(dbPath)
 		if len(entries) > 0 {
 			plan.HasExisting = true
 			plan.Action = "none"
-			plan.Reason = "Database already exists at " + doltPath
+			plan.Reason = "Database already exists at " + dbPath
 			return plan
 		}
 	}
@@ -227,16 +230,11 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config) error {
 }
 
 func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
-	if err := os.MkdirAll(doltDir, 0o750); err != nil {
-		return fmt.Errorf("create dolt directory: %w", err)
-	}
-
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
-	store, err := dolt.New(ctx, &dolt.Config{
-		Path:            doltDir,
+	s, err := newDoltStore(ctx, &dolt.Config{
+		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
 		Database:        dbName,
 		CreateIfMissing: true,
 		AutoStart:       true,
@@ -245,12 +243,12 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = s.Close() }()
 
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := store.Commit(ctx, "bd bootstrap"); err != nil {
+	if err := s.Commit(ctx, "bd bootstrap"); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 
@@ -259,16 +257,11 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 }
 
 func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
-	if err := os.MkdirAll(doltDir, 0o750); err != nil {
-		return fmt.Errorf("create dolt directory: %w", err)
-	}
-
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
-	store, err := dolt.New(ctx, &dolt.Config{
-		Path:            doltDir,
+	s, err := newDoltStore(ctx, &dolt.Config{
+		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
 		Database:        dbName,
 		CreateIfMissing: true,
 		AutoStart:       true,
@@ -277,16 +270,16 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = s.Close() }()
 
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := store.Commit(ctx, "bd bootstrap: init"); err != nil {
+	if err := s.Commit(ctx, "bd bootstrap: init"); err != nil {
 		return fmt.Errorf("commit init: %w", err)
 	}
 
-	result, err := runBackupRestore(ctx, store, plan.BackupDir, false)
+	result, err := runBackupRestore(ctx, s, plan.BackupDir, false)
 	if err != nil {
 		return fmt.Errorf("restore from backup: %w", err)
 	}
@@ -297,16 +290,11 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 }
 
 func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
-	if err := os.MkdirAll(doltDir, 0o750); err != nil {
-		return fmt.Errorf("create dolt directory: %w", err)
-	}
-
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
-	store, err := dolt.New(ctx, &dolt.Config{
-		Path:            doltDir,
+	s, err := newDoltStore(ctx, &dolt.Config{
+		Path:            doltserver.ResolveDoltDir(plan.BeadsDir),
 		Database:        dbName,
 		CreateIfMissing: true,
 		AutoStart:       true,
@@ -315,21 +303,21 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = s.Close() }()
 
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := store.Commit(ctx, "bd bootstrap: init"); err != nil {
+	if err := s.Commit(ctx, "bd bootstrap: init"); err != nil {
 		return fmt.Errorf("commit init: %w", err)
 	}
 
-	count, err := importFromLocalJSONL(ctx, store, plan.JSONLFile)
+	count, err := importFromLocalJSONL(ctx, s, plan.JSONLFile)
 	if err != nil {
 		return fmt.Errorf("import from JSONL: %w", err)
 	}
 
-	if err := store.Commit(ctx, "bd bootstrap: import from issues.jsonl"); err != nil {
+	if err := s.Commit(ctx, "bd bootstrap: import from issues.jsonl"); err != nil {
 		return fmt.Errorf("commit import: %w", err)
 	}
 
@@ -338,9 +326,32 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 }
 
 func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
-	doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
 	dbName := cfg.GetDoltDatabase()
 
+	if isEmbeddedDolt {
+		// Embedded mode: open a connection to the embedded engine and use
+		// DOLT_CLONE to create the database from the remote URL.
+		dataDir := filepath.Join(plan.BeadsDir, "embeddeddolt")
+		if err := os.MkdirAll(dataDir, 0o750); err != nil {
+			return fmt.Errorf("create embeddeddolt directory: %w", err)
+		}
+
+		// Open a connection without specifying a database (clone creates it).
+		db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "", "")
+		if err != nil {
+			return fmt.Errorf("open embedded engine for clone: %w", err)
+		}
+		defer func() { _ = cleanup() }()
+
+		if err := versioncontrolops.DoltClone(ctx, db, plan.SyncRemote, dbName); err != nil {
+			return fmt.Errorf("clone from remote: %w", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "Synced database from %s\n", plan.SyncRemote)
+		return nil
+	}
+
+	doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
 	synced, err := dolt.BootstrapFromGitRemoteWithDB(ctx, doltDir, plan.SyncRemote, dbName)
 	if err != nil {
 		return fmt.Errorf("sync from remote: %w", err)

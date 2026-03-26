@@ -128,6 +128,12 @@ type Flattener interface {
 	Flatten(ctx context.Context) error
 }
 
+// Compactor squashes old Dolt commits while preserving recent ones.
+// Callers should type-assert to this interface for selective history compaction.
+type Compactor interface {
+	Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error
+}
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool

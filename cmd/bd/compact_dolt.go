@@ -1,17 +1,10 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -47,10 +40,6 @@ Examples:
   bd compact --days 7 --force        # Keep only last 7 days of history
   bd compact --days 90 --force       # Conservative: squash 90+ day old commits`,
 	Run: func(_ *cobra.Command, _ []string) {
-		if isEmbeddedDolt {
-			fmt.Fprintln(os.Stderr, "Error: 'bd compact' is not yet supported in embedded mode")
-			os.Exit(1)
-		}
 		if !compactDoltDryRun {
 			CheckReadonly("compact")
 		}
@@ -61,41 +50,13 @@ Examples:
 			FatalError("--days must be non-negative")
 		}
 
-		beadsDir := beads.FindBeadsDir()
-		if beadsDir == "" {
-			FatalError("could not find .beads directory")
+		// Get commit log via store interface
+		logEntries, logErr := store.Log(ctx, 0)
+		if logErr != nil {
+			FatalError("failed to read commit log: %v", logErr)
 		}
 
-		// Detect server mode from config
-		cfg, _ := configfile.Load(beadsDir)
-		serverMode := cfg != nil && cfg.IsDoltServerMode()
-
-		doltPath := filepath.Join(beadsDir, "dolt")
-
-		// In embedded mode, validate local dolt directory and CLI
-		if !serverMode {
-			if _, err := os.Stat(doltPath); os.IsNotExist(err) {
-				FatalError("Dolt directory not found at %s", doltPath)
-			}
-			if _, err := exec.LookPath("dolt"); err != nil {
-				FatalErrorWithHint("dolt command not found in PATH",
-					"Install Dolt from https://github.com/dolthub/dolt")
-			}
-		}
-
-		// Get raw DB access for direct SQL queries
-		accessor, ok := store.(storage.RawDBAccessor)
-		if !ok {
-			FatalError("storage backend does not support raw DB access")
-		}
-		db := accessor.DB()
-
-		// Get total commit count
-		var totalCommits int
-		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&totalCommits); err != nil {
-			FatalError("failed to count commits: %v", err)
-		}
-
+		totalCommits := len(logEntries)
 		if totalCommits <= 1 {
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
@@ -105,53 +66,48 @@ Examples:
 				})
 				return
 			}
-			fmt.Println("Only 1 commit. Nothing to compact.")
+			fmt.Printf("Only %d commit(s). Nothing to compact.\n", totalCommits)
 			return
 		}
 
-		// Find the cutoff date
+		// Find cutoff and partition commits
 		cutoff := time.Now().AddDate(0, 0, -compactDoltDays)
 
-		// Count commits before and after cutoff
 		var oldCommits int
-		err := db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM dolt_log WHERE date < ?", cutoff,
-		).Scan(&oldCommits)
-		if err != nil {
-			FatalError("failed to count old commits: %v", err)
+		var recentHashes []string
+		var initialHash, boundaryHash string
+
+		// Log is ordered newest-first (ORDER BY date DESC)
+		for _, entry := range logEntries {
+			if entry.Date.Before(cutoff) {
+				oldCommits++
+				boundaryHash = entry.Hash // keeps getting overwritten; last = most recent old
+			} else {
+				recentHashes = append(recentHashes, entry.Hash)
+			}
+		}
+		// Initial hash is the oldest commit (last in DESC-ordered log)
+		initialHash = logEntries[totalCommits-1].Hash
+		// boundaryHash is the most recent old commit — but we iterated DESC,
+		// so the first old commit we saw is the most recent. Re-scan:
+		boundaryHash = ""
+		for _, entry := range logEntries {
+			if entry.Date.Before(cutoff) {
+				boundaryHash = entry.Hash
+				break // first match in DESC order = most recent old commit
+			}
 		}
 
-		recentCommits := totalCommits - oldCommits
-
-		// Get initial commit hash
-		var initialHash string
-		if err := db.QueryRowContext(ctx,
-			"SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1",
-		).Scan(&initialHash); err != nil {
-			FatalError("failed to find initial commit: %v", err)
+		// Recent hashes need to be in chronological order (oldest first) for cherry-pick
+		for i, j := 0, len(recentHashes)-1; i < j; i, j = i+1, j-1 {
+			recentHashes[i], recentHashes[j] = recentHashes[j], recentHashes[i]
 		}
 
-		// Find the boundary: most recent commit that is still "old"
-		var boundaryHash string
-		err = db.QueryRowContext(ctx,
-			"SELECT commit_hash FROM dolt_log WHERE date < ? ORDER BY date DESC LIMIT 1",
-			cutoff,
-		).Scan(&boundaryHash)
-		if err == sql.ErrNoRows {
-			boundaryHash = ""
-		} else if err != nil {
-			FatalError("failed to find boundary commit: %v", err)
-		}
-
-		// Size reporting: only available in embedded mode (local dolt dir)
-		var sizeBefore int64
-		if !serverMode {
-			sizeBefore, _ = getDirSize(doltPath)
-		}
+		recentCommits := len(recentHashes)
 
 		if compactDoltDryRun {
 			if jsonOutput {
-				result := map[string]interface{}{
+				outputJSON(map[string]interface{}{
 					"dry_run":        true,
 					"total_commits":  totalCommits,
 					"old_commits":    oldCommits,
@@ -160,22 +116,10 @@ Examples:
 					"cutoff_date":    cutoff.Format("2006-01-02"),
 					"initial_hash":   initialHash,
 					"boundary_hash":  boundaryHash,
-					"server_mode":    serverMode,
-				}
-				if !serverMode {
-					result["size_before"] = sizeBefore
-					result["size_display"] = formatBytes(sizeBefore)
-				}
-				outputJSON(result)
+				})
 				return
 			}
 			fmt.Printf("DRY RUN — Compact preview\n\n")
-			if serverMode {
-				fmt.Printf("  Mode:           server\n")
-			} else {
-				fmt.Printf("  Dolt directory: %s\n", doltPath)
-				fmt.Printf("  Current size:   %s\n", formatBytes(sizeBefore))
-			}
 			fmt.Printf("  Total commits:  %d\n", totalCommits)
 			fmt.Printf("  Old (>%d days): %d (would be squashed into 1)\n", compactDoltDays, oldCommits)
 			fmt.Printf("  Recent:         %d (preserved)\n", recentCommits)
@@ -203,6 +147,10 @@ Examples:
 			return
 		}
 
+		if boundaryHash == "" {
+			FatalError("could not find boundary commit for compaction")
+		}
+
 		if !compactDoltForce {
 			FatalErrorWithHint(
 				fmt.Sprintf("would squash %d old commits into 1, preserving %d recent commits",
@@ -210,168 +158,46 @@ Examples:
 				"Use --force to confirm or --dry-run to preview.")
 		}
 
-		// Collect recent commit hashes (in chronological order, oldest first)
-		// These are commits we need to cherry-pick after squashing old history
-		rows, err := db.QueryContext(ctx,
-			"SELECT commit_hash FROM dolt_log WHERE date >= ? ORDER BY date ASC",
-			cutoff,
-		)
-		if err != nil {
-			FatalError("failed to query recent commits: %v", err)
-		}
-		var recentHashes []string
-		for rows.Next() {
-			var h string
-			if err := rows.Scan(&h); err != nil {
-				_ = rows.Close()
-				FatalError("failed to scan commit hash: %v", err)
-			}
-			recentHashes = append(recentHashes, h)
-		}
-		_ = rows.Close()
-
 		if !jsonOutput {
 			fmt.Printf("Compacting: %d old commits → 1, preserving %d recent\n",
 				oldCommits, len(recentHashes))
 		}
 
-		if serverMode {
-			compactViaSQL(ctx, db, initialHash, boundaryHash, oldCommits, recentHashes)
-		} else {
-			compactViaCLI(doltPath, initialHash, boundaryHash, oldCommits, recentHashes)
+		compactor, ok := store.(storage.Compactor)
+		if !ok {
+			FatalError("storage backend does not support compact")
+		}
+
+		if err := compactor.Compact(ctx, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
+			FatalError("compact failed: %v", err)
+		}
+
+		// Reclaim disk space from orphaned old history
+		if gc, ok := store.(storage.GarbageCollector); ok {
+			if err := gc.DoltGC(ctx); err != nil {
+				WarnError("dolt gc after compact failed: %v", err)
+			}
 		}
 
 		elapsed := time.Since(start)
 		resultCommits := len(recentHashes) + 1
 
-		if serverMode {
-			// No local size info in server mode
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"success":        true,
-					"commits_before": totalCommits,
-					"commits_after":  resultCommits,
-					"old_squashed":   oldCommits,
-					"recent_kept":    len(recentHashes),
-					"server_mode":    true,
-					"elapsed_ms":     elapsed.Milliseconds(),
-				})
-				return
-			}
-			fmt.Printf("✓ Compacted %d commits → %d\n", totalCommits, resultCommits)
-			fmt.Printf("  Squashed: %d old commits → 1 base\n", oldCommits)
-			fmt.Printf("  Preserved: %d recent commits\n", len(recentHashes))
-			fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
-		} else {
-			sizeAfter, _ := getDirSize(doltPath)
-			freed := sizeBefore - sizeAfter
-			if freed < 0 {
-				freed = 0
-			}
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"success":        true,
-					"commits_before": totalCommits,
-					"commits_after":  resultCommits,
-					"old_squashed":   oldCommits,
-					"recent_kept":    len(recentHashes),
-					"size_before":    sizeBefore,
-					"size_after":     sizeAfter,
-					"freed_bytes":    freed,
-					"freed_display":  formatBytes(freed),
-					"elapsed_ms":     elapsed.Milliseconds(),
-				})
-				return
-			}
-			fmt.Printf("✓ Compacted %d commits → %d\n", totalCommits, resultCommits)
-			fmt.Printf("  Squashed: %d old commits → 1 base\n", oldCommits)
-			fmt.Printf("  Preserved: %d recent commits\n", len(recentHashes))
-			fmt.Printf("  %s → %s (freed %s)\n", formatBytes(sizeBefore), formatBytes(sizeAfter), formatBytes(freed))
-			fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"success":        true,
+				"commits_before": totalCommits,
+				"commits_after":  resultCommits,
+				"old_squashed":   oldCommits,
+				"recent_kept":    len(recentHashes),
+				"elapsed_ms":     elapsed.Milliseconds(),
+			})
+			return
 		}
+		fmt.Printf("✓ Compacted %d commits → %d\n", totalCommits, resultCommits)
+		fmt.Printf("  Squashed: %d old commits → 1 base\n", oldCommits)
+		fmt.Printf("  Preserved: %d recent commits\n", len(recentHashes))
+		fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
 	},
-}
-
-// compactViaSQL performs the compaction recipe using SQL stored procedures.
-// Used in server mode where the dolt CLI can't reach the server's data.
-func compactViaSQL(ctx context.Context, db *sql.DB, initialHash, boundaryHash string, oldCommits int, recentHashes []string) {
-	execSQL := func(name, query string, args ...interface{}) {
-		if _, err := db.ExecContext(ctx, query, args...); err != nil {
-			FatalError("compact step '%s' failed: %v", name, err)
-		}
-	}
-
-	// Compaction recipe via SQL stored procedures:
-	// 1. Create temp branch at boundary (last old commit)
-	// 2. Checkout temp branch
-	// 3. Soft-reset to initial commit (collapses all old history into working set)
-	// 4. Commit (single base commit)
-	// 5. Cherry-pick each recent commit
-	// 6. Checkout main, reset --hard to temp branch
-	// 7. Delete temp branch
-	// 8. GC
-	execSQL("create temp branch", "CALL DOLT_BRANCH('compact-tmp', ?)", boundaryHash)
-	execSQL("checkout temp", "CALL DOLT_CHECKOUT('compact-tmp')")
-	execSQL("soft reset to initial", "CALL DOLT_RESET('--soft', ?)", initialHash)
-	execSQL("commit squashed base", "CALL DOLT_COMMIT('-Am', ?)",
-		fmt.Sprintf("compact: squash %d commits into base snapshot", oldCommits))
-
-	// Cherry-pick recent commits one by one
-	for i, hash := range recentHashes {
-		if !jsonOutput {
-			fmt.Printf("  Cherry-picking %d/%d: %s\r", i+1, len(recentHashes), hash[:8])
-		}
-		execSQL(fmt.Sprintf("cherry-pick %s", hash[:8]), "CALL DOLT_CHERRY_PICK(?)", hash)
-	}
-	if !jsonOutput && len(recentHashes) > 0 {
-		fmt.Println() // clear the \r line
-	}
-
-	execSQL("checkout main", "CALL DOLT_CHECKOUT('main')")
-	execSQL("reset main to compacted", "CALL DOLT_RESET('--hard', 'compact-tmp')")
-	execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'compact-tmp')")
-	execSQL("garbage collect", "CALL DOLT_GC()")
-}
-
-// compactViaCLI performs the compaction recipe using the dolt CLI.
-// Used in embedded mode where the local .beads/dolt/ directory is the data source.
-func compactViaCLI(doltPath, initialHash, boundaryHash string, oldCommits int, recentHashes []string) {
-	// Close the store connection before CLI operations
-	if store != nil {
-		_ = store.Close()
-	}
-
-	runDolt := func(name string, args ...string) {
-		cmd := exec.Command("dolt", args...) // #nosec G204 -- fixed commands
-		cmd.Dir = doltPath
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			FatalError("compact step '%s' failed: %v\nOutput: %s", name, err, string(output))
-		}
-	}
-
-	runDolt("create temp branch", "branch", "compact-tmp", boundaryHash)
-	runDolt("checkout temp", "checkout", "compact-tmp")
-	runDolt("soft reset to initial", "reset", "--soft", initialHash)
-	runDolt("stage all", "add", ".")
-	runDolt("commit squashed base", "commit", "-Am",
-		fmt.Sprintf("compact: squash %d commits into base snapshot", oldCommits))
-
-	// Cherry-pick recent commits one by one
-	for i, hash := range recentHashes {
-		if !jsonOutput {
-			fmt.Printf("  Cherry-picking %d/%d: %s\r", i+1, len(recentHashes), hash[:8])
-		}
-		runDolt(fmt.Sprintf("cherry-pick %s", hash[:8]), "cherry-pick", hash)
-	}
-	if !jsonOutput && len(recentHashes) > 0 {
-		fmt.Println() // clear the \r line
-	}
-
-	runDolt("checkout main", "checkout", "main")
-	runDolt("reset main to compacted", "reset", "--hard", "compact-tmp")
-	runDolt("delete temp branch", "branch", "-D", "compact-tmp")
-	runDolt("garbage collect", "gc")
 }
 
 func init() {
