@@ -59,7 +59,7 @@ func runMolBurn(cmd *cobra.Command, args []string) {
 
 	// mol burn requires direct store access
 	if store == nil {
-		FatalErrorWithHint("no database connection", "run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+		FatalErrorWithHint("no database connection", diagHint())
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")

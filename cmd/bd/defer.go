@@ -62,7 +62,7 @@ Examples:
 		// Direct storage access
 		if store == nil {
 			FatalErrorWithHint("database not initialized",
-				"run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+				diagHint())
 		}
 
 		for _, id := range args {

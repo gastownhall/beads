@@ -31,7 +31,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 		// Direct storage access
 		if store == nil {
 			FatalErrorWithHint("database not initialized",
-				"run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+				diagHint())
 		}
 		for _, id := range args {
 			fullID, err := utils.ResolvePartialID(ctx, store, id)

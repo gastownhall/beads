@@ -177,7 +177,11 @@ func printBootstrapPlan(plan BootstrapPlan) {
 	switch plan.Action {
 	case "none":
 		fmt.Printf("✓ Database already exists: %s\n", plan.BeadsDir)
-		fmt.Printf("  Nothing to do. Use 'bd doctor' to check health.\n")
+		if isEmbeddedDolt {
+			fmt.Printf("  Nothing to do.\n")
+		} else {
+			fmt.Printf("  Nothing to do. Use 'bd doctor' to check health.\n")
+		}
 	case "sync":
 		fmt.Printf("Bootstrap plan: clone from remote\n")
 		fmt.Printf("  Remote: %s\n", plan.SyncRemote)

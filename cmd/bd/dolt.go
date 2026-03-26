@@ -792,7 +792,11 @@ var doltRemoteListCmd = &cobra.Command{
 			fmt.Printf("\n%s Could not read CLI remotes: %v\n", ui.RenderWarn("⚠"), cliErr)
 		}
 		if hasDiscrepancy {
-			fmt.Printf("\n%s Remote discrepancies detected. Run 'bd doctor --fix' to resolve.\n", ui.RenderWarn("⚠"))
+			if isEmbeddedDolt {
+				fmt.Printf("\n%s Remote discrepancies detected.\n", ui.RenderWarn("⚠"))
+			} else {
+				fmt.Printf("\n%s Remote discrepancies detected. Run 'bd doctor --fix' to resolve.\n", ui.RenderWarn("⚠"))
+			}
 		}
 	},
 }

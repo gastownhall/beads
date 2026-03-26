@@ -56,11 +56,11 @@ Subcommands:
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
 					"error":   "no_beads_directory",
-					"message": "No .beads directory found. Run 'bd doctor' to diagnose, or 'bd init' to create a new database.",
+					"message": "No .beads directory found. " + diagHint() + ".",
 				})
 				os.Exit(1)
 			} else {
-				FatalErrorWithHint("no .beads directory found", "run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+				FatalErrorWithHint("no .beads directory found", diagHint())
 			}
 		}
 
@@ -290,11 +290,11 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"error":   "no_database",
-				"message": "No beads database found. Run 'bd doctor' to diagnose, or 'bd init' to create a new database.",
+				"message": "No beads database found. " + diagHint() + ".",
 			})
 			os.Exit(1)
 		}
-		FatalErrorWithHint("no beads database found", "run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+		FatalErrorWithHint("no beads database found", diagHint())
 	}
 
 	// Compute new repo ID
@@ -404,11 +404,11 @@ func handleInspect() {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
-				"message": "No .beads directory found. Run 'bd doctor' to diagnose, or 'bd init' to create a new database.",
+				"message": "No .beads directory found. " + diagHint() + ".",
 			})
 			os.Exit(1)
 		}
-		FatalErrorWithHint("no .beads directory found", "run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+		FatalErrorWithHint("no .beads directory found", diagHint())
 	}
 
 	// Check if database is available via the global store
@@ -425,7 +425,7 @@ func handleInspect() {
 				"missing_config": []string{},
 				"db_exists":      false,
 			},
-			"warnings":            []string{"Database does not exist - run 'bd doctor' to diagnose, or 'bd init' to create a new database"},
+			"warnings":            []string{"Database does not exist - " + diagHint()},
 			"invariants_to_check": []string{},
 		}
 
@@ -435,7 +435,7 @@ func handleInspect() {
 			fmt.Println("\nMigration Inspection")
 			fmt.Println("====================")
 			fmt.Println("Database: missing")
-			fmt.Println("\n⚠ Database does not exist - run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+			fmt.Println("\n⚠ Database does not exist - " + diagHint())
 		}
 		return
 	}
@@ -549,11 +549,11 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
-				"message": "No .beads directory found. Run 'bd doctor' to diagnose, or 'bd init' to create a new database.",
+				"message": "No .beads directory found. " + diagHint() + ".",
 			})
 			os.Exit(1)
 		}
-		FatalErrorWithHint("no .beads directory found", "run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+		FatalErrorWithHint("no .beads directory found", diagHint())
 	}
 
 	store := getStore()

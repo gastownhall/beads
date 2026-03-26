@@ -33,7 +33,7 @@ func ensureStoreActive() error {
 	store, err := newDoltStoreFromConfig(getRootContext(), beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w\n"+
-			"Hint: run 'bd init' to create a database or 'bd doctor --fix' to diagnose", err)
+			"Hint: "+diagHint(), err)
 	}
 
 	// Update the database path for compatibility with code that expects it
