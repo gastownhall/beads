@@ -174,7 +174,7 @@ jobs:
         run: go test -tags embeddeddolt -race -c -o /tmp/bd-cmd-test ./cmd/bd/
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: embedded-test-binaries
           path: |
@@ -196,7 +196,7 @@ jobs:
           sudo apt-get install -y libicu-dev
 
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: embedded-test-binaries
           path: /tmp/
@@ -232,7 +232,7 @@ jobs:
           sudo apt-get install -y libicu-dev
 
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: embedded-test-binaries
           path: /tmp/
