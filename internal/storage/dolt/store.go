@@ -255,21 +255,11 @@ func newServerRetryBackoff() backoff.BackOff {
 	return bo
 }
 
-// isRetryableError returns true if the error is a transient error
+// isRetryableError returns true if the error is a transient connection error
 // that should be retried in server mode.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
-	}
-	// MySQL server-level errors (typed)
-	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) {
-		switch mysqlErr.Number {
-		case 1213: // ER_LOCK_DEADLOCK: "Deadlock found when trying to get lock"
-			return true
-		case 1205: // ER_LOCK_WAIT_TIMEOUT: "Lock wait timeout exceeded"
-			return true
-		}
 	}
 	errStr := strings.ToLower(err.Error())
 	// MySQL driver transient errors
@@ -481,13 +471,28 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	return fn(tx)
 }
 
-// withRetryTx wraps withWriteTx in withRetry so that transient errors
-// (bad connection, broken pipe, etc.) cause the entire transaction to
-// be retried with exponential backoff and circuit-breaker integration.
+// withRetryTx wraps withWriteTx with retry logic for serialization failures
+// (MySQL 1213 deadlock, 1205 lock wait timeout). These errors guarantee the
+// transaction was rolled back, so retrying is always safe.
+//
+// Connection-level errors (broken pipe, bad connection) are NOT retried here
+// because they can occur after a successful commit, making retry unsafe for
+// non-idempotent operations. Callers that need connection-level retry should
+// use withRetry at a higher layer.
 func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	return s.withRetry(ctx, func() error {
-		return s.withWriteTx(ctx, fn)
-	})
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 25 * time.Millisecond
+	bo.MaxElapsedTime = 5 * time.Second
+	return backoff.Retry(func() error {
+		err := s.withWriteTx(ctx, fn)
+		if err != nil && isSerializationError(err) {
+			return err // retryable
+		}
+		if err != nil {
+			return backoff.Permanent(err)
+		}
+		return nil
+	}, backoff.WithContext(bo, ctx))
 }
 
 // withWriteTx runs fn inside a transaction, committing on success.
