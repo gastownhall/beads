@@ -150,7 +150,7 @@ that came from the removed repository.`,
 		}
 
 		// Embedded mode: flush Dolt commit before output.
-		if isEmbeddedDolt && store != nil {
+		if isEmbeddedMode() && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				return fmt.Errorf("failed to commit: %w", err)
 			}
@@ -378,7 +378,7 @@ Also triggers Dolt push/pull if a remote is configured.`,
 		// Manual push available via: bd dolt push
 
 		// Embedded mode: flush Dolt commit before output.
-		if isEmbeddedDolt && totalImported > 0 && store != nil {
+		if isEmbeddedMode() && totalImported > 0 && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				return fmt.Errorf("failed to commit: %w", err)
 			}

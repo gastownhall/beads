@@ -1,5 +1,3 @@
-//go:build embeddeddolt
-
 package main
 
 import (
@@ -36,6 +34,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	store.Close()
+	_ = store.Close()
 	fmt.Println("ok")
 }

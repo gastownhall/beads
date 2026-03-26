@@ -11,7 +11,7 @@ var adminCmd = &cobra.Command{
 	GroupID: "advanced",
 	Short:   "Administrative commands for database maintenance",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			return fmt.Errorf("'bd admin' is not yet supported in embedded mode")
 		}
 		return nil

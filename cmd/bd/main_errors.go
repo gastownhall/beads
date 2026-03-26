@@ -31,7 +31,7 @@ func handleFreshCloneError(err error) bool {
 
 	fmt.Fprintf(os.Stderr, "Error: Database not initialized\n\n")
 	fmt.Fprintf(os.Stderr, "This appears to be a fresh clone or the database needs initialization.\n")
-	if !isEmbeddedDolt {
+	if !isEmbeddedMode() {
 		fmt.Fprintf(os.Stderr, "\nTo diagnose, run:\n")
 		fmt.Fprintf(os.Stderr, "  bd doctor\n\n")
 	} else {

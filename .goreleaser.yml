@@ -59,7 +59,8 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-aarch64-linux-android
     tags:
       - gms_pure_go
     goos:
@@ -77,7 +78,8 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-x86_64-macos
     tags:
       - gms_pure_go
       - netgo
@@ -91,12 +93,16 @@ builds:
       - -X main.Build={{.ShortCommit}}
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
+    hooks:
+      post:
+        - ./scripts/verify-cgo.sh "{{ .Path }}"
 
   - id: bd-darwin-arm64
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-aarch64-macos
     tags:
       - gms_pure_go
       - netgo
@@ -110,6 +116,9 @@ builds:
       - -X main.Build={{.ShortCommit}}
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
+    hooks:
+      post:
+        - ./scripts/verify-cgo.sh "{{ .Path }}"
 
   - id: bd-windows-amd64
     main: ./cmd/bd
@@ -168,7 +177,8 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=/tmp/zigcc/cc-x86_64-freebsd
     tags:
       - gms_pure_go
     goos:

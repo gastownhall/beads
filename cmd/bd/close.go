@@ -269,7 +269,7 @@ create, update, show, or close operation).`,
 
 		// Embedded mode: flush Dolt commit. DoltStore commits
 		// inline during CloseIssue so this is only needed for EmbeddedDoltStore.
-		if isEmbeddedDolt && closedCount > 0 && store != nil {
+		if isEmbeddedMode() && closedCount > 0 && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalErrorRespectJSON("failed to commit: %v", err)
 			}

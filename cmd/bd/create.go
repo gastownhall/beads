@@ -706,7 +706,7 @@ var createCmd = &cobra.Command{
 		// a separate commit. In EmbeddedDoltStore mode, CreateIssue writes
 		// to the working set without a Dolt commit, so we always commit
 		// everything together at the end.
-		if isEmbeddedDolt || postCreateWrites {
+		if isEmbeddedMode() || postCreateWrites {
 			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
 			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
 				WarnError("failed to commit: %v", err)

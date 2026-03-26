@@ -121,7 +121,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			if err := repairPrefixes(ctx, store, actor, newPrefix, issues, prefixes, dryRun); err != nil {
 				FatalError("failed to repair prefixes: %v", err)
 			}
-			if isEmbeddedDolt && !dryRun && store != nil {
+			if isEmbeddedMode() && !dryRun && store != nil {
 				if _, err := store.CommitPending(ctx, actor); err != nil {
 					FatalError("failed to commit: %v", err)
 				}
@@ -141,7 +141,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 				if err := store.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
 					FatalError("failed to update prefix: %v", err)
 				}
-				if isEmbeddedDolt && store != nil {
+				if isEmbeddedMode() && store != nil {
 					if _, err := store.CommitPending(ctx, actor); err != nil {
 						FatalError("failed to commit: %v", err)
 					}
@@ -185,7 +185,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && store != nil {
+		if isEmbeddedMode() && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalError("failed to commit: %v", err)
 			}

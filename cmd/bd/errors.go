@@ -9,7 +9,7 @@ import (
 // diagHint returns the appropriate diagnostic hint for the current mode.
 // In embedded mode, 'bd doctor' is not available so the hint omits it.
 func diagHint() string {
-	if isEmbeddedDolt {
+	if isEmbeddedMode() {
 		return "run 'bd init' to create a new database"
 	}
 	return "run 'bd doctor' to diagnose, or 'bd init' to create a new database"

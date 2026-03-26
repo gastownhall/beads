@@ -161,7 +161,7 @@ func installGitHooks() error {
 				oldPath := hook.path + ".old"
 				if err := os.Rename(hook.path, oldPath); err != nil {
 					fmt.Fprintf(os.Stderr, "%s Failed to chain with existing %s hook: %v\n", ui.RenderWarn("⚠"), hook.name, err)
-					if !isEmbeddedDolt {
+					if !isEmbeddedMode() {
 						fmt.Fprintf(os.Stderr, "You can resolve this with: %s\n", ui.RenderAccent("bd doctor --fix"))
 					}
 					continue

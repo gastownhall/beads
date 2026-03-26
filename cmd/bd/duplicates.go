@@ -90,7 +90,7 @@ Example:
 				}
 			}
 		}
-		if isEmbeddedDolt && autoMerge && !dryRun && store != nil {
+		if isEmbeddedMode() && autoMerge && !dryRun && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalError("failed to commit: %v", err)
 			}

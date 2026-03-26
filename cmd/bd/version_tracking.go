@@ -128,7 +128,7 @@ func maybeShowUpgradeNotification() {
 	// Display notification
 	fmt.Printf("🔄 bd upgraded from v%s to v%s since last use\n", previousVersion, Version)
 	fmt.Println("💡 Run 'bd upgrade review' to see what changed")
-	if !isEmbeddedDolt {
+	if !isEmbeddedMode() {
 		fmt.Println("💊 Run 'bd doctor' to verify upgrade completed cleanly")
 	}
 

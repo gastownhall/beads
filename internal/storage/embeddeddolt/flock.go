@@ -1,5 +1,3 @@
-//go:build embeddeddolt
-
 package embeddeddolt
 
 import (
@@ -26,13 +24,13 @@ func TryLock(dataDir string) (*Lock, error) {
 	}
 
 	lockPath := filepath.Join(dataDir, ".lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // lockPath is derived from dataDir, not user input
 	if err != nil {
 		return nil, fmt.Errorf("embeddeddolt: opening lock file: %w", err)
 	}
 
 	if err := lockfile.FlockExclusiveNonBlocking(f); err != nil {
-		f.Close()
+		_ = f.Close()
 		if lockfile.IsLocked(err) {
 			return nil, fmt.Errorf("embeddeddolt: another process holds the exclusive lock on %s; "+
 				"the embedded backend supports only one writer at a time — "+
