@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -309,7 +308,7 @@ required. Use this command for explicit control or diagnostics.`,
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt start' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
-		beadsDir := beads.FindBeadsDir()
+		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
 			os.Exit(1)
@@ -347,7 +346,7 @@ on the next bd command unless auto-start is disabled.`,
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt stop' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
-		beadsDir := beads.FindBeadsDir()
+		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
 			os.Exit(1)
@@ -374,7 +373,7 @@ Displays whether the server is running, its PID, port, and data directory.`,
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt status' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
-		beadsDir := beads.FindBeadsDir()
+		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
 			os.Exit(1)
@@ -428,7 +427,7 @@ servers are preserved.`,
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt killall' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
-		beadsDir := beads.FindBeadsDir()
+		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			beadsDir = "." // best effort
 		}
@@ -950,8 +949,17 @@ func init() {
 	rootCmd.AddCommand(doltCmd)
 }
 
+func selectedDoltBeadsDir() string {
+	beadsDir := selectedNoDBBeadsDir()
+	if beadsDir == "" {
+		return ""
+	}
+	prepareSelectedNoDBContext(beadsDir)
+	return beadsDir
+}
+
 func showDoltConfig(testConnection bool) {
-	beadsDir := beads.FindBeadsDir()
+	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
 		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
 		os.Exit(1)
@@ -1071,7 +1079,7 @@ func showDoltConfig(testConnection bool) {
 }
 
 func setDoltConfig(key, value string, updateConfig bool) {
-	beadsDir := beads.FindBeadsDir()
+	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
 		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
 		os.Exit(1)
@@ -1234,7 +1242,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 }
 
 func testDoltConnection() {
-	beadsDir := beads.FindBeadsDir()
+	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
 		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
 		os.Exit(1)
@@ -1403,7 +1411,7 @@ func testHTTPConnectivity(url string) bool {
 // initialized for dolt subcommands (beads-9vt). Connects without selecting a
 // database so callers can operate on all databases (SHOW DATABASES, DROP DATABASE).
 func openDoltServerConnection() (*sql.DB, func()) {
-	beadsDir := beads.FindBeadsDir()
+	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
 		fmt.Fprintln(os.Stderr, "Error: not in a beads repository (no .beads directory found)")
 		os.Exit(1)

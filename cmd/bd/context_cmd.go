@@ -51,6 +51,10 @@ Examples:
 		}
 
 		// Resolve repo context (works without DB open)
+		if selected := selectedNoDBBeadsDir(); selected != "" {
+			prepareSelectedNoDBContext(selected)
+		}
+
 		rc, err := beads.GetRepoContext()
 		if err != nil {
 			if jsonOutput {
@@ -98,8 +102,8 @@ Examples:
 			info.DataDir = dataDir
 		}
 
-		// Read sync.git-remote from config.yaml
-		if remote := config.GetString("sync.git-remote"); remote != "" {
+		// Read sync.git-remote from the selected repo's config.yaml.
+		if remote := config.GetStringFromDir(rc.BeadsDir, "sync.git-remote"); remote != "" {
 			info.SyncGitRemote = remote
 		}
 
