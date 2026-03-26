@@ -100,10 +100,13 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 			initServerMode = true
 		}
 
-		// Set the global serverMode so isEmbeddedMode() returns the
-		// correct value for the duration of init (PersistentPreRun
-		// doesn't run for init, so this is the only place to set it).
+		// Set serverMode so isEmbeddedMode() returns the correct value.
+		// Both the global and cmdCtx must be set because PersistentPreRun
+		// creates a fresh cmdCtx (with ServerMode=false) before Run executes.
 		serverMode = initServerMode
+		if cmdCtx != nil {
+			cmdCtx.ServerMode = initServerMode
+		}
 
 		// Propagate --shared-server flag to env so that IsSharedServerMode(),
 		// ResolveDoltDir(), and DefaultConfig() all see shared mode immediately

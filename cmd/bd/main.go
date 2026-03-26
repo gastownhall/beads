@@ -150,6 +150,25 @@ func loadEnvironment() {
 	}
 }
 
+// loadServerModeFromConfig loads the storage mode (embedded vs server) from
+// metadata.json so that isEmbeddedMode() returns the correct value. Called
+// for commands that skip full DB init but still need to know the mode.
+func loadServerModeFromConfig() {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return
+	}
+	sm := cfg.IsDoltServerMode()
+	serverMode = sm
+	if cmdCtx != nil {
+		cmdCtx.ServerMode = sm
+	}
+}
+
 // resolveCommandBeadsDir maps a discovered Dolt data path back to the owning
 // .beads directory. filepath.Dir(dbPath) only works when the Dolt data lives
 // under .beads/dolt; custom dolt_data_dir values can place it elsewhere.
@@ -401,6 +420,11 @@ var rootCmd = &cobra.Command{
 		// GH#2677: Load .beads/.env before the noDbCommands early return so that
 		// commands like "bd doctor --server" pick up per-project Dolt credentials.
 		loadEnvironment()
+
+		// Load storage mode (embedded vs server) early so that isEmbeddedMode()
+		// returns the correct value for all commands, including those that skip
+		// full DB initialization (e.g., bd dolt status, bd doctor, bd bootstrap).
+		loadServerModeFromConfig()
 
 		// GH#1093: Check noDbCommands BEFORE expensive operations
 		// to avoid spawning git subprocesses for simple commands

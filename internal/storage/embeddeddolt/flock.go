@@ -8,6 +8,11 @@ import (
 	"github.com/steveyegge/beads/internal/lockfile"
 )
 
+// Unlocker is the interface for releasing an acquired lock.
+type Unlocker interface {
+	Unlock()
+}
+
 // Lock holds an exclusive flock on the embeddeddolt data directory.
 // Used by commands that require single-writer access (e.g., bd init).
 type Lock struct {
@@ -52,3 +57,10 @@ func (l *Lock) Unlock() {
 		panic(fmt.Sprintf("embeddeddolt: failed to close lock file: %v", err))
 	}
 }
+
+// NoopLock is a lock that does nothing. Used in server mode where the
+// external dolt sql-server handles its own concurrency.
+type NoopLock struct{}
+
+// Unlock is a no-op.
+func (NoopLock) Unlock() {}

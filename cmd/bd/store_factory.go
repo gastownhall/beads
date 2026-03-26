@@ -39,9 +39,9 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, e
 // directory derived from beadsDir. The caller must defer lock.Unlock().
 // Returns a no-op lock when serverMode is true (the server handles its own
 // concurrency).
-func acquireEmbeddedLock(beadsDir string, serverMode bool) (*embeddeddolt.Lock, error) {
+func acquireEmbeddedLock(beadsDir string, serverMode bool) (embeddeddolt.Unlocker, error) {
 	if serverMode {
-		return &embeddeddolt.Lock{}, nil
+		return embeddeddolt.NoopLock{}, nil
 	}
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
 	return embeddeddolt.TryLock(dataDir)
