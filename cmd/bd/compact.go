@@ -123,7 +123,7 @@ Examples:
 		if compactAnalyze {
 			if err := ensureDirectMode("compact --analyze requires direct database access"); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Hint: "+diagHint()+"\n")
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
 				os.Exit(1)
 			}
 			runCompactAnalyze(ctx, store)
@@ -134,7 +134,7 @@ Examples:
 		if compactApply {
 			if err := ensureDirectMode("compact --apply requires direct database access"); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Hint: "+diagHint()+"\n")
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
 				os.Exit(1)
 			}
 			if compactID == "" {

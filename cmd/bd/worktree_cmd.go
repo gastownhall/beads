@@ -160,7 +160,7 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	// Get repository context (validates .beads exists and resolves paths)
 	rc, err := beads.GetRepoContext()
 	if err != nil {
-		return fmt.Errorf("no .beads directory found; "+diagHint()+": %w", err)
+		return fmt.Errorf("no .beads directory found; %s: %w", diagHint(), err)
 	}
 
 	// Worktree operations use CWD repo (where user is working), not BEADS_DIR repo

@@ -32,8 +32,7 @@ func ensureStoreActive() error {
 	// based on metadata.json configuration and build tags
 	store, err := newDoltStoreFromConfig(getRootContext(), beadsDir)
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w\n"+
-			"Hint: "+diagHint(), err)
+		return fmt.Errorf("failed to open database: %w\nHint: %s", err, diagHint())
 	}
 
 	// Update the database path for compatibility with code that expects it
