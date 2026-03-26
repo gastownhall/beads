@@ -411,6 +411,109 @@ func TestGetReadyWork_CustomStatusBlockerStillBlocks(t *testing.T) {
 	}
 }
 
+// TestGetReadyWork_PastDeferredIssueIsReady verifies that an issue whose
+// defer_until is in the past appears in ready work. Regression test for a
+// timezone bug: Go stores defer_until as UTC, but Dolt's NOW() returns local
+// time. On non-UTC machines, the comparison defer_until <= NOW() would
+// incorrectly exclude past-deferred issues. The fix uses UTC_TIMESTAMP().
+func TestGetReadyWork_PastDeferredIssueIsReady(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Create an issue and set defer_until to 1 hour in the past (UTC).
+	pastDeferred := &types.Issue{
+		ID:        "rw-past-deferred",
+		Title:     "Past Deferred Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, pastDeferred, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	pastTime := time.Now().UTC().Add(-1 * time.Hour)
+	if err := store.UpdateIssue(ctx, pastDeferred.ID, map[string]interface{}{
+		"defer_until": pastTime,
+	}, "tester"); err != nil {
+		t.Fatalf("failed to set defer_until: %v", err)
+	}
+
+	// Create a normal issue (no defer) as a control.
+	normal := &types.Issue{
+		ID:        "rw-normal",
+		Title:     "Normal Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, normal, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	foundPastDeferred := false
+	foundNormal := false
+	for _, w := range work {
+		if w.ID == pastDeferred.ID {
+			foundPastDeferred = true
+		}
+		if w.ID == normal.ID {
+			foundNormal = true
+		}
+	}
+	if !foundNormal {
+		t.Error("normal issue should appear in ready work")
+	}
+	if !foundPastDeferred {
+		t.Error("past-deferred issue (defer_until in the past) should appear in ready work")
+	}
+}
+
+// TestGetReadyWork_FutureDeferredIssueExcluded verifies that an issue whose
+// defer_until is in the future does NOT appear in ready work.
+func TestGetReadyWork_FutureDeferredIssueExcluded(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	futureDeferred := &types.Issue{
+		ID:        "rw-future-deferred",
+		Title:     "Future Deferred Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, futureDeferred, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	futureTime := time.Now().UTC().Add(24 * time.Hour)
+	if err := store.UpdateIssue(ctx, futureDeferred.ID, map[string]interface{}{
+		"defer_until": futureTime,
+	}, "tester"); err != nil {
+		t.Fatalf("failed to set defer_until: %v", err)
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, w := range work {
+		if w.ID == futureDeferred.ID {
+			t.Error("future-deferred issue should NOT appear in ready work")
+		}
+	}
+}
+
 // =============================================================================
 // GetBlockedIssues tests
 // =============================================================================
