@@ -92,6 +92,10 @@ func TestFindAllDatabases_SymlinkDeduplication(t *testing.T) {
 // TestFindAllDatabases_MultipleSymlinksToSameDB tests that multiple symlinks
 // pointing to the same database are properly deduplicated
 func TestFindAllDatabases_MultipleSymlinksToSameDB(t *testing.T) {
+	if os.Getenv("BEADS_TEST_SKIP") == "dolt" {
+		t.Skip("skipping: Dolt tests disabled via BEADS_TEST_SKIP")
+	}
+
 	tmpDir, err := os.MkdirTemp("", "beads-multisymlink-test")
 	if err != nil {
 		t.Fatal(err)

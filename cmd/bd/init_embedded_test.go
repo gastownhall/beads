@@ -132,25 +132,51 @@ func bdInitFail(t *testing.T, bd string, extraArgs ...string) string {
 
 func readBack(t *testing.T, beadsDir, database, key string, metadata bool) string {
 	t.Helper()
+
+	// The embedded dolt driver holds a process-level lock, so concurrent
+	// test functions in the same shard can transiently block each other.
+	// Retry a few times before giving up.
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		}
+		val, err := readBackOnce(t, beadsDir, database, key, metadata)
+		if err == nil {
+			return val
+		}
+		lastErr = err
+		if !strings.Contains(err.Error(), "locked") {
+			break // non-lock error, don't retry
+		}
+		t.Logf("readBack: attempt %d/%d got lock error, retrying: %v", attempt+1, maxAttempts, err)
+	}
+	t.Fatalf("readBack: %v", lastErr)
+	return "" // unreachable
+}
+
+func readBackOnce(t *testing.T, beadsDir, database, key string, metadata bool) (string, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	store, err := embeddeddolt.New(ctx, beadsDir, database, "main")
 	if err != nil {
-		t.Fatalf("readBack: New failed: %v", err)
+		return "", fmt.Errorf("New failed: %w", err)
 	}
 	defer store.Close()
 	if metadata {
 		val, err := store.GetMetadata(ctx, key)
 		if err != nil {
-			t.Fatalf("readBack: GetMetadata(%q) failed: %v", key, err)
+			return "", fmt.Errorf("GetMetadata(%q) failed: %w", key, err)
 		}
-		return val
+		return val, nil
 	}
 	val, err := store.GetConfig(ctx, key)
 	if err != nil {
-		t.Fatalf("readBack: GetConfig(%q) failed: %v", key, err)
+		return "", fmt.Errorf("GetConfig(%q) failed: %w", key, err)
 	}
-	return val
+	return val, nil
 }
 
 func stripANSI(s string) string {

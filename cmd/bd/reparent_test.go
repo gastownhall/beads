@@ -26,6 +26,9 @@ func TestCLI_ReparentDottedIDExcludesOldParent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	tmpDir := initExecTestDB(t)
 
 	// Create parentA — will get an auto-generated ID like "test-xxxxx"

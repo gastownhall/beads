@@ -124,6 +124,9 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow integration test in short mode")
 	}
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	if runtime.GOOS == windowsOS {
 		t.Skip("dolt integration test not supported on windows")
 	}
@@ -131,9 +134,7 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := []string{
-		"BEADS_TEST_MODE=1",
-	}
+	env := append(os.Environ(), "BEADS_TEST_MODE=1")
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
@@ -185,6 +186,9 @@ func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow integration test in short mode")
 	}
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	if runtime.GOOS == windowsOS {
 		t.Skip("dolt integration test not supported on windows")
 	}
@@ -192,9 +196,7 @@ func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := []string{
-		"BEADS_TEST_MODE=1",
-	}
+	env := append(os.Environ(), "BEADS_TEST_MODE=1")
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
@@ -244,6 +246,9 @@ func TestDoltAutoCommit_Off_DoesNotAdvanceHead(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow integration test in short mode")
 	}
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	if runtime.GOOS == windowsOS {
 		t.Skip("dolt integration test not supported on windows")
 	}
@@ -251,9 +256,7 @@ func TestDoltAutoCommit_Off_DoesNotAdvanceHead(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
-	env := []string{
-		"BEADS_TEST_MODE=1",
-	}
+	env := append(os.Environ(), "BEADS_TEST_MODE=1")
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {

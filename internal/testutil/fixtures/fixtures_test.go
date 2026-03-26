@@ -8,10 +8,12 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestLargeDolt(t *testing.T) {
+	testutil.RequireDoltContainer(t)
 	store, err := dolt.New(context.Background(), &dolt.Config{Path: t.TempDir()})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
@@ -63,6 +65,7 @@ func TestXLargeDolt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping XLarge test in short mode")
 	}
+	testutil.RequireDoltContainer(t)
 
 	store, err := dolt.New(context.Background(), &dolt.Config{Path: t.TempDir()})
 	if err != nil {
@@ -96,6 +99,7 @@ func TestLargeFromJSONL(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping JSONL test in short mode")
 	}
+	testutil.RequireDoltContainer(t)
 
 	store, err := dolt.New(context.Background(), &dolt.Config{Path: t.TempDir()})
 	if err != nil {
