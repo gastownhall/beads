@@ -750,3 +750,212 @@ func TestEnginePushWithStateCache(t *testing.T) {
 		t.Errorf("ResolveState(Closed) = (%q, %v), want (%q, true)", stateID, ok, "state-closed-id")
 	}
 }
+
+// --- ParentID filter tests ---
+
+func TestEnginePushWithParentFilterBasic(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	parent := &types.Issue{ID: "bd-par1", Title: "Parent", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}
+	child1 := &types.Issue{ID: "bd-ch1", Title: "Child 1", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}
+	child2 := &types.Issue{ID: "bd-ch2", Title: "Child 2", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}
+	unrelated := &types.Issue{ID: "bd-unrel1", Title: "Unrelated", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}
+
+	for _, issue := range []*types.Issue{parent, child1, child2, unrelated} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", issue.ID, err)
+		}
+	}
+	for _, childID := range []string{"bd-ch1", "bd-ch2"} {
+		dep := &types.Dependency{IssueID: childID, DependsOnID: "bd-par1", Type: types.DepParentChild}
+		if err := store.AddDependency(ctx, dep, "test-actor"); err != nil {
+			t.Fatalf("AddDependency(%s) error: %v", childID, err)
+		}
+	}
+
+	tk := newMockTracker("test")
+	engine := NewEngine(tk, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, ParentID: "bd-par1"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Errorf("Sync() not successful: %s", result.Error)
+	}
+	if len(tk.created) != 3 {
+		t.Errorf("pushed %d issues, want 3 (parent + 2 children)", len(tk.created))
+	}
+	for _, pushed := range tk.created {
+		if strings.Contains(pushed.Title, "Unrelated") {
+			t.Errorf("unrelated issue was pushed")
+		}
+	}
+}
+
+func TestEnginePushWithParentFilterDeep(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// parent → child → grandchild; unrelated is separate
+	for _, issue := range []*types.Issue{
+		{ID: "bd-dep1", Title: "Parent", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-dch1", Title: "Child", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-dgc1", Title: "Grandchild", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-dunrel1", Title: "Unrelated", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+	} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", issue.ID, err)
+		}
+	}
+	for _, d := range []struct{ child, parent string }{
+		{"bd-dch1", "bd-dep1"},
+		{"bd-dgc1", "bd-dch1"},
+	} {
+		dep := &types.Dependency{IssueID: d.child, DependsOnID: d.parent, Type: types.DepParentChild}
+		if err := store.AddDependency(ctx, dep, "test-actor"); err != nil {
+			t.Fatalf("AddDependency error: %v", err)
+		}
+	}
+
+	tk := newMockTracker("test")
+	engine := NewEngine(tk, store, "test-actor")
+
+	_, err := engine.Sync(ctx, SyncOptions{Push: true, ParentID: "bd-dep1"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if len(tk.created) != 3 {
+		t.Errorf("pushed %d issues, want 3 (parent + child + grandchild)", len(tk.created))
+	}
+}
+
+func TestEnginePushWithParentFilterLeaf(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, issue := range []*types.Issue{
+		{ID: "bd-leaf1", Title: "Leaf", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-lother1", Title: "Other", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+	} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", issue.ID, err)
+		}
+	}
+
+	tk := newMockTracker("test")
+	engine := NewEngine(tk, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, ParentID: "bd-leaf1"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if len(tk.created) != 1 {
+		t.Errorf("pushed %d issues, want 1 (leaf only)", len(tk.created))
+	}
+	if result.Stats.Skipped != 1 {
+		t.Errorf("Stats.Skipped = %d, want 1", result.Stats.Skipped)
+	}
+}
+
+func TestEnginePushWithParentFilterNonParentChildIgnored(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// "blocks" dep should not be followed — only parent-child edges count.
+	for _, issue := range []*types.Issue{
+		{ID: "bd-fp1", Title: "Parent", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-fbl1", Title: "Blocked", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+	} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", issue.ID, err)
+		}
+	}
+	dep := &types.Dependency{IssueID: "bd-fp1", DependsOnID: "bd-fbl1", Type: types.DepBlocks}
+	if err := store.AddDependency(ctx, dep, "test-actor"); err != nil {
+		t.Fatalf("AddDependency error: %v", err)
+	}
+
+	tk := newMockTracker("test")
+	engine := NewEngine(tk, store, "test-actor")
+
+	_, err := engine.Sync(ctx, SyncOptions{Push: true, ParentID: "bd-fp1"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if len(tk.created) != 1 {
+		t.Errorf("pushed %d issues, want 1 (blocks deps must not be followed)", len(tk.created))
+	}
+	if tk.created[0].Title != "Parent" {
+		t.Errorf("pushed %q, want Parent", tk.created[0].Title)
+	}
+}
+
+func TestEnginePushWithParentFilterEmptyMeansAll(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for i, title := range []string{"Issue A", "Issue B", "Issue C"} {
+		issue := &types.Issue{
+			ID:        fmt.Sprintf("bd-all%d", i+1),
+			Title:     title,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+	}
+
+	tk := newMockTracker("test")
+	engine := NewEngine(tk, store, "test-actor")
+
+	_, err := engine.Sync(ctx, SyncOptions{Push: true}) // no ParentID
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if len(tk.created) != 3 {
+		t.Errorf("pushed %d issues, want 3 (no parent filter)", len(tk.created))
+	}
+}
+
+func TestEnginePushWithParentFilterDryRun(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, issue := range []*types.Issue{
+		{ID: "bd-drp1", Title: "Parent", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-drc1", Title: "Child", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-dro1", Title: "Other", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+	} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", issue.ID, err)
+		}
+	}
+	dep := &types.Dependency{IssueID: "bd-drc1", DependsOnID: "bd-drp1", Type: types.DepParentChild}
+	if err := store.AddDependency(ctx, dep, "test-actor"); err != nil {
+		t.Fatalf("AddDependency error: %v", err)
+	}
+
+	tk := newMockTracker("test")
+	engine := NewEngine(tk, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, DryRun: true, ParentID: "bd-drp1"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 2 {
+		t.Errorf("dry-run Stats.Created = %d, want 2", result.Stats.Created)
+	}
+	if len(tk.created) != 0 {
+		t.Errorf("dry-run sent %d issues to tracker, want 0", len(tk.created))
+	}
+}
