@@ -56,7 +56,7 @@ func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text s
 // This prevents comment timestamp drift across import/export cycles.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	var result *types.Comment
-	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
 		return err

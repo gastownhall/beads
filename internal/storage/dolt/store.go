@@ -471,6 +471,30 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	return fn(tx)
 }
 
+// withRetryTx wraps withWriteTx with retry logic for serialization failures
+// (MySQL 1213 deadlock, 1205 lock wait timeout). These errors guarantee the
+// transaction was rolled back, so retrying is always safe.
+//
+// Connection-level errors (broken pipe, bad connection) are NOT retried here
+// because they can occur after a successful commit, making retry unsafe for
+// non-idempotent operations. Callers that need connection-level retry should
+// use withRetry at a higher layer.
+func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 25 * time.Millisecond
+	bo.MaxElapsedTime = 5 * time.Second
+	return backoff.Retry(func() error {
+		err := s.withWriteTx(ctx, fn)
+		if err != nil && isSerializationError(err) {
+			return err // retryable
+		}
+		if err != nil {
+			return backoff.Permanent(err)
+		}
+		return nil
+	}, backoff.WithContext(bo, ctx))
+}
+
 // withWriteTx runs fn inside a transaction, committing on success.
 // Used for write operations that delegate SQL work to issueops functions.
 // The caller's fn should NOT call tx.Commit — withWriteTx handles that.
@@ -1187,33 +1211,6 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("failed to create blocked_issues view: %w", err)
 		}
 		return nil
-	}
-
-	// Acquire an advisory lock to serialize schema initialization across concurrent processes.
-	// On a fresh database, all processes fail the fast path and race to execute ~20 DDL
-	// statements simultaneously, corrupting the Dolt journal. GET_LOCK serializes entry
-	// to the slow path. The lock is connection-scoped: we hold a dedicated connection so
-	// the lock persists across the DDL sequence and is released on conn.Close().
-	const schemaInitLock = "bd_schema_init"
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection for schema init lock: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	var locked int
-	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 30)", schemaInitLock).Scan(&locked); err != nil {
-		return fmt.Errorf("failed to acquire schema init lock: %w", err)
-	}
-	if locked != 1 {
-		return fmt.Errorf("failed to acquire schema init lock: timeout after 30s (another process holds it)")
-	}
-	defer conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", schemaInitLock) //nolint:errcheck
-
-	// Double-check: another process may have completed initialization while we waited.
-	var versionAfterLock int
-	if err := conn.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&versionAfterLock); err == nil && versionAfterLock >= currentSchemaVersion {
-		return createIgnoredTables(db)
 	}
 
 	// Execute schema creation - split into individual statements

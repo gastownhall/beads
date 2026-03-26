@@ -48,7 +48,7 @@ func (s *DoltStore) CheckEligibility(ctx context.Context, issueID string, tier i
 
 // ApplyCompaction records a compaction result in the database.
 func (s *DoltStore) ApplyCompaction(ctx context.Context, issueID string, tier int, originalSize int, _ int, commitHash string) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.ApplyCompactionInTx(ctx, tx, issueID, tier, originalSize, commitHash)
 	})
 }

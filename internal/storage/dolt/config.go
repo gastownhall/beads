@@ -14,7 +14,7 @@ import (
 
 // SetConfig sets a configuration value
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.SetConfigInTx(ctx, tx, key, value)
 	}); err != nil {
 		return err
@@ -70,14 +70,14 @@ func (s *DoltStore) GetAllConfig(ctx context.Context) (map[string]string, error)
 
 // DeleteConfig removes a configuration value
 func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.DeleteConfigInTx(ctx, tx, key)
 	})
 }
 
 // SetMetadata sets a metadata value
 func (s *DoltStore) SetMetadata(ctx context.Context, key, value string) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.SetMetadataInTx(ctx, tx, key, value)
 	})
 }

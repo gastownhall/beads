@@ -13,9 +13,8 @@ import (
 )
 
 // TestConcurrentInitSchema verifies that concurrent initSchemaOnDB calls on a
-// fresh database do not corrupt the Dolt journal. Without the GET_LOCK advisory
-// lock, 20+ concurrent processes running DDL simultaneously on a fresh DB
-// reliably produce CRC/journal corruption (see GH#2672).
+// fresh database do not corrupt the schema. All DDL uses IF NOT EXISTS / ON
+// DUPLICATE KEY so concurrent execution is idempotent.
 func TestConcurrentInitSchema(t *testing.T) {
 	skipIfNoDolt(t)
 	acquireTestSlot()
@@ -40,10 +39,6 @@ func TestConcurrentInitSchema(t *testing.T) {
 	if _, err := initDB.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+dbName+"`"); err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	t.Cleanup(func() {
-		// Skip DROP — rapid create/drop cycles can crash the Dolt container.
-		// The orphan is cleaned up when the container terminates.
-	})
 
 	// Open N independent sql.DB pools pointing at the fresh database.
 	// Each simulates a separate bd process connecting simultaneously.
