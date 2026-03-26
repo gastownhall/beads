@@ -304,9 +304,22 @@ func (c *Config) GetDoltDatabase() string {
 }
 
 // GetDoltServerPassword returns the Dolt server password.
-// Checks BEADS_DOLT_PASSWORD env var (password should never be stored in config files).
+// Checks in order:
+//  1. BEADS_DOLT_PASSWORD env var (highest priority, existing behavior)
+//  2. Credentials file lookup by [host:port] section
+//     (path from BEADS_CREDENTIALS_FILE env var, or ~/.config/beads/credentials)
+//  3. Empty string (no password)
 func (c *Config) GetDoltServerPassword() string {
-	return os.Getenv("BEADS_DOLT_PASSWORD")
+	if p := os.Getenv("BEADS_DOLT_PASSWORD"); p != "" {
+		return p
+	}
+	// Fall back to credentials file, keyed by the configured host:port
+	host := c.GetDoltServerHost()
+	port := c.GetDoltServerPort()
+	if p := LookupCredentialsPassword(host, port); p != "" {
+		return p
+	}
+	return ""
 }
 
 // GetDoltServerTLS returns whether TLS is enabled for server connections.
