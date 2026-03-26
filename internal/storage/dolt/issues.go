@@ -27,28 +27,30 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra types get marked ephemeral (legacy behavior)
 	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		// SkipPrefixValidation matches legacy behavior: single-issue path does
-		// not validate prefixes for explicit IDs.
-		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
-			SkipPrefixValidation: true,
-		})
-		if err != nil {
+	return s.withSerializedWrite(ctx, func() error {
+		if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			// SkipPrefixValidation matches legacy behavior: single-issue path does
+			// not validate prefixes for explicit IDs.
+			bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
+				SkipPrefixValidation: true,
+			})
+			if err != nil {
+				return err
+			}
+			return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
+		}); err != nil {
 			return err
 		}
-		return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
-	}); err != nil {
-		return err
-	}
 
-	// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT.
-	if !issue.Ephemeral && !issue.NoHistory {
-		if err := s.doltAddAndCommit(ctx, []string{"issues", "events"},
-			fmt.Sprintf("bd: create %s", issue.ID)); err != nil {
-			return err
+		// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT.
+		if !issue.Ephemeral && !issue.NoHistory {
+			if err := s.doltAddAndCommit(ctx, []string{"issues", "events"},
+				fmt.Sprintf("bd: create %s", issue.ID)); err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // CreateIssues creates multiple issues in a single transaction
@@ -66,36 +68,38 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
-	// All-wisps fast path: individual transactions, no Dolt versioning.
-	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
-	if issueops.AllWisps(issues) {
-		for _, issue := range issues {
-			if !issue.NoHistory {
-				issue.Ephemeral = true
-			}
-			if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
-				bc, err := issueops.NewBatchContext(ctx, tx, opts)
-				if err != nil {
+	return s.withSerializedWrite(ctx, func() error {
+		// All-wisps fast path: individual transactions, no Dolt versioning.
+		// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
+		if issueops.AllWisps(issues) {
+			for _, issue := range issues {
+				if !issue.NoHistory {
+					issue.Ephemeral = true
+				}
+				if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+					bc, err := issueops.NewBatchContext(ctx, tx, opts)
+					if err != nil {
+						return err
+					}
+					return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
+				}); err != nil {
 					return err
 				}
-				return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
-			}); err != nil {
-				return err
 			}
+			return nil
 		}
-		return nil
-	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
-	}); err != nil {
-		return err
-	}
+		if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
+		}); err != nil {
+			return err
+		}
 
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	return s.doltAddAndCommit(ctx,
-		[]string{"issues", "events", "labels", "comments", "dependencies", "child_counters"},
-		fmt.Sprintf("bd: create %d issue(s)", len(issues)))
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		return s.doltAddAndCommit(ctx,
+			[]string{"issues", "events", "labels", "comments", "dependencies", "child_counters"},
+			fmt.Sprintf("bd: create %d issue(s)", len(issues)))
+	})
 }
 
 // GetIssue retrieves an issue by ID.
@@ -155,37 +159,39 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 		return s.DemoteToWisp(ctx, id, updates, actor)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withSerializedWrite(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
-	if err != nil {
-		return err
-	}
+		result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+		if err != nil {
+			return err
+		}
 
-	// Dolt versioning for permanent issues.
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: update %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
+		// Dolt versioning for permanent issues.
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: update %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit update issue", err)
-	}
-	// Status changes affect the active set used by blocked ID computation
-	if _, hasStatus := updates["status"]; hasStatus {
-		s.invalidateBlockedIDsCache()
-	}
-	_ = result // OldIssue available if needed for future cache invalidation
-	return nil
+		if err := tx.Commit(); err != nil {
+			return wrapTransactionError("commit update issue", err)
+		}
+		// Status changes affect the active set used by blocked ID computation
+		if _, hasStatus := updates["status"]; hasStatus {
+			s.invalidateBlockedIDsCache()
+		}
+		_ = result // OldIssue available if needed for future cache invalidation
+		return nil
+	})
 }
 
 // ClaimIssue atomically claims an issue using compare-and-swap semantics.
@@ -200,33 +206,35 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 		return s.claimWisp(ctx, id, actor)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withSerializedWrite(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
-		return err
-	}
+		if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
+			return err
+		}
 
-	// Dolt versioning for permanent issues.
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: claim %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
+		// Dolt versioning for permanent issues.
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: claim %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit claim issue", err)
-	}
-	// Claiming changes status to in_progress, affecting blocked ID computation
-	s.invalidateBlockedIDsCache()
-	return nil
+		if err := tx.Commit(); err != nil {
+			return wrapTransactionError("commit claim issue", err)
+		}
+		// Claiming changes status to in_progress, affecting blocked ID computation
+		s.invalidateBlockedIDsCache()
+		return nil
+	})
 }
 
 // CloseIssue closes an issue with a reason.
@@ -239,33 +247,35 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		return s.closeWisp(ctx, id, reason, actor, session)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withSerializedWrite(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
-		return err
-	}
+		if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
+			return err
+		}
 
-	// Dolt versioning for permanent issues.
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: close %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
+		// Dolt versioning for permanent issues.
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: close %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit close issue", err)
-	}
-	// Closing changes the active set, which affects blocked ID computation (GH#1495)
-	s.invalidateBlockedIDsCache()
-	return nil
+		if err := tx.Commit(); err != nil {
+			return wrapTransactionError("commit close issue", err)
+		}
+		// Closing changes the active set, which affects blocked ID computation (GH#1495)
+		s.invalidateBlockedIDsCache()
+		return nil
+	})
 }
 
 // DeleteIssue permanently removes an issue
@@ -275,31 +285,33 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 		return s.deleteWisp(ctx, id)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }() // No-op after successful commit
+	return s.withSerializedWrite(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }() // No-op after successful commit
 
-	if err := issueops.DeleteIssueInTx(ctx, tx, id); err != nil {
-		return err
-	}
+		if err := issueops.DeleteIssueInTx(ctx, tx, id); err != nil {
+			return err
+		}
 
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: delete %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: delete %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	s.invalidateBlockedIDsCache()
-	return nil
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		s.invalidateBlockedIDsCache()
+		return nil
+	})
 }
 
 // DeleteIssues deletes multiple issues in a single transaction.

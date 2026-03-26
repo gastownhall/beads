@@ -35,23 +35,25 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		}
 	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		opts := issueops.AddDependencyOpts{
-			SourceTable:   "issues",
-			TargetTable:   targetTable,
-			WriteTable:    "dependencies",
-			IsCrossPrefix: isCrossPrefix,
-		}
-		if err := issueops.AddDependencyInTx(ctx, tx, dep, actor, opts); err != nil {
+	return s.withSerializedWrite(ctx, func() error {
+		if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			opts := issueops.AddDependencyOpts{
+				SourceTable:   "issues",
+				TargetTable:   targetTable,
+				WriteTable:    "dependencies",
+				IsCrossPrefix: isCrossPrefix,
+			}
+			if err := issueops.AddDependencyInTx(ctx, tx, dep, actor, opts); err != nil {
+				return err
+			}
+			s.invalidateBlockedIDsCache()
+			return nil
+		}); err != nil {
 			return err
 		}
-		s.invalidateBlockedIDsCache()
-		return nil
-	}); err != nil {
-		return err
-	}
-	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	return s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
+		// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
+		return s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
+	})
 }
 
 // RemoveDependency removes a dependency between two issues.
@@ -71,25 +73,27 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 		return wrapTransactionError("commit remove wisp dependency", tx.Commit())
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.withSerializedWrite(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
 
-	if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
-		return err
-	}
+		if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
+			return err
+		}
 
-	s.invalidateBlockedIDsCache()
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sql commit: %w", err)
-	}
-	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	if err := s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
-		return err
-	}
-	return nil
+		s.invalidateBlockedIDsCache()
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("sql commit: %w", err)
+		}
+		// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
+		if err := s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // GetDependencies retrieves issues that this issue depends on

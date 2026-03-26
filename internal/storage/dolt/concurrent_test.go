@@ -116,6 +116,165 @@ func TestConcurrentIssueCreation(t *testing.T) {
 	}
 }
 
+func TestConcurrentIssueCreationWithoutCallerRetry(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	errors := make(chan error, numGoroutines)
+	createdIDs := make(chan string, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			issue := &types.Issue{
+				Title:       fmt.Sprintf("No Retry Issue %d", n),
+				Description: fmt.Sprintf("Created by goroutine %d", n),
+				Status:      types.StatusOpen,
+				Priority:    2,
+				IssueType:   types.TypeTask,
+			}
+			if err := store.CreateIssue(ctx, issue, fmt.Sprintf("worker-%d", n)); err != nil {
+				errors <- fmt.Errorf("goroutine %d: %w", n, err)
+				return
+			}
+			createdIDs <- issue.ID
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+	close(createdIDs)
+
+	for err := range errors {
+		t.Errorf("creation error: %v", err)
+	}
+	if t.Failed() {
+		t.Fatal("concurrent create failed without caller retry")
+	}
+
+	ids := make(map[string]bool)
+	for id := range createdIDs {
+		if ids[id] {
+			t.Errorf("duplicate issue ID: %s", id)
+		}
+		ids[id] = true
+	}
+	if len(ids) != numGoroutines {
+		t.Fatalf("expected %d unique IDs, got %d", numGoroutines, len(ids))
+	}
+}
+
+func TestConcurrentCommentAndCloseWithoutCallerRetry(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	const numIssues = 8
+	issueIDs := make([]string, 0, numIssues)
+	for i := 0; i < numIssues; i++ {
+		issue := &types.Issue{
+			ID:          fmt.Sprintf("cc-%d", i),
+			Title:       fmt.Sprintf("Comment Close %d", i),
+			Description: "permanent issue for concurrent comment/close",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%d): %v", i, err)
+		}
+		issueIDs = append(issueIDs, issue.ID)
+	}
+
+	var wg sync.WaitGroup
+	errors := make(chan error, numIssues)
+	for i, issueID := range issueIDs {
+		wg.Add(1)
+		go func(n int, id string) {
+			defer wg.Done()
+			if _, err := store.AddIssueComment(ctx, id, fmt.Sprintf("author-%d", n), fmt.Sprintf("comment-%d", n)); err != nil {
+				errors <- fmt.Errorf("comment %s: %w", id, err)
+				return
+			}
+			if err := store.CloseIssue(ctx, id, "done", fmt.Sprintf("closer-%d", n), "test-session"); err != nil {
+				errors <- fmt.Errorf("close %s: %w", id, err)
+			}
+		}(i, issueID)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Errorf("write error: %v", err)
+	}
+	if t.Failed() {
+		t.Fatal("concurrent comment/close failed without caller retry")
+	}
+
+	for _, issueID := range issueIDs {
+		issue, err := store.GetIssue(ctx, issueID)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", issueID, err)
+		}
+		if issue.Status != types.StatusClosed {
+			t.Fatalf("issue %s status = %s, want closed", issueID, issue.Status)
+		}
+		comments, err := store.GetIssueComments(ctx, issueID)
+		if err != nil {
+			t.Fatalf("GetIssueComments(%s): %v", issueID, err)
+		}
+		if len(comments) != 1 {
+			t.Fatalf("issue %s comment count = %d, want 1", issueID, len(comments))
+		}
+	}
+}
+
+func TestServerWriteLockReleasedAfterWrite(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "lock-release",
+		Title:       "Lock release",
+		Description: "verify write lock is not leaked",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+
+	var locked int
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", store.serverWriteLockName()).Scan(&locked); err != nil {
+		t.Fatalf("GET_LOCK: %v", err)
+	}
+	if locked != 1 {
+		t.Fatalf("expected GET_LOCK to succeed after write, got %d", locked)
+	}
+	if _, err := conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", store.serverWriteLockName()); err != nil {
+		t.Fatalf("RELEASE_LOCK: %v", err)
+	}
+}
+
 // =============================================================================
 // Test 2: Same-Issue Update Race
 // 10 goroutines update the same issue simultaneously.

@@ -247,10 +247,20 @@ const cliExecTimeout = 5 * time.Minute
 // Retry configuration for transient connection errors (stale pool connections,
 // brief network issues, server restarts).
 const serverRetryMaxElapsed = 30 * time.Second
+const serverWriteRetryMaxElapsed = 12 * time.Second
+const serverWriteLockWait = 2 * time.Second
 
 func newServerRetryBackoff() backoff.BackOff {
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = serverRetryMaxElapsed
+	return bo
+}
+
+func newServerWriteRetryBackoff() backoff.BackOff {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 100 * time.Millisecond
+	bo.MaxInterval = time.Second
+	bo.MaxElapsedTime = serverWriteRetryMaxElapsed
 	return bo
 }
 
@@ -316,6 +326,46 @@ func isRetryableError(err error) bool {
 	return false
 }
 
+func isRetryableWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isRetryableError(err) || isLockError(err) || isSerializationError(err) {
+		return true
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "failed to acquire write lock")
+}
+
+func writeLockName(database string) string {
+	const prefix = "bd_write_"
+	if database == "" {
+		database = "default"
+	}
+	var b strings.Builder
+	b.Grow(len(prefix) + len(database))
+	b.WriteString(prefix)
+	for _, r := range database {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-', r == ':':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	name := b.String()
+	if len(name) <= 64 {
+		return name
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(database))
+	return prefix + strconv.FormatUint(h.Sum64(), 16)
+}
+
+func (s *DoltStore) serverWriteLockName() string {
+	return writeLockName(s.database)
+}
+
 // isLockError returns true if the error indicates a Dolt lock contention problem.
 // These can occur when the Dolt server's storage layer is locked by another
 // process or a stale LOCK file was left behind by a crashed server.
@@ -339,6 +389,57 @@ func wrapLockError(err error) error {
 	return fmt.Errorf("%w\n\nThe Dolt database is locked. This usually means the Dolt server's "+
 		"storage is held by another process or a stale lock file exists.\n"+
 		"Try restarting the Dolt server, or run 'bd doctor --fix' to clean stale lock files.", err)
+}
+
+func (s *DoltStore) withServerWriteLock(ctx context.Context, fn func() error) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection for write lock: %w", err)
+	}
+	defer conn.Close()
+
+	start := time.Now()
+	var locked int
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", s.serverWriteLockName(), int(serverWriteLockWait/time.Second)).Scan(&locked); err != nil {
+		doltMetrics.lockWaitMs.Record(ctx, float64(time.Since(start).Milliseconds()))
+		return fmt.Errorf("failed to acquire write lock: %w", err)
+	}
+	doltMetrics.lockWaitMs.Record(ctx, float64(time.Since(start).Milliseconds()))
+	if locked != 1 {
+		return fmt.Errorf("failed to acquire write lock: timeout after %s (another process holds it)", serverWriteLockWait)
+	}
+	defer conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", s.serverWriteLockName()) //nolint:errcheck
+
+	return fn()
+}
+
+func (s *DoltStore) withWriteRetry(ctx context.Context, op func() error) error {
+	attempts := 0
+	bo := newServerWriteRetryBackoff()
+	err := backoff.Retry(func() error {
+		attempts++
+		err := op()
+		if err != nil && isRetryableWriteError(err) {
+			return err
+		}
+		if err != nil {
+			return backoff.Permanent(err)
+		}
+		return nil
+	}, backoff.WithContext(bo, ctx))
+	if attempts > 1 {
+		doltMetrics.retryCount.Add(ctx, int64(attempts-1))
+	}
+	return err
+}
+
+func (s *DoltStore) withSerializedWrite(ctx context.Context, fn func() error) error {
+	if !s.serverMode {
+		return fn()
+	}
+	return wrapLockError(s.withWriteRetry(ctx, func() error {
+		return s.withServerWriteLock(ctx, fn)
+	}))
 }
 
 // withRetry executes an operation with retry for transient errors.

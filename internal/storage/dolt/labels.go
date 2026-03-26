@@ -10,16 +10,20 @@ import (
 
 // AddLabel adds a label to an issue
 func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+	return s.withSerializedWrite(ctx, func() error {
+		return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+		})
 	})
 }
 
 // RemoveLabel removes a label from an issue.
 // Delegates SQL work to issueops.RemoveLabelInTx which handles wisp routing.
 func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
+	return s.withSerializedWrite(ctx, func() error {
+		return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
+		})
 	})
 }
 
