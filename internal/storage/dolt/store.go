@@ -255,11 +255,21 @@ func newServerRetryBackoff() backoff.BackOff {
 	return bo
 }
 
-// isRetryableError returns true if the error is a transient connection error
+// isRetryableError returns true if the error is a transient error
 // that should be retried in server mode.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// MySQL server-level errors (typed)
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1213: // ER_LOCK_DEADLOCK: "Deadlock found when trying to get lock"
+			return true
+		case 1205: // ER_LOCK_WAIT_TIMEOUT: "Lock wait timeout exceeded"
+			return true
+		}
 	}
 	errStr := strings.ToLower(err.Error())
 	// MySQL driver transient errors
@@ -469,6 +479,15 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	}
 	defer func() { _ = tx.Rollback() }()
 	return fn(tx)
+}
+
+// withRetryTx wraps withWriteTx in withRetry so that transient errors
+// (bad connection, broken pipe, etc.) cause the entire transaction to
+// be retried with exponential backoff and circuit-breaker integration.
+func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	return s.withRetry(ctx, func() error {
+		return s.withWriteTx(ctx, fn)
+	})
 }
 
 // withWriteTx runs fn inside a transaction, committing on success.

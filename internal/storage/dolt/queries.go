@@ -542,7 +542,7 @@ func (s *DoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID stri
 // Delegates SQL work to issueops.GetNextChildIDTx.
 func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string, error) {
 	var childID string
-	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		childID, err = issueops.GetNextChildIDTx(ctx, tx, parentID)
 		return err

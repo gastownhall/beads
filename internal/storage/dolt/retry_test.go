@@ -3,7 +3,10 @@ package dolt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestIsRetryableError(t *testing.T) {
@@ -85,6 +88,21 @@ func TestIsRetryableError(t *testing.T) {
 		{
 			name:     "no root value found in session",
 			err:      errors.New("Error 1105 (HY000): no root value found in session"),
+			expected: true,
+		},
+		{
+			name:     "MySQL deadlock (error 1213) - retryable",
+			err:      &mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock"},
+			expected: true,
+		},
+		{
+			name:     "MySQL lock wait timeout (error 1205) - retryable",
+			err:      &mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"},
+			expected: true,
+		},
+		{
+			name:     "wrapped MySQL deadlock - retryable",
+			err:      fmt.Errorf("exec failed: %w", &mysql.MySQLError{Number: 1213, Message: "Deadlock found"}),
 			expected: true,
 		},
 		{

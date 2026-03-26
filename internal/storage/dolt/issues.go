@@ -27,7 +27,7 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra types get marked ephemeral (legacy behavior)
 	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -73,7 +73,7 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			if !issue.NoHistory {
 				issue.Ephemeral = true
 			}
-			if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 				bc, err := issueops.NewBatchContext(ctx, tx, opts)
 				if err != nil {
 					return err
@@ -86,7 +86,7 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
 	}); err != nil {
 		return err
@@ -575,7 +575,7 @@ var (
 // Returns the number of issues deleted.
 func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo string) (int, error) {
 	var count int
-	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		count, err = issueops.DeleteIssuesBySourceRepoInTx(ctx, tx, sourceRepo)
 		return err
@@ -588,7 +588,7 @@ func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo str
 
 // ClearRepoMtime removes the mtime cache entry for a repository.
 func (s *DoltStore) ClearRepoMtime(ctx context.Context, repoPath string) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.ClearRepoMtimeInTx(ctx, tx, repoPath)
 	})
 }
@@ -607,7 +607,7 @@ func (s *DoltStore) GetRepoMtime(ctx context.Context, repoPath string) (int64, e
 
 // SetRepoMtime updates the mtime cache for a repository's data file.
 func (s *DoltStore) SetRepoMtime(ctx context.Context, repoPath, jsonlPath string, mtimeNs int64) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.SetRepoMtimeInTx(ctx, tx, repoPath, jsonlPath, mtimeNs)
 	})
 }
