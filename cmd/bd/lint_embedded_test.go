@@ -1,5 +1,3 @@
-//go:build embeddeddolt
-
 package main
 
 import (

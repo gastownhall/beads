@@ -112,7 +112,7 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 
 	// Check for existing database (path differs between server and embedded mode)
 	var dbPath string
-	if isEmbeddedDolt {
+	if isEmbeddedMode() {
 		dbPath = filepath.Join(beadsDir, "embeddeddolt")
 	} else {
 		dbPath = doltserver.ResolveDoltDir(beadsDir)
@@ -177,7 +177,7 @@ func printBootstrapPlan(plan BootstrapPlan) {
 	switch plan.Action {
 	case "none":
 		fmt.Printf("✓ Database already exists: %s\n", plan.BeadsDir)
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Printf("  Nothing to do.\n")
 		} else {
 			fmt.Printf("  Nothing to do. Use 'bd doctor' to check health.\n")
@@ -332,7 +332,7 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
 	dbName := cfg.GetDoltDatabase()
 
-	if isEmbeddedDolt {
+	if isEmbeddedMode() {
 		// Embedded mode: open a connection to the embedded engine and use
 		// DOLT_CLONE to create the database from the remote URL.
 		dataDir := filepath.Join(plan.BeadsDir, "embeddeddolt")

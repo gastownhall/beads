@@ -1,5 +1,3 @@
-//go:build embeddeddolt
-
 package main
 
 import (
@@ -50,9 +48,9 @@ func buildEmbeddedBD(t *testing.T) string {
 			name = "bd.exe"
 		}
 		embeddedBD = filepath.Join(tmpDir, name)
-		cmd := exec.Command("go", "build", "-tags", "embeddeddolt", "-o", embeddedBD, ".")
+		cmd := exec.Command("go", "build", "-o", embeddedBD, ".")
 		if out, err := cmd.CombinedOutput(); err != nil {
-			embeddedBDErr = fmt.Errorf("go build -tags embeddeddolt failed: %v\n%s", err, out)
+			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}
 	})
 	if embeddedBDErr != nil {

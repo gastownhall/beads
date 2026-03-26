@@ -140,7 +140,7 @@ Examples:
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			if _, err := store.CommitPending(ctx, author); err != nil {
 				FatalErrorRespectJSON("failed to commit: %v", err)
 			}

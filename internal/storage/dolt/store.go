@@ -230,6 +230,11 @@ type Config struct {
 	// creation of shadow databases on the wrong server.
 	CreateIfMissing bool
 
+	// ServerMode indicates this config targets an external dolt sql-server
+	// rather than the embedded Dolt engine. Set by the store factory based
+	// on metadata.json dolt_mode or BEADS_DOLT_SERVER_MODE env var.
+	ServerMode bool
+
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
 	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).

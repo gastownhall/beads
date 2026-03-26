@@ -66,7 +66,7 @@ var addTodoCmd = &cobra.Command{
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && getStore() != nil {
+		if isEmbeddedMode() && getStore() != nil {
 			if _, err := getStore().CommitPending(ctx, getActorWithGit()); err != nil {
 				FatalError("failed to commit: %v", err)
 			}
@@ -174,7 +174,7 @@ var doneTodoCmd = &cobra.Command{
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && len(closedIDs) > 0 && getStore() != nil {
+		if isEmbeddedMode() && len(closedIDs) > 0 && getStore() != nil {
 			if _, err := getStore().CommitPending(ctx, getActorWithGit()); err != nil {
 				FatalError("failed to commit: %v", err)
 			}

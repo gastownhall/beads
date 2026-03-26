@@ -1,37 +1,74 @@
-//go:build !embeddeddolt
-
 package main
 
 import (
 	"context"
+	"path/filepath"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
-const isEmbeddedDolt = false
-
-// newDoltStore creates a storage backend from an explicit config.
-// Used by bd init and PersistentPreRun.
-func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
-	return dolt.New(ctx, cfg)
+// isEmbeddedMode returns true when the current session is using the embedded
+// Dolt engine (the default). Returns false in server mode (external dolt
+// sql-server). Safe to call before store initialization — defaults to true
+// (embedded) when the mode hasn't been set yet.
+func isEmbeddedMode() bool {
+	if shouldUseGlobals() {
+		return !serverMode
+	}
+	if cmdCtx != nil {
+		return !cmdCtx.ServerMode
+	}
+	return true // default: embedded
 }
 
-// acquireEmbeddedLock is a no-op in non-embedded builds. The server-mode dolt
-// backend handles its own concurrency.
-func acquireEmbeddedLock(_ string) (*embeddeddolt.Lock, error) {
-	return &embeddeddolt.Lock{}, nil
+// newDoltStore creates a storage backend from an explicit config.
+// When cfg.ServerMode is true, connects to an external dolt sql-server;
+// otherwise uses the embedded Dolt engine (default).
+// Used by bd init and PersistentPreRun.
+func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
+	if cfg.ServerMode {
+		return dolt.New(ctx, cfg)
+	}
+	return embeddeddolt.New(ctx, cfg.BeadsDir, cfg.Database, "main")
+}
+
+// acquireEmbeddedLock acquires an exclusive flock on the embeddeddolt data
+// directory derived from beadsDir. The caller must defer lock.Unlock().
+// Returns a no-op lock when serverMode is true (the server handles its own
+// concurrency).
+func acquireEmbeddedLock(beadsDir string, serverMode bool) (*embeddeddolt.Lock, error) {
+	if serverMode {
+		return &embeddeddolt.Lock{}, nil
+	}
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	return embeddeddolt.TryLock(dataDir)
 }
 
 // newDoltStoreFromConfig creates a storage backend from the beads directory's
-// persisted metadata.json configuration.
+// persisted metadata.json configuration. Uses embedded Dolt by default;
+// connects to dolt sql-server when dolt_mode is "server".
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	return dolt.NewFromConfig(ctx, beadsDir)
+	cfg, err := configfile.Load(beadsDir)
+	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+		return dolt.NewFromConfig(ctx, beadsDir)
+	}
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	return embeddeddolt.New(ctx, beadsDir, database, "main")
 }
 
 // newReadOnlyStoreFromConfig creates a read-only storage backend from the beads
 // directory's persisted metadata.json configuration.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	cfg, err := configfile.Load(beadsDir)
+	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	}
+	// Embedded dolt is single-process so read-only is not enforced at the engine level.
+	return newDoltStoreFromConfig(ctx, beadsDir)
 }

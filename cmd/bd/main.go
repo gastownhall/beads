@@ -58,6 +58,7 @@ var (
 )
 var (
 	sandboxMode     bool
+	serverMode      bool               // True when using external dolt sql-server (dolt_mode=server)
 	readonlyMode    bool               // Read-only mode: block write operations (for worker sandboxes)
 	storeIsReadOnly bool               // Track if store was opened read-only (for staleness checks)
 	lockTimeout     = 30 * time.Second // Dolt open timeout (fixed default)
@@ -591,6 +592,12 @@ var rootCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "warning: failed to load beads config from %s: %v\n", beadsDir, cfgErr)
 		}
 		if cfg != nil {
+			doltCfg.ServerMode = cfg.IsDoltServerMode()
+			serverMode = doltCfg.ServerMode
+			if cmdCtx != nil {
+				cmdCtx.ServerMode = doltCfg.ServerMode
+			}
+
 			// Always set database name (needed for bootstrap to find
 			// prefix-based databases like "beads_hq"; see #1669)
 			doltCfg.Database = cfg.GetDoltDatabase()
@@ -626,7 +633,7 @@ var rootCmd = &cobra.Command{
 		// These prevent the Dolt server from opening databases (SIGSEGV or
 		// "database is locked"). Safe because we haven't connected yet.
 		// NOTE: Intentionally skipped for embedded mode.
-		if !isEmbeddedDolt {
+		if !isEmbeddedMode() {
 			if removed, _ := dolt.CleanStaleNomsLocks(doltPath); removed > 0 {
 				debug.Logf("cleaned %d stale noms LOCK file(s) from %s", removed, doltPath)
 			}

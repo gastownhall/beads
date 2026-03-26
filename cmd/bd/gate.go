@@ -212,7 +212,7 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && store != nil {
+		if isEmbeddedMode() && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalError("failed to commit: %v", err)
 			}
@@ -314,7 +314,7 @@ Use --reason to provide context for why the gate was resolved.`,
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && store != nil {
+		if isEmbeddedMode() && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalError("failed to commit: %v", err)
 			}
@@ -780,7 +780,7 @@ func closeGate(_ interface{}, gateID, reason string) error {
 		return err
 	}
 	// Embedded mode: flush Dolt commit.
-	if isEmbeddedDolt && store != nil {
+	if isEmbeddedMode() && store != nil {
 		if _, err := store.CommitPending(rootCtx, actor); err != nil {
 			return err
 		}

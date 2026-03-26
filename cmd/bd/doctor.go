@@ -185,7 +185,7 @@ Examples:
   bd doctor --migration=post   # Validate Dolt migration completed
   bd doctor --migration=pre --json  # Machine-parseable migration validation`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd doctor' is not yet supported in embedded mode")
 			os.Exit(1)
 		}

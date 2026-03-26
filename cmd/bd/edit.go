@@ -166,9 +166,9 @@ Examples:
 		}
 		editSaved = true
 
-		// Embedded mode: flush Dolt commit (only for non-routed stores).
-		if isEmbeddedDolt && !result.Routed {
-			if _, err := issueStore.CommitPending(ctx, actor); err != nil {
+		// Embedded mode: flush Dolt commit.
+		if isEmbeddedMode() {
+			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalErrorRespectJSON("failed to commit: %v", err)
 			}
 		}

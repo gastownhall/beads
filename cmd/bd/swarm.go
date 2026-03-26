@@ -1037,7 +1037,7 @@ Examples:
 			FatalErrorRespectJSON("failed to link swarm to epic: %v", err)
 		}
 
-		if isEmbeddedDolt && store != nil {
+		if isEmbeddedMode() && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalErrorRespectJSON("failed to commit: %v", err)
 			}

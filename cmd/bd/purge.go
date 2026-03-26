@@ -202,7 +202,7 @@ EXAMPLES:
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && result.DeletedCount > 0 && store != nil {
+		if isEmbeddedMode() && result.DeletedCount > 0 && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalError("failed to commit: %v", err)
 			}

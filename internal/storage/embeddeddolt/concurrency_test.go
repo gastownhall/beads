@@ -1,5 +1,3 @@
-//go:build embeddeddolt
-
 package embeddeddolt_test
 
 import (
@@ -69,9 +67,8 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 		t.Logf("using pre-built test binary: %s", testBin)
 	} else {
 		testBin = filepath.Join(t.TempDir(), "embeddeddolt.test")
-		t.Logf("building test binary: go test -tags embeddeddolt -c -o %s ./internal/storage/embeddeddolt/", testBin)
+		t.Logf("building test binary: go test -c -o %s ./internal/storage/embeddeddolt/", testBin)
 		build := exec.CommandContext(ctx, "go", "test",
-			"-tags", "embeddeddolt",
 			"-c",
 			"-o", testBin,
 			"./internal/storage/embeddeddolt/",

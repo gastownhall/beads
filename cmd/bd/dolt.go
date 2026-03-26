@@ -75,7 +75,7 @@ var doltShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Show current Dolt configuration with connection status",
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt show' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
@@ -104,7 +104,7 @@ Examples:
   bd dolt set data-dir /home/user/.beads-dolt/myproject`,
 	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt set' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
@@ -126,7 +126,7 @@ This verifies that:
 
 Use this before switching to server mode to ensure the server is running.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt test' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
@@ -285,7 +285,7 @@ project path. PID and logs are stored in .beads/.
 The server auto-starts transparently when needed, so manual start is rarely
 required. Use this command for explicit control or diagnostics.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt start' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
@@ -323,7 +323,7 @@ var doltStopCmd = &cobra.Command{
 This sends a graceful shutdown signal. The server will restart automatically
 on the next bd command unless auto-start is disabled.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt stop' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
@@ -350,7 +350,7 @@ var doltStatusCmd = &cobra.Command{
 
 Displays whether the server is running, its PID, port, and data directory.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt status' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
@@ -404,7 +404,7 @@ In standalone mode, only dolt sql-server processes using the current
 project's Dolt data directory are eligible for cleanup. Other projects'
 servers are preserved.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt killall' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
@@ -449,7 +449,7 @@ Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*
 These waste server memory and can degrade performance under concurrent load.
 Use --dry-run to see what would be dropped without actually dropping.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt clean-databases' is not supported in embedded mode (no Dolt server)")
 			os.Exit(1)
 		}
@@ -658,7 +658,7 @@ var doltRemoteAddCmd = &cobra.Command{
 		// In embedded mode, SQL and CLI operate on the same directory,
 		// so the SQL add already wrote the remote config — skip CLI.
 		cliFailed := false
-		if !isEmbeddedDolt && cliURL != url {
+		if !isEmbeddedMode() && cliURL != url {
 			if err := doltutil.AddCLIRemote(dbPath, name, url); err != nil {
 				cliFailed = true
 				// Non-fatal: SQL remote was added successfully
@@ -792,7 +792,7 @@ var doltRemoteListCmd = &cobra.Command{
 			fmt.Printf("\n%s Could not read CLI remotes: %v\n", ui.RenderWarn("⚠"), cliErr)
 		}
 		if hasDiscrepancy {
-			if isEmbeddedDolt {
+			if isEmbeddedMode() {
 				fmt.Printf("\n%s Remote discrepancies detected.\n", ui.RenderWarn("⚠"))
 			} else {
 				fmt.Printf("\n%s Remote discrepancies detected. Run 'bd doctor --fix' to resolve.\n", ui.RenderWarn("⚠"))
@@ -857,7 +857,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 		// In embedded mode, SQL and CLI operate on the same directory,
 		// so the SQL remove already cleared the remote config — skip CLI.
 		cliRemoveFailed := false
-		if !isEmbeddedDolt && cliURL != "" {
+		if !isEmbeddedMode() && cliURL != "" {
 			if err := doltutil.RemoveCLIRemote(dbPath, name); err != nil {
 				cliRemoveFailed = true
 				fmt.Fprintf(os.Stderr, "Warning: SQL remote removed but CLI remote failed: %v\n", err)

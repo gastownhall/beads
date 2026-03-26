@@ -171,7 +171,7 @@ Examples:
 		}
 
 		// Embedded mode: flush Dolt commits on both stores.
-		if isEmbeddedDolt {
+		if isEmbeddedMode() {
 			if sourceStore != nil {
 				if _, err := sourceStore.CommitPending(ctx, actor); err != nil {
 					WarnError("failed to commit source store: %v", err)
