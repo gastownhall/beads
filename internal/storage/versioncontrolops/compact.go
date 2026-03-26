@@ -19,7 +19,19 @@ import (
 //
 // conn must be a single database connection (not a pooled *sql.DB) since the
 // stored procedures rely on session-scoped state (current branch, working set).
-func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string, oldCommits int, recentHashes []string) (retErr error) {
+	branchCreated := false
+
+	// Best-effort cleanup: if any step fails after creating the temp branch,
+	// try to return to main and delete the temp branch so future compactions
+	// aren't blocked by a leftover branch.
+	defer func() {
+		if retErr != nil && branchCreated {
+			_, _ = conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')")
+			_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-D', 'compact-tmp')")
+		}
+	}()
+
 	execSQL := func(name, query string, args ...interface{}) error {
 		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("compact step %q: %w", name, err)
@@ -30,6 +42,8 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 	if err := execSQL("create temp branch", "CALL DOLT_BRANCH('compact-tmp', ?)", boundaryHash); err != nil {
 		return err
 	}
+	branchCreated = true
+
 	if err := execSQL("checkout temp", "CALL DOLT_CHECKOUT('compact-tmp')"); err != nil {
 		return err
 	}
