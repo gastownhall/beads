@@ -18,13 +18,6 @@ func MigrateWispAuxiliaryTables(db *sql.DB) error {
 	}
 
 	for name, schema := range tables {
-		exists, err := tableExists(db, name)
-		if err != nil {
-			return fmt.Errorf("failed to check %s existence: %w", name, err)
-		}
-		if exists {
-			continue
-		}
 		if _, err := db.Exec(schema); err != nil {
 			return fmt.Errorf("failed to create %s table: %w", name, err)
 		}
@@ -33,14 +26,14 @@ func MigrateWispAuxiliaryTables(db *sql.DB) error {
 	return nil
 }
 
-const wispLabelsSchema = `CREATE TABLE wisp_labels (
+const wispLabelsSchema = `CREATE TABLE IF NOT EXISTS wisp_labels (
     issue_id VARCHAR(255) NOT NULL,
     label VARCHAR(255) NOT NULL,
     PRIMARY KEY (issue_id, label),
     INDEX idx_wisp_labels_label (label)
 )`
 
-const wispDependenciesSchema = `CREATE TABLE wisp_dependencies (
+const wispDependenciesSchema = `CREATE TABLE IF NOT EXISTS wisp_dependencies (
     issue_id VARCHAR(255) NOT NULL,
     depends_on_id VARCHAR(255) NOT NULL,
     type VARCHAR(32) NOT NULL DEFAULT 'blocks',
@@ -52,7 +45,7 @@ const wispDependenciesSchema = `CREATE TABLE wisp_dependencies (
     INDEX idx_wisp_dep_depends (depends_on_id)
 )`
 
-const wispEventsSchema = `CREATE TABLE wisp_events (
+const wispEventsSchema = `CREATE TABLE IF NOT EXISTS wisp_events (
     id CHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID()),
     issue_id VARCHAR(255) NOT NULL,
     event_type VARCHAR(32) NOT NULL,
@@ -64,7 +57,7 @@ const wispEventsSchema = `CREATE TABLE wisp_events (
     INDEX idx_wisp_events_issue (issue_id)
 )`
 
-const wispCommentsSchema = `CREATE TABLE wisp_comments (
+const wispCommentsSchema = `CREATE TABLE IF NOT EXISTS wisp_comments (
     id CHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID()),
     issue_id VARCHAR(255) NOT NULL,
     author VARCHAR(255) DEFAULT '',
