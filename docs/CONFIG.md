@@ -52,7 +52,7 @@ Tool-level settings you can configure:
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see below) |
 
-**Backend note:** Dolt is the primary storage backend. SQLite remains supported for simple single-user setups. See [DOLT.md](DOLT.md) for Dolt-specific configuration.
+**Backend note:** Dolt is the only storage backend. By default, Dolt runs in embedded mode (in-process, no server). Use `bd init --server` or `BEADS_DOLT_SERVER_MODE=1` for server mode. See [DOLT.md](DOLT.md) for details.
 
 ### Dolt Auto-Commit (SQL commit vs Dolt commit)
 

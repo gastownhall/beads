@@ -37,8 +37,8 @@ The wizard will:
 - Prompt to configure git merge driver (recommended)
 
 Notes:
-- Dolt stores data in `.beads/dolt/` and records `"database": "dolt"` in `.beads/metadata.json`.
-- The Dolt server handles database access (`bd dolt start/stop`).
+- By default, Dolt runs in **embedded mode** (in-process, no server needed). Data is stored in `.beads/embeddeddolt/`.
+- For multi-writer setups, use `bd init --server` to connect to a `dolt sql-server` instead.
 
 ## Your First Issues
 

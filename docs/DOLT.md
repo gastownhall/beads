@@ -62,8 +62,16 @@ gt dolt start
 cd ~/.dolt-data/beads && dolt sql-server --port 3307
 ```
 
+```bash
+# Initialize in server mode
+bd init --server
+
+# Or switch via environment variable
+export BEADS_DOLT_SERVER_MODE=1
+```
+
 ```yaml
-# .beads/config.yaml
+# .beads/config.yaml (server mode settings)
 dolt:
   mode: server
   host: 127.0.0.1
@@ -71,10 +79,29 @@ dolt:
   user: root
 ```
 
-Server mode is required for:
+Switch to server mode when you need:
 - Multiple agents writing simultaneously
 - Orchestrator multi-rig setups
 - Federation with remote peers
+
+## Migrating Between Backends
+
+<!-- TODO: Document the correct workflows for migrating data between backends.
+     Needs coverage of:
+     - Embedded → Server migration
+     - Server → Embedded migration
+     - JSONL backup/restore path (universal, portable)
+     - Dolt remote push/pull path (preserves full history)
+     - Data location differences (.beads/embeddeddolt/ vs .beads/dolt/)
+     - Pre-migration checklist (stop server, verify backup, etc.)
+     - Post-migration validation (bd list, bd doctor)
+     - File locking considerations (embedded uses flock)
+-->
+
+Migration between embedded and server mode is possible via `bd backup` / `bd backup restore`
+or via Dolt remotes (`bd dolt push` / `bd dolt pull`). Full migration guide coming soon.
+
+See also [DOLT-BACKEND.md](DOLT-BACKEND.md#migrating-between-backends).
 
 ## Federation (Peer-to-Peer Sync)
 
@@ -229,13 +256,8 @@ bd doctor --server         # Server mode checks (if applicable)
 
 **Symptom:** "database is locked" errors.
 
-Embedded mode is single-writer. If you need concurrent access:
-
-```bash
-# Switch to server mode
-gt dolt start
-bd config set dolt.mode server
-```
+Embedded mode is single-writer (enforced via file lock). If you need concurrent
+access, switch to server mode. See [Migrating Between Backends](#migrating-between-backends).
 
 ## Configuration Reference
 
@@ -247,8 +269,9 @@ dolt:
   # Auto-commit Dolt history after writes (default: on for embedded, off for server)
   auto-commit: on        # on | off
 
-  # Server mode settings (when mode: server)
+  # Storage mode (default: embedded)
   mode: embedded         # embedded | server
+  # Server mode settings (only used when mode: server)
   host: 127.0.0.1
   port: 3307
   user: root

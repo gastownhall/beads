@@ -37,7 +37,8 @@ bd config reset import.orphan_handling
 
 ```toml
 [database]
-path = ".beads/beads.db"     # Database file location
+# Embedded mode (default): data stored in .beads/embeddeddolt/
+# Server mode: connects to dolt sql-server (bd init --server)
 ```
 
 ### ID Generation

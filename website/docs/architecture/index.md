@@ -12,6 +12,10 @@ This document explains how Beads' architecture works with Dolt as its storage ba
 
 Beads uses **Dolt** as its sole storage backend -- a version-controlled SQL database that provides git-like semantics (branch, merge, diff, push, pull) natively at the database level.
 
+By default, Dolt runs in **embedded mode** (in-process, no separate server). For multi-writer
+setups (multiple agents, orchestrator), switch to **server mode** which connects to a
+running `dolt sql-server`. See [DOLT.md](/docs/DOLT.md) for details.
+
 ```mermaid
 flowchart TD
     subgraph DOLT["🗄️ Dolt Database"]
