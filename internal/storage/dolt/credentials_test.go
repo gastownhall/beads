@@ -438,3 +438,45 @@ func TestFederationCredentialCLIRouting(t *testing.T) {
 		})
 	}
 }
+
+func TestCloudAuthCLIRouting(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed")
+	}
+
+	tests := []struct {
+		name        string
+		serverMode  bool
+		setupRemote bool
+		envKey      string // env var to set (empty = none)
+		envValue    string
+		wantCLI     bool
+	}{
+		// Positive: cloud env + server mode + remote configured → CLI
+		{"azure storage account", true, true, "AZURE_STORAGE_ACCOUNT", "myaccount", true},
+		{"azure storage key", true, true, "AZURE_STORAGE_KEY", "mykey", true},
+		{"aws access key", true, true, "AWS_ACCESS_KEY_ID", "AKID", true},
+		{"aws secret key", true, true, "AWS_SECRET_ACCESS_KEY", "secret", true},
+		{"google creds", true, true, "GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json", true},
+		{"gcs creds file", true, true, "GCS_CREDENTIALS_FILE", "/path/to/creds.json", true},
+		{"oci var", true, true, "OCI_TENANCY", "ocid1.tenancy", true},
+		{"dolt remote user", true, true, "DOLT_REMOTE_USER", "admin", true},
+		// Negative: missing conditions → SQL fallback
+		{"no cloud env", true, true, "", "", false},
+		{"embedded mode", false, true, "AZURE_STORAGE_ACCOUNT", "myaccount", false},
+		{"no CLI remote", true, false, "AZURE_STORAGE_ACCOUNT", "myaccount", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Use a clean store (no remoteUser/remotePassword — cloud auth uses env vars)
+			store := setupCredentialTestStore(t, "", "", tt.serverMode, tt.setupRemote)
+			if tt.envKey != "" {
+				t.Setenv(tt.envKey, tt.envValue)
+			}
+			got := store.shouldUseCLIForCloudAuth()
+			if got != tt.wantCLI {
+				t.Errorf("shouldUseCLIForCloudAuth() = %v, want %v", got, tt.wantCLI)
+			}
+		})
+	}
+}

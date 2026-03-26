@@ -1839,6 +1839,13 @@ func (s *DoltStore) Push(ctx context.Context) (retErr error) {
 	if s.shouldUseCLIForCredentials(ctx) {
 		return s.doltCLIPush(ctx, false, creds)
 	}
+	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
+	// etc.) are set and we're in server mode, route through CLI so the dolt
+	// subprocess inherits the current env. The SQL server may not have these
+	// vars if it was started in a different context (GH#6).
+	if s.shouldUseCLIForCloudAuth() {
+		return s.doltCLIPush(ctx, false, creds)
+	}
 	if s.remoteUser != "" {
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
@@ -1878,6 +1885,10 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 	// cmd.Env (applyToCmd). The SQL path's withEnvCredentials sets process-wide
 	// env vars that an external server cannot see.
 	if s.shouldUseCLIForCredentials(ctx) {
+		return s.doltCLIPush(ctx, true, creds)
+	}
+	// Cloud auth CLI routing (GH#6).
+	if s.shouldUseCLIForCloudAuth() {
 		return s.doltCLIPush(ctx, true, creds)
 	}
 	if s.remoteUser != "" {
@@ -1944,6 +1955,10 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 			return err
 		}
 		return nil
+	}
+	// Cloud auth CLI routing (GH#6).
+	if s.shouldUseCLIForCloudAuth() {
+		return s.doltCLIPull(ctx, creds)
 	}
 	if s.remoteUser != "" {
 		return withEnvCredentials(creds, func() error {
