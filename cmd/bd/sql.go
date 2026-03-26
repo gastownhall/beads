@@ -39,7 +39,7 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 		csvOutput, _ := cmd.Flags().GetBool("csv")
 
 		if store == nil {
-			FatalErrorRespectJSON("no database connection available (run 'bd doctor' to diagnose, or 'bd init' to create a new database)")
+			FatalErrorRespectJSON("no database connection available (%s)", diagHint())
 		}
 
 		accessor, ok := store.(storage.RawDBAccessor)

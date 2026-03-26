@@ -1367,14 +1367,18 @@ func promptContributorMode() (isContributor bool, err error) {
 func verifyMetadata(ctx context.Context, store storage.DoltStorage, key, value string) bool {
 	if err := store.SetMetadata(ctx, key, value); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write %s metadata: %v\n", key, err)
-		fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")
+		if !isEmbeddedDolt {
+			fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")
+		}
 		return false
 	}
 	// Verify read-back
 	readBack, err := store.GetMetadata(ctx, key)
 	if err != nil || readBack != value {
 		fmt.Fprintf(os.Stderr, "Warning: %s metadata write did not persist (wrote %q, read %q)\n", key, value, readBack)
-		fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")
+		if !isEmbeddedDolt {
+			fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")
+		}
 		return false
 	}
 	return true

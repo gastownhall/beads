@@ -6,6 +6,15 @@ import (
 	"os"
 )
 
+// diagHint returns the appropriate diagnostic hint for the current mode.
+// In embedded mode, 'bd doctor' is not available so the hint omits it.
+func diagHint() string {
+	if isEmbeddedDolt {
+		return "run 'bd init' to create a new database"
+	}
+	return "run 'bd doctor' to diagnose, or 'bd init' to create a new database"
+}
+
 // FatalError writes an error message to stderr and exits with code 1.
 // Use this for fatal errors that prevent the command from completing.
 //

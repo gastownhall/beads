@@ -147,6 +147,7 @@ var _ storage.LifecycleManager = (*DoltStore)(nil)
 var _ storage.PendingCommitter = (*DoltStore)(nil)
 var _ storage.GarbageCollector = (*DoltStore)(nil)
 var _ storage.Flattener = (*DoltStore)(nil)
+var _ storage.Compactor = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -1477,6 +1478,17 @@ func (s *DoltStore) Flatten(ctx context.Context) error {
 	}
 	defer conn.Close()
 	return versioncontrolops.Flatten(ctx, conn)
+}
+
+// Compact squashes old Dolt commits while preserving recent ones.
+// Pins a single connection for session-scoped stored procedures.
+func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for compact: %w", err)
+	}
+	defer conn.Close()
+	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes)
 }
 
 // UnderlyingDB returns the underlying *sql.DB connection

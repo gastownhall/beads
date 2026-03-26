@@ -141,7 +141,7 @@ func runWispCreate(cmd *cobra.Command, args []string) {
 
 	// Wisp create requires direct store access
 	if store == nil {
-		FatalErrorWithHint("no database connection", "check 'bd doctor' and 'bd dolt status' for configuration issues")
+		FatalErrorWithHint("no database connection", diagHint())
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -584,7 +584,7 @@ func runWispGC(cmd *cobra.Command, args []string) {
 
 	// Wisp gc requires direct store access for deletion
 	if store == nil {
-		FatalErrorWithHint("no database connection", "check 'bd doctor' and 'bd dolt status' for configuration issues")
+		FatalErrorWithHint("no database connection", diagHint())
 	}
 
 	// Convert string slice to []types.IssueType
