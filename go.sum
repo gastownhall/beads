@@ -439,8 +439,12 @@ github.com/dolthub/dolt-mcp v0.3.4 h1:AyG5cw+fNWXDHXujtQnqUPZrpWtPg6FN6yYtjv1pP4
 github.com/dolthub/dolt-mcp v0.3.4/go.mod h1:bCZ7KHvDYs+M0e+ySgmGiNvLhcwsN7bbf5YCyillLrk=
 github.com/dolthub/dolt/go v0.40.5-0.20260323192425-7781d0de1e77 h1:DyynjXNrnzgQvSEl3KRxvDyq5kUANnuOnAgsvnyocwI=
 github.com/dolthub/dolt/go v0.40.5-0.20260323192425-7781d0de1e77/go.mod h1:LSPzsKIiqct6k4iSDDF+d/gwyVV3mn3ilIUP25C2xu4=
+github.com/dolthub/dolt/go v0.40.5-0.20260326074512-005921bdd8ca h1:dxaYAH5y99lQJ0IJIgt6nCU5FJViH7oS8dDjmxB3KlI=
+github.com/dolthub/dolt/go v0.40.5-0.20260326074512-005921bdd8ca/go.mod h1:LqqtZnKTz/eF6iBihsyHfRG/KLGqT2B/nCVxOD23Rgo=
 github.com/dolthub/driver v1.84.0 h1:wOvfq7TYHIbF4/GXdqoCUkB5gk6Rp8lU8g9s6zeGEvU=
 github.com/dolthub/driver v1.84.0/go.mod h1:Zg0d1E8D0SxtcJi66b2x5c4lqkP8jRi6pkRsYeuEgQg=
+github.com/dolthub/driver v1.84.1 h1:2uFK2iatQavkFb0Ef6UgS312F2dtaow/O1i1cGk0Ymg=
+github.com/dolthub/driver v1.84.1/go.mod h1:6CyHVv/OqRoZGbL71KbucBd0ACeIs/Bg241w8aZskd8=
 github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69 h1:JShhbqMw26nKx3pqqu/cFxOpzBkN+4elVhzuUfgDw2k=
 github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69/go.mod h1:SSLraQS/jGLYFgff3vuZ+JbVUct6vyEeMzjLBqWqoyM=
 github.com/dolthub/flatbuffers/v23 v23.3.3-dh.2 h1:u3PMzfF8RkKd3lB9pZ2bfn0qEG+1Gms9599cr0REMww=
@@ -451,6 +455,8 @@ github.com/dolthub/go-icu-regex v0.0.0-20250916051405-78a38d478790 h1:zxMsH7RLiG
 github.com/dolthub/go-icu-regex v0.0.0-20250916051405-78a38d478790/go.mod h1:F3cnm+vMRK1HaU6+rNqQrOCyR03HHhR1GWG2gnPOqaE=
 github.com/dolthub/go-mysql-server v0.20.1-0.20260323191635-3ba1fd7740a3 h1:swQ7tjXgjTMWdWW5R5/yxrwrosvhN2MENJ+UPUeeuNs=
 github.com/dolthub/go-mysql-server v0.20.1-0.20260323191635-3ba1fd7740a3/go.mod h1:ZPKRptEeXSk9Ytb9LhB+8tB4BkltxuNYiYDFvIqXD/4=
+github.com/dolthub/go-mysql-server v0.20.1-0.20260325173633-83a7fba2790f h1:w94bo6kTYotpqmnp7NP+wwZAtlzIBJ8Mfu8bqmeSx84=
+github.com/dolthub/go-mysql-server v0.20.1-0.20260325173633-83a7fba2790f/go.mod h1:ZPKRptEeXSk9Ytb9LhB+8tB4BkltxuNYiYDFvIqXD/4=
 github.com/dolthub/gozstd v0.0.0-20240423170813-23a2903bca63 h1:OAsXLAPL4du6tfbBgK0xXHZkOlos63RdKYS3Sgw/dfI=
 github.com/dolthub/gozstd v0.0.0-20240423170813-23a2903bca63/go.mod h1:lV7lUeuDhH5thVGDCKXbatwKy2KW80L4rMT46n+Y2/Q=
 github.com/dolthub/ishell v0.0.0-20240701202509-2b217167d718 h1:lT7hE5k+0nkBdj/1UOSFwjWpNxf+LCApbRHgnCA17XE=
