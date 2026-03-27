@@ -86,6 +86,7 @@ Type Filtering (--push only):
   --type task,feature       Only sync issues of these types
   --exclude-type wisp       Exclude issues of these types
   --include-ephemeral       Include ephemeral issues (wisps, etc.); default is to exclude
+  --parent TICKET           Only push this ticket and its descendants
 
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
@@ -97,6 +98,7 @@ Examples:
   bd linear sync --push --create-only           # Push new issues only
   bd linear sync --push --type=task,feature     # Push only tasks and features
   bd linear sync --push --exclude-type=wisp     # Push all except wisps
+  bd linear sync --push --parent=bd-abc123      # Push one ticket tree
   bd linear sync --dry-run                      # Preview without changes
   bd linear sync --prefer-local                 # Bidirectional, local wins`,
 	Run: runLinearSync,
@@ -140,6 +142,7 @@ func init() {
 	linearSyncCmd.Flags().StringSlice("type", nil, "Only sync issues of these types (can be repeated)")
 	linearSyncCmd.Flags().StringSlice("exclude-type", nil, "Exclude issues of these types (can be repeated)")
 	linearSyncCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps, etc.) when pushing to Linear")
+	linearSyncCmd.Flags().String("parent", "", "Limit push to this beads ticket and its descendants")
 
 	linearCmd.AddCommand(linearSyncCmd)
 	linearCmd.AddCommand(linearStatusCmd)
@@ -158,6 +161,11 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	typeFilters, _ := cmd.Flags().GetStringSlice("type")
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
 	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
+	parentID, _ := cmd.Flags().GetString("parent")
+
+	if parentID != "" && !push {
+		FatalError("--parent requires --push")
+	}
 
 	if !dryRun {
 		CheckReadonly("linear sync")
@@ -213,6 +221,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	if !includeEphemeral {
 		opts.ExcludeEphemeral = true
 	}
+	opts.ParentID = parentID
 
 	// Map conflict resolution
 	if preferLocal {

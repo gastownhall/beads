@@ -84,6 +84,9 @@ type SyncOptions struct {
 	ExcludeTypes []types.IssueType
 	// ExcludeEphemeral skips ephemeral/wisp issues from push (default behavior in CLI).
 	ExcludeEphemeral bool
+	// ParentID limits push to this beads issue and all its descendants via
+	// parent-child dependencies. Empty means no restriction.
+	ParentID string
 }
 
 // SyncResult is the complete result of a sync operation.
