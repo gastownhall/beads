@@ -259,7 +259,7 @@ Beads uses `dolt-native` sync mode exclusively:
 - Uses Dolt remotes (DoltHub, S3, GCS, etc.)
 - Native database-level sync with cell-level merge
 - Supports branching and merging
-- `bd export` available for issue portability; `bd backup` / `bd backup restore` for JSONL backup snapshots
+- `bd export` available for issue portability; `bd backup add` / `bd backup sync` / `bd backup restore` for Dolt-native backups
 
 ## Dolt Remotes
 
@@ -483,20 +483,32 @@ federation:
 
 ## Migrating Between Backends
 
-<!-- TODO: Document the correct workflows for migrating data between backends.
-     Needs coverage of:
-     - Embedded → Server migration
-     - Server → Embedded migration
-     - JSONL backup/restore path (universal, portable)
-     - Dolt remote push/pull path (preserves full history)
-     - Data location differences (.beads/embeddeddolt/ vs .beads/dolt/)
-     - Pre-migration checklist (stop server, verify backup, etc.)
-     - Post-migration validation (bd list, bd doctor)
-     - File locking considerations (embedded uses flock)
--->
+Use `bd backup` to migrate data between embedded and server mode. Both
+directions preserve full Dolt commit history. See [DOLT.md](DOLT.md#migrating-between-backends)
+for step-by-step instructions.
 
-Migration between embedded and server mode is possible via `bd backup` / `bd backup restore`
-or via Dolt remotes (`bd dolt push` / `bd dolt pull`). Full migration guide coming soon.
+**Quick reference:**
+
+```bash
+# 1. Backup the source project
+bd backup add /path/to/backup-dir
+bd backup sync
+
+# 2. Create target project and restore
+mkdir target && cd target
+bd init                    # or bd init --server
+bd backup restore --force /path/to/backup-dir
+
+# 3. Verify
+bd list
+```
+
+**Key details:**
+- Embedded data lives in `.beads/embeddeddolt/`, server data in `.beads/dolt/`
+- `--force` is required when restoring into an initialized project (overwrites the database)
+- The restore auto-registers the backup dir for future syncs and updates the project identity
+- Embedded mode uses file locking (`flock`) — only one writer at a time
+- Alternative: migrate via Dolt remotes (`bd dolt push` / `bd dolt pull`) if both projects share a remote
 
 ## See Also
 

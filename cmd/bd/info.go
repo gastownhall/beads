@@ -372,7 +372,7 @@ var versionChanges = []VersionChange{
 			"NEW: SSH push/pull fallback with dual-surface remote management",
 			"NEW: Hook migration system — census and migration planning",
 			"NEW: Section markers for git hooks (safer hook updates)",
-			"NEW: bd backup init/sync/restore for Dolt-native backups",
+			"NEW: bd backup add/sync/restore for Dolt-native backups",
 			"NEW: bd gc, bd compact, bd flatten for standalone lifecycle",
 			"NEW: Circuit breaker for Dolt server connections",
 		},

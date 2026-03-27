@@ -567,11 +567,12 @@ bd gate add-waiter <gate-id> <waiter>
 # Export issues to issue JSONL
 bd export -o issues.jsonl
 
-# Write or restore the supported JSONL backup snapshot
-bd backup
-bd backup restore
-bd backup export-git
-bd backup fetch-git
+# Dolt-native backup (preserves full commit history)
+bd backup add /path/to/backup    # Register a backup destination
+bd backup sync                   # Push to backup destination
+bd backup restore [path]         # Restore from a backup
+bd backup remove                 # Remove backup destination
+bd backup status                 # Show backup status
 
 # Bootstrap a new database from an issue export
 bd init --from-jsonl                            # Reads .beads/issues.jsonl
