@@ -198,10 +198,24 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 }
 
 func (t *Tracker) IsExternalRef(ref string) bool {
+	// Match the fallback format "gitlab:IDENTIFIER"
+	if strings.HasPrefix(ref, "gitlab:") {
+		return true
+	}
+	// Match URLs from the configured GitLab instance (handles self-hosted without "gitlab" in hostname)
+	if t.client != nil && t.client.BaseURL != "" && strings.HasPrefix(ref, t.client.BaseURL) {
+		return issueIIDPattern.MatchString(ref)
+	}
+	// Match URLs containing "gitlab" in the hostname (gitlab.com, my-gitlab.example.com, etc.)
 	return strings.Contains(ref, "gitlab") && issueIIDPattern.MatchString(ref)
 }
 
 func (t *Tracker) ExtractIdentifier(ref string) string {
+	// Handle fallback format "gitlab:IDENTIFIER"
+	if strings.HasPrefix(ref, "gitlab:") {
+		return strings.TrimPrefix(ref, "gitlab:")
+	}
+	// Handle URL format with /issues/\d+
 	matches := issueIIDPattern.FindStringSubmatch(ref)
 	if len(matches) < 2 {
 		return ""
