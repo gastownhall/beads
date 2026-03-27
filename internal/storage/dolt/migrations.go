@@ -31,6 +31,7 @@ var migrationsList = []Migration{
 	{"uuid_primary_keys", migrations.MigrateUUIDPrimaryKeys},
 	{"add_no_history_column", migrations.MigrateAddNoHistoryColumn},
 	{"drop_hop_columns", migrations.MigrateDropHOPColumns},
+	{"drop_child_counters_fk", migrations.MigrateDropChildCountersFK},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.

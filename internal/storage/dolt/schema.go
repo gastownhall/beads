@@ -150,10 +150,11 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL
 );
 -- Child counters table
+-- No FK constraint: parent_id may reference issues or wisps (agent beads were
+-- migrated to wisps in 007_infra_to_wisps but this FK was not updated).
 CREATE TABLE IF NOT EXISTS child_counters (
     parent_id VARCHAR(255) PRIMARY KEY,
-    last_child INT NOT NULL DEFAULT 0,
-    CONSTRAINT fk_counter_parent FOREIGN KEY (parent_id) REFERENCES issues(id) ON DELETE CASCADE
+    last_child INT NOT NULL DEFAULT 0
 );
 
 -- Issue snapshots table (for compaction)

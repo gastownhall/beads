@@ -59,6 +59,22 @@ func indexExists(db *sql.DB, table, indexName string) bool {
 	return rows.Next()
 }
 
+// constraintExists checks if a named constraint exists on a table.
+// Uses SHOW CREATE TABLE and string matching because Dolt doesn't support
+// information_schema.TABLE_CONSTRAINTS reliably.
+func constraintExists(db *sql.DB, table, constraint string) (bool, error) {
+	var tableName, createStmt string
+	//nolint:gosec // G202: table name is an internal constant
+	err := db.QueryRow("SHOW CREATE TABLE `" + table + "`").Scan(&tableName, &createStmt)
+	if err != nil {
+		if isTableNotFoundError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("SHOW CREATE TABLE %s: %w", table, err)
+	}
+	return strings.Contains(createStmt, constraint), nil
+}
+
 // tableExists checks if a table exists using SHOW TABLES.
 // Uses SHOW TABLES LIKE instead of information_schema to avoid crashes
 // when the Dolt server catalog contains stale database entries from
