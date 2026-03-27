@@ -926,6 +926,132 @@ func TestEnginePushWithParentFilterEmptyMeansAll(t *testing.T) {
 	}
 }
 
+// TestEnginePullDedupsAfterPush verifies that pull does not create duplicate
+// issues for beads that were previously pushed to the tracker.
+// Regression test for be-wnb: GetIssueByExternalRef only checked the issues
+// table, so pushed wisps were re-imported as duplicates on every sync.
+func TestEnginePullDedupsAfterPush(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create a regular issue and push it.
+	issue := &types.Issue{
+		ID:        "bd-dedup1",
+		Title:     "Regular issue",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tk := newMockTracker("dedup")
+	engine := NewEngine(tk, store, "test-actor")
+
+	// Push: creates the issue in the tracker and sets external_ref.
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Push Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Fatalf("Push Stats.Created = %d, want 1", result.Stats.Created)
+	}
+
+	// Now simulate the tracker returning the same issue during pull.
+	tk.issues = []TrackerIssue{
+		{
+			ID:         "ext-bd-dedup1",
+			Identifier: "EXT-bd-dedup1",
+			URL:        fmt.Sprintf("https://dedup.test/EXT-bd-dedup1"),
+			Title:      "Regular issue",
+			UpdatedAt:  time.Now(),
+		},
+	}
+
+	// Pull: should find the existing issue by external_ref, not create a duplicate.
+	result, err = engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Pull Sync() error: %v", err)
+	}
+	if result.Stats.Created != 0 {
+		t.Errorf("Pull Stats.Created = %d, want 0 (dedup should prevent creation)", result.Stats.Created)
+	}
+
+	// Verify only 1 issue exists (no duplicate).
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues() error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Errorf("stored %d issues after push+pull, want 1 (no duplicate)", len(issues))
+	}
+}
+
+// TestEnginePullDedupsWispAfterPush verifies that pull correctly deduplicates
+// wisps (ephemeral issues) that were previously pushed to the tracker.
+// This is the core regression for be-wnb.
+func TestEnginePullDedupsWispAfterPush(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create an ephemeral issue (wisp) and push it.
+	wisp := &types.Issue{
+		ID:        "bd-wisp-dedup1",
+		Title:     "Ephemeral wisp",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, wisp, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue(wisp) error: %v", err)
+	}
+
+	tk := newMockTracker("dedup")
+	engine := NewEngine(tk, store, "test-actor")
+
+	// Push: creates the wisp in the tracker and sets external_ref.
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Push Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Fatalf("Push Stats.Created = %d, want 1", result.Stats.Created)
+	}
+
+	// Verify external_ref was set on the wisp.
+	got, err := store.GetIssueByExternalRef(ctx, fmt.Sprintf("https://dedup.test/EXT-bd-wisp-dedup1"))
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef() after push error: %v", err)
+	}
+	if got.ID != "bd-wisp-dedup1" {
+		t.Fatalf("GetIssueByExternalRef() returned %s, want bd-wisp-dedup1", got.ID)
+	}
+
+	// Simulate the tracker returning the same issue during pull.
+	tk.issues = []TrackerIssue{
+		{
+			ID:         "ext-bd-wisp-dedup1",
+			Identifier: "EXT-bd-wisp-dedup1",
+			URL:        fmt.Sprintf("https://dedup.test/EXT-bd-wisp-dedup1"),
+			Title:      "Ephemeral wisp",
+			UpdatedAt:  time.Now(),
+		},
+	}
+
+	// Pull: should find the existing wisp by external_ref, not create a duplicate.
+	result, err = engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Pull Sync() error: %v", err)
+	}
+	if result.Stats.Created != 0 {
+		t.Errorf("Pull Stats.Created = %d, want 0 (wisp dedup should prevent creation)", result.Stats.Created)
+	}
+}
+
 func TestEnginePushWithParentFilterDryRun(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
