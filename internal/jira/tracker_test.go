@@ -602,7 +602,17 @@ func (s *configStore) ListWisps(_ context.Context, _ types.WispFilter) ([]*types
 func (s *configStore) RunInTransaction(_ context.Context, _ string, _ func(tx storage.Transaction) error) error {
 	return nil
 }
-func (s *configStore) Close() error { return nil }
+func (s *configStore) MergeSlotCreate(_ context.Context, _ string) (*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotCheck(_ context.Context) (*storage.MergeSlotStatus, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotAcquire(_ context.Context, _, _ string, _ bool) (*storage.MergeSlotResult, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotRelease(_ context.Context, _, _ string) error { return nil }
+func (s *configStore) Close() error                                          { return nil }
 
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	var capturedJQL string
