@@ -25,6 +25,19 @@ func NewClient(token, baseURL, projectID string) *Client {
 	}
 }
 
+// WithGroupID returns a new client configured to fetch issues at the group level.
+// When GroupID is set, FetchIssues and FetchIssuesSince use /groups/:id/issues
+// instead of /projects/:id/issues. Issue creation still uses the project endpoint.
+func (c *Client) WithGroupID(groupID string) *Client {
+	return &Client{
+		Token:      c.Token,
+		BaseURL:    c.BaseURL,
+		ProjectID:  c.ProjectID,
+		GroupID:    groupID,
+		HTTPClient: c.HTTPClient,
+	}
+}
+
 // WithHTTPClient returns a new client configured to use the specified HTTP client.
 // This is useful for testing or customizing timeouts and transport settings.
 func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
@@ -32,6 +45,7 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 		Token:      c.Token,
 		BaseURL:    c.BaseURL,
 		ProjectID:  c.ProjectID,
+		GroupID:    c.GroupID,
 		HTTPClient: httpClient,
 	}
 }
@@ -43,6 +57,7 @@ func (c *Client) WithEndpoint(endpoint string) *Client {
 		Token:      c.Token,
 		BaseURL:    endpoint,
 		ProjectID:  c.ProjectID,
+		GroupID:    c.GroupID,
 		HTTPClient: c.HTTPClient,
 	}
 }
@@ -51,6 +66,16 @@ func (c *Client) WithEndpoint(endpoint string) *Client {
 // This handles both numeric IDs (e.g., "123") and path-based IDs (e.g., "group/project").
 func (c *Client) projectPath() string {
 	return url.PathEscape(c.ProjectID)
+}
+
+// issuesBasePath returns the API path prefix for listing issues.
+// When GroupID is set, returns /groups/:id/issues (group-level).
+// Otherwise, returns /projects/:id/issues (project-level).
+func (c *Client) issuesBasePath() string {
+	if c.GroupID != "" {
+		return "/groups/" + url.PathEscape(c.GroupID) + "/issues"
+	}
+	return "/projects/" + c.projectPath() + "/issues"
 }
 
 // buildURL constructs a full API URL from path and optional query parameters.
@@ -141,9 +166,46 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 	return nil, nil, fmt.Errorf("max retries (%d) exceeded: %w", MaxRetries+1, lastErr)
 }
 
-// FetchIssues retrieves issues from GitLab with optional filtering by state.
+// applyFilter adds IssueFilter fields as query parameters to the params map.
+// ProjectID filtering is done client-side (not supported by GitLab API on group endpoints).
+func applyFilter(params map[string]string, filter *IssueFilter) {
+	if filter == nil {
+		return
+	}
+	if filter.Labels != "" {
+		params["labels"] = filter.Labels
+	}
+	if filter.Milestone != "" {
+		params["milestone"] = filter.Milestone
+	}
+	if filter.Assignee != "" {
+		params["assignee_username"] = filter.Assignee
+	}
+}
+
+// filterByProject removes issues that don't match the filter's ProjectID.
+// Returns the input slice unmodified if filter is nil or ProjectID is 0.
+func filterByProject(issues []Issue, filter *IssueFilter) []Issue {
+	if filter == nil || filter.ProjectID == 0 {
+		return issues
+	}
+	filtered := make([]Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.ProjectID == filter.ProjectID {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered
+}
+
+// FetchIssues retrieves issues from GitLab with optional filtering by state and IssueFilter.
 // state can be: "opened", "closed", or "all".
-func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error) {
+func (c *Client) FetchIssues(ctx context.Context, state string, filters ...*IssueFilter) ([]Issue, error) {
+	var filter *IssueFilter
+	if len(filters) > 0 {
+		filter = filters[0]
+	}
+
 	var allIssues []Issue
 	page := 1
 
@@ -162,8 +224,9 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 		if state != "" && state != "all" {
 			params["state"] = state
 		}
+		applyFilter(params, filter)
 
-		urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues", params)
+		urlStr := c.buildURL(c.issuesBasePath(), params)
 		respBody, headers, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch issues: %w", err)
@@ -189,12 +252,17 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 		}
 	}
 
-	return allIssues, nil
+	return filterByProject(allIssues, filter), nil
 }
 
 // FetchIssuesSince retrieves issues from GitLab that have been updated since the given time.
 // This enables incremental sync by only fetching issues modified after the last sync.
-func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.Time) ([]Issue, error) {
+func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.Time, filters ...*IssueFilter) ([]Issue, error) {
+	var filter *IssueFilter
+	if len(filters) > 0 {
+		filter = filters[0]
+	}
+
 	var allIssues []Issue
 	page := 1
 
@@ -216,8 +284,9 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 		if state != "" && state != "all" {
 			params["state"] = state
 		}
+		applyFilter(params, filter)
 
-		urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues", params)
+		urlStr := c.buildURL(c.issuesBasePath(), params)
 		respBody, headers, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch issues since %s: %w", sinceStr, err)
@@ -243,7 +312,7 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 		}
 	}
 
-	return allIssues, nil
+	return filterByProject(allIssues, filter), nil
 }
 
 // CreateIssue creates a new issue in GitLab.

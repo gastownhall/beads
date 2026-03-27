@@ -20,9 +20,11 @@ import (
 
 // GitLabConfig holds GitLab connection configuration.
 type GitLabConfig struct {
-	URL       string // GitLab instance URL (e.g., "https://gitlab.com")
-	Token     string // Personal access token
-	ProjectID string // Project ID or URL-encoded path
+	URL              string // GitLab instance URL (e.g., "https://gitlab.com")
+	Token            string // Personal access token
+	ProjectID        string // Project ID or URL-encoded path
+	GroupID          string // Optional group ID for group-level issue fetching
+	DefaultProjectID string // Project ID for creating issues in group mode
 }
 
 // gitlabCmd is the root command for GitLab operations.
@@ -32,9 +34,11 @@ var gitlabCmd = &cobra.Command{
 	Long: `Commands for syncing issues between beads and GitLab.
 
 Configuration can be set via 'bd config' or environment variables:
-  gitlab.url / GITLAB_URL         - GitLab instance URL
-  gitlab.token / GITLAB_TOKEN     - Personal access token
-  gitlab.project_id / GITLAB_PROJECT_ID - Project ID or path`,
+  gitlab.url / GITLAB_URL                         - GitLab instance URL
+  gitlab.token / GITLAB_TOKEN                     - Personal access token
+  gitlab.project_id / GITLAB_PROJECT_ID           - Project ID or path
+  gitlab.group_id / GITLAB_GROUP_ID               - Group ID for group-level sync
+  gitlab.default_project_id / GITLAB_DEFAULT_PROJECT_ID - Project for creating issues in group mode`,
 }
 
 // gitlabSyncCmd synchronizes issues between beads and GitLab.
@@ -74,6 +78,12 @@ var (
 	gitlabPreferLocal  bool
 	gitlabPreferGitLab bool
 	gitlabPreferNewer  bool
+
+	// Filter flags for sync
+	gitlabFilterLabel     string
+	gitlabFilterProject   string
+	gitlabFilterMilestone string
+	gitlabFilterAssignee  string
 )
 
 // issueIDCounter is used to generate unique issue IDs.
@@ -171,6 +181,12 @@ func init() {
 	gitlabSyncCmd.Flags().BoolVar(&gitlabPreferGitLab, "prefer-gitlab", false, "On conflict, use GitLab version")
 	gitlabSyncCmd.Flags().BoolVar(&gitlabPreferNewer, "prefer-newer", false, "On conflict, use most recent version (default)")
 
+	// Filter flags (override config defaults)
+	gitlabSyncCmd.Flags().StringVar(&gitlabFilterLabel, "label", "", "Filter by labels (comma-separated, AND logic)")
+	gitlabSyncCmd.Flags().StringVar(&gitlabFilterProject, "project", "", "Filter to issues from this project ID (group mode)")
+	gitlabSyncCmd.Flags().StringVar(&gitlabFilterMilestone, "milestone", "", "Filter by milestone title")
+	gitlabSyncCmd.Flags().StringVar(&gitlabFilterAssignee, "assignee", "", "Filter by assignee username")
+
 	// Register gitlab command with root
 	rootCmd.AddCommand(gitlabCmd)
 }
@@ -183,6 +199,8 @@ func getGitLabConfig() GitLabConfig {
 	config.URL = getGitLabConfigValue(ctx, "gitlab.url")
 	config.Token = getGitLabConfigValue(ctx, "gitlab.token")
 	config.ProjectID = getGitLabConfigValue(ctx, "gitlab.project_id")
+	config.GroupID = getGitLabConfigValue(ctx, "gitlab.group_id")
+	config.DefaultProjectID = getGitLabConfigValue(ctx, "gitlab.default_project_id")
 
 	return config
 }
@@ -226,6 +244,18 @@ func gitlabConfigToEnvVar(key string) string {
 		return "GITLAB_TOKEN"
 	case "gitlab.project_id":
 		return "GITLAB_PROJECT_ID"
+	case "gitlab.group_id":
+		return "GITLAB_GROUP_ID"
+	case "gitlab.default_project_id":
+		return "GITLAB_DEFAULT_PROJECT_ID"
+	case "gitlab.filter_labels":
+		return "GITLAB_FILTER_LABELS"
+	case "gitlab.filter_project":
+		return "GITLAB_FILTER_PROJECT"
+	case "gitlab.filter_milestone":
+		return "GITLAB_FILTER_MILESTONE"
+	case "gitlab.filter_assignee":
+		return "GITLAB_FILTER_ASSIGNEE"
 	default:
 		return ""
 	}
@@ -239,8 +269,8 @@ func validateGitLabConfig(config GitLabConfig) error {
 	if config.Token == "" {
 		return fmt.Errorf("gitlab.token is not configured. Set via 'bd config gitlab.token <token>' or GITLAB_TOKEN environment variable")
 	}
-	if config.ProjectID == "" {
-		return fmt.Errorf("gitlab.project_id is not configured. Set via 'bd config gitlab.project_id <id>' or GITLAB_PROJECT_ID environment variable")
+	if config.ProjectID == "" && config.GroupID == "" {
+		return fmt.Errorf("gitlab.project_id or gitlab.group_id is not configured. Set via 'bd config' or environment variables")
 	}
 	// Reject non-HTTPS URLs to prevent sending tokens in cleartext.
 	// Allow http://localhost and http://127.0.0.1 for local development/testing.
@@ -267,7 +297,11 @@ func maskGitLabToken(token string) string {
 
 // getGitLabClient creates a GitLab client from the current configuration.
 func getGitLabClient(config GitLabConfig) *gitlab.Client {
-	return gitlab.NewClient(config.Token, config.URL, config.ProjectID)
+	client := gitlab.NewClient(config.Token, config.URL, config.ProjectID)
+	if config.GroupID != "" {
+		client = client.WithGroupID(config.GroupID)
+	}
+	return client
 }
 
 // runGitLabStatus implements the gitlab status command.
@@ -280,6 +314,37 @@ func runGitLabStatus(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(out, "URL:        %s\n", config.URL)
 	_, _ = fmt.Fprintf(out, "Token:      %s\n", maskGitLabToken(config.Token))
 	_, _ = fmt.Fprintf(out, "Project ID: %s\n", config.ProjectID)
+	if config.GroupID != "" {
+		_, _ = fmt.Fprintf(out, "Group ID:   %s\n", config.GroupID)
+		_, _ = fmt.Fprintf(out, "Sync Mode:  group (fetches from all projects in group)\n")
+		if config.DefaultProjectID != "" {
+			_, _ = fmt.Fprintf(out, "Default Project ID: %s (for creating new issues)\n", config.DefaultProjectID)
+		}
+	} else {
+		_, _ = fmt.Fprintf(out, "Sync Mode:  project\n")
+	}
+
+	// Show configured filters
+	ctx := context.Background()
+	filterLabels := getGitLabConfigValue(ctx, "gitlab.filter_labels")
+	filterProject := getGitLabConfigValue(ctx, "gitlab.filter_project")
+	filterMilestone := getGitLabConfigValue(ctx, "gitlab.filter_milestone")
+	filterAssignee := getGitLabConfigValue(ctx, "gitlab.filter_assignee")
+	if filterLabels != "" || filterProject != "" || filterMilestone != "" || filterAssignee != "" {
+		_, _ = fmt.Fprintf(out, "\nFilters:\n")
+		if filterLabels != "" {
+			_, _ = fmt.Fprintf(out, "  Labels:    %s\n", filterLabels)
+		}
+		if filterProject != "" {
+			_, _ = fmt.Fprintf(out, "  Project:   %s\n", filterProject)
+		}
+		if filterMilestone != "" {
+			_, _ = fmt.Fprintf(out, "  Milestone: %s\n", filterMilestone)
+		}
+		if filterAssignee != "" {
+			_, _ = fmt.Fprintf(out, "  Assignee:  %s\n", filterAssignee)
+		}
+	}
 
 	// Validate configuration
 	if err := validateGitLabConfig(config); err != nil {
@@ -360,6 +425,11 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitLab tracker: %w", err)
 	}
 
+	// Apply CLI filter overrides (take precedence over config defaults)
+	if cliFilter := buildCLIFilter(); cliFilter != nil {
+		gt.SetFilter(cliFilter)
+	}
+
 	// Create the sync engine
 	engine := tracker.NewEngine(gt, store, actor)
 	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
@@ -420,6 +490,26 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// buildCLIFilter constructs an IssueFilter from CLI flags.
+// Returns nil if no filter flags were provided.
+func buildCLIFilter() *gitlab.IssueFilter {
+	if gitlabFilterLabel == "" && gitlabFilterProject == "" &&
+		gitlabFilterMilestone == "" && gitlabFilterAssignee == "" {
+		return nil
+	}
+	filter := &gitlab.IssueFilter{
+		Labels:    gitlabFilterLabel,
+		Milestone: gitlabFilterMilestone,
+		Assignee:  gitlabFilterAssignee,
+	}
+	if gitlabFilterProject != "" {
+		if pid, err := strconv.Atoi(gitlabFilterProject); err == nil {
+			filter.ProjectID = pid
+		}
+	}
+	return filter
 }
 
 // buildGitLabPullHooks creates PullHooks for GitLab-specific pull behavior.

@@ -954,3 +954,347 @@ func TestFetchIssuesSince_ContextCancellation(t *testing.T) {
 	// was caught by our loop check (returns partial) or by doRequest (returns nil)
 	t.Logf("Loop stopped after %d requests, %d issues returned, error: %v", requestCount.Load(), len(issues), err)
 }
+
+// TestWithGroupID verifies the builder pattern for group-level issue fetching.
+func TestWithGroupID(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123").
+		WithGroupID("mygroup")
+
+	if client.GroupID != "mygroup" {
+		t.Errorf("GroupID = %q, want %q", client.GroupID, "mygroup")
+	}
+	if client.ProjectID != "123" {
+		t.Errorf("ProjectID = %q, want %q", client.ProjectID, "123")
+	}
+	if client.Token != "token" {
+		t.Errorf("Token = %q, want %q", client.Token, "token")
+	}
+}
+
+// TestWithGroupID_PreservesGroupID verifies that WithHTTPClient and WithEndpoint preserve GroupID.
+func TestWithGroupID_PreservesGroupID(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123").
+		WithGroupID("mygroup").
+		WithHTTPClient(&http.Client{Timeout: 60 * time.Second}).
+		WithEndpoint("https://custom.gitlab.com")
+
+	if client.GroupID != "mygroup" {
+		t.Errorf("GroupID = %q after chaining, want %q", client.GroupID, "mygroup")
+	}
+}
+
+// TestIssuesBasePath_Project verifies issuesBasePath returns project path when no GroupID.
+func TestIssuesBasePath_Project(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123")
+	got := client.issuesBasePath()
+	want := "/projects/123/issues"
+	if got != want {
+		t.Errorf("issuesBasePath() = %q, want %q", got, want)
+	}
+}
+
+// TestIssuesBasePath_Group verifies issuesBasePath returns group path when GroupID is set.
+func TestIssuesBasePath_Group(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123").
+		WithGroupID("mygroup")
+	got := client.issuesBasePath()
+	want := "/groups/mygroup/issues"
+	if got != want {
+		t.Errorf("issuesBasePath() = %q, want %q", got, want)
+	}
+}
+
+// TestIssuesBasePath_GroupPathEncoded verifies group paths with slashes are URL-encoded.
+func TestIssuesBasePath_GroupPathEncoded(t *testing.T) {
+	client := NewClient("token", "https://gitlab.example.com", "123").
+		WithGroupID("parent/child")
+	got := client.issuesBasePath()
+	want := "/groups/parent%2Fchild/issues"
+	if got != want {
+		t.Errorf("issuesBasePath() = %q, want %q", got, want)
+	}
+}
+
+// TestFetchIssues_GroupLevel verifies FetchIssues uses group endpoint when GroupID is set.
+func TestFetchIssues_GroupLevel(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{
+			{ID: 1, IID: 1, ProjectID: 10, Title: "Group issue 1"},
+			{ID: 2, IID: 5, ProjectID: 20, Title: "Group issue 2"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123").WithGroupID("42")
+	ctx := context.Background()
+
+	issues, err := client.FetchIssues(ctx, "opened")
+	if err != nil {
+		t.Fatalf("FetchIssues() error = %v", err)
+	}
+
+	// Should use /groups/42/issues, not /projects/123/issues
+	if !strings.Contains(capturedPath, "/groups/42/issues") {
+		t.Errorf("URL path = %s, want to contain /groups/42/issues", capturedPath)
+	}
+	if strings.Contains(capturedPath, "/projects/") {
+		t.Errorf("URL path = %s, should NOT contain /projects/ in group mode", capturedPath)
+	}
+	if len(issues) != 2 {
+		t.Errorf("FetchIssues() returned %d issues, want 2", len(issues))
+	}
+}
+
+// TestFetchIssuesSince_GroupLevel verifies FetchIssuesSince uses group endpoint.
+func TestFetchIssuesSince_GroupLevel(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123").WithGroupID("mygroup")
+	ctx := context.Background()
+
+	_, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("FetchIssuesSince() error = %v", err)
+	}
+
+	if !strings.Contains(capturedPath, "/groups/mygroup/issues") {
+		t.Errorf("URL path = %s, want to contain /groups/mygroup/issues", capturedPath)
+	}
+}
+
+// TestCreateIssue_StillUsesProject verifies CreateIssue always uses project endpoint,
+// even when GroupID is set (issues are created at project level).
+func TestCreateIssue_StillUsesProject(t *testing.T) {
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Issue{ID: 1, IID: 1, Title: "New"})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "456").WithGroupID("mygroup")
+	ctx := context.Background()
+
+	_, err := client.CreateIssue(ctx, "New", "Desc", nil)
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+
+	// CreateIssue should still use /projects/ endpoint
+	if !strings.Contains(capturedPath, "/projects/456/issues") {
+		t.Errorf("CreateIssue URL path = %s, want to contain /projects/456/issues", capturedPath)
+	}
+}
+
+// TestFetchIssues_WithLabelFilter verifies labels filter is passed as query param.
+func TestFetchIssues_WithLabelFilter(t *testing.T) {
+	var capturedURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	filter := &IssueFilter{Labels: "bug,backend"}
+	_, err := client.FetchIssues(ctx, "opened", filter)
+	if err != nil {
+		t.Fatalf("FetchIssues() error = %v", err)
+	}
+
+	if !strings.Contains(capturedURL, "labels=bug%2Cbackend") && !strings.Contains(capturedURL, "labels=bug,backend") {
+		t.Errorf("URL = %s, want to contain labels param", capturedURL)
+	}
+}
+
+// TestFetchIssues_WithMilestoneFilter verifies milestone filter is passed as query param.
+func TestFetchIssues_WithMilestoneFilter(t *testing.T) {
+	var capturedURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	filter := &IssueFilter{Milestone: "Sprint 1"}
+	_, err := client.FetchIssues(ctx, "all", filter)
+	if err != nil {
+		t.Fatalf("FetchIssues() error = %v", err)
+	}
+
+	if !strings.Contains(capturedURL, "milestone=") {
+		t.Errorf("URL = %s, want to contain milestone param", capturedURL)
+	}
+}
+
+// TestFetchIssues_WithAssigneeFilter verifies assignee filter is passed as query param.
+func TestFetchIssues_WithAssigneeFilter(t *testing.T) {
+	var capturedURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	filter := &IssueFilter{Assignee: "kyriakos"}
+	_, err := client.FetchIssues(ctx, "all", filter)
+	if err != nil {
+		t.Fatalf("FetchIssues() error = %v", err)
+	}
+
+	if !strings.Contains(capturedURL, "assignee_username=kyriakos") {
+		t.Errorf("URL = %s, want to contain assignee_username=kyriakos", capturedURL)
+	}
+}
+
+// TestFetchIssues_WithProjectFilter verifies client-side project filtering.
+func TestFetchIssues_WithProjectFilter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{
+			{ID: 1, IID: 1, ProjectID: 10, Title: "Project 10 issue"},
+			{ID: 2, IID: 2, ProjectID: 20, Title: "Project 20 issue"},
+			{ID: 3, IID: 3, ProjectID: 10, Title: "Another project 10 issue"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123").WithGroupID("mygroup")
+	ctx := context.Background()
+
+	filter := &IssueFilter{ProjectID: 10}
+	issues, err := client.FetchIssues(ctx, "all", filter)
+	if err != nil {
+		t.Fatalf("FetchIssues() error = %v", err)
+	}
+
+	if len(issues) != 2 {
+		t.Errorf("FetchIssues() returned %d issues, want 2 (filtered to project 10)", len(issues))
+	}
+	for _, issue := range issues {
+		if issue.ProjectID != 10 {
+			t.Errorf("issue.ProjectID = %d, want 10", issue.ProjectID)
+		}
+	}
+}
+
+// TestFetchIssues_NilFilter verifies nil filter doesn't affect behavior.
+func TestFetchIssues_NilFilter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{{ID: 1, IID: 1, Title: "Issue"}})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	// No filter arg
+	issues, err := client.FetchIssues(ctx, "all")
+	if err != nil {
+		t.Fatalf("FetchIssues() error = %v", err)
+	}
+	if len(issues) != 1 {
+		t.Errorf("FetchIssues() returned %d issues, want 1", len(issues))
+	}
+
+	// Explicit nil filter
+	issues, err = client.FetchIssues(ctx, "all", nil)
+	if err != nil {
+		t.Fatalf("FetchIssues(nil) error = %v", err)
+	}
+	if len(issues) != 1 {
+		t.Errorf("FetchIssues(nil) returned %d issues, want 1", len(issues))
+	}
+}
+
+// TestFetchIssuesSince_WithFilter verifies filters work on FetchIssuesSince too.
+func TestFetchIssuesSince_WithFilter(t *testing.T) {
+	var capturedURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{
+			{ID: 1, IID: 1, ProjectID: 10, Title: "Match"},
+			{ID: 2, IID: 2, ProjectID: 20, Title: "No match"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123").WithGroupID("mygroup")
+	ctx := context.Background()
+
+	filter := &IssueFilter{Labels: "backend", Assignee: "user1", ProjectID: 10}
+	issues, err := client.FetchIssuesSince(ctx, "all", time.Now().Add(-24*time.Hour), filter)
+	if err != nil {
+		t.Fatalf("FetchIssuesSince() error = %v", err)
+	}
+
+	// API params should be set
+	if !strings.Contains(capturedURL, "labels=backend") {
+		t.Errorf("URL = %s, want to contain labels=backend", capturedURL)
+	}
+	if !strings.Contains(capturedURL, "assignee_username=user1") {
+		t.Errorf("URL = %s, want to contain assignee_username=user1", capturedURL)
+	}
+	// Client-side project filter
+	if len(issues) != 1 {
+		t.Errorf("FetchIssuesSince() returned %d issues, want 1 (filtered to project 10)", len(issues))
+	}
+}
+
+// TestFetchIssues_CombinedFilters verifies multiple filters compose correctly.
+func TestFetchIssues_CombinedFilters(t *testing.T) {
+	var capturedURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedURL = r.URL.String()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]Issue{})
+	}))
+	defer server.Close()
+
+	client := NewClient("token", server.URL, "123")
+	ctx := context.Background()
+
+	filter := &IssueFilter{
+		Labels:    "bug,critical",
+		Milestone: "v1.0",
+		Assignee:  "dev1",
+	}
+	_, err := client.FetchIssues(ctx, "opened", filter)
+	if err != nil {
+		t.Fatalf("FetchIssues() error = %v", err)
+	}
+
+	if !strings.Contains(capturedURL, "milestone=v1.0") {
+		t.Errorf("URL = %s, want to contain milestone=v1.0", capturedURL)
+	}
+	if !strings.Contains(capturedURL, "assignee_username=dev1") {
+		t.Errorf("URL = %s, want to contain assignee_username=dev1", capturedURL)
+	}
+	if !strings.Contains(capturedURL, "state=opened") {
+		t.Errorf("URL = %s, want to contain state=opened", capturedURL)
+	}
+}
