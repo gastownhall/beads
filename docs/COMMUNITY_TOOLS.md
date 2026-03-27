@@ -17,7 +17,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[beads-ui](https://github.com/mantoni/beads-ui)** - Local web interface with live updates and kanban board. Uses the `bd` CLI for Dolt compatibility. Run with `npx beads-ui start`. Built by [@mantoni](https://github.com/mantoni). (Node.js)
 
-- **[BeadBoard](https://github.com/zenchantlive/beadboard)** - Windows-native control center with multi-project registry, dependency graph explorer, agent sessions hub, and timeline. Built by [@zenchantlive](https://github.com/zenchantlive). (Next.js/TypeScript)
+- **[BeadBoard](https://github.com/zenchantlive/beadboard)** - Multi-agent orchestration and communication system with a live dashboard. Agent-to-agent messaging (HANDOFF/BLOCKED/DECISION/INFO), DAG dependency graph, swarm coordination with archetypes and templates, scope-based work reservations, and an embedded execution runtime (bb-pi) built on [Pi](https://github.com/badlogic/pi-mono) that spawns typed worker agents. Cross-platform (macOS, Linux, Windows). Includes the `beadboard-driver` skill for agent integration (`npx skills add zenchantlive/beadboard --skill beadboard-driver`). Built by [@zenchantlive](https://github.com/zenchantlive). (Next.js/TypeScript)
 
 - **[beads-web](https://github.com/weselow/beads-web)** - Actively maintained fork of beads-kanban-ui. Cross-platform single-binary distribution (macOS, Linux, Windows), 7 visual themes, Dolt direct SQL integration, Windows multi-drive path support, drag-and-drop status updates. Download from [GitHub Releases](https://github.com/weselow/beads-web/releases). Built by [@weselow](https://github.com/weselow). (TypeScript/Rust)
 
