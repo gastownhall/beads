@@ -15,13 +15,14 @@ var backupCmd = &cobra.Command{
 	Long: `Back up your beads database for off-machine recovery.
 
 Commands:
-  bd backup add <path>     Add a backup destination (filesystem or DoltHub)
+  bd backup init <path>    Set up a backup destination (filesystem or DoltHub)
   bd backup sync           Push to configured backup destination
   bd backup restore [path] Restore from a backup directory
+  bd backup remove         Remove backup destination
   bd backup status         Show backup status
 
 DoltHub is recommended for cloud backup:
-  bd backup add https://doltremoteapi.dolthub.com/<user>/<repo>
+  bd backup init https://doltremoteapi.dolthub.com/<user>/<repo>
   Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.`,
 	GroupID: "sync",
 }
@@ -66,7 +67,7 @@ var backupStatusCmd = &cobra.Command{
 			fmt.Println("No backup has been performed yet.")
 			fmt.Println()
 			fmt.Println("Setup:")
-			fmt.Println("  bd backup add <path>     Set up a backup destination")
+			fmt.Println("  bd backup init <path>    Set up a backup destination")
 			fmt.Println("  bd backup sync           Push to backup destination")
 			showDBSize()
 			return nil

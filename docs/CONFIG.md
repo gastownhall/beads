@@ -95,7 +95,7 @@ backup:
 - State is tracked in `.beads/backup/backup_state.json`
 
 **Manual commands:**
-- `bd backup add <path>` — register a backup destination (filesystem or DoltHub URL)
+- `bd backup init <path>` — register a backup destination (filesystem or DoltHub URL)
 - `bd backup sync` — push to the configured backup destination
 - `bd backup restore [path]` — restore from a backup (`--force` to overwrite)
 - `bd backup remove` — unregister the backup destination
@@ -148,7 +148,7 @@ The sync mode controls how beads synchronizes data with git and/or Dolt remotes.
 
 #### Sync Mode
 
-Beads uses `dolt-native` sync mode exclusively. Dolt remotes handle sync directly with cell-level merge. Use `bd export` for issue portability, and `bd backup add` / `bd backup sync` / `bd backup restore` for Dolt-native backups.
+Beads uses `dolt-native` sync mode exclusively. Dolt remotes handle sync directly with cell-level merge. Use `bd export` for issue portability, and `bd backup init` / `bd backup sync` / `bd backup restore` for Dolt-native backups.
 
 #### Sync Triggers
 

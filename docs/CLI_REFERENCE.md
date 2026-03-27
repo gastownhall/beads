@@ -568,7 +568,7 @@ bd gate add-waiter <gate-id> <waiter>
 bd export -o issues.jsonl
 
 # Dolt-native backup (preserves full commit history)
-bd backup add /path/to/backup    # Register a backup destination
+bd backup init /path/to/backup    # Register a backup destination
 bd backup sync                   # Push to backup destination
 bd backup restore [path]         # Restore from a backup
 bd backup remove                 # Remove backup destination
