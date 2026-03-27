@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,14 +13,8 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
-
-// dbQuerier abstracts query execution so callers can use a retry-wrapped
-// DoltStore.QueryContext instead of a raw *sql.DB.  Both *sql.DB and
-// *sql.DB satisfies this interface.
-type dbQuerier interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
 
 // backupState tracks watermarks for incremental backup.
 type backupCounts struct {
@@ -180,91 +172,22 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	// On shared Dolt servers, the database contains issues from ALL projects.
 	// We must filter by prefix to avoid exporting (and later restoring) foreign issues.
 	prefix := getBackupPrefix(ctx)
-	prefixFilter := prefix + "-" // e.g. "Prosa-"
 
-	// Extract raw DB handle once for all table exports.
-	accessor, ok := store.(storage.RawDBAccessor)
+	bs, ok := store.(storage.BackupStore)
 	if !ok {
-		return nil, fmt.Errorf("storage backend does not support raw DB access")
+		return nil, fmt.Errorf("storage backend does not support backup operations")
 	}
-	db := accessor.DB()
 
-	var n int
-
-	// Export issues only — wisps are ephemeral and excluded from backup.
-	// They can be regenerated from the database if needed for disaster recovery.
-	if prefix != "" {
-		n, err = exportTable(ctx, db, dir, "issues.jsonl",
-			"SELECT * FROM issues WHERE id LIKE ? ORDER BY id", prefixFilter+"%")
-	} else {
-		n, err = exportTable(ctx, db, dir, "issues.jsonl",
-			"SELECT * FROM issues ORDER BY id")
-	}
+	counts, err := bs.BackupExportTables(ctx, dir, prefix)
 	if err != nil {
-		return nil, fmt.Errorf("backup issues: %w", err)
+		return nil, err
 	}
-	state.Counts.Issues = n
-
-	if prefix != "" {
-		n, err = exportTable(ctx, db, dir, "events.jsonl",
-			"SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at FROM events WHERE issue_id LIKE ? ORDER BY created_at ASC, id ASC",
-			prefixFilter+"%")
-	} else {
-		n, err = exportTable(ctx, db, dir, "events.jsonl",
-			"SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at FROM events ORDER BY created_at ASC, id ASC")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("backup events: %w", err)
-	}
-	state.Counts.Events = n
-
-	if prefix != "" {
-		n, err = exportTable(ctx, db, dir, "comments.jsonl",
-			"SELECT id, issue_id, author, text, created_at FROM comments WHERE issue_id LIKE ? ORDER BY id",
-			prefixFilter+"%")
-	} else {
-		n, err = exportTable(ctx, db, dir, "comments.jsonl",
-			"SELECT id, issue_id, author, text, created_at FROM comments ORDER BY id")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("backup comments: %w", err)
-	}
-	state.Counts.Comments = n
-
-	if prefix != "" {
-		// For dependencies, both issue_id and depends_on_id should belong to this project.
-		// We filter on issue_id (the dependent) having our prefix.
-		n, err = exportTable(ctx, db, dir, "dependencies.jsonl",
-			"SELECT issue_id, depends_on_id, type, created_at, created_by, metadata FROM dependencies WHERE issue_id LIKE ? ORDER BY issue_id, depends_on_id",
-			prefixFilter+"%")
-	} else {
-		n, err = exportTable(ctx, db, dir, "dependencies.jsonl",
-			"SELECT issue_id, depends_on_id, type, created_at, created_by, metadata FROM dependencies ORDER BY issue_id, depends_on_id")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("backup dependencies: %w", err)
-	}
-	state.Counts.Dependencies = n
-
-	if prefix != "" {
-		n, err = exportTable(ctx, db, dir, "labels.jsonl",
-			"SELECT issue_id, label FROM labels WHERE issue_id LIKE ? ORDER BY issue_id, label",
-			prefixFilter+"%")
-	} else {
-		n, err = exportTable(ctx, db, dir, "labels.jsonl",
-			"SELECT issue_id, label FROM labels ORDER BY issue_id, label")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("backup labels: %w", err)
-	}
-	state.Counts.Labels = n
-
-	n, err = exportTable(ctx, db, dir, "config.jsonl",
-		"SELECT `key`, value FROM config ORDER BY `key`")
-	if err != nil {
-		return nil, fmt.Errorf("backup config: %w", err)
-	}
-	state.Counts.Config = n
+	state.Counts.Issues = counts.Issues
+	state.Counts.Events = counts.Events
+	state.Counts.Comments = counts.Comments
+	state.Counts.Dependencies = counts.Dependencies
+	state.Counts.Labels = counts.Labels
+	state.Counts.Config = counts.Config
 
 	// Update watermarks
 	currentCommit, err := store.GetCurrentCommit(ctx)
@@ -289,104 +212,6 @@ func truncateHash(h string) string {
 	return h
 }
 
-// exportTable streams query results to a JSONL file using atomic write (temp file + rename).
-// Uses bounded memory regardless of result set size.
-// Optional args are passed as query parameters (for WHERE clause filtering).
-func exportTable(ctx context.Context, q dbQuerier, dir, filename, query string, args ...any) (int, error) {
-	rows, err := q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return 0, fmt.Errorf("query failed: %w", err)
-	}
-	defer rows.Close()
-
-	cols, err := rows.Columns()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get columns: %w", err)
-	}
-
-	// Write to temp file, then rename atomically for crash safety.
-	tmp, err := os.CreateTemp(dir, ".backup-tmp-*")
-	if err != nil {
-		return 0, fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }() // cleanup on error path
-
-	w := bufio.NewWriter(tmp)
-	count, err := writeRows(rows, cols, w)
-	if err != nil {
-		_ = tmp.Close()
-		return 0, err
-	}
-
-	if err := w.Flush(); err != nil {
-		_ = tmp.Close()
-		return 0, fmt.Errorf("flush failed: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return 0, fmt.Errorf("sync failed: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return 0, fmt.Errorf("close failed: %w", err)
-	}
-
-	dest := filepath.Join(dir, filename)
-	if err := os.Rename(tmpPath, dest); err != nil {
-		return 0, fmt.Errorf("rename failed: %w", err)
-	}
-	return count, nil
-}
-
-// writeRows scans rows and writes each as a JSON line to w.
-// Allocates scan buffers once and reuses them across all rows.
-func writeRows(rows *sql.Rows, cols []string, w *bufio.Writer) (int, error) {
-	values := make([]interface{}, len(cols))
-	ptrs := make([]interface{}, len(cols))
-	for i := range values {
-		ptrs[i] = &values[i]
-	}
-
-	count := 0
-	for rows.Next() {
-		if err := rows.Scan(ptrs...); err != nil {
-			return 0, fmt.Errorf("scan failed: %w", err)
-		}
-
-		row := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			row[col] = normalizeValue(values[i])
-		}
-
-		data, err := json.Marshal(row)
-		if err != nil {
-			return 0, fmt.Errorf("marshal failed: %w", err)
-		}
-		data = append(data, '\n')
-		if _, err := w.Write(data); err != nil {
-			return 0, fmt.Errorf("write failed: %w", err)
-		}
-		count++
-	}
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("row iteration failed: %w", err)
-	}
-	return count, nil
-}
-
-// normalizeValue converts database driver types to JSON-friendly values.
-func normalizeValue(v interface{}) interface{} {
-	switch val := v.(type) {
-	case []byte:
-		return string(val)
-	case time.Time:
-		if val.IsZero() {
-			return nil
-		}
-		return val.Format(time.RFC3339)
-	case nil:
-		return nil
-	default:
-		return val
-	}
-}
+// normalizeValue delegates to the shared versioncontrolops implementation.
+// Kept as a package-level alias for test compatibility.
+var normalizeValue = versioncontrolops.NormalizeExportValue

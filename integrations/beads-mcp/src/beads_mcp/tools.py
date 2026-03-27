@@ -91,7 +91,7 @@ def _resolve_beads_redirect(beads_dir: str, workspace_root: str) -> str | None:
         # Resolve relative to workspace_root (the redirect is written from the perspective
         # of being inside workspace_root, not inside workspace_root/.beads)
         # e.g., redirect contains "../../mayor/rig/.beads"
-        # from polecats/capable/, this resolves to mayor/rig/.beads
+        # from agents/capable/, this resolves to the canonical .beads
         resolved = os.path.normpath(os.path.join(workspace_root, redirect_target))
 
         if not os.path.isdir(resolved):
@@ -118,7 +118,7 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
     """Walk up directory tree looking for .beads/*.db (matches Go CLI behavior).
 
     Also follows .beads/redirect files to shared beads locations, which is
-    essential for polecat/crew directories that share a central database.
+    essential for agent/worker directories that share a central database.
 
     Args:
         start_dir: Starting directory (default: current working directory)
@@ -141,7 +141,7 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
         while True:
             beads_dir = os.path.join(current, ".beads")
             if os.path.isdir(beads_dir):
-                # First, check for redirect file (polecat/crew directories use this)
+                # First, check for redirect file (agent/worker directories use this)
                 redirected = _resolve_beads_redirect(beads_dir, current)
                 if redirected:
                     logger.debug(f"Followed redirect from {current} to {redirected}")

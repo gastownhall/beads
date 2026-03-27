@@ -453,6 +453,10 @@ create, update, show, or close operation).`,
 			updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID) // Best effort: nil issue handled by subsequent nil check
 			if updatedIssue != nil && hookRunner != nil {
 				hookRunner.Run(hooks.EventUpdate, updatedIssue)
+				// Also fire on_close hook when status actually transitions to closed (GH#2630)
+				if updatedIssue.Status == types.StatusClosed && issue.Status != types.StatusClosed {
+					hookRunner.Run(hooks.EventClose, updatedIssue)
+				}
 			}
 
 			updateTitle := ""
@@ -609,7 +613,7 @@ func init() {
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
-	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; fails if already claimed)")
+	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you)")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

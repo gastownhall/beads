@@ -143,9 +143,6 @@ environment variable.`,
 					expectedToken := fmt.Sprintf("DESTROY-%s", prefix)
 					if destroyToken == expectedToken {
 						fmt.Fprintf(os.Stderr, "Destroy token accepted. Proceeding with re-initialization.\n")
-					} else if quiet {
-						// Legacy --quiet behavior (deprecated path)
-						fmt.Fprintf(os.Stderr, "Warning: --force --quiet bypasses safety checks. Use --destroy-token=%s instead.\n", expectedToken)
 					} else {
 						fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
 						fmt.Fprintf(os.Stderr, "To proceed, use: bd init --force --destroy-token=%s\n", expectedToken)
@@ -808,18 +805,37 @@ environment variable.`,
 			}
 		}
 
-		// Add agent instructions to AGENTS.md
+		// Add agent instructions to AGENTS.md (or custom filename via --agents-file)
 		// Skip in stealth mode (user wants invisible setup) or when explicitly skipped
 		if !stealth && !skipAgents {
 			agentsTemplate, _ := cmd.Flags().GetString("agents-template")
 			agentsProfileStr, _ := cmd.Flags().GetString("agents-profile")
 			agentsProfile := agents.Profile(agentsProfileStr)
+			agentsFile, _ := cmd.Flags().GetString("agents-file")
+
+			// Validate and persist custom agents filename
+			if agentsFile != "" {
+				if err := config.ValidateAgentsFile(agentsFile); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid --agents-file: %v\n", err)
+					return
+				}
+				if err := config.SetYamlConfig("agents.file", agentsFile); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to persist agents.file to config: %v\n", err)
+				}
+			}
+
+			// Use flag value directly if provided (honoring user intent even if
+			// config persistence failed), otherwise read from config/default.
+			resolvedAgentsFile := agentsFile
+			if resolvedAgentsFile == "" {
+				resolvedAgentsFile = config.SafeAgentsFile()
+			}
 			if isBareGitRepo() {
 				if !quiet {
-					fmt.Printf("  Skipping AGENTS.md generation in bare repository\n")
+					fmt.Printf("  Skipping %s generation in bare repository\n", resolvedAgentsFile)
 				}
 			} else {
-				addAgentsInstructions(!quiet, agentsTemplate, agentsProfile)
+				addAgentsInstructions(resolvedAgentsFile, !quiet, agentsTemplate, agentsProfile)
 			}
 		}
 
@@ -829,9 +845,10 @@ environment variable.`,
 		if !stealth && isGitRepo() && useLocalBeads {
 			gitAddCmd := exec.Command("git", "add", ".beads/")
 			if _, addErr := gitAddCmd.CombinedOutput(); addErr == nil {
-				// Also stage AGENTS.md if it exists
-				if _, statErr := os.Stat("AGENTS.md"); statErr == nil {
-					agentsCmd := exec.Command("git", "add", "AGENTS.md")
+				// Also stage the agents file if it exists
+				agentsFileToStage := config.SafeAgentsFile()
+				if _, statErr := os.Stat(agentsFileToStage); statErr == nil {
+					agentsCmd := exec.Command("git", "add", agentsFileToStage)
 					_ = agentsCmd.Run()
 				}
 				// Also stage .gitignore if modified by EnsureProjectGitignore
@@ -957,6 +974,7 @@ func init() {
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")
 	initCmd.Flags().String("agents-profile", "", "AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)")
+	initCmd.Flags().String("agents-file", "", "Custom filename for agent instructions (default: AGENTS.md)")
 
 	// Backend selection (dolt is the only supported backend; sqlite accepted for deprecation notice)
 	initCmd.Flags().String("backend", "", "Storage backend (default: dolt). --backend=sqlite prints deprecation notice.")
@@ -1346,14 +1364,18 @@ func promptContributorMode() (isContributor bool, err error) {
 func verifyMetadata(ctx context.Context, store storage.DoltStorage, key, value string) bool {
 	if err := store.SetMetadata(ctx, key, value); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write %s metadata: %v\n", key, err)
-		fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")
+		if !isEmbeddedDolt {
+			fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")
+		}
 		return false
 	}
 	// Verify read-back
 	readBack, err := store.GetMetadata(ctx, key)
 	if err != nil || readBack != value {
 		fmt.Fprintf(os.Stderr, "Warning: %s metadata write did not persist (wrote %q, read %q)\n", key, value, readBack)
-		fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")
+		if !isEmbeddedDolt {
+			fmt.Fprintf(os.Stderr, "  Run 'bd doctor --fix' to repair.\n")
+		}
 		return false
 	}
 	return true

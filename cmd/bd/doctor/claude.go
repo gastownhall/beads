@@ -353,19 +353,12 @@ func CheckBdInPath() DoctorCheck {
 	}
 }
 
-// CheckDocumentationBdPrimeReference checks if AGENTS.md or CLAUDE.md reference 'bd prime'
+// CheckDocumentationBdPrimeReference checks if the agents file or CLAUDE.md reference 'bd prime'
 // and verifies the command exists. This helps catch version mismatches where docs
 // reference features not available in the installed version.
 // Also supports local-only variants (claude.local.md) that are gitignored.
 func CheckDocumentationBdPrimeReference(repoPath string) DoctorCheck {
-	docFiles := []string{
-		filepath.Join(repoPath, "AGENTS.md"),
-		filepath.Join(repoPath, "CLAUDE.md"),
-		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
-		// Local-only variants (not committed to repo)
-		filepath.Join(repoPath, "claude.local.md"),
-		filepath.Join(repoPath, ".claude", "claude.local.md"),
-	}
+	docFiles := agentDocFiles(repoPath)
 
 	var filesWithBdPrime []string
 	for _, docFile := range docFiles {

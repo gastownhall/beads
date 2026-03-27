@@ -157,25 +157,24 @@ func resolveCommandBeadsDir(dbPath string) string {
 		return ""
 	}
 
-	guessedBeadsDir := filepath.Dir(dbPath)
-
 	// BEADS_DB is an explicit database override, so preserve its legacy
 	// filepath.Dir behavior instead of trying to rediscover a repo-local .beads.
 	if os.Getenv("BEADS_DB") != "" {
-		return guessedBeadsDir
+		return filepath.Dir(dbPath)
 	}
 
-	if cfg, err := configfile.Load(guessedBeadsDir); err == nil && cfg != nil {
-		if utils.PathsEqual(cfg.DatabasePath(guessedBeadsDir), dbPath) {
-			return guessedBeadsDir
-		}
+	// Use the same validated candidate logic as the helper/reopen path
+	// (GH#2627). This checks filepath.Dir, canonicalized paths, AND
+	// FindBeadsDir — but only returns a candidate whose metadata.json
+	// actually points to dbPath, preventing CWD discovery from overriding
+	// an explicit --db flag.
+	if beadsDir := resolveBeadsDirForDBPath(dbPath); beadsDir != "" {
+		return beadsDir
 	}
 
-	if discoveredBeadsDir := beads.FindBeadsDir(); discoveredBeadsDir != "" {
-		return discoveredBeadsDir
-	}
-
-	return guessedBeadsDir
+	// No candidate matched — fall back to parent directory of the db path.
+	// This handles bootstrap/init where no metadata.json exists yet.
+	return filepath.Dir(dbPath)
 }
 
 // getActorWithGit returns the actor for audit trails with git config fallback.
@@ -421,7 +420,6 @@ var rootCmd = &cobra.Command{
 			"human",
 			"init",
 			"merge",
-			"migrate", // manages its own store lifecycle (#1668)
 			"onboard",
 			"powershell",
 			"prime",
@@ -443,6 +441,7 @@ var rootCmd = &cobra.Command{
 
 		// Check both the command name and parent command name for subcommands
 		cmdName := cmd.Name()
+		isSubcommand := cmd.Parent() != nil && cmd.Parent().Name() != "bd"
 		if cmd.Parent() != nil {
 			parentName := cmd.Parent().Name()
 			if parentName == "dolt" && slices.Contains(needsStoreDoltSubcommands, cmdName) {
@@ -453,7 +452,9 @@ var rootCmd = &cobra.Command{
 				return
 			}
 		}
-		if slices.Contains(noDbCommands, cmdName) {
+		// Only skip for top-level commands in noDbCommands, not subcommands
+		// that happen to share names (e.g., "bd backup init" vs "bd init").
+		if slices.Contains(noDbCommands, cmdName) && !isSubcommand {
 			return
 		}
 
@@ -528,7 +529,7 @@ var rootCmd = &cobra.Command{
 				if cmd.Name() != "import" && cmd.Name() != "setup" && !isYamlOnlyConfigOp {
 					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
-					fmt.Fprintf(os.Stderr, "Hint: run 'bd doctor' to diagnose, or 'bd init' to create a new database\n")
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
 					os.Exit(1)
 				}
@@ -722,6 +723,9 @@ var rootCmd = &cobra.Command{
 
 		// Auto-backup: export JSONL to .beads/backup/ if enabled and due
 		maybeAutoBackup(rootCtx)
+
+		// Auto-export: write git-tracked JSONL for portability if enabled and due
+		maybeAutoExport(rootCtx)
 
 		// Auto-push: push to Dolt remote if enabled and due.
 		// Skip for read-only commands to avoid unnecessary network operations

@@ -174,17 +174,17 @@ See [LABELS.md](LABELS.md#operational-state-pattern-labels-as-cache) for full pa
 ```bash
 # Query current state value
 bd state <id> <dimension>                    # Output: value
-bd state witness-abc patrol                  # Output: active
-bd state --json witness-abc patrol           # {"issue_id": "...", "dimension": "patrol", "value": "active"}
+bd state agent-abc patrol                  # Output: active
+bd state --json agent-abc patrol           # {"issue_id": "...", "dimension": "patrol", "value": "active"}
 
 # List all state dimensions on an issue
 bd state list <id> --json
-bd state list witness-abc                    # patrol: active, mode: normal, health: healthy
+bd state list agent-abc                    # patrol: active, mode: normal, health: healthy
 
 # Set state (creates event + updates label atomically)
 bd set-state <id> <dimension>=<value> --reason "explanation" --json
-bd set-state witness-abc patrol=muted --reason "Investigating stuck polecat"
-bd set-state witness-abc mode=degraded --reason "High error rate"
+bd set-state agent-abc patrol=muted --reason "Investigating stuck worker"
+bd set-state agent-abc mode=degraded --reason "High error rate"
 ```
 
 **Common dimensions:**

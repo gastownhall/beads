@@ -80,10 +80,9 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	}
 
 	// Read custom state/type mappings from config.
-	stateMap := t.readMappingConfig(ctx, "ado.state_map.",
-		[]string{"open", "in_progress", "blocked", "deferred", "closed"})
-	typeMap := t.readMappingConfig(ctx, "ado.type_map.",
-		[]string{"bug", "feature", "task", "epic", "chore"})
+	// Uses prefix-scan to support custom types (e.g., ado.type_map.story).
+	stateMap := t.readMappingConfigByPrefix(ctx, "ado.state_map.")
+	typeMap := t.readMappingConfigByPrefix(ctx, "ado.type_map.")
 
 	t.mapper = NewFieldMapper(stateMap, typeMap)
 
@@ -268,13 +267,18 @@ func (t *Tracker) getConfig(ctx context.Context, key, envVar string) string {
 	return ""
 }
 
-// readMappingConfig reads custom mapping keys from the config store.
-func (t *Tracker) readMappingConfig(ctx context.Context, prefix string, keys []string) map[string]string {
+// readMappingConfigByPrefix reads all config keys with the given prefix and
+// returns a map of suffix → value. This supports both built-in and custom
+// types/states (e.g., ado.type_map.story → "User Story").
+func (t *Tracker) readMappingConfigByPrefix(ctx context.Context, prefix string) map[string]string {
 	m := make(map[string]string)
-	for _, k := range keys {
-		val := t.getConfig(ctx, prefix+k, "")
-		if val != "" {
-			m[k] = val
+	allConfig, err := t.store.GetAllConfig(ctx)
+	if err != nil {
+		return m
+	}
+	for key, val := range allConfig {
+		if strings.HasPrefix(key, prefix) && val != "" {
+			m[strings.TrimPrefix(key, prefix)] = val
 		}
 	}
 	return m

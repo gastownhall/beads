@@ -100,7 +100,10 @@ func maybeAutoBackup(ctx context.Context) {
 	// Run the export (force=true since we already checked change detection above)
 	newState, err := runBackupExport(ctx, true)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: auto-backup failed: %v\n", err)
+		if !isQuiet() && !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Warning: auto-backup failed: %v\n", err)
+		}
+		debug.Logf("backup: export error: %v\n", err)
 		return
 	}
 
@@ -112,7 +115,10 @@ func maybeAutoBackup(ctx context.Context) {
 		if branch, err := currentGitBranch(); err == nil && !isDefaultBranch(branch) {
 			debug.Logf("backup: skipping git commit — on branch %q (not default)\n", branch)
 		} else if err := gitBackup(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: backup git push failed: %v\n", err)
+			if !isQuiet() && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "Warning: backup git push failed: %v\n", err)
+			}
+			debug.Logf("backup: git push error: %v\n", err)
 		}
 	}
 }

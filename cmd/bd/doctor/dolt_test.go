@@ -14,9 +14,53 @@ import (
 // (bd-yqpwy)
 
 func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
-	// Server-only mode: without a running dolt sql-server, the connection
-	// check should return StatusError and all 6 checks should be present
-	// (consistent return shape regardless of connection success/failure).
+	// GH#2722: In owned/embedded mode (non-external), when no server is
+	// running, server-dependent checks should be skipped gracefully (StatusOK)
+	// instead of reporting false errors. The embedded SharedStore checks
+	// already cover data integrity.
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create beads dir: %v", err)
+	}
+
+	// Write metadata.json marking this as dolt backend (no explicit server port → owned mode)
+	configContent := []byte(`{"backend":"dolt"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// No BEADS_DOLT_SERVER_PORT set → port 0 → no server running
+	// No BEADS_DOLT_SHARED_SERVER → owned mode (not external)
+	checks := RunDoltHealthChecks(tmpDir)
+	if len(checks) != 7 {
+		t.Fatalf("expected exactly 7 checks (consistent shape), got %d", len(checks))
+	}
+
+	// Verify check names are consistent
+	expectedNames := []string{"Dolt Connection", "Dolt Schema", "Dolt Issue Count", "Dolt Status", "Dolt Lock Health", "Phantom Databases", "Shared Server"}
+	for i, name := range expectedNames {
+		if checks[i].Name != name {
+			t.Errorf("checks[%d].Name = %q, want %q", i, checks[i].Name, name)
+		}
+	}
+
+	// Server-dependent checks should be OK (gracefully skipped), not errors
+	for _, idx := range []int{0, 1, 2, 3, 5} {
+		if checks[idx].Status != StatusOK {
+			t.Errorf("checks[%d] (%s): expected StatusOK (graceful skip), got %s: %s",
+				idx, checks[idx].Name, checks[idx].Status, checks[idx].Message)
+		}
+		if !strings.Contains(checks[idx].Message, "no server running") {
+			t.Errorf("checks[%d] (%s): expected skip message about no server, got %q",
+				idx, checks[idx].Name, checks[idx].Message)
+		}
+	}
+}
+
+func TestRunDoltHealthChecks_ExternalModeNoServer(t *testing.T) {
+	// In external/shared server mode, a server IS expected to be running,
+	// so connection failure should report real errors.
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -29,8 +73,9 @@ func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
 		t.Fatalf("failed to write config: %v", err)
 	}
 
-	// Point at a port nothing listens on to ensure connection fails
+	// Point at a port nothing listens on AND set server mode to external
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "59998")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
 
 	checks := RunDoltHealthChecks(tmpDir)
 	if len(checks) != 7 {
@@ -41,15 +86,7 @@ func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
 		t.Errorf("expected first check to be 'Dolt Connection', got %q", checks[0].Name)
 	}
 	if checks[0].Status != StatusError {
-		t.Errorf("expected StatusError (no server running), got %s: %s", checks[0].Status, checks[0].Message)
-	}
-
-	// Verify placeholder checks for dimensions that require a connection
-	expectedNames := []string{"Dolt Connection", "Dolt Schema", "Dolt Issue Count", "Dolt Status", "Dolt Lock Health", "Phantom Databases", "Shared Server"}
-	for i, name := range expectedNames {
-		if checks[i].Name != name {
-			t.Errorf("checks[%d].Name = %q, want %q", i, checks[i].Name, name)
-		}
+		t.Errorf("expected StatusError (external server unreachable), got %s: %s", checks[0].Status, checks[0].Message)
 	}
 
 	// Schema, Issue Count, Status, and Phantom Databases should be StatusError with skip message
@@ -87,7 +124,7 @@ func TestRunDoltHealthChecks_CheckNameAndCategory(t *testing.T) {
 
 func TestServerMode_NoLockAcquired(t *testing.T) {
 	// Server-only mode never acquires advisory locks.
-	// We force a non-listening port so the connection always fails.
+	// We force a non-listening port in external mode so the connection always fails.
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	doltDir := filepath.Join(beadsDir, "dolt")
@@ -101,6 +138,7 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 	}
 
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "59999")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1") // External mode: server expected
 
 	checks := RunDoltHealthChecks(tmpDir)
 	if len(checks) != 7 {

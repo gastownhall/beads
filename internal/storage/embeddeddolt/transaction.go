@@ -10,22 +10,36 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // RunInTransaction executes a function within a database transaction.
-// EmbeddedDolt auto-commits the SQL transaction; Dolt versioning is deferred
-// to CommitPending which is called by the auto-commit flow.
+// After the SQL transaction commits, dirty tables are selectively staged
+// and a Dolt version commit is created with the given message.
 func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
-	return s.withConn(ctx, true, func(sqlTx *sql.Tx) error {
-		tx := &embeddedTransaction{tx: sqlTx}
+	var tracker versioncontrolops.DirtyTableTracker
+
+	if err := s.withConn(ctx, true, func(sqlTx *sql.Tx) error {
+		tx := &embeddedTransaction{tx: sqlTx, dirty: &tracker}
 		return fn(tx)
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Create a Dolt version commit from the working set changes.
+	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
+		return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, commitAuthor)
+		})
+	}
+	return nil
 }
 
 // embeddedTransaction implements storage.Transaction for EmbeddedDoltStore.
 type embeddedTransaction struct {
-	tx *sql.Tx
+	tx    *sql.Tx
+	dirty *versioncontrolops.DirtyTableTracker
 }
 
 func (t *embeddedTransaction) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
@@ -33,6 +47,8 @@ func (t *embeddedTransaction) CreateIssue(ctx context.Context, issue *types.Issu
 	if err != nil {
 		return err
 	}
+	t.dirty.MarkDirty("issues")
+	t.dirty.MarkDirty("events")
 	return issueops.CreateIssueInTx(ctx, t.tx, bc, issue, actor)
 }
 
@@ -46,16 +62,25 @@ func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.
 }
 
 func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	t.dirty.MarkDirty("issues")
+	t.dirty.MarkDirty("events")
 	_, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
 	return err
 }
 
 func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
+	t.dirty.MarkDirty("issues")
+	t.dirty.MarkDirty("events")
 	_, err := issueops.CloseIssueInTx(ctx, t.tx, id, reason, actor, session)
 	return err
 }
 
 func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error {
+	t.dirty.MarkDirty("issues")
+	t.dirty.MarkDirty("dependencies")
+	t.dirty.MarkDirty("labels")
+	t.dirty.MarkDirty("comments")
+	t.dirty.MarkDirty("events")
 	return issueops.DeleteIssueInTx(ctx, t.tx, id)
 }
 
@@ -68,10 +93,12 @@ func (t *embeddedTransaction) SearchIssues(ctx context.Context, query string, fi
 }
 
 func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	t.dirty.MarkDirty("dependencies")
 	return issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{})
 }
 
 func (t *embeddedTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
+	t.dirty.MarkDirty("dependencies")
 	return issueops.RemoveDependencyInTx(ctx, t.tx, issueID, dependsOnID)
 }
 
@@ -84,10 +111,12 @@ func (t *embeddedTransaction) GetDependencyRecords(ctx context.Context, issueID 
 }
 
 func (t *embeddedTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
+	t.dirty.MarkDirty("labels")
 	return issueops.AddLabelInTx(ctx, t.tx, "", "", issueID, label, actor)
 }
 
 func (t *embeddedTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
+	t.dirty.MarkDirty("labels")
 	return issueops.RemoveLabelInTx(ctx, t.tx, "", "", issueID, label, actor)
 }
 
@@ -96,31 +125,21 @@ func (t *embeddedTransaction) GetLabels(ctx context.Context, issueID string) ([]
 }
 
 func (t *embeddedTransaction) SetConfig(ctx context.Context, key, value string) error {
-	_, err := t.tx.ExecContext(ctx, "INSERT INTO config (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = ?", key, value, value)
-	return err
+	t.dirty.MarkDirty("config")
+	return issueops.SetConfigInTx(ctx, t.tx, key, value)
 }
 
 func (t *embeddedTransaction) GetConfig(ctx context.Context, key string) (string, error) {
-	var value string
-	err := t.tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
-	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("config key %q not found", key)
-	}
-	return value, err
+	return issueops.GetConfigInTx(ctx, t.tx, key)
 }
 
 func (t *embeddedTransaction) SetMetadata(ctx context.Context, key, value string) error {
-	_, err := t.tx.ExecContext(ctx, "INSERT INTO metadata (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = ?", key, value, value)
-	return err
+	t.dirty.MarkDirty("metadata")
+	return issueops.SetMetadataInTx(ctx, t.tx, key, value)
 }
 
 func (t *embeddedTransaction) GetMetadata(ctx context.Context, key string) (string, error) {
-	var value string
-	err := t.tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = ?", key).Scan(&value)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return value, err
+	return issueops.GetMetadataInTx(ctx, t.tx, key)
 }
 
 func (t *embeddedTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {
@@ -140,5 +159,7 @@ func (t *embeddedTransaction) CreateIssueImport(ctx context.Context, issue *type
 	if err != nil {
 		return err
 	}
+	t.dirty.MarkDirty("issues")
+	t.dirty.MarkDirty("events")
 	return issueops.CreateIssueInTx(ctx, t.tx, bc, issue, actor)
 }

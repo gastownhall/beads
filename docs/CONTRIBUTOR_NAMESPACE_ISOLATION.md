@@ -2,7 +2,7 @@
 
 **Issue**: bd-umbf
 **Status**: Design Complete
-**Author**: beads/polecats/onyx
+**Author**: beads/agents/onyx
 **Created**: 2025-12-30
 
 ## Problem Statement

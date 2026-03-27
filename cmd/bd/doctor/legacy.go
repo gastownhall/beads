@@ -14,20 +14,33 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 )
 
-// CheckLegacyBeadsSlashCommands detects old /beads:* slash commands in documentation
-// and recommends migration to bd prime hooks for better token efficiency.
-//
-// Old pattern: /beads:quickstart, /beads:ready (~10.5k tokens per session)
-// New pattern: bd prime hooks (~50-2k tokens per session)
-func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
-	docFiles := []string{
-		filepath.Join(repoPath, "AGENTS.md"),
+// agentDocFiles returns the list of documentation files to check, including
+// the configured agents file (which may differ from the default AGENTS.md).
+func agentDocFiles(repoPath string) []string {
+	agentsFile := config.SafeAgentsFile()
+	files := []string{
+		filepath.Join(repoPath, agentsFile),
 		filepath.Join(repoPath, "CLAUDE.md"),
 		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
 		// Local-only variants (not committed to repo)
 		filepath.Join(repoPath, "claude.local.md"),
 		filepath.Join(repoPath, ".claude", "claude.local.md"),
 	}
+	// If the configured file isn't the default, also check the default
+	// to catch legacy files that haven't been migrated.
+	if !strings.EqualFold(agentsFile, config.DefaultAgentsFile) {
+		files = append(files, filepath.Join(repoPath, config.DefaultAgentsFile))
+	}
+	return files
+}
+
+// CheckLegacyBeadsSlashCommands detects old /beads:* slash commands in documentation
+// and recommends migration to bd prime hooks for better token efficiency.
+//
+// Old pattern: /beads:quickstart, /beads:ready (~10.5k tokens per session)
+// New pattern: bd prime hooks (~50-2k tokens per session)
+func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
+	docFiles := agentDocFiles(repoPath)
 
 	var filesWithLegacyCommands []string
 	legacyPattern := "/beads:"
@@ -61,7 +74,7 @@ func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
 			"\n" +
 			"Migration Steps:\n" +
 			"  1. Run 'bd setup claude' to add SessionStart/PreCompact hooks\n" +
-			"  2. Update AGENTS.md/CLAUDE.md:\n" +
+			"  2. Update " + config.AgentsFile() + "/CLAUDE.md:\n" +
 			"     - Remove /beads:* slash command references\n" +
 			"     - Add: \"Run 'bd prime' for workflow context\" (for users without hooks)\n" +
 			"\n" +
@@ -81,14 +94,7 @@ func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
 // Old pattern: Document MCP tool names for direct tool calls (~10.5k tokens per scan)
 // New pattern: bd prime hooks with CLI commands (~50-2k tokens)
 func CheckLegacyMCPToolReferences(repoPath string) DoctorCheck {
-	docFiles := []string{
-		filepath.Join(repoPath, "AGENTS.md"),
-		filepath.Join(repoPath, "CLAUDE.md"),
-		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
-		// Local-only variants (not committed to repo)
-		filepath.Join(repoPath, "claude.local.md"),
-		filepath.Join(repoPath, ".claude", "claude.local.md"),
-	}
+	docFiles := agentDocFiles(repoPath)
 
 	mcpPatterns := []string{
 		"mcp__beads_beads__",
@@ -148,14 +154,7 @@ func CheckLegacyMCPToolReferences(repoPath string) DoctorCheck {
 // and recommends adding it if missing, suggesting bd onboard or bd setup claude.
 // Also supports local-only variants (claude.local.md) that are gitignored.
 func CheckAgentDocumentation(repoPath string) DoctorCheck {
-	docFiles := []string{
-		filepath.Join(repoPath, "AGENTS.md"),
-		filepath.Join(repoPath, "CLAUDE.md"),
-		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
-		// Local-only variants (not committed to repo)
-		filepath.Join(repoPath, "claude.local.md"),
-		filepath.Join(repoPath, ".claude", "claude.local.md"),
-	}
+	docFiles := agentDocFiles(repoPath)
 
 	var foundDocs []string
 	for _, docFile := range docFiles {
@@ -176,10 +175,10 @@ func CheckAgentDocumentation(repoPath string) DoctorCheck {
 		Name:    "Agent Documentation",
 		Status:  StatusWarning,
 		Message: "No agent documentation found",
-		Detail: "Missing: AGENTS.md or CLAUDE.md\n" +
+		Detail: "Missing: " + config.AgentsFile() + " or CLAUDE.md\n" +
 			"  Documenting workflow helps AI agents work more effectively",
 		Fix: "Add agent documentation:\n" +
-			"  • Run 'bd onboard' to create AGENTS.md with workflow guidance\n" +
+			"  • Run 'bd onboard' to create " + config.AgentsFile() + " with workflow guidance\n" +
 			"  • Or run 'bd setup claude' to add Claude-specific documentation\n" +
 			"\n" +
 			"For local-only documentation (not committed to repo):\n" +

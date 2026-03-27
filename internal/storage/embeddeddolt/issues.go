@@ -42,6 +42,31 @@ func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates 
 	})
 }
 
+// ReopenIssue reopens a closed issue, setting status to open and clearing
+// closed_at and defer_until. If reason is non-empty, it is recorded as a comment.
+// Wraps UpdateIssue; EmbeddedDolt auto-commits the transaction.
+func (s *EmbeddedDoltStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
+	updates := map[string]interface{}{
+		"status":      string(types.StatusOpen),
+		"defer_until": nil,
+	}
+	if err := s.UpdateIssue(ctx, id, updates, actor); err != nil {
+		return err
+	}
+	if reason != "" {
+		if err := s.AddComment(ctx, id, actor, reason); err != nil {
+			return fmt.Errorf("reopen comment: %w", err)
+		}
+	}
+	return nil
+}
+
+// UpdateIssueType changes the issue_type field of an issue.
+// Wraps UpdateIssue; EmbeddedDolt auto-commits the transaction.
+func (s *EmbeddedDoltStore) UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error {
+	return s.UpdateIssue(ctx, id, map[string]interface{}{"issue_type": issueType}, actor)
+}
+
 // CloseIssue closes an issue with a reason.
 // Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {

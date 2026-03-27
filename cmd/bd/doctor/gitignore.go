@@ -46,6 +46,7 @@ redirect
 # These files are machine-specific and should not be shared across clones
 .sync.lock
 export-state/
+export-state.json
 
 # Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
 ephemeral.sqlite3
@@ -103,6 +104,7 @@ var requiredPatterns = []string{
 	"bd.sock.startlock",
 	".sync.lock",
 	"export-state/",
+	"export-state.json",
 	"dolt/",
 	"dolt-access.lock",
 	"ephemeral.sqlite3",

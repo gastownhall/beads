@@ -587,8 +587,17 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		return nil, fmt.Errorf("searching local issues: %w", err)
 	}
 
+	// Build descendant set if --parent was specified.
+	var descendantSet map[string]bool
+	if opts.ParentID != "" {
+		descendantSet, err = e.buildDescendantSet(ctx, opts.ParentID)
+		if err != nil {
+			return nil, fmt.Errorf("resolving parent %s: %w", opts.ParentID, err)
+		}
+	}
+
 	if batchTracker, ok := e.Tracker.(BatchPushTracker); ok {
-		pushIssues, skipped := e.collectBatchPushIssues(issues, opts, skipIDs, forceIDs)
+		pushIssues, skipped := e.collectBatchPushIssues(issues, opts, descendantSet, skipIDs, forceIDs)
 		stats.Skipped += skipped
 		if len(pushIssues) == 0 {
 			return stats, nil
@@ -637,6 +646,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 	}
 
 	for _, issue := range issues {
+		// Limit to parent and its descendants if requested.
+		if descendantSet != nil && !descendantSet[issue.ID] {
+			stats.Skipped++
+			continue
+		}
 		// Skip filtered types/states/ephemeral
 		if !e.shouldPushIssue(issue, opts) {
 			stats.Skipped++
@@ -740,10 +754,14 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 	return stats, nil
 }
 
-func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions, skipIDs, forceIDs map[string]bool) ([]*types.Issue, int) {
+func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions, descendantSet, skipIDs, forceIDs map[string]bool) ([]*types.Issue, int) {
 	pushIssues := make([]*types.Issue, 0, len(issues))
 	skipped := 0
 	for _, issue := range issues {
+		if descendantSet != nil && !descendantSet[issue.ID] {
+			skipped++
+			continue
+		}
 		if !e.shouldPushIssue(issue, opts) {
 			skipped++
 			continue
@@ -892,6 +910,28 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 			e.warn("Failed to create dependency %s -> %s: %v", fromIssue.ID, toIssue.ID, err)
 		}
 	}
+}
+
+// buildDescendantSet returns the set of issue IDs consisting of the given parent
+// and all its transitive descendants via parent-child dependencies.
+func (e *Engine) buildDescendantSet(ctx context.Context, parentID string) (map[string]bool, error) {
+	result := map[string]bool{parentID: true}
+	queue := []string{parentID}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		dependents, err := e.Store.GetDependentsWithMetadata(ctx, current)
+		if err != nil {
+			return nil, fmt.Errorf("getting dependents of %s: %w", current, err)
+		}
+		for _, dep := range dependents {
+			if dep.DependencyType == types.DepParentChild && !result[dep.Issue.ID] {
+				result[dep.Issue.ID] = true
+				queue = append(queue, dep.Issue.ID)
+			}
+		}
+	}
+	return result, nil
 }
 
 // shouldPushIssue checks if an issue should be included in push based on filters.

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var editCmd = &cobra.Command{
@@ -33,12 +31,14 @@ Examples:
 		id := args[0]
 		ctx := rootCtx
 
-		// Resolve partial ID
-		fullID, err := utils.ResolvePartialID(ctx, store, id)
+		// Resolve ID with prefix routing (supports cross-rig edits like `bd edit xe-5ls`)
+		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 		if err != nil {
 			FatalErrorRespectJSON("resolving %s: %v", id, err)
 		}
-		id = fullID
+		defer result.Close()
+		id = result.ResolvedID
+		issueStore := result.Store
 
 		// Determine which field to edit
 		fieldToEdit := "description"
@@ -70,14 +70,7 @@ Examples:
 			FatalErrorRespectJSON("no editor found. Set $EDITOR or $VISUAL environment variable")
 		}
 
-		// Get the current issue
-		issue, err := store.GetIssue(ctx, id)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				FatalErrorRespectJSON("issue %s not found", id)
-			}
-			FatalErrorRespectJSON("fetching issue %s: %v", id, err)
-		}
+		issue := result.Issue
 
 		// Get the current field value
 		var currentValue string
@@ -149,22 +142,23 @@ Examples:
 
 		// Update the issue — retry once if the DB connection went stale
 		// during a long editor session (GH-2267).
+		// Use the routed store for cross-rig mutations.
 		updates := map[string]interface{}{
 			fieldToEdit: newValue,
 		}
 
-		err = store.UpdateIssue(ctx, id, updates, actor)
+		err = issueStore.UpdateIssue(ctx, id, updates, actor)
 		if err != nil {
 			// Connection may have gone stale while the editor was open.
 			// Ping to force the pool to discard dead connections, then retry.
-			if accessor, ok := store.(storage.RawDBAccessor); ok {
+			if accessor, ok := issueStore.(storage.RawDBAccessor); ok {
 				if pingErr := accessor.DB().PingContext(ctx); pingErr != nil {
 					// Ping failed — try to force a fresh connection via sql.DB pool reset.
 					accessor.DB().SetConnMaxIdleTime(0)
 					_ = accessor.DB().PingContext(ctx)
 				}
 			}
-			err = store.UpdateIssue(ctx, id, updates, actor)
+			err = issueStore.UpdateIssue(ctx, id, updates, actor)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Your edits are preserved in: %s\n", tmpPath)
@@ -172,9 +166,9 @@ Examples:
 		}
 		editSaved = true
 
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
+		// Embedded mode: flush Dolt commit (only for non-routed stores).
+		if isEmbeddedDolt && !result.Routed {
+			if _, err := issueStore.CommitPending(ctx, actor); err != nil {
 				FatalErrorRespectJSON("failed to commit: %v", err)
 			}
 		}

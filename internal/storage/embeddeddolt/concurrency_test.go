@@ -60,20 +60,29 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 	t.Log("init complete")
 
 	// Build the test binary that subprocesses will exec.
-	testBin := filepath.Join(t.TempDir(), "embeddeddolt.test")
-	t.Logf("building test binary: go test -tags embeddeddolt -c -o %s ./internal/storage/embeddeddolt/", testBin)
-	build := exec.CommandContext(ctx, "go", "test",
-		"-tags", "embeddeddolt",
-		"-c",
-		"-o", testBin,
-		"./internal/storage/embeddeddolt/",
-	)
-	build.Dir = modRoot
-	build.Env = append(os.Environ(), "CGO_ENABLED=1")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build test binary: %v\n%s", err, string(out))
+	// If BEADS_TEST_EMBEDDED_TEST_BINARY is set, skip the build.
+	testBin := os.Getenv("BEADS_TEST_EMBEDDED_TEST_BINARY")
+	if testBin != "" {
+		if _, err := os.Stat(testBin); err != nil {
+			t.Fatalf("BEADS_TEST_EMBEDDED_TEST_BINARY=%q not found: %v", testBin, err)
+		}
+		t.Logf("using pre-built test binary: %s", testBin)
+	} else {
+		testBin = filepath.Join(t.TempDir(), "embeddeddolt.test")
+		t.Logf("building test binary: go test -tags embeddeddolt -c -o %s ./internal/storage/embeddeddolt/", testBin)
+		build := exec.CommandContext(ctx, "go", "test",
+			"-tags", "embeddeddolt",
+			"-c",
+			"-o", testBin,
+			"./internal/storage/embeddeddolt/",
+		)
+		build.Dir = modRoot
+		build.Env = append(os.Environ(), "CGO_ENABLED=1")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build test binary: %v\n%s", err, string(out))
+		}
+		t.Log("build complete")
 	}
-	t.Log("build complete")
 
 	t.Logf("launching %d subprocesses (%d iterations each)", procs, iters)
 	eg, egCtx := errgroup.WithContext(ctx)

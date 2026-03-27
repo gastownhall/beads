@@ -47,7 +47,7 @@ var rememberCmd = &cobra.Command{
 	Short: "Store a persistent memory",
 	Long: `Store a memory that persists across sessions and account rotations.
 
-Memories are injected at prime time (bd prime / gt prime) so you have them
+Memories are injected at prime time (bd prime) so you have them
 in every session without manual loading.
 
 Examples:

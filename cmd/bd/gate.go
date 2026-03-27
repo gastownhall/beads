@@ -167,10 +167,10 @@ var gateAddWaiterCmd = &cobra.Command{
 	Short: "Add a waiter to a gate",
 	Long: `Register an agent as a waiter on a gate bead.
 
-When the gate closes, the waiter will receive a wake notification via 'gt gate wake'.
+When the gate closes, the waiter will receive a wake notification via 'bd gate wake'.
 The waiter is typically the worker's address (e.g., "my-project/workers/agent-1").
 
-This is used by 'gt done --phase-complete' to register for gate wake notifications.`,
+This is used by 'bd done --phase-complete' to register for gate wake notifications.`,
 	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("gate add-waiter")

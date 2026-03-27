@@ -317,7 +317,7 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 	// Ensure globals are initialized
 	if store == nil {
 		FatalErrorWithHint("database not initialized",
-			"run 'bd doctor' to diagnose, or 'bd init' to create a new database")
+			diagHint())
 	}
 	if actor == "" {
 		actor = "bd" // Default actor if not set

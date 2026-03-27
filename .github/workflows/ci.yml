@@ -127,7 +127,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.coverage && !cancelled()
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -135,7 +135,7 @@ jobs:
 
       - name: Upload test results to Codecov
         if: matrix.coverage && !cancelled()
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: junit.xml
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -144,8 +144,12 @@ jobs:
 
   # Embedded Dolt tests - runs the embeddeddolt build tag tests
   # These test the in-process Dolt engine (no server required)
-  test-embedded-dolt:
-    name: Test (Embedded Dolt)
+  #
+  # Split into: build → storage tests + 4 parallel cmd test shards.
+  # Adding new *_embedded_test.go files auto-distributes via hash sharding.
+
+  build-embedded:
+    name: Build (Embedded Dolt)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -160,20 +164,92 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
+      - name: Build embedded bd binary
+        run: go build -tags embeddeddolt -race -o /tmp/bd-embedded-test ./cmd/bd/
+
+      - name: Build embedded storage test binary
+        run: go test -tags embeddeddolt -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
+
+      - name: Build embedded cmd test binary
+        run: go test -tags embeddeddolt -race -c -o /tmp/bd-cmd-test ./cmd/bd/
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-test-binaries
+          path: |
+            /tmp/bd-embedded-test
+            /tmp/embeddeddolt-test
+            /tmp/bd-cmd-test
+          retention-days: 1
+
+  test-embedded-storage:
+    name: Test (Embedded Dolt Storage)
+    needs: build-embedded
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/embeddeddolt-test
+
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
 
-      - name: Test (embedded dolt - storage)
+      - name: Test
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
-        run: go test -tags embeddeddolt -v -race -count=1 ./internal/storage/embeddeddolt/
+          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=10m
 
-      - name: Test (embedded dolt - cmd)
+  test-embedded-cmd:
+    name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: build-embedded
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test /tmp/bd-cmd-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Test
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
-        run: go test -tags embeddeddolt -v -race -count=1 -timeout 20m -run TestEmbedded ./cmd/bd/
+          BEADS_TEST_BD_BINARY: /tmp/bd-embedded-test
+        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 20
 
   # Windows smoke tests only - full test suite times out (see bd-bmev)
   # Linux/macOS run comprehensive tests; Windows just verifies binary works

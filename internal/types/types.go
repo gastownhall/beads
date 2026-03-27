@@ -1066,6 +1066,10 @@ type IssueFilter struct {
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
+
+	// Hydration options — control which relational data is populated on returned issues.
+	// Labels are always hydrated. Dependencies are not by default (for performance).
+	IncludeDependencies bool // When true, populate Issue.Dependencies with []*Dependency records
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1113,6 +1117,9 @@ type WorkFilter struct {
 	// Parent filtering: filter to descendants of a bead/epic (recursive)
 	ParentID *string // Show all descendants of this issue
 
+	// Molecule filtering: filter to direct children of this molecule
+	MoleculeID string // If set, only return issues that are children of this molecule
+
 	// Molecule type filtering
 	MolType *MolType // Filter by molecule type (nil = any, swarm/patrol/work)
 
@@ -1142,6 +1149,34 @@ type StaleFilter struct {
 	Days   int    // Issues not updated in this many days
 	Status string // Filter by status (open|in_progress|blocked), empty = all non-closed
 	Limit  int    // Maximum issues to return
+}
+
+// WispFilter is used to filter ListWisps queries.
+// All fields are optional (zero value = no filter).
+// ListWisps always restricts to ephemeral issues (Ephemeral=true).
+type WispFilter struct {
+	// Type filters by issue type (e.g., "agent", "task", "patrol").
+	// nil = any type.
+	Type *IssueType
+
+	// Status filters by issue status.
+	// nil = non-closed only (open, in_progress, blocked).
+	Status *Status
+
+	// UpdatedAfter excludes wisps last updated before this time.
+	// Use this for age-based filtering (e.g., only wisps updated in the last hour).
+	UpdatedAfter *time.Time
+
+	// UpdatedBefore excludes wisps last updated after this time.
+	// Use this for staleness detection.
+	UpdatedBefore *time.Time
+
+	// IncludeClosed includes closed wisps in the results.
+	// When true and Status is nil, all statuses are returned.
+	IncludeClosed bool
+
+	// Limit caps the number of results returned (0 = no limit).
+	Limit int
 }
 
 // EpicStatus represents an epic with its completion status

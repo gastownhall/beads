@@ -134,6 +134,7 @@ func TestEmbeddedCreate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 
@@ -647,6 +648,7 @@ func TestEmbeddedCreateCommitPending(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 
@@ -703,6 +705,7 @@ func TestEmbeddedCreateCrossRepo(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 
@@ -742,6 +745,7 @@ func TestEmbeddedCreateWithGitRemote(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "gr")
@@ -766,6 +770,7 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cc")

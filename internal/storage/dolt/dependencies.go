@@ -35,7 +35,7 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		}
 	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
 			SourceTable:   "issues",
 			TargetTable:   targetTable,

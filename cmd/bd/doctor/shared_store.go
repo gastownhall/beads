@@ -3,8 +3,8 @@ package doctor
 import (
 	"context"
 	"os"
-	"path/filepath"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -26,16 +26,37 @@ type SharedStore struct {
 	beadsDir string
 }
 
+func beadsDirFromSharedStore(path string, ss *SharedStore) string {
+	if beadsDir := sharedStoreBeadsDir(ss); beadsDir != "" {
+		return beadsDir
+	}
+	return ResolveBeadsDirForRepo(path)
+}
+
+func sharedStoreBeadsDir(ss *SharedStore) string {
+	if ss == nil {
+		return ""
+	}
+	return ss.BeadsDir()
+}
+
+func sharedStoreNeedsLocalDoltDir(beadsDir string) bool {
+	cfg, err := configfile.Load(beadsDir)
+	return err != nil || cfg == nil || !cfg.IsDoltServerMode()
+}
+
 // NewSharedStore opens a single read-only DoltStore for the given repo path.
 // If the database doesn't exist or can't be opened, Store() will return nil.
 // The caller MUST call Close() when done (typically via defer).
 func NewSharedStore(path string) *SharedStore {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 	ss := &SharedStore{beadsDir: beadsDir}
 
-	doltPath := getDatabasePath(beadsDir)
-	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
-		return ss // No database, store stays nil
+	if sharedStoreNeedsLocalDoltDir(beadsDir) {
+		doltPath := getDatabasePath(beadsDir)
+		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+			return ss // No database, store stays nil
+		}
 	}
 
 	ctx := context.Background()

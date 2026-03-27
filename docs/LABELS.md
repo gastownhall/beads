@@ -458,11 +458,11 @@ Examples:
 ```bash
 # Event: Full record of what happened and why
 bd create "Muted patrol: user requested during debugging" -t event \
-  -l event-type:patrol-muted,actor:witness,reason:user-request
+  -l event-type:patrol-muted,actor:observer,reason:user-request
 
 # State: Update the role bead's label to reflect current state
-bd label remove beads/witness patrol:active
-bd label add beads/witness patrol:muted
+bd label remove beads/observer patrol:active
+bd label add beads/observer patrol:muted
 ```
 
 **Key principle:** Events are the source of truth. Labels are a cache for fast queries.
@@ -475,7 +475,7 @@ bd label add beads/witness patrol:muted
 bd list --type event | grep "patrol" | tail -1  # Slow, fragile
 
 # With labels-as-state: direct query
-bd show beads/witness | grep "patrol:"  # Instant
+bd show beads/observer | grep "patrol:"  # Instant
 ```
 
 **History preserved:**
@@ -524,14 +524,14 @@ transition_state() {
 }
 
 # Usage
-transition_state beads/witness patrol active muted "User debugging session"
+transition_state beads/observer patrol active muted "User debugging session"
 ```
 
 ### Querying State
 
 ```bash
 # Current state of a role
-bd label list beads/witness | grep ":"
+bd label list beads/observer | grep ":"
 
 # All roles in a specific state
 bd list --label patrol:muted
@@ -556,10 +556,10 @@ bd list --type event --label event-type:state-change
 The pattern suggests helper commands (see bd-7l67):
 ```bash
 # Query current state
-bd state beads/witness patrol     # → "muted"
+bd state beads/observer patrol     # → "muted"
 
 # Transition with automatic event creation
-bd set-state beads/witness patrol=active --reason "Debugging complete"
+bd set-state beads/observer patrol=active --reason "Debugging complete"
 ```
 
 Until helpers exist, use the manual pattern above.
@@ -637,13 +637,13 @@ health:healthy    health:failing
 
 ```bash
 # 1. Record the event (source of truth)
-bd create "Muted patrol for witness-abc" -t event \
-  --parent witness-abc \
-  -d "Reason: investigating stuck polecat. Expected duration: 30m"
+bd create "Muted patrol for agent-abc" -t event \
+  --parent agent-abc \
+  -d "Reason: investigating stuck worker. Expected duration: 30m"
 
 # 2. Update the cached state label
-bd label remove witness-abc patrol:active
-bd label add witness-abc patrol:muted
+bd label remove agent-abc patrol:active
+bd label add agent-abc patrol:muted
 ```
 
 ### Why This Pattern?

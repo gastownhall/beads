@@ -140,7 +140,10 @@ func maybeAutoPush(ctx context.Context) {
 	// Push
 	debug.Logf("dolt auto-push: pushing to origin...\n")
 	if err := st.Push(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
+		if !isQuiet() && !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
+		}
+		debug.Logf("dolt auto-push: push error: %v\n", err)
 		return
 	}
 

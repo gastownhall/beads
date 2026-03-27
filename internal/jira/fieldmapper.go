@@ -11,6 +11,7 @@ import (
 type jiraFieldMapper struct {
 	apiVersion string            // "2" or "3" (default: "3")
 	statusMap  map[string]string // beads status → Jira status name (from jira.status_map.* config)
+	typeMap    map[string]string // beads type → Jira type (from jira.type_map.* config)
 }
 
 func (m *jiraFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
@@ -90,22 +91,36 @@ func (m *jiraFieldMapper) StatusToTracker(beadsStatus types.Status) interface{} 
 }
 
 func (m *jiraFieldMapper) TypeToBeads(trackerType interface{}) types.IssueType {
-	if t, ok := trackerType.(string); ok {
-		switch t {
-		case "Bug":
-			return types.TypeBug
-		case "Story", "Feature":
-			return types.TypeFeature
-		case "Epic":
-			return types.TypeEpic
-		case "Task", "Sub-task":
-			return types.TypeTask
+	t, ok := trackerType.(string)
+	if !ok {
+		return types.TypeTask
+	}
+
+	// Check custom map first (inverted: Jira type → beads type).
+	for beadsType, jiraType := range m.typeMap {
+		if strings.EqualFold(t, jiraType) {
+			return types.IssueType(beadsType)
 		}
+	}
+
+	// Jira defaults.
+	switch t {
+	case "Bug":
+		return types.TypeBug
+	case "Story", "Feature":
+		return types.TypeFeature
+	case "Epic":
+		return types.TypeEpic
+	case "Task", "Sub-task":
+		return types.TypeTask
 	}
 	return types.TypeTask
 }
 
 func (m *jiraFieldMapper) TypeToTracker(beadsType types.IssueType) interface{} {
+	if name, ok := m.typeMap[string(beadsType)]; ok {
+		return name
+	}
 	switch beadsType {
 	case types.TypeBug:
 		return "Bug"

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -185,25 +186,5 @@ type tableConflict struct {
 
 // ResolveConflicts resolves conflicts using the specified strategy
 func (s *DoltStore) ResolveConflicts(ctx context.Context, table string, strategy string) error {
-	// Validate table name to prevent SQL injection
-	if err := validateTableName(table); err != nil {
-		return fmt.Errorf("invalid table name: %w", err)
-	}
-
-	var query string
-	switch strategy {
-	case "ours":
-		// Note: DOLT_CONFLICTS_RESOLVE requires literal value, but we've validated table is safe
-		query = fmt.Sprintf("CALL DOLT_CONFLICTS_RESOLVE('--ours', '%s')", table)
-	case "theirs":
-		query = fmt.Sprintf("CALL DOLT_CONFLICTS_RESOLVE('--theirs', '%s')", table)
-	default:
-		return fmt.Errorf("unknown conflict resolution strategy: %s", strategy)
-	}
-
-	_, err := s.execContext(ctx, query)
-	if err != nil {
-		return fmt.Errorf("failed to resolve conflicts: %w", err)
-	}
-	return nil
+	return versioncontrolops.ResolveConflicts(ctx, s.db, table, strategy)
 }

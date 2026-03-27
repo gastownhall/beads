@@ -540,8 +540,10 @@ func (s *configStore) GetIssuesByIDs(_ context.Context, _ []string) ([]*types.Is
 func (s *configStore) UpdateIssue(_ context.Context, _ string, _ map[string]interface{}, _ string) error {
 	return nil
 }
-func (s *configStore) CloseIssue(_ context.Context, _, _, _, _ string) error { return nil }
-func (s *configStore) DeleteIssue(_ context.Context, _ string) error         { return nil }
+func (s *configStore) ReopenIssue(_ context.Context, _, _, _ string) error     { return nil }
+func (s *configStore) UpdateIssueType(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) CloseIssue(_ context.Context, _, _, _, _ string) error   { return nil }
+func (s *configStore) DeleteIssue(_ context.Context, _ string) error           { return nil }
 func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
 	return nil, nil
 }
@@ -594,10 +596,23 @@ func (s *configStore) GetAllEventsSince(_ context.Context, _ time.Time) ([]*type
 	return nil, nil
 }
 func (s *configStore) GetStatistics(_ context.Context) (*types.Statistics, error) { return nil, nil }
+func (s *configStore) ListWisps(_ context.Context, _ types.WispFilter) ([]*types.Issue, error) {
+	return nil, nil
+}
 func (s *configStore) RunInTransaction(_ context.Context, _ string, _ func(tx storage.Transaction) error) error {
 	return nil
 }
-func (s *configStore) Close() error { return nil }
+func (s *configStore) MergeSlotCreate(_ context.Context, _ string) (*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotCheck(_ context.Context) (*storage.MergeSlotStatus, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotAcquire(_ context.Context, _, _ string, _ bool) (*storage.MergeSlotResult, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotRelease(_ context.Context, _, _ string) error { return nil }
+func (s *configStore) Close() error                                          { return nil }
 
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	var capturedJQL string
@@ -715,5 +730,54 @@ func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("StatusToTracker(%q) = %q, want %q", tt.status, got, tt.want)
 		}
+	}
+}
+
+func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
+	store := &configStore{
+		data: map[string]string{
+			"jira.url":              "https://example.atlassian.net",
+			"jira.project":          "PROJ",
+			"jira.api_token":        "token123",
+			"jira.type_map.story":   "User Story",
+			"jira.type_map.feature": "Feature",
+		},
+	}
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), store); err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	mapper := tr.FieldMapper()
+
+	// Custom "story" type should map from Jira "User Story"
+	got := mapper.TypeToBeads("User Story")
+	if got != "story" {
+		t.Errorf("TypeToBeads(\"User Story\") = %q, want %q", got, "story")
+	}
+
+	// Custom "feature" should map from Jira "Feature"
+	got = mapper.TypeToBeads("Feature")
+	if got != "feature" {
+		t.Errorf("TypeToBeads(\"Feature\") = %q, want %q", got, "feature")
+	}
+
+	// Unmapped Jira types fall back to defaults
+	got = mapper.TypeToBeads("Bug")
+	if got != types.TypeBug {
+		t.Errorf("TypeToBeads(\"Bug\") = %q, want %q", got, types.TypeBug)
+	}
+
+	// Reverse: custom "story" → "User Story"
+	gotTracker, _ := mapper.TypeToTracker("story").(string)
+	if gotTracker != "User Story" {
+		t.Errorf("TypeToTracker(\"story\") = %q, want %q", gotTracker, "User Story")
+	}
+
+	// Reverse: unmapped "epic" falls back to default "Epic"
+	gotTracker, _ = mapper.TypeToTracker(types.TypeEpic).(string)
+	if gotTracker != "Epic" {
+		t.Errorf("TypeToTracker(epic) = %q, want %q", gotTracker, "Epic")
 	}
 }

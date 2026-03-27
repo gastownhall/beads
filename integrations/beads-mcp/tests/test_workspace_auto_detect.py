@@ -157,10 +157,11 @@ async def test_get_client_env_var_over_auto_detect():
 
 
 def test_find_beads_db_follows_redirect():
-    """Test that _find_beads_db_in_tree follows .beads/redirect files (gt-tnw).
+    """Test that _find_beads_db_in_tree follows .beads/redirect files.
 
-    This is essential for polecat/crew directories that use redirect files
-    to share a central beads database.
+    This is essential for agent/worker directories that use redirect files
+    to share a central beads database. Tests use legacy orchestrator paths
+    (polecats/) for backwards compatibility validation.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create main workspace with actual database

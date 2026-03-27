@@ -43,6 +43,14 @@ func (m *mockStore) SetConfig(_ context.Context, key, value string) error {
 	return nil
 }
 
+func (m *mockStore) GetAllConfig(_ context.Context) (map[string]string, error) {
+	result := make(map[string]string, len(m.config))
+	for k, v := range m.config {
+		result[k] = v
+	}
+	return result, nil
+}
+
 func TestTracker_Name(t *testing.T) {
 	tr := &Tracker{}
 	if got := tr.Name(); got != "ado" {
@@ -176,6 +184,41 @@ func TestTracker_InitWithStateMappings(t *testing.T) {
 	}
 	if tr.mapper == nil {
 		t.Fatal("mapper not created")
+	}
+}
+
+func TestTracker_InitWithCustomTypeMapping(t *testing.T) {
+	tr := &Tracker{}
+	store := newMockStore(map[string]string{
+		"ado.pat":              "some-pat",
+		"ado.org":              "myorg",
+		"ado.project":          "myproject",
+		"ado.type_map.story":   "User Story",
+		"ado.type_map.feature": "Feature",
+	})
+	err := tr.Init(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Init() unexpected error: %v", err)
+	}
+
+	mapper := tr.FieldMapper()
+
+	// Custom "story" type should map from "User Story"
+	got := mapper.TypeToBeads("User Story")
+	if got != "story" {
+		t.Errorf("TypeToBeads(\"User Story\") = %q, want %q", got, "story")
+	}
+
+	// Custom "feature" type should map from "Feature"
+	got = mapper.TypeToBeads("Feature")
+	if got != "feature" {
+		t.Errorf("TypeToBeads(\"Feature\") = %q, want %q", got, "feature")
+	}
+
+	// Reverse: "story" should map to "User Story"
+	gotTracker := mapper.TypeToTracker("story")
+	if gotTracker != "User Story" {
+		t.Errorf("TypeToTracker(\"story\") = %q, want %q", gotTracker, "User Story")
 	}
 }
 

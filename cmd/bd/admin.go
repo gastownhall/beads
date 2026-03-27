@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 )
 
@@ -8,6 +10,12 @@ var adminCmd = &cobra.Command{
 	Use:     "admin",
 	GroupID: "advanced",
 	Short:   "Administrative commands for database maintenance",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if isEmbeddedDolt {
+			return fmt.Errorf("'bd admin' is not yet supported in embedded mode")
+		}
+		return nil
+	},
 	Long: `Administrative commands for beads database maintenance.
 
 These commands are for advanced users and should be used carefully:

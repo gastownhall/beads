@@ -138,6 +138,13 @@ func runShip(cmd *cobra.Command, args []string) {
 		fmt.Printf("\nExternal projects can now depend on: external:%s:%s\n",
 			"<this-project>", capability)
 	}
+
+	// Embedded mode: flush Dolt commit.
+	if isEmbeddedDolt && store != nil {
+		if _, err := store.CommitPending(ctx, actor); err != nil {
+			FatalError("failed to commit: %v", err)
+		}
+	}
 }
 
 func init() {

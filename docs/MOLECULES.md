@@ -173,9 +173,9 @@ bd dep add <aggregate> <fileA> --type waits-for
 When the number of children isn't known until runtime:
 
 ```bash
-# In a survey step, discover polecats and bond arms dynamically
-for polecat in $(gt polecat list); do
-  bd mol bond mol-polecat-arm $PATROL_ID --ref arm-$polecat --var name=$polecat
+# In a survey step, discover workers and bond arms dynamically
+for worker in $(bd agent list); do
+  bd mol bond mol-worker-arm $PATROL_ID --ref arm-$worker --var name=$worker
 done
 ```
 

@@ -411,6 +411,109 @@ func TestGetReadyWork_CustomStatusBlockerStillBlocks(t *testing.T) {
 	}
 }
 
+// TestGetReadyWork_PastDeferredIssueIsReady verifies that an issue whose
+// defer_until is in the past appears in ready work. Regression test for a
+// timezone bug: Go stores defer_until as UTC, but Dolt's NOW() returns local
+// time. On non-UTC machines, the comparison defer_until <= NOW() would
+// incorrectly exclude past-deferred issues. The fix uses UTC_TIMESTAMP().
+func TestGetReadyWork_PastDeferredIssueIsReady(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Create an issue and set defer_until to 1 hour in the past (UTC).
+	pastDeferred := &types.Issue{
+		ID:        "rw-past-deferred",
+		Title:     "Past Deferred Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, pastDeferred, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	pastTime := time.Now().UTC().Add(-1 * time.Hour)
+	if err := store.UpdateIssue(ctx, pastDeferred.ID, map[string]interface{}{
+		"defer_until": pastTime,
+	}, "tester"); err != nil {
+		t.Fatalf("failed to set defer_until: %v", err)
+	}
+
+	// Create a normal issue (no defer) as a control.
+	normal := &types.Issue{
+		ID:        "rw-normal",
+		Title:     "Normal Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, normal, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	foundPastDeferred := false
+	foundNormal := false
+	for _, w := range work {
+		if w.ID == pastDeferred.ID {
+			foundPastDeferred = true
+		}
+		if w.ID == normal.ID {
+			foundNormal = true
+		}
+	}
+	if !foundNormal {
+		t.Error("normal issue should appear in ready work")
+	}
+	if !foundPastDeferred {
+		t.Error("past-deferred issue (defer_until in the past) should appear in ready work")
+	}
+}
+
+// TestGetReadyWork_FutureDeferredIssueExcluded verifies that an issue whose
+// defer_until is in the future does NOT appear in ready work.
+func TestGetReadyWork_FutureDeferredIssueExcluded(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	futureDeferred := &types.Issue{
+		ID:        "rw-future-deferred",
+		Title:     "Future Deferred Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, futureDeferred, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	futureTime := time.Now().UTC().Add(24 * time.Hour)
+	if err := store.UpdateIssue(ctx, futureDeferred.ID, map[string]interface{}{
+		"defer_until": futureTime,
+	}, "tester"); err != nil {
+		t.Fatalf("failed to set defer_until: %v", err)
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, w := range work {
+		if w.ID == futureDeferred.ID {
+			t.Error("future-deferred issue should NOT appear in ready work")
+		}
+	}
+}
+
 // =============================================================================
 // GetBlockedIssues tests
 // =============================================================================
@@ -1185,6 +1288,99 @@ func TestSearchIssues_IssueTypeFilter(t *testing.T) {
 	if results[0].ID != bug.ID {
 		t.Errorf("expected bug issue, got %s", results[0].ID)
 	}
+}
+
+func TestSearchIssues_IncludeDependencies(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	parent := &types.Issue{
+		ID:        "si-dep-parent",
+		Title:     "DepHydration Parent",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	child := &types.Issue{
+		ID:        "si-dep-child",
+		Title:     "DepHydration Child",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	standalone := &types.Issue{
+		ID:        "si-dep-standalone",
+		Title:     "DepHydration Standalone",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeTask,
+	}
+	for _, iss := range []*types.Issue{parent, child, standalone} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", iss.ID, err)
+		}
+	}
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: parent.ID,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	t.Run("false_by_default", func(t *testing.T) {
+		results, err := store.SearchIssues(ctx, "DepHydration", types.IssueFilter{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, iss := range results {
+			if len(iss.Dependencies) > 0 {
+				t.Errorf("issue %s has Dependencies populated without IncludeDependencies", iss.ID)
+			}
+		}
+	})
+
+	t.Run("true_hydrates_deps", func(t *testing.T) {
+		results, err := store.SearchIssues(ctx, "DepHydration", types.IssueFilter{
+			IncludeDependencies: true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(results) != 3 {
+			t.Fatalf("expected 3 results, got %d", len(results))
+		}
+
+		depsByID := make(map[string][]*types.Dependency)
+		for _, iss := range results {
+			depsByID[iss.ID] = iss.Dependencies
+		}
+
+		// child should have one dependency on parent
+		childDeps := depsByID[child.ID]
+		if len(childDeps) != 1 {
+			t.Fatalf("child expected 1 dependency, got %d", len(childDeps))
+		}
+		if childDeps[0].DependsOnID != parent.ID {
+			t.Errorf("child dep.DependsOnID = %s, want %s", childDeps[0].DependsOnID, parent.ID)
+		}
+		if childDeps[0].Type != types.DepBlocks {
+			t.Errorf("child dep.Type = %s, want %s", childDeps[0].Type, types.DepBlocks)
+		}
+
+		// parent and standalone should have no dependencies
+		if len(depsByID[parent.ID]) != 0 {
+			t.Errorf("parent expected 0 dependencies, got %d", len(depsByID[parent.ID]))
+		}
+		if len(depsByID[standalone.ID]) != 0 {
+			t.Errorf("standalone expected 0 dependencies, got %d", len(depsByID[standalone.ID]))
+		}
+	})
 }
 
 // =============================================================================
