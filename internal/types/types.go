@@ -1066,6 +1066,10 @@ type IssueFilter struct {
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
+
+	// Hydration options — control which relational data is populated on returned issues.
+	// Labels are always hydrated. Dependencies are not by default (for performance).
+	IncludeDependencies bool // When true, populate Issue.Dependencies with []*Dependency records
 }
 
 // SortPolicy determines how ready work is ordered
