@@ -66,7 +66,7 @@ var backupStatusCmd = &cobra.Command{
 			fmt.Println("No backup has been performed yet.")
 			fmt.Println()
 			fmt.Println("Setup:")
-			fmt.Println("  bd backup init <path>    Set up a backup destination")
+			fmt.Println("  bd backup add <path>     Set up a backup destination")
 			fmt.Println("  bd backup sync           Push to backup destination")
 			showDBSize()
 			return nil

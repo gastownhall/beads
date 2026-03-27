@@ -102,11 +102,11 @@ var backupSyncCmd = &cobra.Command{
 	Long: `Sync the current beads database to the configured Dolt backup destination.
 
 This pushes the entire database state (all branches, full history) to the
-backup location configured with 'bd backup init'.
+backup location configured with 'bd backup add'.
 
 The backup is atomic — if the sync fails, the previous backup state is preserved.
 
-Run 'bd backup init <path>' first to configure a destination.`,
+Run 'bd backup add <path>' first to configure a destination.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := rootCtx
 		if store == nil {
@@ -137,7 +137,7 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		if err := bs.BackupSync(ctx, defaultDoltBackupName); err != nil {
 			if strings.Contains(err.Error(), "no backup") ||
 				strings.Contains(err.Error(), "not found") {
-				return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
+				return fmt.Errorf("no backup destination configured. Run 'bd backup add <path>' first")
 			}
 			return fmt.Errorf("backup sync failed: %w", err)
 		}

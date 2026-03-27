@@ -198,7 +198,7 @@ bd dolt push    # Push changes to Dolt remote
 bd dolt pull    # Pull changes from Dolt remote
 ```
 
-The `bd export` command exists for issue portability and interchange. For supported backup and restore flows, use `bd backup` to write JSONL backup snapshots, `bd backup restore` to restore them, and `bd backup export-git` / `bd backup fetch-git` if you want those snapshots published to a git branch. None of these are needed for day-to-day Dolt sync.
+The `bd export` command exists for issue portability and interchange. For backup and restore, use `bd backup add <path>` / `bd backup sync` to push Dolt-native backups, and `bd backup restore <path>` to restore from them. None of these are needed for day-to-day Dolt sync.
 
 ### What if my database feels stale after a colleague pushes changes?
 

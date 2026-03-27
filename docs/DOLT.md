@@ -86,20 +86,80 @@ Switch to server mode when you need:
 
 ## Migrating Between Backends
 
-<!-- TODO: Document the correct workflows for migrating data between backends.
-     Needs coverage of:
-     - Embedded → Server migration
-     - Server → Embedded migration
-     - JSONL backup/restore path (universal, portable)
-     - Dolt remote push/pull path (preserves full history)
-     - Data location differences (.beads/embeddeddolt/ vs .beads/dolt/)
-     - Pre-migration checklist (stop server, verify backup, etc.)
-     - Post-migration validation (bd list, bd doctor)
-     - File locking considerations (embedded uses flock)
--->
+You can migrate data between embedded mode and server mode using `bd backup`.
+Both directions preserve full Dolt commit history.
 
-Migration between embedded and server mode is possible via `bd backup` / `bd backup restore`
-or via Dolt remotes (`bd dolt push` / `bd dolt pull`). Full migration guide coming soon.
+### Server → Embedded
+
+1. **Create a backup from the server-mode project:**
+
+   ```bash
+   # In the server-mode project directory
+   bd backup add /path/to/backup-dir
+   bd backup sync
+   ```
+
+2. **Create a new embedded-mode project and restore:**
+
+   ```bash
+   mkdir new-project && cd new-project
+   bd init                  # creates an embedded-mode project by default
+   bd backup restore --force /path/to/backup-dir
+   ```
+
+   `--force` overwrites the freshly-initialized database with the backup
+   contents. The restore automatically:
+   - Updates `metadata.json` to match the restored project identity
+   - Registers the backup directory for future `bd backup sync`
+   - Backfills the embedded migration tracker (`schema_migrations`)
+
+3. **Verify:**
+
+   ```bash
+   bd list
+   bd backup status
+   ```
+
+### Embedded → Server
+
+1. **Create a backup from the embedded-mode project:**
+
+   ```bash
+   # In the embedded-mode project directory
+   bd backup add /path/to/backup-dir
+   bd backup sync
+   ```
+
+2. **Create a new server-mode project and restore:**
+
+   ```bash
+   mkdir new-project && cd new-project
+   bd init --server         # creates a server-mode project
+   bd backup restore --force /path/to/backup-dir
+   ```
+
+3. **Verify:**
+
+   ```bash
+   bd list
+   bd backup status
+   ```
+
+### Backup Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `bd backup add <path>` | Register a backup destination (filesystem or DoltHub URL) |
+| `bd backup sync` | Push database to the configured backup destination |
+| `bd backup restore [path]` | Restore from a backup directory (`--force` to overwrite) |
+| `bd backup remove` | Unregister the backup destination |
+| `bd backup status` | Show backup configuration and last sync time |
+
+### Notes
+
+- Data locations differ between modes: `.beads/embeddeddolt/` (embedded) vs `.beads/dolt/` (server)
+- The backup directory is a full Dolt backup — it can be on a local drive, NAS, or DoltHub
+- You can also migrate via Dolt remotes (`bd dolt push` / `bd dolt pull`) if both projects share a remote
 
 See also [DOLT-BACKEND.md](DOLT-BACKEND.md#migrating-between-backends).
 

@@ -447,10 +447,8 @@ For **physical database corruption** (disk failures, power loss, filesystem erro
 mv .beads/dolt .beads/dolt.backup
 bd init
 bd dolt pull    # Pull from Dolt remote if configured
-# Or restore from a local backup snapshot:
-# bd backup restore
-# Or fetch one from a backup branch:
-# bd backup fetch-git
+# Or restore from a backup:
+# bd backup restore [path] --force
 ```
 
 For **logical consistency issues** (ID collisions from branch merges, parallel workers):

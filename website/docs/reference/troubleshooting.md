@@ -69,11 +69,8 @@ bd doctor --fix
 # Or pull from Dolt remote
 bd dolt pull
 
-# Or restore from a local JSONL backup snapshot
-bd backup restore
-
-# Or fetch the latest snapshot from a backup git branch
-bd backup fetch-git
+# Or restore from a backup
+bd backup restore [path] --force
 ```
 
 ## Dolt Server Issues
@@ -116,11 +113,8 @@ bd hooks status
 ### Recovery from backup
 
 ```bash
-# Restore from a local JSONL backup snapshot
-bd backup restore
-
-# Or fetch the latest snapshot from a backup git branch
-bd backup fetch-git
+# Restore from a Dolt backup
+bd backup restore [path] --force
 
 # Or pull from Dolt remote
 bd dolt pull

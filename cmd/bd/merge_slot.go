@@ -112,7 +112,7 @@ func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if isEmbeddedDolt && store != nil {
+	if isEmbeddedMode() && store != nil {
 		if _, err := store.CommitPending(rootCtx, actor); err != nil {
 			return fmt.Errorf("failed to commit: %w", err)
 		}
@@ -236,7 +236,7 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 	}
 
 	// Successfully acquired.
-	if isEmbeddedDolt && store != nil {
+	if isEmbeddedMode() && store != nil {
 		if _, err := store.CommitPending(rootCtx, actor); err != nil {
 			return fmt.Errorf("failed to commit: %w", err)
 		}
@@ -265,7 +265,7 @@ func runMergeSlotRelease(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if isEmbeddedDolt && store != nil {
+	if isEmbeddedMode() && store != nil {
 		if _, err := store.CommitPending(rootCtx, actor); err != nil {
 			return fmt.Errorf("failed to commit: %w", err)
 		}

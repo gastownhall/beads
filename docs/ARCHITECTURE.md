@@ -49,7 +49,7 @@ bd's core design enables a distributed, Dolt-powered issue tracker that feels li
 
 **Dolt for distribution:** Native push/pull to Dolt remotes (DoltHub, S3, GCS). No special sync server needed. Issues travel with your code. Offline work just works.
 
-**Export and backup:** `bd export` outputs issue JSONL for data migration and interoperability. Use `bd backup` and `bd backup restore` for supported JSONL backup snapshots, and `bd backup export-git` / `bd backup fetch-git` when you want those snapshots stored in a git branch.
+**Export and backup:** `bd export` outputs issue JSONL for data migration and interoperability. Use `bd backup add` / `bd backup sync` to push Dolt-native backups (preserving full commit history) to a filesystem path or DoltHub, and `bd backup restore` to restore from them.
 
 ## Write Path
 
@@ -85,7 +85,7 @@ All queries run directly against the local Dolt database:
 2. **Sync:** Use `bd dolt pull` to fetch updates from Dolt remotes
 
 Key implementation:
-- JSONL backup restore: `cmd/bd/backup_restore.go`
+- Backup restore: `cmd/bd/backup_restore.go`
 - Issue bootstrap/migration: `cmd/bd/init.go`
 - Dolt storage: `internal/storage/dolt/`
 
@@ -297,7 +297,7 @@ Each issue in the Dolt database (and in JSONL exports via `bd export`) has the f
 | Dolt implementation | `internal/storage/dolt/` |
 | RPC protocol | `internal/rpc/protocol.go`, `server_*.go` |
 | Export logic (portability) | `cmd/bd/export.go` |
-| JSONL backup restore | `cmd/bd/backup_restore.go` |
+| Backup restore | `cmd/bd/backup_restore.go` |
 | Issue bootstrap/migration | `cmd/bd/init.go` |
 
 ## Wisps and Molecules
