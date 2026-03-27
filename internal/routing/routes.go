@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // RoutesFileName is the name of the routes configuration file
@@ -64,6 +65,30 @@ func LoadRoutes(beadsDir string) ([]Route, error) {
 func LoadTownRoutes(beadsDir string) ([]Route, error) {
 	routes, _ := findTownRoutes(beadsDir)
 	return routes, nil
+}
+
+// ResolveTownBeadsDir returns the authoritative routes-bearing .beads directory
+// for the current routing context.
+func ResolveTownBeadsDir(currentBeadsDir string) string {
+	if currentBeadsDir != "" {
+		routes, err := LoadRoutes(currentBeadsDir)
+		if err == nil && len(routes) > 0 {
+			return currentBeadsDir
+		}
+	}
+
+	_, townRoot := findTownRoutes(currentBeadsDir)
+	if townRoot == "" {
+		return ""
+	}
+
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	routes, err := LoadRoutes(townBeadsDir)
+	if err != nil || len(routes) == 0 {
+		return ""
+	}
+
+	return townBeadsDir
 }
 
 // ExtractPrefix extracts the prefix from an issue ID.
@@ -329,6 +354,74 @@ func findTownRootFromCWD() string {
 	return findTownRoot(cwd)
 }
 
+func canonicalizeRoutingBeadsDir(beadsDir string) string {
+	if beadsDir == "" {
+		return ""
+	}
+	return utils.NormalizePathForComparison(beads.ResolveRedirect(beadsDir).TargetDir)
+}
+
+func findTownRootForBeadsDirFromCWD(currentBeadsDir string) string {
+	targetBeadsDir := canonicalizeRoutingBeadsDir(currentBeadsDir)
+	if targetBeadsDir == "" {
+		return ""
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	current := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(current, "mayor", "town.json")); err == nil {
+			candidateBeadsDir := filepath.Join(current, ".beads")
+			if info, statErr := os.Stat(candidateBeadsDir); statErr == nil && info.IsDir() {
+				if canonicalizeRoutingBeadsDir(candidateBeadsDir) == targetBeadsDir {
+					return current
+				}
+			}
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func findNearestTownRoutesFromPath(startDir string) ([]Route, string) {
+	if startDir == "" {
+		return nil, ""
+	}
+
+	current := startDir
+	for {
+		if _, err := os.Stat(filepath.Join(current, "mayor", "town.json")); err == nil {
+			townBeadsDir := filepath.Join(current, ".beads")
+			routes, loadErr := LoadRoutes(townBeadsDir)
+			if loadErr == nil && len(routes) > 0 {
+				return routes, current
+			}
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil, ""
+		}
+		current = parent
+	}
+}
+
+func findNearestTownRoutesFromCWD() ([]Route, string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, ""
+	}
+	return findNearestTownRoutesFromPath(cwd)
+}
+
 // findTownRoutes searches for routes.jsonl at the town level.
 // It walks up from currentBeadsDir to find the town root, then loads routes
 // from <townRoot>/.beads/routes.jsonl.
@@ -342,18 +435,25 @@ func findTownRoutes(currentBeadsDir string) ([]Route, string) {
 	// First try the current beads dir (works if we're already at town level)
 	routes, err := LoadRoutes(currentBeadsDir)
 	if err == nil && len(routes) > 0 {
-		// Use findTownRoot() starting from CWD to determine the actual town root.
-		// We must NOT use currentBeadsDir as the starting point because if .beads
-		// is a symlink (e.g., <town>/.beads -> <town>/olympus/.beads), currentBeadsDir
-		// will be the resolved path (e.g., <town>/olympus/.beads) and walking up
-		// from there would find <town>/olympus as the town root instead of <town>.
-		townRoot := findTownRootFromCWD()
+		// When routes come from currentBeadsDir, the town root must belong to that
+		// same .beads owner. In nested town layouts, blindly using the nearest CWD
+		// town can pair outer routes with an inner mayor/town.json and route to the
+		// wrong tree.
+		townRoot := findTownRootForBeadsDirFromCWD(currentBeadsDir)
 		if townRoot != "" {
 			if os.Getenv("BD_DEBUG_ROUTING") != "" {
-				fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: found routes in %s, townRoot=%s (via findTownRootFromCWD)\n", currentBeadsDir, townRoot)
+				fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: found routes in %s, townRoot=%s (matched route source)\n", currentBeadsDir, townRoot)
 			}
 			return routes, townRoot
 		}
+
+		if townRoot = findTownRoot(filepath.Dir(currentBeadsDir)); townRoot != "" {
+			if os.Getenv("BD_DEBUG_ROUTING") != "" {
+				fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: found routes in %s, townRoot=%s (via currentBeadsDir ancestry)\n", currentBeadsDir, townRoot)
+			}
+			return routes, townRoot
+		}
+
 		// Fallback to parent dir if not in a town structure (for non-orchestrator repos)
 		if os.Getenv("BD_DEBUG_ROUTING") != "" {
 			fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: found routes in %s, townRoot=%s (fallback to parent dir)\n", currentBeadsDir, filepath.Dir(currentBeadsDir))
@@ -361,21 +461,29 @@ func findTownRoutes(currentBeadsDir string) ([]Route, string) {
 		return routes, filepath.Dir(currentBeadsDir)
 	}
 
-	// Walk up from CWD to find town root
-	townRoot := findTownRootFromCWD()
-	if townRoot == "" {
+	if currentBeadsDir != "" {
+		routes, townRoot := findNearestTownRoutesFromPath(filepath.Dir(currentBeadsDir))
+		if len(routes) > 0 && townRoot != "" {
+			if os.Getenv("BD_DEBUG_ROUTING") != "" {
+				fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: loaded routes from %s, townRoot=%s (via currentBeadsDir ancestry)\n", filepath.Join(townRoot, ".beads"), townRoot)
+			}
+			return routes, townRoot
+		}
+
+		if os.Getenv("BD_DEBUG_ROUTING") != "" {
+			fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: no routes found for authoritative beads dir %s\n", currentBeadsDir)
+		}
+		return nil, ""
+	}
+
+	// Walk up town roots from CWD until we find one that actually has routes.
+	routes, townRoot := findNearestTownRoutesFromCWD()
+	if len(routes) == 0 || townRoot == "" {
 		return nil, "" // Not in a town
 	}
 
-	// Load routes from town beads
-	townBeadsDir := filepath.Join(townRoot, ".beads")
-	routes, err = LoadRoutes(townBeadsDir)
-	if err != nil || len(routes) == 0 {
-		return nil, "" // No town routes
-	}
-
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
-		fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: loaded routes from %s, townRoot=%s\n", townBeadsDir, townRoot)
+		fmt.Fprintf(os.Stderr, "[routing] findTownRoutes: loaded routes from %s, townRoot=%s\n", filepath.Join(townRoot, ".beads"), townRoot)
 	}
 
 	return routes, townRoot

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/hooks"
@@ -1018,33 +1019,20 @@ func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, is
 }
 
 // findTownBeadsDir finds the town-level .beads directory (where routes.jsonl lives).
-// It walks up from the current directory looking for a .beads directory with routes.jsonl.
+// It follows the active beads directory for this command so nested towns do not
+// override the authoritative routing context.
 func findTownBeadsDir() (string, error) {
-	// Start from current directory and walk up
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", err
+	currentBeadsDir := resolveCommandBeadsDir(dbPath)
+	if currentBeadsDir == "" {
+		currentBeadsDir = beads.FindBeadsDir()
 	}
 
-	for {
-		beadsDir := filepath.Join(dir, ".beads")
-		routesFile := filepath.Join(beadsDir, routing.RoutesFileName)
-
-		// Check if this .beads directory has routes.jsonl
-		if _, err := os.Stat(routesFile); err == nil {
-			return beadsDir, nil
-		}
-
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-		dir = parent
+	townBeadsDir := routing.ResolveTownBeadsDir(currentBeadsDir)
+	if townBeadsDir == "" {
+		return "", fmt.Errorf("no routes.jsonl found for current beads directory")
 	}
 
-	return "", fmt.Errorf("no routes.jsonl found in any parent .beads directory")
+	return townBeadsDir, nil
 }
 
 // formatTimeForRPC converts a *time.Time to RFC3339 string for RPC calls.
