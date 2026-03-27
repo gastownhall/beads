@@ -1117,6 +1117,9 @@ type WorkFilter struct {
 	// Parent filtering: filter to descendants of a bead/epic (recursive)
 	ParentID *string // Show all descendants of this issue
 
+	// Molecule filtering: filter to direct children of this molecule
+	MoleculeID string // If set, only return issues that are children of this molecule
+
 	// Molecule type filtering
 	MolType *MolType // Filter by molecule type (nil = any, swarm/patrol/work)
 
