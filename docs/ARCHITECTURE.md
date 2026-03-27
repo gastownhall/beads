@@ -49,7 +49,7 @@ bd's core design enables a distributed, Dolt-powered issue tracker that feels li
 
 **Dolt for distribution:** Native push/pull to Dolt remotes (DoltHub, S3, GCS). No special sync server needed. Issues travel with your code. Offline work just works.
 
-**Export and backup:** `bd export` outputs issue JSONL for data migration and interoperability. Use `bd backup add` / `bd backup sync` to push Dolt-native backups (preserving full commit history) to a filesystem path or DoltHub, and `bd backup restore` to restore from them.
+**Export and backup:** `bd export` outputs issue JSONL for data migration and interoperability. Use `bd backup init` / `bd backup sync` to push Dolt-native backups (preserving full commit history) to a filesystem path or DoltHub, and `bd backup restore` to restore from them.
 
 ## Write Path
 

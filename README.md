@@ -137,7 +137,7 @@ Back up your database and migrate between modes using `bd backup`:
 
 ```bash
 # Set up a backup destination and push
-bd backup add /path/to/backup
+bd backup init /path/to/backup
 bd backup sync
 
 # Restore into a new project (any mode)

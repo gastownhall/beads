@@ -95,7 +95,7 @@ Both directions preserve full Dolt commit history.
 
    ```bash
    # In the server-mode project directory
-   bd backup add /path/to/backup-dir
+   bd backup init /path/to/backup-dir
    bd backup sync
    ```
 
@@ -126,7 +126,7 @@ Both directions preserve full Dolt commit history.
 
    ```bash
    # In the embedded-mode project directory
-   bd backup add /path/to/backup-dir
+   bd backup init /path/to/backup-dir
    bd backup sync
    ```
 
@@ -149,7 +149,7 @@ Both directions preserve full Dolt commit history.
 
 | Command | Description |
 |---------|-------------|
-| `bd backup add <path>` | Register a backup destination (filesystem or DoltHub URL) |
+| `bd backup init <path>` | Register a backup destination (filesystem or DoltHub URL) |
 | `bd backup sync` | Push database to the configured backup destination |
 | `bd backup restore [path]` | Restore from a backup directory (`--force` to overwrite) |
 | `bd backup remove` | Unregister the backup destination |
