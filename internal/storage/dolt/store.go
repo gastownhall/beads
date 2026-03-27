@@ -571,14 +571,43 @@ func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
 	return versioncontrolops.BackupRemove(ctx, s.db, name)
 }
 
-// BackupExportTables exports all tables to JSONL files in dir.
-func (s *DoltStore) BackupExportTables(ctx context.Context, dir, prefix string) (*storage.BackupCounts, error) {
-	return versioncontrolops.ExportTables(ctx, s.db, dir, prefix)
+// BackupDatabase registers dir as a file:// Dolt backup remote and syncs
+// the full database to it, preserving complete commit history.
+func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("backup destination does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup destination is not a directory: %s", dir)
+	}
+
+	backupURL := "file://" + dir
+	backupName := "backup_export"
+
+	// Register as a backup remote (idempotent — remove first if exists).
+	_ = versioncontrolops.BackupRemove(ctx, s.db, backupName)
+	if err := versioncontrolops.BackupAdd(ctx, s.db, backupName, backupURL); err != nil {
+		return fmt.Errorf("register backup remote: %w", err)
+	}
+	if err := versioncontrolops.BackupSync(ctx, s.db, backupName); err != nil {
+		return fmt.Errorf("sync to backup: %w", err)
+	}
+	return nil
 }
 
-// BackupRestoreFromDir restores all JSONL tables from dir.
-func (s *DoltStore) BackupRestoreFromDir(ctx context.Context, dir, prefix string, dryRun bool) (*storage.BackupRestoreResult, error) {
-	return versioncontrolops.RestoreFromDir(ctx, s.db, s, dir, prefix, dryRun)
+// RestoreDatabase restores the database from a Dolt backup at dir.
+func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("backup source does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup source is not a directory: %s", dir)
+	}
+
+	backupURL := "file://" + dir
+	return versioncontrolops.BackupRestore(ctx, s.db, backupURL, s.database)
 }
 
 // QueryContext wraps s.db.QueryContext with retry for transient errors.
