@@ -36,6 +36,7 @@ var trackedRuntimePatterns = []string{
 	// Runtime state
 	"interactions.jsonl",
 	"push-state.json",
+	"export-state.json",
 	"sync-state.json",
 	"last-touched",
 	".local_version",
