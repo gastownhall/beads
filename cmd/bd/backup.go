@@ -15,13 +15,13 @@ var backupCmd = &cobra.Command{
 	Long: `Back up your beads database for off-machine recovery.
 
 Commands:
-  bd backup status         Show backup status
-  bd backup restore [path] Restore from a backup directory
-  bd backup init <path>    Set up a backup destination (filesystem or DoltHub)
+  bd backup add <path>     Add a backup destination (filesystem or DoltHub)
   bd backup sync           Push to configured backup destination
+  bd backup restore [path] Restore from a backup directory
+  bd backup status         Show backup status
 
 DoltHub is recommended for cloud backup:
-  bd backup init https://doltremoteapi.dolthub.com/<user>/<repo>
+  bd backup add https://doltremoteapi.dolthub.com/<user>/<repo>
   Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.`,
 	GroupID: "sync",
 }

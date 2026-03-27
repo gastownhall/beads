@@ -88,6 +88,10 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 		}
 	}
 
+	// Register the restore source as the backup destination so
+	// `bd backup sync` works immediately without a separate `bd backup add`.
+	registerBackupRemote(ctx, bs, dir)
+
 	if err := s.Commit(ctx, "bd backup restore"); err != nil {
 		if !strings.Contains(err.Error(), "nothing to commit") {
 			return fmt.Errorf("failed to commit restore: %w", err)
@@ -95,6 +99,22 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 	}
 
 	return nil
+}
+
+// registerBackupRemote registers dir as the default backup remote and saves
+// the local backup config. Errors are non-fatal warnings.
+func registerBackupRemote(ctx context.Context, bs storage.BackupStore, dir string) {
+	backupURL := resolveDoltBackupURL(dir)
+
+	// Remove + re-add to handle the case where a remote already exists.
+	_ = bs.BackupRemove(ctx, defaultDoltBackupName)
+	if err := bs.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to register backup remote: %v\n", err)
+		return
+	}
+	if err := saveDoltBackupConfig(backupURL); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: backup registered but failed to save config: %v\n", err)
+	}
 }
 
 // syncProjectIDFromDB reads _project_id from the restored database and

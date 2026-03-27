@@ -78,6 +78,16 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 		return 0, nil
 	}
 
+	// If schema_migrations is empty but core tables already exist (e.g. restored
+	// from a DoltStore backup that doesn't track embedded migrations), backfill
+	// all versions so we don't re-run migrations that would fail on "already exists".
+	if current == 0 {
+		var tableCount int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'issues' AND table_schema = DATABASE()").Scan(&tableCount); err == nil && tableCount > 0 {
+			return backfillMigrations(ctx, tx)
+		}
+	}
+
 	// Collect and sort migration files.
 	entries, err := fs.ReadDir(upMigrations, "schema")
 	if err != nil {
@@ -130,4 +140,30 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 	}
 
 	return len(pending), nil
+}
+
+// backfillMigrations marks all known migrations as applied without executing them.
+// Used when a database is restored from a backup that predates the schema_migrations
+// tracking table — the schema is already correct, we just need to record that fact.
+func backfillMigrations(ctx context.Context, tx *sql.Tx) (int, error) {
+	entries, err := fs.ReadDir(upMigrations, "schema")
+	if err != nil {
+		return 0, fmt.Errorf("reading embedded migrations for backfill: %w", err)
+	}
+
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".up.sql") {
+			continue
+		}
+		v, err := parseVersion(e.Name())
+		if err != nil {
+			return 0, fmt.Errorf("parsing migration filename %q: %w", e.Name(), err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations (version) VALUES (?)", v); err != nil {
+			return 0, fmt.Errorf("backfilling migration %s: %w", e.Name(), err)
+		}
+		n++
+	}
+	return n, nil
 }
