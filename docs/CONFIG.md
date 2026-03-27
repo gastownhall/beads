@@ -362,6 +362,7 @@ Use these namespaces for external integrations:
 - `linear.*` - Linear integration settings
 - `github.*` - GitHub integration settings
 - `ado.*` - Azure DevOps integration settings
+- `targetprocess.*` - Targetprocess integration settings
 - `custom.*` - Custom integration settings
 
 ### Status and Type Customization
@@ -642,6 +643,106 @@ bd config set jira.type_map.bug "Bug"
 bd config set jira.type_map.feature "Story"
 bd config set jira.type_map.task "Task"
 ```
+
+### Example: Targetprocess Integration
+
+Targetprocess integration provides bidirectional sync between bd and Targetprocess using both REST APIs:
+- `v2` for pull/read operations
+- `v1` for create/update operations
+
+In other words, `v2` is treated as an extension to `v1`, not a replacement for it.
+
+**Required configuration:**
+
+```bash
+# Account URL (can also use TARGETPROCESS_URL)
+bd config set targetprocess.url "https://company.tpondemand.com"
+
+# Project ID to scope pull/create operations (can also use TARGETPROCESS_PROJECT_ID)
+bd config set targetprocess.project_id "123"
+
+# Preferred authentication: personal access token (can also use TARGETPROCESS_ACCESS_TOKEN)
+bd config set targetprocess.access_token "YOUR_ACCESS_TOKEN"
+```
+
+**Alternative authentication:**
+
+```bash
+# Service token from /api/v1/Authentication
+bd config set targetprocess.token "YOUR_SERVICE_TOKEN"
+
+# Or basic auth
+bd config set targetprocess.username "login"
+bd config set targetprocess.password "password"
+```
+
+**Status mapping (Targetprocess workflow states → Beads statuses):**
+
+Use custom state-name mappings when your account uses non-default workflow names:
+
+```bash
+bd config set targetprocess.status_map.open "Open"
+bd config set targetprocess.status_map.in_progress "In Progress"
+bd config set targetprocess.status_map.blocked "Blocked"
+bd config set targetprocess.status_map.deferred "Deferred"
+bd config set targetprocess.status_map.closed "Done"
+```
+
+**Type mapping (Targetprocess entity types ↔ Beads issue types):**
+
+The built-in defaults are:
+- `Bug` → `bug`
+- `UserStory` → `feature`
+- `feature`, `epic`, `task`, `chore` push back as `UserStory`
+
+Override them when needed:
+
+```bash
+bd config set targetprocess.type_map.bug "Bug"
+bd config set targetprocess.type_map.feature "UserStory"
+bd config set targetprocess.type_map.task "UserStory"
+bd config set targetprocess.type_map.epic "UserStory"
+bd config set targetprocess.type_map.chore "UserStory"
+```
+
+**Optional filters:**
+
+```bash
+# Only import a subset of project items during pull
+# This expression is passed through to the v2 `where` clause.
+bd config set targetprocess.pull_where "owner.id=7"
+
+# Only push issues whose bd IDs start with these prefixes
+bd config set targetprocess.push_prefix "bd,app,ops"
+```
+
+**Sync commands:**
+
+```bash
+# Bidirectional sync (pull then push, with conflict resolution)
+bd targetprocess sync
+
+# Pull only (import from Targetprocess)
+bd targetprocess sync --pull
+
+# Push only (export to Targetprocess)
+bd targetprocess sync --push
+
+# Dry run (preview without changes)
+bd targetprocess sync --dry-run
+
+# Conflict resolution options
+bd targetprocess sync --prefer-local
+bd targetprocess sync --prefer-targetprocess
+# Default: newer timestamp wins
+
+# Check sync status
+bd targetprocess status
+```
+
+**Automatic sync tracking:**
+
+The `targetprocess.last_sync` config key is automatically updated after each sync, enabling incremental sync (only fetch items updated since the last successful sync). Pull uses Targetprocess `v2` query semantics; push and point updates use `v1`.
 
 ### Example: Linear Integration
 
