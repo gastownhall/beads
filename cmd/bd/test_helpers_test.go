@@ -373,6 +373,7 @@ func openExistingTestDB(t *testing.T, dbPath string) (*dolt.DoltStore, error) {
 func runCommandInDir(dir string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
+	cmd.Env = testEnvNoPrompt()
 	return cmd.Run()
 }
 
@@ -380,11 +381,21 @@ func runCommandInDir(dir string, name string, args ...string) error {
 func runCommandInDirWithOutput(dir string, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
+	cmd.Env = testEnvNoPrompt()
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// testEnvNoPrompt returns the current environment with git auth prompts
+// suppressed. Prevents ksshaskpass/SSH_ASKPASS popups during tests that
+// configure fake git remotes (e.g. github.com/test/repo.git).
+func testEnvNoPrompt() []string {
+	env := os.Environ()
+	env = append(env, "GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS=", "GIT_ASKPASS=")
+	return env
 }
 
 // captureStderr captures stderr output from fn and returns it as a string.
