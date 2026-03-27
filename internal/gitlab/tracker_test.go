@@ -45,6 +45,66 @@ func TestIsExternalRef(t *testing.T) {
 	}
 }
 
+func TestIsExternalRef_SelfHosted(t *testing.T) {
+	// Self-hosted GitLab instance without "gitlab" in the URL.
+	// The tracker must recognize refs from its configured base URL.
+	tr := &Tracker{
+		client: NewClient("token", "https://git.company.com", "42"),
+	}
+	tests := []struct {
+		ref  string
+		want bool
+	}{
+		{"https://git.company.com/team/repo/-/issues/99", true},
+		{"https://git.company.com/org/project/-/issues/1", true},
+		{"https://other-server.com/team/repo/-/issues/5", false},
+		{"https://github.com/org/repo/issues/1", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := tr.IsExternalRef(tt.ref); got != tt.want {
+			t.Errorf("IsExternalRef(%q) = %v, want %v", tt.ref, got, tt.want)
+		}
+	}
+}
+
+func TestIsExternalRef_FallbackFormat(t *testing.T) {
+	// The fallback format "gitlab:IDENTIFIER" is used when URL is empty.
+	tr := &Tracker{}
+	tests := []struct {
+		ref  string
+		want bool
+	}{
+		{"gitlab:42", true},
+		{"gitlab:TEST-1", true},
+		{"linear:PROJ-123", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := tr.IsExternalRef(tt.ref); got != tt.want {
+			t.Errorf("IsExternalRef(%q) = %v, want %v", tt.ref, got, tt.want)
+		}
+	}
+}
+
+func TestExtractIdentifier_FallbackFormat(t *testing.T) {
+	tr := &Tracker{}
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"https://gitlab.com/group/project/-/issues/42", "42"},
+		{"gitlab:99", "99"},
+		{"gitlab:TEST-1", "TEST-1"},
+		{"not-a-url", ""},
+	}
+	for _, tt := range tests {
+		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
+			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+}
+
 func TestExtractIdentifier(t *testing.T) {
 	tr := &Tracker{}
 	tests := []struct {

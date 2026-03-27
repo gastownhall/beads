@@ -239,6 +239,96 @@ func TestEnginePushOnly(t *testing.T) {
 	}
 }
 
+func TestEnginePushNoDuplicatesOnSecondSync(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// Create a local issue without external_ref
+	issue := &types.Issue{
+		ID:        "bd-dup1",
+		Title:     "Issue that should not be duplicated",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	trk := newMockTracker("test")
+	engine := NewEngine(trk, store, "test-actor")
+
+	// First sync: should create the issue externally
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("First Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("First sync Stats.Created = %d, want 1", result.Stats.Created)
+	}
+
+	// Verify external_ref was stored
+	updated, err := store.GetIssue(ctx, "bd-dup1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if updated.ExternalRef == nil || *updated.ExternalRef == "" {
+		t.Fatal("external_ref not stored after first sync")
+	}
+
+	// Second sync: should NOT create a duplicate — issue already has external_ref
+	trk2 := newMockTracker("test")
+	engine2 := NewEngine(trk2, store, "test-actor")
+
+	result2, err := engine2.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Second Sync() error: %v", err)
+	}
+	if result2.Stats.Created != 0 {
+		t.Errorf("Second sync Stats.Created = %d, want 0 (no duplicates)", result2.Stats.Created)
+	}
+	if len(trk2.created) != 0 {
+		t.Errorf("Second sync tracker.created = %d, want 0", len(trk2.created))
+	}
+}
+
+func TestEnginePushStoresSourceSystem(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:        "bd-ss1",
+		Title:     "Issue for source_system test",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	trk := newMockTracker("test")
+	engine := NewEngine(trk, store, "test-actor")
+
+	if _, err := engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+
+	// Verify source_system was stored
+	updated, err := store.GetIssue(ctx, "bd-ss1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if updated.SourceSystem == "" {
+		t.Error("source_system not stored after push")
+	}
+	if !strings.HasPrefix(updated.SourceSystem, "test:") {
+		t.Errorf("source_system = %q, want prefix %q", updated.SourceSystem, "test:")
+	}
+}
+
 func TestEngineDryRun(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

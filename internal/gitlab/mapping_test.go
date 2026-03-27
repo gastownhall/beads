@@ -402,6 +402,21 @@ func TestBeadsIssueToGitLabFields_StateEvent(t *testing.T) {
 	}
 }
 
+func TestBeadsIssueToGitLabFields_StateEventReopen(t *testing.T) {
+	config := DefaultMappingConfig()
+
+	openIssue := &types.Issue{
+		Title:  "Reopened task",
+		Status: types.StatusOpen,
+	}
+
+	fields := BeadsIssueToGitLabFields(openIssue, config)
+
+	if fields["state_event"] != "reopen" {
+		t.Errorf("fields[\"state_event\"] = %v, want \"reopen\"", fields["state_event"])
+	}
+}
+
 // TestissueLinksToDependencies verifies conversion of GitLab IssueLinks to beads Dependencies.
 func TestIssueLinksToDependencies(t *testing.T) {
 	config := DefaultMappingConfig()
