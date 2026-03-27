@@ -1148,6 +1148,34 @@ type StaleFilter struct {
 	Limit  int    // Maximum issues to return
 }
 
+// WispFilter is used to filter ListWisps queries.
+// All fields are optional (zero value = no filter).
+// ListWisps always restricts to ephemeral issues (Ephemeral=true).
+type WispFilter struct {
+	// Type filters by issue type (e.g., "agent", "task", "patrol").
+	// nil = any type.
+	Type *IssueType
+
+	// Status filters by issue status.
+	// nil = non-closed only (open, in_progress, blocked).
+	Status *Status
+
+	// UpdatedAfter excludes wisps last updated before this time.
+	// Use this for age-based filtering (e.g., only wisps updated in the last hour).
+	UpdatedAfter *time.Time
+
+	// UpdatedBefore excludes wisps last updated after this time.
+	// Use this for staleness detection.
+	UpdatedBefore *time.Time
+
+	// IncludeClosed includes closed wisps in the results.
+	// When true and Status is nil, all statuses are returned.
+	IncludeClosed bool
+
+	// Limit caps the number of results returned (0 = no limit).
+	Limit int
+}
+
 // EpicStatus represents an epic with its completion status
 type EpicStatus struct {
 	Epic             *Issue `json:"epic"`
