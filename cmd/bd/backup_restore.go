@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -18,6 +20,8 @@ var backupRestoreCmd = &cobra.Command{
 
 By default, reads from .beads/backup/ (or the configured backup directory).
 Optionally specify a path to a directory containing a Dolt backup.
+
+Use --force to overwrite an existing database with the backup contents.
 
 The database must already be initialized (run 'bd init' first if needed).
 To initialize and restore in one step, use: bd init && bd backup restore`,
@@ -40,7 +44,9 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			return err
 		}
 
-		if err := runBackupRestore(ctx, store, dir); err != nil {
+		force, _ := cmd.Flags().GetBool("force")
+
+		if err := runBackupRestore(ctx, store, dir, force); err != nil {
 			return err
 		}
 
@@ -53,11 +59,12 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 }
 
 func init() {
+	backupRestoreCmd.Flags().Bool("force", false, "Overwrite existing database with backup contents")
 	backupCmd.AddCommand(backupRestoreCmd)
 }
 
 // runBackupRestore restores the database from a Dolt-native backup.
-func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string) error {
+func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, force bool) error {
 	if s == nil {
 		return fmt.Errorf("database is not initialized. Run 'bd init' first")
 	}
@@ -67,8 +74,18 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string) er
 		return fmt.Errorf("storage backend does not support backup operations")
 	}
 
-	if err := bs.RestoreDatabase(ctx, dir); err != nil {
+	if err := bs.RestoreDatabase(ctx, dir, force); err != nil {
 		return err
+	}
+
+	// After a force restore, the database's _project_id may differ from
+	// metadata.json (the backup came from a different project). Sync
+	// metadata.json to match the restored database so the identity check
+	// doesn't reject subsequent connections.
+	if force {
+		if err := syncProjectIDFromDB(ctx, s); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync project ID after restore: %v\n", err)
+		}
 	}
 
 	if err := s.Commit(ctx, "bd backup restore"); err != nil {
@@ -78,6 +95,32 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string) er
 	}
 
 	return nil
+}
+
+// syncProjectIDFromDB reads _project_id from the restored database and
+// updates metadata.json to match, preventing identity mismatch errors.
+func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
+	dbID, err := s.GetMetadata(ctx, "_project_id")
+	if err != nil || dbID == "" {
+		return err
+	}
+
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return fmt.Errorf("cannot find .beads directory")
+	}
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return err
+	}
+
+	if cfg.ProjectID == dbID {
+		return nil // already in sync
+	}
+
+	cfg.ProjectID = dbID
+	return cfg.Save(beadsDir)
 }
 
 func validateBackupRestoreDir(dir string) error {

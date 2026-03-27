@@ -196,7 +196,8 @@ type BackupStore interface {
 	// the full database to it, preserving complete commit history.
 	BackupDatabase(ctx context.Context, dir string) error
 	// RestoreDatabase restores the database from a Dolt backup at dir.
-	RestoreDatabase(ctx context.Context, dir string) error
+	// When force is true, the existing database is dropped before restoring.
+	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 
 // Transaction provides atomic multi-operation support within a single database transaction.
