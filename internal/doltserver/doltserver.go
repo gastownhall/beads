@@ -668,7 +668,6 @@ func Start(beadsDir string) (*State, error) {
 		cmd := exec.Command(doltBin, "sql-server", //nolint:gosec // doltBin is resolved from PATH, not user input
 			"-H", cfg.Host,
 			"-P", strconv.Itoa(actualPort),
-			"-l", "debug",
 		)
 		cmd.Dir = doltDir
 		cmd.Stdout = logFile
