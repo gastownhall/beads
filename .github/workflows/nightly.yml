@@ -63,7 +63,7 @@ jobs:
           fi
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         if: success()
         with:
           file: ./coverage.out
