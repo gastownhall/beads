@@ -131,10 +131,12 @@ func TestFindDatabasePath_CwdPriority(t *testing.T) {
 	}
 
 	resultResolved, _ := filepath.EvalSymlinks(result)
-	if !isUnder(resultResolved, rigDir) {
-		t.Errorf("FindDatabasePath() = %q, want path under %q (rig's .beads should win)", result, rigDir)
+	rigDirResolved, _ := filepath.EvalSymlinks(rigDir)
+	rootBeadsDirResolved, _ := filepath.EvalSymlinks(rootBeadsDir)
+	if !isUnder(resultResolved, rigDirResolved) {
+		t.Errorf("FindDatabasePath() = %q, want path under %q (rig's .beads should win)", result, rigDirResolved)
 	}
-	if isUnder(resultResolved, rootBeadsDir) {
+	if isUnder(resultResolved, rootBeadsDirResolved) {
 		t.Errorf("FindDatabasePath() = %q, should NOT be under root's .beads %q", result, rootBeadsDir)
 	}
 }
