@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -140,11 +141,22 @@ func maybeAutoPush(ctx context.Context) {
 	// Push
 	debug.Logf("dolt auto-push: pushing to origin...\n")
 	if err := st.Push(ctx); err != nil {
-		if !isQuiet() && !jsonOutput {
-			fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
+		// Retry with --force on checksum errors (known Dolt issue with chunk dedup).
+		if strings.Contains(err.Error(), "checksum error") {
+			debug.Logf("dolt auto-push: checksum error, retrying with --force...\n")
+			if forceErr := st.ForcePush(ctx); forceErr != nil {
+				if !isQuiet() && !jsonOutput {
+					fmt.Fprintf(os.Stderr, "Warning: dolt auto-push force retry failed: %v\n", forceErr)
+				}
+				return
+			}
+		} else {
+			if !isQuiet() && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
+			}
+			debug.Logf("dolt auto-push: push error: %v\n", err)
+			return
 		}
-		debug.Logf("dolt auto-push: push error: %v\n", err)
-		return
 	}
 
 	// Record last push time and commit to local file
