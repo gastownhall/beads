@@ -43,22 +43,10 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				result.Close()
 				continue
 			}
-			// UpdateIssue automatically clears closed_at when status changes from closed.
-			// Also clear defer_until so the issue appears in bd ready immediately.
-			updates := map[string]interface{}{
-				"status":      string(types.StatusOpen),
-				"defer_until": nil,
-			}
-			if err := issueStore.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+			if err := issueStore.ReopenIssue(ctx, fullID, reason, actor); err != nil {
 				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
 				result.Close()
 				continue
-			}
-			// Add reason as a comment if provided
-			if reason != "" {
-				if err := issueStore.AddComment(ctx, fullID, actor, reason); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to add comment to %s: %v\n", fullID, err)
-				}
 			}
 			if jsonOutput {
 				updated, _ := issueStore.GetIssue(ctx, fullID)
