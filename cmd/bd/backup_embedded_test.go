@@ -46,34 +46,6 @@ func TestEmbeddedBackup(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 
-	t.Run("default_export", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "bkexp")
-		bdCreateSilent(t, bd, dir, "backup test issue 1")
-		bdCreateSilent(t, bd, dir, "backup test issue 2")
-
-		out := bdBackup(t, bd, dir)
-		if !strings.Contains(out, "Backup complete") {
-			t.Errorf("expected 'Backup complete' in output, got: %s", out)
-		}
-
-		backupDir := filepath.Join(dir, ".beads", "backup")
-		requireFile(t, backupDir)
-	})
-
-	t.Run("default_export_force", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "bkforce")
-		bdCreateSilent(t, bd, dir, "force backup issue")
-
-		// First backup
-		bdBackup(t, bd, dir)
-
-		// Second backup without --force should succeed (cached or re-run)
-		bdBackup(t, bd, dir)
-
-		// Third backup with --force should re-export
-		bdBackup(t, bd, dir, "--force")
-	})
-
 	t.Run("status_no_backup", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "bkstat0")
 
@@ -83,14 +55,16 @@ func TestEmbeddedBackup(t *testing.T) {
 		}
 	})
 
-	t.Run("status_after_backup", func(t *testing.T) {
+	t.Run("status_after_init_sync", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "bkstat1")
 		bdCreateSilent(t, bd, dir, "status test issue")
 
-		bdBackup(t, bd, dir)
+		backupDest := filepath.Join(t.TempDir(), "dolt-backup-status")
+		backupURL := "file://" + backupDest
+		bdBackup(t, bd, dir, "init", backupURL)
+		bdBackup(t, bd, dir, "sync")
 
 		out := bdBackup(t, bd, dir, "status")
-		// Status should show something about the backup (format may vary)
 		if out == "" {
 			t.Error("expected non-empty status output")
 		}
@@ -175,6 +149,11 @@ func TestEmbeddedBackupConcurrent(t *testing.T) {
 		bdCreateSilent(t, bd, dir, fmt.Sprintf("concurrent backup issue %d", i))
 	}
 
+	// Set up a backup destination for sync
+	backupDest := filepath.Join(t.TempDir(), "dolt-backup-concurrent")
+	backupURL := "file://" + backupDest
+	bdBackup(t, bd, dir, "init", backupURL)
+
 	const numWorkers = 5
 
 	type result struct {
@@ -190,7 +169,7 @@ func TestEmbeddedBackupConcurrent(t *testing.T) {
 	for w := 0; w < numWorkers; w++ {
 		go func(worker int) {
 			defer wg.Done()
-			cmd := exec.Command(bd, "backup", "--force")
+			cmd := exec.Command(bd, "backup", "sync")
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
 			out, err := cmd.CombinedOutput()
@@ -215,6 +194,7 @@ func TestEmbeddedBackupConcurrent(t *testing.T) {
 	}
 	t.Logf("%d/%d backup workers succeeded", successes, numWorkers)
 
-	backupDir := filepath.Join(dir, ".beads", "backup")
-	requireFile(t, backupDir)
+	if _, err := os.Stat(backupDest); os.IsNotExist(err) {
+		t.Error("backup destination should exist after concurrent syncs")
+	}
 }

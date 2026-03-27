@@ -266,23 +266,22 @@ func (s *EmbeddedDoltStore) BackupRemove(ctx context.Context, name string) error
 	})
 }
 
-// BackupExportTables registers dir as a file:// Dolt backup remote and syncs
+// BackupDatabase registers dir as a file:// Dolt backup remote and syncs
 // the database to it. The dir must exist locally. This preserves full Dolt
-// commit history (unlike the DoltStore JSONL export path).
-func (s *EmbeddedDoltStore) BackupExportTables(ctx context.Context, dir, _ string) (*storage.BackupCounts, error) {
-	// Precondition: dir must exist.
+// commit history.
+func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
-		return nil, fmt.Errorf("backup destination does not exist: %w", err)
+		return fmt.Errorf("backup destination does not exist: %w", err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("backup destination is not a directory: %s", dir)
+		return fmt.Errorf("backup destination is not a directory: %s", dir)
 	}
 
 	backupURL := "file://" + dir
 	backupName := "backup_export"
 
-	return &storage.BackupCounts{}, s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		// Register as a backup remote (idempotent — remove first if exists).
 		_ = versioncontrolops.BackupRemove(ctx, db, backupName)
 		if err := versioncontrolops.BackupAdd(ctx, db, backupName, backupURL); err != nil {
@@ -295,24 +294,20 @@ func (s *EmbeddedDoltStore) BackupExportTables(ctx context.Context, dir, _ strin
 	})
 }
 
-// BackupRestoreFromDir restores the database from a Dolt backup at dir.
+// RestoreDatabase restores the database from a Dolt backup at dir.
 // The dir must exist locally and contain a valid Dolt backup.
-// Dry-run is not supported for embedded Dolt backup restore.
-func (s *EmbeddedDoltStore) BackupRestoreFromDir(ctx context.Context, dir, _ string, dryRun bool) (*storage.BackupRestoreResult, error) {
-	if dryRun {
-		return nil, fmt.Errorf("--dry-run is not supported for embedded Dolt backup restore")
-	}
+func (s *EmbeddedDoltStore) RestoreDatabase(ctx context.Context, dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
-		return nil, fmt.Errorf("backup source does not exist: %w", err)
+		return fmt.Errorf("backup source does not exist: %w", err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("backup source is not a directory: %s", dir)
+		return fmt.Errorf("backup source is not a directory: %s", dir)
 	}
 
 	backupURL := "file://" + dir
 
-	return &storage.BackupRestoreResult{}, s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.BackupRestore(ctx, db, backupURL, s.database)
 	})
 }
