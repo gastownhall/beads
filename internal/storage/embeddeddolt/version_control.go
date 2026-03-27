@@ -278,7 +278,10 @@ func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) erro
 		return fmt.Errorf("backup destination is not a directory: %s", dir)
 	}
 
-	backupURL := "file://" + dir
+	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	if err != nil {
+		return err
+	}
 	backupName := "backup_export"
 
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -296,7 +299,8 @@ func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) erro
 
 // RestoreDatabase restores the database from a Dolt backup at dir.
 // The dir must exist locally and contain a valid Dolt backup.
-func (s *EmbeddedDoltStore) RestoreDatabase(ctx context.Context, dir string) error {
+// When force is true, an existing database is overwritten.
+func (s *EmbeddedDoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return fmt.Errorf("backup source does not exist: %w", err)
@@ -305,9 +309,12 @@ func (s *EmbeddedDoltStore) RestoreDatabase(ctx context.Context, dir string) err
 		return fmt.Errorf("backup source is not a directory: %s", dir)
 	}
 
-	backupURL := "file://" + dir
+	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	if err != nil {
+		return err
+	}
 
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.BackupRestore(ctx, db, backupURL, s.database)
+		return versioncontrolops.BackupRestore(ctx, db, backupURL, s.database, force)
 	})
 }

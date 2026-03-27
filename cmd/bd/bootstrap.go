@@ -283,7 +283,7 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 		return fmt.Errorf("commit init: %w", err)
 	}
 
-	if err := runBackupRestore(ctx, s, plan.BackupDir); err != nil {
+	if err := runBackupRestore(ctx, s, plan.BackupDir, false); err != nil {
 		return fmt.Errorf("restore from backup: %w", err)
 	}
 

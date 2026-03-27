@@ -582,7 +582,10 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 		return fmt.Errorf("backup destination is not a directory: %s", dir)
 	}
 
-	backupURL := "file://" + dir
+	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	if err != nil {
+		return err
+	}
 	backupName := "backup_export"
 
 	// Register as a backup remote (idempotent — remove first if exists).
@@ -597,7 +600,8 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 }
 
 // RestoreDatabase restores the database from a Dolt backup at dir.
-func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string) error {
+// When force is true, an existing database is overwritten.
+func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return fmt.Errorf("backup source does not exist: %w", err)
@@ -606,8 +610,11 @@ func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string) error {
 		return fmt.Errorf("backup source is not a directory: %s", dir)
 	}
 
-	backupURL := "file://" + dir
-	return versioncontrolops.BackupRestore(ctx, s.db, backupURL, s.database)
+	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	if err != nil {
+		return err
+	}
+	return versioncontrolops.BackupRestore(ctx, s.db, backupURL, s.database, force)
 }
 
 // QueryContext wraps s.db.QueryContext with retry for transient errors.
