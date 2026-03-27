@@ -210,12 +210,12 @@ Examples:
 		}
 
 		// Guardrail: never run mutating bd doctor fix from orchestrator workspace root.
-		// Town-level repair must go through `gt doctor --fix` because workspace roots
-		// have additional invariants beyond beads-only repos.
+		// Workspace roots have additional invariants beyond single-project repos;
+		// repairs should go through the orchestrator's own doctor command.
 		if doctorFix && isOrchestratorRoot(absPath) {
 			FatalErrorWithHint(
 				"refusing to run 'bd doctor --fix' at orchestrator workspace root",
-				"Use 'gt doctor --fix' from workspace root, or run 'bd doctor --fix' inside a specific rig clone (e.g. <rig>/mayor/rig)",
+				"Run the orchestrator's doctor command from workspace root, or run 'bd doctor --fix' inside a specific project clone",
 			)
 		}
 
