@@ -138,7 +138,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 			return nil, err
 		}
 		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
-		args = append(args, "$."+filter.HasMetadataKey)
+		args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
 	}
 
 	// Metadata field equality filters (GH#1406)
@@ -153,7 +153,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 				return nil, err
 			}
 			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, "$."+k, filter.MetadataFields[k])
+			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
 		}
 	}
 
