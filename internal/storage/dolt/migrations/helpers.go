@@ -65,7 +65,7 @@ func indexExists(db *sql.DB, table, indexName string) bool {
 func constraintExists(db *sql.DB, table, constraint string) (bool, error) {
 	var tableName, createStmt string
 	//nolint:gosec // G202: table name is an internal constant
-	err := db.QueryRow("SHOW CREATE TABLE `" + table + "`").Scan(&tableName, &createStmt)
+	err := db.QueryRow("SHOW CREATE TABLE `"+table+"`").Scan(&tableName, &createStmt)
 	if err != nil {
 		if isTableNotFoundError(err) {
 			return false, nil

@@ -22,6 +22,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 		ctx := rootCtx
 
 		reopenedIssues := []*types.Issue{}
+		hasError := false
 		if store == nil {
 			FatalErrorWithHint("database not initialized",
 				diagHint())
@@ -31,6 +32,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				hasError = true
 				continue
 			}
 			fullID := result.ResolvedID
@@ -45,6 +47,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 			}
 			if err := issueStore.ReopenIssue(ctx, fullID, reason, actor); err != nil {
 				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
+				hasError = true
 				result.Close()
 				continue
 			}
@@ -72,6 +75,10 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 
 		if jsonOutput && len(reopenedIssues) > 0 {
 			outputJSON(reopenedIssues)
+		}
+
+		if hasError {
+			os.Exit(1)
 		}
 	},
 }

@@ -49,7 +49,10 @@ func TestGetRoutingConfigValue_YAMLPrecedence(t *testing.T) {
 }
 
 func TestFindTownBeadsDir_PrefersCurrentBeadsDirOverNestedTownCWD(t *testing.T) {
-	outerTownDir := t.TempDir()
+	outerTownDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	outerMayorDir := filepath.Join(outerTownDir, "mayor")
 	if err := os.MkdirAll(outerMayorDir, 0750); err != nil {
