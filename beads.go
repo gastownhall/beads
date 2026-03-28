@@ -121,6 +121,7 @@ type (
 	IssueWithDependencyMetadata = types.IssueWithDependencyMetadata
 	SortPolicy                  = types.SortPolicy
 	EpicStatus                  = types.EpicStatus
+	WispFilter                  = types.WispFilter
 )
 
 // Status constants
