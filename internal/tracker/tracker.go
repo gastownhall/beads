@@ -58,6 +58,24 @@ type IssueTracker interface {
 	BuildExternalRef(issue *TrackerIssue) string
 }
 
+// BatchPushTracker is an optional capability for trackers that can export
+// multiple issues in one remote call.
+type BatchPushTracker interface {
+	BatchPush(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error)
+}
+
+// BatchPushDryRunner is an optional capability for trackers that can preview
+// batch push decisions without mutating the remote system.
+type BatchPushDryRunner interface {
+	BatchPushDryRun(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error)
+}
+
+// PullStatsProvider is an optional capability for trackers that can report
+// raw fetch counts separately from incremental pull candidates.
+type PullStatsProvider interface {
+	LastPullStats() (queried int, candidates int)
+}
+
 // FieldMapper handles bidirectional conversion of issue fields between
 // an external tracker and beads. Each tracker provides its own mapper.
 type FieldMapper interface {

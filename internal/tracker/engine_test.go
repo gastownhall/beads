@@ -66,12 +66,51 @@ type mockTracker struct {
 	fieldMapper FieldMapper
 }
 
+type mockExternalRefTracker struct {
+	*mockTracker
+	buildRef func(*TrackerIssue) string
+	extract  func(string) string
+	isRef    func(string) bool
+}
+
+type mockBatchTracker struct {
+	*mockTracker
+	batchResult   *BatchPushResult
+	batchDryRun   *BatchPushResult
+	batchErr      error
+	batchCalls    int
+	batchDryCalls int
+	batchIssues   []*types.Issue
+	batchForceIDs map[string]bool
+}
+
 func newMockTracker(name string) *mockTracker {
 	return &mockTracker{
 		name:        name,
 		updated:     make(map[string]*types.Issue),
 		fieldMapper: &mockMapper{},
 	}
+}
+
+func (m *mockExternalRefTracker) IsExternalRef(ref string) bool {
+	if m.isRef != nil {
+		return m.isRef(ref)
+	}
+	return m.mockTracker.IsExternalRef(ref)
+}
+
+func (m *mockExternalRefTracker) ExtractIdentifier(ref string) string {
+	if m.extract != nil {
+		return m.extract(ref)
+	}
+	return m.mockTracker.ExtractIdentifier(ref)
+}
+
+func (m *mockExternalRefTracker) BuildExternalRef(issue *TrackerIssue) string {
+	if m.buildRef != nil {
+		return m.buildRef(issue)
+	}
+	return m.mockTracker.BuildExternalRef(issue)
 }
 
 func (m *mockTracker) Name() string                                    { return m.name }
@@ -91,6 +130,32 @@ func (m *mockTracker) ExtractIdentifier(ref string) string {
 }
 func (m *mockTracker) BuildExternalRef(issue *TrackerIssue) string {
 	return fmt.Sprintf("https://%s.test/%s", m.name, issue.Identifier)
+}
+
+func (m *mockBatchTracker) BatchPush(_ context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error) {
+	if m.batchErr != nil {
+		return nil, m.batchErr
+	}
+	m.batchCalls++
+	m.batchIssues = append(m.batchIssues, issues...)
+	m.batchForceIDs = forceIDs
+	if m.batchResult != nil {
+		return m.batchResult, nil
+	}
+	return &BatchPushResult{}, nil
+}
+
+func (m *mockBatchTracker) BatchPushDryRun(_ context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error) {
+	if m.batchErr != nil {
+		return nil, m.batchErr
+	}
+	m.batchDryCalls++
+	m.batchIssues = append(m.batchIssues, issues...)
+	m.batchForceIDs = forceIDs
+	if m.batchDryRun != nil {
+		return m.batchDryRun, nil
+	}
+	return &BatchPushResult{}, nil
 }
 
 func (m *mockTracker) FetchIssues(_ context.Context, _ FetchOptions) ([]TrackerIssue, error) {
@@ -138,7 +203,9 @@ func (m *mockTracker) UpdateIssue(_ context.Context, externalID string, issue *t
 }
 
 // mockMapper implements FieldMapper for testing.
-type mockMapper struct{}
+type mockMapper struct {
+	issueToBeads func(*TrackerIssue) *IssueConversion
+}
 
 func (m *mockMapper) PriorityToBeads(p interface{}) int {
 	if v, ok := p.(int); ok {
@@ -159,6 +226,9 @@ func (m *mockMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {
 }
 
 func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
+	if m.issueToBeads != nil {
+		return m.issueToBeads(ti)
+	}
 	return &IssueConversion{
 		Issue: &types.Issue{
 			Title:       ti.Title,
@@ -167,6 +237,327 @@ func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
 			Status:      types.StatusOpen,
 			IssueType:   types.TypeTask,
 		},
+	}
+}
+
+func TestEnginePullMatchesExistingIssueByLocalID(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Local title",
+		Description: "Local description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         "https://test.test/EXT-1",
+		Title:       "Remote title",
+		Description: "Remote description",
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+				},
+			}
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Created != 0 || result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want Created=0 Updated=1", result.PullStats)
+	}
+	updated, err := store.GetIssue(ctx, "bd-local")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if updated.Title != "Remote title" || updated.Description != "Remote description" {
+		t.Fatalf("issue = %+v", updated)
+	}
+}
+
+func TestEnginePullSkipsNoopUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://www.notion.so/32be5bf97fae804d9e07f93af6c79467"
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Remote title",
+		Description: "Remote description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		Assignee:    "Osamu",
+		Labels:      []string{"alpha", "beta"},
+		ExternalRef: &extRef,
+		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title",
+		Description: "Remote description",
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+					Assignee:    "Osamu",
+					Labels:      []string{"beta", "alpha"},
+				},
+			}
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Created != 0 || result.PullStats.Updated != 0 || result.PullStats.Skipped != 1 {
+		t.Fatalf("PullStats = %+v, want Created=0 Updated=0 Skipped=1", result.PullStats)
+	}
+}
+
+func TestEnginePullUpdatesLabelsOnExistingIssue(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://www.notion.so/32be5bf97fae804d9e07f93af6c79467"
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Remote title",
+		Description: "Remote description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		Assignee:    "Osamu",
+		Labels:      []string{"old-label"},
+		ExternalRef: &extRef,
+		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title",
+		Description: "Remote description",
+		Labels:      []string{"new-a", "new-b"},
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+					Assignee:    "Osamu",
+					Labels:      append([]string(nil), ti.Labels...),
+				},
+			}
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want Updated=1", result.PullStats)
+	}
+	labels, err := store.GetLabels(ctx, "bd-local")
+	if err != nil {
+		t.Fatalf("GetLabels() error: %v", err)
+	}
+	if !equalNormalizedStrings(labels, []string{"new-a", "new-b"}) {
+		t.Fatalf("labels = %v, want [new-a new-b]", labels)
+	}
+}
+
+func TestEnginePullDryRunTreatsLabelOnlyChangeAsUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://www.notion.so/32be5bf97fae804d9e07f93af6c79467"
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Remote title",
+		Description: "Remote description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		Assignee:    "Osamu",
+		Labels:      []string{"old-label"},
+		ExternalRef: &extRef,
+		UpdatedAt:   time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title",
+		Description: "Remote description",
+		Labels:      []string{"new-label"},
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+					Assignee:    "Osamu",
+					Labels:      append([]string(nil), ti.Labels...),
+				},
+			}
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Updated != 1 || result.PullStats.Created != 0 {
+		t.Fatalf("PullStats = %+v, want Updated=1 Created=0", result.PullStats)
+	}
+	labels, err := store.GetLabels(ctx, "bd-local")
+	if err != nil {
+		t.Fatalf("GetLabels() error: %v", err)
+	}
+	if !equalNormalizedStrings(labels, []string{"old-label"}) {
+		t.Fatalf("labels = %v, want [old-label]", labels)
+	}
+}
+
+func TestEnginePullDoesNotTreatPreviousPullAsLocalConflict(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://www.notion.so/32be5bf97fae804d9e07f93af6c79467"
+	issue := &types.Issue{
+		ID:          "bd-local",
+		Title:       "Local title",
+		Description: "Local description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: &extRef,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.fieldMapper = &mockMapper{
+		issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					ID:          "bd-local",
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+				},
+			}
+		},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title 1",
+		Description: "Remote description 1",
+		UpdatedAt:   time.Now().UTC(),
+	}}
+	if _, err := engine.Sync(ctx, SyncOptions{Pull: true}); err != nil {
+		t.Fatalf("first Sync() error: %v", err)
+	}
+
+	tracker.issues = []TrackerIssue{{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		URL:         extRef,
+		Title:       "Remote title 2",
+		Description: "Remote description 2",
+		UpdatedAt:   time.Now().UTC().Add(time.Second),
+	}}
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("second Sync() error: %v", err)
+	}
+	if result.PullStats.Updated != 1 {
+		t.Fatalf("second PullStats = %+v, want Updated=1", result.PullStats)
+	}
+	updated, err := store.GetIssue(ctx, "bd-local")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if updated.Description != "Remote description 2" {
+		t.Fatalf("description = %q, want %q", updated.Description, "Remote description 2")
 	}
 }
 
@@ -192,6 +583,12 @@ func TestEnginePullOnly(t *testing.T) {
 	}
 	if result.Stats.Created != 2 {
 		t.Errorf("Stats.Created = %d, want 2", result.Stats.Created)
+	}
+	if result.PullStats.Created != 2 || result.PullStats.Updated != 0 {
+		t.Errorf("PullStats = %+v, want Created=2 Updated=0", result.PullStats)
+	}
+	if result.PushStats.Created != 0 || result.PushStats.Updated != 0 {
+		t.Errorf("PushStats = %+v, want zero value", result.PushStats)
 	}
 
 	// Verify issues were stored
@@ -234,8 +631,176 @@ func TestEnginePushOnly(t *testing.T) {
 	if result.Stats.Created != 1 {
 		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
 	}
+	if result.PushStats.Created != 1 || result.PushStats.Updated != 0 {
+		t.Errorf("PushStats = %+v, want Created=1 Updated=0", result.PushStats)
+	}
+	if result.PullStats.Created != 0 || result.PullStats.Updated != 0 {
+		t.Errorf("PullStats = %+v, want zero value", result.PullStats)
+	}
 	if len(tracker.created) != 1 {
 		t.Errorf("tracker.created = %d, want 1", len(tracker.created))
+	}
+}
+
+func TestEnginePushUsesBatchTrackerWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	ref := strPtr("https://notion.so/existing")
+	issues := []*types.Issue{
+		{ID: "bd-batch-1", Title: "Create me", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-batch-2", Title: "Update me", Status: types.StatusInProgress, IssueType: types.TypeFeature, Priority: 1, ExternalRef: ref},
+	}
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", issue.ID, err)
+		}
+	}
+
+	tracker := &mockBatchTracker{
+		mockTracker: newMockTracker("notion"),
+		batchResult: &BatchPushResult{
+			Created:  []BatchPushItem{{LocalID: "bd-batch-1", ExternalRef: "https://notion.so/new-page"}},
+			Updated:  []BatchPushItem{{LocalID: "bd-batch-2", ExternalRef: "https://notion.so/existing"}},
+			Warnings: []string{"Skipped unsupported Notion issue types: pm=1"},
+		},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if tracker.batchCalls != 1 {
+		t.Fatalf("batchCalls = %d, want 1", tracker.batchCalls)
+	}
+	if len(tracker.created) != 0 || len(tracker.updated) != 0 {
+		t.Fatalf("fallback create/update path should not run: created=%d updated=%d", len(tracker.created), len(tracker.updated))
+	}
+	if result.PushStats.Created != 1 || result.PushStats.Updated != 1 {
+		t.Fatalf("PushStats = %+v", result.PushStats)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "pm=1") {
+		t.Fatalf("warnings = %#v", result.Warnings)
+	}
+	stored, err := store.GetIssue(ctx, "bd-batch-1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if stored.ExternalRef == nil || *stored.ExternalRef != "https://notion.so/new-page" {
+		t.Fatalf("external_ref = %#v, want batch-created ref", stored.ExternalRef)
+	}
+	storedUpdated, err := store.GetIssue(ctx, "bd-batch-2")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if storedUpdated.ExternalRef == nil || *storedUpdated.ExternalRef != "https://notion.so/existing" {
+		t.Fatalf("updated external_ref = %#v, want batch-updated ref", storedUpdated.ExternalRef)
+	}
+}
+
+func TestEngineDryRunUsesBatchPreviewWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:          "bd-batch-preview",
+		Title:       "Preview me",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://notion.so/existing"),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := &mockBatchTracker{
+		mockTracker: newMockTracker("notion"),
+		batchDryRun: &BatchPushResult{
+			Skipped:  []string{"bd-batch-preview"},
+			Warnings: []string{"Skipped bd-batch-preview: Notion external_ref points outside the current target"},
+		},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+	var msgs []string
+	var warns []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+	engine.OnWarning = func(msg string) { warns = append(warns, msg) }
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if tracker.batchDryCalls != 1 {
+		t.Fatalf("batchDryCalls = %d, want 1", tracker.batchDryCalls)
+	}
+	if tracker.batchCalls != 0 {
+		t.Fatalf("batchCalls = %d, want 0", tracker.batchCalls)
+	}
+	if result.PushStats.Updated != 0 || result.PushStats.Created != 0 {
+		t.Fatalf("PushStats = %+v, want zero create/update", result.PushStats)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "outside the current target") {
+		t.Fatalf("warnings = %#v", result.Warnings)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("msgs = %#v, want no create/update preview lines", msgs)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warns = %#v, want no immediate warning spam", warns)
+	}
+	stored, err := store.GetIssue(ctx, "bd-batch-preview")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if stored.ExternalRef == nil || *stored.ExternalRef != "https://notion.so/existing" {
+		t.Fatalf("external_ref mutated in dry-run: %#v", stored.ExternalRef)
+	}
+}
+
+func TestEnginePushCountsCreateErrors(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:        "bd-createerr1",
+		Title:     "Local issue",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.createErr = fmt.Errorf("push response reported 1 error")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 0 {
+		t.Errorf("Stats.Created = %d, want 0", result.Stats.Created)
+	}
+	if result.Stats.Errors != 1 {
+		t.Errorf("Stats.Errors = %d, want 1", result.Stats.Errors)
+	}
+
+	stored, err := store.GetIssue(ctx, "bd-createerr1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if stored.ExternalRef != nil {
+		t.Fatalf("external_ref = %q, want nil", *stored.ExternalRef)
+	}
+	if len(tracker.created) != 0 {
+		t.Errorf("tracker.created = %d, want 0", len(tracker.created))
 	}
 }
 
@@ -269,6 +834,135 @@ func TestEngineDryRun(t *testing.T) {
 	}
 	if len(issues) != 0 {
 		t.Errorf("stored %d issues in dry-run, want 0", len(issues))
+	}
+}
+
+func TestEnginePullMatchesExistingIssueByExternalIdentifier(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	externalRef := strPtr("https://www.notion.so/0123456789abcdef0123456789abcdef")
+	issue := &types.Issue{
+		ID:          "bd-notion1",
+		Title:       "Existing issue",
+		Description: "old description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: externalRef,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	base := newMockTracker("notion")
+	base.issues = []TrackerIssue{
+		{
+			ID:          "01234567-89ab-cdef-0123-456789abcdef",
+			Identifier:  "01234567-89ab-cdef-0123-456789abcdef",
+			URL:         "https://www.notion.so/0123456789abcdef0123456789abcdef",
+			Title:       "Existing issue updated",
+			Description: "new description",
+			UpdatedAt:   time.Now(),
+		},
+	}
+	tracker := &mockExternalRefTracker{
+		mockTracker: base,
+		buildRef:    func(issue *TrackerIssue) string { return issue.URL },
+		extract: func(ref string) string {
+			ref = strings.TrimSpace(ref)
+			if strings.HasPrefix(ref, "https://www.notion.so/") {
+				ref = strings.TrimPrefix(ref, "https://www.notion.so/")
+			}
+			return strings.ToLower(strings.ReplaceAll(ref, "-", ""))
+		},
+		isRef: func(ref string) bool { return strings.HasPrefix(ref, "https://www.notion.so/") },
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 0 {
+		t.Errorf("Stats.Created = %d, want 0", result.Stats.Created)
+	}
+	if result.Stats.Updated != 1 {
+		t.Errorf("Stats.Updated = %d, want 1", result.Stats.Updated)
+	}
+
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues() error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("stored issues = %d, want 1", len(issues))
+	}
+	if issues[0].ExternalRef == nil || *issues[0].ExternalRef != "https://www.notion.so/0123456789abcdef0123456789abcdef" {
+		t.Fatalf("external_ref = %v, want canonical url", issues[0].ExternalRef)
+	}
+	if issues[0].Title != "Existing issue updated" {
+		t.Fatalf("title = %q, want updated title", issues[0].Title)
+	}
+}
+
+func TestEngineDryRunCountsExistingIssuesAsUpdates(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := strPtr("https://notion.test/EXT-1")
+	issue := &types.Issue{
+		ID:          "bd-existing1",
+		Title:       "Existing issue",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: extRef,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("notion")
+	tracker.issues = []TrackerIssue{
+		{
+			ID:         "EXT-1",
+			Identifier: "EXT-1",
+			URL:        "https://notion.test/EXT-1",
+			Title:      "Existing issue updated",
+			UpdatedAt:  time.Now(),
+		},
+	}
+
+	var messages []string
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.OnMessage = func(msg string) { messages = append(messages, msg) }
+
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Created != 0 {
+		t.Errorf("PullStats.Created = %d, want 0", result.PullStats.Created)
+	}
+	if result.PullStats.Updated != 1 {
+		t.Errorf("PullStats.Updated = %d, want 1", result.PullStats.Updated)
+	}
+	joined := strings.Join(messages, "\n")
+	if strings.Contains(joined, "Would import") {
+		t.Fatalf("messages = %q, want update preview without import", joined)
+	}
+	if !strings.Contains(joined, "Would update local issue") {
+		t.Fatalf("messages = %q, want update preview", joined)
+	}
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues() error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("stored issues = %d, want 1", len(issues))
 	}
 }
 
@@ -362,6 +1056,62 @@ func TestEngineConflictResolution(t *testing.T) {
 	}
 	if conflicts[0].IssueID != "bd-conflict1" {
 		t.Errorf("conflict issue ID = %q, want %q", conflicts[0].IssueID, "bd-conflict1")
+	}
+}
+
+func TestEngineSyncDoesNotCreateFalseConflictsAfterPull(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	lastSync := time.Now().UTC().Add(-1 * time.Hour)
+	if err := store.SetConfig(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetConfig() error: %v", err)
+	}
+
+	issue := &types.Issue{
+		ID:          "bd-sync1",
+		Title:       "Local title",
+		Description: "Local description",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://test.test/EXT-1"),
+		UpdatedAt:   lastSync.Add(-10 * time.Minute),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{
+			ID:          "EXT-1",
+			Identifier:  "EXT-1",
+			URL:         "https://test.test/EXT-1",
+			Title:       "Remote title",
+			Description: "Remote description",
+			UpdatedAt:   lastSync.Add(30 * time.Minute),
+		},
+	}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Conflicts != 0 {
+		t.Fatalf("conflicts = %d, want 0", result.Stats.Conflicts)
+	}
+	if len(tracker.updated) != 0 {
+		t.Fatalf("tracker.updated = %d, want 0", len(tracker.updated))
+	}
+	stored, err := store.GetIssue(ctx, "bd-sync1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if stored.Title != "Remote title" {
+		t.Fatalf("title = %q, want remote title", stored.Title)
 	}
 }
 
@@ -595,6 +1345,121 @@ func TestEnginePushWithShouldPush(t *testing.T) {
 	}
 	if len(tracker.created) != 1 {
 		t.Errorf("tracker.created = %d, want 1", len(tracker.created))
+	}
+}
+
+func TestEnginePushWithShouldPushCanInspectLabels(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, tc := range []struct {
+		id    string
+		title string
+		label string
+	}{
+		{id: "bd-labelpush1", title: "Push labeled", label: "notion-sync"},
+		{id: "bd-labelskip1", title: "Skip unlabeled"},
+	} {
+		issue := &types.Issue{
+			ID:        tc.id,
+			Title:     tc.title,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Priority:  2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", tc.id, err)
+		}
+		if tc.label != "" {
+			if err := store.AddLabel(ctx, tc.id, tc.label, "test-actor"); err != nil {
+				t.Fatalf("AddLabel(%s) error: %v", tc.id, err)
+			}
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		ShouldPush: func(issue *types.Issue) bool {
+			for _, label := range issue.Labels {
+				if label == "notion-sync" {
+					return true
+				}
+			}
+			return false
+		},
+	}
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Errorf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if len(tracker.created) != 1 {
+		t.Fatalf("tracker.created = %d, want 1", len(tracker.created))
+	}
+	if tracker.created[0].ID != "bd-labelpush1" {
+		t.Fatalf("pushed issue ID = %q, want bd-labelpush1", tracker.created[0].ID)
+	}
+}
+
+func TestEngineDryRunTreatsForeignExternalRefAsCreate(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	foreignRef := "https://github.com/example/repo/issues/1"
+	issue := &types.Issue{
+		ID:          "bd-foreign1",
+		Title:       "Mirror me to Notion",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: &foreignRef,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := &mockExternalRefTracker{
+		mockTracker: newMockTracker("notion"),
+		isRef:       func(ref string) bool { return strings.Contains(ref, "notion.so") },
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+
+	var msgs []string
+	engine.OnMessage = func(msg string) { msgs = append(msgs, msg) }
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 {
+		t.Fatalf("Stats.Created = %d, want 1", result.Stats.Created)
+	}
+	if result.Stats.Updated != 0 {
+		t.Fatalf("Stats.Updated = %d, want 0", result.Stats.Updated)
+	}
+	joined := strings.Join(msgs, "\n")
+	if !strings.Contains(joined, "Would create in notion: Mirror me to Notion") {
+		t.Fatalf("messages = %q, want create message", joined)
+	}
+	if strings.Contains(joined, "Would update in notion") {
+		t.Fatalf("messages = %q, did not expect update message", joined)
+	}
+
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues() error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("stored issues = %d, want 1", len(issues))
+	}
+	if issues[0].ExternalRef == nil || *issues[0].ExternalRef != foreignRef {
+		t.Fatalf("external_ref = %v, want %q", issues[0].ExternalRef, foreignRef)
 	}
 }
 
