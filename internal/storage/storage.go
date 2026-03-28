@@ -95,6 +95,12 @@ type Storage interface {
 	MergeSlotAcquire(ctx context.Context, holder, actor string, wait bool) (*MergeSlotResult, error)
 	MergeSlotRelease(ctx context.Context, holder, actor string) error
 
+	// Metadata slots — key-value pairs stored in issue metadata JSON.
+	// Used by gt for delegation tracking, hook state, and other per-issue data.
+	SlotSet(ctx context.Context, issueID, key, value, actor string) error
+	SlotGet(ctx context.Context, issueID, key string) (string, error)
+	SlotClear(ctx context.Context, issueID, key, actor string) error
+
 	// Lifecycle
 	Close() error
 }
