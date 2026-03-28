@@ -35,6 +35,7 @@ var migrationsList = []Migration{
 	{"wisp_events_created_at_index", migrations.MigrateWispEventsCreatedAtIndex},
 	{"custom_status_type_tables", migrations.MigrateCustomStatusTypeTables},
 	{"backfill_custom_tables", migrations.BackfillCustomTables},
+	{"add_crystallizes_column", migrations.MigrateAddCrystallizesColumn},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.
