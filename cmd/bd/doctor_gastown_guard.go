@@ -10,7 +10,7 @@ import (
 //
 // Detection: presence of both:
 //  1. .beads/routes.jsonl (cross-project routing config)
-//  2. mayor/ directory (orchestrator agent workspace)
+//  2. mayor/town.json (orchestrator configuration)
 //
 // This prevents bd doctor --fix from running at the workspace root,
 // where repairs should go through the orchestrator's own doctor command.
@@ -20,12 +20,12 @@ func isOrchestratorRoot(path string) bool {
 	}
 
 	routes := filepath.Join(path, ".beads", "routes.jsonl")
-	mayorDir := filepath.Join(path, "mayor")
+	townJSON := filepath.Join(path, "mayor", "town.json")
 
 	if _, err := os.Stat(routes); err != nil {
 		return false
 	}
-	if fi, err := os.Stat(mayorDir); err != nil || !fi.IsDir() {
+	if _, err := os.Stat(townJSON); err != nil {
 		return false
 	}
 
