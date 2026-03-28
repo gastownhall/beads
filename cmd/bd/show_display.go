@@ -124,11 +124,6 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 	depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
 
-	// Resolve external deps via routing (bd-k0pfm)
-	if externalDeps, err := resolveExternalDepsViaRouting(ctx, issueStore, issue.ID); err == nil {
-		depsWithMeta = append(depsWithMeta, externalDeps...)
-	}
-
 	if len(depsWithMeta) > 0 {
 		var blocks, parent, discovered []*types.IssueWithDependencyMetadata
 		for _, dep := range depsWithMeta {

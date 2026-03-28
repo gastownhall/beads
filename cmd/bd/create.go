@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/hooks"
@@ -159,8 +158,6 @@ var createCmd = &cobra.Command{
 		waitsForGate, _ := cmd.Flags().GetString("waits-for-gate")
 		forceCreate, _ := cmd.Flags().GetBool("force")
 		repoOverride, _ := cmd.Flags().GetString("repo")
-		rigOverride, _ := cmd.Flags().GetString("rig")
-		prefixOverride, _ := cmd.Flags().GetString("prefix")
 		wisp, _ := cmd.Flags().GetBool("ephemeral")
 		noHistory, _ := cmd.Flags().GetBool("no-history")
 		if wisp && noHistory {
@@ -330,58 +327,10 @@ var createCmd = &cobra.Command{
 				if len(deps) > 0 {
 					fmt.Printf("  Dependencies: %s\n", strings.Join(deps, ", "))
 				}
-				if rigOverride != "" || prefixOverride != "" {
-					rig := rigOverride
-					if rig == "" {
-						rig = prefixOverride
-					}
-					fmt.Printf("  Target rig: %s\n", rig)
-				}
 				if eventCategory != "" {
 					fmt.Printf("  Event category: %s\n", eventCategory)
 				}
 			}
-			return
-		}
-
-		// Auto-route based on explicit ID prefix (if no explicit --rig/--prefix provided)
-		// When creating an issue with --id=pq-xxx, automatically route to the database
-		// that handles the pq- prefix based on routes.jsonl
-		if explicitID != "" && rigOverride == "" && prefixOverride == "" {
-			prefix := routing.ExtractPrefix(explicitID)
-			if prefix != "" {
-				// Load routes from town level
-				townBeadsDir, err := findTownBeadsDir()
-				if err == nil {
-					routes, err := routing.LoadTownRoutes(townBeadsDir)
-					if err == nil && len(routes) > 0 {
-						// Check if this prefix matches a route to a different rig
-						for _, route := range routes {
-							if route.Prefix == prefix && route.Path != "" && route.Path != "." {
-								// Found a matching route - auto-route to that rig
-								rigName := routing.ExtractProjectFromPath(route.Path)
-								if rigName != "" {
-									createInRig(cmd, rigName, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, specID, wisp, noHistory)
-									return
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Handle --rig or --prefix flag: create issue in a different rig
-		// Both flags use the same forgiving lookup (accepts rig names or prefixes)
-		targetRig := rigOverride
-		if prefixOverride != "" {
-			if targetRig != "" {
-				FatalError("cannot specify both --rig and --prefix flags")
-			}
-			targetRig = prefixOverride
-		}
-		if targetRig != "" {
-			createInRig(cmd, targetRig, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, specID, wisp, noHistory)
 			return
 		}
 
@@ -829,8 +778,6 @@ func init() {
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")
-	createCmd.Flags().String("rig", "", "Create issue in a different rig (e.g., --rig beads)")
-	createCmd.Flags().String("prefix", "", "Create issue in rig by prefix (e.g., --prefix bd- or --prefix bd or --prefix beads)")
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (short-lived, subject to TTL compaction)")
 	createCmd.Flags().Bool("no-history", false, "Skip Dolt commit history without making GC-eligible (for permanent agent beads)")
@@ -855,184 +802,6 @@ func init() {
 	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
-}
-
-// createInRig creates an issue in a different rig using --rig flag or auto-routing.
-// This directly creates in the target rig's database.
-func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, issueType string, priority int, design, acceptance, notes, assignee string, labels []string, externalRef, specID string, wisp, noHistory bool) {
-	ctx := rootCtx
-
-	// Find the town-level beads directory (where routes.jsonl lives)
-	townBeadsDir, err := findTownBeadsDir()
-	if err != nil {
-		FatalError("cannot use --rig: %v", err)
-	}
-
-	// Resolve the target rig's beads directory and prefix
-	targetBeadsDir, targetPrefix, err := routing.ResolveBeadsDirForRig(rigName, townBeadsDir)
-	if err != nil {
-		FatalError("%v", err)
-	}
-
-	// Open storage for the target rig using factory to respect backend config
-	targetStore, err := newDoltStoreFromConfig(ctx, targetBeadsDir)
-	if err != nil {
-		FatalError("failed to open rig %q database: %v", rigName, err)
-	}
-	defer func() {
-		if err := targetStore.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close rig database: %v\n", err)
-		}
-	}()
-
-	// Prepare prefix override from routes.jsonl for cross-rig creation
-	// Strip trailing hyphen - database stores prefix without it (e.g., "aops" not "aops-")
-	var prefixOverride string
-	if targetPrefix != "" {
-		prefixOverride = strings.TrimSuffix(targetPrefix, "-")
-	}
-
-	var externalRefPtr *string
-	if externalRef != "" {
-		externalRefPtr = &externalRef
-	}
-
-	// Extract event-specific flags (bd-xwvo fix)
-	eventCategory, _ := cmd.Flags().GetString("event-category")
-	eventActor, _ := cmd.Flags().GetString("event-actor")
-	eventTarget, _ := cmd.Flags().GetString("event-target")
-	eventPayload, _ := cmd.Flags().GetString("event-payload")
-
-	// Extract molecule/agent flags (bd-xwvo fix)
-	molTypeStr, _ := cmd.Flags().GetString("mol-type")
-	var molType types.MolType
-	if molTypeStr != "" {
-		molType = types.MolType(molTypeStr)
-	}
-	// Extract wisp type (TTL classification for ephemeral wisps)
-	wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
-	var wispType types.WispType
-	if wispTypeStr != "" {
-		wispType = types.WispType(wispTypeStr)
-	}
-
-	// Extract time-based scheduling flags (bd-xwvo fix)
-	var dueAt *time.Time
-	dueStr, _ := cmd.Flags().GetString("due")
-	if dueStr != "" {
-		t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
-		if err != nil {
-			FatalError("invalid --due format %q", dueStr)
-		}
-		dueAt = &t
-	}
-
-	var deferUntil *time.Time
-	deferStr, _ := cmd.Flags().GetString("defer")
-	if deferStr != "" {
-		t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
-		if err != nil {
-			FatalError("invalid --defer format %q", deferStr)
-		}
-		deferUntil = &t
-	}
-
-	// Parse --metadata for cross-rig creation
-	var metadata json.RawMessage
-	if cmd.Flags().Changed("metadata") {
-		metadataValue, _ := cmd.Flags().GetString("metadata")
-		var metadataJSON string
-		if strings.HasPrefix(metadataValue, "@") {
-			filePath := metadataValue[1:]
-			// #nosec G304 -- user explicitly provides file path via @file.json syntax
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				FatalError("failed to read metadata file %s: %v", filePath, err)
-			}
-			metadataJSON = string(data)
-		} else {
-			metadataJSON = metadataValue
-		}
-		if !json.Valid([]byte(metadataJSON)) {
-			FatalError("invalid JSON in --metadata: must be valid JSON")
-		}
-		metadata = json.RawMessage(metadataJSON)
-	}
-
-	// Create issue with explicit ID if provided, otherwise CreateIssue will generate one
-	issue := &types.Issue{
-		ID:                 explicitID, // Set explicit ID if provided (empty string if not)
-		Title:              title,
-		Description:        description,
-		Design:             design,
-		AcceptanceCriteria: acceptance,
-		Notes:              notes,
-		SpecID:             specID,
-		Status:             types.StatusOpen,
-		Priority:           priority,
-		IssueType:          types.IssueType(issueType).Normalize(),
-		Assignee:           assignee,
-		ExternalRef:        externalRefPtr,
-		Ephemeral:          wisp,
-		NoHistory:          noHistory,
-		CreatedBy:          getActorWithGit(),
-		Owner:              getOwner(),
-		// Event fields (bd-xwvo fix)
-		EventKind: eventCategory,
-		Actor:     eventActor,
-		Target:    eventTarget,
-		Payload:   eventPayload,
-		// Molecule/agent fields (bd-xwvo fix)
-		MolType:  molType,
-		WispType: wispType,
-		// Time scheduling fields (bd-xwvo fix)
-		DueAt:      dueAt,
-		DeferUntil: deferUntil,
-		Metadata:   metadata,
-		// Cross-rig routing: use route prefix instead of database config
-		PrefixOverride: prefixOverride,
-	}
-
-	if err := targetStore.CreateIssue(ctx, issue, actor); err != nil {
-		FatalError("failed to create issue in rig %q: %v", rigName, err)
-	}
-
-	// Add labels if specified
-	for _, label := range labels {
-		if err := targetStore.AddLabel(ctx, issue.ID, label, actor); err != nil {
-			WarnError("failed to add label %s: %v", label, err)
-		}
-	}
-
-	// Get silent flag
-	silent, _ := cmd.Flags().GetBool("silent")
-
-	if jsonOutput {
-		outputJSON(issue)
-	} else if silent {
-		fmt.Println(issue.ID)
-	} else {
-		fmt.Printf("%s Created issue in rig %q: %s\n", ui.RenderPass("✓"), rigName, formatFeedbackID(issue.ID, issue.Title))
-		fmt.Printf("  Priority: P%d\n", issue.Priority)
-		fmt.Printf("  Status: %s\n", issue.Status)
-	}
-}
-
-// findTownBeadsDir finds the town-level .beads directory (where routes.jsonl lives).
-// It follows the active beads directory for this command so nested towns do not
-// override the authoritative routing context.
-func findTownBeadsDir() (string, error) {
-	currentBeadsDir := resolveCommandBeadsDir(dbPath)
-	if currentBeadsDir == "" {
-		currentBeadsDir = beads.FindBeadsDir()
-	}
-
-	townBeadsDir := routing.ResolveTownBeadsDir(currentBeadsDir)
-	if townBeadsDir == "" {
-		return "", fmt.Errorf("no routes.jsonl found for current beads directory")
-	}
-
-	return townBeadsDir, nil
 }
 
 // formatTimeForRPC converts a *time.Time to RFC3339 string for RPC calls.

@@ -5,24 +5,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
-
-// getBeadsDir returns the .beads directory path, derived from the global dbPath.
-func getBeadsDir() string {
-	if dbPath != "" {
-		return filepath.Dir(dbPath)
-	}
-	return ""
-}
 
 // resolveIDWithRouting resolves a partial issue ID using prefix-based routing.
 // It returns the resolved full ID and the store that contains the issue.
@@ -277,14 +266,7 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				// Resolution failed - try auto-converting to external ref
-				beadsDir := getBeadsDir()
-				if extRef := routing.ResolveToExternalRef(dependsOnArg, beadsDir); extRef != "" {
-					toID = extRef
-					isExternalRef = true
-				} else {
-					FatalErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
-				}
+				FatalErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
 			} else {
 				defer toCleanup()
 			}
@@ -403,14 +385,6 @@ Examples:
 			FatalErrorRespectJSON("%v", err)
 		}
 
-		// Resolve external references (cross-rig dependencies)
-		// GetDependenciesWithMetadata only returns local issues, so we need to
-		// fetch raw dependency records and resolve external refs separately
-		if direction == "down" {
-			externalIssues := resolveExternalDependencies(ctx, depStore, fullID, typeFilter)
-			issues = append(issues, externalIssues...)
-		}
-
 		// Apply type filter if specified
 		if typeFilter != "" {
 			var filtered []*types.IssueWithDependencyMetadata
@@ -505,13 +479,7 @@ var depRemoveCmd = &cobra.Command{
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, args[1])
 			if err != nil {
-				// Resolution failed - try auto-converting to external ref
-				beadsDir := getBeadsDir()
-				if extRef := routing.ResolveToExternalRef(args[1], beadsDir); extRef != "" {
-					toID = extRef
-				} else {
-					FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
-				}
+				FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
 			} else {
 				defer toCleanup()
 			}
@@ -1066,106 +1034,6 @@ func ParseExternalRef(ref string) (project, capability string) {
 		return "", ""
 	}
 	return parts[1], parts[2]
-}
-
-// resolveExternalDependencies fetches issue metadata for external (cross-rig) dependencies.
-// It queries raw dependency records, finds external refs, and resolves them via routing.
-func resolveExternalDependencies(ctx context.Context, depStore storage.DoltStorage, issueID string, typeFilter string) []*types.IssueWithDependencyMetadata {
-	if depStore == nil {
-		return nil
-	}
-
-	// Get raw dependency records to find external refs
-	deps, err := depStore.GetDependencyRecords(ctx, issueID)
-	if err != nil {
-		if isVerbose() {
-			fmt.Fprintf(os.Stderr, "[external-deps] GetDependencyRecords error: %v\n", err)
-		}
-		return nil // Silently fail - local deps still work
-	}
-
-	if isVerbose() {
-		fmt.Fprintf(os.Stderr, "[external-deps] found %d raw deps for %s\n", len(deps), issueID)
-	}
-
-	var result []*types.IssueWithDependencyMetadata
-	beadsDir := getBeadsDir()
-
-	for _, dep := range deps {
-		if isVerbose() {
-			fmt.Fprintf(os.Stderr, "[external-deps] checking dep: %s -> %s (%s)\n", dep.IssueID, dep.DependsOnID, dep.Type)
-		}
-
-		// Skip non-external refs (already handled by GetDependenciesWithMetadata)
-		if !IsExternalRef(dep.DependsOnID) {
-			continue
-		}
-
-		// Apply type filter early if specified
-		if typeFilter != "" && string(dep.Type) != typeFilter {
-			if isVerbose() {
-				fmt.Fprintf(os.Stderr, "[external-deps] skipping due to type filter: %s != %s\n", dep.Type, typeFilter)
-			}
-			continue
-		}
-
-		// Parse external ref: external:<project>:<issue-id>
-		project, targetID := ParseExternalRef(dep.DependsOnID)
-		if project == "" || targetID == "" {
-			if isVerbose() {
-				fmt.Fprintf(os.Stderr, "[external-deps] failed to parse external ref: %s\n", dep.DependsOnID)
-			}
-			continue
-		}
-
-		if isVerbose() {
-			fmt.Fprintf(os.Stderr, "[external-deps] parsed: project=%s, targetID=%s\n", project, targetID)
-		}
-
-		// Resolve the beads directory for this project via routing
-		targetBeadsDir, _, err := routing.ResolveBeadsDirForRig(project, beadsDir)
-		if err != nil {
-			if isVerbose() {
-				fmt.Fprintf(os.Stderr, "[external-deps] routing error for %s: %v\n", project, err)
-			}
-			continue // Project not configured in routes
-		}
-
-		if isVerbose() {
-			fmt.Fprintf(os.Stderr, "[external-deps] resolved beads dir: %s\n", targetBeadsDir)
-		}
-
-		// Open storage for the target rig (auto-detect backend from metadata.json)
-		targetStore, err := dolt.NewFromConfig(ctx, targetBeadsDir)
-		if err != nil {
-			if isVerbose() {
-				fmt.Fprintf(os.Stderr, "[external-deps] failed to open target db %s: %v\n", targetBeadsDir, err)
-			}
-			continue // Can't open target database
-		}
-
-		// Fetch the issue from the target rig
-		issue, err := targetStore.GetIssue(ctx, targetID)
-		_ = targetStore.Close() // Best effort cleanup
-		if err != nil || issue == nil {
-			if isVerbose() {
-				fmt.Fprintf(os.Stderr, "[external-deps] issue not found: %s (err=%v)\n", targetID, err)
-			}
-			continue // Issue not found in target
-		}
-
-		if isVerbose() {
-			fmt.Fprintf(os.Stderr, "[external-deps] resolved issue: %s - %s\n", issue.ID, issue.Title)
-		}
-
-		// Convert to IssueWithDependencyMetadata
-		result = append(result, &types.IssueWithDependencyMetadata{
-			Issue:          *issue,
-			DependencyType: dep.Type,
-		})
-	}
-
-	return result
 }
 
 func init() {

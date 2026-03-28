@@ -61,7 +61,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		includeDeferred, _ := cmd.Flags().GetBool("include-deferred")
 		includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
 		excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
-		rigOverride, _ := cmd.Flags().GetString("rig")
 		var molType *types.MolType
 		if molTypeStr != "" {
 			mt := types.MolType(molTypeStr)
@@ -153,26 +152,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		// Direct mode
 		ctx := rootCtx
 
-		// Handle --rig flag: query a different rig's database
 		activeStore := store
-		if rigOverride != "" {
-			rigStore, err := openStoreForRig(ctx, rigOverride)
-			if err != nil {
-				FatalError("%v", err)
-			}
-			defer func() { _ = rigStore.Close() }()
-			activeStore = rigStore
-		} else {
-			// Keep ready/read behavior aligned with bd create routing decisions.
-			// Contributor auto-routing should read from the same target repo.
-			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
-			if err != nil {
-				FatalError("%v", err)
-			}
-			if routed {
-				defer func() { _ = routedStore.Close() }()
-				activeStore = routedStore
-			}
+		// Contributor auto-routing: read from the same target repo as bd create.
+		routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+		if err != nil {
+			FatalError("%v", err)
+		}
+		if routed {
+			defer func() { _ = routedStore.Close() }()
+			activeStore = routedStore
 		}
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)
@@ -329,10 +317,8 @@ var blockedCmd = &cobra.Command{
 			if blockedBy == nil {
 				blockedBy = []string{}
 			}
-			// Resolve external refs to show real issue info (bd-k0pfm)
-			resolved := resolveBlockedByRefs(ctx, blockedBy)
 			fmt.Printf("  Blocked by %d open dependencies: %v\n",
-				issue.BlockedByCount, resolved)
+				issue.BlockedByCount, blockedBy)
 			fmt.Println()
 		}
 	},
@@ -552,7 +538,6 @@ func init() {
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
-	readyCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig my-project, --rig gt-, --rig gt)")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")

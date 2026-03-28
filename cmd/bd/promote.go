@@ -40,12 +40,6 @@ Examples:
 				diagHint())
 		}
 
-		// Handle cross-rig routing
-		if needsRouting(id) {
-			promoteRouted(id, reason)
-			return
-		}
-
 		fullID, err := utils.ResolvePartialID(ctx, store, id)
 		if err != nil {
 			FatalErrorRespectJSON("resolving %s: %v", id, err)
@@ -94,53 +88,6 @@ Examples:
 			fmt.Printf("%s Promoted %s to permanent bead\n", ui.RenderPass("✓"), fullID)
 		}
 	},
-}
-
-// promoteRouted handles promotion for cross-rig routed issues.
-func promoteRouted(id, reason string) {
-	result, err := resolveAndGetIssueWithRouting(rootCtx, store, id)
-	if err != nil {
-		FatalErrorRespectJSON("resolving %s: %v", id, err)
-	}
-	if result == nil || result.Issue == nil {
-		if result != nil {
-			result.Close()
-		}
-		FatalErrorRespectJSON("issue %s not found", id)
-	}
-	defer result.Close()
-
-	if !result.Issue.Ephemeral {
-		FatalErrorRespectJSON("%s is not a wisp (already persistent)", id)
-	}
-
-	if err := result.Store.PromoteFromEphemeral(rootCtx, result.ResolvedID, actor); err != nil {
-		FatalErrorRespectJSON("promoting %s: %v", id, err)
-	}
-
-	comment := "Promoted from wisp to permanent bead"
-	if reason != "" {
-		comment += ": " + reason
-	}
-	if err := result.Store.AddComment(rootCtx, result.ResolvedID, actor, comment); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to add promotion comment to %s: %v\n", id, err)
-	}
-
-	// Embedded mode: flush Dolt commit.
-	if isEmbeddedDolt {
-		if _, err := result.Store.CommitPending(rootCtx, actor); err != nil {
-			FatalErrorRespectJSON("failed to commit: %v", err)
-		}
-	}
-
-	if jsonOutput {
-		updated, _ := result.Store.GetIssue(rootCtx, result.ResolvedID)
-		if updated != nil {
-			outputJSON(updated)
-		}
-	} else {
-		fmt.Printf("%s Promoted %s to permanent bead\n", ui.RenderPass("✓"), result.ResolvedID)
-	}
 }
 
 func init() {

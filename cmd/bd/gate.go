@@ -11,9 +11,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -729,49 +726,11 @@ func checkTimer(gate *types.Issue, now time.Time) (resolved, escalated bool, rea
 // checkBeadGate checks if a cross-rig bead gate is satisfied.
 // await_id format: <rig>:<bead-id> (e.g., "other-project:op-abc123")
 // Returns (satisfied, reason).
-func checkBeadGate(ctx context.Context, awaitID string) (bool, string) {
-	// Parse await_id format: <rig>:<bead-id>
-	parts := strings.SplitN(awaitID, ":", 2)
-	if len(parts) != 2 {
-		return false, fmt.Sprintf("invalid await_id format: expected <rig>:<bead-id>, got %q", awaitID)
-	}
-
-	rigName := parts[0]
-	beadID := parts[1]
-
-	if rigName == "" || beadID == "" {
-		return false, "await_id missing rig name or bead ID"
-	}
-
-	// Resolve the target rig's beads directory
-	currentBeadsDir := beads.FindBeadsDir()
-	if currentBeadsDir == "" {
-		return false, "could not find current beads directory"
-	}
-	targetBeadsDir, _, err := routing.ResolveBeadsDirForRig(rigName, currentBeadsDir)
-	if err != nil {
-		return false, fmt.Sprintf("rig %q not found: %v", rigName, err)
-	}
-
-	// Open the target database (read-only) using storage factory
-	// This supports both Dolt and legacy SQLite backends in the target rig.
-	targetStore, err := dolt.NewFromConfigWithOptions(ctx, targetBeadsDir, &dolt.Config{ReadOnly: true})
-	if err != nil {
-		return false, fmt.Sprintf("failed to open database for rig %q: %v", rigName, err)
-	}
-	defer func() { _ = targetStore.Close() }()
-
-	// Check if the target bead exists and is closed
-	issue, err := targetStore.GetIssue(ctx, beadID)
-	if err != nil {
-		return false, fmt.Sprintf("bead %s not found in rig %s: %v", beadID, rigName, err)
-	}
-
-	if issue.Status == types.StatusClosed {
-		return true, fmt.Sprintf("target bead %s is closed", beadID)
-	}
-
-	return false, fmt.Sprintf("target bead %s status is %q (waiting for closed)", beadID, string(issue.Status))
+//
+// Multi-rig routing has been removed, so cross-rig bead gates cannot be resolved.
+// This always returns false with a descriptive message.
+func checkBeadGate(_ context.Context, awaitID string) (bool, string) {
+	return false, fmt.Sprintf("cross-rig bead gate %q cannot be checked (multi-rig routing removed)", awaitID)
 }
 
 // closeGate closes a gate issue with the given reason

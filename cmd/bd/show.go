@@ -146,11 +146,7 @@ var showCmd = &cobra.Command{
 
 				// Get dependencies with metadata (dependency_type field)
 				details.Dependencies, _ = issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
-				// Resolve external deps via routing (bd-k0pfm)
-				if externalDeps, err := resolveExternalDepsViaRouting(ctx, issueStore, issue.ID); err == nil {
-					details.Dependencies = append(details.Dependencies, externalDeps...)
-				}
-				details.Dependents, _ = issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
+				details.Dependents, _ = issueStore.GetDependentsWithMetadata(ctx, issue.ID)     // Best effort: show issue even if dependents unavailable
 
 				details.Comments, _ = issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
 
@@ -239,14 +235,6 @@ var showCmd = &cobra.Command{
 
 			// Show dependencies - grouped by dependency type for clarity
 			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
-
-			// Resolve external deps via routing (bd-k0pfm)
-			// GetDependenciesWithMetadata JOINs on issues table, so external refs
-			// (e.g., "external:other-project:gt-42zaq") are silently dropped.
-			// Resolve them via prefix routes and merge into the dep list.
-			if externalDeps, err := resolveExternalDepsViaRouting(ctx, issueStore, issue.ID); err == nil {
-				depsWithMeta = append(depsWithMeta, externalDeps...)
-			}
 
 			if len(depsWithMeta) > 0 {
 				// Group by dependency type
