@@ -772,3 +772,40 @@ func (s *EmbeddedDoltStore) GetStaleIssues(ctx context.Context, filter types.Sta
 	})
 	return result, err
 }
+
+// SlotSet atomically sets key=value in the issue's Metadata JSON object.
+func (s *EmbeddedDoltStore) SlotSet(ctx context.Context, id, key, value string) error {
+	if err := storage.ValidateMetadataKey(key); err != nil {
+		return err
+	}
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.SlotSetInTx(ctx, tx, id, key, value)
+	})
+}
+
+// SlotGet reads a key from the issue's Metadata JSON object.
+// Returns (value, true, nil) when the key exists, ("", false, nil) when absent.
+func (s *EmbeddedDoltStore) SlotGet(ctx context.Context, id, key string) (string, bool, error) {
+	if err := storage.ValidateMetadataKey(key); err != nil {
+		return "", false, err
+	}
+	var val string
+	var ok bool
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		val, ok, err = issueops.SlotGetInTx(ctx, tx, id, key)
+		return err
+	})
+	return val, ok, err
+}
+
+// SlotClear removes a key from the issue's Metadata JSON object.
+// No-op if the key is absent.
+func (s *EmbeddedDoltStore) SlotClear(ctx context.Context, id, key string) error {
+	if err := storage.ValidateMetadataKey(key); err != nil {
+		return err
+	}
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.SlotClearInTx(ctx, tx, id, key)
+	})
+}

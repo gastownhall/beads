@@ -459,6 +459,41 @@ func (s *InstrumentedStorage) MergeSlotRelease(ctx context.Context, holder, acto
 	return err
 }
 
+// ── Metadata slots ───────────────────────────────────────────────────────────
+
+func (s *InstrumentedStorage) SlotSet(ctx context.Context, id, key, value string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.slot.key", key),
+	}
+	ctx, span, t := s.op(ctx, "SlotSet", attrs...)
+	err := s.inner.SlotSet(ctx, id, key, value)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
+func (s *InstrumentedStorage) SlotGet(ctx context.Context, id, key string) (string, bool, error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.slot.key", key),
+	}
+	ctx, span, t := s.op(ctx, "SlotGet", attrs...)
+	v, ok, err := s.inner.SlotGet(ctx, id, key)
+	s.done(ctx, span, t, err, attrs...)
+	return v, ok, err
+}
+
+func (s *InstrumentedStorage) SlotClear(ctx context.Context, id, key string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.slot.key", key),
+	}
+	ctx, span, t := s.op(ctx, "SlotClear", attrs...)
+	err := s.inner.SlotClear(ctx, id, key)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) Close() error {

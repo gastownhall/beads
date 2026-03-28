@@ -84,6 +84,14 @@ type Storage interface {
 	GetConfig(ctx context.Context, key string) (string, error)
 	GetAllConfig(ctx context.Context) (map[string]string, error)
 
+	// Metadata slot operations — atomic key-level reads and writes on issue.Metadata JSON.
+	// SlotSet sets key to value in the issue's metadata object (creating it if absent).
+	// SlotGet returns (value, true, nil) when the key exists, ("", false, nil) when absent.
+	// SlotClear removes key from the metadata object (no-op if absent).
+	SlotSet(ctx context.Context, id, key, value string) error
+	SlotGet(ctx context.Context, id, key string) (string, bool, error)
+	SlotClear(ctx context.Context, id, key string) error
+
 	// Transactions
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 
