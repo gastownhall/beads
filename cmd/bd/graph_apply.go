@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -90,6 +91,16 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 		return fmt.Errorf("plan has no nodes")
 	}
 
+	// Load custom types so user-configured types (spec, session, etc.) are accepted.
+	var customTypes []string
+	if store != nil {
+		ct, _ := store.GetCustomTypes(rootCtx)
+		customTypes = ct
+	}
+	if len(customTypes) == 0 {
+		customTypes = config.GetCustomTypesFromYAML()
+	}
+
 	seenKeys := make(map[string]bool, len(plan.Nodes))
 	for i, node := range plan.Nodes {
 		if node.Key == "" {
@@ -104,7 +115,7 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 		}
 		if node.Type != "" {
 			it := types.IssueType(node.Type)
-			if !it.IsValid() {
+			if !it.IsValidWithCustom(customTypes) {
 				return fmt.Errorf("node %q: invalid type %q", node.Key, node.Type)
 			}
 		}
