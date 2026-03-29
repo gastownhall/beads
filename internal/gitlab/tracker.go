@@ -267,28 +267,58 @@ func (t *Tracker) updateMilestone(ctx context.Context, externalID string, issue 
 	return milestoneToTrackerIssue(ms), nil
 }
 
-// findParentEpicMilestone looks up the parent epic of an issue and returns
-// its GitLab milestone ID, or 0 if no parent epic or no milestone found.
+// findParentEpicMilestone walks up the parent-child chain from an issue
+// to find an ancestor epic, then returns its GitLab milestone API ID.
+// Returns 0 if no epic ancestor or no milestone found.
 func (t *Tracker) findParentEpicMilestone(ctx context.Context, issueID string) int {
-	deps, err := t.store.GetDependenciesWithMetadata(ctx, issueID)
-	if err != nil {
-		return 0
-	}
-	for _, dep := range deps {
-		if dep.DependencyType == types.DepParentChild && dep.Issue.IssueType == types.TypeEpic {
-			ref := ""
-			if dep.Issue.ExternalRef != nil {
-				ref = *dep.Issue.ExternalRef
-			}
-			if ref == "" {
+	// Walk up parent chain (max 5 levels to prevent loops)
+	currentID := issueID
+	for i := 0; i < 5; i++ {
+		deps, err := t.store.GetDependenciesWithMetadata(ctx, currentID)
+		if err != nil {
+			return 0
+		}
+		foundParent := false
+		for _, dep := range deps {
+			if dep.DependencyType != types.DepParentChild {
 				continue
 			}
-			matches := milestoneIDPattern.FindStringSubmatch(ref)
-			if len(matches) >= 2 {
-				if mid, err := strconv.Atoi(matches[1]); err == nil {
-					return mid
+			if dep.Issue.IssueType == types.TypeEpic {
+				// Found the epic — extract milestone IID from its external ref
+				ref := ""
+				if dep.Issue.ExternalRef != nil {
+					ref = *dep.Issue.ExternalRef
 				}
+				if ref == "" {
+					return 0
+				}
+				matches := milestoneIDPattern.FindStringSubmatch(ref)
+				if len(matches) < 2 {
+					return 0
+				}
+				milestoneIID, err := strconv.Atoi(matches[1])
+				if err != nil {
+					return 0
+				}
+				// Look up API ID by IID
+				milestones, err := t.client.FetchMilestones(ctx, "")
+				if err != nil {
+					return 0
+				}
+				for _, ms := range milestones {
+					if ms.IID == milestoneIID {
+						return ms.ID
+					}
+				}
+				return 0
 			}
+			// Not an epic — keep walking up
+			currentID = dep.Issue.ID
+			foundParent = true
+			break
+		}
+		if !foundParent {
+			return 0
 		}
 	}
 	return 0
