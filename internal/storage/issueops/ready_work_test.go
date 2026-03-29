@@ -8,28 +8,28 @@ func TestBuildSQLInClause(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		ids             []string
+		name             string
+		ids              []string
 		wantPlaceholders string
-		wantArgs        []interface{}
+		wantArgs         []interface{}
 	}{
 		{
-			name:            "single ID",
-			ids:             []string{"42"},
+			name:             "single ID",
+			ids:              []string{"42"},
 			wantPlaceholders: "?",
-			wantArgs:        []interface{}{"42"},
+			wantArgs:         []interface{}{"42"},
 		},
 		{
-			name:            "multiple IDs",
-			ids:             []string{"1", "2", "3"},
+			name:             "multiple IDs",
+			ids:              []string{"1", "2", "3"},
 			wantPlaceholders: "?,?,?",
-			wantArgs:        []interface{}{"1", "2", "3"},
+			wantArgs:         []interface{}{"1", "2", "3"},
 		},
 		{
-			name:            "empty slice",
-			ids:             []string{},
+			name:             "empty slice",
+			ids:              []string{},
 			wantPlaceholders: "",
-			wantArgs:        []interface{}{},
+			wantArgs:         []interface{}{},
 		},
 	}
 

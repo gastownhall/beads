@@ -235,9 +235,9 @@ func TestBuildIssueFilterClauses_PinnedFilter(t *testing.T) {
 	pinFalse := false
 
 	tests := []struct {
-		name     string
-		pinned   *bool
-		wantSQL  string
+		name    string
+		pinned  *bool
+		wantSQL string
 	}{
 		{name: "pinned=true", pinned: &pinTrue, wantSQL: "pinned = 1"},
 		{name: "pinned=false", pinned: &pinFalse, wantSQL: "(pinned = 0 OR pinned IS NULL)"},

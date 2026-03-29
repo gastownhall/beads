@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -66,28 +65,11 @@ func TestCheckBeadGate_InvalidFormat(t *testing.T) {
 	tests := []struct {
 		name    string
 		awaitID string
-		wantErr string
 	}{
-		{
-			name:    "empty",
-			awaitID: "",
-			wantErr: "invalid await_id format",
-		},
-		{
-			name:    "no colon",
-			awaitID: "my-project-mp-abc",
-			wantErr: "invalid await_id format",
-		},
-		{
-			name:    "missing rig",
-			awaitID: ":gt-abc",
-			wantErr: "await_id missing rig name",
-		},
-		{
-			name:    "missing bead",
-			awaitID: "my-project:",
-			wantErr: "await_id missing rig name or bead ID",
-		},
+		{name: "empty", awaitID: ""},
+		{name: "no colon", awaitID: "my-project-mp-abc"},
+		{name: "missing rig", awaitID: ":gt-abc"},
+		{name: "missing bead", awaitID: "my-project:"},
 	}
 
 	for _, tt := range tests {
@@ -99,9 +81,8 @@ func TestCheckBeadGate_InvalidFormat(t *testing.T) {
 			if reason == "" {
 				t.Error("expected reason to be set")
 			}
-			// Just check the error message contains the expected substring
-			if tt.wantErr != "" && !gateTestContainsIgnoreCase(reason, tt.wantErr) {
-				t.Errorf("reason %q does not contain %q", reason, tt.wantErr)
+			if !gateTestContainsIgnoreCase(reason, "multi-rig routing removed") {
+				t.Errorf("reason %q does not contain %q", reason, "multi-rig routing removed")
 			}
 		})
 	}
@@ -110,19 +91,7 @@ func TestCheckBeadGate_InvalidFormat(t *testing.T) {
 func TestCheckBeadGate_RigNotFound(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a temp directory with a minimal beads setup
-	tmpDir, err := os.MkdirTemp("", "gate_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Change to temp dir
-	origDir, _ := os.Getwd()
-	defer os.Chdir(origDir)
-	os.Chdir(tmpDir)
-
-	// Try to check a gate for a non-existent rig
+	// With multi-rig routing removed, all bead gates return the same message
 	satisfied, reason := checkBeadGate(ctx, "nonexistent:some-id")
 	if satisfied {
 		t.Error("expected not satisfied for non-existent rig")
@@ -130,9 +99,8 @@ func TestCheckBeadGate_RigNotFound(t *testing.T) {
 	if reason == "" {
 		t.Error("expected reason to be set")
 	}
-	// The error should mention the rig not being found
-	if !gateTestContainsIgnoreCase(reason, "not found") && !gateTestContainsIgnoreCase(reason, "could not find") {
-		t.Errorf("reason should mention not found: %q", reason)
+	if !gateTestContainsIgnoreCase(reason, "multi-rig routing removed") {
+		t.Errorf("reason %q does not contain %q", reason, "multi-rig routing removed")
 	}
 }
 
