@@ -46,12 +46,16 @@ const (
 	// TypeAspect is a cross-cutting concern that can be applied to other formulas.
 	// Examples: add logging steps, add approval gates.
 	TypeAspect FormulaType = "aspect"
+
+	// TypeConvoy is a multi-agent workflow that coordinates parallel workers.
+	// Examples: code review with multiple reviewers, design review sessions.
+	TypeConvoy FormulaType = "convoy"
 )
 
 // IsValid checks if the formula type is recognized.
 func (t FormulaType) IsValid() bool {
 	switch t {
-	case TypeWorkflow, TypeExpansion, TypeAspect:
+	case TypeWorkflow, TypeExpansion, TypeAspect, TypeConvoy:
 		return true
 	}
 	return false
