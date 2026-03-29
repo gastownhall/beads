@@ -45,9 +45,7 @@ jobs:
           for pair in \
             "cc-x86_64-macos:x86_64-macos" \
             "cc-aarch64-macos:aarch64-macos" \
-            "cc-aarch64-windows-gnu:aarch64-windows-gnu" \
-            "cc-aarch64-linux-android:aarch64-linux-android" \
-            "cc-x86_64-freebsd:x86_64-freebsd"; do
+            "cc-aarch64-windows-gnu:aarch64-windows-gnu"; do
             name="${pair%%:*}"
             target="${pair##*:}"
             # Build wrapper: strip -lresolv entirely. The macOS builds use the

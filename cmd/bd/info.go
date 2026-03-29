@@ -210,7 +210,7 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
-		Version: "0.63.0",
+		Version: "0.63.1",
 		Date:    "2026-03-29",
 		Changes: []string{
 			"NEW: Embedded Dolt is now the default storage backend — no separate server needed",

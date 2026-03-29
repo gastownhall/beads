@@ -59,8 +59,7 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=1
-      - CC=/tmp/zigcc/cc-aarch64-linux-android
+      - CGO_ENABLED=0
     tags:
       - gms_pure_go
     goos:
@@ -177,8 +176,7 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=1
-      - CC=/tmp/zigcc/cc-x86_64-freebsd
+      - CGO_ENABLED=0
     tags:
       - gms_pure_go
     goos:
