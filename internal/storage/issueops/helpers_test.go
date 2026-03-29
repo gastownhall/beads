@@ -260,10 +260,10 @@ func TestTableRouting(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		issue       *types.Issue
-		wantIssue   string
-		wantEvent   string
+		name      string
+		issue     *types.Issue
+		wantIssue string
+		wantEvent string
 	}{
 		{
 			name:      "regular issue routes to issues/events",
