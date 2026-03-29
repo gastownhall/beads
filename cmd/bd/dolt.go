@@ -170,9 +170,19 @@ uncommitted changes in its working set).`,
 			if err := st.ForcePush(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
-					fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
-					fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
-					fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "No remote is configured for this database.")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "For solo use, pushing is optional — your issues are stored locally")
+					fmt.Fprintln(os.Stderr, "in .beads/ and versioned by Dolt automatically.")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "To set up remote sync (for backup or team sharing):")
+					fmt.Fprintln(os.Stderr, "  bd dolt remote add origin <url>")
+					fmt.Fprintln(os.Stderr, "  bd dolt push")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "Supported remote URLs:")
+					fmt.Fprintln(os.Stderr, "  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
+					fmt.Fprintln(os.Stderr, "  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
 				}
 				os.Exit(1)
 			}
@@ -180,9 +190,19 @@ uncommitted changes in its working set).`,
 			if err := st.Push(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
-					fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
-					fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
-					fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "No remote is configured for this database.")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "For solo use, pushing is optional — your issues are stored locally")
+					fmt.Fprintln(os.Stderr, "in .beads/ and versioned by Dolt automatically.")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "To set up remote sync (for backup or team sharing):")
+					fmt.Fprintln(os.Stderr, "  bd dolt remote add origin <url>")
+					fmt.Fprintln(os.Stderr, "  bd dolt push")
+					fmt.Fprintln(os.Stderr, "")
+					fmt.Fprintln(os.Stderr, "Supported remote URLs:")
+					fmt.Fprintln(os.Stderr, "  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
+					fmt.Fprintln(os.Stderr, "  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
 				}
 				os.Exit(1)
 			}
