@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.0] - 2026-03-29
+
+### Added
+
+- **Embedded mode by default** — New installations now use embedded Dolt as the default storage backend, eliminating the need to run a separate Dolt server process. Existing server-mode installations are unaffected. ([PR #2842](https://github.com/steveyegge/beads/pull/2842))
+- **`bd create --graph`** — Batch issue creation from a YAML/JSON dependency graph, replacing the standalone `bd graph-apply` command. ([PR #2894](https://github.com/steveyegge/beads/pull/2894))
+- **Multi-project/team sync** — Linear, Jira, and ADO integrations now support syncing multiple projects and teams in a single repo. ([PR #2868](https://github.com/steveyegge/beads/pull/2868))
+- **Notion sync** — Reimplemented Notion integration on REST data sources with full page property mapping. ([PR #2843](https://github.com/steveyegge/beads/pull/2843))
+- **GitLab sync** — Optional group-level GitLab issue sync. ([PR #2801](https://github.com/steveyegge/beads/pull/2801))
+- **Linear `--parent` flag** — `bd linear sync --parent` limits sync push to a specific ticket tree. ([PR #2853](https://github.com/steveyegge/beads/pull/2853))
+- **Remote URL support** — Multi-repo hydration now supports remote URLs. ([PR #2827](https://github.com/steveyegge/beads/pull/2827))
+- **Top-level command aliases** — `bd comment`, `bd assign`, `bd tag`, `bd link`, `bd priority` as convenient shortcuts. ([GH#2611](https://github.com/steveyegge/beads/issues/2611))
+- **Storage interface expansion** — `ListWisps`, `MergeSlot`, `ReopenIssue`, `UpdateIssueType`, replication, and VC interfaces now exposed in the public API. ([PRs #2782-#2788](https://github.com/steveyegge/beads/pull/2782))
+- **SearchIssues dependency hydration** — Bulk dependency population for search results. ([PR #2773](https://github.com/steveyegge/beads/pull/2773))
+- **`--agents-file` flag** — `bd init --agents-file` customizes the agent instructions filename. ([PR #2761](https://github.com/steveyegge/beads/pull/2761))
+- **Multi-process concurrency tests** — Server lifecycle and concurrent access integration tests. ([PR #2767](https://github.com/steveyegge/beads/pull/2767))
+
+### Changed
+
+- **Backup system simplified** — Removed git-based backup/restore (`backup export-git`, `backup fetch-git`). Backup and restore now operate exclusively through Dolt's native replication. ([PR #2842](https://github.com/steveyegge/beads/pull/2842))
+- **dolthub/driver v1.84.0** — Updated from v1.83.8, picking up serialization retry support.
+- **Dolt write retry** — `writeRetryTx` automatically retries on Dolt serialization errors. ([PR #2855](https://github.com/steveyegge/beads/pull/2855))
+- **CI overhaul** — Test sharding, precompiled binaries, shared Go module cache for faster CI runs.
+- **Gas Town terminology removed** — Remaining Gas Town naming removed from beads orchestrator detection. ([PR #2762](https://github.com/steveyegge/beads/pull/2762))
+- **TypeScript v6, backoff v5, goldmark 1.7.17** — Dependency updates.
+
+### Fixed
+
+- **Init git cache reset** — `bd init` now resets git caches after auto-init, preventing stale `.beads/dolt/` references in embedded mode. ([PR #2907](https://github.com/steveyegge/beads/pull/2907))
+- **Doctor embedded mode** — Improved embedded mode detection and push error guidance. ([PR #2910](https://github.com/steveyegge/beads/pull/2910))
+- **Create description warning** — Removed spurious description warning; test-issue warning now gated on DB size. ([PR #2908](https://github.com/steveyegge/beads/pull/2908))
+- **External contributor PRs** — `block-gh-watch` hook now allows external contributors to create PRs. ([PR #2907](https://github.com/steveyegge/beads/pull/2907))
+- **CWD `.beads/` priority** — `bd` now checks CWD for `.beads/` before git-worktree resolution, fixing worktree-based discovery in nested projects.
+- **Epic closure eligibility** — Wisp children now correctly included in epic closure checks. ([PR #2843](https://github.com/steveyegge/beads/pull/2843))
+- **Prefix routing** — `bd edit`, `bd reopen`, and `bd delete` now correctly route with prefixes from town root. ([PRs #2780, #2847](https://github.com/steveyegge/beads/pull/2847))
+- **ADO/Jira custom type_map** — Custom type maps no longer silently ignored. ADO dependency links now imported correctly. ([PR #2771](https://github.com/steveyegge/beads/pull/2771))
+- **Init safety guard** — `bd init --force` no longer bypasses close --quiet check. ([PR #2799](https://github.com/steveyegge/beads/pull/2799))
+- **Circuit breaker TTL** — Stale circuit breaker files cleaned during init; files moved to subdirectory. ([PR #2799](https://github.com/steveyegge/beads/pull/2799))
+- **`bd show --watch`** — Replaced fsnotify with polling to fix cross-platform compatibility. ([PR #2755](https://github.com/steveyegge/beads/pull/2755))
+- **Config unset routing** — `config unset` now routes to correct store; backup keys shown in list. ([GH#2727](https://github.com/steveyegge/beads/issues/2727))
+- **Doctor false errors** — Server health checks skipped when no Dolt server expected; bare worktree fallback fixed. ([GH#2722](https://github.com/steveyegge/beads/issues/2722))
+- **UTC timestamps** — ADO/Jira defer_until comparisons use UTC_TIMESTAMP(). ([PR #2819](https://github.com/steveyegge/beads/pull/2819))
+- **Cloud storage routing** — Push/pull routed through CLI when cloud storage env vars are set. ([GH#2820](https://github.com/steveyegge/beads/issues/2820))
+- **Embedded schema** — Removed HOP columns (crystallizes, quality_score) from embedded schema. ([PR #2837](https://github.com/steveyegge/beads/pull/2837))
+- **JSON path quoting** — Dotted metadata keys now properly quoted in JSON path expressions. ([PR #2865](https://github.com/steveyegge/beads/pull/2865))
+- **Hook fire on update** — `bd update --status closed` now fires on_close hook; `bd close` fires on_update. ([PR #2754](https://github.com/steveyegge/beads/pull/2754))
+
+### Embedded Dolt
+
+- **46 commits** from the Dolt team (coffeegoddd) completing embedded Dolt support: bootstrap, compact, migrate, sync, backup, restore, maintenance, setup, config, and advanced commands. Includes serialization retry, driver bump to v1.84.0, CI test sharding, and `RunInTransaction` refactor for shared `issueops` operations.
+
+### Community
+
+Contributors: coffeegoddd (Dustin Brown), matt wilkie (maphew), harry-miller-trimble, quad341, ktoulgaridis, eitsupi, renezander030, REMvisual, aphexcx, anupamchugh, MovGP0, Bella-Giraffety, julianknutsen, osamu2001, toumorokoshi, fernanja, sammywachtel, outdoorsea.
+
 ## [0.62.0] - 2026-03-21
 
 ### Added

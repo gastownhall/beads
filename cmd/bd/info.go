@@ -210,6 +210,26 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.63.0",
+		Date:    "2026-03-29",
+		Changes: []string{
+			"NEW: Embedded Dolt is now the default storage backend — no separate server needed",
+			"NEW: bd create --graph for batch issue creation from dependency graphs",
+			"NEW: Multi-project/team sync for Linear, Jira, and ADO",
+			"NEW: Notion sync reimplemented on REST data sources",
+			"NEW: GitLab group-level issue sync",
+			"NEW: Top-level command aliases (comment, assign, tag, link, priority)",
+			"NEW: Storage API expansion — ListWisps, MergeSlot, ReopenIssue, and more",
+			"CHANGE: Backup system simplified — git-based backup removed, Dolt-native only",
+			"CHANGE: Dolt writeRetryTx auto-retries on serialization errors",
+			"FIX: Init git cache reset prevents stale embedded refs",
+			"FIX: CWD .beads/ priority over git-worktree resolution",
+			"FIX: Epic closure correctly includes wisp children",
+			"FIX: Prefix routing for edit, reopen, and delete commands",
+			"FIX: ADO/Jira custom type_map no longer silently ignored",
+		},
+	},
+	{
 		Version: "0.62.0",
 		Date:    "2026-03-21",
 		Changes: []string{
