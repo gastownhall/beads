@@ -43,12 +43,17 @@ func Status(ctx context.Context, db DBConn) (*storage.Status, error) {
 }
 
 // Log returns recent commit history up to limit entries.
+// If limit is 0 or negative, all entries are returned.
 func Log(ctx context.Context, db DBConn, limit int) ([]storage.CommitInfo, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT commit_hash, committer, email, date, message
-		FROM dolt_log
-		LIMIT ?
-	`, limit)
+	var query string
+	var args []interface{}
+	if limit > 0 {
+		query = "SELECT commit_hash, committer, email, date, message FROM dolt_log ORDER BY date DESC LIMIT ?"
+		args = []interface{}{limit}
+	} else {
+		query = "SELECT commit_hash, committer, email, date, message FROM dolt_log ORDER BY date DESC"
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get log: %w", err)
 	}

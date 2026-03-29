@@ -31,6 +31,7 @@ var migrationsList = []Migration{
 	{"uuid_primary_keys", migrations.MigrateUUIDPrimaryKeys},
 	{"add_no_history_column", migrations.MigrateAddNoHistoryColumn},
 	{"drop_hop_columns", migrations.MigrateDropHOPColumns},
+	{"drop_child_counters_fk", migrations.MigrateDropChildCountersFK},
 	{"comment_sync_columns", migrations.MigrateCommentSyncColumns},
 }
 

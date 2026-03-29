@@ -27,7 +27,7 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra types get marked ephemeral (legacy behavior)
 	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -73,7 +73,7 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			if !issue.NoHistory {
 				issue.Ephemeral = true
 			}
-			if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 				bc, err := issueops.NewBatchContext(ctx, tx, opts)
 				if err != nil {
 					return err
@@ -86,7 +86,7 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
-	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
 	}); err != nil {
 		return err
@@ -227,6 +227,31 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 	// Claiming changes status to in_progress, affecting blocked ID computation
 	s.invalidateBlockedIDsCache()
 	return nil
+}
+
+// ReopenIssue reopens a closed issue, setting status to open and clearing
+// closed_at and defer_until. If reason is non-empty, it is recorded as a comment.
+// Wraps UpdateIssue for Dolt-specific concerns (wisp routing, DOLT_COMMIT, etc.).
+func (s *DoltStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
+	updates := map[string]interface{}{
+		"status":      string(types.StatusOpen),
+		"defer_until": nil,
+	}
+	if err := s.UpdateIssue(ctx, id, updates, actor); err != nil {
+		return err
+	}
+	if reason != "" {
+		if err := s.AddComment(ctx, id, actor, reason); err != nil {
+			return fmt.Errorf("reopen comment: %w", err)
+		}
+	}
+	return nil
+}
+
+// UpdateIssueType changes the issue_type field of an issue.
+// Wraps UpdateIssue for Dolt-specific concerns (wisp routing, DOLT_COMMIT, etc.).
+func (s *DoltStore) UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error {
+	return s.UpdateIssue(ctx, id, map[string]interface{}{"issue_type": issueType}, actor)
 }
 
 // CloseIssue closes an issue with a reason.
@@ -575,7 +600,7 @@ var (
 // Returns the number of issues deleted.
 func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo string) (int, error) {
 	var count int
-	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		count, err = issueops.DeleteIssuesBySourceRepoInTx(ctx, tx, sourceRepo)
 		return err
@@ -588,7 +613,7 @@ func (s *DoltStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo str
 
 // ClearRepoMtime removes the mtime cache entry for a repository.
 func (s *DoltStore) ClearRepoMtime(ctx context.Context, repoPath string) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.ClearRepoMtimeInTx(ctx, tx, repoPath)
 	})
 }
@@ -607,7 +632,7 @@ func (s *DoltStore) GetRepoMtime(ctx context.Context, repoPath string) (int64, e
 
 // SetRepoMtime updates the mtime cache for a repository's data file.
 func (s *DoltStore) SetRepoMtime(ctx context.Context, repoPath, jsonlPath string, mtimeNs int64) error {
-	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.SetRepoMtimeInTx(ctx, tx, repoPath, jsonlPath, mtimeNs)
 	})
 }

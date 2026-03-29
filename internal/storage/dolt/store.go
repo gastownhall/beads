@@ -145,6 +145,9 @@ var _ storage.RawDBAccessor = (*DoltStore)(nil)
 var _ storage.StoreLocator = (*DoltStore)(nil)
 var _ storage.LifecycleManager = (*DoltStore)(nil)
 var _ storage.PendingCommitter = (*DoltStore)(nil)
+var _ storage.GarbageCollector = (*DoltStore)(nil)
+var _ storage.Flattener = (*DoltStore)(nil)
+var _ storage.Compactor = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -226,6 +229,11 @@ type Config struct {
 	// which causes an error if the database is missing — preventing silent
 	// creation of shadow databases on the wrong server.
 	CreateIfMissing bool
+
+	// ServerMode indicates this config targets an external dolt sql-server
+	// rather than the embedded Dolt engine. Set by the store factory based
+	// on metadata.json dolt_mode or BEADS_DOLT_SERVER_MODE env var.
+	ServerMode bool
 
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
@@ -468,6 +476,30 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	return fn(tx)
 }
 
+// withRetryTx wraps withWriteTx with retry logic for serialization failures
+// (MySQL 1213 deadlock, 1205 lock wait timeout). These errors guarantee the
+// transaction was rolled back, so retrying is always safe.
+//
+// Connection-level errors (broken pipe, bad connection) are NOT retried here
+// because they can occur after a successful commit, making retry unsafe for
+// non-idempotent operations. Callers that need connection-level retry should
+// use withRetry at a higher layer.
+func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 25 * time.Millisecond
+	bo.MaxElapsedTime = 5 * time.Second
+	return backoff.Retry(func() error {
+		err := s.withWriteTx(ctx, fn)
+		if err != nil && isSerializationError(err) {
+			return err // retryable
+		}
+		if err != nil {
+			return backoff.Permanent(err)
+		}
+		return nil
+	}, backoff.WithContext(bo, ctx))
+}
+
 // withWriteTx runs fn inside a transaction, committing on success.
 // Used for write operations that delegate SQL work to issueops functions.
 // The caller's fn should NOT call tx.Commit — withWriteTx handles that.
@@ -539,14 +571,50 @@ func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
 	return versioncontrolops.BackupRemove(ctx, s.db, name)
 }
 
-// BackupExportTables exports all tables to JSONL files in dir.
-func (s *DoltStore) BackupExportTables(ctx context.Context, dir, prefix string) (*storage.BackupCounts, error) {
-	return versioncontrolops.ExportTables(ctx, s.db, dir, prefix)
+// BackupDatabase registers dir as a file:// Dolt backup remote and syncs
+// the full database to it, preserving complete commit history.
+func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("backup destination does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup destination is not a directory: %s", dir)
+	}
+
+	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	if err != nil {
+		return err
+	}
+	backupName := "backup_export"
+
+	// Register as a backup remote (idempotent — remove first if exists).
+	_ = versioncontrolops.BackupRemove(ctx, s.db, backupName)
+	if err := versioncontrolops.BackupAdd(ctx, s.db, backupName, backupURL); err != nil {
+		return fmt.Errorf("register backup remote: %w", err)
+	}
+	if err := versioncontrolops.BackupSync(ctx, s.db, backupName); err != nil {
+		return fmt.Errorf("sync to backup: %w", err)
+	}
+	return nil
 }
 
-// BackupRestoreFromDir restores all JSONL tables from dir.
-func (s *DoltStore) BackupRestoreFromDir(ctx context.Context, dir, prefix string, dryRun bool) (*storage.BackupRestoreResult, error) {
-	return versioncontrolops.RestoreFromDir(ctx, s.db, s, dir, prefix, dryRun)
+// RestoreDatabase restores the database from a Dolt backup at dir.
+// When force is true, an existing database is overwritten.
+func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("backup source does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup source is not a directory: %s", dir)
+	}
+
+	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	if err != nil {
+		return err
+	}
+	return versioncontrolops.BackupRestore(ctx, s.db, backupURL, s.database, force)
 }
 
 // QueryContext wraps s.db.QueryContext with retry for transient errors.
@@ -1186,33 +1254,6 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		return nil
 	}
 
-	// Acquire an advisory lock to serialize schema initialization across concurrent processes.
-	// On a fresh database, all processes fail the fast path and race to execute ~20 DDL
-	// statements simultaneously, corrupting the Dolt journal. GET_LOCK serializes entry
-	// to the slow path. The lock is connection-scoped: we hold a dedicated connection so
-	// the lock persists across the DDL sequence and is released on conn.Close().
-	const schemaInitLock = "bd_schema_init"
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection for schema init lock: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	var locked int
-	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 30)", schemaInitLock).Scan(&locked); err != nil {
-		return fmt.Errorf("failed to acquire schema init lock: %w", err)
-	}
-	if locked != 1 {
-		return fmt.Errorf("failed to acquire schema init lock: timeout after 30s (another process holds it)")
-	}
-	defer conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", schemaInitLock) //nolint:errcheck
-
-	// Double-check: another process may have completed initialization while we waited.
-	var versionAfterLock int
-	if err := conn.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&versionAfterLock); err == nil && versionAfterLock >= currentSchemaVersion {
-		return createIgnoredTables(db)
-	}
-
 	// Execute schema creation - split into individual statements
 	// because MySQL/Dolt doesn't support multiple statements in one Exec
 	for _, stmt := range splitStatements(schema) {
@@ -1451,6 +1492,41 @@ func (s *DoltStore) CLIDir() string {
 		return ""
 	}
 	return filepath.Join(s.dbPath, s.database)
+}
+
+// DoltGC runs Dolt garbage collection to reclaim disk space.
+// Pins a single connection to avoid session state loss on pooled *sql.DB.
+func (s *DoltStore) DoltGC(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for gc: %w", err)
+	}
+	defer conn.Close()
+	return versioncontrolops.DoltGC(ctx, conn)
+}
+
+// Flatten squashes all Dolt commit history into a single commit.
+// Pins a single connection because the stored procedures (DOLT_CHECKOUT,
+// DOLT_RESET, etc.) rely on session-scoped state that would be lost if
+// steps execute on different pooled connections.
+func (s *DoltStore) Flatten(ctx context.Context) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for flatten: %w", err)
+	}
+	defer conn.Close()
+	return versioncontrolops.Flatten(ctx, conn)
+}
+
+// Compact squashes old Dolt commits while preserving recent ones.
+// Pins a single connection for session-scoped stored procedures.
+func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for compact: %w", err)
+	}
+	defer conn.Close()
+	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes)
 }
 
 // UnderlyingDB returns the underlying *sql.DB connection
@@ -1813,6 +1889,13 @@ func (s *DoltStore) Push(ctx context.Context) (retErr error) {
 	if s.shouldUseCLIForCredentials(ctx) {
 		return s.doltCLIPush(ctx, false, creds)
 	}
+	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
+	// etc.) are set and we're in server mode, route through CLI so the dolt
+	// subprocess inherits the current env. The SQL server may not have these
+	// vars if it was started in a different context (GH#6).
+	if s.shouldUseCLIForCloudAuth() {
+		return s.doltCLIPush(ctx, false, creds)
+	}
 	if s.remoteUser != "" {
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
@@ -1852,6 +1935,10 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 	// cmd.Env (applyToCmd). The SQL path's withEnvCredentials sets process-wide
 	// env vars that an external server cannot see.
 	if s.shouldUseCLIForCredentials(ctx) {
+		return s.doltCLIPush(ctx, true, creds)
+	}
+	// Cloud auth CLI routing (GH#6).
+	if s.shouldUseCLIForCloudAuth() {
 		return s.doltCLIPush(ctx, true, creds)
 	}
 	if s.remoteUser != "" {
@@ -1918,6 +2005,10 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 			return err
 		}
 		return nil
+	}
+	// Cloud auth CLI routing (GH#6).
+	if s.shouldUseCLIForCloudAuth() {
+		return s.doltCLIPull(ctx, creds)
 	}
 	if s.remoteUser != "" {
 		return withEnvCredentials(creds, func() error {

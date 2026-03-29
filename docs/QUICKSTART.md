@@ -26,16 +26,16 @@ bd init --team
 ```
 
 The wizard will:
-- Create `.beads/` directory and Dolt database
+- Create `.beads/` directory and embedded Dolt database
 - **Prompt for your role** (maintainer or contributor) unless a flag is provided
 - Import existing issues from git (if any)
 - Prompt to install git hooks (recommended)
 - Prompt to configure git merge driver (recommended)
-- Auto-start Dolt server for database operations
 
 Notes:
-- Dolt is the default (and only) storage backend. Data is stored in `.beads/dolt/`.
-- Dolt uses a `dolt sql-server` for database operations.
+- Dolt is the default (and only) storage backend. Data is stored in `.beads/embeddeddolt/`.
+- By default, Dolt runs in **embedded mode** (in-process, no server needed).
+- For multi-writer setups, use `bd init --server` to connect to a `dolt sql-server` instead.
 - To import issues from an older installation, run `bd init --from-jsonl`.
 
 ### Role Configuration
@@ -197,9 +197,44 @@ When a teammate clones the repo, `bd bootstrap` auto-detects the existing databa
 
 See [DOLT-BACKEND.md](DOLT-BACKEND.md#dolt-remotes) for remote configuration details and [FEDERATION-SETUP.md](../FEDERATION-SETUP.md) for multi-team sync.
 
+## Optional: Notion Sync
+
+If you keep project issues in Notion, save an integration token first:
+
+```bash
+bd config set notion.token <your-token>
+```
+
+Then either create a new Beads database under a parent page or connect to an existing target:
+
+```bash
+bd notion init --parent <page-id>
+# or
+bd notion connect --url <notion-database-or-data-source-url>
+```
+
+The same auth value can also come from `NOTION_TOKEN`. Directly setting `notion.data_source_id` remains available as an escape hatch for advanced setups.
+
+Check which auth source is active and whether the target schema is ready:
+
+```bash
+bd notion status
+bd notion status --json
+```
+
+Preview or run sync:
+
+```bash
+bd notion sync --dry-run
+bd notion sync
+bd notion sync --pull
+bd notion sync --push
+```
+
 ## Database Location
 
-By default, data is stored in `.beads/dolt/` within your repository.
+By default (embedded mode), data is stored in `.beads/embeddeddolt/` within your repository.
+In server mode, data is managed by the external `dolt sql-server`.
 
 ## Migrating Databases
 

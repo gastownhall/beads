@@ -1,17 +1,10 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -52,51 +45,22 @@ Examples:
 		ctx := rootCtx
 		start := time.Now()
 
-		beadsDir := beads.FindBeadsDir()
-		if beadsDir == "" {
-			FatalError("could not find .beads directory")
-		}
-
-		// Detect server mode from config
-		cfg, _ := configfile.Load(beadsDir)
-		serverMode := cfg != nil && cfg.IsDoltServerMode()
-
-		doltPath := filepath.Join(beadsDir, "dolt")
-
-		// In embedded mode, validate local dolt directory and CLI
-		if !serverMode {
-			if _, err := os.Stat(doltPath); os.IsNotExist(err) {
-				FatalError("Dolt directory not found at %s", doltPath)
-			}
-			if _, err := exec.LookPath("dolt"); err != nil {
-				FatalErrorWithHint("dolt command not found in PATH",
-					"Install Dolt from https://github.com/dolthub/dolt")
-			}
-		}
-
-		// Count commits
-		accessor, ok := store.(storage.RawDBAccessor)
+		flattener, ok := store.(storage.Flattener)
 		if !ok {
-			FatalError("storage backend does not support raw DB access")
-		}
-		db := accessor.DB()
-		var commitCount int
-		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
-			FatalError("failed to count commits: %v", err)
+			FatalError("storage backend does not support flatten")
 		}
 
-		// Get initial commit hash (oldest ancestor)
+		// Get commit count and initial hash for reporting.
+		// Use store.Log() which works across both backends.
+		logEntries, logErr := store.Log(ctx, 0)
+		if logErr != nil {
+			FatalError("failed to read commit log: %v", logErr)
+		}
+		commitCount := len(logEntries)
+
 		var initialHash string
-		if err := db.QueryRowContext(ctx,
-			"SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1",
-		).Scan(&initialHash); err != nil {
-			FatalError("failed to find initial commit: %v", err)
-		}
-
-		// Size reporting: only available in embedded mode (local dolt dir)
-		var sizeBefore int64
-		if !serverMode {
-			sizeBefore, _ = getDirSize(doltPath)
+		if commitCount > 0 {
+			initialHash = logEntries[commitCount-1].Hash // oldest is last
 		}
 
 		if flattenDryRun {
@@ -105,24 +69,12 @@ Examples:
 					"dry_run":       true,
 					"commit_count":  commitCount,
 					"initial_hash":  initialHash,
-					"server_mode":   serverMode,
 					"would_flatten": commitCount > 1,
-				}
-				if !serverMode {
-					result["dolt_path"] = doltPath
-					result["size_before"] = sizeBefore
-					result["size_display"] = formatBytes(sizeBefore)
 				}
 				outputJSON(result)
 				return
 			}
 			fmt.Printf("DRY RUN — Flatten preview\n\n")
-			if serverMode {
-				fmt.Printf("  Mode:           server\n")
-			} else {
-				fmt.Printf("  Dolt directory: %s\n", doltPath)
-				fmt.Printf("  Current size:   %s\n", formatBytes(sizeBefore))
-			}
 			fmt.Printf("  Commits:        %d\n", commitCount)
 			fmt.Printf("  Initial commit: %s\n", initialHash)
 			if commitCount <= 1 {
@@ -157,114 +109,31 @@ Examples:
 			fmt.Printf("Flattening %d commits...\n", commitCount)
 		}
 
-		if serverMode {
-			flattenViaSQL(ctx, db, initialHash)
-		} else {
-			flattenViaCLI(doltPath, initialHash)
+		if err := flattener.Flatten(ctx); err != nil {
+			FatalError("flatten failed: %v", err)
+		}
+
+		// Reclaim disk space from the now-orphaned old history.
+		if gc, ok := store.(storage.GarbageCollector); ok {
+			if err := gc.DoltGC(ctx); err != nil {
+				WarnError("dolt gc after flatten failed: %v", err)
+			}
 		}
 
 		elapsed := time.Since(start)
 
-		if serverMode {
-			// No local size info in server mode
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"success":        true,
-					"commits_before": commitCount,
-					"commits_after":  1,
-					"server_mode":    true,
-					"elapsed_ms":     elapsed.Milliseconds(),
-				})
-				return
-			}
-			fmt.Printf("✓ Flattened %d commits → 1\n", commitCount)
-			fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
-		} else {
-			sizeAfter, _ := getDirSize(doltPath)
-			freed := sizeBefore - sizeAfter
-			if freed < 0 {
-				freed = 0
-			}
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"success":        true,
-					"commits_before": commitCount,
-					"commits_after":  1,
-					"size_before":    sizeBefore,
-					"size_after":     sizeAfter,
-					"freed_bytes":    freed,
-					"freed_display":  formatBytes(freed),
-					"elapsed_ms":     elapsed.Milliseconds(),
-				})
-				return
-			}
-			fmt.Printf("✓ Flattened %d commits → 1\n", commitCount)
-			fmt.Printf("  %s → %s (freed %s)\n", formatBytes(sizeBefore), formatBytes(sizeAfter), formatBytes(freed))
-			fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"success":        true,
+				"commits_before": commitCount,
+				"commits_after":  1,
+				"elapsed_ms":     elapsed.Milliseconds(),
+			})
+			return
 		}
+		fmt.Printf("✓ Flattened %d commits → 1\n", commitCount)
+		fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
 	},
-}
-
-// flattenViaSQL performs the Tim Sehn flatten recipe using SQL stored procedures.
-// Used in server mode where the dolt CLI can't reach the server's data.
-func flattenViaSQL(ctx context.Context, db *sql.DB, initialHash string) {
-	execSQL := func(name, query string, args ...interface{}) {
-		if _, err := db.ExecContext(ctx, query, args...); err != nil {
-			FatalError("flatten step '%s' failed: %v", name, err)
-		}
-	}
-
-	// Tim Sehn recipe via SQL stored procedures:
-	// 1. Create temp branch
-	// 2. Checkout temp branch
-	// 3. Soft-reset to initial commit (collapses all history into working set)
-	// 4. Stage all + commit as single snapshot
-	// 5. Checkout main
-	// 6. Hard-reset main to the flattened branch
-	// 7. Delete temp branch
-	// 8. GC
-	execSQL("create temp branch", "CALL DOLT_BRANCH('flatten-tmp')")
-	execSQL("checkout temp branch", "CALL DOLT_CHECKOUT('flatten-tmp')")
-	execSQL("soft reset to initial", "CALL DOLT_RESET('--soft', ?)", initialHash)
-	execSQL("commit flattened snapshot", "CALL DOLT_COMMIT('-Am', 'flatten: squash all history into single commit')")
-	execSQL("checkout main", "CALL DOLT_CHECKOUT('main')")
-	execSQL("reset main to flattened", "CALL DOLT_RESET('--hard', 'flatten-tmp')")
-	execSQL("delete temp branch", "CALL DOLT_BRANCH('-D', 'flatten-tmp')")
-	execSQL("garbage collect", "CALL DOLT_GC()")
-}
-
-// flattenViaCLI performs the Tim Sehn flatten recipe using the dolt CLI.
-// Used in embedded mode where the local .beads/dolt/ directory is the data source.
-func flattenViaCLI(doltPath, initialHash string) {
-	// Close the store connection before running CLI operations
-	// that manipulate branches, to avoid locked database issues.
-	if store != nil {
-		_ = store.Close()
-	}
-
-	steps := []struct {
-		name string
-		args []string
-	}{
-		{"create temp branch", []string{"branch", "flatten-tmp"}},
-		{"checkout temp branch", []string{"checkout", "flatten-tmp"}},
-		{"soft reset to initial", []string{"reset", "--soft", initialHash}},
-		{"stage all changes", []string{"add", "."}},
-		{"commit flattened snapshot", []string{"commit", "-Am", "flatten: squash all history into single commit"}},
-		{"checkout main", []string{"checkout", "main"}},
-		{"reset main to flattened", []string{"reset", "--hard", "flatten-tmp"}},
-		{"delete temp branch", []string{"branch", "-D", "flatten-tmp"}},
-		{"garbage collect", []string{"gc"}},
-	}
-
-	for _, step := range steps {
-		cmd := exec.Command("dolt", step.args...) // #nosec G204 -- fixed commands
-		cmd.Dir = doltPath
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			FatalError("flatten step '%s' failed: %v\nOutput: %s", step.name, err, string(output))
-		}
-	}
 }
 
 func init() {

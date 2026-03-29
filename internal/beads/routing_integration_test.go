@@ -135,6 +135,9 @@ func TestMultiRepoEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow integration test in short mode")
 	}
+	if testDoltPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 
 	// Create primary repo
 	primaryDir := t.TempDir()

@@ -170,10 +170,11 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL
 );
 -- Child counters table
+-- No FK constraint: parent_id may reference issues or wisps (agent beads were
+-- migrated to wisps in 007_infra_to_wisps but this FK was not updated).
 CREATE TABLE IF NOT EXISTS child_counters (
     parent_id VARCHAR(255) PRIMARY KEY,
-    last_child INT NOT NULL DEFAULT 0,
-    CONSTRAINT fk_counter_parent FOREIGN KEY (parent_id) REFERENCES issues(id) ON DELETE CASCADE
+    last_child INT NOT NULL DEFAULT 0
 );
 
 -- Issue snapshots table (for compaction)
@@ -314,14 +315,14 @@ LEFT JOIN blocked_transitively bt ON bt.issue_id = i.id
 WHERE i.status = 'open'
   AND (i.ephemeral = 0 OR i.ephemeral IS NULL)
   AND bt.issue_id IS NULL
-  AND (i.defer_until IS NULL OR i.defer_until <= NOW())
+  AND (i.defer_until IS NULL OR i.defer_until <= UTC_TIMESTAMP())
   AND NOT EXISTS (
     SELECT 1 FROM dependencies d_parent
     JOIN issues parent ON parent.id = d_parent.depends_on_id
     WHERE d_parent.issue_id = i.id
       AND d_parent.type = 'parent-child'
       AND parent.defer_until IS NOT NULL
-      AND parent.defer_until > NOW()
+      AND parent.defer_until > UTC_TIMESTAMP()
   );
 `
 
@@ -398,14 +399,14 @@ LEFT JOIN blocked_transitively bt ON bt.issue_id = i.id
 WHERE i.status IN (` + statusList + `)
   AND (i.ephemeral = 0 OR i.ephemeral IS NULL)
   AND bt.issue_id IS NULL
-  AND (i.defer_until IS NULL OR i.defer_until <= NOW())
+  AND (i.defer_until IS NULL OR i.defer_until <= UTC_TIMESTAMP())
   AND NOT EXISTS (
     SELECT 1 FROM dependencies d_parent
     JOIN issues parent ON parent.id = d_parent.depends_on_id
     WHERE d_parent.issue_id = i.id
       AND d_parent.type = 'parent-child'
       AND parent.defer_until IS NOT NULL
-      AND parent.defer_until > NOW()
+      AND parent.defer_until > UTC_TIMESTAMP()
   );
 `
 }

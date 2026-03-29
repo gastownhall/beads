@@ -38,6 +38,9 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 		"BEADS_DOLT_SERVER_PORT=",
 		"BEADS_DOLT_PORT=",
 		"BEADS_DOLT_SHARED_SERVER=",
+		"GIT_TERMINAL_PROMPT=0",
+		"SSH_ASKPASS=",
+		"GIT_ASKPASS=",
 	)
 
 	initOut, initErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")

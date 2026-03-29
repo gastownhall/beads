@@ -42,9 +42,8 @@ Tool-level settings you can configure:
 | `git.no-gpg-sign` | - | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
 | `directory.labels` | - | - | (none) | Map directories to labels for automatic filtering |
 | `external_projects` | - | - | (none) | Map project names to paths for cross-project deps |
-| `backup.enabled` | - | `BD_BACKUP_ENABLED` | `false` | Enable periodic JSONL backup to `.beads/backup/` |
-| `backup.interval` | - | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-exports |
-| `backup.git-push` | - | `BD_BACKUP_GIT_PUSH` | `false` | Auto git-add + commit + push after export |
+| `backup.enabled` | - | `BD_BACKUP_ENABLED` | `false` | Enable periodic Dolt-native backup to `.beads/backup/` |
+| `backup.interval` | - | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-backups |
 | `dolt.auto-push` | - | `BD_DOLT_AUTO_PUSH` | (auto) | Auto-push to Dolt remote after writes (auto-enabled when origin exists) |
 | `dolt.auto-push-interval` | - | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share a single Dolt server across all projects at `~/.beads/shared-server/` |
@@ -52,7 +51,7 @@ Tool-level settings you can configure:
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see below) |
 
-**Backend note:** Dolt is the primary storage backend. SQLite remains supported for simple single-user setups. See [DOLT.md](DOLT.md) for Dolt-specific configuration.
+**Backend note:** Dolt is the only storage backend. By default, Dolt runs in embedded mode (in-process, no server). Use `bd init --server` or `BEADS_DOLT_SERVER_MODE=1` for server mode. See [DOLT.md](DOLT.md) for details.
 
 ### Dolt Auto-Commit (SQL commit vs Dolt commit)
 
@@ -79,30 +78,28 @@ dolt:
 
 **Caveat:** enabling this creates **more Dolt commits** over time (one per write command). This is intentional so changes are not left only in the working set.
 
-### JSONL Backup
+### Auto-Backup
 
-Periodic JSONL export to `.beads/backup/` provides an off-machine recovery path. Local Dolt snapshots (via `dolt.auto-commit`) remain the primary safety net; JSONL backup is a secondary layer.
+Periodic Dolt-native backup to `.beads/backup/` provides an off-machine recovery path. Local Dolt snapshots (via `dolt.auto-commit`) remain the primary safety net; backup is a secondary layer.
 
 ```yaml
 backup:
   enabled: true    # Enable auto-backup after write commands
-  interval: 15m    # Minimum time between auto-exports
-  git-push: false  # Auto git-add + commit + push after export
+  interval: 15m    # Minimum time between auto-backups
 ```
 
 **How it works:**
 - After each write command (in PersistentPostRun), `bd` checks the Dolt HEAD commit hash against the last backup state
-- If data changed and the throttle interval has passed, all tables are exported to sorted JSONL files
-- Events are exported incrementally (append-only) using a high-water mark
-- Each table is written atomically via temp file + rename (crash-safe)
+- If data changed and the throttle interval has passed, a Dolt-native backup is synced to `.beads/backup/`
+- Full commit history is preserved in the backup
 - State is tracked in `.beads/backup/backup_state.json`
 
 **Manual commands:**
-- `bd backup` — run export immediately (ignores throttle)
-- `bd backup --force` — export even if nothing changed
-- `bd backup status` — show last backup time, commit hash, counts
-
-**Git push mode:** When `backup.git-push: true`, after each export `bd` runs `git add -f .beads/backup/`, commits with a timestamped message, and pushes. Push failures are warnings only (non-fatal).
+- `bd backup init <path>` — register a backup destination (filesystem or DoltHub URL)
+- `bd backup sync` — push to the configured backup destination
+- `bd backup restore [path]` — restore from a backup (`--force` to overwrite)
+- `bd backup remove` — unregister the backup destination
+- `bd backup status` — show backup configuration and last sync time
 
 ### Dolt Auto-Push
 
@@ -151,7 +148,7 @@ The sync mode controls how beads synchronizes data with git and/or Dolt remotes.
 
 #### Sync Mode
 
-Beads uses `dolt-native` sync mode exclusively. Dolt remotes handle sync directly with cell-level merge. Use `bd export` for issue portability, `bd backup` / `bd backup restore` for supported JSONL backup snapshots, and `bd backup export-git` / `bd backup fetch-git` to move those snapshots through a git branch.
+Beads uses `dolt-native` sync mode exclusively. Dolt remotes handle sync directly with cell-level merge. Use `bd export` for issue portability, and `bd backup init` / `bd backup sync` / `bd backup restore` for Dolt-native backups.
 
 #### Sync Triggers
 
@@ -630,6 +627,7 @@ bd config set sync.require_confirmation_on_mass_delete "true"
 # Configure Jira connection
 bd config set jira.url "https://company.atlassian.net"
 bd config set jira.project "PROJ"
+bd config set jira.projects "PROJ1,PROJ2"   # Multiple projects (comma-separated)
 bd config set jira.api_token "YOUR_TOKEN"
 
 # Map bd statuses to Jira statuses
@@ -655,7 +653,15 @@ bd config set linear.api_key "lin_api_YOUR_API_KEY"
 
 # Team ID (find in Linear team settings or URL)
 bd config set linear.team_id "team-uuid-here"
+
+# Multiple team IDs (comma-separated; can also use LINEAR_TEAM_IDS env var)
+bd config set linear.team_ids "uuid-team-1,uuid-team-2"
 ```
+
+When `linear.team_ids` is set, `bd linear sync` fetches issues from all listed
+teams. For push operations with multiple teams, use the `--team` flag to specify
+the target. The singular `linear.team_id` is still supported for backward
+compatibility.
 
 **Getting your Linear credentials:**
 
@@ -775,7 +781,14 @@ bd config set ado.org "myorg"
 
 # Project name (can also use AZURE_DEVOPS_PROJECT environment variable)
 bd config set ado.project "MyProject"
+
+# Multiple projects (comma-separated; can also use AZURE_DEVOPS_PROJECTS env var)
+bd config set ado.projects "Project1,Project2"
 ```
+
+When `ado.projects` is set, `bd ado sync` fetches work items from all listed
+projects in a single WIQL query. The singular `ado.project` is still supported
+for backward compatibility.
 
 **Optional configuration:**
 
@@ -848,12 +861,13 @@ Priority mapping is not configurable — it is handled automatically.
 
 All ADO config keys have environment variable equivalents:
 
-| Config Key    | Environment Variable     |
-|---------------|--------------------------|
-| `ado.pat`     | `AZURE_DEVOPS_PAT`       |
-| `ado.org`     | `AZURE_DEVOPS_ORG`       |
-| `ado.project` | `AZURE_DEVOPS_PROJECT`   |
-| `ado.url`     | `AZURE_DEVOPS_URL`       |
+| Config Key     | Environment Variable     |
+|----------------|--------------------------|
+| `ado.pat`      | `AZURE_DEVOPS_PAT`       |
+| `ado.org`      | `AZURE_DEVOPS_ORG`       |
+| `ado.project`  | `AZURE_DEVOPS_PROJECT`   |
+| `ado.projects` | `AZURE_DEVOPS_PROJECTS`  |
+| `ado.url`      | `AZURE_DEVOPS_URL`       |
 
 Environment variables take effect when the corresponding `bd config` key is not set.
 

@@ -83,6 +83,9 @@ func TestE2E_DoctorFixMetadataRoundtrip(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("dolt metadata e2e test not supported on windows")
 	}
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 
 	tmpDir := createTempDirWithCleanup(t)
 
@@ -151,6 +154,9 @@ func TestE2E_MigrateDoltMetadata(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("dolt metadata e2e test not supported on windows")
+	}
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
 	}
 
 	tmpDir := createTempDirWithCleanup(t)

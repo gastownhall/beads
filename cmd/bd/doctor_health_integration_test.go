@@ -26,9 +26,11 @@ func TestDoctorCheckHealthReportsVersionMismatchOnRepoLocalPort(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.email", "test@example.com")
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 
-	env := []string{
-		"BEADS_TEST_MODE=1",
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
 	}
+
+	env := append(os.Environ(), "BEADS_TEST_MODE=1")
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {

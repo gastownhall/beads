@@ -540,8 +540,10 @@ func (s *configStore) GetIssuesByIDs(_ context.Context, _ []string) ([]*types.Is
 func (s *configStore) UpdateIssue(_ context.Context, _ string, _ map[string]interface{}, _ string) error {
 	return nil
 }
-func (s *configStore) CloseIssue(_ context.Context, _, _, _, _ string) error { return nil }
-func (s *configStore) DeleteIssue(_ context.Context, _ string) error         { return nil }
+func (s *configStore) ReopenIssue(_ context.Context, _, _, _ string) error     { return nil }
+func (s *configStore) UpdateIssueType(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) CloseIssue(_ context.Context, _, _, _, _ string) error   { return nil }
+func (s *configStore) DeleteIssue(_ context.Context, _ string) error           { return nil }
 func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
 	return nil, nil
 }
@@ -594,10 +596,23 @@ func (s *configStore) GetAllEventsSince(_ context.Context, _ time.Time) ([]*type
 	return nil, nil
 }
 func (s *configStore) GetStatistics(_ context.Context) (*types.Statistics, error) { return nil, nil }
+func (s *configStore) ListWisps(_ context.Context, _ types.WispFilter) ([]*types.Issue, error) {
+	return nil, nil
+}
 func (s *configStore) RunInTransaction(_ context.Context, _ string, _ func(tx storage.Transaction) error) error {
 	return nil
 }
-func (s *configStore) Close() error { return nil }
+func (s *configStore) MergeSlotCreate(_ context.Context, _ string) (*types.Issue, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotCheck(_ context.Context) (*storage.MergeSlotStatus, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotAcquire(_ context.Context, _, _ string, _ bool) (*storage.MergeSlotResult, error) {
+	return nil, nil
+}
+func (s *configStore) MergeSlotRelease(_ context.Context, _, _ string) error { return nil }
+func (s *configStore) Close() error                                          { return nil }
 
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	var capturedJQL string
@@ -625,10 +640,10 @@ func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	}
 
 	tr := &Tracker{
-		client:     newTestClient(srv.URL, "3"),
-		store:      store,
-		projectKey: "TEST",
-		apiVersion: "3",
+		client:      newTestClient(srv.URL, "3"),
+		store:       store,
+		projectKeys: []string{"TEST"},
+		apiVersion:  "3",
 	}
 
 	_, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{State: "open"})
@@ -665,10 +680,10 @@ func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
 	}
 
 	tr := &Tracker{
-		client:     newTestClient(srv.URL, "3"),
-		store:      store,
-		projectKey: "TEST",
-		apiVersion: "3",
+		client:      newTestClient(srv.URL, "3"),
+		store:       store,
+		projectKeys: []string{"TEST"},
+		apiVersion:  "3",
 	}
 
 	_, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{State: "open"})

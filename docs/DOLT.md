@@ -62,8 +62,16 @@ gt dolt start
 cd ~/.dolt-data/beads && dolt sql-server --port 3307
 ```
 
+```bash
+# Initialize in server mode
+bd init --server
+
+# Or switch via environment variable
+export BEADS_DOLT_SERVER_MODE=1
+```
+
 ```yaml
-# .beads/config.yaml
+# .beads/config.yaml (server mode settings)
 dolt:
   mode: server
   host: 127.0.0.1
@@ -71,10 +79,89 @@ dolt:
   user: root
 ```
 
-Server mode is required for:
+Switch to server mode when you need:
 - Multiple agents writing simultaneously
 - Orchestrator multi-rig setups
 - Federation with remote peers
+
+## Migrating Between Backends
+
+You can migrate data between embedded mode and server mode using `bd backup`.
+Both directions preserve full Dolt commit history.
+
+### Server → Embedded
+
+1. **Create a backup from the server-mode project:**
+
+   ```bash
+   # In the server-mode project directory
+   bd backup init /path/to/backup-dir
+   bd backup sync
+   ```
+
+2. **Create a new embedded-mode project and restore:**
+
+   ```bash
+   mkdir new-project && cd new-project
+   bd init                  # creates an embedded-mode project by default
+   bd backup restore --force /path/to/backup-dir
+   ```
+
+   `--force` overwrites the freshly-initialized database with the backup
+   contents. The restore automatically:
+   - Updates `metadata.json` to match the restored project identity
+   - Registers the backup directory for future `bd backup sync`
+   - Backfills the embedded migration tracker (`schema_migrations`)
+
+3. **Verify:**
+
+   ```bash
+   bd list
+   bd backup status
+   ```
+
+### Embedded → Server
+
+1. **Create a backup from the embedded-mode project:**
+
+   ```bash
+   # In the embedded-mode project directory
+   bd backup init /path/to/backup-dir
+   bd backup sync
+   ```
+
+2. **Create a new server-mode project and restore:**
+
+   ```bash
+   mkdir new-project && cd new-project
+   bd init --server         # creates a server-mode project
+   bd backup restore --force /path/to/backup-dir
+   ```
+
+3. **Verify:**
+
+   ```bash
+   bd list
+   bd backup status
+   ```
+
+### Backup Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `bd backup init <path>` | Register a backup destination (filesystem or DoltHub URL) |
+| `bd backup sync` | Push database to the configured backup destination |
+| `bd backup restore [path]` | Restore from a backup directory (`--force` to overwrite) |
+| `bd backup remove` | Unregister the backup destination |
+| `bd backup status` | Show backup configuration and last sync time |
+
+### Notes
+
+- Data locations differ between modes: `.beads/embeddeddolt/` (embedded) vs `.beads/dolt/` (server)
+- The backup directory is a full Dolt backup — it can be on a local drive, NAS, or DoltHub
+- You can also migrate via Dolt remotes (`bd dolt push` / `bd dolt pull`) if both projects share a remote
+
+See also [DOLT-BACKEND.md](DOLT-BACKEND.md#migrating-between-backends).
 
 ## Federation (Peer-to-Peer Sync)
 
@@ -229,13 +316,8 @@ bd doctor --server         # Server mode checks (if applicable)
 
 **Symptom:** "database is locked" errors.
 
-Embedded mode is single-writer. If you need concurrent access:
-
-```bash
-# Switch to server mode
-gt dolt start
-bd config set dolt.mode server
-```
+Embedded mode is single-writer (enforced via file lock). If you need concurrent
+access, switch to server mode. See [Migrating Between Backends](#migrating-between-backends).
 
 ## Configuration Reference
 
@@ -247,8 +329,9 @@ dolt:
   # Auto-commit Dolt history after writes (default: on for embedded, off for server)
   auto-commit: on        # on | off
 
-  # Server mode settings (when mode: server)
+  # Storage mode (default: embedded)
   mode: embedded         # embedded | server
+  # Server mode settings (only used when mode: server)
   host: 127.0.0.1
   port: 3307
   user: root

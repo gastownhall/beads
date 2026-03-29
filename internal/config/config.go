@@ -186,6 +186,14 @@ func Initialize() error {
 	v.SetDefault("backup.git-push", false)
 	v.SetDefault("backup.git-repo", "")
 
+	// Auto-export: write git-tracked JSONL after mutations for portability
+	// When no Dolt remote is configured, this is the primary way to share
+	// beads state (issues + memories) across machines via git.
+	v.SetDefault("export.auto", false)
+	v.SetDefault("export.interval", "60s")
+	v.SetDefault("export.path", "export.jsonl") // relative to .beads/
+	v.SetDefault("export.git-add", false)
+
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
 

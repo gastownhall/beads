@@ -29,6 +29,9 @@ type CommandContext struct {
 	Verbose      bool
 	Quiet        bool
 
+	// Storage mode — true when connected to an external dolt sql-server.
+	ServerMode bool
+
 	// Runtime state
 	Store      storage.DoltStorage
 	RootCtx    context.Context

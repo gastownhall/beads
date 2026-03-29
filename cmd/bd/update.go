@@ -481,7 +481,7 @@ create, update, show, or close operation).`,
 
 		// Embedded mode: flush Dolt commit. DoltStore commits
 		// inline during UpdateIssue so this is only needed for EmbeddedDoltStore.
-		if isEmbeddedDolt && firstUpdatedID != "" && store != nil {
+		if isEmbeddedMode() && firstUpdatedID != "" && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalErrorRespectJSON("failed to commit: %v", err)
 			}
@@ -613,7 +613,7 @@ func init() {
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
-	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; fails if already claimed)")
+	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you)")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

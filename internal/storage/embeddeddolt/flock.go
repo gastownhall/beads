@@ -1,5 +1,3 @@
-//go:build embeddeddolt
-
 package embeddeddolt
 
 import (
@@ -9,6 +7,11 @@ import (
 
 	"github.com/steveyegge/beads/internal/lockfile"
 )
+
+// Unlocker is the interface for releasing an acquired lock.
+type Unlocker interface {
+	Unlock()
+}
 
 // Lock holds an exclusive flock on the embeddeddolt data directory.
 // Used by commands that require single-writer access (e.g., bd init).
@@ -26,13 +29,13 @@ func TryLock(dataDir string) (*Lock, error) {
 	}
 
 	lockPath := filepath.Join(dataDir, ".lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // lockPath is derived from dataDir, not user input
 	if err != nil {
 		return nil, fmt.Errorf("embeddeddolt: opening lock file: %w", err)
 	}
 
 	if err := lockfile.FlockExclusiveNonBlocking(f); err != nil {
-		f.Close()
+		_ = f.Close()
 		if lockfile.IsLocked(err) {
 			return nil, fmt.Errorf("embeddeddolt: another process holds the exclusive lock on %s; "+
 				"the embedded backend supports only one writer at a time — "+
@@ -54,3 +57,10 @@ func (l *Lock) Unlock() {
 		panic(fmt.Sprintf("embeddeddolt: failed to close lock file: %v", err))
 	}
 }
+
+// NoopLock is a lock that does nothing. Used in server mode where the
+// external dolt sql-server handles its own concurrency.
+type NoopLock struct{}
+
+// Unlock is a no-op.
+func (NoopLock) Unlock() {}

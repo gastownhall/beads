@@ -19,10 +19,11 @@ import (
 
 // ADOConfig holds Azure DevOps connection configuration.
 type ADOConfig struct {
-	PAT     string // Personal access token
-	Org     string // Organization name
-	Project string // Project name
-	URL     string // Custom base URL (for on-prem)
+	PAT      string   // Personal access token
+	Org      string   // Organization name
+	Project  string   // Primary project name (backward compat)
+	Projects []string // All project names
+	URL      string   // Custom base URL (for on-prem)
 }
 
 // adoCmd is the root command for Azure DevOps operations.
@@ -32,10 +33,11 @@ var adoCmd = &cobra.Command{
 	Long: `Commands for syncing issues between beads and Azure DevOps.
 
 Configuration can be set via 'bd config' or environment variables:
-  ado.org / AZURE_DEVOPS_ORG         - Organization name
-  ado.project / AZURE_DEVOPS_PROJECT - Project name
-  ado.pat / AZURE_DEVOPS_PAT         - Personal access token
-  ado.url / AZURE_DEVOPS_URL         - Custom base URL (on-prem)`,
+  ado.org / AZURE_DEVOPS_ORG              - Organization name
+  ado.project / AZURE_DEVOPS_PROJECT      - Project name (single)
+  ado.projects / AZURE_DEVOPS_PROJECTS    - Project names (comma-separated)
+  ado.pat / AZURE_DEVOPS_PAT              - Personal access token
+  ado.url / AZURE_DEVOPS_URL              - Custom base URL (on-prem)`,
 }
 
 // adoSyncCmd synchronizes issues between beads and Azure DevOps.
@@ -158,6 +160,7 @@ func init() {
 	adoSyncCmd.Flags().StringVar(&adoFilterIterationPath, "iteration-path", "", "Filter to ADO iteration path (e.g., \"Project\\Sprint 1\")")
 	adoSyncCmd.Flags().StringVar(&adoFilterTypes, "types", "", "Filter to work item types, comma-separated (e.g., \"Bug,Task,User Story\")")
 	adoSyncCmd.Flags().StringVar(&adoFilterStates, "states", "", "Filter to ADO states, comma-separated (e.g., \"New,Active,Resolved\")")
+	adoSyncCmd.Flags().StringSlice("project", nil, "Project name(s) to sync (overrides configured project/projects)")
 
 	// Register ado command with root
 	rootCmd.AddCommand(adoCmd)
@@ -170,8 +173,15 @@ func getADOConfig() ADOConfig {
 
 	cfg.PAT = getADOConfigValue(ctx, "ado.pat")
 	cfg.Org = getADOConfigValue(ctx, "ado.org")
-	cfg.Project = getADOConfigValue(ctx, "ado.project")
 	cfg.URL = getADOConfigValue(ctx, "ado.url")
+
+	// Resolve projects from all sources.
+	pluralVal := getADOConfigValue(ctx, "ado.projects")
+	singularVal := getADOConfigValue(ctx, "ado.project")
+	cfg.Projects = tracker.ResolveProjectIDs(nil, pluralVal, singularVal)
+	if len(cfg.Projects) > 0 {
+		cfg.Project = cfg.Projects[0]
+	}
 
 	return cfg
 }
@@ -215,6 +225,8 @@ func adoConfigToEnvVar(key string) string {
 		return "AZURE_DEVOPS_ORG"
 	case "ado.project":
 		return "AZURE_DEVOPS_PROJECT"
+	case "ado.projects":
+		return "AZURE_DEVOPS_PROJECTS"
 	case "ado.url":
 		return "AZURE_DEVOPS_URL"
 	default:
@@ -230,8 +242,8 @@ func validateADOConfig(cfg ADOConfig) error {
 	if cfg.Org == "" && cfg.URL == "" {
 		return fmt.Errorf("ado.org not configured: set via 'bd config ado.org <org>' or AZURE_DEVOPS_ORG env var")
 	}
-	if cfg.Project == "" {
-		return fmt.Errorf("ado.project not configured: set via 'bd config ado.project <project>' or AZURE_DEVOPS_PROJECT env var")
+	if len(cfg.Projects) == 0 {
+		return fmt.Errorf("no ADO project configured\nSet via 'bd config set ado.project <project>'\nOr:  'bd config set ado.projects \"proj1,proj2\"'\nOr: AZURE_DEVOPS_PROJECT env var")
 	}
 	return nil
 }
@@ -330,12 +342,13 @@ func buildADOPullFilters(ctx context.Context, cmd *cobra.Command) *ado.PullFilte
 
 // adoStatusResult holds the JSON output for the ado status command.
 type adoStatusResult struct {
-	Org        string `json:"org"`
-	Project    string `json:"project"`
-	HasToken   bool   `json:"has_token"`
-	URL        string `json:"url,omitempty"`
-	Configured bool   `json:"configured"`
-	Error      string `json:"error,omitempty"`
+	Org        string   `json:"org"`
+	Project    string   `json:"project"`
+	Projects   []string `json:"projects,omitempty"`
+	HasToken   bool     `json:"has_token"`
+	URL        string   `json:"url,omitempty"`
+	Configured bool     `json:"configured"`
+	Error      string   `json:"error,omitempty"`
 }
 
 // runADOStatus implements the ado status command.
@@ -346,6 +359,7 @@ func runADOStatus(cmd *cobra.Command, _ []string) error {
 		result := adoStatusResult{
 			Org:      cfg.Org,
 			Project:  cfg.Project,
+			Projects: cfg.Projects,
 			HasToken: cfg.PAT != "",
 			URL:      cfg.URL,
 		}
@@ -363,7 +377,11 @@ func runADOStatus(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintln(out, "Azure DevOps Configuration")
 	_, _ = fmt.Fprintln(out, "==========================")
 	_, _ = fmt.Fprintf(out, "Organization: %s\n", cfg.Org)
-	_, _ = fmt.Fprintf(out, "Project:      %s\n", cfg.Project)
+	if len(cfg.Projects) <= 1 {
+		_, _ = fmt.Fprintf(out, "Project:      %s\n", cfg.Project)
+	} else {
+		_, _ = fmt.Fprintf(out, "Projects:     %s (%d projects)\n", strings.Join(cfg.Projects, ", "), len(cfg.Projects))
+	}
 	_, _ = fmt.Fprintf(out, "PAT:          %s\n", maskADOToken(cfg.PAT))
 	if cfg.URL != "" {
 		_, _ = fmt.Fprintf(out, "Base URL:     %s\n", cfg.URL)
@@ -473,6 +491,10 @@ func runADOSync(cmd *cobra.Command, _ []string) error {
 
 	// Create and initialize the ADO tracker
 	at := &ado.Tracker{}
+	cliProjects, _ := cmd.Flags().GetStringSlice("project")
+	if len(cliProjects) > 0 {
+		at.SetProjects(tracker.DeduplicateStrings(cliProjects))
+	}
 	if err := at.Init(ctx, store); err != nil {
 		return fmt.Errorf("initializing Azure DevOps tracker: %w", err)
 	}
@@ -687,6 +709,13 @@ func runADOSync(cmd *cobra.Command, _ []string) error {
 	if adoSyncDryRun {
 		_, _ = fmt.Fprintln(out)
 		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
+	}
+
+	// Embedded mode: flush Dolt commit after sync writes.
+	if isEmbeddedMode() && !adoSyncDryRun && store != nil {
+		if _, commitErr := store.CommitPending(rootCtx, actor); commitErr != nil {
+			return fmt.Errorf("failed to commit: %w", commitErr)
+		}
 	}
 
 	return nil

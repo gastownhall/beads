@@ -760,27 +760,15 @@ var listCmd = &cobra.Command{
 
 		ctx := rootCtx
 
-		// Handle --rig flag: query a different rig's database
-		rigOverride, _ := cmd.Flags().GetString("rig")
 		activeStore := store
-		if rigOverride != "" {
-			rigStore, err := openStoreForRig(ctx, rigOverride)
-			if err != nil {
-				FatalError("%v", err)
-			}
-			defer func() { _ = rigStore.Close() }() // Best effort cleanup
-			activeStore = rigStore
-		} else {
-			// Keep list/read behavior aligned with bd create routing decisions.
-			// Contributor auto-routing should read from the same target repo.
-			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
-			if err != nil {
-				FatalError("%v", err)
-			}
-			if routed {
-				defer func() { _ = routedStore.Close() }()
-				activeStore = routedStore
-			}
+		// Contributor auto-routing: read from the same target repo as bd create.
+		routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+		if err != nil {
+			FatalError("%v", err)
+		}
+		if routed {
+			defer func() { _ = routedStore.Close() }()
+			activeStore = routedStore
 		}
 
 		// Direct mode
@@ -1042,9 +1030,6 @@ func init() {
 
 	// Ready filter: show only issues ready to be worked on (bd-ihu31)
 	listCmd.Flags().Bool("ready", false, "Show only ready issues (status=open, excludes hooked/in_progress/blocked/deferred)")
-
-	// Cross-rig routing: query a different rig's database (bd-rgdjr)
-	listCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig my-project, --rig gt-, --rig gt)")
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

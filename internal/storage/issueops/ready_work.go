@@ -97,6 +97,12 @@ func GetReadyWorkInTx(
 		args = append(args, parentID, parentID)
 	}
 
+	// Molecule filtering: filter to direct children of the specified molecule.
+	if filter.MoleculeID != "" {
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
+		args = append(args, filter.MoleculeID, filter.MoleculeID)
+	}
+
 	// Metadata existence check.
 	if filter.HasMetadataKey != "" {
 		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
@@ -118,7 +124,7 @@ func GetReadyWorkInTx(
 				return nil, err
 			}
 			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, "$."+k, filter.MetadataFields[k])
+			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
 		}
 	}
 

@@ -105,7 +105,7 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to close duplicate: %w", err)
 	}
 
-	if isEmbeddedDolt && store != nil {
+	if isEmbeddedMode() && store != nil {
 		if _, err := store.CommitPending(ctx, actor); err != nil {
 			return fmt.Errorf("failed to commit: %w", err)
 		}
@@ -173,7 +173,7 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to close superseded issue: %w", err)
 	}
 
-	if isEmbeddedDolt && store != nil {
+	if isEmbeddedMode() && store != nil {
 		if _, err := store.CommitPending(ctx, actor); err != nil {
 			return fmt.Errorf("failed to commit: %w", err)
 		}

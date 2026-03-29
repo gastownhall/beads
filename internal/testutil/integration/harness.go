@@ -211,9 +211,17 @@ func FilterEnv(environ []string) []string {
 	return filtered
 }
 
-// RequireDolt skips the test if the dolt binary is not available on PATH.
+// RequireDolt skips the test if the dolt binary is not available on PATH
+// or if BEADS_TEST_SKIP contains "dolt".
 func RequireDolt(t *testing.T) string {
 	t.Helper()
+	if skip := os.Getenv("BEADS_TEST_SKIP"); skip != "" {
+		for _, s := range strings.Split(skip, ",") {
+			if strings.TrimSpace(s) == "dolt" {
+				t.Skip("skipping: Dolt tests skipped (BEADS_TEST_SKIP=dolt)")
+			}
+		}
+	}
 	doltPath, err := exec.LookPath("dolt")
 	if err != nil {
 		t.Skip("dolt binary not found on PATH, skipping integration test")

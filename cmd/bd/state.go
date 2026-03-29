@@ -223,7 +223,7 @@ The --reason flag provides context for the event bead (recommended).`,
 		}
 
 		// Embedded mode: flush Dolt commit.
-		if isEmbeddedDolt && store != nil {
+		if isEmbeddedMode() && store != nil {
 			if _, err := store.CommitPending(ctx, actor); err != nil {
 				FatalErrorRespectJSON("failed to commit: %v", err)
 			}

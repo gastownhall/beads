@@ -1,4 +1,4 @@
-//go:build embeddeddolt && cgo
+//go:build cgo
 
 package main
 

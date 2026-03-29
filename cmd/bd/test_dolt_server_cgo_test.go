@@ -1,4 +1,4 @@
-//go:build cgo && !embeddeddolt
+//go:build cgo
 
 package main
 
@@ -26,7 +26,16 @@ var testSharedConn *sql.DB
 // on a dynamic port using the shared testutil helper. This prevents tests
 // from creating testdb_* databases on the production Dolt server.
 // Returns a cleanup function that stops the server and removes the container.
+//
+// Skipped when only embedded tests are requested (BEADS_TEST_EMBEDDED_DOLT=1
+// without the server test flag) — embedded tests use subprocess binaries and
+// don't need a Docker container.
 func startTestDoltServer() func() {
+	// Skip Docker container when only embedded tests are requested.
+	// Embedded tests build and run subprocess binaries; they don't need a server.
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") == "1" {
+		return func() {}
+	}
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 		return func() {}

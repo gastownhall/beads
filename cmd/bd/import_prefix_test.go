@@ -15,6 +15,9 @@ func TestCLI_Import_PrefixValidation_E2E(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping slow CLI test in short mode")
 	}
+	if testDoltServerPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 
 	// Step 0: Build the bd binary
 	tmpDir := t.TempDir()

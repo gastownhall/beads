@@ -121,14 +121,11 @@ bd migrate
 
 ### Recovery after upgrade
 
-If you need to restore from a JSONL backup:
+If you need to restore from a backup:
 
 ```bash
 bd init
-bd backup restore
-
-# Or fetch the latest snapshot from a backup git branch
-bd backup fetch-git
+bd backup restore [path] --force
 ```
 
 Or pull from a Dolt remote:

@@ -29,8 +29,13 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
       - name: Build bd
-        run: CGO_ENABLED=0 go build -o bd ./cmd/bd/
+        run: go build -o bd ./cmd/bd/
 
       - name: Validate docs against CLI
         run: ./scripts/check-doc-flags.sh ./bd
@@ -119,15 +124,15 @@ jobs:
           gotestsum \
             --junitfile junit.xml \
             --format testdox \
-            -- -race -short -coverprofile=coverage.out ./...
+            -- -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...
 
       - name: Test
         if: ${{ !matrix.coverage }}
-        run: go test ${{ matrix.test-flags }} ./...
+        run: go test ${{ matrix.test-flags }} -skip '^TestEmbedded' ./...
 
       - name: Upload coverage to Codecov
         if: matrix.coverage && !cancelled()
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -135,17 +140,16 @@ jobs:
 
       - name: Upload test results to Codecov
         if: matrix.coverage && !cancelled()
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: junit.xml
           token: ${{ secrets.CODECOV_TOKEN }}
           report_type: test_results
           fail_ci_if_error: false
 
-  # Embedded Dolt tests - runs the embeddeddolt build tag tests
-  # These test the in-process Dolt engine (no server required)
+  # Embedded Dolt tests - test the in-process Dolt engine (no server required)
   #
-  # Split into: build → storage tests + 4 parallel cmd test shards.
+  # Split into: build → storage tests + parallel cmd test shards.
   # Adding new *_embedded_test.go files auto-distributes via hash sharding.
 
   build-embedded:
@@ -165,18 +169,22 @@ jobs:
           sudo apt-get install -y libicu-dev
 
       - name: Build embedded bd binary
-        run: go build -tags embeddeddolt -race -o /tmp/bd-embedded-test ./cmd/bd/
+        run: go build -race -o /tmp/bd-embedded-test ./cmd/bd/
 
       - name: Build embedded storage test binary
-        run: go test -tags embeddeddolt -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
+        run: go test -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
+
+      - name: Build embedded cmd test binary
+        run: go test -race -c -o /tmp/bd-cmd-test ./cmd/bd/
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: embedded-test-binaries
           path: |
             /tmp/bd-embedded-test
             /tmp/embeddeddolt-test
+            /tmp/bd-cmd-test
           retention-days: 1
 
   test-embedded-storage:
@@ -186,24 +194,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
-
       - name: Install ICU4C
         run: |
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: embedded-test-binaries
           path: /tmp/
 
       - name: Fix permissions
-        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
+        run: chmod +x /tmp/embeddeddolt-test
 
       - name: Configure Git
         run: |
@@ -214,7 +217,7 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        run: go test -tags embeddeddolt -v -race -count=1 ./internal/storage/embeddeddolt/
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=10m
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
@@ -223,14 +226,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: 'go.mod'
 
       - name: Install ICU4C
         run: |
@@ -238,13 +236,13 @@ jobs:
           sudo apt-get install -y libicu-dev
 
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: embedded-test-binaries
           path: /tmp/
 
       - name: Fix permissions
-        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test
+        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test /tmp/bd-cmd-test
 
       - name: Configure Git
         run: |
@@ -255,15 +253,14 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_BD_BINARY: /tmp/bd-embedded-test
-        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 8
+        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 20
 
   # Windows smoke tests only - full test suite times out (see bd-bmev)
   # Linux/macOS run comprehensive tests; Windows just verifies binary works
   #
-  # ICU is NOT required on Windows:
-  # - go-mysql-server's regex_pure.go (via -tags gms_pure_go) uses Go stdlib regexp
-  # - go-icu-regex's regex_windows.go also uses Go stdlib regexp (build tag: windows)
-  # - The only CGO deps on Windows are runtime/cgo and gozstd (bundled C source)
+  # Windows uses -tags gms_pure_go to avoid the ICU regex dependency.
+  # go-icu-regex's regex_windows.go also uses Go stdlib regexp (build tag: windows).
+  # CGO is still required for gozstd (bundled C source) and the embedded dolt engine.
   test-windows:
     name: Test (Windows - smoke)
     runs-on: windows-latest
@@ -280,10 +277,8 @@ jobs:
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
 
-      - name: Build (no CGO, pure Go)
-        run: |
-          $env:CGO_ENABLED="0"
-          go build -v -tags gms_pure_go -o bd.exe ./cmd/bd
+      - name: Build (pure Go regex)
+        run: go build -v -tags gms_pure_go -o bd.exe ./cmd/bd
 
       - name: Smoke test - version
         run: ./bd.exe version

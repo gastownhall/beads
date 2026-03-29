@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/hooks"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -27,14 +28,18 @@ var createCmd = &cobra.Command{
 	Use:     "create [title]",
 	GroupID: "issues",
 	Aliases: []string{"new"},
-	Short:   "Create a new issue (or multiple issues from markdown file)",
+	Short:   "Create a new issue (or batch from markdown/graph JSON)",
 	Args:    cobra.MinimumNArgs(0), // Changed to allow no args when using -f
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("create")
 		file, _ := cmd.Flags().GetString("file")
+		graphFile, _ := cmd.Flags().GetString("graph")
 
 		// If file flag is provided, parse markdown and create multiple issues
 		if file != "" {
+			if graphFile != "" {
+				FatalError("cannot specify both --file and --graph")
+			}
 			if len(args) > 0 {
 				FatalError("cannot specify both title and --file flag")
 			}
@@ -44,6 +49,15 @@ var createCmd = &cobra.Command{
 				FatalError("--dry-run is not supported with --file flag")
 			}
 			createIssuesFromMarkdown(cmd, file)
+			return
+		}
+
+		// If graph flag is provided, batch-create a graph of issues atomically
+		if graphFile != "" {
+			if len(args) > 0 {
+				FatalError("cannot specify both title and --graph flag")
+			}
+			createIssuesFromGraph(graphFile)
 			return
 		}
 
@@ -144,8 +158,6 @@ var createCmd = &cobra.Command{
 		waitsForGate, _ := cmd.Flags().GetString("waits-for-gate")
 		forceCreate, _ := cmd.Flags().GetBool("force")
 		repoOverride, _ := cmd.Flags().GetString("repo")
-		rigOverride, _ := cmd.Flags().GetString("rig")
-		prefixOverride, _ := cmd.Flags().GetString("prefix")
 		wisp, _ := cmd.Flags().GetBool("ephemeral")
 		noHistory, _ := cmd.Flags().GetBool("no-history")
 		if wisp && noHistory {
@@ -315,58 +327,10 @@ var createCmd = &cobra.Command{
 				if len(deps) > 0 {
 					fmt.Printf("  Dependencies: %s\n", strings.Join(deps, ", "))
 				}
-				if rigOverride != "" || prefixOverride != "" {
-					rig := rigOverride
-					if rig == "" {
-						rig = prefixOverride
-					}
-					fmt.Printf("  Target rig: %s\n", rig)
-				}
 				if eventCategory != "" {
 					fmt.Printf("  Event category: %s\n", eventCategory)
 				}
 			}
-			return
-		}
-
-		// Auto-route based on explicit ID prefix (if no explicit --rig/--prefix provided)
-		// When creating an issue with --id=pq-xxx, automatically route to the database
-		// that handles the pq- prefix based on routes.jsonl
-		if explicitID != "" && rigOverride == "" && prefixOverride == "" {
-			prefix := routing.ExtractPrefix(explicitID)
-			if prefix != "" {
-				// Load routes from town level
-				townBeadsDir, err := findTownBeadsDir()
-				if err == nil {
-					routes, err := routing.LoadTownRoutes(townBeadsDir)
-					if err == nil && len(routes) > 0 {
-						// Check if this prefix matches a route to a different rig
-						for _, route := range routes {
-							if route.Prefix == prefix && route.Path != "" && route.Path != "." {
-								// Found a matching route - auto-route to that rig
-								rigName := routing.ExtractProjectFromPath(route.Path)
-								if rigName != "" {
-									createInRig(cmd, rigName, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, specID, wisp, noHistory)
-									return
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Handle --rig or --prefix flag: create issue in a different rig
-		// Both flags use the same forgiving lookup (accepts rig names or prefixes)
-		targetRig := rigOverride
-		if prefixOverride != "" {
-			if targetRig != "" {
-				FatalError("cannot specify both --rig and --prefix flags")
-			}
-			targetRig = prefixOverride
-		}
-		if targetRig != "" {
-			createInRig(cmd, targetRig, explicitID, title, description, issueType, priority, design, acceptance, notes, assignee, labels, externalRef, specID, wisp, noHistory)
 			return
 		}
 
@@ -423,21 +387,38 @@ var createCmd = &cobra.Command{
 		// Switch to target repo for multi-repo support (bd-6x6g)
 		// When routing to a different repo, we use direct storage access
 		var targetStore storage.DoltStorage
+		var remoteCache *remotecache.Cache // non-nil when routing to a remote URL
 		if repoPath != "." {
-			targetBeadsDir := routing.ExpandPath(repoPath)
-			debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
+			if remotecache.IsRemoteURL(repoPath) {
+				// Remote URL: pull into cache, open store, push explicitly after create
+				var err error
+				remoteCache, err = remotecache.DefaultCache()
+				if err != nil {
+					FatalError("failed to initialize remote cache: %v", err)
+				}
+				if _, err := remoteCache.Ensure(rootCtx, repoPath); err != nil {
+					FatalError("failed to sync remote %s: %v", repoPath, err)
+				}
+				targetStore, err = remoteCache.OpenStore(rootCtx, repoPath, newDoltStoreFromConfig)
+				if err != nil {
+					FatalError("failed to open remote store: %v", err)
+				}
+			} else {
+				targetBeadsDir := routing.ExpandPath(repoPath)
+				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
 
-			// Ensure target beads directory exists with prefix inheritance
-			if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store); err != nil {
-				FatalError("failed to initialize target repo: %v", err)
-			}
+				// Ensure target beads directory exists with prefix inheritance
+				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store); err != nil {
+					FatalError("failed to initialize target repo: %v", err)
+				}
 
-			// Open new store for target repo using factory to respect backend config
-			targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
-			var err error
-			targetStore, err = newDoltStoreFromConfig(rootCtx, targetBeadsDirPath)
-			if err != nil {
-				FatalError("failed to open target store: %v", err)
+				// Open new store for target repo using factory to respect backend config
+				targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
+				var err error
+				targetStore, err = newDoltStoreFromConfig(rootCtx, targetBeadsDirPath)
+				if err != nil {
+					FatalError("failed to open target store: %v", err)
+				}
 			}
 
 			// Close the original store before replacing it (it won't be used anymore)
@@ -725,7 +706,7 @@ var createCmd = &cobra.Command{
 		// a separate commit. In EmbeddedDoltStore mode, CreateIssue writes
 		// to the working set without a Dolt commit, so we always commit
 		// everything together at the end.
-		if isEmbeddedDolt || postCreateWrites {
+		if isEmbeddedMode() || postCreateWrites {
 			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
 			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
 				WarnError("failed to commit: %v", err)
@@ -739,6 +720,15 @@ var createCmd = &cobra.Command{
 		if repoPath != "." && targetStore != nil {
 			if _, err := targetStore.CommitPending(ctx, actor); err != nil {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
+			}
+		}
+
+		// Push to remote if this was a remote-routed create.
+		// Done explicitly (not via defer) because FatalError calls os.Exit,
+		// which skips deferred functions.
+		if remoteCache != nil {
+			if pushErr := remoteCache.Push(rootCtx, repoPath); pushErr != nil {
+				FatalError("failed to push to %s: %v\nThe issue was created locally but not synced to the remote.", repoPath, pushErr)
 			}
 		}
 
@@ -767,6 +757,7 @@ var createCmd = &cobra.Command{
 
 func init() {
 	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
+	createCmd.Flags().String("graph", "", "Create a graph of issues with dependencies from JSON plan file")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	createCmd.Flags().Bool("dry-run", false, "Preview what would be created without actually creating")
@@ -787,8 +778,6 @@ func init() {
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")
-	createCmd.Flags().String("rig", "", "Create issue in a different rig (e.g., --rig beads)")
-	createCmd.Flags().String("prefix", "", "Create issue in rig by prefix (e.g., --prefix bd- or --prefix bd or --prefix beads)")
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (short-lived, subject to TTL compaction)")
 	createCmd.Flags().Bool("no-history", false, "Skip Dolt commit history without making GC-eligible (for permanent agent beads)")
@@ -813,197 +802,6 @@ func init() {
 	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
-}
-
-// createInRig creates an issue in a different rig using --rig flag or auto-routing.
-// This directly creates in the target rig's database.
-func createInRig(cmd *cobra.Command, rigName, explicitID, title, description, issueType string, priority int, design, acceptance, notes, assignee string, labels []string, externalRef, specID string, wisp, noHistory bool) {
-	ctx := rootCtx
-
-	// Find the town-level beads directory (where routes.jsonl lives)
-	townBeadsDir, err := findTownBeadsDir()
-	if err != nil {
-		FatalError("cannot use --rig: %v", err)
-	}
-
-	// Resolve the target rig's beads directory and prefix
-	targetBeadsDir, targetPrefix, err := routing.ResolveBeadsDirForRig(rigName, townBeadsDir)
-	if err != nil {
-		FatalError("%v", err)
-	}
-
-	// Open storage for the target rig using factory to respect backend config
-	targetStore, err := newDoltStoreFromConfig(ctx, targetBeadsDir)
-	if err != nil {
-		FatalError("failed to open rig %q database: %v", rigName, err)
-	}
-	defer func() {
-		if err := targetStore.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to close rig database: %v\n", err)
-		}
-	}()
-
-	// Prepare prefix override from routes.jsonl for cross-rig creation
-	// Strip trailing hyphen - database stores prefix without it (e.g., "aops" not "aops-")
-	var prefixOverride string
-	if targetPrefix != "" {
-		prefixOverride = strings.TrimSuffix(targetPrefix, "-")
-	}
-
-	var externalRefPtr *string
-	if externalRef != "" {
-		externalRefPtr = &externalRef
-	}
-
-	// Extract event-specific flags (bd-xwvo fix)
-	eventCategory, _ := cmd.Flags().GetString("event-category")
-	eventActor, _ := cmd.Flags().GetString("event-actor")
-	eventTarget, _ := cmd.Flags().GetString("event-target")
-	eventPayload, _ := cmd.Flags().GetString("event-payload")
-
-	// Extract molecule/agent flags (bd-xwvo fix)
-	molTypeStr, _ := cmd.Flags().GetString("mol-type")
-	var molType types.MolType
-	if molTypeStr != "" {
-		molType = types.MolType(molTypeStr)
-	}
-	// Extract wisp type (TTL classification for ephemeral wisps)
-	wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
-	var wispType types.WispType
-	if wispTypeStr != "" {
-		wispType = types.WispType(wispTypeStr)
-	}
-
-	// Extract time-based scheduling flags (bd-xwvo fix)
-	var dueAt *time.Time
-	dueStr, _ := cmd.Flags().GetString("due")
-	if dueStr != "" {
-		t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
-		if err != nil {
-			FatalError("invalid --due format %q", dueStr)
-		}
-		dueAt = &t
-	}
-
-	var deferUntil *time.Time
-	deferStr, _ := cmd.Flags().GetString("defer")
-	if deferStr != "" {
-		t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
-		if err != nil {
-			FatalError("invalid --defer format %q", deferStr)
-		}
-		deferUntil = &t
-	}
-
-	// Parse --metadata for cross-rig creation
-	var metadata json.RawMessage
-	if cmd.Flags().Changed("metadata") {
-		metadataValue, _ := cmd.Flags().GetString("metadata")
-		var metadataJSON string
-		if strings.HasPrefix(metadataValue, "@") {
-			filePath := metadataValue[1:]
-			// #nosec G304 -- user explicitly provides file path via @file.json syntax
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				FatalError("failed to read metadata file %s: %v", filePath, err)
-			}
-			metadataJSON = string(data)
-		} else {
-			metadataJSON = metadataValue
-		}
-		if !json.Valid([]byte(metadataJSON)) {
-			FatalError("invalid JSON in --metadata: must be valid JSON")
-		}
-		metadata = json.RawMessage(metadataJSON)
-	}
-
-	// Create issue with explicit ID if provided, otherwise CreateIssue will generate one
-	issue := &types.Issue{
-		ID:                 explicitID, // Set explicit ID if provided (empty string if not)
-		Title:              title,
-		Description:        description,
-		Design:             design,
-		AcceptanceCriteria: acceptance,
-		Notes:              notes,
-		SpecID:             specID,
-		Status:             types.StatusOpen,
-		Priority:           priority,
-		IssueType:          types.IssueType(issueType).Normalize(),
-		Assignee:           assignee,
-		ExternalRef:        externalRefPtr,
-		Ephemeral:          wisp,
-		NoHistory:          noHistory,
-		CreatedBy:          getActorWithGit(),
-		Owner:              getOwner(),
-		// Event fields (bd-xwvo fix)
-		EventKind: eventCategory,
-		Actor:     eventActor,
-		Target:    eventTarget,
-		Payload:   eventPayload,
-		// Molecule/agent fields (bd-xwvo fix)
-		MolType:  molType,
-		WispType: wispType,
-		// Time scheduling fields (bd-xwvo fix)
-		DueAt:      dueAt,
-		DeferUntil: deferUntil,
-		Metadata:   metadata,
-		// Cross-rig routing: use route prefix instead of database config
-		PrefixOverride: prefixOverride,
-	}
-
-	if err := targetStore.CreateIssue(ctx, issue, actor); err != nil {
-		FatalError("failed to create issue in rig %q: %v", rigName, err)
-	}
-
-	// Add labels if specified
-	for _, label := range labels {
-		if err := targetStore.AddLabel(ctx, issue.ID, label, actor); err != nil {
-			WarnError("failed to add label %s: %v", label, err)
-		}
-	}
-
-	// Get silent flag
-	silent, _ := cmd.Flags().GetBool("silent")
-
-	if jsonOutput {
-		outputJSON(issue)
-	} else if silent {
-		fmt.Println(issue.ID)
-	} else {
-		fmt.Printf("%s Created issue in rig %q: %s\n", ui.RenderPass("✓"), rigName, formatFeedbackID(issue.ID, issue.Title))
-		fmt.Printf("  Priority: P%d\n", issue.Priority)
-		fmt.Printf("  Status: %s\n", issue.Status)
-	}
-}
-
-// findTownBeadsDir finds the town-level .beads directory (where routes.jsonl lives).
-// It walks up from the current directory looking for a .beads directory with routes.jsonl.
-func findTownBeadsDir() (string, error) {
-	// Start from current directory and walk up
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	for {
-		beadsDir := filepath.Join(dir, ".beads")
-		routesFile := filepath.Join(beadsDir, routing.RoutesFileName)
-
-		// Check if this .beads directory has routes.jsonl
-		if _, err := os.Stat(routesFile); err == nil {
-			return beadsDir, nil
-		}
-
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			break
-		}
-		dir = parent
-	}
-
-	return "", fmt.Errorf("no routes.jsonl found in any parent .beads directory")
 }
 
 // formatTimeForRPC converts a *time.Time to RFC3339 string for RPC calls.

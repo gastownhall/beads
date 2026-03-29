@@ -92,7 +92,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	}
 	// Exclude future-deferred issues unless IncludeDeferred is set
 	if !filter.IncludeDeferred {
-		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= NOW())")
+		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
 	}
 	// Exclude children of future-deferred parents (GH#1190)
 	// Pre-compute excluded IDs using separate single-table queries to avoid
@@ -126,13 +126,19 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 		args = append(args, parentID, parentID)
 	}
 
+	// Molecule filtering: filter to direct children of the specified molecule.
+	if filter.MoleculeID != "" {
+		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
+		args = append(args, filter.MoleculeID, filter.MoleculeID)
+	}
+
 	// Metadata existence check (GH#1406)
 	if filter.HasMetadataKey != "" {
 		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
 			return nil, err
 		}
 		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
-		args = append(args, "$."+filter.HasMetadataKey)
+		args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
 	}
 
 	// Metadata field equality filters (GH#1406)
@@ -147,7 +153,7 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 				return nil, err
 			}
 			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, "$."+k, filter.MetadataFields[k])
+			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
 		}
 	}
 
@@ -282,25 +288,9 @@ func (s *DoltStore) GetStaleIssues(ctx context.Context, filter types.StaleFilter
 func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
 	stats := &types.Statistics{}
 
-	// Get counts per status.
-	// Important: COALESCE to avoid NULL scans when the table is empty.
-	err := s.db.QueryRowContext(ctx, `
-		SELECT
-			COUNT(*) as total,
-			COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) as open_count,
-			COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) as in_progress,
-			COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0) as closed,
-			COALESCE(SUM(CASE WHEN status = 'deferred' THEN 1 ELSE 0 END), 0) as deferred,
-			COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) as pinned
-		FROM issues
-	`).Scan(
-		&stats.TotalIssues,
-		&stats.OpenIssues,
-		&stats.InProgressIssues,
-		&stats.ClosedIssues,
-		&stats.DeferredIssues,
-		&stats.PinnedIssues,
-	)
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		return issueops.ScanIssueCountsInTx(ctx, tx, stats)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get statistics: %w", err)
 	}
@@ -397,7 +387,7 @@ func (s *DoltStore) getChildrenOfDeferredParents(ctx context.Context) ([]string,
 	// Step 1: Get IDs of issues with future defer_until
 	deferredRows, err := s.queryContext(ctx, `
 		SELECT id FROM issues
-		WHERE defer_until IS NOT NULL AND defer_until > NOW()
+		WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()
 	`)
 	if err != nil {
 		return nil, wrapQueryError("deferred parents: get deferred issues", err)
@@ -558,7 +548,7 @@ func (s *DoltStore) GetMoleculeLastActivity(ctx context.Context, moleculeID stri
 // Delegates SQL work to issueops.GetNextChildIDTx.
 func (s *DoltStore) GetNextChildID(ctx context.Context, parentID string) (string, error) {
 	var childID string
-	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		childID, err = issueops.GetNextChildIDTx(ctx, tx, parentID)
 		return err

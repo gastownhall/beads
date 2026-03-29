@@ -1,5 +1,3 @@
-//go:build embeddeddolt
-
 package embeddeddolt
 
 import (
@@ -15,6 +13,17 @@ func (s *EmbeddedDoltStore) SearchIssues(ctx context.Context, query string, filt
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.SearchIssuesInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
+func (s *EmbeddedDoltStore) ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error) {
+	issueFilter := issueops.WispFilterToIssueFilter(filter)
+	var result []*types.Issue
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssuesInTx(ctx, tx, "", issueFilter)
 		return err
 	})
 	return result, err

@@ -49,30 +49,38 @@ sync:
   mode: dolt-native  # Default: use Dolt remotes
 ```
 
-## Server Mode (Recommended)
+## Embedded Mode (Default)
 
-Server mode provides fast operations by running a persistent `dolt sql-server` that handles connections.
+Embedded mode runs the Dolt engine in-process — no separate server needed. This is
+the default for all `bd init` installations. Just `bd init` and go.
 
-### Server Mode is Enabled by Default
+- Zero-config: no server, no ports, no PID files
+- Single-writer (one process at a time, enforced via file lock)
+- Data lives in `.beads/embeddeddolt/` alongside your code
 
-When Dolt backend is detected, server mode is automatically enabled. The server auto-starts if not already running.
+## Server Mode (Opt-In)
 
-### Disable Server Mode (Not Recommended)
+Server mode connects to a running `dolt sql-server` for multi-client access. Use
+server mode when you need concurrent writers (multiple agents, orchestrator setups).
+
+### Enable Server Mode
 
 ```bash
-# Via environment variable
-export BEADS_DOLT_SERVER_MODE=0
+# During init
+bd init --server
 
-# Or in config.yaml
-dolt:
-  server_mode: false
+# Or via environment variable
+export BEADS_DOLT_SERVER_MODE=1
+bd init
 ```
+
+For an existing embedded project, see [Migrating Between Backends](#migrating-between-backends) below.
 
 ### Server Configuration
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `BEADS_DOLT_SERVER_MODE` | `1` | Enable/disable server mode (`1`/`0`) |
+| `BEADS_DOLT_SERVER_MODE` | (empty) | Set to `1` to enable server mode |
 | `BEADS_DOLT_SERVER_HOST` | `127.0.0.1` | Server bind address |
 | `BEADS_DOLT_SERVER_PORT` | `3307` | Server port (MySQL protocol) |
 | `BEADS_DOLT_SERVER_USER` | `root` | MySQL username |
@@ -81,18 +89,21 @@ dolt:
 
 ### Server Lifecycle
 
+These commands are only available in server mode:
+
 ```bash
 # Check server status
 bd doctor
-
-# Server auto-starts when needed
-# PID stored in: .beads/dolt-server.pid
-# Logs written to: .beads/dolt-server.log
 
 # Start/stop/status
 bd dolt start
 bd dolt stop
 bd dolt status
+
+# Server-only config commands (error in embedded mode)
+bd dolt show
+bd dolt set
+bd dolt test
 ```
 
 ### Shared Server Mode
@@ -123,12 +134,12 @@ embedded instances.
 | | Embedded (default) | Central Server |
 |---|---|---|
 | **Setup** | Zero-config — `bd init` handles everything | One-time server setup required |
-| **Data location** | `.beads/dolt/` per project | Central directory (e.g. `/opt/homebrew/var/dolt`) |
+| **Data location** | `.beads/embeddeddolt/` per project | Central directory (e.g. `/opt/homebrew/var/dolt`) |
 | **Concurrency** | Single writer per project | Multi-writer via MySQL protocol |
-| **Use case** | Solo development, single project | Orchestrator, multiple projects, multiple agents |
+| **Use case** | Solo development, single agent | Orchestrator, multiple projects, multiple agents |
 
-For single-project solo use, **embedded mode is recommended** — it requires no
-setup. Switch to a central server when you need an orchestrator or concurrent access.
+Embedded mode is the default and requires no setup. Switch to a central server
+when you need an orchestrator or concurrent access from multiple agents.
 
 ### Why Not `brew services start dolt`?
 
@@ -248,7 +259,7 @@ Beads uses `dolt-native` sync mode exclusively:
 - Uses Dolt remotes (DoltHub, S3, GCS, etc.)
 - Native database-level sync with cell-level merge
 - Supports branching and merging
-- `bd export` available for issue portability; `bd backup` / `bd backup restore` for JSONL backup snapshots
+- `bd export` available for issue portability; `bd backup init` / `bd backup sync` / `bd backup restore` for Dolt-native backups
 
 ## Dolt Remotes
 
@@ -375,10 +386,9 @@ bd list  # Triggers auto-start
 
 ### Performance Issues
 
-1. **Ensure server mode is enabled** (default)
-2. Check server logs for errors
-3. Run `bd doctor` for diagnostics
-4. Consider `dolt gc` for database maintenance:
+1. Run `bd doctor` for diagnostics
+2. If using server mode, check server logs for errors
+3. Consider `dolt gc` for database maintenance:
    ```bash
    cd .beads/dolt && dolt gc
    ```
@@ -445,9 +455,9 @@ sync:
   auto_dolt_push: false    # Auto-push after sync (default: false)
 
 dolt:
-  server_mode: true        # Use sql-server (default: true)
-  server_host: "127.0.0.1"
-  server_port: 3306
+  server_mode: false       # Use sql-server (default: false — embedded mode)
+  server_host: "127.0.0.1" # Only used when server_mode: true
+  server_port: 3307
   server_user: "root"
   server_pass: ""
 
@@ -471,7 +481,37 @@ federation:
 | `BEADS_DOLT_SERVER_USER` | Server user |
 | `BEADS_DOLT_SERVER_PASS` | Server password |
 
+## Migrating Between Backends
+
+Use `bd backup` to migrate data between embedded and server mode. Both
+directions preserve full Dolt commit history. See [DOLT.md](DOLT.md#migrating-between-backends)
+for step-by-step instructions.
+
+**Quick reference:**
+
+```bash
+# 1. Backup the source project
+bd backup init /path/to/backup-dir
+bd backup sync
+
+# 2. Create target project and restore
+mkdir target && cd target
+bd init                    # or bd init --server
+bd backup restore --force /path/to/backup-dir
+
+# 3. Verify
+bd list
+```
+
+**Key details:**
+- Embedded data lives in `.beads/embeddeddolt/`, server data in `.beads/dolt/`
+- `--force` is required when restoring into an initialized project (overwrites the database)
+- The restore auto-registers the backup dir for future syncs and updates the project identity
+- Embedded mode uses file locking (`flock`) — only one writer at a time
+- Alternative: migrate via Dolt remotes (`bd dolt push` / `bd dolt pull`) if both projects share a remote
+
 ## See Also
 
+- [DOLT.md](DOLT.md) - Dolt backend overview, federation, and mode details
 - [Troubleshooting](TROUBLESHOOTING.md) - General troubleshooting
 - [Dolt Documentation](https://docs.dolthub.com/) - Official Dolt docs

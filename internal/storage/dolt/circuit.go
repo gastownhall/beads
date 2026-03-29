@@ -75,14 +75,20 @@ func maybeNewCircuitBreaker(host string, port int) *circuitBreaker {
 	return newCircuitBreaker(host, port)
 }
 
+// circuitBreakerDir is the dedicated directory for circuit breaker state files.
+// Using a subdirectory avoids scanning all of /tmp (which may contain millions
+// of entries) when cleaning up stale breaker files on startup.
+const circuitBreakerDir = "/tmp/beads-circuit"
+
 // newCircuitBreaker creates a circuit breaker for the given Dolt server host:port.
 func newCircuitBreaker(host string, port int) *circuitBreaker {
 	// Sanitize host for use in filename (replace dots/colons with dashes)
 	safeHost := strings.NewReplacer(".", "-", ":", "-").Replace(host)
+	_ = os.MkdirAll(circuitBreakerDir, 0755)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
-		filePath: fmt.Sprintf("/tmp/beads-dolt-circuit-%s-%d.json", safeHost, port),
+		filePath: filepath.Join(circuitBreakerDir, fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)),
 	}
 }
 
@@ -287,14 +293,20 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 	_ = os.Rename(tmp, cb.filePath)
 }
 
-// CleanStaleCircuitBreakerFiles removes stale circuit breaker files from /tmp.
+// CleanStaleCircuitBreakerFiles removes stale circuit breaker files.
 // This cleans up leftover files that could poison fresh inits:
 //   - Legacy port-0 files (beads-dolt-circuit-0.json) from before the port-0 fix
 //   - Any breaker file whose open/half-open state is older than circuitStaleTTL
 //
 // Called during init to ensure a clean starting state (GH#2598).
 func CleanStaleCircuitBreakerFiles() {
-	cleanStaleCircuitBreakerFilesIn("/tmp")
+	// Remove legacy files that lived directly in /tmp (before the subdirectory move).
+	// Direct path removal — no directory scan needed.
+	_ = os.Remove("/tmp/beads-dolt-circuit-0.json")
+
+	// Clean stale files in the dedicated subdirectory (fast — typically 0-2 files).
+	_ = os.MkdirAll(circuitBreakerDir, 0755)
+	cleanStaleCircuitBreakerFilesIn(circuitBreakerDir)
 }
 
 // cleanStaleCircuitBreakerFilesIn is the testable implementation of

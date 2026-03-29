@@ -147,6 +147,11 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 	// as a fresh clone and allow init to proceed.
 
 	t.Run("server_mode_metadata_no_dolt_dir_allows_init", func(t *testing.T) {
+		// Switch to server mode for this subtest
+		oldServerMode := serverMode
+		serverMode = true
+		defer func() { serverMode = oldServerMode }()
+
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
 		if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -176,6 +181,11 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 	})
 
 	t.Run("server_mode_with_dolt_dir_blocks_init", func(t *testing.T) {
+		// Switch to server mode for this subtest
+		oldServerMode := serverMode
+		serverMode = true
+		defer func() { serverMode = oldServerMode }()
+
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
 		if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -203,6 +213,66 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 		err := checkExistingBeadsDataAt(beadsDir, "myproject")
 		if err == nil {
 			t.Error("existing dolt directory should block init")
+		}
+		if err != nil && !strings.Contains(err.Error(), "already initialized") {
+			t.Errorf("expected 'already initialized' message, got: %v", err)
+		}
+	})
+
+	t.Run("embedded_mode_no_embeddeddolt_dir_allows_init", func(t *testing.T) {
+		// Embedded mode is the default — no need to set serverMode
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write metadata.json with embedded mode
+		metadata := map[string]interface{}{
+			"database":  "dolt",
+			"backend":   "dolt",
+			"dolt_mode": "embedded",
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// No embeddeddolt/ directory — simulates fresh clone
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err != nil {
+			t.Errorf("fresh clone with embedded metadata should allow init, got: %v", err)
+		}
+	})
+
+	t.Run("embedded_mode_with_existing_db_blocks_init", func(t *testing.T) {
+		// Embedded mode is the default — no need to set serverMode
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write metadata.json with embedded mode
+		metadata := map[string]interface{}{
+			"database":  "dolt",
+			"backend":   "dolt",
+			"dolt_mode": "embedded",
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create embeddeddolt/<db>/.dolt/ to simulate an existing embedded database
+		dbDir := filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt")
+		if err := os.MkdirAll(dbDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Error("existing embedded database should block init")
 		}
 		if err != nil && !strings.Contains(err.Error(), "already initialized") {
 			t.Errorf("expected 'already initialized' message, got: %v", err)

@@ -40,7 +40,7 @@ func processBatchLabelOperation(issueIDs []string, label string, operation strin
 	}
 	// Embedded mode: flush Dolt commit. transact() only commits the SQL
 	// transaction; a Dolt commit is needed separately.
-	if isEmbeddedDolt && store != nil {
+	if isEmbeddedMode() && store != nil {
 		if _, err := store.CommitPending(ctx, actor); err != nil {
 			FatalErrorRespectJSON("failed to commit: %v", err)
 		}

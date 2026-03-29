@@ -11,7 +11,47 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
-func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
+func TestDetectBootstrapAction_NoneWhenDatabaseExists_Embedded(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create embeddeddolt directory with content so it's detected as existing
+	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
+	if err := os.MkdirAll(filepath.Join(embeddedDir, "beads"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run from tmpDir so auto-detect doesn't find parent git repo
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Embedded mode is the default — no need to set serverMode
+	cfg := configfile.DefaultConfig()
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Action != "none" {
+		t.Errorf("action = %q, want %q", plan.Action, "none")
+	}
+	if !plan.HasExisting {
+		t.Error("HasExisting = false, want true")
+	}
+}
+
+func TestDetectBootstrapAction_NoneWhenDatabaseExists_Server(t *testing.T) {
+	// Switch to server mode for this test
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o750); err != nil {

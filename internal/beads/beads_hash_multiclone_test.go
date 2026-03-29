@@ -102,6 +102,9 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow git e2e test")
 	}
+	if testDoltPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
+	}
 	t.Parallel()
 	tmpDir := testutil.TempDirInMemory(t)
 
@@ -154,6 +157,9 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 func TestHashIDs_IdenticalContentDedup(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow git e2e test")
+	}
+	if testDoltPort == 0 {
+		t.Skip("skipping: Dolt test container not available")
 	}
 	t.Parallel()
 	tmpDir := testutil.TempDirInMemory(t)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // NormalizeMetadataValue converts metadata values to a validated JSON string.
@@ -216,4 +217,15 @@ func ValidateMetadataKey(key string) error {
 		return fmt.Errorf("invalid metadata key %q: must match [a-zA-Z_][a-zA-Z0-9_.]*", key)
 	}
 	return nil
+}
+
+// JSONMetadataPath returns a MySQL/Dolt JSON path expression for the given
+// metadata key. Keys containing dots are quoted so that "gc.routed_to"
+// produces '$."gc.routed_to"' instead of '$.gc.routed_to' (which dolt
+// interprets as a nested path: {gc: {routed_to: ...}}).
+func JSONMetadataPath(key string) string {
+	if strings.Contains(key, ".") {
+		return `$."` + key + `"`
+	}
+	return "$." + key
 }

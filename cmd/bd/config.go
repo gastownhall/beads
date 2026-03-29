@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -13,11 +12,9 @@ import (
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/types"
 )
-
-// gitSSHRemotePattern matches standard git SSH remote URLs (user@host:path)
-var gitSSHRemotePattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+@[a-zA-Z0-9][a-zA-Z0-9._-]*:.+$`)
 
 var configCmd = &cobra.Command{
 	Use:     "config",
@@ -503,27 +500,10 @@ func validateSyncConfig(repoPath string) []string {
 	return issues
 }
 
-// isValidRemoteURL validates remote URL formats for sync configuration
+// isValidRemoteURL validates remote URL formats for sync configuration.
+// Delegates to remotecache.IsRemoteURL for consistent URL classification.
 func isValidRemoteURL(url string) bool {
-	// Valid URL schemes for beads remotes
-	validSchemes := []string{
-		"dolthub://",
-		"gs://",
-		"s3://",
-		"file://",
-		"https://",
-		"http://",
-		"ssh://",
-	}
-
-	for _, scheme := range validSchemes {
-		if strings.HasPrefix(url, scheme) {
-			return true
-		}
-	}
-
-	// Also allow standard git remote patterns (user@host:path)
-	return gitSSHRemotePattern.MatchString(url)
+	return remotecache.IsRemoteURL(url)
 }
 
 // findBeadsRepoRoot walks up from the given path to find the repo root (containing .beads)

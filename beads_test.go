@@ -255,3 +255,80 @@ func TestConstants(t *testing.T) {
 		t.Errorf("DepRelated = %q, want %q", beads.DepRelated, "related")
 	}
 }
+
+func TestPublicAPITypeAssertions(t *testing.T) {
+	skipIfNoDoltServer(t)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test-dolt")
+
+	ctx := context.Background()
+	store, err := beads.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	t.Run("RemoteStore", func(t *testing.T) {
+		rs, ok := store.(beads.RemoteStore)
+		if !ok {
+			t.Fatal("store does not satisfy beads.RemoteStore")
+		}
+		// Verify a method is callable (no remotes configured, so empty list)
+		remotes, err := rs.ListRemotes(ctx)
+		if err != nil {
+			t.Fatalf("ListRemotes failed: %v", err)
+		}
+		_ = remotes
+	})
+
+	t.Run("SyncStore", func(t *testing.T) {
+		_, ok := store.(beads.SyncStore)
+		if !ok {
+			t.Fatal("store does not satisfy beads.SyncStore")
+		}
+	})
+
+	t.Run("VersionControlReader", func(t *testing.T) {
+		vcr, ok := store.(beads.VersionControlReader)
+		if !ok {
+			t.Fatal("store does not satisfy beads.VersionControlReader")
+		}
+
+		branch, err := vcr.CurrentBranch(ctx)
+		if err != nil {
+			t.Fatalf("CurrentBranch failed: %v", err)
+		}
+		if branch == "" {
+			t.Error("expected non-empty branch name")
+		}
+
+		commit, err := vcr.GetCurrentCommit(ctx)
+		if err != nil {
+			t.Fatalf("GetCurrentCommit failed: %v", err)
+		}
+		if commit == "" {
+			t.Error("expected non-empty commit hash")
+		}
+
+		exists, err := vcr.CommitExists(ctx, commit)
+		if err != nil {
+			t.Fatalf("CommitExists failed: %v", err)
+		}
+		if !exists {
+			t.Errorf("CommitExists(%s) = false, want true", commit)
+		}
+
+		status, err := vcr.Status(ctx)
+		if err != nil {
+			t.Fatalf("Status failed: %v", err)
+		}
+		_ = status
+
+		logs, err := vcr.Log(ctx, 5)
+		if err != nil {
+			t.Fatalf("Log failed: %v", err)
+		}
+		_ = logs
+	})
+}
