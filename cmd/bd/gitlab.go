@@ -452,13 +452,24 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	pull := !gitlabSyncPushOnly
 	push := !gitlabSyncPullOnly
 
+	excludeTypes := parseTypeList(gitlabExcludeTypes)
+	// Default: exclude internal coordination types from push unless
+	// the user provided an explicit --type whitelist.
+	if gitlabTypeFilter == "" && gitlabExcludeTypes == "" {
+		excludeTypes = []types.IssueType{
+			types.TypeMolecule,
+			types.TypeMessage,
+			types.TypeEvent,
+		}
+	}
+
 	opts := tracker.SyncOptions{
 		Pull:             pull,
 		Push:             push,
 		DryRun:           gitlabSyncDryRun,
 		ExcludeEphemeral: gitlabNoEphemeral,
 		TypeFilter:       parseTypeList(gitlabTypeFilter),
-		ExcludeTypes:     parseTypeList(gitlabExcludeTypes),
+		ExcludeTypes:     excludeTypes,
 	}
 
 	// Map conflict resolution
