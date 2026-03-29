@@ -234,8 +234,11 @@ func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []strin
 		depInfo = " " + depInfo
 	}
 
-	// Get styled status icon
+	// Get styled status icon — override to blocked when issue has open blockers (GH#2858)
 	statusIcon := renderStatusIcon(issue.Status)
+	if len(blockedBy) > 0 && issue.Status == types.StatusOpen {
+		statusIcon = renderStatusIcon(types.StatusBlocked)
+	}
 
 	if issue.Status == types.StatusClosed {
 		// Closed issues: entire line muted (fades visually)
