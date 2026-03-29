@@ -674,6 +674,7 @@ func Start(beadsDir string) (*State, error) {
 		cmd.Stderr = logFile
 		cmd.Stdin = nil
 		cmd.SysProcAttr = procAttrDetached()
+		cmd.Env = os.Environ()
 
 		if startErr := cmd.Start(); startErr != nil {
 			lastErr = startErr
