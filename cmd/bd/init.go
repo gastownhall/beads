@@ -337,6 +337,9 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 			if output, err := gitInitCmd.CombinedOutput(); err != nil {
 				FatalError("failed to initialize git repository: %v\n%s", err, output)
 			}
+			// Clear cached git context so subsequent operations (e.g. hook
+			// installation) see the newly-created repository (GH#2899).
+			git.ResetCaches()
 			if !quiet {
 				fmt.Printf("  %s Initialized git repository\n", ui.RenderPass("✓"))
 			}
@@ -345,8 +348,12 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 		// Ensure storage directory exists (.beads/dolt).
 		// In server mode, dolt.New() connects via TCP and doesn't create local directories,
 		// so we create the marker directory explicitly.
-		if err := os.MkdirAll(initDBPath, 0750); err != nil {
-			FatalError("failed to create storage directory %s: %v", initDBPath, err)
+		// In embedded mode the engine creates its own directories under .beads/embeddeddolt/,
+		// so skip this to avoid leaving an empty .beads/dolt/ artifact (GH#2903).
+		if initServerMode {
+			if err := os.MkdirAll(initDBPath, 0750); err != nil {
+				FatalError("failed to create storage directory %s: %v", initDBPath, err)
+			}
 		}
 
 		ctx := rootCtx
