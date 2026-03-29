@@ -76,14 +76,19 @@ func statusFromLabelsAndState(labels []string, state string, config *MappingConf
 		prefix, value := parseLabelPrefix(label)
 		if prefix == "status" {
 			normalized := strings.ToLower(value)
-			if normalized == "in_progress" {
+			switch normalized {
+			case "open":
+				return "open"
+			case "in_progress":
 				return "in_progress"
-			}
-			if normalized == "blocked" {
+			case "review":
+				return "in_progress" // review maps to in_progress in beads
+			case "blocked":
 				return "blocked"
-			}
-			if normalized == "deferred" {
+			case "deferred":
 				return "deferred"
+			case "done":
+				return "closed"
 			}
 		}
 	}
@@ -178,13 +183,18 @@ func BeadsIssueToGitLabFields(issue *types.Issue, config *MappingConfig) map[str
 		labels = append(labels, "priority::"+priorityLabel)
 	}
 
-	// Add status label (if not open or closed - those are handled by state)
-	if issue.Status == types.StatusInProgress {
+	// Add status label for board column placement
+	switch issue.Status {
+	case types.StatusOpen:
+		labels = append(labels, "status::open")
+	case types.StatusInProgress:
 		labels = append(labels, "status::in_progress")
-	} else if issue.Status == types.StatusBlocked {
+	case types.StatusBlocked:
 		labels = append(labels, "status::blocked")
-	} else if issue.Status == types.StatusDeferred {
+	case types.StatusDeferred:
 		labels = append(labels, "status::deferred")
+	case types.StatusClosed:
+		labels = append(labels, "status::done")
 	}
 
 	// Add any existing non-scoped labels
