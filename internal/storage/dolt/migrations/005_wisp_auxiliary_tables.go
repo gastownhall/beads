@@ -54,7 +54,8 @@ const wispEventsSchema = `CREATE TABLE IF NOT EXISTS wisp_events (
     new_value TEXT DEFAULT '',
     comment TEXT DEFAULT '',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_wisp_events_issue (issue_id)
+    INDEX idx_wisp_events_issue (issue_id),
+    INDEX idx_wisp_events_created_at (created_at)
 )`
 
 const wispCommentsSchema = `CREATE TABLE IF NOT EXISTS wisp_comments (
