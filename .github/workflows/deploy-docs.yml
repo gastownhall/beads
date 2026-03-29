@@ -54,6 +54,7 @@ jobs:
             --offline
             --include-fragments
             --timeout 30
+            --root-dir website/build
             --exclude-path 'website/build/search/**'
             website/build
           fail: true
