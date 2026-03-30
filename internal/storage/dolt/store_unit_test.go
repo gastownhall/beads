@@ -379,6 +379,58 @@ func TestExecWithLongTimeoutDSNRewrite(t *testing.T) {
 	}
 }
 
+// TestBuildServerDSN_SpecialCharacterPassword verifies that passwords with
+// characters that collide with DSN delimiters (@ : / ? & < > etc.) are
+// properly escaped by FormatDSN. This was a real bug — passwords from Secret
+// Manager like "zId&z,L9P4X,%k4n4rylGV<Ibos9<)/p" caused Access Denied.
+func TestBuildServerDSN_SpecialCharacterPassword(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+	}{
+		{"ampersand and angle brackets", "zId&z,L9P4X,%k4n4rylGV<Ibos9<)/p"},
+		{"at sign and colon", "p@ss:word"},
+		{"slash and question mark", "pass/word?maybe"},
+		{"percent encoding chars", "100%done&dusted"},
+		{"empty password", ""},
+		{"alphanumeric only", "SimplePassword123"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				ServerUser:     "testuser",
+				ServerPassword: tt.password,
+				ServerHost:     "127.0.0.1",
+				ServerPort:     3308,
+				Database:       "testdb",
+			}
+			applyConfigDefaults(cfg)
+
+			dsn := buildServerDSN(cfg, cfg.Database)
+
+			// The DSN must be parseable by go-sql-driver
+			parsed, err := mysql.ParseDSN(dsn)
+			if err != nil {
+				t.Fatalf("buildServerDSN produced unparseable DSN: %v\n  DSN: %s", err, dsn)
+			}
+
+			// The parsed password must match the original exactly
+			if parsed.Passwd != tt.password {
+				t.Errorf("password roundtrip failed: got %q, want %q", parsed.Passwd, tt.password)
+			}
+
+			if parsed.User != "testuser" {
+				t.Errorf("user roundtrip failed: got %q, want %q", parsed.User, "testuser")
+			}
+
+			if parsed.DBName != "testdb" {
+				t.Errorf("database roundtrip failed: got %q, want %q", parsed.DBName, "testdb")
+			}
+		})
+	}
+}
+
 func TestShouldStopAutoStartedServerOnClose(t *testing.T) {
 	origTestMode := os.Getenv("BEADS_TEST_MODE")
 	defer func() {
