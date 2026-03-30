@@ -333,6 +333,12 @@ func (c *Client) doRequest(ctx context.Context, method, apiURL string, body []by
 
 	var lastErr error
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		// Reset body reader at top of loop so retries after network errors
+		// don't send empty bodies (the reader may be at EOF).
+		if body != nil {
+			bodyReader = bytes.NewReader(body)
+		}
+
 		req, err := http.NewRequestWithContext(ctx, method, apiURL, bodyReader)
 		if err != nil {
 			return nil, fmt.Errorf("create request: %w", err)
@@ -404,10 +410,6 @@ func (c *Client) doRequest(ctx context.Context, method, apiURL string, body []by
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(delay):
-				// Reset body reader for retry
-				if body != nil {
-					bodyReader = bytes.NewReader(body)
-				}
 				continue
 			}
 		}

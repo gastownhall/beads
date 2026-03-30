@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // SanitizeForTerminal removes ANSI escape sequences and control characters
@@ -81,7 +82,7 @@ func SanitizeForTerminal(s string) string {
 		size := 1
 		if ch >= 0x80 {
 			// Decode UTF-8 rune
-			r, size = decodeRune(s[i:])
+			r, size = utf8.DecodeRuneInString(s[i:])
 			if r == unicode.ReplacementChar && size == 1 {
 				// Invalid UTF-8 byte, skip
 				i++
@@ -99,16 +100,4 @@ func SanitizeForTerminal(s string) string {
 	}
 
 	return b.String()
-}
-
-// decodeRune decodes a single UTF-8 rune from the string.
-func decodeRune(s string) (rune, int) {
-	if len(s) == 0 {
-		return unicode.ReplacementChar, 0
-	}
-	// Use range to decode
-	for _, r := range s {
-		return r, len(string(r))
-	}
-	return unicode.ReplacementChar, 1
 }

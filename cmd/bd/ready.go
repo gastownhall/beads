@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -448,11 +449,20 @@ func runReadyExplain(cmd *cobra.Command) {
 	for i, issue := range readyIssues {
 		readyIDs[i] = issue.ID
 	}
-	depCounts, _ := activeStore.GetDependencyCounts(ctx, readyIDs)
-	allDeps, _ := activeStore.GetDependencyRecordsForIssues(ctx, readyIDs)
+	depCounts, err := activeStore.GetDependencyCounts(ctx, readyIDs)
+	if err != nil {
+		debug.Logf("warning: failed to get dependency counts: %v", err)
+	}
+	allDeps, err := activeStore.GetDependencyRecordsForIssues(ctx, readyIDs)
+	if err != nil {
+		debug.Logf("warning: failed to get dependency records: %v", err)
+	}
 
 	// Detect cycles
-	cycles, _ := activeStore.DetectCycles(ctx)
+	cycles, err := activeStore.DetectCycles(ctx)
+	if err != nil {
+		debug.Logf("warning: failed to detect cycles: %v", err)
+	}
 
 	// Collect all blocker IDs to batch-fetch blocker details
 	allBlockerIDs := make(map[string]bool)
@@ -467,7 +477,10 @@ func runReadyExplain(cmd *cobra.Command) {
 	}
 
 	// Build ready items with explanations
-	blockerIssues, _ := activeStore.GetIssuesByIDs(ctx, blockerIDList)
+	blockerIssues, err := activeStore.GetIssuesByIDs(ctx, blockerIDList)
+	if err != nil {
+		debug.Logf("warning: failed to get blocker issues: %v", err)
+	}
 	blockerMap := make(map[string]*types.Issue, len(blockerIssues))
 	for _, issue := range blockerIssues {
 		blockerMap[issue.ID] = issue
