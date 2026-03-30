@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -969,6 +970,65 @@ func TestFormatIssueCompactWithDependencies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFormatIssueCompactBlockedIcon verifies that dependency-blocked open issues
+// show the blocked icon (●) instead of the open icon (○) in compact list output. (GH#2858)
+func TestFormatIssueCompactBlockedIcon(t *testing.T) {
+	t.Parallel()
+
+	t.Run("open issue with blockers shows blocked icon", func(t *testing.T) {
+		issue := &types.Issue{
+			ID:        "test-blocked",
+			Title:     "Blocked by dependency",
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+		}
+		var buf strings.Builder
+		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "")
+		result := buf.String()
+		// Should show blocked icon ● not open icon ○
+		if strings.Contains(result, ui.StatusIconOpen) {
+			t.Errorf("dependency-blocked issue should not show open icon ○, got: %q", result)
+		}
+		if !strings.Contains(result, ui.StatusIconBlocked) {
+			t.Errorf("dependency-blocked issue should show blocked icon ●, got: %q", result)
+		}
+	})
+
+	t.Run("open issue without blockers shows open icon", func(t *testing.T) {
+		issue := &types.Issue{
+			ID:        "test-open",
+			Title:     "Normal open issue",
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+		}
+		var buf strings.Builder
+		formatIssueCompact(&buf, issue, nil, nil, nil, "")
+		result := buf.String()
+		if !strings.Contains(result, ui.StatusIconOpen) {
+			t.Errorf("open issue without blockers should show open icon ○, got: %q", result)
+		}
+	})
+
+	t.Run("in_progress issue with blockers keeps in_progress icon", func(t *testing.T) {
+		issue := &types.Issue{
+			ID:        "test-wip",
+			Title:     "In progress with blocker",
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusInProgress,
+		}
+		var buf strings.Builder
+		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "")
+		result := buf.String()
+		// Should keep in_progress icon, not override to blocked
+		if !strings.Contains(result, ui.StatusIconInProgress) {
+			t.Errorf("in_progress issue should keep its icon even with blockers, got: %q", result)
+		}
+	})
 }
 
 func TestParseTimeFlag(t *testing.T) {
