@@ -474,6 +474,62 @@ func TestClient_escapeWIQL(t *testing.T) {
 	}
 }
 
+func TestFormatWIQLDate(t *testing.T) {
+	tests := []struct {
+		name string
+		time time.Time
+		want string
+	}{
+		{
+			name: "UTC time",
+			time: time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+			want: "2024-06-01T00:00:00Z",
+		},
+		{
+			name: "UTC time with seconds",
+			time: time.Date(2024, 6, 15, 14, 30, 45, 0, time.UTC),
+			want: "2024-06-15T14:30:45Z",
+		},
+		{
+			name: "non-UTC positive offset converts to UTC",
+			time: time.Date(2024, 6, 1, 12, 0, 0, 0, time.FixedZone("IST", 5*3600+30*60)),
+			want: "2024-06-01T06:30:00Z",
+		},
+		{
+			name: "non-UTC negative offset converts to UTC",
+			time: time.Date(2024, 6, 1, 10, 0, 0, 0, time.FixedZone("EST", -5*3600)),
+			want: "2024-06-01T15:00:00Z",
+		},
+		{
+			name: "nanoseconds truncated to seconds",
+			time: time.Date(2024, 6, 1, 10, 30, 45, 123456789, time.UTC),
+			want: "2024-06-01T10:30:45Z",
+		},
+		{
+			name: "midnight boundary from non-UTC",
+			time: time.Date(2024, 6, 2, 2, 0, 0, 0, time.FixedZone("CEST", 2*3600)),
+			want: "2024-06-02T00:00:00Z",
+		},
+		{
+			name: "date rollback across day boundary",
+			time: time.Date(2024, 6, 1, 1, 0, 0, 0, time.FixedZone("JST", 9*3600)),
+			want: "2024-05-31T16:00:00Z",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatWIQLDate(tt.time)
+			if got != tt.want {
+				t.Errorf("formatWIQLDate() = %q, want %q", got, tt.want)
+			}
+			// Verify output always ends with Z (UTC indicator)
+			if !strings.HasSuffix(got, "Z") {
+				t.Errorf("formatWIQLDate() output %q must end with Z for WIQL compatibility", got)
+			}
+		})
+	}
+}
+
 func TestClient_AddWorkItemLink(t *testing.T) {
 	client, _ := setupTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {
@@ -648,6 +704,7 @@ func TestValidateProject(t *testing.T) {
 func TestBuildPullWIQL(t *testing.T) {
 	c := NewClient(NewSecretString("pat"), "myorg", "testproject")
 	since := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
+	sinceNonUTC := time.Date(2024, 6, 1, 12, 0, 0, 0, time.FixedZone("IST", 5*3600+30*60))
 
 	tests := []struct {
 		name     string
@@ -672,6 +729,14 @@ func TestBuildPullWIQL(t *testing.T) {
 			filters: nil,
 			contains: []string{
 				"[System.ChangedDate] >= '2024-06-01T00:00:00Z'",
+			},
+		},
+		{
+			name:    "with since non-UTC converts to UTC",
+			since:   &sinceNonUTC,
+			filters: nil,
+			contains: []string{
+				"[System.ChangedDate] >= '2024-06-01T06:30:00Z'",
 			},
 		},
 		{
