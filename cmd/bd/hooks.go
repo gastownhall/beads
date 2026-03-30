@@ -9,11 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // managedHookNames lists the git hooks managed by beads.
@@ -1037,10 +1036,10 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 		// Disable terminal color probing to prevent OSC 11 escape sequence leaks (GH#1303).
 		// Our shell shims set BD_GIT_HOOK=1 before invoking bd, but third-party hook
 		// runners (lefthook, husky, etc.) call 'bd hooks run' directly without it.
-		// By this point ui.init() has already run, so we must also reset the lipgloss
-		// color profile — the env var alone only helps if set before process start.
+		// By this point ui.init() has already run, so we must also reset styles
+		// to suppress ANSI output — the env var alone only helps if set before process start.
 		_ = os.Setenv("BD_GIT_HOOK", "1")
-		lipgloss.SetColorProfile(termenv.Ascii)
+		ui.DisableColors()
 
 		hookName := args[0]
 		hookArgs := args[1:]

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/charmbracelet/lipgloss"
+	lipgloss "charm.land/lipgloss/v2"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
