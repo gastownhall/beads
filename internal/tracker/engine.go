@@ -112,7 +112,6 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	result := &SyncResult{Success: true}
 	e.warnings = nil
-	now := time.Now().UTC()
 
 	// Default to bidirectional if neither specified
 	if !opts.Pull && !opts.Push {

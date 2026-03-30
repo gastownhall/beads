@@ -404,29 +404,10 @@ func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
 }
 
 // runReadyExplain shows dependency-aware reasoning for why issues are ready or blocked.
-func runReadyExplain(cmd *cobra.Command) {
+func runReadyExplain(_ *cobra.Command) {
 	ctx := rootCtx
 
-	// Get the active store (respect --rig flag)
 	activeStore := store
-	rigOverride, _ := cmd.Flags().GetString("rig")
-	if rigOverride != "" {
-		rigStore, err := openStoreForRig(ctx, rigOverride)
-		if err != nil {
-			FatalError("%v", err)
-		}
-		defer func() { _ = rigStore.Close() }()
-		activeStore = rigStore
-	} else {
-		routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
-		if err != nil {
-			FatalError("%v", err)
-		}
-		if routed {
-			defer func() { _ = routedStore.Close() }()
-			activeStore = routedStore
-		}
-	}
 
 	// Get ready issues (no limit for explain mode — show everything)
 	filter := types.WorkFilter{
@@ -696,7 +677,6 @@ func init() {
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
-	readyCmd.Flags().String("rig", "", "Query a different rig's database (e.g., --rig my-project, --rig gt-, --rig gt)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
