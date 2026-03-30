@@ -309,13 +309,26 @@ func (c *Config) GetDoltDatabase() string {
 //  2. Credentials file lookup by [host:port] section
 //     (path from BEADS_CREDENTIALS_FILE env var, or ~/.config/beads/credentials)
 //  3. Empty string (no password)
+//
+// Note: uses the port from configfile (metadata.json / env var), which may differ
+// from the resolved runtime port (doltserver port file). If you have the resolved
+// port, prefer GetDoltServerPasswordForPort for correct credentials file lookup.
 func (c *Config) GetDoltServerPassword() string {
+	return c.GetDoltServerPasswordForPort(c.GetDoltServerPort())
+}
+
+// GetDoltServerPasswordForPort returns the Dolt server password using an explicit
+// port for the credentials file lookup. Use this when the resolved runtime port
+// (from doltserver.DefaultConfig) differs from the configfile port (metadata.json).
+//
+// This avoids a mismatch where metadata.json says port 3308 (tunnel) but the
+// doltserver port file says 3307 (local), causing the credentials file lookup
+// to use the wrong [host:port] section.
+func (c *Config) GetDoltServerPasswordForPort(port int) string {
 	if p := os.Getenv("BEADS_DOLT_PASSWORD"); p != "" {
 		return p
 	}
-	// Fall back to credentials file, keyed by the configured host:port
 	host := c.GetDoltServerHost()
-	port := c.GetDoltServerPort()
 	if p := LookupCredentialsPassword(host, port); p != "" {
 		return p
 	}

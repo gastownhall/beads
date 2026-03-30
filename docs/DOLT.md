@@ -371,8 +371,14 @@ on its configured server.
 
 **Password resolution order:**
 1. `BEADS_DOLT_PASSWORD` env var (highest priority, existing behavior)
-2. Credentials file lookup by `[host:port]`
+2. Credentials file lookup by `[host:port]` (using the resolved runtime port)
 3. Empty string (no password)
+
+**Port resolution note:** The `[host:port]` used for credential lookup matches the
+resolved runtime port (from the port file, env var, or config — in that priority
+order), not necessarily the port stored in `metadata.json`. This matters when using
+IAP tunnels: if your tunnel maps remote:3307 to localhost:3308, store your password
+under `[127.0.0.1:3308]` and the credentials file will match the actual connection.
 
 **Default location:** `~/.config/beads/credentials` (Linux/macOS), `%APPDATA%\beads\credentials` (Windows)
 

@@ -159,6 +159,49 @@ password=workServerPass
 	}
 }
 
+func TestGetDoltServerPasswordForPort_OverridesConfigPort(t *testing.T) {
+	// Simulates the tunnel scenario: metadata.json has port 3308 (tunnel)
+	// but the doltserver port file resolves to 3307 (local). The credentials
+	// file has the password under [127.0.0.1:3307]. GetDoltServerPassword()
+	// would look up [127.0.0.1:3308] and miss. GetDoltServerPasswordForPort(3307)
+	// should find it.
+	tmpDir := t.TempDir()
+	credFile := filepath.Join(tmpDir, "credentials")
+	content := `[127.0.0.1:3307]
+password=localPass
+
+[127.0.0.1:3308]
+password=tunnelPass
+`
+	if err := os.WriteFile(credFile, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write credentials file: %v", err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+
+	cfg := DefaultConfig()
+	cfg.DoltServerHost = "127.0.0.1"
+	cfg.DoltServerPort = 3308 // metadata.json says tunnel port
+
+	// GetDoltServerPassword uses config port (3308) → tunnelPass
+	got := cfg.GetDoltServerPassword()
+	if got != "tunnelPass" {
+		t.Errorf("GetDoltServerPassword() = %q, want %q", got, "tunnelPass")
+	}
+
+	// GetDoltServerPasswordForPort with resolved runtime port (3307) → localPass
+	got = cfg.GetDoltServerPasswordForPort(3307)
+	if got != "localPass" {
+		t.Errorf("GetDoltServerPasswordForPort(3307) = %q, want %q", got, "localPass")
+	}
+
+	// GetDoltServerPasswordForPort with tunnel port (3308) → tunnelPass
+	got = cfg.GetDoltServerPasswordForPort(3308)
+	if got != "tunnelPass" {
+		t.Errorf("GetDoltServerPasswordForPort(3308) = %q, want %q", got, "tunnelPass")
+	}
+}
+
 func TestReadPasswordFromFile_InlineComments(t *testing.T) {
 	tmpDir := t.TempDir()
 	credFile := filepath.Join(tmpDir, "credentials")
