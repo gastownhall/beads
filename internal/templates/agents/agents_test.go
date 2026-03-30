@@ -15,7 +15,7 @@ func TestEmbeddedDefault(t *testing.T) {
 	required := []string{
 		"# Agent Instructions",
 		"## Quick Reference",
-		"bd onboard",
+		"bd prime",
 		"BEGIN BEADS INTEGRATION",
 		"END BEADS INTEGRATION",
 		"## Session Completion",

@@ -428,8 +428,8 @@ func TestSetupClaudeSettings_InvalidJSON(t *testing.T) {
 		t.Error("Original file content should be preserved")
 	}
 
-	if strings.Contains(string(content), "bd onboard") {
-		t.Error("File should NOT contain bd onboard prompt after error")
+	if strings.Contains(string(content), "bd prime") {
+		t.Error("File should NOT contain bd prime prompt after error")
 	}
 }
 
@@ -476,8 +476,8 @@ func TestSetupClaudeSettings_ValidJSON(t *testing.T) {
 	contentStr := string(content)
 
 	// Should contain the new prompt
-	if !strings.Contains(contentStr, "bd onboard") {
-		t.Error("File should contain bd onboard prompt")
+	if !strings.Contains(contentStr, "bd prime") {
+		t.Error("File should contain bd prime prompt")
 	}
 
 	// Should preserve existing permissions
@@ -516,8 +516,8 @@ func TestSetupClaudeSettings_NoExistingFile(t *testing.T) {
 		t.Fatalf("Failed to read settings file: %v", err)
 	}
 
-	if !strings.Contains(string(content), "bd onboard") {
-		t.Error("File should contain bd onboard prompt")
+	if !strings.Contains(string(content), "bd prime") {
+		t.Error("File should contain bd prime prompt")
 	}
 }
 
