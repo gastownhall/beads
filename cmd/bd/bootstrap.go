@@ -349,6 +349,11 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 			return fmt.Errorf("clone from remote: %w", err)
 		}
 
+		// Clean stale noms LOCK files left by the clone process.
+		if removed, _ := dolt.CleanStaleNomsLocks(dataDir); removed > 0 {
+			fmt.Fprintf(os.Stderr, "Cleaned %d stale noms LOCK file(s)\n", removed)
+		}
+
 		fmt.Fprintf(os.Stderr, "Synced database from %s\n", plan.SyncRemote)
 		return nil
 	}
@@ -359,6 +364,11 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		return fmt.Errorf("sync from remote: %w", err)
 	}
 	if synced {
+		// Clean stale noms LOCK files left by the dolt clone process.
+		// These prevent dolt sql-server from starting (GH#bd-cmo).
+		if removed, _ := dolt.CleanStaleNomsLocks(doltDir); removed > 0 {
+			fmt.Fprintf(os.Stderr, "Cleaned %d stale noms LOCK file(s)\n", removed)
+		}
 		fmt.Fprintf(os.Stderr, "Synced database from %s\n", plan.SyncRemote)
 	}
 	return nil
