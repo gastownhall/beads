@@ -32,6 +32,7 @@ var migrationsList = []Migration{
 	{"add_no_history_column", migrations.MigrateAddNoHistoryColumn},
 	{"drop_hop_columns", migrations.MigrateDropHOPColumns},
 	{"drop_child_counters_fk", migrations.MigrateDropChildCountersFK},
+	{"wisp_events_created_at_index", migrations.MigrateWispEventsCreatedAtIndex},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.
