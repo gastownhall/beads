@@ -422,7 +422,8 @@ func findLocalBeadsDir() string {
 
 // findDatabaseInBeadsDir searches for a database within a .beads directory.
 // Checks metadata.json for the Dolt database path. For server mode, no local
-// directory is required. For embedded mode, the dolt/ directory must exist.
+// directory is required. For embedded mode, checks both the embeddeddolt/
+// directory (where the embedded engine stores data) and the legacy dolt/ path.
 // Returns empty string if no database is found.
 func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 	// Check for metadata.json first (single source of truth)
@@ -431,14 +432,25 @@ func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 		if cfg.IsDoltServerMode() {
 			return cfg.DatabasePath(beadsDir)
 		}
-		// For embedded Dolt, check if the configured database directory exists
+		// For embedded Dolt, the engine stores data under .beads/embeddeddolt/,
+		// not .beads/dolt/. Check the actual embedded data directory first.
+		embeddedPath := filepath.Join(beadsDir, "embeddeddolt")
+		if info, err := os.Stat(embeddedPath); err == nil && info.IsDir() {
+			return embeddedPath
+		}
+		// Fall back to configured database path (e.g. .beads/dolt/ for
+		// server-mode installs or legacy setups that pre-date embeddeddolt).
 		doltPath := cfg.DatabasePath(beadsDir)
 		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
 			return doltPath
 		}
 	}
 
-	// Fall back: check if dolt directory exists without metadata.json
+	// Fall back: check if embeddeddolt or dolt directory exists without metadata.json
+	embeddedPath := filepath.Join(beadsDir, "embeddeddolt")
+	if info, err := os.Stat(embeddedPath); err == nil && info.IsDir() {
+		return embeddedPath
+	}
 	doltPath := filepath.Join(beadsDir, "dolt")
 	if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
 		return doltPath
@@ -521,8 +533,11 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 		return true
 	}
 
-	// Check for Dolt database directory
+	// Check for Dolt database directory (server mode uses dolt/, embedded uses embeddeddolt/)
 	if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err == nil && info.IsDir() {
+		return true
+	}
+	if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil && info.IsDir() {
 		return true
 	}
 
