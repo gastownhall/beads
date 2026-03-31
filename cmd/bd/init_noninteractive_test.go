@@ -112,28 +112,3 @@ func TestIsNonInteractiveInitPrecedence(t *testing.T) {
 		t.Error("BD_NON_INTERACTIVE=1 should return true")
 	}
 }
-
-// TestRoleFlagValidation verifies the role flag validation logic inline
-// (the actual validation is in the Run function; this tests the values directly).
-func TestRoleFlagValidation(t *testing.T) {
-	validRoles := []string{"maintainer", "contributor"}
-	invalidRoles := []string{"admin", "owner", "", "MAINTAINER"}
-
-	for _, role := range validRoles {
-		switch role {
-		case "maintainer", "contributor":
-			// OK - valid
-		default:
-			t.Errorf("role %q should be valid", role)
-		}
-	}
-
-	for _, role := range invalidRoles {
-		switch role {
-		case "maintainer", "contributor":
-			t.Errorf("role %q should be invalid", role)
-		default:
-			// OK - correctly rejected
-		}
-	}
-}
