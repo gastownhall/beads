@@ -157,7 +157,6 @@ func TestInitCommand(t *testing.T) {
 					"*.db-shm",
 					"bd.sock",
 					"dolt/",
-					"dolt-access.lock",
 				}
 				for _, pattern := range expectedPatterns {
 					if !strings.Contains(gitignoreStr, pattern) {

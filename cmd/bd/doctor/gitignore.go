@@ -11,7 +11,6 @@ import (
 // GitignoreTemplate is the canonical .beads/.gitignore content
 const GitignoreTemplate = `# Dolt database (managed by Dolt, not git)
 dolt/
-dolt-access.lock
 
 # Runtime files
 bd.sock
@@ -106,7 +105,6 @@ var requiredPatterns = []string{
 	"export-state/",
 	"export-state.json",
 	"dolt/",
-	"dolt-access.lock",
 	"ephemeral.sqlite3",
 	"dolt-server.pid",
 	"dolt-server.log",

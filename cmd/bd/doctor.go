@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -284,12 +283,7 @@ Examples:
 		if doctorDryRun {
 			previewFixes(result)
 		} else if doctorFix {
-			// Release any Dolt locks left by diagnostics before applying fixes.
-			releaseDiagnosticLocks(absPath)
 			applyFixes(result)
-			// Re-run diagnostics to verify fixes were applied correctly.
-			// Release any locks that may have been left by the fix phase.
-			releaseDiagnosticLocks(absPath)
 			fmt.Println("\nVerifying fixes...")
 			result = runDiagnostics(absPath)
 		}
@@ -342,39 +336,6 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
 	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
-}
-
-// releaseDiagnosticLocks removes stale noms LOCK files that the diagnostics
-// phase may have left behind. CloseWithTimeout can leave goroutines (and
-// their LOCK files) behind when it times out.
-func releaseDiagnosticLocks(path string) {
-	beadsDir := filepath.Join(path, ".beads")
-	beadsDir = beads.FollowRedirect(beadsDir)
-
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil {
-		return // Can't determine config, skip cleanup
-	}
-
-	// Only clean up for Dolt backend.
-	if cfg.GetBackend() != configfile.BackendDolt {
-		return
-	}
-
-	doltPath := cfg.DatabasePath(beadsDir)
-	entries, err := os.ReadDir(doltPath)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		nomsLock := filepath.Join(doltPath, entry.Name(), ".dolt", "noms", "LOCK")
-		if _, err := os.Stat(nomsLock); err == nil {
-			_ = os.Remove(nomsLock)
-		}
-	}
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -450,12 +411,6 @@ func runDiagnostics(path string) doctorResult {
 			Category: doctor.CategoryCore,
 		})
 	}
-
-	// GH#1981: Run lock health check BEFORE any checks that open embedded
-	// Dolt databases. Earlier checks (CheckDatabaseVersion, CheckSchemaCompatibility,
-	// etc.) create noms LOCK files via flock(); if CheckLockHealth runs after them,
-	// it detects those same-process locks as "held by another process" (false positive).
-	earlyLockCheck := doctor.CheckLockHealth(path)
 
 	// bd-jgxi: Auto-migrate database version before checking it.
 	// Since doctor skips PersistentPreRun DB init (it's in noDbCommands),
@@ -576,9 +531,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall for remote discrepancies, just warn
 
 	// Dolt health checks (connection, schema, issue count, status).
-	// GH#1981: Pass the pre-computed lock check (run before any embedded Dolt
-	// opens) to avoid false positives from doctor's own noms LOCK files.
-	for _, dc := range doctor.RunDoltHealthChecksWithLock(path, earlyLockCheck) {
+	for _, dc := range doctor.RunDoltHealthChecks(path) {
 		result.Checks = append(result.Checks, convertDoctorCheck(dc))
 	}
 
@@ -813,11 +766,6 @@ func runDiagnostics(path string) doctorResult {
 	classicArtifactsCheck := convertDoctorCheck(doctor.CheckClassicArtifacts(path))
 	result.Checks = append(result.Checks, classicArtifactsCheck)
 	// Don't fail overall check for classic artifacts, just warn
-
-	// Check 36: Embedded mode concurrency issues (GH#2086)
-	concurrencyCheck := convertWithCategory(doctor.CheckEmbeddedModeConcurrency(path), doctor.CategoryRuntime)
-	result.Checks = append(result.Checks, concurrencyCheck)
-	// Don't fail overall — this is a recommendation, not a broken state
 
 	// GH#1095: Filter out suppressed checks (doctor.suppress.<slug> = true)
 	suppressed := doctor.GetSuppressedChecksWithStore(sharedStore)

@@ -14,7 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/lockfile"
+
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -111,18 +111,11 @@ func IsDoltBackend(beadsDir string) bool {
 // RunDoltHealthChecks runs all Dolt-specific health checks using a single
 // shared server connection. Returns one check per health dimension.
 // Non-Dolt backends get N/A results for all dimensions.
-//
-// Note: Prefer RunDoltHealthChecksWithLock when the lock check has already
-// been run early (before any embedded Dolt opens) to avoid false positives.
 func RunDoltHealthChecks(path string) []DoctorCheck {
-	return RunDoltHealthChecksWithLock(path, CheckLockHealth(path))
+	return runDoltHealthChecksInternal(path)
 }
 
-// RunDoltHealthChecksWithLock is like RunDoltHealthChecks but accepts a
-// pre-computed lock health check result. This allows the caller to run
-// CheckLockHealth before any checks that open embedded Dolt databases,
-// avoiding false positives from doctor's own noms LOCK files (GH#1981).
-func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorCheck {
+func runDoltHealthChecksInternal(path string) []DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(path)
 
 	if !IsDoltBackend(beadsDir) {
@@ -152,7 +145,7 @@ func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorChe
 				{Name: "Dolt Schema", Status: StatusOK, Message: skipMsg, Category: CategoryCore},
 				{Name: "Dolt Issue Count", Status: StatusOK, Message: skipMsg, Category: CategoryData},
 				{Name: "Dolt Status", Status: StatusOK, Message: skipMsg, Category: CategoryData},
-				lockCheck,
+				{Name: "Dolt Lock Health", Status: StatusOK, Message: "N/A (removed)", Category: CategoryRuntime},
 				{Name: "Phantom Databases", Status: StatusOK, Message: skipMsg, Category: CategoryData},
 				checkSharedServerHealth(beadsDir),
 			}
@@ -166,7 +159,7 @@ func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorChe
 			{Name: "Dolt Schema", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryCore},
 			{Name: "Dolt Issue Count", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryData},
 			{Name: "Dolt Status", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryData},
-			lockCheck,
+			{Name: "Dolt Lock Health", Status: StatusOK, Message: "N/A (removed)", Category: CategoryRuntime},
 			{Name: "Phantom Databases", Status: StatusError, Message: "Skipped (no connection)", Detail: connErr, Category: CategoryData},
 			checkSharedServerHealth(beadsDir),
 		}
@@ -178,7 +171,7 @@ func RunDoltHealthChecksWithLock(path string, lockCheck DoctorCheck) []DoctorChe
 		checkSchemaWithDB(conn),
 		checkIssueCountWithDB(conn),
 		checkStatusWithDB(conn),
-		lockCheck,
+		{Name: "Dolt Lock Health", Status: StatusOK, Message: "N/A (removed)", Category: CategoryRuntime},
 		checkPhantomDatabases(conn),
 		checkSharedServerHealth(beadsDir),
 	}
@@ -506,85 +499,6 @@ func CheckDoltStatus(path string) DoctorCheck {
 	defer conn.Close()
 
 	return checkStatusWithDB(conn)
-}
-
-// CheckLockHealth checks the health of Dolt lock files.
-// It probes for stale noms LOCK files and checks whether the advisory lock
-// is currently held, providing actionable guidance when issues are found.
-func CheckLockHealth(path string) DoctorCheck {
-	beadsDir := ResolveBeadsDirForRepo(path)
-
-	if !IsDoltBackend(beadsDir) {
-		return DoctorCheck{
-			Name:     "Dolt Lock Health",
-			Status:   StatusOK,
-			Message:  "N/A (not using Dolt backend)",
-			Category: CategoryRuntime,
-		}
-	}
-
-	var warnings []string
-
-	// Check for noms LOCK files that are actively held by another process.
-	// Dolt's noms chunk store creates a LOCK file on open and releases the
-	// flock on close, but never deletes the file. We probe the flock to
-	// distinguish an actively held lock (real contention) from a stale
-	// file left by a previous process (harmless).
-	doltDir := getDatabasePath(beadsDir)
-	if dbEntries, err := os.ReadDir(doltDir); err == nil {
-		for _, dbEntry := range dbEntries {
-			if !dbEntry.IsDir() {
-				continue
-			}
-			nomsLock := filepath.Join(doltDir, dbEntry.Name(), ".dolt", "noms", "LOCK")
-			if f, err := os.OpenFile(nomsLock, os.O_RDWR, 0); err == nil { //nolint:gosec // controlled path
-				if lockErr := lockfile.FlockExclusiveNonBlocking(f); lockErr != nil {
-					// Lock is actively held by another process
-					warnings = append(warnings,
-						fmt.Sprintf("noms LOCK at dolt/%s/.dolt/noms/LOCK is held by another process — may block database access", dbEntry.Name()))
-				} else {
-					// File exists but lock is not held — stale file, not a problem
-					_ = lockfile.FlockUnlock(f)
-				}
-				_ = f.Close()
-			}
-		}
-	}
-
-	// Probe advisory lock to check if it's currently held
-	accessLockPath := filepath.Join(beadsDir, "dolt-access.lock")
-	if _, err := os.Stat(accessLockPath); err == nil {
-		f, err := os.OpenFile(accessLockPath, os.O_RDWR, 0) //nolint:gosec // controlled path
-		if err == nil {
-			if lockErr := lockfile.FlockExclusiveNonBlocking(f); lockErr != nil {
-				// Lock is held by another process
-				warnings = append(warnings,
-					"advisory lock is currently held by another bd process")
-			} else {
-				// We acquired it, meaning no one holds it — release immediately
-				_ = lockfile.FlockUnlock(f)
-			}
-			_ = f.Close()
-		}
-	}
-
-	if len(warnings) == 0 {
-		return DoctorCheck{
-			Name:     "Dolt Lock Health",
-			Status:   StatusOK,
-			Message:  "No lock contention detected",
-			Category: CategoryRuntime,
-		}
-	}
-
-	return DoctorCheck{
-		Name:     "Dolt Lock Health",
-		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d lock issue(s) detected", len(warnings)),
-		Detail:   strings.Join(warnings, "; "),
-		Fix:      "Run 'bd doctor --fix' to clean stale lock files, or wait for the other process to finish",
-		Category: CategoryRuntime,
-	}
 }
 
 // checkPhantomDatabases detects phantom catalog entries from naming convention

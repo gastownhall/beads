@@ -410,7 +410,7 @@ func init() {
 		metric.WithUnit("{retry}"),
 	)
 	doltMetrics.lockWaitMs, _ = m.Float64Histogram("bd.db.lock_wait_ms",
-		metric.WithDescription("Time spent waiting to acquire the dolt access lock"),
+		metric.WithDescription("Time spent waiting to acquire database locks"),
 		metric.WithUnit("ms"),
 	)
 	doltMetrics.circuitTrips, _ = m.Int64Counter("bd.db.circuit_trips",
@@ -1445,37 +1445,12 @@ func (s *DoltStore) Close() error {
 		s.autoStartedServerDir = ""
 	}
 
-	// Clean up 0-byte noms LOCK files. The Dolt engine creates these when
-	// opening a database; they should be removed on clean shutdown but may
-	// persist after crashes or when bd init triggers hook reopens.
-	if s.dbPath != "" {
-		cleanZeroByteNomsLocks(s.dbPath)
-	}
+	// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+	// directory — including noms/LOCK files. These are Dolt-internal files.
+	// Removing them WILL cause unrecoverable data corruption and data loss.
+	// Dolt manages these files itself; external interference is never safe.
 
 	return err
-}
-
-// cleanZeroByteNomsLocks removes 0-byte noms LOCK files from all databases
-// under doltDir. Only empty LOCK files are removed — non-empty ones may
-// indicate an active lock held by a running server.
-func cleanZeroByteNomsLocks(doltDir string) {
-	entries, err := os.ReadDir(doltDir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		lockPath := filepath.Join(doltDir, entry.Name(), ".dolt", "noms", "LOCK")
-		info, statErr := os.Stat(lockPath)
-		if statErr != nil {
-			continue
-		}
-		if info.Size() == 0 {
-			_ = os.Remove(lockPath)
-		}
-	}
 }
 
 // Path returns the database directory path

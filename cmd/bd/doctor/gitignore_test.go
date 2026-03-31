@@ -1690,14 +1690,6 @@ func TestGitignoreTemplate_ContainsDolt(t *testing.T) {
 	}
 }
 
-// TestGitignoreTemplate_ContainsDoltAccessLock verifies that the .beads/.gitignore template
-// includes dolt-access.lock to prevent the Dolt advisory lock file from being committed.
-func TestGitignoreTemplate_ContainsDoltAccessLock(t *testing.T) {
-	if !strings.Contains(GitignoreTemplate, "dolt-access.lock") {
-		t.Error("GitignoreTemplate should contain 'dolt-access.lock' pattern")
-	}
-}
-
 // TestRequiredPatterns_ContainsDolt verifies that bd doctor validates
 // the presence of the dolt/ pattern in .beads/.gitignore.
 func TestRequiredPatterns_ContainsDolt(t *testing.T) {
@@ -1710,21 +1702,6 @@ func TestRequiredPatterns_ContainsDolt(t *testing.T) {
 	}
 	if !found {
 		t.Error("requiredPatterns should include 'dolt/'")
-	}
-}
-
-// TestRequiredPatterns_ContainsDoltAccessLock verifies that bd doctor validates
-// the presence of the dolt-access.lock pattern in .beads/.gitignore.
-func TestRequiredPatterns_ContainsDoltAccessLock(t *testing.T) {
-	found := false
-	for _, pattern := range requiredPatterns {
-		if pattern == "dolt-access.lock" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("requiredPatterns should include 'dolt-access.lock'")
 	}
 }
 

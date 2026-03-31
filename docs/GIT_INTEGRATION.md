@@ -301,8 +301,6 @@ See [MULTI_REPO_MIGRATION.md](MULTI_REPO_MIGRATION.md) for complete guide.
 # Dolt database (not tracked in git)
 .beads/dolt/
 
-# Lock files
-.beads/dolt-access.lock
 ```
 
 ### Git LFS Considerations

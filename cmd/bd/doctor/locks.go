@@ -11,9 +11,8 @@ import (
 // staleLockThresholds defines the age thresholds for each lock type.
 // Lock files older than these thresholds are considered stale.
 var staleLockThresholds = map[string]time.Duration{
-	"bootstrap.lock":   5 * time.Minute, // Bootstrap should complete quickly
-	".sync.lock":       1 * time.Hour,   // Sync can be slow for large repos
-	"dolt-access.lock": 5 * time.Minute, // Dolt advisory lock
+	"bootstrap.lock": 5 * time.Minute, // Bootstrap should complete quickly
+	".sync.lock":     1 * time.Hour,   // Sync can be slow for large repos
 }
 
 // CheckStaleLockFiles detects leftover lock files from crashed processes.
@@ -55,22 +54,10 @@ func CheckStaleLockFiles(path string) DoctorCheck {
 		}
 	}
 
-	// Check dolt-access.lock (embedded dolt advisory flock)
-	accessLockPath := filepath.Join(beadsDir, "dolt-access.lock")
-	if info, err := os.Stat(accessLockPath); err == nil {
-		age := time.Since(info.ModTime())
-		if age > staleLockThresholds["dolt-access.lock"] {
-			staleFiles = append(staleFiles, "dolt-access.lock")
-			details = append(details, fmt.Sprintf("dolt-access.lock: age %s (threshold: %s)",
-				age.Round(time.Second), staleLockThresholds["dolt-access.lock"]))
-		}
-	}
-
-	// Note: Dolt internal noms LOCK files (.beads/dolt/<db>/.dolt/noms/LOCK)
-	// are NOT checked here as diagnostics. These are auto-cleaned on bd startup
-	// (pre-flight in PersistentPreRun) and by 'bd doctor --fix'. Stale noms LOCK
-	// files from crashed processes would prevent the Dolt server from opening
-	// databases. The auto-cleanup makes this a non-issue for most users.
+	// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+	// directory — including noms/LOCK files. These are Dolt-internal files.
+	// Removing them WILL cause unrecoverable data corruption and data loss.
+	// Dolt manages these files itself; external interference is never safe.
 
 	// Check startup lock (bd.sock.startlock)
 	// Look for any .startlock files in beadsDir

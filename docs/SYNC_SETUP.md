@@ -231,11 +231,9 @@ The Dolt database wasn't bootstrapped. Either run `bd bootstrap` or follow the [
 bd doctor --fix --yes
 ```
 
-If a noms LOCK file persists:
-
-```bash
-rm -f .beads/dolt/<dbname>/.dolt/noms/LOCK
-```
+**WARNING**: Do NOT manually remove files inside `.dolt/` directories (including
+`noms/LOCK`). These are Dolt-internal files and removing them **will cause
+unrecoverable data corruption**. Dolt manages these files itself.
 
 ### "fatal: Unable to read current working directory"
 
