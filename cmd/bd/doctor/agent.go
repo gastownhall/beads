@@ -412,8 +412,6 @@ func enrichDoltStatus(dc DoctorCheck) agentEnrichment {
 	}
 }
 
-
-
 func enrichDependencyCycles(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "degraded",

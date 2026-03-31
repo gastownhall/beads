@@ -338,7 +338,6 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
-
 func runDiagnostics(path string) doctorResult {
 	result := doctorResult{
 		Path:       path,
@@ -767,7 +766,6 @@ func runDiagnostics(path string) doctorResult {
 	classicArtifactsCheck := convertDoctorCheck(doctor.CheckClassicArtifacts(path))
 	result.Checks = append(result.Checks, classicArtifactsCheck)
 	// Don't fail overall check for classic artifacts, just warn
-
 
 	// GH#1095: Filter out suppressed checks (doctor.suppress.<slug> = true)
 	suppressed := doctor.GetSuppressedChecksWithStore(sharedStore)

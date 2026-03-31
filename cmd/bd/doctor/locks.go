@@ -11,8 +11,8 @@ import (
 // staleLockThresholds defines the age thresholds for each lock type.
 // Lock files older than these thresholds are considered stale.
 var staleLockThresholds = map[string]time.Duration{
-	"bootstrap.lock":   5 * time.Minute, // Bootstrap should complete quickly
-	".sync.lock":       1 * time.Hour,   // Sync can be slow for large repos
+	"bootstrap.lock": 5 * time.Minute, // Bootstrap should complete quickly
+	".sync.lock":     1 * time.Hour,   // Sync can be slow for large repos
 }
 
 // CheckStaleLockFiles detects leftover lock files from crashed processes.

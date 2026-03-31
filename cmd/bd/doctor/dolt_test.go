@@ -180,4 +180,3 @@ func TestIsWispTable(t *testing.T) {
 		})
 	}
 }
-

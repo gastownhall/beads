@@ -111,7 +111,6 @@ func IsDoltBackend(beadsDir string) bool {
 // RunDoltHealthChecks runs all Dolt-specific health checks using a single
 // shared server connection. Returns one check per health dimension.
 // Non-Dolt backends get N/A results for all dimensions.
-//
 func RunDoltHealthChecks(path string) []DoctorCheck {
 	return runDoltHealthChecksInternal(path)
 }
@@ -501,7 +500,6 @@ func CheckDoltStatus(path string) DoctorCheck {
 
 	return checkStatusWithDB(conn)
 }
-
 
 // checkPhantomDatabases detects phantom catalog entries from naming convention
 // changes (beads_* prefix or *_beads suffix) that don't match the configured
