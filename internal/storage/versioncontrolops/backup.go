@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 )
 
 // BackupAdd registers a Dolt backup destination.
@@ -53,4 +54,33 @@ func DirToFileURL(dir string) (string, error) {
 		return "", fmt.Errorf("resolve absolute path: %w", err)
 	}
 	return "file://" + abs, nil
+}
+
+// ExtractAddressConflictName parses the conflicting remote name from a Dolt
+// "address conflict with a remote" error.
+//
+// Dolt returns errors of the form:
+//
+//	Error 1105: address conflict with a remote: 'name' -> url
+//
+// When BackupAdd fails because another remote (e.g. "default", registered by
+// `bd backup init`) already points to the same URL, the caller can use the
+// conflicting name to sync directly rather than treating it as a hard error.
+// Returns "" if the error is not an address conflict.
+func ExtractAddressConflictName(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	const marker = "address conflict with a remote: '"
+	idx := strings.Index(s, marker)
+	if idx == -1 {
+		return ""
+	}
+	s = s[idx+len(marker):]
+	end := strings.Index(s, "'")
+	if end == -1 {
+		return ""
+	}
+	return s[:end]
 }

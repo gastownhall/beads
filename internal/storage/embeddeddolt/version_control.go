@@ -290,6 +290,15 @@ func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) erro
 		// Register as a backup remote (idempotent — remove first if exists).
 		_ = versioncontrolops.BackupRemove(ctx, db, backupName)
 		if err := versioncontrolops.BackupAdd(ctx, db, backupName, backupURL); err != nil {
+			// Another backup (e.g. "default" registered by `bd backup init`) may
+			// already point to this URL. In that case, sync using the existing
+			// remote name rather than failing.
+			if conflict := versioncontrolops.ExtractAddressConflictName(err); conflict != "" {
+				if syncErr := versioncontrolops.BackupSync(ctx, db, conflict); syncErr != nil {
+					return fmt.Errorf("sync to backup: %w", syncErr)
+				}
+				return nil
+			}
 			return fmt.Errorf("register backup remote: %w", err)
 		}
 		if err := versioncontrolops.BackupSync(ctx, db, backupName); err != nil {
