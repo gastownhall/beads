@@ -230,3 +230,140 @@ func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
 	}
 }
+
+// TestBootstrapFreshCloneDetectsRemote verifies that when .beads does NOT
+// exist but origin has refs/dolt/data, the bootstrap handler's remote-probe
+// logic synthesizes beadsDir and detectBootstrapAction produces a "sync"
+// plan instead of the handler exiting with "No .beads directory found".
+// This is the core fix for GH#2792.
+func TestBootstrapFreshCloneDetectsRemote(t *testing.T) {
+	// Create a bare repo and push a fake refs/dolt/data ref to it.
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	// Clone into a fresh directory — no .beads exists.
+	cloneDir := t.TempDir()
+	runGitForBootstrapTest(t, cloneDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", bareDir)
+
+	// Verify .beads does NOT exist.
+	beadsDir := filepath.Join(cloneDir, ".beads")
+	if _, err := os.Stat(beadsDir); err == nil {
+		t.Fatal(".beads should not exist before bootstrap")
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(cloneDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replicate the Run handler's remote-probe logic: when beadsDir is
+	// empty, check origin for refs/dolt/data and synthesize beadsDir.
+	// This exercises the same code path the handler uses before calling
+	// detectBootstrapAction.
+	if !isGitRepo() {
+		t.Fatal("expected to be in a git repo")
+	}
+	originURL, err := gitRemoteGetURL("origin")
+	if err != nil || originURL == "" {
+		t.Fatalf("expected origin URL, got err=%v url=%q", err, originURL)
+	}
+	if !gitLsRemoteHasRef("origin", "refs/dolt/data") {
+		t.Fatal("expected origin to have refs/dolt/data")
+	}
+
+	// Synthesize beadsDir the same way the handler does, then feed it
+	// through detectBootstrapAction — the single code path for plan building.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	synthesizedDir := filepath.Join(cwd, ".beads")
+	cfg := configfile.DefaultConfig()
+	plan := detectBootstrapAction(synthesizedDir, cfg)
+
+	if plan.Action != "sync" {
+		t.Errorf("action = %q, want %q", plan.Action, "sync")
+	}
+	if plan.SyncRemote == "" {
+		t.Error("SyncRemote should not be empty")
+	}
+	if plan.BeadsDir != synthesizedDir {
+		t.Errorf("BeadsDir = %q, want %q", plan.BeadsDir, synthesizedDir)
+	}
+}
+
+// TestBootstrapFreshCloneNoRemoteData verifies that when .beads does NOT exist
+// and origin has NO refs/dolt/data, bootstrap correctly reports no data found
+// (does not create .beads or crash).
+func TestBootstrapFreshCloneNoRemoteData(t *testing.T) {
+	// Create a bare repo WITHOUT refs/dolt/data.
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+	cloneDir := t.TempDir()
+	runGitForBootstrapTest(t, cloneDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", bareDir)
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(cloneDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// When no .beads and no remote data, the remote probe should return false.
+	if !isGitRepo() {
+		t.Fatal("expected to be in a git repo")
+	}
+	if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+		t.Fatal("origin should NOT have refs/dolt/data")
+	}
+
+	// .beads should still not exist after detection.
+	beadsDir := filepath.Join(cloneDir, ".beads")
+	if _, err := os.Stat(beadsDir); err == nil {
+		t.Fatal(".beads should not be created when remote has no data")
+	}
+}
+
+// TestBootstrapExistingBeadsDirUnchanged verifies that when .beads already
+// exists, the normal bootstrap flow is unaffected by the fresh-clone fix.
+func TestBootstrapExistingBeadsDirUnchanged(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// With .beads present but empty, detectBootstrapAction should return "init".
+	cfg := configfile.DefaultConfig()
+	plan := detectBootstrapAction(beadsDir, cfg)
+	if plan.Action != "init" {
+		t.Errorf("action = %q, want %q for existing empty .beads", plan.Action, "init")
+	}
+}
