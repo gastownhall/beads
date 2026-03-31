@@ -16,6 +16,21 @@ import (
 	"time"
 )
 
+// APIError represents an HTTP error response from the Azure DevOps API.
+// It carries the HTTP status code so callers can use errors.As to inspect
+// the status without fragile string matching.
+type APIError struct {
+	// StatusCode is the HTTP status code returned by the API.
+	StatusCode int
+	// Body is the response body text.
+	Body string
+}
+
+// Error implements the error interface.
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error: %s (status %d)", e.Body, e.StatusCode)
+}
+
 // PullFilters configures which work items to pull from ADO.
 // All filter values are validated before use in WIQL queries.
 type PullFilters struct {
@@ -230,7 +245,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 		// Permanent failures — no retry.
 		switch resp.StatusCode {
 		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
-			return nil, fmt.Errorf("API error: %s (status %d)", string(respBody), resp.StatusCode)
+			return nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 		}
 
 		// Retry on 429 and 5xx server errors (idempotent requests only).
@@ -253,7 +268,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 			}
 		}
 
-		return nil, fmt.Errorf("API error: %s (status %d)", string(respBody), resp.StatusCode)
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	return nil, fmt.Errorf("max retries (%d) exceeded: %w", maxAttempts+1, lastErr)
