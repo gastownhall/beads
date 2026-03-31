@@ -45,7 +45,7 @@ func CleanStaleNomsLocks(doltDir string) (removed int, errs []error) {
 		}
 		// Match files named "LOCK" inside a "noms" directory.
 		if d.Name() == "LOCK" && filepath.Base(filepath.Dir(path)) == "noms" {
-			if rmErr := os.Remove(path); rmErr != nil {
+			if rmErr := os.Remove(path); rmErr != nil { //nolint:gosec // G122: safe pre-start cleanup of known LOCK files
 				errs = append(errs, fmt.Errorf("removing %s: %w", path, rmErr))
 			} else {
 				removed++
