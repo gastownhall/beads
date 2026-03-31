@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -85,6 +86,11 @@ func ResolveCustomTypesInTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
 	}
 
 	if value != "" {
+		// Try JSON array first (e.g. '["gate","convoy"]'), fall back to comma-separated
+		var jsonTypes []string
+		if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
+			return jsonTypes, nil
+		}
 		return ParseCommaSeparatedList(value), nil
 	}
 
