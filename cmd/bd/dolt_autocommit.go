@@ -54,7 +54,7 @@ func maybeAutoCommit(ctx context.Context, p doltAutoCommitParams) error {
 	if st == nil {
 		return nil
 	}
-	if lm, ok := st.(storage.LifecycleManager); ok && lm.IsClosed() {
+	if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {
 		return nil
 	}
 

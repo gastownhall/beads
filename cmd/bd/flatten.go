@@ -45,7 +45,7 @@ Examples:
 		ctx := rootCtx
 		start := time.Now()
 
-		flattener, ok := store.(storage.Flattener)
+		flattener, ok := storage.UnwrapStore(store).(storage.Flattener)
 		if !ok {
 			FatalError("storage backend does not support flatten")
 		}
@@ -114,7 +114,7 @@ Examples:
 		}
 
 		// Reclaim disk space from the now-orphaned old history.
-		if gc, ok := store.(storage.GarbageCollector); ok {
+		if gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector); ok {
 			if err := gc.DoltGC(ctx); err != nil {
 				WarnError("dolt gc after flatten failed: %v", err)
 			}

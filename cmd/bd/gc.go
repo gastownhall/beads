@@ -176,7 +176,7 @@ Examples:
 				fmt.Println("Phase 3/3: Dolt GC (reclaim disk space)")
 			}
 
-			gc, ok := store.(storage.GarbageCollector)
+			gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector)
 			if !ok {
 				if !jsonOutput {
 					fmt.Println("  Storage backend does not support GC, skipping")

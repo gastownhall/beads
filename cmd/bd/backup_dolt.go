@@ -55,7 +55,7 @@ After adding, run 'bd backup sync' to push your data.`,
 		// DoltHub URLs are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
-		bs, ok := store.(storage.BackupStore)
+		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
 		if !ok {
 			return fmt.Errorf("storage backend does not support backup operations")
 		}
@@ -113,13 +113,13 @@ Run 'bd backup init <path>' first to configure a destination.`,
 			return fmt.Errorf("no store available")
 		}
 
-		bs, ok := store.(storage.BackupStore)
+		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
 		if !ok {
 			return fmt.Errorf("storage backend does not support backup operations")
 		}
 
 		// First, commit any pending changes so they're included in the backup
-		committer, ok := store.(storage.PendingCommitter)
+		committer, ok := storage.UnwrapStore(store).(storage.PendingCommitter)
 		if !ok {
 			return fmt.Errorf("storage backend does not support pending commits")
 		}
@@ -396,7 +396,7 @@ backup configuration. The backup data at the destination is not deleted.`,
 			return fmt.Errorf("no store available")
 		}
 
-		bs, ok := store.(storage.BackupStore)
+		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
 		if !ok {
 			return fmt.Errorf("storage backend does not support backup operations")
 		}

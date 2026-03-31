@@ -73,7 +73,7 @@ func isDoltAutoPushEnabled(ctx context.Context) bool {
 	if st == nil {
 		return false
 	}
-	if lm, ok := st.(storage.LifecycleManager); ok && lm.IsClosed() {
+	if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {
 		return false
 	}
 	has, err := st.HasRemote(ctx, "origin")
@@ -99,7 +99,7 @@ func maybeAutoPush(ctx context.Context) {
 	if st == nil {
 		return
 	}
-	if lm, ok := st.(storage.LifecycleManager); ok && lm.IsClosed() {
+	if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {
 		return
 	}
 

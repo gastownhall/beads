@@ -264,7 +264,7 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		if msg == "" {
 			// No explicit message — use CommitPending which generates a
 			// descriptive summary of accumulated changes.
-			pc, ok := st.(storage.PendingCommitter)
+			pc, ok := storage.UnwrapStore(st).(storage.PendingCommitter)
 			if !ok {
 				fmt.Fprintf(os.Stderr, "Error: storage backend does not support pending commits\n")
 				os.Exit(1)
@@ -621,7 +621,7 @@ var doltRemoteAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		name, url := args[0], args[1]
-		locator, ok := st.(storage.StoreLocator)
+		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
 			os.Exit(1)
@@ -713,7 +713,7 @@ var doltRemoteListCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
 			os.Exit(1)
 		}
-		locator, ok := st.(storage.StoreLocator)
+		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
 			os.Exit(1)
@@ -833,7 +833,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		name := args[0]
-		locator, ok := st.(storage.StoreLocator)
+		locator, ok := storage.UnwrapStore(st).(storage.StoreLocator)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Error: storage backend does not support store location\n")
 			os.Exit(1)

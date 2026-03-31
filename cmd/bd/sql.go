@@ -42,7 +42,7 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 			FatalErrorRespectJSON("no database connection available (%s)", diagHint())
 		}
 
-		accessor, ok := store.(storage.RawDBAccessor)
+		accessor, ok := storage.UnwrapStore(store).(storage.RawDBAccessor)
 		if !ok {
 			FatalErrorRespectJSON("storage backend does not support raw DB access")
 		}

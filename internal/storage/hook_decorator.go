@@ -44,6 +44,18 @@ func NewHookFiringStore(store DoltStorage, runner *hooks.Runner) *HookFiringStor
 // (e.g., StoreLocator, RawDBAccessor).
 func (h *HookFiringStore) Inner() DoltStorage { return h.inner }
 
+// UnwrapStore returns the underlying concrete store if s is a
+// HookFiringStore decorator, otherwise returns s unchanged.
+// Use this before type assertions to optional interfaces
+// (StoreLocator, BackupStore, Flattener, etc.) so the assertion
+// reaches the concrete store rather than the decorator.
+func UnwrapStore(s DoltStorage) DoltStorage {
+	if h, ok := s.(*HookFiringStore); ok {
+		return h.inner
+	}
+	return s
+}
+
 // ── Issue mutations ─────────────────────────────────────────────────
 
 // CreateIssue creates an issue and fires on_create.

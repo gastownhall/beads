@@ -38,7 +38,7 @@ func maybeAutoBackup(ctx context.Context) {
 	if store == nil {
 		return
 	}
-	if lm, ok := store.(storage.LifecycleManager); ok && lm.IsClosed() {
+	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
 		return
 	}
 

@@ -133,7 +133,7 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 		}
 	}
 
-	bs, ok := store.(storage.BackupStore)
+	bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
 	if !ok {
 		return nil, fmt.Errorf("storage backend does not support backup operations")
 	}

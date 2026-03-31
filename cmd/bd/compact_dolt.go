@@ -163,7 +163,7 @@ Examples:
 				oldCommits, len(recentHashes))
 		}
 
-		compactor, ok := store.(storage.Compactor)
+		compactor, ok := storage.UnwrapStore(store).(storage.Compactor)
 		if !ok {
 			FatalError("storage backend does not support compact")
 		}
@@ -173,7 +173,7 @@ Examples:
 		}
 
 		// Reclaim disk space from orphaned old history
-		if gc, ok := store.(storage.GarbageCollector); ok {
+		if gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector); ok {
 			if err := gc.DoltGC(ctx); err != nil {
 				WarnError("dolt gc after compact failed: %v", err)
 			}

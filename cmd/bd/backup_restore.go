@@ -69,7 +69,7 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 		return fmt.Errorf("database is not initialized. Run 'bd init' first")
 	}
 
-	bs, ok := s.(storage.BackupStore)
+	bs, ok := storage.UnwrapStore(s).(storage.BackupStore)
 	if !ok {
 		return fmt.Errorf("storage backend does not support backup operations")
 	}

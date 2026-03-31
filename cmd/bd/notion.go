@@ -620,7 +620,7 @@ func saveNotionTargetConfig(ctx context.Context, dataSourceID, viewURL string) e
 	}
 	viewURL = strings.TrimSpace(viewURL)
 	if viewURL == "" {
-		deleter, ok := store.(storage.ConfigMetadataStore)
+		deleter, ok := storage.UnwrapStore(store).(storage.ConfigMetadataStore)
 		if !ok {
 			return fmt.Errorf("store does not support config deletion")
 		}
