@@ -130,4 +130,93 @@ func TestCleanStaleNomsLocks(t *testing.T) {
 			t.Fatalf("expected 0 removed, got %d", removed)
 		}
 	})
+
+	t.Run("removes nested stats LOCK files", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+
+		// Simulate the exact paths from the bug report:
+		// .beads/dolt/lista/.dolt/stats/.dolt/noms/LOCK
+		// .beads/dolt/.dolt/noms/LOCK
+		// .beads/dolt/.dolt/stats/.dolt/noms/LOCK
+		paths := []string{
+			filepath.Join(dir, "lista", ".dolt", "stats", ".dolt", "noms"),
+			filepath.Join(dir, ".dolt", "noms"),
+			filepath.Join(dir, ".dolt", "stats", ".dolt", "noms"),
+		}
+		for _, p := range paths {
+			if err := os.MkdirAll(p, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(p, "LOCK"), []byte("stale"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Also add a normal db-level lock
+		normalNoms := filepath.Join(dir, "lista", ".dolt", "noms")
+		if err := os.MkdirAll(normalNoms, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(normalNoms, "LOCK"), []byte("stale"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		removed, errs := CleanStaleNomsLocks(dir)
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		if removed != 4 {
+			t.Fatalf("expected 4 removed, got %d", removed)
+		}
+
+		// Verify all are gone
+		for _, p := range paths {
+			lockPath := filepath.Join(p, "LOCK")
+			if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+				t.Fatalf("LOCK file should have been removed: %s", lockPath)
+			}
+		}
+		normalLock := filepath.Join(normalNoms, "LOCK")
+		if _, err := os.Stat(normalLock); !os.IsNotExist(err) {
+			t.Fatalf("LOCK file should have been removed: %s", normalLock)
+		}
+	})
+
+	t.Run("ignores LOCK files not in noms directory", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+
+		// A LOCK file in a non-noms directory should be ignored
+		otherDir := filepath.Join(dir, "mydb", ".dolt", "other")
+		if err := os.MkdirAll(otherDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(otherDir, "LOCK"), []byte("keep"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		// A real noms LOCK should still be removed
+		nomsDir := filepath.Join(dir, "mydb", ".dolt", "noms")
+		if err := os.MkdirAll(nomsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nomsDir, "LOCK"), []byte("stale"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		removed, errs := CleanStaleNomsLocks(dir)
+		if len(errs) > 0 {
+			t.Fatalf("unexpected errors: %v", errs)
+		}
+		if removed != 1 {
+			t.Fatalf("expected 1 removed, got %d", removed)
+		}
+
+		// The non-noms LOCK should still exist
+		otherLock := filepath.Join(otherDir, "LOCK")
+		if _, err := os.Stat(otherLock); err != nil {
+			t.Fatalf("non-noms LOCK file should not have been removed: %s", otherLock)
+		}
+	})
 }

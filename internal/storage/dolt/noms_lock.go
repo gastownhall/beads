@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -16,32 +17,44 @@ import (
 // (nil pointer dereference in DoltDB.SetCrashOnFatalError) or a "database is
 // locked" error.
 //
+// LOCK files can appear at multiple nesting levels, including stats databases:
+//   - <db>/.dolt/noms/LOCK
+//   - <db>/.dolt/stats/.dolt/noms/LOCK
+//   - .dolt/noms/LOCK (root-level)
+//
+// This function uses filepath.WalkDir to recursively find and remove all files
+// named "LOCK" inside "noms" directories under doltDir.
+//
 // This function is safe to call before starting or connecting to a Dolt server
-// because the server is not yet using the databases. It scans all subdirectories
-// of doltDir for <db>/.dolt/noms/LOCK and removes them.
+// because the server is not yet using the databases.
 //
 // Returns the number of lock files removed. Errors removing individual files
 // are collected but do not abort the scan.
 func CleanStaleNomsLocks(doltDir string) (removed int, errs []error) {
-	entries, err := os.ReadDir(doltDir)
-	if err != nil {
-		// Directory doesn't exist or can't be read — nothing to clean.
+	// Quick check: if directory doesn't exist, nothing to clean.
+	if _, err := os.Stat(doltDir); err != nil {
 		return 0, nil
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	walkErr := filepath.WalkDir(doltDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
 		}
-		lockPath := filepath.Join(doltDir, entry.Name(), ".dolt", "noms", "LOCK")
-		if _, statErr := os.Stat(lockPath); os.IsNotExist(statErr) {
-			continue
+		if d.IsDir() {
+			return nil
 		}
-		if rmErr := os.Remove(lockPath); rmErr != nil {
-			errs = append(errs, fmt.Errorf("removing %s: %w", lockPath, rmErr))
-		} else {
-			removed++
+		// Match files named "LOCK" inside a "noms" directory.
+		if d.Name() == "LOCK" && filepath.Base(filepath.Dir(path)) == "noms" {
+			if rmErr := os.Remove(path); rmErr != nil {
+				errs = append(errs, fmt.Errorf("removing %s: %w", path, rmErr))
+			} else {
+				removed++
+			}
 		}
+		return nil
+	})
+	if walkErr != nil {
+		errs = append(errs, fmt.Errorf("walking %s: %w", doltDir, walkErr))
 	}
 
 	return removed, errs
