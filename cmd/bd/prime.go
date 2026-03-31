@@ -270,7 +270,7 @@ func formatMemoriesForPrime(compact bool) string {
 		}
 	} else {
 		sb.WriteString(fmt.Sprintf("\n## Persistent Memories (%d)\n\n", len(memories)))
-		sb.WriteString("Stored via `bd remember`. Search with `bd memories <keyword>`. Remove with `bd forget <key>`.\n\n")
+		sb.WriteString("Stored via `bd remember`. Update in place with `bd remember --key <key> \"new content\"`. Search with `bd memories <keyword>`. Remove with `bd forget <key>`.\n\n")
 		for _, k := range keys {
 			sb.WriteString(fmt.Sprintf("### %s\n%s\n\n", k, memories[k]))
 		}
