@@ -56,7 +56,7 @@ Examples:
   bd formula list
   bd formula list --json
   bd formula list --type workflow
-  bd formula list --type aspect`,
+  bd formula list --type convoy`,
 	Run: runFormulaList,
 }
 
@@ -157,8 +157,8 @@ func runFormulaList(cmd *cobra.Command, args []string) {
 		byType[e.Type] = append(byType[e.Type], e)
 	}
 
-	// Print in type order: workflow, expansion, aspect
-	typeOrder := []string{"workflow", "expansion", "aspect"}
+	// Print in type order: workflow, expansion, aspect, convoy
+	typeOrder := []string{"workflow", "expansion", "aspect", "convoy"}
 	for _, t := range typeOrder {
 		typeEntries := byType[t]
 		if len(typeEntries) == 0 {
@@ -430,6 +430,8 @@ func getTypeIcon(t string) string {
 		return "📐"
 	case "aspect":
 		return "🎯"
+	case "convoy":
+		return "🚐"
 	default:
 		return "📜"
 	}
@@ -757,7 +759,7 @@ func fixIntegerFields(m map[string]interface{}) {
 }
 
 func init() {
-	formulaListCmd.Flags().String("type", "", "Filter by type (workflow, expansion, aspect)")
+	formulaListCmd.Flags().String("type", "", "Filter by type (workflow, expansion, aspect, convoy)")
 	formulaConvertCmd.Flags().BoolVar(&convertAll, "all", false, "Convert all JSON formulas")
 	formulaConvertCmd.Flags().BoolVar(&convertDelete, "delete", false, "Delete JSON file after conversion")
 	formulaConvertCmd.Flags().BoolVar(&convertStdout, "stdout", false, "Print TOML to stdout instead of file")

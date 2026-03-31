@@ -221,22 +221,43 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store s
 	originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
 
 	if compactDryRun {
+		ageDays := 0
+		var closedAtStr string
+		if issue.ClosedAt != nil {
+			ageDays = int(time.Since(*issue.ClosedAt).Hours() / 24)
+			closedAtStr = issue.ClosedAt.Format(time.RFC3339)
+		}
+
+		candidate := map[string]interface{}{
+			"id":           issueID,
+			"title":        issue.Title,
+			"closed_at":    closedAtStr,
+			"age_days":     ageDays,
+			"content_size": originalSize,
+		}
+
 		if jsonOutput {
 			output := map[string]interface{}{
-				"dry_run":             true,
-				"tier":                compactTier,
-				"issue_id":            issueID,
-				"original_size":       originalSize,
-				"estimated_reduction": "70-80%",
+				"dry_run":    true,
+				"tier":       compactTier,
+				"candidates": []interface{}{candidate},
+				"summary": map[string]interface{}{
+					"total_candidates":    1,
+					"total_content_bytes": originalSize,
+				},
 			}
 			outputJSON(output)
 			return
 		}
 
 		fmt.Printf("DRY RUN - Tier %d compaction\n\n", compactTier)
-		fmt.Printf("Issue: %s\n", issueID)
-		fmt.Printf("Original size: %d bytes\n", originalSize)
-		fmt.Printf("Estimated reduction: 70-80%%\n")
+		fmt.Printf("  %-12s %-40s %8s %10s\n", "ID", "TITLE", "AGE", "SIZE")
+		title := issue.Title
+		if len(title) > 40 {
+			title = title[:37] + "..."
+		}
+		fmt.Printf("  %-12s %-40s %5dd %10d B\n", issueID, title, ageDays, originalSize)
+		fmt.Printf("\nSummary: 1 candidate, %d bytes total content\n", originalSize)
 		return
 	}
 
@@ -323,31 +344,64 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store stor
 	}
 
 	if compactDryRun {
+		type dryRunCandidate struct {
+			ID          string `json:"id"`
+			Title       string `json:"title"`
+			ClosedAt    string `json:"closed_at"`
+			AgeDays     int    `json:"age_days"`
+			ContentSize int    `json:"content_size"`
+		}
+
+		var dryCandidates []dryRunCandidate
 		totalSize := 0
 		for _, id := range candidates {
 			issue, err := store.GetIssue(ctx, id)
 			if err != nil {
 				continue
 			}
-			totalSize += len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+			contentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+			totalSize += contentSize
+
+			ageDays := 0
+			var closedAtStr string
+			if issue.ClosedAt != nil {
+				ageDays = int(time.Since(*issue.ClosedAt).Hours() / 24)
+				closedAtStr = issue.ClosedAt.Format(time.RFC3339)
+			}
+
+			dryCandidates = append(dryCandidates, dryRunCandidate{
+				ID:          issue.ID,
+				Title:       issue.Title,
+				ClosedAt:    closedAtStr,
+				AgeDays:     ageDays,
+				ContentSize: contentSize,
+			})
 		}
 
 		if jsonOutput {
 			output := map[string]interface{}{
-				"dry_run":             true,
-				"tier":                compactTier,
-				"candidate_count":     len(candidates),
-				"total_size_bytes":    totalSize,
-				"estimated_reduction": "70-80%",
+				"dry_run":    true,
+				"tier":       compactTier,
+				"candidates": dryCandidates,
+				"summary": map[string]interface{}{
+					"total_candidates":    len(dryCandidates),
+					"total_content_bytes": totalSize,
+				},
 			}
 			outputJSON(output)
 			return
 		}
 
 		fmt.Printf("DRY RUN - Tier %d compaction\n\n", compactTier)
-		fmt.Printf("Candidates: %d issues\n", len(candidates))
-		fmt.Printf("Total size: %d bytes\n", totalSize)
-		fmt.Printf("Estimated reduction: 70-80%%\n")
+		fmt.Printf("  %-12s %-40s %8s %10s\n", "ID", "TITLE", "AGE", "SIZE")
+		for _, c := range dryCandidates {
+			title := c.Title
+			if len(title) > 40 {
+				title = title[:37] + "..."
+			}
+			fmt.Printf("  %-12s %-40s %5dd %10d B\n", c.ID, title, c.AgeDays, c.ContentSize)
+		}
+		fmt.Printf("\nSummary: %d candidates, %d bytes total content\n", len(dryCandidates), totalSize)
 		return
 	}
 
@@ -546,23 +600,38 @@ func runCompactAnalyze(ctx context.Context, store storage.DoltStorage) {
 	}
 
 	if jsonOutput {
-		outputJSON(candidates)
+		totalSize := 0
+		for _, c := range candidates {
+			totalSize += c.SizeBytes
+		}
+		output := map[string]interface{}{
+			"candidates": candidates,
+			"summary": map[string]interface{}{
+				"total_candidates":    len(candidates),
+				"total_content_bytes": totalSize,
+			},
+		}
+		outputJSON(output)
 		return
 	}
 
 	// Human-readable output
 	fmt.Printf("Compaction Candidates (Tier %d)\n\n", compactTier)
+	fmt.Printf("  %-12s %-40s %8s %10s\n", "ID", "TITLE", "AGE", "SIZE")
+	totalSize := 0
 	for _, c := range candidates {
 		compactStatus := ""
 		if c.Compacted {
-			compactStatus = " (already compacted)"
+			compactStatus = " *"
 		}
-		fmt.Printf("ID: %s%s\n", c.ID, compactStatus)
-		fmt.Printf("  Title: %s\n", c.Title)
-		fmt.Printf("  Size: %d bytes\n", c.SizeBytes)
-		fmt.Printf("  Age: %d days\n\n", c.AgeDays)
+		title := c.Title
+		if len(title) > 40 {
+			title = title[:37] + "..."
+		}
+		fmt.Printf("  %-12s %-40s %5dd %10d B%s\n", c.ID, title, c.AgeDays, c.SizeBytes, compactStatus)
+		totalSize += c.SizeBytes
 	}
-	fmt.Printf("Total: %d candidates\n", len(candidates))
+	fmt.Printf("\nSummary: %d candidates, %d bytes total content\n", len(candidates), totalSize)
 }
 
 func runCompactApply(ctx context.Context, store storage.DoltStorage) {

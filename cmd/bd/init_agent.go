@@ -151,27 +151,32 @@ func setupClaudeSettings(verbose bool) error {
 		existingSettings = make(map[string]interface{})
 	}
 
-	// Add or update the prompt with onboard instruction
-	onboardPrompt := "Before starting any work, run 'bd onboard' to understand the current project state and available issues."
+	// Add or update the prompt with prime instruction
+	primePrompt := "Before starting any work, run 'bd prime' to understand the current project state and available issues."
 
-	// Check if prompt already contains onboard instruction
+	// Check if prompt already contains prime or onboard instruction
 	if promptValue, exists := existingSettings["prompt"]; exists {
 		if promptStr, ok := promptValue.(string); ok {
-			if strings.Contains(promptStr, "bd onboard") {
+			if strings.Contains(promptStr, "bd prime") {
 				if verbose {
-					fmt.Printf("Claude settings already configured with bd onboard instruction\n")
+					fmt.Printf("Claude settings already configured with bd prime instruction\n")
 				}
 				return nil
 			}
-			// Update existing prompt to include onboard instruction
-			existingSettings["prompt"] = promptStr + "\n\n" + onboardPrompt
+			// Migrate legacy "bd onboard" references to "bd prime"
+			if strings.Contains(promptStr, "bd onboard") {
+				existingSettings["prompt"] = strings.ReplaceAll(promptStr, "bd onboard", "bd prime")
+			} else {
+				// Update existing prompt to include prime instruction
+				existingSettings["prompt"] = promptStr + "\n\n" + primePrompt
+			}
 		} else {
 			// Existing prompt is not a string, replace it
-			existingSettings["prompt"] = onboardPrompt
+			existingSettings["prompt"] = primePrompt
 		}
 	} else {
-		// Add new prompt with onboard instruction
-		existingSettings["prompt"] = onboardPrompt
+		// Add new prompt with prime instruction
+		existingSettings["prompt"] = primePrompt
 	}
 
 	// Write updated settings
@@ -186,7 +191,7 @@ func setupClaudeSettings(verbose bool) error {
 	}
 
 	if verbose {
-		fmt.Printf("Configured Claude settings with bd onboard instruction\n")
+		fmt.Printf("Configured Claude settings with bd prime instruction\n")
 	}
 
 	return nil

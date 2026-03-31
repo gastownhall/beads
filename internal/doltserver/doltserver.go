@@ -129,7 +129,7 @@ func SharedServerDir() (string, error) {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 	dir := filepath.Join(home, ".beads", "shared-server")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, config.BeadsDirPerm); err != nil {
 		return "", fmt.Errorf("cannot create shared server directory %s: %w", dir, err)
 	}
 	return dir, nil
@@ -143,7 +143,7 @@ func SharedDoltDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(serverDir, "dolt")
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, config.BeadsDirPerm); err != nil {
 		return "", fmt.Errorf("cannot create shared dolt directory %s: %w", dir, err)
 	}
 	return dir, nil
@@ -1032,7 +1032,7 @@ const bdDoltMarker = ".bd-dolt-ok"
 // If .dolt/ exists, seeds the .bd-dolt-ok marker for existing working databases.
 // See GH#2137 for background on pre-0.56 database compatibility.
 func ensureDoltInit(doltDir string) error {
-	if err := os.MkdirAll(doltDir, 0750); err != nil {
+	if err := os.MkdirAll(doltDir, config.BeadsDirPerm); err != nil {
 		return fmt.Errorf("creating dolt directory: %w", err)
 	}
 

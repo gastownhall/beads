@@ -736,6 +736,52 @@ func TestEmbeddedCreateCrossRepo(t *testing.T) {
 	}
 }
 
+// TestEmbeddedCreateCrossRepoWithParent verifies that --parent works correctly
+// when combined with --repo routing (regression test for GH#2736). The old --rig
+// flag had a separate code path (createInRig) that silently dropped --parent.
+// After the multi-rig refactor (d7629204), --repo uses the same code path as
+// local create, so --parent is resolved against the target store.
+func TestEmbeddedCreateCrossRepoWithParent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// Set up primary repo (where we run from)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cr")
+
+	// Set up target repo
+	targetDir := filepath.Join(dir, "target-repo")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	runBDInit(t, bd, targetDir, "--prefix", "tgt")
+
+	// Create parent issue in target repo
+	parent := bdCreate(t, bd, dir, "Parent epic", "-t", "epic", "--repo", targetDir)
+	if parent.ID == "" {
+		t.Fatal("expected parent issue ID")
+	}
+
+	// Create child issue with --parent in the same target repo
+	child := bdCreate(t, bd, dir, "Child task", "--parent", parent.ID, "--repo", targetDir)
+	if child.ID == "" {
+		t.Fatal("expected child issue ID")
+	}
+
+	// Child ID should be a dotted child of the parent
+	if !strings.HasPrefix(child.ID, parent.ID+".") {
+		t.Errorf("child ID %q should start with %q.", child.ID, parent.ID+".")
+	}
+
+	// Verify parent-child dependency exists in the target store
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	assertDepExists(t, targetBeadsDir, "tgt", child.ID, parent.ID)
+}
+
 // TestEmbeddedCreateWithGitRemote verifies bd create works end-to-end when a
 // git remote exists (which enables auto-backup in PersistentPostRun). This
 // catches panics from unimplemented methods called after the create succeeds.

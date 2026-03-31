@@ -26,7 +26,7 @@ type Lock struct {
 // If another process holds the lock, returns an error directing the user to
 // the dolt server backend for concurrent access.
 func TryLock(dataDir string) (*Lock, error) {
-	if err := os.MkdirAll(dataDir, 0750); err != nil {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("embeddeddolt: creating data directory for lock: %w", err)
 	}
 

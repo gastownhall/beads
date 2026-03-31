@@ -200,7 +200,10 @@ func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.T
 	return &ti, nil
 }
 
-// CreateIssue creates a new work item in Azure DevOps.
+// CreateIssue creates a new work item in Azure DevOps. If the target state
+// is not a valid initial state (e.g., "Closed"), the work item is created
+// without a state (ADO assigns its default) and then transitioned through
+// intermediate states to reach the target.
 func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker.TrackerIssue, error) {
 	fields := t.mapper.IssueToTracker(issue)
 	typeName, _ := t.mapper.TypeToTracker(issue.IssueType).(string)
@@ -208,9 +211,36 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		typeName = "Task"
 	}
 
+	// Extract and remove the target state from creation fields when it is not
+	// a valid initial state. ADO rejects creating items directly in states
+	// like "Closed" — they must be created in an initial state and transitioned.
+	var targetState string
+	if s, ok := fields[FieldState].(string); ok && !isInitialState(s) {
+		targetState = s
+		delete(fields, FieldState)
+	}
+
 	wi, err := t.client.CreateWorkItem(ctx, typeName, fields)
 	if err != nil {
 		return nil, err
+	}
+
+	// Transition to the target state if it differs from the created state.
+	if targetState != "" {
+		createdState := wi.GetStringField(FieldState)
+		if createdState != targetState {
+			transitioned, err := t.client.transitionWorkItem(ctx, wi.ID, typeName, createdState, targetState)
+			if err != nil {
+				// Return the created item even if transition fails — the item
+				// exists in ADO but may be in the wrong state.
+				ti := adoWorkItemToTrackerIssue(wi)
+				return &ti, fmt.Errorf("created work item %d but failed to transition from %q to %q: %w",
+					wi.ID, createdState, targetState, err)
+			}
+			if transitioned != nil {
+				wi = transitioned
+			}
+		}
 	}
 
 	ti := adoWorkItemToTrackerIssue(wi)

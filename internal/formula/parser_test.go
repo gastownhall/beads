@@ -604,6 +604,7 @@ func TestFormulaType_IsValid(t *testing.T) {
 		{TypeWorkflow, true},
 		{TypeExpansion, true},
 		{TypeAspect, true},
+		{TypeConvoy, true},
 		{"invalid", false},
 		{"", false},
 	}

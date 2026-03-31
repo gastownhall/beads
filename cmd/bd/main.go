@@ -147,6 +147,8 @@ func loadEnvironment() {
 	// and resolves BEADS_DIR, redirects, and worktree paths.
 	if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
 		loadBeadsEnvFile(beadsDir)
+		// Non-fatal warning if .beads/ directory has overly permissive access.
+		config.CheckBeadsDirPermissions(beadsDir)
 	}
 }
 

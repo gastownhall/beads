@@ -2,6 +2,33 @@
 
 Get up and running with Beads in 2 minutes.
 
+## Why Beads?
+
+Flat issue trackers (GitHub Issues, Jira, etc.) show you a list of open items. You pick one. But if that item depends on something else that isn't done yet, you've wasted time. Multiply this across a team of AI agents and humans, and you get thrashing.
+
+Beads tracks **dependencies between issues** and computes a **ready queue** — only items with no active blockers appear. Here's the difference:
+
+**Flat tracker (GitHub Issues):**
+```
+Open issues: Set up database, Create API, Add authentication
+→ An agent picks "Add authentication" and gets stuck immediately
+```
+
+**Beads:**
+```bash
+$ bd ready
+1. [P1] [task] bd-1: Set up database
+
+$ bd ready --explain --json | jq '.blocked[0]'
+{
+  "id": "bd-3",
+  "title": "Add authentication",
+  "blocked_by": [{"id": "bd-2", "title": "Create API", "status": "open"}]
+}
+```
+
+The agent picks the right task every time. No wasted cycles.
+
 ## Installation
 
 ```bash
@@ -153,6 +180,35 @@ Output:
 
 Only bd-1 is ready because bd-2 and bd-3 are blocked!
 
+**Understanding why:** Use `--explain` to see the full graph reasoning:
+
+```bash
+./bd ready --explain
+```
+
+Output:
+```
+📊 Ready Work Explanation
+
+● Ready (1 issues):
+
+  bd-1 [P1] Set up database
+    Reason: no blocking dependencies
+    Unblocks: 1 issue(s)
+
+● Blocked (2 issues):
+
+  bd-2 [P2] Create API
+    ← blocked by bd-1: Set up database [open]
+
+  bd-3 [P2] Add authentication
+    ← blocked by bd-2: Create API [open]
+
+─ Summary: 1 ready, 2 blocked
+```
+
+**Note:** `bd ready` is not the same as `bd list --status open`. The `list` command shows all open issues regardless of blockers. The `ready` command computes the dependency graph and only shows truly unblocked work.
+
 ## Work the Queue
 
 ```bash
@@ -288,6 +344,8 @@ bd admin cleanup --force
 
 - Add labels: `./bd create "Task" -l "backend,urgent"`
 - Filter ready work: `./bd ready --priority 1`
+- Explain the graph: `./bd ready --explain`
+- Check graph integrity: `./bd graph check`
 - Search issues: `./bd list --status open`
 - Detect cycles: `./bd dep cycles`
 - Use gates for PR/CI sync: See [DEPENDENCIES.md](DEPENDENCIES.md)

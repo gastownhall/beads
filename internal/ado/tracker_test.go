@@ -127,6 +127,11 @@ func TestTracker_InitWithCustomURL(t *testing.T) {
 }
 
 func TestTracker_InitMissingPAT(t *testing.T) {
+	// Clear env vars that getConfig falls back to, so mock store controls all config.
+	t.Setenv("AZURE_DEVOPS_PAT", "")
+	t.Setenv("AZURE_DEVOPS_ORG", "")
+	t.Setenv("AZURE_DEVOPS_PROJECT", "")
+	t.Setenv("AZURE_DEVOPS_URL", "")
 	tr := &Tracker{}
 	err := tr.Init(context.Background(), newMockStore(nil))
 	if err == nil {
@@ -138,6 +143,8 @@ func TestTracker_InitMissingPAT(t *testing.T) {
 }
 
 func TestTracker_InitMissingOrg(t *testing.T) {
+	t.Setenv("AZURE_DEVOPS_ORG", "")
+	t.Setenv("AZURE_DEVOPS_URL", "")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
 		"ado.pat":     "some-pat",
@@ -153,6 +160,7 @@ func TestTracker_InitMissingOrg(t *testing.T) {
 }
 
 func TestTracker_InitMissingProject(t *testing.T) {
+	t.Setenv("AZURE_DEVOPS_PROJECT", "")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
 		"ado.pat": "some-pat",

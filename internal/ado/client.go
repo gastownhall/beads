@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -15,6 +16,21 @@ import (
 	"strings"
 	"time"
 )
+
+// APIError represents an HTTP error response from the Azure DevOps API.
+// It carries the HTTP status code so callers can use errors.As to inspect
+// the status without fragile string matching.
+type APIError struct {
+	// StatusCode is the HTTP status code returned by the API.
+	StatusCode int
+	// Body is the response body text.
+	Body string
+}
+
+// Error implements the error interface.
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error: %s (status %d)", e.Body, e.StatusCode)
+}
 
 // PullFilters configures which work items to pull from ADO.
 // All filter values are validated before use in WIQL queries.
@@ -207,6 +223,9 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, maxAttempts+1, err)
 			if attempt < maxAttempts {
 				delay := RetryDelay * time.Duration(1<<uint(attempt))
+				if half := int64(delay / 2); half > 0 {
+					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
+				}
 				select {
 				case <-ctx.Done():
 					return nil, ctx.Err()
@@ -230,7 +249,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 		// Permanent failures — no retry.
 		switch resp.StatusCode {
 		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
-			return nil, fmt.Errorf("API error: %s (status %d)", string(respBody), resp.StatusCode)
+			return nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 		}
 
 		// Retry on 429 and 5xx server errors (idempotent requests only).
@@ -239,9 +258,17 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 
 		if retriable && attempt < maxAttempts {
 			delay := RetryDelay * time.Duration(1<<uint(attempt))
+			useServerDelay := false
 			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
 				if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
 					delay = time.Duration(seconds) * time.Second
+					useServerDelay = true
+				}
+			}
+			// Only add jitter to our own exponential backoff, not server-mandated delays
+			if !useServerDelay {
+				if half := int64(delay / 2); half > 0 {
+					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
 				}
 			}
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, maxAttempts+1)
@@ -253,7 +280,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 			}
 		}
 
-		return nil, fmt.Errorf("API error: %s (status %d)", string(respBody), resp.StatusCode)
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	return nil, fmt.Errorf("max retries (%d) exceeded: %w", maxAttempts+1, lastErr)
@@ -277,6 +304,14 @@ type listResponse struct {
 func escapeWIQL(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	return strings.ReplaceAll(s, "'", "''")
+}
+
+// formatWIQLDate formats a time.Time for use in WIQL datetime literals.
+// WIQL expects UTC ISO 8601 dates in single quotes: 'YYYY-MM-DDTHH:MM:SSZ'.
+// The time is converted to UTC and formatted with time.RFC3339, which uses
+// the proper Z07:00 timezone placeholder (outputs "Z" for UTC).
+func formatWIQLDate(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
 }
 
 // buildPatchOps converts a field map into sorted JSON Patch operations.
@@ -358,7 +393,7 @@ func (c *Client) buildPullWIQLMulti(projects []string, since *time.Time, filters
 	if since != nil {
 		clauses = append(clauses, fmt.Sprintf(
 			"[System.ChangedDate] >= '%s'",
-			since.UTC().Format("2006-01-02T15:04:05Z"),
+			formatWIQLDate(*since),
 		))
 	}
 	if filters != nil {

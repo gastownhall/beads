@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/utils"
@@ -46,7 +47,7 @@ Examples:
 			return
 		}
 
-		fmt.Println(activity.LastActivity.UTC().Format("2006-01-02T15:04:05Z"))
+		fmt.Println(activity.LastActivity.UTC().Format(time.RFC3339))
 	},
 }
 
