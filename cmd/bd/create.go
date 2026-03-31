@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
@@ -727,11 +726,6 @@ var createCmd = &cobra.Command{
 			if pushErr := remoteCache.Push(rootCtx, repoPath); pushErr != nil {
 				FatalError("failed to push to %s: %v\nThe issue was created locally but not synced to the remote.", repoPath, pushErr)
 			}
-		}
-
-		// Run create hook
-		if hookRunner != nil {
-			hookRunner.Run(hooks.EventCreate, issue)
 		}
 
 		if jsonOutput {

@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -60,14 +59,10 @@ Examples:
 			}
 		}
 
-		// Run update hook
-		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
-		if updatedIssue != nil && hookRunner != nil {
-			hookRunner.Run(hooks.EventUpdate, updatedIssue)
-		}
-
 		SetLastTouchedID(result.ResolvedID)
 
+		// Re-fetch for display
+		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
 		title := ""
 		if updatedIssue != nil {
 			title = updatedIssue.Title

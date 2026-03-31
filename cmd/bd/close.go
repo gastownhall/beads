@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -171,15 +170,8 @@ create, update, show, or close operation).`,
 			// Auto-close parent molecule if all steps are now complete
 			autoCloseCompletedMolecule(ctx, store, id, actor, session)
 
-			// Run hooks (best effort: hooks run only if re-fetch succeeds)
+			// Re-fetch for display
 			closedIssue, _ := store.GetIssue(ctx, id)
-			if closedIssue != nil && hookRunner != nil {
-				// Fire on_update only if status actually changed (GH#2630)
-				if issue == nil || issue.Status != types.StatusClosed {
-					hookRunner.Run(hooks.EventUpdate, closedIssue)
-				}
-				hookRunner.Run(hooks.EventClose, closedIssue)
-			}
 
 			if jsonOutput {
 				if closedIssue != nil {

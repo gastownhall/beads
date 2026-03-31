@@ -121,6 +121,7 @@ func Initialize() error {
 	v.SetDefault("json", false)
 	v.SetDefault("events-export", false)
 	v.SetDefault("no-db", false)
+	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")
 	v.SetDefault("actor", "")
 	v.SetDefault("issue-prefix", "")
