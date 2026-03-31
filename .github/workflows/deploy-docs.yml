@@ -84,7 +84,7 @@ jobs:
 
   deploy:
     # Guard: deploy should only run in the canonical repository (not in forks)
-    if: ${{ github.repository == 'steveyegge/beads' }}
+    if: ${{ github.repository == 'gastownhall/beads' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

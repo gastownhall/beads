@@ -16,7 +16,7 @@ permissions:
 jobs:
   goreleaser:
     # Guard: only run goreleaser in the canonical repository (not in forks)
-    if: ${{ github.repository == 'steveyegge/beads' }}
+    if: ${{ github.repository == 'gastownhall/beads' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,7 +44,7 @@ jobs:
           version: '~> v2'
           args: >
             release --clean --parallelism 1
-            ${{ github.repository != 'steveyegge/beads' && '--skip=publish --skip=announce' || '' }}
+            ${{ github.repository != 'gastownhall/beads' && '--skip=publish --skip=announce' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Homebrew tap publishing (requires PAT with contents:write on homebrew-beads)
@@ -57,7 +57,7 @@ jobs:
   publish-pypi:
     runs-on: ubuntu-latest
     needs: goreleaser
-    if: ${{ always() && github.repository == 'steveyegge/beads' }}
+    if: ${{ always() && github.repository == 'gastownhall/beads' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -86,7 +86,7 @@ jobs:
   publish-npm:
     runs-on: ubuntu-latest
     needs: goreleaser
-    if: ${{ github.repository == 'steveyegge/beads' }}
+    if: ${{ github.repository == 'gastownhall/beads' }}
     permissions:
       contents: read
       id-token: write  # Required for npm provenance/trusted publishing
