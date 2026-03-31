@@ -113,15 +113,12 @@ var agentEnrichers = map[string]enricher{
 	"Dolt Schema":                  enrichDoltSchema,
 	"Dolt Issue Count":             enrichDoltIssueCount,
 	"Dolt Status":                  enrichDoltStatus,
-	"Dolt Locks":                   enrichDoltLocks,
-	"Dolt Lock Health":             enrichLockHealth,
 	"Dependency Cycles":            enrichDependencyCycles,
 	"Duplicate Issues":             enrichDuplicateIssues,
 	"Test Pollution":               enrichTestPollution,
 	"Orphaned Dependencies":        enrichOrphanedDeps,
 	"Child-Parent Dependencies":    enrichChildParentDeps,
 	"Classic Artifacts":            enrichClassicArtifacts,
-	"Embedded Mode Concurrency":    enrichEmbeddedConcurrency,
 	"Pending Migrations":           enrichPendingMigrations,
 	"KV Sync Status":               enrichKVSync,
 	"Stale Closed Issues":          enrichStaleClosedIssues,
@@ -415,27 +412,7 @@ func enrichDoltStatus(dc DoctorCheck) agentEnrichment {
 	}
 }
 
-func enrichDoltLocks(dc DoctorCheck) agentEnrichment {
-	return agentEnrichment{
-		severity:    "degraded",
-		explanation: fmt.Sprintf("Dolt lock issue: %s. WARNING: Do NOT manually remove noms/LOCK files inside .dolt/ directories — doing so WILL cause unrecoverable data corruption. Dolt manages these files internally.", dc.Message),
-		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No active lock contention on Dolt databases",
-		commands:    []string{"bd doctor --fix"},
-		sourceFiles: []string{"cmd/bd/doctor/migration_validation.go:CheckDoltLocks"},
-	}
-}
 
-func enrichLockHealth(dc DoctorCheck) agentEnrichment {
-	return agentEnrichment{
-		severity:    "degraded",
-		explanation: fmt.Sprintf("Lock health issue: %s. Database lock files may be held by another process or left from a crash. Check if another bd/dolt process is running before removing.", dc.Message),
-		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No active or stale lock files",
-		commands:    []string{"lsof +D .beads/dolt 2>/dev/null | grep LOCK", "bd doctor --fix"},
-		sourceFiles: []string{"cmd/bd/doctor/dolt.go:CheckLockHealth"},
-	}
-}
 
 func enrichDependencyCycles(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
@@ -500,17 +477,6 @@ func enrichClassicArtifacts(dc DoctorCheck) agentEnrichment {
 		expected:    "No classic artifacts present (JSONL files, SQLite database, cruft directories)",
 		commands:    []string{"bd doctor --check=artifacts", "bd doctor --check=artifacts --clean"},
 		sourceFiles: []string{"cmd/bd/doctor/artifacts.go:CheckClassicArtifacts"},
-	}
-}
-
-func enrichEmbeddedConcurrency(dc DoctorCheck) agentEnrichment {
-	return agentEnrichment{
-		severity:    "advisory",
-		explanation: fmt.Sprintf("Embedded Dolt concurrency concern: %s. Multiple bd processes accessing the same embedded Dolt database can cause lock contention. Consider switching to Dolt server mode for concurrent access.", dc.Message),
-		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "Either single-process access or Dolt server mode configured",
-		commands:    []string{"gt dolt start", "bd config set dolt.server-mode true"},
-		sourceFiles: []string{"cmd/bd/doctor/broken_migration.go:CheckEmbeddedModeConcurrency"},
 	}
 }
 

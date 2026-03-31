@@ -101,25 +101,6 @@ func TestCheckMetadataVersionTracking_BareParentWorktreeFallback(t *testing.T) {
 	}
 }
 
-func TestCheckLockHealth_BareParentWorktreeFallback(t *testing.T) {
-	clearResolveBeadsDirCache()
-	t.Cleanup(clearResolveBeadsDirCache)
-
-	bareDir, featureWorktreeDir := setupBareParentWorktreeForDoctorTest(t)
-	bareBeadsDir := filepath.Join(bareDir, ".beads")
-	if err := os.MkdirAll(filepath.Join(bareBeadsDir, "dolt"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bareBeadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	check := CheckLockHealth(featureWorktreeDir)
-	if check.Status != StatusOK {
-		t.Fatalf("expected ok, got %s: %s", check.Status, check.Message)
-	}
-}
-
 func TestCheckDoltLocks_BareParentWorktreeFallback(t *testing.T) {
 	clearResolveBeadsDirCache()
 	t.Cleanup(clearResolveBeadsDirCache)

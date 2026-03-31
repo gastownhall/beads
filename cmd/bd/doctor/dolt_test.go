@@ -150,40 +150,7 @@ func TestServerMode_NoLockAcquired(t *testing.T) {
 		t.Errorf("expected StatusError (server unreachable), got %s", check.Status)
 	}
 
-	// The error should NOT be about lock acquisition
-	if strings.Contains(check.Detail, "access lock") {
-		t.Errorf("should not attempt lock acquisition, but Detail contains %q: %s",
-			"access lock", check.Detail)
-	}
-
-	// Verify no lock file was created
-	lockPath := filepath.Join(beadsDir, "dolt-access.lock")
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Errorf("lock file should not exist, but found at %s", lockPath)
-	}
 }
-
-func TestCheckLockHealth_NoIssues(t *testing.T) {
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	doltDir := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	configContent := []byte(`{"backend":"dolt"}`)
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	check := CheckLockHealth(tmpDir)
-	if check.Status != StatusOK {
-		t.Errorf("expected OK status, got %s: %s", check.Status, check.Message)
-	}
-}
-
-// noms LOCK tests removed: we no longer probe or interact with Dolt-internal
-// noms/LOCK files. Removing or probing them risks data corruption.
 
 func TestIsWispTable(t *testing.T) {
 	tests := []struct {
@@ -214,21 +181,3 @@ func TestIsWispTable(t *testing.T) {
 	}
 }
 
-func TestCheckLockHealth_NonDoltBackend(t *testing.T) {
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write SQLite backend config
-	configContent := []byte(`{"backend":"sqlite"}`)
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), configContent, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	check := CheckLockHealth(tmpDir)
-	if check.Status != StatusOK {
-		t.Errorf("expected OK for non-Dolt backend, got %s", check.Status)
-	}
-}

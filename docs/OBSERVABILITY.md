@@ -76,7 +76,7 @@ bd_storage_operations_total
 | Metric | Type | Attributes | Description |
 |--------|------|------------|-------------|
 | `bd_db_retry_count_total` | Counter | — | SQL retries in server mode |
-| `bd_db_lock_wait_ms` | Histogram | `dolt_lock_exclusive` | Wait time to acquire `dolt-access.lock` |
+| `bd_db_lock_wait_ms` | Histogram | `dolt_lock_exclusive` | Wait time to acquire database locks |
 
 ### Issues (`bd_issue_*`)
 

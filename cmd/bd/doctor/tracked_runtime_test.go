@@ -18,7 +18,6 @@ func TestShouldFlagTrackedFile(t *testing.T) {
 		{"daemon lock", "daemon.lock", true},
 		{"dolt-monitor pid lock", "dolt-monitor.pid.lock", true},
 		{"dolt-server lock", "dolt-server.lock", true},
-		{"dolt-access lock", "dolt-access.lock", true},
 
 		// Daemon/server runtime
 		{"daemon pid", "daemon.pid", true},

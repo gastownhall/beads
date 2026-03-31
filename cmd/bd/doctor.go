@@ -338,13 +338,6 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
-// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
-// directory — including noms/LOCK files. These are Dolt-internal files.
-// Removing them WILL cause unrecoverable data corruption and data loss.
-// Dolt manages these files itself; external interference is never safe.
-//
-// releaseDiagnosticLocks was removed — it previously deleted noms/LOCK
-// files after diagnostics, which risks data corruption.
 
 func runDiagnostics(path string) doctorResult {
 	result := doctorResult{
@@ -419,12 +412,6 @@ func runDiagnostics(path string) doctorResult {
 			Category: doctor.CategoryCore,
 		})
 	}
-
-	// GH#1981: Run lock health check BEFORE any checks that open embedded
-	// Dolt databases. Earlier checks (CheckDatabaseVersion, CheckSchemaCompatibility,
-	// etc.) create noms LOCK files via flock(); if CheckLockHealth runs after them,
-	// it detects those same-process locks as "held by another process" (false positive).
-	earlyLockCheck := doctor.CheckLockHealth(path)
 
 	// bd-jgxi: Auto-migrate database version before checking it.
 	// Since doctor skips PersistentPreRun DB init (it's in noDbCommands),
@@ -545,9 +532,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall for remote discrepancies, just warn
 
 	// Dolt health checks (connection, schema, issue count, status).
-	// GH#1981: Pass the pre-computed lock check (run before any embedded Dolt
-	// opens) to avoid false positives from doctor's own noms LOCK files.
-	for _, dc := range doctor.RunDoltHealthChecksWithLock(path, earlyLockCheck) {
+	for _, dc := range doctor.RunDoltHealthChecks(path) {
 		result.Checks = append(result.Checks, convertDoctorCheck(dc))
 	}
 
@@ -783,10 +768,6 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, classicArtifactsCheck)
 	// Don't fail overall check for classic artifacts, just warn
 
-	// Check 36: Embedded mode concurrency issues (GH#2086)
-	concurrencyCheck := convertWithCategory(doctor.CheckEmbeddedModeConcurrency(path), doctor.CategoryRuntime)
-	result.Checks = append(result.Checks, concurrencyCheck)
-	// Don't fail overall — this is a recommendation, not a broken state
 
 	// GH#1095: Filter out suppressed checks (doctor.suppress.<slug> = true)
 	suppressed := doctor.GetSuppressedChecksWithStore(sharedStore)

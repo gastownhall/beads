@@ -13,7 +13,6 @@ import (
 var staleLockThresholds = map[string]time.Duration{
 	"bootstrap.lock":   5 * time.Minute, // Bootstrap should complete quickly
 	".sync.lock":       1 * time.Hour,   // Sync can be slow for large repos
-	"dolt-access.lock": 5 * time.Minute, // Dolt advisory lock
 }
 
 // CheckStaleLockFiles detects leftover lock files from crashed processes.
@@ -52,17 +51,6 @@ func CheckStaleLockFiles(path string) DoctorCheck {
 			staleFiles = append(staleFiles, ".sync.lock")
 			details = append(details, fmt.Sprintf(".sync.lock: age %s (threshold: %s)",
 				age.Round(time.Second), staleLockThresholds[".sync.lock"]))
-		}
-	}
-
-	// Check dolt-access.lock (embedded dolt advisory flock)
-	accessLockPath := filepath.Join(beadsDir, "dolt-access.lock")
-	if info, err := os.Stat(accessLockPath); err == nil {
-		age := time.Since(info.ModTime())
-		if age > staleLockThresholds["dolt-access.lock"] {
-			staleFiles = append(staleFiles, "dolt-access.lock")
-			details = append(details, fmt.Sprintf("dolt-access.lock: age %s (threshold: %s)",
-				age.Round(time.Second), staleLockThresholds["dolt-access.lock"]))
 		}
 	}
 

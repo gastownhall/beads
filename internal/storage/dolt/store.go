@@ -410,7 +410,7 @@ func init() {
 		metric.WithUnit("{retry}"),
 	)
 	doltMetrics.lockWaitMs, _ = m.Float64Histogram("bd.db.lock_wait_ms",
-		metric.WithDescription("Time spent waiting to acquire the dolt access lock"),
+		metric.WithDescription("Time spent waiting to acquire database locks"),
 		metric.WithUnit("ms"),
 	)
 	doltMetrics.circuitTrips, _ = m.Int64Counter("bd.db.circuit_trips",
