@@ -1123,6 +1123,7 @@ type Statistics struct {
 // IssueFilter is used to filter issue queries
 type IssueFilter struct {
 	Status       *Status
+	Statuses     []Status // Multiple status OR filter (from comma-separated --status)
 	Priority     *int
 	IssueType    *IssueType
 	Assignee     *string
