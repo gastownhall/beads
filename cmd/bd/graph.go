@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -162,6 +163,77 @@ Examples:
 	},
 }
 
+var graphCheckCmd = &cobra.Command{
+	Use:   "check",
+	Short: "Check dependency graph integrity",
+	Long: `Check the dependency graph for cycles, orphans, and other integrity issues.
+
+Returns exit code 0 if the graph is clean, 1 if issues are found.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := rootCtx
+
+		type GraphCheckResult struct {
+			Clean   bool       `json:"clean"`
+			Cycles  [][]string `json:"cycles"`
+			Summary struct {
+				CycleCount int `json:"cycle_count"`
+			} `json:"summary"`
+		}
+
+		result := GraphCheckResult{Clean: true}
+
+		// Detect cycles
+		cycles, err := store.DetectCycles(ctx)
+		if err != nil {
+			FatalErrorRespectJSON("cycle detection failed: %v", err)
+		}
+
+		for _, cycle := range cycles {
+			ids := make([]string, len(cycle))
+			for i, issue := range cycle {
+				ids[i] = issue.ID
+			}
+			result.Cycles = append(result.Cycles, ids)
+		}
+		result.Summary.CycleCount = len(cycles)
+
+		if len(cycles) > 0 {
+			result.Clean = false
+		}
+
+		if jsonOutput {
+			outputJSON(result)
+			if !result.Clean {
+				os.Exit(1)
+			}
+			return
+		}
+
+		// Human-readable output
+		if result.Clean {
+			fmt.Printf("\n%s Graph integrity check passed\n\n", ui.RenderPass("✓"))
+		} else {
+			fmt.Printf("\n%s Graph integrity issues found\n\n", ui.RenderFail("✗"))
+		}
+
+		if len(result.Cycles) > 0 {
+			fmt.Printf("%s Cycles (%d):\n\n", ui.RenderFail("⚠"), len(result.Cycles))
+			for _, cycle := range result.Cycles {
+				fmt.Printf("  %s → %s\n", strings.Join(cycle, " → "), cycle[0])
+			}
+			fmt.Println()
+		} else {
+			fmt.Printf("  %s No dependency cycles\n", ui.RenderPass("✓"))
+		}
+
+		fmt.Println()
+
+		if !result.Clean {
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	graphCmd.Flags().BoolVar(&graphAll, "all", false, "Show graph for all open issues")
 	graphCmd.Flags().BoolVar(&graphCompact, "compact", false, "Tree format, one line per issue, more scannable")
@@ -170,6 +242,7 @@ func init() {
 	graphCmd.Flags().BoolVar(&graphHTML, "html", false, "Output self-contained interactive HTML (redirect to file)")
 	graphCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(graphCmd)
+	graphCmd.AddCommand(graphCheckCmd)
 }
 
 // loadGraphSubgraph loads an issue and its subgraph for visualization

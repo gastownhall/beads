@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -174,7 +175,7 @@ func (c *Client) Execute(ctx context.Context, req *GraphQLRequest) (json.RawMess
 			continue
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
 		_ = resp.Body.Close() // Best effort: HTTP body close; connection may be reused regardless
 		if err != nil {
 			lastErr = fmt.Errorf("failed to read response (attempt %d/%d): %w", attempt+1, MaxRetries+1, err)
@@ -183,6 +184,9 @@ func (c *Client) Execute(ctx context.Context, req *GraphQLRequest) (json.RawMess
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			delay := RetryDelay * time.Duration(1<<attempt) // Exponential backoff
+			if half := int64(delay / 2); half > 0 {
+				delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
+			}
 			lastErr = fmt.Errorf("rate limited (attempt %d/%d), retrying after %v", attempt+1, MaxRetries+1, delay)
 			select {
 			case <-ctx.Done():
@@ -257,7 +261,19 @@ func (c *Client) FetchIssues(ctx context.Context, state string) ([]Issue, error)
 		}
 	}
 
+	page := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
+		page++
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
+
 		variables := map[string]interface{}{
 			"filter": filter,
 			"first":  MaxPageSize,
@@ -339,7 +355,19 @@ func (c *Client) FetchIssuesSince(ctx context.Context, state string, since time.
 		}
 	}
 
+	page := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
+		page++
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
+
 		variables := map[string]interface{}{
 			"filter": filter,
 			"first":  MaxPageSize,

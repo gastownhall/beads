@@ -93,7 +93,7 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 	// Write key file with owner-only permissions (0600).
 	// Ensure the directory exists first — when connecting to an external
 	// server without having run `bd init`, .beads/ may not exist yet (GH#2641).
-	if err := os.MkdirAll(s.beadsDir, 0750); err != nil {
+	if err := os.MkdirAll(s.beadsDir, 0700); err != nil {
 		return fmt.Errorf("failed to create beads directory %s: %w", s.beadsDir, err)
 	}
 	if err := os.WriteFile(keyPath, key, 0600); err != nil {

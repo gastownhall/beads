@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -106,6 +107,16 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 
 	var lastErr error
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		// Reset body reader at top of loop so retries after network errors
+		// don't send empty bodies (the reader may be at EOF).
+		if body != nil {
+			jsonBody, err := json.Marshal(body)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to marshal request body: %w", err)
+			}
+			reqBody = bytes.NewReader(jsonBody)
+		}
+
 		req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create request: %w", err)
@@ -142,20 +153,28 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 
 		if retriable {
 			delay := RetryDelay * time.Duration(1<<attempt)
+			useServerDelay := false
+
+			// Use Retry-After header if present (no jitter — respect server-mandated delay)
+			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+				if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
+					delay = time.Duration(seconds) * time.Second
+					useServerDelay = true
+				}
+			}
+
+			// Only add jitter to our own exponential backoff, not server-mandated delays
+			if !useServerDelay {
+				if half := int64(delay / 2); half > 0 {
+					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
+				}
+			}
+
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, MaxRetries+1)
 			select {
 			case <-ctx.Done():
 				return nil, nil, ctx.Err()
 			case <-time.After(delay):
-				// Reset body reader for retry
-				if body != nil {
-					jsonBody, err := json.Marshal(body)
-					if err != nil {
-						lastErr = fmt.Errorf("retry marshal failed: %w", err)
-						continue
-					}
-					reqBody = bytes.NewReader(jsonBody)
-				}
 				continue
 			}
 		}

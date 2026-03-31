@@ -945,6 +945,138 @@ type BlockedIssue struct {
 	BlockedBy      []string `json:"blocked_by"`
 }
 
+// ReadyExplanation provides reasoning for why issues are ready or blocked.
+type ReadyExplanation struct {
+	Ready   []ReadyItem    `json:"ready"`
+	Blocked []BlockedItem  `json:"blocked"`
+	Cycles  [][]string     `json:"cycles,omitempty"`
+	Summary ExplainSummary `json:"summary"`
+}
+
+// ReadyItem explains why a specific issue is ready for work.
+type ReadyItem struct {
+	*Issue
+	Reason           string   `json:"reason"`
+	ResolvedBlockers []string `json:"resolved_blockers"`
+	DependencyCount  int      `json:"dependency_count"`
+	DependentCount   int      `json:"dependent_count"`
+	Parent           *string  `json:"parent,omitempty"`
+}
+
+// BlockedItem explains why a specific issue is blocked.
+type BlockedItem struct {
+	Issue
+	BlockedBy      []BlockerInfo `json:"blocked_by"`
+	BlockedByCount int           `json:"blocked_by_count"`
+}
+
+// BlockerInfo provides details about a single blocker.
+type BlockerInfo struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Status   Status `json:"status"`
+	Priority int    `json:"priority"`
+}
+
+// ExplainSummary provides aggregate statistics.
+type ExplainSummary struct {
+	TotalReady   int `json:"total_ready"`
+	TotalBlocked int `json:"total_blocked"`
+	CycleCount   int `json:"cycle_count"`
+}
+
+// BuildReadyExplanation constructs a ReadyExplanation from pre-fetched data.
+// This pure function is separated from CLI concerns for testability.
+func BuildReadyExplanation(
+	readyIssues []*Issue,
+	blockedIssues []*BlockedIssue,
+	depCounts map[string]*DependencyCounts,
+	allDeps map[string][]*Dependency,
+	blockerMap map[string]*Issue,
+	cycles [][]*Issue,
+) ReadyExplanation {
+	// Build ready items with explanations
+	readyItems := make([]ReadyItem, 0, len(readyIssues))
+	for _, issue := range readyIssues {
+		counts := depCounts[issue.ID]
+		if counts == nil {
+			counts = &DependencyCounts{}
+		}
+
+		// Find resolved blockers (closed issues that this depended on)
+		var resolvedBlockers []string
+		reason := "no blocking dependencies"
+		deps := allDeps[issue.ID]
+		for _, dep := range deps {
+			if dep.Type == DepBlocks || dep.Type == DepConditionalBlocks || dep.Type == DepWaitsFor {
+				resolvedBlockers = append(resolvedBlockers, dep.DependsOnID)
+			}
+		}
+		if len(resolvedBlockers) > 0 {
+			reason = fmt.Sprintf("%d blocker(s) resolved", len(resolvedBlockers))
+		}
+
+		// Compute parent
+		var parent *string
+		for _, dep := range deps {
+			if dep.Type == DepParentChild {
+				parent = &dep.DependsOnID
+				break
+			}
+		}
+
+		readyItems = append(readyItems, ReadyItem{
+			Issue:            issue,
+			Reason:           reason,
+			ResolvedBlockers: resolvedBlockers,
+			DependencyCount:  counts.DependencyCount,
+			DependentCount:   counts.DependentCount,
+			Parent:           parent,
+		})
+	}
+
+	// Build blocked items with blocker details
+	blockedItems := make([]BlockedItem, 0, len(blockedIssues))
+	for _, bi := range blockedIssues {
+		blockers := make([]BlockerInfo, 0, len(bi.BlockedBy))
+		for _, blockerID := range bi.BlockedBy {
+			info := BlockerInfo{ID: blockerID}
+			if blocker, ok := blockerMap[blockerID]; ok {
+				info.Title = blocker.Title
+				info.Status = blocker.Status
+				info.Priority = blocker.Priority
+			}
+			blockers = append(blockers, info)
+		}
+		blockedItems = append(blockedItems, BlockedItem{
+			Issue:          bi.Issue,
+			BlockedBy:      blockers,
+			BlockedByCount: bi.BlockedByCount,
+		})
+	}
+
+	// Build cycle info
+	var cycleIDs [][]string
+	for _, cycle := range cycles {
+		ids := make([]string, len(cycle))
+		for i, issue := range cycle {
+			ids[i] = issue.ID
+		}
+		cycleIDs = append(cycleIDs, ids)
+	}
+
+	return ReadyExplanation{
+		Ready:   readyItems,
+		Blocked: blockedItems,
+		Cycles:  cycleIDs,
+		Summary: ExplainSummary{
+			TotalReady:   len(readyItems),
+			TotalBlocked: len(blockedItems),
+			CycleCount:   len(cycleIDs),
+		},
+	}
+}
+
 // TreeNode represents a node in a dependency tree
 type TreeNode struct {
 	Issue

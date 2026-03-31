@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // syncTracer is the OTel tracer for tracker sync spans.
@@ -83,6 +84,9 @@ type Engine struct {
 	// stateCache holds the opaque value from PushHooks.BuildStateCache during a push.
 	// Tracker adapters access it via ResolveState().
 	stateCache interface{}
+
+	// warnings collects warning messages during a Sync() call for inclusion in SyncResult.
+	warnings []string
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
@@ -107,6 +111,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	defer span.End()
 
 	result := &SyncResult{Success: true}
+	e.warnings = nil
 
 	// Default to bidirectional if neither specified
 	if !opts.Pull && !opts.Push {
@@ -146,6 +151,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Created += pullStats.Created
 		result.Stats.Updated += pullStats.Updated
 		result.Stats.Skipped += pullStats.Skipped
+		result.Stats.Errors += pullStats.Errors
 	}
 
 	// Phase 3: Push
@@ -188,6 +194,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.LastSync = lastSync
 	}
 
+	result.Warnings = e.warnings
 	return result, nil
 }
 
@@ -373,10 +380,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 		if opts.DryRun {
 			if existing != nil {
-				e.msg("[dry-run] Would update local issue: %s - %s", extIssue.Identifier, extIssue.Title)
+				e.msg("[dry-run] Would update local issue: %s - %s", extIssue.Identifier, ui.SanitizeForTerminal(extIssue.Title))
 				stats.Updated++
 			} else {
-				e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, extIssue.Title)
+				e.msg("[dry-run] Would import: %s - %s", extIssue.Identifier, ui.SanitizeForTerminal(extIssue.Title))
 				stats.Created++
 			}
 			continue
@@ -425,7 +432,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	}
 
 	// Create dependencies after all issues are imported
-	e.createDependencies(ctx, pendingDeps)
+	depErrors := e.createDependencies(ctx, pendingDeps)
+	stats.Skipped += depErrors
 
 	span.SetAttributes(
 		attribute.Int("sync.created", stats.Created),
@@ -676,10 +684,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 
 		if opts.DryRun {
 			if willCreate {
-				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), issue.Title)
+				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Created++
 			} else {
-				e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), issue.Title)
+				e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Updated++
 			}
 			continue
@@ -707,6 +715,9 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			updates := map[string]interface{}{"external_ref": ref}
 			if err := e.Store.UpdateIssue(ctx, issue.ID, updates, e.Actor); err != nil {
 				e.warn("Failed to update external_ref for %s: %v", issue.ID, err)
+				stats.Errors++
+				// Note: issue WAS created externally, so we still count Created
+				// but also flag the error so the user knows the link is broken
 			}
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
@@ -887,18 +898,30 @@ func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 }
 
 // createDependencies creates dependencies from the pending list, matching
-// external IDs to local issue IDs.
-func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) {
+// external IDs to local issue IDs. Returns the number of dependencies that
+// failed to resolve or create.
+func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) int {
 	if len(deps) == 0 {
-		return
+		return 0
 	}
 
+	errCount := 0
 	for _, dep := range deps {
-		fromIssue, _ := e.Store.GetIssueByExternalRef(ctx, dep.FromExternalID)
-		toIssue, _ := e.Store.GetIssueByExternalRef(ctx, dep.ToExternalID)
+		fromIssue, err := e.Store.GetIssueByExternalRef(ctx, dep.FromExternalID)
+		if err != nil {
+			e.warn("Failed to resolve dependency source %s: %v", dep.FromExternalID, err)
+			errCount++
+			continue
+		}
+		toIssue, err := e.Store.GetIssueByExternalRef(ctx, dep.ToExternalID)
+		if err != nil {
+			e.warn("Failed to resolve dependency target %s: %v", dep.ToExternalID, err)
+			errCount++
+			continue
+		}
 
 		if fromIssue == nil || toIssue == nil {
-			continue
+			continue // Not found (no error) — expected if issue wasn't imported
 		}
 
 		d := &types.Dependency{
@@ -908,8 +931,10 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		}
 		if err := e.Store.AddDependency(ctx, d, e.Actor); err != nil {
 			e.warn("Failed to create dependency %s -> %s: %v", fromIssue.ID, toIssue.ID, err)
+			errCount++
 		}
 	}
+	return errCount
 }
 
 // buildDescendantSet returns the set of issue IDs consisting of the given parent
@@ -994,7 +1019,9 @@ func (e *Engine) msg(format string, args ...interface{}) {
 }
 
 func (e *Engine) warn(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	e.warnings = append(e.warnings, msg)
 	if e.OnWarning != nil {
-		e.OnWarning(fmt.Sprintf(format, args...))
+		e.OnWarning(msg)
 	}
 }

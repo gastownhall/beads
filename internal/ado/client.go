@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -222,6 +223,9 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, maxAttempts+1, err)
 			if attempt < maxAttempts {
 				delay := RetryDelay * time.Duration(1<<uint(attempt))
+				if half := int64(delay / 2); half > 0 {
+					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
+				}
 				select {
 				case <-ctx.Done():
 					return nil, ctx.Err()
@@ -254,9 +258,17 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr, contentType stri
 
 		if retriable && attempt < maxAttempts {
 			delay := RetryDelay * time.Duration(1<<uint(attempt))
+			useServerDelay := false
 			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
 				if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
 					delay = time.Duration(seconds) * time.Second
+					useServerDelay = true
+				}
+			}
+			// Only add jitter to our own exponential backoff, not server-mandated delays
+			if !useServerDelay {
+				if half := int64(delay / 2); half > 0 {
+					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
 				}
 			}
 			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, maxAttempts+1)
