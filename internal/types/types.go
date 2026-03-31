@@ -520,14 +520,17 @@ type IssueType string
 // Core work type constants - these are the built-in types that beads validates.
 // All other types require configuration via types.custom in config.yaml.
 const (
-	TypeBug      IssueType = "bug"
-	TypeFeature  IssueType = "feature"
-	TypeTask     IssueType = "task"
-	TypeEpic     IssueType = "epic"
-	TypeChore    IssueType = "chore"
-	TypeDecision IssueType = "decision"
-	TypeMessage  IssueType = "message"
-	TypeMolecule IssueType = "molecule" // Molecule type for swarm coordination (internal use)
+	TypeBug       IssueType = "bug"
+	TypeFeature   IssueType = "feature"
+	TypeTask      IssueType = "task"
+	TypeEpic      IssueType = "epic"
+	TypeChore     IssueType = "chore"
+	TypeDecision  IssueType = "decision"
+	TypeMessage   IssueType = "message"
+	TypeMolecule  IssueType = "molecule"  // Molecule type for swarm coordination (internal use)
+	TypeSpike     IssueType = "spike"     // Timeboxed investigation to reduce uncertainty
+	TypeStory     IssueType = "story"     // User story describing a feature from the user's perspective
+	TypeMilestone IssueType = "milestone" // Marks completion of a set of related issues (no work itself)
 )
 
 // TypeEvent is a system-internal type used by set-state for audit trail beads.
@@ -543,11 +546,12 @@ const TypeEvent IssueType = "event"
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
 // IsValid checks if the issue type is a core work type.
-// Core work types (bug, feature, task, epic, chore, decision, message) and molecule type are built-in.
-// Other types (gate, convoy, etc.) require types.custom configuration.
+// Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
+// and molecule type are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
 	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule:
+	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule,
+		TypeSpike, TypeStory, TypeMilestone:
 		return true
 	}
 	return false
@@ -585,6 +589,12 @@ func (t IssueType) Normalize() IssueType {
 		return TypeFeature
 	case "dec", "adr":
 		return TypeDecision
+	case "investigation", "timebox":
+		return TypeSpike
+	case "user-story", "user_story":
+		return TypeStory
+	case "ms":
+		return TypeMilestone
 	default:
 		return t
 	}
@@ -606,7 +616,7 @@ func (t IssueType) RequiredSections() []RequiredSection {
 			{Heading: "## Steps to Reproduce", Hint: "Describe how to reproduce the bug"},
 			{Heading: "## Acceptance Criteria", Hint: "Define criteria to verify the fix"},
 		}
-	case TypeTask, TypeFeature:
+	case TypeTask, TypeFeature, TypeStory:
 		return []RequiredSection{
 			{Heading: "## Acceptance Criteria", Hint: "Define criteria to verify completion"},
 		}
@@ -620,8 +630,13 @@ func (t IssueType) RequiredSections() []RequiredSection {
 			{Heading: "## Rationale", Hint: "Explain why this option was chosen"},
 			{Heading: "## Alternatives Considered", Hint: "List alternatives and why they were rejected"},
 		}
+	case TypeSpike:
+		return []RequiredSection{
+			{Heading: "## Goal", Hint: "What question does this spike answer?"},
+			{Heading: "## Findings", Hint: "What was learned? (fill in when complete)"},
+		}
 	default:
-		// Chore and custom types have no required sections
+		// Chore, milestone, and custom types have no required sections
 		return nil
 	}
 }
