@@ -320,115 +320,169 @@ Examples:
 }
 
 var depListCmd = &cobra.Command{
-	Use:   "list [issue-id]",
-	Short: "List dependencies or dependents of an issue",
-	Long: `List dependencies or dependents of an issue with optional type filtering.
+	Use:   "list [issue-id...]",
+	Short: "List dependencies or dependents of one or more issues",
+	Long: `List dependencies or dependents of one or more issues with optional type filtering.
 
-By default shows dependencies (what this issue depends on). Use --direction to control:
+By default shows dependencies (what issues depend on). Use --direction to control:
   - down: Show dependencies (what this issue depends on) - default
   - up:   Show dependents (what depends on this issue)
+
+Multiple IDs can be provided for batch dep listing. With --json, the output
+is a flat array of dependency records across all requested issues.
 
 Use --type to filter by dependency type (e.g., tracks, blocks, parent-child).
 
 Examples:
   bd dep list gt-abc                     # Show what gt-abc depends on
+  bd dep list gt-abc gt-def              # Batch: deps for both issues
   bd dep list gt-abc --direction=up      # Show what depends on gt-abc
   bd dep list gt-abc --direction=up -t tracks  # Show what tracks gt-abc (convoy tracking)`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := rootCtx
-
-		// Resolve partial ID with cross-rig routing support
-		var fullID string
-		var depStore storage.DoltStorage // store to query dependencies from
-		var routedResult *RoutedResult
-		defer func() {
-			if routedResult != nil {
-				routedResult.Close()
-			}
-		}()
-
-		// Direct mode - use routing-aware resolution
-		var err error
-		routedResult, err = resolveAndGetIssueWithRouting(ctx, store, args[0])
-		if err != nil {
-			FatalErrorRespectJSON("resolving %s: %v", args[0], err)
-		}
-		if routedResult == nil || routedResult.Issue == nil {
-			FatalErrorRespectJSON("no issue found: %s", args[0])
-		}
-		fullID = routedResult.ResolvedID
-		if routedResult.Routed {
-			depStore = routedResult.Store
-		}
-
-		// If no routed store was used, use local storage
-		if depStore == nil {
-			depStore = store
-		}
-
 		direction, _ := cmd.Flags().GetString("direction")
 		typeFilter, _ := cmd.Flags().GetString("type")
-
 		if direction == "" {
 			direction = "down"
 		}
 
-		var issues []*types.IssueWithDependencyMetadata
-
-		if direction == "up" {
-			issues, err = depStore.GetDependentsWithMetadata(ctx, fullID)
-		} else {
-			issues, err = depStore.GetDependenciesWithMetadata(ctx, fullID)
+		// Resolve all IDs and group by store.
+		type resolvedID struct {
+			fullID string
+			store  storage.DoltStorage
+			result *RoutedResult
 		}
-		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+		var resolved []resolvedID
+		for _, arg := range args {
+			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
+			if err != nil {
+				FatalErrorRespectJSON("resolving %s: %v", arg, err)
+			}
+			if routedResult == nil || routedResult.Issue == nil {
+				FatalErrorRespectJSON("no issue found: %s", arg)
+			}
+			depStore := store
+			if routedResult.Routed && routedResult.Store != nil {
+				depStore = routedResult.Store
+			}
+			resolved = append(resolved, resolvedID{
+				fullID: routedResult.ResolvedID,
+				store:  depStore,
+				result: routedResult,
+			})
 		}
-
-		// Apply type filter if specified
-		if typeFilter != "" {
-			var filtered []*types.IssueWithDependencyMetadata
-			for _, iss := range issues {
-				if string(iss.DependencyType) == typeFilter {
-					filtered = append(filtered, iss)
+		defer func() {
+			for _, r := range resolved {
+				if r.result != nil {
+					r.result.Close()
 				}
 			}
-			issues = filtered
+		}()
+
+		// Batch path: if all IDs route to the same store and direction
+		// is "down", use GetDependencyRecordsForIssues for one query.
+		if len(resolved) > 1 && direction == "down" {
+			allSameStore := true
+			firstStore := resolved[0].store
+			for _, r := range resolved[1:] {
+				if r.store != firstStore {
+					allSameStore = false
+					break
+				}
+			}
+			if allSameStore {
+				ids := make([]string, len(resolved))
+				for i, r := range resolved {
+					ids[i] = r.fullID
+				}
+				depMap, err := firstStore.GetDependencyRecordsForIssues(ctx, ids)
+				if err == nil {
+					// Flatten and filter.
+					var allDeps []*types.Dependency
+					for _, id := range ids {
+						for _, dep := range depMap[id] {
+							if typeFilter == "" || string(dep.Type) == typeFilter {
+								allDeps = append(allDeps, dep)
+							}
+						}
+					}
+					if jsonOutput {
+						if allDeps == nil {
+							allDeps = []*types.Dependency{}
+						}
+						outputJSON(allDeps)
+						return
+					}
+					// Human-readable output grouped by issue.
+					for _, id := range ids {
+						deps := depMap[id]
+						if len(deps) == 0 {
+							fmt.Printf("\n%s has no dependencies\n", id)
+							continue
+						}
+						fmt.Printf("\n%s %s depends on:\n\n", ui.RenderAccent("📋"), id)
+						for _, dep := range deps {
+							if typeFilter != "" && string(dep.Type) != typeFilter {
+								continue
+							}
+							fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
+						}
+					}
+					fmt.Println()
+					return
+				}
+				// Fall through to per-ID path on error.
+			}
+		}
+
+		// Per-ID path (single ID or mixed stores or "up" direction).
+		var allIssues []*types.IssueWithDependencyMetadata
+		for _, r := range resolved {
+			var issues []*types.IssueWithDependencyMetadata
+			var err error
+			if direction == "up" {
+				issues, err = r.store.GetDependentsWithMetadata(ctx, r.fullID)
+			} else {
+				issues, err = r.store.GetDependenciesWithMetadata(ctx, r.fullID)
+			}
+			if err != nil {
+				FatalErrorRespectJSON("%v", err)
+			}
+			if typeFilter != "" {
+				var filtered []*types.IssueWithDependencyMetadata
+				for _, iss := range issues {
+					if string(iss.DependencyType) == typeFilter {
+						filtered = append(filtered, iss)
+					}
+				}
+				issues = filtered
+			}
+			allIssues = append(allIssues, issues...)
 		}
 
 		if jsonOutput {
-			if issues == nil {
-				issues = []*types.IssueWithDependencyMetadata{}
+			if allIssues == nil {
+				allIssues = []*types.IssueWithDependencyMetadata{}
 			}
-			outputJSON(issues)
+			outputJSON(allIssues)
 			return
 		}
 
-		if len(issues) == 0 {
-			if typeFilter != "" {
+		if len(allIssues) == 0 {
+			if len(resolved) == 1 {
 				if direction == "up" {
-					fmt.Printf("\nNo issues depend on %s with type '%s'\n", fullID, typeFilter)
+					fmt.Printf("\nNo issues depend on %s\n", resolved[0].fullID)
 				} else {
-					fmt.Printf("\n%s has no dependencies of type '%s'\n", fullID, typeFilter)
+					fmt.Printf("\n%s has no dependencies\n", resolved[0].fullID)
 				}
 			} else {
-				if direction == "up" {
-					fmt.Printf("\nNo issues depend on %s\n", fullID)
-				} else {
-					fmt.Printf("\n%s has no dependencies\n", fullID)
-				}
+				fmt.Println("\nNo dependencies found")
 			}
 			return
 		}
 
-		if direction == "up" {
-			fmt.Printf("\n%s Issues that depend on %s:\n\n", ui.RenderAccent("📋"), fullID)
-		} else {
-			fmt.Printf("\n%s %s depends on:\n\n", ui.RenderAccent("📋"), fullID)
-		}
-
-		for _, iss := range issues {
-			// Color the ID based on status
+		for _, iss := range allIssues {
 			var idStr string
 			switch iss.Status {
 			case types.StatusOpen:
@@ -442,7 +496,6 @@ Examples:
 			default:
 				idStr = iss.ID
 			}
-
 			fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
 				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
 		}
