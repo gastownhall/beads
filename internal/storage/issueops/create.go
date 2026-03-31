@@ -26,7 +26,7 @@ func NewBatchContext(ctx context.Context, tx *sql.Tx, opts storage.BatchCreateOp
 	if err != nil {
 		return nil, fmt.Errorf("failed to get custom statuses: %w", err)
 	}
-	customTypes, err := GetCustomTypesTx(ctx, tx)
+	customTypes, err := ResolveCustomTypesInTx(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get custom types: %w", err)
 	}
