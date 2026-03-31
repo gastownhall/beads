@@ -48,7 +48,14 @@ With --stealth: configures per-repository git settings for invisible beads usage
 By default, beads uses an embedded Dolt engine (no external server needed).
 Pass --server to use an external dolt sql-server instead. In server mode,
 set connection details with --server-host, --server-port, and --server-user.
-Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
+Password should be set via BEADS_DOLT_PASSWORD environment variable.
+
+Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
+  Skips all interactive prompts, using sensible defaults:
+  • Role defaults to "maintainer" (override with --role)
+  • Fork exclude auto-configured when fork detected
+  • --contributor and --team flags are rejected (wizards require interaction)
+  Also auto-detected when stdin is not a terminal or CI=true is set.`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
@@ -58,6 +65,8 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 		skipAgents, _ := cmd.Flags().GetBool("skip-agents")
 		force, _ := cmd.Flags().GetBool("force")
+		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
+		roleFlag, _ := cmd.Flags().GetString("role")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 		// Dolt server connection flags
 		backendFlag, _ := cmd.Flags().GetString("backend")
@@ -90,6 +99,28 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 			if err := dolt.ValidateDatabaseName(database); err != nil {
 				FatalError("invalid database name %q: %v", database, err)
 			}
+		}
+
+		// Resolve non-interactive mode: flag > env var > terminal detection.
+		// This must be computed before any interactive prompts.
+		nonInteractive := isNonInteractiveInit(nonInteractiveFlag)
+
+		// Validate --role flag value
+		if roleFlag != "" {
+			switch roleFlag {
+			case "maintainer", "contributor":
+				// valid
+			default:
+				FatalError("invalid --role %q: must be \"maintainer\" or \"contributor\"", roleFlag)
+			}
+		}
+
+		// Fail-fast: contributor/team wizards require interaction
+		if nonInteractive && contributor {
+			FatalError("--contributor requires interactive prompts and cannot be used with --non-interactive")
+		}
+		if nonInteractive && team {
+			FatalError("--team requires interactive prompts and cannot be used with --non-interactive")
 		}
 
 		// Dolt is the only supported backend
@@ -669,9 +700,10 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 
 		// Prompt for contributor mode if:
 		// - In a git repo (needed to set beads.role config)
-		// - Interactive terminal (stdin is TTY)
+		// - Interactive terminal (stdin is TTY) and not --non-interactive
 		// - No explicit --contributor or --team flag provided
-		if isGitRepo() && !contributor && !team && shouldPromptForRole() {
+		// - No explicit --role flag provided
+		if isGitRepo() && !contributor && !team && roleFlag == "" && !nonInteractive && shouldPromptForRole() {
 			promptedContributor, err := promptContributorMode()
 			if err != nil {
 				if isCanceled(err) {
@@ -689,11 +721,19 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 		} else if isGitRepo() && !contributor && !team {
 			// If prompt was skipped (non-interactive or CI environment),
 			// ensure beads.role is set to avoid "not configured" warning
-			// during diagnostics. Only set if not already configured.
+			// during diagnostics. Use --role flag if provided, otherwise default.
+			role := roleFlag
+			if role == "" {
+				role = "maintainer"
+			}
 			if _, hasRole := getBeadsRole(); !hasRole {
-				// Default to maintainer for non-interactive environments
-				if err := setBeadsRole("maintainer"); err != nil && !quiet {
+				if err := setBeadsRole(role); err != nil && !quiet {
 					fmt.Fprintf(os.Stderr, "Warning: failed to set default beads.role: %v\n", err)
+				}
+			} else if roleFlag != "" {
+				// Explicit --role flag overrides existing role
+				if err := setBeadsRole(role); err != nil && !quiet {
+					fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role: %v\n", err)
 				}
 			}
 		}
@@ -765,16 +805,23 @@ Password should be set via BEADS_DOLT_PASSWORD environment variable.`,
 		} else if !stealth && isGitRepo() {
 			// Auto-detect fork and prompt (skip if stealth - it handles exclude already)
 			if isFork, upstreamURL := detectForkSetup(); isFork {
-				shouldExclude, err := promptForkExclude(upstreamURL, quiet)
-				if err != nil {
-					if isCanceled(err) {
-						fmt.Fprintln(os.Stderr, "Setup canceled.")
-						exitCanceled()
-					}
-				}
-				if shouldExclude {
+				if nonInteractive {
+					// In non-interactive mode, auto-configure fork exclude
 					if err := setupForkExclude(!quiet); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to configure git exclude: %v\n", err)
+					}
+				} else {
+					shouldExclude, err := promptForkExclude(upstreamURL, quiet)
+					if err != nil {
+						if isCanceled(err) {
+							fmt.Fprintln(os.Stderr, "Setup canceled.")
+							exitCanceled()
+						}
+					}
+					if shouldExclude {
+						if err := setupForkExclude(!quiet); err != nil {
+							fmt.Fprintf(os.Stderr, "Warning: failed to configure git exclude: %v\n", err)
+						}
 					}
 				}
 			}
@@ -997,6 +1044,10 @@ func init() {
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")
 	initCmd.Flags().String("agents-profile", "", "AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)")
 	initCmd.Flags().String("agents-file", "", "Custom filename for agent instructions (default: AGENTS.md)")
+
+	// Non-interactive mode for CI/cloud agents
+	initCmd.Flags().Bool("non-interactive", false, "Skip all interactive prompts (auto-detected in CI or non-TTY environments)")
+	initCmd.Flags().String("role", "", "Set beads role without prompting: \"maintainer\" or \"contributor\"")
 
 	// Backend selection (dolt is the only supported backend; sqlite accepted for deprecation notice)
 	initCmd.Flags().String("backend", "", "Storage backend (default: dolt). --backend=sqlite prints deprecation notice.")
@@ -1297,6 +1348,21 @@ func checkExistingBeadsData(prefix string) error {
 	}
 
 	return checkExistingBeadsDataAt(beadsDir, prefix)
+}
+
+// isNonInteractiveInit returns true if init should run without interactive prompts.
+// Precedence: explicit flag > BD_NON_INTERACTIVE env > CI env > terminal detection.
+func isNonInteractiveInit(flagValue bool) bool {
+	if flagValue {
+		return true
+	}
+	if v := os.Getenv("BD_NON_INTERACTIVE"); v == "1" || v == "true" {
+		return true
+	}
+	if v := os.Getenv("CI"); v == "true" || v == "1" {
+		return true
+	}
+	return !term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // shouldPromptForRole returns true if we should prompt the user for their role.
