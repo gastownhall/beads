@@ -491,13 +491,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 		defer initLock.Unlock()
 
-		// Clean stale noms LOCK files from previously crashed processes
-		// before opening the Dolt server store. Without this, a crashed init
-		// leaves LOCK files that cause nil pointer dereference in DoltDB.
-		// Skipped for embedded mode — embedded dolt has its own locking model.
-		if !isEmbeddedMode() {
-			dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
-		}
+		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+		// directory — including noms/LOCK files. These are Dolt-internal files.
+		// Removing them WILL cause unrecoverable data corruption and data loss.
+		// Dolt manages these files itself; external interference is never safe.
 
 		store, err := newDoltStore(ctx, doltCfg)
 		if err != nil {
@@ -789,11 +786,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			fmt.Fprintf(os.Stderr, "Warning: failed to close database: %v\n", err)
 		}
 
-		// Clean up 0-byte noms LOCK files left behind by the store open/close cycle.
-		// NOTE: Intentionally skipped for embedded mode. See earlier note.
-		if !isEmbeddedMode() {
-			dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
-		}
+		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+		// directory — including noms/LOCK files. These are Dolt-internal files.
+		// Removing them WILL cause unrecoverable data corruption and data loss.
+		// Dolt manages these files itself; external interference is never safe.
 
 		// Fork detection: offer to configure .git/info/exclude (GH#742)
 		setupExclude, _ := cmd.Flags().GetBool("setup-exclude")
@@ -933,12 +929,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				} else if !quiet {
 					fmt.Printf("  %s Committed beads files to git\n", ui.RenderPass("✓"))
 				}
-				// Clean up LOCK files again — the pre-commit hook may have
-				// reopened the database and left a new LOCK behind.
-				// NOTE: Intentionally skipped for embedded mode. See earlier note.
-				if !isEmbeddedMode() {
-					dolt.CleanStaleNomsLocks(doltserver.ResolveDoltDir(beadsDir))
-				}
+				// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+				// directory — including noms/LOCK files. These are Dolt-internal files.
+				// Removing them WILL cause unrecoverable data corruption and data loss.
+				// Dolt manages these files itself; external interference is never safe.
 			}
 		}
 

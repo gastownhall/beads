@@ -44,24 +44,10 @@ func CheckEmbeddedModeConcurrency(path string) DoctorCheck {
 		issues = append(issues, "dolt-access.lock present (embedded mode advisory lock)")
 	}
 
-	// Check for noms LOCK files in dolt database directories
-	doltDir := getDatabasePath(beadsDir)
-	if entries, err := os.ReadDir(doltDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				nomsLock := filepath.Join(doltDir, entry.Name(), ".dolt", "noms", "LOCK")
-				if _, err := os.Stat(nomsLock); err == nil {
-					issues = append(issues, fmt.Sprintf("noms LOCK in %s (Dolt database lock)", entry.Name()))
-				}
-			}
-		}
-	}
-
-	// Check for stale noms LOCK at the top level too
-	topNomsDir := filepath.Join(doltDir, ".dolt", "noms")
-	if _, err := os.Stat(filepath.Join(topNomsDir, "LOCK")); err == nil {
-		issues = append(issues, "noms LOCK in dolt root (Dolt database lock)")
-	}
+	// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+	// directory — including noms/LOCK files. These are Dolt-internal files.
+	// Removing them WILL cause unrecoverable data corruption and data loss.
+	// Dolt manages these files itself; external interference is never safe.
 
 	if len(issues) == 0 {
 		return DoctorCheck{

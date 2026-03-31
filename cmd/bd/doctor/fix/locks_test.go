@@ -110,87 +110,8 @@ func TestStaleLockFiles(t *testing.T) {
 		}
 	})
 
-	t.Run("noms LOCK always removed by doctor fix", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		nomsDir := filepath.Join(tmpDir, ".beads", "dolt", "beads", ".dolt", "noms")
-		if err := os.MkdirAll(nomsDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		lockPath := filepath.Join(nomsDir, "LOCK")
-		if err := os.WriteFile(lockPath, []byte("lock"), 0600); err != nil {
-			t.Fatal(err)
-		}
-
-		// In server mode (the only mode now), noms LOCK files are always
-		// removed by doctor --fix. The Dolt server manages its own locks;
-		// if the user is running doctor --fix, stale locks are the likely
-		// cause of the problem they're trying to fix.
-		if err := StaleLockFiles(tmpDir); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-			t.Error("noms LOCK should be removed by doctor --fix")
-		}
-	})
-
-	t.Run("stale noms LOCK removed", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		nomsDir := filepath.Join(tmpDir, ".beads", "dolt", "beads", ".dolt", "noms")
-		if err := os.MkdirAll(nomsDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		lockPath := filepath.Join(nomsDir, "LOCK")
-		if err := os.WriteFile(lockPath, []byte("lock"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		oldTime := time.Now().Add(-10 * time.Minute)
-		if err := os.Chtimes(lockPath, oldTime, oldTime); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := StaleLockFiles(tmpDir); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-			t.Error("stale noms LOCK should be removed")
-		}
-	})
-
-	t.Run("stale noms LOCK multi-database", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		beadsDir := filepath.Join(tmpDir, ".beads")
-
-		var lockPaths []string
-		for _, dbName := range []string{"beads", "other"} {
-			nomsDir := filepath.Join(beadsDir, "dolt", dbName, ".dolt", "noms")
-			if err := os.MkdirAll(nomsDir, 0755); err != nil {
-				t.Fatal(err)
-			}
-			lockPath := filepath.Join(nomsDir, "LOCK")
-			if err := os.WriteFile(lockPath, []byte("lock"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			oldTime := time.Now().Add(-10 * time.Minute)
-			if err := os.Chtimes(lockPath, oldTime, oldTime); err != nil {
-				t.Fatal(err)
-			}
-			lockPaths = append(lockPaths, lockPath)
-		}
-
-		if err := StaleLockFiles(tmpDir); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		for _, lockPath := range lockPaths {
-			if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-				t.Errorf("stale noms LOCK should be removed: %s", lockPath)
-			}
-		}
-	})
+	// noms LOCK tests removed: we no longer delete Dolt-internal noms/LOCK files.
+	// Removing them causes unrecoverable data corruption.
 
 	t.Run("stale bootstrap lock still removed", func(t *testing.T) {
 		// Verify we didn't break existing cleanup

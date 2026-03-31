@@ -525,31 +525,10 @@ func CheckLockHealth(path string) DoctorCheck {
 
 	var warnings []string
 
-	// Check for noms LOCK files that are actively held by another process.
-	// Dolt's noms chunk store creates a LOCK file on open and releases the
-	// flock on close, but never deletes the file. We probe the flock to
-	// distinguish an actively held lock (real contention) from a stale
-	// file left by a previous process (harmless).
-	doltDir := getDatabasePath(beadsDir)
-	if dbEntries, err := os.ReadDir(doltDir); err == nil {
-		for _, dbEntry := range dbEntries {
-			if !dbEntry.IsDir() {
-				continue
-			}
-			nomsLock := filepath.Join(doltDir, dbEntry.Name(), ".dolt", "noms", "LOCK")
-			if f, err := os.OpenFile(nomsLock, os.O_RDWR, 0); err == nil { //nolint:gosec // controlled path
-				if lockErr := lockfile.FlockExclusiveNonBlocking(f); lockErr != nil {
-					// Lock is actively held by another process
-					warnings = append(warnings,
-						fmt.Sprintf("noms LOCK at dolt/%s/.dolt/noms/LOCK is held by another process — may block database access", dbEntry.Name()))
-				} else {
-					// File exists but lock is not held — stale file, not a problem
-					_ = lockfile.FlockUnlock(f)
-				}
-				_ = f.Close()
-			}
-		}
-	}
+	// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+	// directory — including noms/LOCK files. These are Dolt-internal files.
+	// Removing them WILL cause unrecoverable data corruption and data loss.
+	// Dolt manages these files itself; external interference is never safe.
 
 	// Probe advisory lock to check if it's currently held
 	accessLockPath := filepath.Join(beadsDir, "dolt-access.lock")

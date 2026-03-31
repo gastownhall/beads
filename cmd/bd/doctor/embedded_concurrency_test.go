@@ -87,8 +87,8 @@ func TestCheckEmbeddedModeConcurrency_WarnsForEmbeddedLocks(t *testing.T) {
 	if check.Status != StatusWarning {
 		t.Fatalf("expected StatusWarning for embedded lock indicators, got %s: %s", check.Status, check.Message)
 	}
-	if !strings.Contains(check.Detail, "noms LOCK") {
-		t.Fatalf("expected detail to mention noms LOCK, got %q", check.Detail)
+	if !strings.Contains(check.Detail, "dolt-access.lock") {
+		t.Fatalf("expected detail to mention dolt-access.lock, got %q", check.Detail)
 	}
 }
 
@@ -108,11 +108,11 @@ func writeEmbeddedConcurrencyConfig(t *testing.T, beadsDir string, cfg *configfi
 
 func writeEmbeddedConcurrencyLock(t *testing.T, beadsDir string) {
 	t.Helper()
-	lockDir := filepath.Join(beadsDir, "dolt", ".dolt", "noms")
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
-		t.Fatalf("mkdir lock dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(lockDir, "LOCK"), []byte(""), 0o600); err != nil {
+	// Create a dolt-access.lock to simulate an embedded mode advisory lock.
+	// We no longer create or check noms/LOCK files — those are Dolt-internal
+	// and must not be touched (removing them causes data corruption).
+	lockPath := filepath.Join(beadsDir, "dolt-access.lock")
+	if err := os.WriteFile(lockPath, []byte(""), 0o600); err != nil {
 		t.Fatalf("write lock file: %v", err)
 	}
 }

@@ -418,10 +418,10 @@ func enrichDoltStatus(dc DoctorCheck) agentEnrichment {
 func enrichDoltLocks(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "degraded",
-		explanation: fmt.Sprintf("Dolt lock issue: %s. Noms LOCK files prevent concurrent database access. If no bd process is running, these are stale and safe to remove.", dc.Message),
+		explanation: fmt.Sprintf("Dolt lock issue: %s. WARNING: Do NOT manually remove noms/LOCK files inside .dolt/ directories — doing so WILL cause unrecoverable data corruption. Dolt manages these files internally.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No stale noms LOCK files in .beads/dolt/",
-		commands:    []string{"bd doctor --fix", "find .beads/dolt -name LOCK -delete"},
+		expected:    "No active lock contention on Dolt databases",
+		commands:    []string{"bd doctor --fix"},
 		sourceFiles: []string{"cmd/bd/doctor/migration_validation.go:CheckDoltLocks"},
 	}
 }

@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // StaleLockFiles removes stale lock files from the .beads directory.
@@ -65,15 +63,10 @@ func StaleLockFiles(path string) error {
 		}
 	}
 
-	// Remove stale Dolt noms LOCK files via shared helper.
-	// Same cleanup that runs pre-flight in PersistentPreRun.
-	doltDir := getDatabasePath(beadsDir)
-	if n, errs := dolt.CleanStaleNomsLocks(doltDir); n > 0 {
-		removed = append(removed, fmt.Sprintf("%d noms LOCK file(s)", n))
-		for _, e := range errs {
-			errors = append(errors, e.Error())
-		}
-	}
+	// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+	// directory — including noms/LOCK files. These are Dolt-internal files.
+	// Removing them WILL cause unrecoverable data corruption and data loss.
+	// Dolt manages these files itself; external interference is never safe.
 
 	// Remove stale startup locks
 	entries, err := os.ReadDir(beadsDir)

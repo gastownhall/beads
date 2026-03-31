@@ -11,7 +11,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -284,12 +283,7 @@ Examples:
 		if doctorDryRun {
 			previewFixes(result)
 		} else if doctorFix {
-			// Release any Dolt locks left by diagnostics before applying fixes.
-			releaseDiagnosticLocks(absPath)
 			applyFixes(result)
-			// Re-run diagnostics to verify fixes were applied correctly.
-			// Release any locks that may have been left by the fix phase.
-			releaseDiagnosticLocks(absPath)
 			fmt.Println("\nVerifying fixes...")
 			result = runDiagnostics(absPath)
 		}
@@ -344,38 +338,13 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
-// releaseDiagnosticLocks removes stale noms LOCK files that the diagnostics
-// phase may have left behind. CloseWithTimeout can leave goroutines (and
-// their LOCK files) behind when it times out.
-func releaseDiagnosticLocks(path string) {
-	beadsDir := filepath.Join(path, ".beads")
-	beadsDir = beads.FollowRedirect(beadsDir)
-
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil {
-		return // Can't determine config, skip cleanup
-	}
-
-	// Only clean up for Dolt backend.
-	if cfg.GetBackend() != configfile.BackendDolt {
-		return
-	}
-
-	doltPath := cfg.DatabasePath(beadsDir)
-	entries, err := os.ReadDir(doltPath)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		nomsLock := filepath.Join(doltPath, entry.Name(), ".dolt", "noms", "LOCK")
-		if _, err := os.Stat(nomsLock); err == nil {
-			_ = os.Remove(nomsLock)
-		}
-	}
-}
+// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+// directory — including noms/LOCK files. These are Dolt-internal files.
+// Removing them WILL cause unrecoverable data corruption and data loss.
+// Dolt manages these files itself; external interference is never safe.
+//
+// releaseDiagnosticLocks was removed — it previously deleted noms/LOCK
+// files after diagnostics, which risks data corruption.
 
 func runDiagnostics(path string) doctorResult {
 	result := doctorResult{

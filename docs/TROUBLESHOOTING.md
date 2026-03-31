@@ -309,8 +309,9 @@ Another bd process is accessing the database. Solutions:
 ps aux | grep bd
 kill <pid>
 
-# Remove a stale lock file
-rm .beads/dolt/.dolt/lock
+# WARNING: Do NOT remove files inside .dolt/ directories (including noms/LOCK).
+# These are Dolt-internal files — removing them WILL cause unrecoverable
+# data corruption. Dolt manages these files itself.
 
 # For server mode: restart the Dolt server
 # (server mode handles concurrent access natively)
