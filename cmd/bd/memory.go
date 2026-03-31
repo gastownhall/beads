@@ -298,7 +298,7 @@ func truncateMemory(s string, maxLen int) string {
 }
 
 func init() {
-	rememberCmd.Flags().StringVar(&memoryKeyFlag, "key", "", "Explicit key for the memory (auto-generated from content if not set)")
+	rememberCmd.Flags().StringVar(&memoryKeyFlag, "key", "", "Explicit key for the memory (auto-generated from content if not set). If a memory with this key already exists, it will be updated in place")
 
 	rootCmd.AddCommand(rememberCmd)
 	rootCmd.AddCommand(memoriesCmd)
