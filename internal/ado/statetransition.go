@@ -2,7 +2,9 @@ package ado
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -111,8 +113,10 @@ func (c *Client) transitionWorkItem(ctx context.Context, workItemID int, workIte
 		return wi, nil
 	}
 
-	// If direct transition failed, check for a known path.
-	if !strings.Contains(err.Error(), "status 400") {
+	// If direct transition failed with a 400 Bad Request, try walking
+	// through intermediate states. Any other error is a real failure.
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
 		return nil, fmt.Errorf("transitioning to %q: %w", targetState, err)
 	}
 

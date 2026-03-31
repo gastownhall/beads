@@ -2,9 +2,10 @@ package ado
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -118,16 +119,20 @@ func (r *Reconciler) checkSingleItem(ctx context.Context, id int, result *Reconc
 		return // Item exists and is accessible
 	}
 
-	errMsg := err.Error()
 	idStr := strconv.Itoa(id)
 
-	if strings.Contains(errMsg, "status 404") {
-		result.Deleted = append(result.Deleted, idStr)
-	} else if strings.Contains(errMsg, "status 403") {
-		result.Denied = append(result.Denied, idStr)
-	} else {
-		result.Errors = append(result.Errors, fmt.Errorf("work item %d: %w", id, err))
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusNotFound:
+			result.Deleted = append(result.Deleted, idStr)
+			return
+		case http.StatusForbidden:
+			result.Denied = append(result.Denied, idStr)
+			return
+		}
 	}
+	result.Errors = append(result.Errors, fmt.Errorf("work item %d: %w", id, err))
 }
 
 func (r *Reconciler) getInterval(ctx context.Context) int {
