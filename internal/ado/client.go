@@ -279,6 +279,14 @@ func escapeWIQL(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
+// formatWIQLDate formats a time.Time for use in WIQL datetime literals.
+// WIQL expects UTC ISO 8601 dates in single quotes: 'YYYY-MM-DDTHH:MM:SSZ'.
+// The time is converted to UTC and formatted with time.RFC3339, which uses
+// the proper Z07:00 timezone placeholder (outputs "Z" for UTC).
+func formatWIQLDate(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
+}
+
 // buildPatchOps converts a field map into sorted JSON Patch operations.
 func buildPatchOps(fields map[string]interface{}) []PatchOperation {
 	var ops []PatchOperation
@@ -358,7 +366,7 @@ func (c *Client) buildPullWIQLMulti(projects []string, since *time.Time, filters
 	if since != nil {
 		clauses = append(clauses, fmt.Sprintf(
 			"[System.ChangedDate] >= '%s'",
-			since.UTC().Format("2006-01-02T15:04:05Z"),
+			formatWIQLDate(*since),
 		))
 	}
 	if filters != nil {
