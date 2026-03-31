@@ -63,6 +63,34 @@ func TestPriorityToTracker(t *testing.T) {
 	}
 }
 
+func TestSeverityForBug(t *testing.T) {
+	fm := NewFieldMapper(nil, nil)
+	m := fm.(*adoFieldMapper)
+
+	tests := []struct {
+		name     string
+		priority int
+		want     string
+	}{
+		{"P0 → 1 - Critical", 0, "1 - Critical"},
+		{"P1 → 2 - High", 1, "2 - High"},
+		{"P2 → 3 - Medium", 2, "3 - Medium"},
+		{"P3 → 4 - Low", 3, "4 - Low"},
+		{"P4 → 4 - Low", 4, "4 - Low"},
+		{"negative → 3 - Medium default", -1, "3 - Medium"},
+		{"out of range → 3 - Medium default", 99, "3 - Medium"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := m.SeverityForBug(tt.priority)
+			if got != tt.want {
+				t.Errorf("SeverityForBug(%d) = %q, want %q", tt.priority, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStatusToBeads_Defaults(t *testing.T) {
 	m := NewFieldMapper(nil, nil)
 
@@ -576,6 +604,92 @@ func TestIssueToTracker(t *testing.T) {
 	if fields[FieldStoryPoints] != float64(5) {
 		t.Errorf("StoryPoints = %v, want 5", fields[FieldStoryPoints])
 	}
+
+	// Non-bug types should not have Severity set.
+	if _, hasSeverity := fields[FieldSeverity]; hasSeverity {
+		t.Errorf("Severity should not be set for Feature type, got %v", fields[FieldSeverity])
+	}
+}
+
+func TestIssueToTracker_BugSetsSeverity(t *testing.T) {
+	m := NewFieldMapper(nil, nil)
+
+	tests := []struct {
+		name         string
+		priority     int
+		wantSeverity string
+	}{
+		{"P0 bug → 1 - Critical", 0, "1 - Critical"},
+		{"P1 bug → 2 - High", 1, "2 - High"},
+		{"P2 bug → 3 - Medium", 2, "3 - Medium"},
+		{"P3 bug → 4 - Low", 3, "4 - Low"},
+		{"P4 bug → 4 - Low", 4, "4 - Low"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{
+				Title:     "Bug issue",
+				Status:    types.StatusOpen,
+				Priority:  tt.priority,
+				IssueType: types.TypeBug,
+			}
+			fields := m.IssueToTracker(issue)
+
+			sev, ok := fields[FieldSeverity].(string)
+			if !ok {
+				t.Fatalf("Severity field missing for Bug type")
+			}
+			if sev != tt.wantSeverity {
+				t.Errorf("Severity = %q, want %q", sev, tt.wantSeverity)
+			}
+		})
+	}
+}
+
+func TestIssueToTracker_NonBugNoSeverity(t *testing.T) {
+	m := NewFieldMapper(nil, nil)
+
+	nonBugTypes := []types.IssueType{
+		types.TypeFeature,
+		types.TypeTask,
+		types.TypeEpic,
+		types.TypeChore,
+	}
+
+	for _, it := range nonBugTypes {
+		t.Run(string(it), func(t *testing.T) {
+			issue := &types.Issue{
+				Title:     "Non-bug issue",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: it,
+			}
+			fields := m.IssueToTracker(issue)
+
+			if _, hasSeverity := fields[FieldSeverity]; hasSeverity {
+				t.Errorf("Severity should not be set for %s type, got %v", it, fields[FieldSeverity])
+			}
+		})
+	}
+}
+
+func TestIssueToTracker_CustomBugTypeName(t *testing.T) {
+	// When a custom type map maps "bug" to "Defect", Severity should NOT be set
+	// because the type name is "Defect", not "Bug".
+	m := NewFieldMapper(nil, map[string]string{"bug": "Defect"})
+
+	issue := &types.Issue{
+		Title:     "Custom bug type",
+		Status:    types.StatusOpen,
+		Priority:  0,
+		IssueType: types.TypeBug,
+	}
+	fields := m.IssueToTracker(issue)
+
+	if _, hasSeverity := fields[FieldSeverity]; hasSeverity {
+		t.Errorf("Severity should not be set when bug maps to 'Defect' (not 'Bug'), got %v", fields[FieldSeverity])
+	}
 }
 
 func TestParseTags(t *testing.T) {
@@ -725,6 +839,23 @@ func TestRestoreMetadata(t *testing.T) {
 			name:       "unrelated metadata keys ignored",
 			metadata:   json.RawMessage(`{"ado.rev":3,"custom_field":"value"}`),
 			wantFields: map[string]interface{}{},
+		},
+		{
+			name:     "severity metadata restored",
+			metadata: json.RawMessage(`{"ado.severity":"2 - High"}`),
+			wantFields: map[string]interface{}{
+				FieldSeverity: "2 - High",
+			},
+		},
+		{
+			name:     "all metadata fields including severity",
+			metadata: json.RawMessage(`{"ado.area_path":"A","ado.iteration_path":"B","ado.story_points":8,"ado.severity":"1 - Critical"}`),
+			wantFields: map[string]interface{}{
+				FieldAreaPath:      "A",
+				FieldIterationPath: "B",
+				FieldStoryPoints:   float64(8),
+				FieldSeverity:      "1 - Critical",
+			},
 		},
 	}
 
@@ -924,6 +1055,49 @@ func TestPriorityNoMetadata_DefaultsTo3(t *testing.T) {
 	conv := m.IssueToBeads(ti)
 	if conv.Issue.Priority != 3 {
 		t.Errorf("Priority = %d, want 3", conv.Issue.Priority)
+	}
+}
+
+func TestSeverityRoundTrip(t *testing.T) {
+	m := NewFieldMapper(nil, nil)
+
+	// Pull: ADO Bug with Severity → beads issue with severity in metadata.
+	wi := &WorkItem{
+		ID:  60,
+		Rev: 1,
+		URL: "https://dev.azure.com/org/proj/_apis/wit/workItems/60",
+		Fields: map[string]interface{}{
+			FieldTitle:        "Crash on login",
+			FieldState:        "New",
+			FieldPriority:     float64(1),
+			FieldWorkItemType: "Bug",
+			FieldSeverity:     "2 - High",
+		},
+	}
+	ti := &tracker.TrackerIssue{ID: "60", Raw: wi}
+	conv := m.IssueToBeads(ti)
+	if conv == nil {
+		t.Fatal("pull: IssueToBeads returned nil")
+	}
+
+	// Verify severity is preserved in metadata.
+	var meta map[string]interface{}
+	if err := json.Unmarshal(conv.Issue.Metadata, &meta); err != nil {
+		t.Fatalf("pull: failed to unmarshal metadata: %v", err)
+	}
+	if meta["ado.severity"] != "2 - High" {
+		t.Errorf("pull: ado.severity = %v, want %q", meta["ado.severity"], "2 - High")
+	}
+
+	// Push: beads bug issue → ADO fields should include Severity.
+	fields := m.IssueToTracker(conv.Issue)
+	sev, ok := fields[FieldSeverity].(string)
+	if !ok {
+		t.Fatal("push: Severity field missing")
+	}
+	// The metadata-restored severity ("2 - High") should take precedence.
+	if sev != "2 - High" {
+		t.Errorf("push: Severity = %q, want %q", sev, "2 - High")
 	}
 }
 

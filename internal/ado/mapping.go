@@ -137,7 +137,15 @@ func (m *adoFieldMapper) IssueToTracker(issue *types.Issue) map[string]interface
 		}
 	}
 
-	// Restore ADO-specific metadata if present.
+	// Set Severity for Bug-type work items (required by ADO).
+	// This is set before restoreMetadata so that a severity value previously
+	// pulled from ADO (stored in metadata) takes precedence over the computed one.
+	typeName, _ := m.TypeToTracker(issue.IssueType).(string)
+	if strings.EqualFold(typeName, "Bug") {
+		fields[FieldSeverity] = m.SeverityForBug(issue.Priority)
+	}
+
+	// Restore ADO-specific metadata if present (may override computed severity).
 	restoreMetadata(issue, fields)
 
 	return fields
@@ -190,6 +198,9 @@ func buildMetadata(wi *WorkItem) map[string]interface{} {
 	if v := wi.GetField(FieldRemainingWork); v != nil {
 		meta["ado.remaining_work"] = v
 	}
+	if v := wi.GetStringField(FieldSeverity); v != "" {
+		meta["ado.severity"] = v
+	}
 	if wi.Rev > 0 {
 		meta["ado.rev"] = wi.Rev
 	}
@@ -214,6 +225,9 @@ func restoreMetadata(issue *types.Issue, fields map[string]interface{}) {
 	}
 	if v, ok := meta["ado.story_points"]; ok {
 		fields[FieldStoryPoints] = v
+	}
+	if v, ok := meta["ado.severity"]; ok {
+		fields[FieldSeverity] = v
 	}
 }
 

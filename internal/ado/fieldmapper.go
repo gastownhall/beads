@@ -159,6 +159,27 @@ func (m *adoFieldMapper) TypeToBeads(trackerType interface{}) types.IssueType {
 	}
 }
 
+// SeverityForBug maps a beads priority (0-4) to an ADO Severity string.
+// ADO Bug work items require a Severity field with values like "1 - Critical".
+// Beads 0→"1 - Critical", 1→"2 - High", 2→"3 - Medium", 3/4→"4 - Low".
+// Returns "3 - Medium" for unknown values.
+func (m *adoFieldMapper) SeverityForBug(beadsPriority int) string {
+	switch beadsPriority {
+	case 0:
+		return "1 - Critical"
+	case 1:
+		return "2 - High"
+	case 2:
+		return "3 - Medium"
+	case 3:
+		return "4 - Low"
+	case 4:
+		return "4 - Low"
+	default:
+		return "3 - Medium"
+	}
+}
+
 // TypeToTracker converts a beads IssueType to an ADO work item type string.
 // Checks custom typeMap first, then falls back to Agile defaults.
 func (m *adoFieldMapper) TypeToTracker(beadsType types.IssueType) interface{} {

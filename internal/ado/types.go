@@ -69,6 +69,10 @@ const (
 	// FieldStoryPoints is the story points scheduling field.
 	FieldStoryPoints = "Microsoft.VSTS.Scheduling.StoryPoints"
 
+	// FieldSeverity is the severity field, required for Bug work items.
+	// Values: "1 - Critical", "2 - High", "3 - Medium", "4 - Low".
+	FieldSeverity = "Microsoft.VSTS.Common.Severity"
+
 	// FieldRemainingWork is the remaining work scheduling field.
 	FieldRemainingWork = "Microsoft.VSTS.Scheduling.RemainingWork"
 
