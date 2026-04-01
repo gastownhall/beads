@@ -14,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/ado"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // adoStdioMutex serializes tests that redirect os.Stdout/os.Stderr.
@@ -865,3 +867,148 @@ func captureADOStdout(t *testing.T, fn func()) string {
 
 	return buf.String()
 }
+
+// TestBuildADOPushHooks_NoFilters verifies nil is returned when no filters are set.
+func TestBuildADOPushHooks_NoFilters(t *testing.T) {
+	mapper := ado.NewFieldMapper(nil, nil)
+	hooks := buildADOPushHooks(mapper, func(string) bool { return false }, nil, false)
+	if hooks != nil {
+		t.Error("expected nil PushHooks when no filters are set")
+	}
+}
+
+// TestBuildADOPushHooks_TypeFilter verifies --types filtering on push.
+func TestBuildADOPushHooks_TypeFilter(t *testing.T) {
+	mapper := ado.NewFieldMapper(nil, nil)
+	filters := &ado.PullFilters{WorkItemTypes: []string{"Bug", "Task"}}
+	hooks := buildADOPushHooks(mapper, func(string) bool { return false }, filters, false)
+	if hooks == nil || hooks.ShouldPush == nil {
+		t.Fatal("expected non-nil PushHooks with ShouldPush")
+	}
+
+	tests := []struct {
+		name     string
+		issueTyp types.IssueType
+		want     bool
+	}{
+		{"bug allowed", types.TypeBug, true},
+		{"task allowed", types.TypeTask, true},
+		{"feature excluded", types.TypeFeature, false},
+		{"epic excluded", types.TypeEpic, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{IssueType: tt.issueTyp, Status: types.StatusOpen}
+			if got := hooks.ShouldPush(issue); got != tt.want {
+				t.Errorf("ShouldPush(%s) = %v, want %v", tt.issueTyp, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildADOPushHooks_StateFilter verifies --states filtering on push.
+func TestBuildADOPushHooks_StateFilter(t *testing.T) {
+	mapper := ado.NewFieldMapper(nil, nil)
+	// "Active" maps to StatusInProgress, "New" maps to StatusOpen
+	filters := &ado.PullFilters{States: []string{"Active", "New"}}
+	hooks := buildADOPushHooks(mapper, func(string) bool { return false }, filters, false)
+	if hooks == nil || hooks.ShouldPush == nil {
+		t.Fatal("expected non-nil PushHooks with ShouldPush")
+	}
+
+	tests := []struct {
+		name   string
+		status types.Status
+		want   bool
+	}{
+		{"open allowed (maps from New)", types.StatusOpen, true},
+		{"in_progress allowed (maps from Active)", types.StatusInProgress, true},
+		{"closed excluded", types.StatusClosed, false},
+		{"deferred excluded", types.StatusDeferred, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{IssueType: types.TypeTask, Status: tt.status}
+			if got := hooks.ShouldPush(issue); got != tt.want {
+				t.Errorf("ShouldPush(status=%s) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildADOPushHooks_NoCreate verifies --no-create filtering on push.
+func TestBuildADOPushHooks_NoCreate(t *testing.T) {
+	mapper := ado.NewFieldMapper(nil, nil)
+	isADORef := func(ref string) bool {
+		return strings.Contains(ref, "dev.azure.com") || strings.Contains(ref, "_workitems/edit/")
+	}
+	hooks := buildADOPushHooks(mapper, isADORef, nil, true)
+	if hooks == nil || hooks.ShouldPush == nil {
+		t.Fatal("expected non-nil PushHooks with ShouldPush")
+	}
+
+	adoRef := "https://dev.azure.com/org/proj/_workitems/edit/123"
+	ghRef := "https://github.com/owner/repo/issues/1"
+
+	tests := []struct {
+		name string
+		ref  *string
+		want bool
+	}{
+		{"nil ref skipped", nil, false},
+		{"empty ref skipped", strPtr(""), false},
+		{"non-ADO ref skipped", &ghRef, false},
+		{"ADO ref allowed", &adoRef, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{IssueType: types.TypeTask, Status: types.StatusOpen, ExternalRef: tt.ref}
+			if got := hooks.ShouldPush(issue); got != tt.want {
+				t.Errorf("ShouldPush(ref=%v) = %v, want %v", tt.ref, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildADOPushHooks_Combined verifies combined type + state + no-create filters.
+func TestBuildADOPushHooks_Combined(t *testing.T) {
+	mapper := ado.NewFieldMapper(nil, nil)
+	isADORef := func(ref string) bool {
+		return strings.Contains(ref, "_workitems/edit/")
+	}
+	filters := &ado.PullFilters{
+		WorkItemTypes: []string{"Bug"},
+		States:        []string{"Active"},
+	}
+	hooks := buildADOPushHooks(mapper, isADORef, filters, true)
+	if hooks == nil || hooks.ShouldPush == nil {
+		t.Fatal("expected non-nil PushHooks with ShouldPush")
+	}
+
+	adoRef := "https://dev.azure.com/org/proj/_workitems/edit/42"
+
+	tests := []struct {
+		name     string
+		issueTyp types.IssueType
+		status   types.Status
+		ref      *string
+		want     bool
+	}{
+		{"bug+active+linked", types.TypeBug, types.StatusInProgress, &adoRef, true},
+		{"task+active+linked (wrong type)", types.TypeTask, types.StatusInProgress, &adoRef, false},
+		{"bug+closed+linked (wrong state)", types.TypeBug, types.StatusClosed, &adoRef, false},
+		{"bug+active+unlinked (no-create)", types.TypeBug, types.StatusInProgress, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{IssueType: tt.issueTyp, Status: tt.status, ExternalRef: tt.ref}
+			if got := hooks.ShouldPush(issue); got != tt.want {
+				t.Errorf("ShouldPush() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// strPtr returns a pointer to s. Duplicated locally so the test file
+// compiles without depending on internal/tracker (unexported helper).
+func strPtr(s string) *string { return &s }
