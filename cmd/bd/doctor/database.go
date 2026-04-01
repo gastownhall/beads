@@ -69,7 +69,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 			Status:  StatusError,
 			Message: "No dolt database found",
 			Detail:  "Storage: Dolt",
-			Fix:     "Run 'bd init' to create database (will clone from remote if configured)",
+			Fix:     "Run 'bd bootstrap' to recover an existing database safely. Use 'bd init' only when creating a brand-new project.",
 		}
 	}
 
@@ -111,7 +111,7 @@ func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorChe
 				Status:  StatusError,
 				Message: "No dolt database found",
 				Detail:  "Storage: Dolt",
-				Fix:     "Run 'bd init' to create database (will clone from remote if configured)",
+				Fix:     "Run 'bd bootstrap' to recover an existing database safely. Use 'bd init' only when creating a brand-new project.",
 			}
 		}
 		return DoctorCheck{
