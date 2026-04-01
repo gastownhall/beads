@@ -644,6 +644,12 @@ var rootCmd = &cobra.Command{
 		}
 		if cfg != nil {
 			doltCfg.ServerMode = cfg.IsDoltServerMode()
+			// Shared server mode (dolt.shared-server in config.yaml) is a
+			// form of server mode. Override metadata.json if it still says
+			// embedded — handles installs created before GH#2946 fix.
+			if !doltCfg.ServerMode && doltserver.IsSharedServerMode() {
+				doltCfg.ServerMode = true
+			}
 			serverMode = doltCfg.ServerMode
 			if cmdCtx != nil {
 				cmdCtx.ServerMode = doltCfg.ServerMode

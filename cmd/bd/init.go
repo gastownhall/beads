@@ -134,7 +134,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Shared server mode still uses a Dolt sql-server, so it must select
 		// the server-backed store path during init. Without this, init can
 		// persist shared-server intent in YAML while still creating an embedded
-		// store and recording dolt_mode=embedded in metadata.json.
+		// store and recording dolt_mode=embedded in metadata.json (GH#2946).
 		if sharedServer || strings.EqualFold(os.Getenv("BEADS_DOLT_SHARED_SERVER"), "true") || os.Getenv("BEADS_DOLT_SHARED_SERVER") == "1" {
 			initServerMode = true
 		}
