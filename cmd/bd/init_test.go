@@ -1887,6 +1887,50 @@ func TestInitDatabaseFlag(t *testing.T) {
 		}
 	})
 
+	t.Run("shared_server_flag_selects_server_mode", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		cmd := exec.Command(bd, "init", "--shared-server", "--prefix", "shared-mode-test", "--skip-hooks")
+		cmd.Dir = tmpDir
+		cmd.Env = os.Environ()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd init --shared-server failed: %v\n%s", err, out)
+		}
+
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("Failed to load metadata.json: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("metadata.json not found")
+		}
+
+		if cfg.DoltMode != configfile.DoltModeServer {
+			t.Errorf("Expected DoltMode %q, got %q", configfile.DoltModeServer, cfg.DoltMode)
+		}
+
+		configYAML, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+		if err != nil {
+			t.Fatalf("Failed to read config.yaml: %v", err)
+		}
+		if !strings.Contains(string(configYAML), "dolt.shared-server: true") {
+			t.Fatalf("expected config.yaml to enable shared server, got:\n%s", configYAML)
+		}
+
+		outStr := string(out)
+		if !strings.Contains(outStr, "Shared server mode enabled") {
+			t.Fatalf("expected init output to mention shared server mode, got:\n%s", outStr)
+		}
+		if !strings.Contains(outStr, "Mode: server") {
+			t.Fatalf("expected init output to report server mode, got:\n%s", outStr)
+		}
+		if strings.Contains(outStr, "Mode: embedded") {
+			t.Fatalf("init output should not report embedded mode when --shared-server is set:\n%s", outStr)
+		}
+	})
+
 	t.Run("validation_invalid_name", func(t *testing.T) {
 		tmpDir := t.TempDir()
 

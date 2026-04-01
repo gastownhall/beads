@@ -155,6 +155,21 @@ func loadEnvironment() {
 // loadServerModeFromConfig loads the storage mode (embedded vs server) from
 // metadata.json so that isEmbeddedMode() returns the correct value. Called
 // for commands that skip full DB init but still need to know the mode.
+func warnSharedServerEmbeddedMismatch(cfg *configfile.Config) {
+	if cfg == nil {
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(cfg.DoltMode)) != configfile.DoltModeEmbedded {
+		return
+	}
+	if !doltserver.IsSharedServerMode() {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "Warning: shared-server is enabled but metadata.json still pins dolt_mode=embedded.")
+	fmt.Fprintln(os.Stderr, "Commands may reopen the repo in embedded mode and hide the expected server-backed issue state.")
+	fmt.Fprintln(os.Stderr, "Fix: re-run 'bd init --shared-server' after upgrading, or repair metadata.json to use server mode.")
+}
+
 func loadServerModeFromConfig() {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -164,6 +179,7 @@ func loadServerModeFromConfig() {
 	if err != nil || cfg == nil {
 		return
 	}
+	warnSharedServerEmbeddedMismatch(cfg)
 	sm := cfg.IsDoltServerMode()
 	serverMode = sm
 	if cmdCtx != nil {

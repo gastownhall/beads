@@ -131,6 +131,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			initServerMode = true
 		}
 
+		// Shared server mode still uses a Dolt sql-server, so it must select
+		// the server-backed store path during init. Without this, init can
+		// persist shared-server intent in YAML while still creating an embedded
+		// store and recording dolt_mode=embedded in metadata.json.
+		if sharedServer || strings.EqualFold(os.Getenv("BEADS_DOLT_SHARED_SERVER"), "true") || os.Getenv("BEADS_DOLT_SHARED_SERVER") == "1" {
+			initServerMode = true
+		}
+
 		// Set serverMode so isEmbeddedMode() returns the correct value.
 		// Both the global and cmdCtx must be set because PersistentPreRun
 		// creates a fresh cmdCtx (with ServerMode=false) before Run executes.
