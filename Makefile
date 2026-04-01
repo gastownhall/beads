@@ -9,7 +9,7 @@ SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
 endif
 endif
 
-.PHONY: all build test test-full-cgo test-regression bench bench-quick clean install install-force help check-up-to-date fmt fmt-check
+.PHONY: all build test test-full-cgo test-regression test-upgrade bench bench-quick clean install install-force help check-up-to-date fmt fmt-check
 
 # Default target
 all: build
@@ -87,6 +87,13 @@ test-full-cgo:
 test-regression:
 	@echo "Running regression tests (baseline vs candidate)..."
 	go test -tags=regression -timeout=10m -v ./tests/regression/...
+
+# Run upgrade smoke tests (release stability gate).
+# Tests that upgrading from previous release preserves data, role, and mode.
+# Override version: ./scripts/upgrade-smoke-test.sh v0.62.0
+test-upgrade: build
+	@echo "Running upgrade smoke tests..."
+	@CANDIDATE_BIN=./bd ./scripts/upgrade-smoke-test.sh
 
 # Run performance benchmarks against Dolt storage backend
 # Requires CGO and Dolt; generates CPU profile files
@@ -179,6 +186,7 @@ help:
 	@echo "  make test         - Run all tests"
 	@echo "  make test-full-cgo - Run full CGO-enabled test suite"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
+	@echo "  make test-upgrade  - Run upgrade smoke tests (release stability gate)"
 	@echo "  make bench        - Run performance benchmarks (generates CPU profiles)"
 	@echo "  make bench-quick  - Run quick benchmarks (shorter benchtime)"
 	@echo "  make install      - Install bd to ~/.local/bin (with codesign on macOS, includes 'beads' alias)"
