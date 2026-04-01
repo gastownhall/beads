@@ -1,0 +1,89 @@
+# ibead Lifecycle Formula
+# Encodes the interconnected bead workflow for bd molecules/formulas system.
+#
+# Usage:
+#   bd formula show ibead
+#   bd mol pour ibead --title "{{task_title}}" --parent {{parent_id}}
+#
+name: ibead
+version: 1.0.0
+description: |
+  Interconnected bead workflow. Generates domain-scoped impact markers
+  from GitNexus depth-1 analysis. Enforces full blast-radius audit before
+  parent bead close.
+
+variables:
+  parent_id:
+    description: "Parent bead ID (e.g. GGV3-abc123)"
+    required: true
+  task_title:
+    description: "Short description of the task"
+    required: true
+  domain:
+    description: "Domain label (e.g. auth-layer, ci-coverage, api-contracts)"
+    required: false
+    default: "unknown"
+
+steps:
+  - id: create_ibead
+    label: "Create ibead (Pass 1 — approximation)"
+    command: npm run ibead:create -- --parent {{parent_id}}
+    description: |
+      Runs GitNexus query on parent bead title terms. Generates 3–5
+      domain-scoped ibeads. Writes to bd store and Task.md.
+    when: parent_id is set
+
+  - id: implementation_complete
+    label: "Mark implementation complete → triggers Pass 2"
+    command: bd update {{parent_id}} --status implementation-complete
+    description: |
+      Marks parent bead as implementation-complete. Triggers ibead:audit
+      (Pass 2) which re-evaluates actual code changes via GitNexus impact.
+    when: implementation is done
+
+  - id: audit_ibeads
+    label: "Audit ibeads (Pass 2 — accurate blast radius)"
+    command: npm run ibead:audit -- --parent {{parent_id}}
+    description: |
+      Re-evaluates splash radius against actual changed files. Populates
+      task_list in each ibead. Writes investigation items to Task.md.
+    when: implementation-complete status set
+
+  - id: close_each_ibead
+    label: "Close each ibead (close gate enforced)"
+    command: npm run ibead:close -- --bead <ibead-id>
+    description: |
+      For each ibead: audit domain, run codex:rescue, pass lint + type-check,
+      then close. Repeat for all ibeads.
+    repeat: for each open ibead
+
+  - id: close_parent
+    label: "Close parent bead (all ibeads must be closed)"
+    command: npm run ibead:close -- --bead {{parent_id}}
+    description: |
+      Verifies all child ibeads are closed. Runs codex:rescue reminder.
+      Runs lint + type-check. Closes parent bead.
+    depends_on: close_each_ibead
+
+close_gate:
+  requires:
+    - all_ibeads_closed: true
+    - codex_rescue_run: true
+    - lint_pass: true
+    - type_check_pass: true
+
+extended_research:
+  depth_control:
+    default: 1
+    command_pattern: "bead:deepresearch:{{depth}}"
+    description: |
+      Run bead:deepresearch:N to generate ibeads at depth N.
+      Ibeads do NOT generate their own ibeads by default.
+      Deep research is a deliberate opt-in for complex planning.
+
+  batch_research:
+    command: npm run ibead:research
+    description: |
+      Re-evaluates all open/in-progress beads. Detects new domains
+      that emerged from other closed beads. Flags stale ibeads.
+      Full automation with summary report.
