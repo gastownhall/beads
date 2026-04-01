@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -48,7 +49,7 @@ func ParseCommaSeparatedList(value string) []string {
 
 // ResolveCustomStatusesDetailedInTx reads custom statuses from the custom_statuses
 // table, falling back to the config string and then config.yaml if the table
-// doesn't exist or is empty (pre-migration databases).
+// doesn't exist (pre-migration databases).
 // Returns nil on parse errors (degraded mode). Does not cache or log —
 // callers layer those concerns on top.
 func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx *sql.Tx) ([]types.CustomStatus, error) {
@@ -67,13 +68,15 @@ func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx *sql.Tx) ([]types
 				Category: types.StatusCategory(category),
 			})
 		}
-		if len(result) > 0 {
-			return result, nil
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("reading custom_statuses: %w", err)
 		}
-		// Table exists but is empty — fall through to config string
+		// Table query succeeded — return result even if empty.
+		// Only fall through to config string when the table doesn't exist (query error above).
+		return result, nil
 	}
 
-	// Fallback: read from config string (pre-migration or empty table)
+	// Fallback: table doesn't exist (pre-migration) — read from config string
 	value, err := GetConfigInTx(ctx, tx, "status.custom")
 	if err != nil {
 		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
@@ -98,7 +101,7 @@ func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx *sql.Tx) ([]types
 
 // ResolveCustomTypesInTx reads custom issue types from the custom_types table,
 // falling back to config string and then config.yaml if the table doesn't exist
-// or is empty (pre-migration databases).
+// (pre-migration databases).
 // Does not cache — callers layer caching on top.
 func ResolveCustomTypesInTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
 	// Try the normalized table first
@@ -113,13 +116,15 @@ func ResolveCustomTypesInTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
 			}
 			result = append(result, name)
 		}
-		if len(result) > 0 {
-			return result, nil
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("reading custom_types: %w", err)
 		}
-		// Table exists but is empty — fall through to config string
+		// Table query succeeded — return result even if empty.
+		// Only fall through to config string when the table doesn't exist (query error above).
+		return result, nil
 	}
 
-	// Fallback: read from config string (pre-migration or empty table)
+	// Fallback: table doesn't exist (pre-migration) — read from config string
 	value, err := GetConfigInTx(ctx, tx, "types.custom")
 	if err != nil {
 		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {

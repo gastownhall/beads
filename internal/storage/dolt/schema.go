@@ -2,8 +2,6 @@ package dolt
 
 import (
 	"strings"
-
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // currentSchemaVersion is bumped whenever the schema or migrations change.
@@ -354,7 +352,7 @@ WHERE i.status NOT IN ('closed', 'pinned')
 // BuildReadyIssuesView generates the ready_issues view SQL, incorporating
 // custom statuses with CategoryActive from the custom_statuses table.
 // The view uses a subquery against custom_statuses rather than dynamic IN clauses.
-func BuildReadyIssuesView(_ []types.CustomStatus) string {
+func BuildReadyIssuesView() string {
 	return `
 CREATE OR REPLACE VIEW ready_issues AS
 WITH RECURSIVE
@@ -401,10 +399,13 @@ WHERE (
 
 // BuildBlockedIssuesView generates the blocked_issues view SQL, incorporating
 // custom statuses with CategoryDone/CategoryFrozen from the custom_statuses table.
-// The view uses subqueries against custom_statuses rather than dynamic NOT IN clauses.
-func BuildBlockedIssuesView(_ []types.CustomStatus) string {
+// The view uses a CTE against custom_statuses to deduplicate the subquery.
+func BuildBlockedIssuesView() string {
 	return `
 CREATE OR REPLACE VIEW blocked_issues AS
+WITH done_frozen AS (
+    SELECT name FROM custom_statuses WHERE category IN ('done', 'frozen')
+)
 SELECT
     i.*,
     (SELECT COUNT(*)
@@ -415,12 +416,12 @@ SELECT
          SELECT 1 FROM issues blocker
          WHERE blocker.id = d.depends_on_id
            AND blocker.status NOT IN ('closed', 'pinned')
-           AND blocker.status NOT IN (SELECT name FROM custom_statuses WHERE category IN ('done', 'frozen'))
+           AND blocker.status NOT IN (SELECT name FROM done_frozen)
        )
     ) as blocked_by_count
 FROM issues i
 WHERE i.status NOT IN ('closed', 'pinned')
-  AND i.status NOT IN (SELECT name FROM custom_statuses WHERE category IN ('done', 'frozen'))
+  AND i.status NOT IN (SELECT name FROM done_frozen)
   AND EXISTS (
     SELECT 1 FROM dependencies d
     WHERE d.issue_id = i.id
@@ -429,15 +430,15 @@ WHERE i.status NOT IN ('closed', 'pinned')
         SELECT 1 FROM issues blocker
         WHERE blocker.id = d.depends_on_id
           AND blocker.status NOT IN ('closed', 'pinned')
-          AND blocker.status NOT IN (SELECT name FROM custom_statuses WHERE category IN ('done', 'frozen'))
+          AND blocker.status NOT IN (SELECT name FROM done_frozen)
       )
   );
 `
 }
 
 // escapeSQL escapes a string for safe inclusion in SQL string literals.
-// Legacy: retained for backward compatibility and testing. View building now
-// uses JOINs against the custom_statuses table instead of string interpolation.
+// Deprecated: View building now uses JOINs against the custom_statuses table
+// instead of string interpolation. Retained for backward compatibility and testing.
 func escapeSQL(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }

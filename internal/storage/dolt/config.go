@@ -70,7 +70,7 @@ func syncCustomStatusesTable(ctx context.Context, tx *sql.Tx, value string) erro
 	}
 	parsed, err := types.ParseCustomStatusConfig(value)
 	if err != nil {
-		return nil // validation error — leave table empty, config layer reports the error
+		return fmt.Errorf("invalid status.custom value: %w", err)
 	}
 	for _, s := range parsed {
 		if _, err := tx.ExecContext(ctx, "INSERT INTO custom_statuses (name, category) VALUES (?, ?)",

@@ -2,8 +2,12 @@ package migrations
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // MigrateCustomStatusTypeTables creates normalized custom_statuses and
@@ -36,31 +40,26 @@ func migrateCustomStatusesTable(db *sql.DB) error {
 		return fmt.Errorf("creating table: %w", err)
 	}
 
-	// Populate from existing config value
+	// Populate from existing config value using validated parser.
+	// Invalid entries are logged and skipped — the migration is intentionally lenient
+	// so existing databases aren't blocked. The first `bd config set status.custom`
+	// will normalize the data through the stricter runtime validation.
 	var value string
 	err = db.QueryRow("SELECT `value` FROM config WHERE `key` = 'status.custom'").Scan(&value)
 	if err != nil || value == "" {
 		return nil
 	}
 
-	for _, part := range strings.Split(value, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		name := part
-		category := "unspecified"
-		if idx := strings.IndexByte(part, ':'); idx >= 0 {
-			name = part[:idx]
-			category = part[idx+1:]
-		}
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		_, err = db.Exec("INSERT IGNORE INTO custom_statuses (name, category) VALUES (?, ?)", name, category)
+	parsed, parseErr := types.ParseCustomStatusConfig(value)
+	if parseErr != nil {
+		// Config has invalid entries — log and skip rather than blocking the migration.
+		log.Printf("migration: skipping invalid status.custom entries: %v", parseErr)
+		return nil
+	}
+	for _, s := range parsed {
+		_, err = db.Exec("INSERT IGNORE INTO custom_statuses (name, category) VALUES (?, ?)", s.Name, string(s.Category))
 		if err != nil {
-			return fmt.Errorf("inserting status %q: %w", name, err)
+			return fmt.Errorf("inserting status %q: %w", s.Name, err)
 		}
 	}
 
@@ -112,22 +111,12 @@ func parseTypesValue(value string) []string {
 	if value == "" {
 		return nil
 	}
-	// Simple JSON array detection
-	if strings.HasPrefix(value, "[") {
-		// Strip brackets and quotes
-		inner := strings.TrimPrefix(value, "[")
-		inner = strings.TrimSuffix(inner, "]")
-		parts := strings.Split(inner, ",")
-		var result []string
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			p = strings.Trim(p, `"`)
-			if p != "" {
-				result = append(result, p)
-			}
-		}
-		return result
+	// Try JSON array first (e.g. '["gate","convoy"]')
+	var jsonTypes []string
+	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
+		return jsonTypes
 	}
+	// Fall back to comma-separated
 	parts := strings.Split(value, ",")
 	var result []string
 	for _, p := range parts {
