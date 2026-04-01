@@ -10,6 +10,7 @@ require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0
 	github.com/anthropics/anthropic-sdk-go v1.27.1
 	github.com/cenkalti/backoff/v4 v4.3.0
+	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/dolthub/driver v1.84.1
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/olebedev/when v1.1.0
@@ -35,7 +36,6 @@ require (
 
 require (
 	github.com/JohannesKaufmann/dom v0.2.0 // indirect
-	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 )
 
