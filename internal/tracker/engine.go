@@ -317,13 +317,49 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	}
 
 	// Fetch issues from external tracker
-	extIssues, err := e.Tracker.FetchIssues(ctx, fetchOpts)
-	if err != nil {
-		return nil, fmt.Errorf("fetching issues: %w", err)
-	}
-	stats.Candidates = len(extIssues)
-	if provider, ok := e.Tracker.(PullStatsProvider); ok {
-		stats.Queried, stats.Candidates = provider.LastPullStats()
+	var extIssues []TrackerIssue
+	if len(opts.IssueIDs) > 0 {
+		// Selective pull: fetch only requested issues via FetchIssue()
+		prefix, _ := e.Store.GetConfig(ctx, "issue_prefix")
+		for _, id := range opts.IssueIDs {
+			var identifier string
+			if isBeadID(id, prefix) {
+				// Look up the local issue to find its external ref
+				if local, ok := localByID[id]; ok && local.ExternalRef != nil {
+					identifier = e.Tracker.ExtractIdentifier(*local.ExternalRef)
+				}
+				if identifier == "" {
+					e.warn("No external ref found for local issue %s, skipping pull", id)
+					stats.Skipped++
+					continue
+				}
+			} else {
+				identifier = id
+			}
+			extIssue, err := e.Tracker.FetchIssue(ctx, identifier)
+			if err != nil {
+				e.warn("Failed to fetch %s: %v", identifier, err)
+				stats.Errors++
+				continue
+			}
+			if extIssue == nil {
+				e.warn("Issue %s not found in %s", identifier, e.Tracker.DisplayName())
+				stats.Skipped++
+				continue
+			}
+			extIssues = append(extIssues, *extIssue)
+		}
+		stats.Candidates = len(extIssues)
+	} else {
+		// Bulk pull: fetch all issues matching filters
+		extIssues, err = e.Tracker.FetchIssues(ctx, fetchOpts)
+		if err != nil {
+			return nil, fmt.Errorf("fetching issues: %w", err)
+		}
+		stats.Candidates = len(extIssues)
+		if provider, ok := e.Tracker.(PullStatsProvider); ok {
+			stats.Queried, stats.Candidates = provider.LastPullStats()
+		}
 	}
 
 	mapper := e.Tracker.FieldMapper()
@@ -593,6 +629,17 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 	issues, err := e.Store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return nil, fmt.Errorf("searching local issues: %w", err)
+	}
+
+	// Filter to specific IssueIDs if requested.
+	if issueIDSet := buildIssueIDSet(opts.IssueIDs); issueIDSet != nil {
+		filtered := make([]*types.Issue, 0, len(opts.IssueIDs))
+		for _, issue := range issues {
+			if issueIDSet[issue.ID] {
+				filtered = append(filtered, issue)
+			}
+		}
+		issues = filtered
 	}
 
 	// Build descendant set if --parent was specified.
@@ -1010,6 +1057,28 @@ func derefStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// isBeadID returns true if the given string looks like a local bead ID
+// (i.e. it starts with the configured prefix followed by a hyphen, like "bd-123").
+// External tracker refs (URLs, "EXT-1", etc.) will return false.
+func isBeadID(id, prefix string) bool {
+	if prefix == "" || id == "" {
+		return false
+	}
+	return strings.HasPrefix(id, prefix+"-")
+}
+
+// buildIssueIDSet converts a slice of IDs into a set for O(1) lookup.
+func buildIssueIDSet(ids []string) map[string]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
 }
 
 func (e *Engine) msg(format string, args ...interface{}) {

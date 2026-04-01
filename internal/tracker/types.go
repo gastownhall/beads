@@ -87,6 +87,10 @@ type SyncOptions struct {
 	// ParentID limits push to this beads issue and all its descendants via
 	// parent-child dependencies. Empty means no restriction.
 	ParentID string
+	// IssueIDs restricts sync to only these issues. Accepts bead IDs (e.g. "bd-123")
+	// or external refs (e.g. "EXT-456"). When non-empty, push filters local issues
+	// by ID and pull uses FetchIssue() for targeted retrieval instead of bulk fetch.
+	IssueIDs []string
 }
 
 // SyncResult is the complete result of a sync operation.
