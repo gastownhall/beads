@@ -3,11 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
@@ -18,6 +21,56 @@ import (
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"golang.org/x/term"
 )
+
+type bootstrapServerDBCheck struct {
+	Exists    bool
+	Reachable bool
+	Err       error
+}
+
+var checkBootstrapServerDB = func(host string, port int, user, password, dbName string) bootstrapServerDBCheck {
+	var userPart string
+	if password != "" {
+		userPart = fmt.Sprintf("%s:%s", user, password)
+	} else {
+		userPart = user
+	}
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?timeout=5s", userPart, host, port)
+
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return bootstrapServerDBCheck{Reachable: false, Err: err}
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		return bootstrapServerDBCheck{Reachable: false, Err: err}
+	}
+
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return bootstrapServerDBCheck{Reachable: true, Err: err}
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return bootstrapServerDBCheck{Reachable: true, Err: err}
+		}
+		if name == dbName {
+			return bootstrapServerDBCheck{Exists: true, Reachable: true}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return bootstrapServerDBCheck{Reachable: true, Err: err}
+	}
+
+	return bootstrapServerDBCheck{Exists: false, Reachable: true}
+}
 
 var bootstrapCmd = &cobra.Command{
 	Use:     "bootstrap",
@@ -143,10 +196,26 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	if info, err := os.Stat(dbPath); err == nil && info.IsDir() {
 		entries, _ := os.ReadDir(dbPath)
 		if len(entries) > 0 {
-			plan.HasExisting = true
-			plan.Action = "none"
-			plan.Reason = "Database already exists at " + dbPath
-			return plan
+			if cfg.GetDoltMode() == configfile.DoltModeServer {
+				result := checkBootstrapServerDB(
+					cfg.GetDoltServerHost(),
+					cfg.GetDoltServerPort(),
+					cfg.GetDoltServerUser(),
+					cfg.GetDoltServerPassword(),
+					cfg.GetDoltDatabase(),
+				)
+				if result.Exists {
+					plan.HasExisting = true
+					plan.Action = "none"
+					plan.Reason = fmt.Sprintf("Database %s already exists on server at %s:%d", cfg.GetDoltDatabase(), cfg.GetDoltServerHost(), cfg.GetDoltServerPort())
+					return plan
+				}
+			} else {
+				plan.HasExisting = true
+				plan.Action = "none"
+				plan.Reason = "Database already exists at " + dbPath
+				return plan
+			}
 		}
 	}
 
