@@ -90,24 +90,24 @@ func TestEmbeddedVC(t *testing.T) {
 
 	t.Run("commit_json", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "vccj")
+		// bd create auto-commits, so vc commit may see "nothing to commit".
+		// Both committed=true and committed=false are valid outcomes.
 		bdCreateSilent(t, bd, dir, "commit json issue")
 
 		cmd := exec.Command(bd, "vc", "commit", "-m", "json commit", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		out, err := cmd.CombinedOutput()
-		if err != nil && !strings.Contains(string(out), "nothing to commit") {
+		if err != nil {
 			t.Fatalf("bd vc commit --json failed unexpectedly: %v\n%s", err, out)
 		}
-		// If commit succeeded, verify JSON
-		if err == nil {
-			var result map[string]interface{}
-			if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
-				t.Fatalf("failed to parse JSON: %v\n%s", jsonErr, out)
-			}
-			if committed, _ := result["committed"].(bool); !committed {
-				t.Error("expected committed=true")
-			}
+		// Verify valid JSON with committed field (true or false are both valid)
+		var result map[string]interface{}
+		if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
+			t.Fatalf("failed to parse JSON: %v\n%s", jsonErr, out)
+		}
+		if _, ok := result["committed"]; !ok {
+			t.Error("expected 'committed' field in JSON output")
 		}
 	})
 
