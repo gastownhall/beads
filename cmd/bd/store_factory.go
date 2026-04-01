@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -18,10 +19,17 @@ import (
 // (embedded) when the mode hasn't been set yet.
 func isEmbeddedMode() bool {
 	if shouldUseGlobals() {
-		return !serverMode
+		if serverMode {
+			return false
+		}
+	} else if cmdCtx != nil && cmdCtx.ServerMode {
+		return false
 	}
-	if cmdCtx != nil {
-		return !cmdCtx.ServerMode
+	// Shared server mode is a form of server mode. This check covers
+	// commands that skip DB init (dolt status, dolt start, etc.) where
+	// serverMode hasn't been set from metadata.json yet (GH#2946).
+	if doltserver.IsSharedServerMode() {
+		return false
 	}
 	return true // default: embedded
 }
