@@ -15,37 +15,16 @@ func TestBuildReadyIssuesView(t *testing.T) {
 		wantNotContain []string
 	}{
 		{
-			name:           "no custom statuses uses static view",
+			name:           "no custom statuses uses table-backed view",
 			customStatuses: nil,
-			wantContains:   []string{"i.status = 'open'"},
-			wantNotContain: []string{"'review'"},
+			wantContains:   []string{"i.status = 'open'", "custom_statuses WHERE category = 'active'"},
 		},
 		{
-			name: "no active custom statuses uses static view",
-			customStatuses: []types.CustomStatus{
-				{Name: "review", Category: types.CategoryWIP},
-			},
-			wantContains:   []string{"i.status = 'open'"},
-			wantNotContain: []string{"'review'"},
-		},
-		{
-			name: "active custom statuses added to IN clause",
+			name: "custom statuses param is ignored (table-backed)",
 			customStatuses: []types.CustomStatus{
 				{Name: "review", Category: types.CategoryActive},
-				{Name: "triage", Category: types.CategoryActive},
-				{Name: "testing", Category: types.CategoryWIP},
 			},
-			wantContains:   []string{"IN", "'open'", "'review'", "'triage'"},
-			wantNotContain: []string{"'testing'"},
-		},
-		{
-			name: "unspecified category not included",
-			customStatuses: []types.CustomStatus{
-				{Name: "legacy", Category: types.CategoryUnspecified},
-				{Name: "review", Category: types.CategoryActive},
-			},
-			wantContains:   []string{"'review'"},
-			wantNotContain: []string{"'legacy'"},
+			wantContains: []string{"custom_statuses WHERE category = 'active'"},
 		},
 	}
 
@@ -62,7 +41,6 @@ func TestBuildReadyIssuesView(t *testing.T) {
 					t.Errorf("expected SQL to NOT contain %q, got:\n%s", notWant, sql)
 				}
 			}
-			// All views must be valid CREATE OR REPLACE VIEW statements
 			if !strings.Contains(sql, "CREATE OR REPLACE VIEW ready_issues") {
 				t.Errorf("expected valid CREATE VIEW statement")
 			}
@@ -78,29 +56,16 @@ func TestBuildBlockedIssuesView(t *testing.T) {
 		wantNotContain []string
 	}{
 		{
-			name:           "no custom statuses uses static view",
+			name:           "no custom statuses uses table-backed view",
 			customStatuses: nil,
-			wantContains:   []string{"NOT IN ('closed', 'pinned')"},
-			wantNotContain: []string{"'archived'"},
+			wantContains:   []string{"NOT IN ('closed', 'pinned')", "custom_statuses WHERE category IN ('done', 'frozen')"},
 		},
 		{
-			name: "done/frozen custom statuses added to NOT IN",
+			name: "custom statuses param is ignored (table-backed)",
 			customStatuses: []types.CustomStatus{
 				{Name: "archived", Category: types.CategoryDone},
-				{Name: "on-ice", Category: types.CategoryFrozen},
-				{Name: "review", Category: types.CategoryActive},
 			},
-			wantContains:   []string{"'closed'", "'pinned'", "'archived'", "'on-ice'"},
-			wantNotContain: []string{"'review'"},
-		},
-		{
-			name: "only wip and active statuses - uses static view",
-			customStatuses: []types.CustomStatus{
-				{Name: "review", Category: types.CategoryActive},
-				{Name: "testing", Category: types.CategoryWIP},
-			},
-			wantContains:   []string{"NOT IN ('closed', 'pinned')"},
-			wantNotContain: []string{"'review'", "'testing'"},
+			wantContains: []string{"custom_statuses WHERE category IN ('done', 'frozen')"},
 		},
 	}
 
@@ -125,6 +90,7 @@ func TestBuildBlockedIssuesView(t *testing.T) {
 }
 
 func TestEscapeSQL(t *testing.T) {
+	// escapeSQL is legacy but retained for backward compatibility
 	tests := []struct {
 		input string
 		want  string
@@ -145,94 +111,38 @@ func TestEscapeSQL(t *testing.T) {
 	}
 }
 
-func TestBuildReadyIssuesViewManyActiveStatuses(t *testing.T) {
-	// 12 active statuses should all appear in the IN clause
-	var statuses []types.CustomStatus
-	for i := 0; i < 12; i++ {
-		name := "status" + strings.Repeat("x", i+1) // statusx, statusxx, ...
-		statuses = append(statuses, types.CustomStatus{Name: name, Category: types.CategoryActive})
-	}
-
-	sql := BuildReadyIssuesView(statuses)
-	if !strings.Contains(sql, "IN") {
-		t.Fatal("expected IN clause for multiple active statuses")
-	}
-	for _, s := range statuses {
-		if !strings.Contains(sql, "'"+s.Name+"'") {
-			t.Errorf("expected SQL to contain %q", s.Name)
-		}
-	}
-	if !strings.Contains(sql, "'open'") {
-		t.Error("expected SQL to still contain 'open'")
+func TestBuildReadyIssuesViewIsStatic(t *testing.T) {
+	// The view is now static (table-backed) — same SQL regardless of input
+	sql1 := BuildReadyIssuesView(nil)
+	sql2 := BuildReadyIssuesView([]types.CustomStatus{
+		{Name: "review", Category: types.CategoryActive},
+		{Name: "testing", Category: types.CategoryWIP},
+	})
+	if sql1 != sql2 {
+		t.Error("BuildReadyIssuesView should return identical SQL regardless of input")
 	}
 }
 
-func TestBuildBlockedIssuesViewManyDoneFrozen(t *testing.T) {
-	var statuses []types.CustomStatus
-	for i := 0; i < 5; i++ {
-		statuses = append(statuses, types.CustomStatus{
-			Name:     "done" + strings.Repeat("x", i+1),
-			Category: types.CategoryDone,
-		})
-	}
-	for i := 0; i < 5; i++ {
-		statuses = append(statuses, types.CustomStatus{
-			Name:     "frozen" + strings.Repeat("x", i+1),
-			Category: types.CategoryFrozen,
-		})
-	}
-
-	sql := BuildBlockedIssuesView(statuses)
-	for _, s := range statuses {
-		if !strings.Contains(sql, "'"+s.Name+"'") {
-			t.Errorf("expected SQL to contain %q", s.Name)
-		}
-	}
-	// Built-in exclusions should still be present
-	if !strings.Contains(sql, "'closed'") {
-		t.Error("expected SQL to contain 'closed'")
-	}
-	if !strings.Contains(sql, "'pinned'") {
-		t.Error("expected SQL to contain 'pinned'")
+func TestBuildBlockedIssuesViewIsStatic(t *testing.T) {
+	// The view is now static (table-backed) — same SQL regardless of input
+	sql1 := BuildBlockedIssuesView(nil)
+	sql2 := BuildBlockedIssuesView([]types.CustomStatus{
+		{Name: "archived", Category: types.CategoryDone},
+		{Name: "on-ice", Category: types.CategoryFrozen},
+	})
+	if sql1 != sql2 {
+		t.Error("BuildBlockedIssuesView should return identical SQL regardless of input")
 	}
 }
 
-func TestBuildReadyIssuesViewUnspecifiedNotIncluded(t *testing.T) {
-	statuses := []types.CustomStatus{
-		{Name: "legacy", Category: types.CategoryUnspecified},
-		{Name: "old-flow", Category: types.CategoryUnspecified},
-	}
+func TestViewsReferenceCustomStatusesTable(t *testing.T) {
+	readySQL := BuildReadyIssuesView(nil)
+	blockedSQL := BuildBlockedIssuesView(nil)
 
-	sql := BuildReadyIssuesView(statuses)
-	// Unspecified should NOT affect the ready view
-	if strings.Contains(sql, "'legacy'") {
-		t.Error("unspecified status 'legacy' should not appear in ready view")
+	if !strings.Contains(readySQL, "custom_statuses") {
+		t.Error("ready_issues view should reference custom_statuses table")
 	}
-	if strings.Contains(sql, "'old-flow'") {
-		t.Error("unspecified status 'old-flow' should not appear in ready view")
-	}
-	// Should use static view (no IN clause needed)
-	if !strings.Contains(sql, "i.status = 'open'") {
-		t.Error("expected static view with just i.status = 'open'")
-	}
-}
-
-func TestBuildBlockedIssuesViewUnspecifiedNotIncluded(t *testing.T) {
-	statuses := []types.CustomStatus{
-		{Name: "legacy", Category: types.CategoryUnspecified},
-		{Name: "old-flow", Category: types.CategoryUnspecified},
-	}
-
-	sql := BuildBlockedIssuesView(statuses)
-	// Unspecified should NOT affect the blocked view
-	if strings.Contains(sql, "'legacy'") {
-		t.Error("unspecified status 'legacy' should not appear in blocked view")
-	}
-	if strings.Contains(sql, "'old-flow'") {
-		t.Error("unspecified status 'old-flow' should not appear in blocked view")
-	}
-	// Should use static NOT IN
-	if !strings.Contains(sql, "NOT IN ('closed', 'pinned')") {
-		t.Error("expected static NOT IN clause")
+	if !strings.Contains(blockedSQL, "custom_statuses") {
+		t.Error("blocked_issues view should reference custom_statuses table")
 	}
 }

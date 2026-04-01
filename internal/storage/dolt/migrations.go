@@ -33,6 +33,7 @@ var migrationsList = []Migration{
 	{"drop_hop_columns", migrations.MigrateDropHOPColumns},
 	{"drop_child_counters_fk", migrations.MigrateDropChildCountersFK},
 	{"wisp_events_created_at_index", migrations.MigrateWispEventsCreatedAtIndex},
+	{"custom_status_type_tables", migrations.MigrateCustomStatusTypeTables},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.
@@ -53,6 +54,7 @@ func RunMigrations(db *sql.DB) error {
 		"wisp_dependencies", "labels", "wisp_labels", "comments",
 		"wisp_comments", "metadata", "child_counters", "issue_counter",
 		"issue_snapshots", "compaction_snapshots", "federation_peers",
+		"custom_statuses", "custom_types",
 		"dolt_ignore",
 	}
 	for _, table := range migrationTables {
