@@ -115,6 +115,7 @@ func TestDetectBootstrapAction_InitWhenNothingExists(t *testing.T) {
 }
 
 func TestDetectBootstrapAction_ServerModeMissingConfiguredDBDoesNotReturnNone(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
@@ -141,6 +142,7 @@ func TestDetectBootstrapAction_ServerModeMissingConfiguredDBDoesNotReturnNone(t 
 	cfg.DoltMode = configfile.DoltModeServer
 	cfg.DoltDatabase = "project_missing"
 	cfg.DoltDataDir = sharedDir
+	t.Setenv("BEADS_DOLT_DATA_DIR", sharedDir)
 
 	origCheck := checkBootstrapServerDB
 	checkBootstrapServerDB = func(host string, port int, user, password, dbName string) bootstrapServerDBCheck {
