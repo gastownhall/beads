@@ -229,7 +229,7 @@ func extractBeadPrefix(beadID string) string {
 // loadPrefixRoutes loads prefix-to-path routes from routes.jsonl in the beads directory.
 func loadPrefixRoutes(beadsDir string) ([]prefixRoute, error) {
 	routesPath := filepath.Join(beadsDir, "routes.jsonl")
-	file, err := os.Open(routesPath)
+	file, err := os.Open(routesPath) //nolint:gosec // G304: path is constructed from trusted beads directory
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +256,7 @@ func loadPrefixRoutes(beadsDir string) ([]prefixRoute, error) {
 // readDoltDatabase reads the dolt_database field from a .beads/metadata.json file.
 func readDoltDatabase(beadsDir string) string {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	data, err := os.ReadFile(metadataPath)
+	data, err := os.ReadFile(metadataPath) //nolint:gosec // G304: path is constructed from trusted beads directory
 	if err != nil {
 		return ""
 	}
