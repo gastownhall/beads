@@ -80,7 +80,7 @@ function Install-WithGo {
 
     Write-Info "Installing bd via go install..."
     try {
-        & go install github.com/steveyegge/beads/cmd/bd@latest
+        & go install -tags gms_pure_go github.com/steveyegge/beads/cmd/bd@latest
         if ($LASTEXITCODE -ne 0) {
             Write-WarningMsg "go install exited with code $LASTEXITCODE"
             return $false
@@ -295,7 +295,7 @@ function Install-FromSource {
         Push-Location $repoPath
         try {
             Write-Info "Compiling bd.exe..."
-            & go build -o bd.exe ./cmd/bd
+            & go build -tags gms_pure_go -o bd.exe ./cmd/bd
             if ($LASTEXITCODE -ne 0) {
                 throw "go build failed with exit code $LASTEXITCODE"
             }
@@ -467,3 +467,4 @@ if ($installed) {
     Write-Err "Installation failed. Please install Go 1.24+ and try again."
     exit 1
 }
+

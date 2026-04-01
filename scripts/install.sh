@@ -34,6 +34,84 @@ log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
 }
 
+append_env_flag() {
+    local var_name=$1
+    local flag_value=$2
+    local current_value
+
+    current_value=${!var_name:-}
+    if [ -n "$current_value" ]; then
+        export "$var_name=$current_value $flag_value"
+    else
+        export "$var_name=$flag_value"
+    fi
+}
+
+configure_cgo_build_env() {
+    local system
+    system=$(uname -s)
+
+    case "$system" in
+        Darwin)
+            if command -v brew &> /dev/null; then
+                local icu_prefix
+                icu_prefix=$(brew --prefix icu4c 2>/dev/null || true)
+                if [ -n "$icu_prefix" ]; then
+                    append_env_flag CGO_CFLAGS "-I${icu_prefix}/include"
+                    append_env_flag CGO_CPPFLAGS "-I${icu_prefix}/include"
+                    append_env_flag CGO_LDFLAGS "-L${icu_prefix}/lib -Wl,-rpath,${icu_prefix}/lib"
+                    log_info "Configured CGO to use Homebrew icu4c at ${icu_prefix}"
+                fi
+            fi
+            ;;
+        Linux|FreeBSD)
+            if command -v pkg-config &> /dev/null && pkg-config --exists icu-i18n; then
+                local icu_cflags
+                local icu_libs
+                icu_cflags=$(pkg-config --cflags icu-i18n)
+                icu_libs=$(pkg-config --libs icu-i18n)
+                if [ -n "$icu_cflags" ]; then
+                    append_env_flag CGO_CFLAGS "$icu_cflags"
+                    append_env_flag CGO_CPPFLAGS "$icu_cflags"
+                fi
+                if [ -n "$icu_libs" ]; then
+                    append_env_flag CGO_LDFLAGS "$icu_libs"
+                fi
+                log_info "Configured CGO to use pkg-config ICU flags"
+            elif command -v brew &> /dev/null; then
+                local icu_prefix
+                icu_prefix=$(brew --prefix icu4c 2>/dev/null || true)
+                if [ -n "$icu_prefix" ]; then
+                    append_env_flag CGO_CFLAGS "-I${icu_prefix}/include"
+                    append_env_flag CGO_CPPFLAGS "-I${icu_prefix}/include"
+                    append_env_flag CGO_LDFLAGS "-L${icu_prefix}/lib -Wl,-rpath,${icu_prefix}/lib"
+                    log_info "Configured CGO to use Homebrew icu4c at ${icu_prefix}"
+                fi
+            fi
+            ;;
+    esac
+}
+
+print_missing_icu_help() {
+    local system
+    system=$(uname -s)
+
+    case "$system" in
+        Darwin)
+            log_warning "Missing ICU headers. Install them with: brew install icu4c zstd"
+            log_warning "If icu4c is already installed, rerun this installer; it now auto-detects Homebrew's keg-only prefix."
+            ;;
+        Linux)
+            log_warning "Missing ICU headers. Install them with your package manager, for example:"
+            log_warning "  Debian/Ubuntu: sudo apt-get install -y libicu-dev libzstd-dev"
+            log_warning "  Fedora/RHEL: sudo dnf install -y libicu-devel libzstd-devel"
+            ;;
+        FreeBSD)
+            log_warning "Missing ICU headers. Install them with: pkg install -y icu zstd"
+            ;;
+    esac
+}
+
 release_has_asset() {
     local release_json=$1
     local asset_name=$2
@@ -406,6 +484,7 @@ verify_binary_has_cgo() {
 # Install using go install (fallback)
 install_with_go() {
     log_info "Installing bd using 'go install'..."
+    configure_cgo_build_env
 
     if CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest; then
         log_success "bd installed successfully via go install"
@@ -443,7 +522,7 @@ install_with_go() {
         return 0
     else
         log_error "go install failed"
-        log_warning "If you see 'unicode/uregex.h' missing, install ICU headers (macOS: brew install icu4c; Linux: libicu-dev or libicu-devel) and try again."
+        print_missing_icu_help
         return 1
     fi
 }
@@ -451,6 +530,7 @@ install_with_go() {
 # Build from source (last resort)
 build_from_source() {
     log_info "Building bd from source..."
+    configure_cgo_build_env
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
@@ -510,7 +590,7 @@ build_from_source() {
             return 0
         else
             log_error "Build failed"
-            log_warning "If you see 'unicode/uregex.h' missing, install ICU headers (macOS: brew install icu4c; Linux: libicu-dev or libicu-devel) and try again."
+            print_missing_icu_help
     cd - > /dev/null || cd "$HOME"
             cd - > /dev/null
             rm -rf "$tmp_dir"
@@ -685,3 +765,4 @@ main() {
 }
 
 main "$@"
+
