@@ -146,6 +146,46 @@ func isRemoteNotFoundErr(err error) bool {
 	return strings.Contains(msg, "remote") && strings.Contains(msg, "not found")
 }
 
+// isDivergedHistoryErr checks whether the error indicates that local and remote
+// Dolt histories have diverged. This happens when independent pushes create
+// separate commit histories with no common merge base (e.g., two agents
+// bootstrapping from scratch and pushing to the same remote, or a local
+// database being re-initialized while the remote retains the old history).
+func isDivergedHistoryErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no common ancestor") ||
+		strings.Contains(msg, "can't find common ancestor") ||
+		strings.Contains(msg, "cannot find common ancestor")
+}
+
+// printDivergedHistoryGuidance prints recovery guidance when push/pull fails
+// due to diverged local and remote histories.
+func printDivergedHistoryGuidance(operation string) {
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Local and remote Dolt histories have diverged.")
+	fmt.Fprintln(os.Stderr, "This means the local database and the remote have independent commit")
+	fmt.Fprintln(os.Stderr, "histories with no common merge base.")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Recovery options:")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  1. Keep remote, discard local (recommended if remote is authoritative):")
+	fmt.Fprintln(os.Stderr, "       bd bootstrap              # re-clone from remote")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  2. Keep local, overwrite remote (if local is authoritative):")
+	fmt.Fprintln(os.Stderr, "       bd dolt push --force       # force-push local history to remote")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  3. Manual recovery (re-initialize local database):")
+	fmt.Fprintln(os.Stderr, "       rm -rf .beads/dolt         # delete local Dolt database")
+	fmt.Fprintln(os.Stderr, "       bd bootstrap              # re-clone from remote")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Tip: This usually happens when multiple agents independently initialize")
+	fmt.Fprintln(os.Stderr, "databases and push to the same remote. Use 'bd bootstrap' to clone an")
+	fmt.Fprintln(os.Stderr, "existing remote instead of 'bd init' to avoid divergent histories.")
+}
+
 var doltPushCmd = &cobra.Command{
 	Use:   "push",
 	Short: "Push commits to Dolt remote",
@@ -183,6 +223,8 @@ uncommitted changes in its working set).`,
 					fmt.Fprintln(os.Stderr, "Supported remote URLs:")
 					fmt.Fprintln(os.Stderr, "  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
 					fmt.Fprintln(os.Stderr, "  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
+				} else if isDivergedHistoryErr(err) {
+					printDivergedHistoryGuidance("push --force")
 				}
 				os.Exit(1)
 			}
@@ -203,6 +245,8 @@ uncommitted changes in its working set).`,
 					fmt.Fprintln(os.Stderr, "Supported remote URLs:")
 					fmt.Fprintln(os.Stderr, "  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
 					fmt.Fprintln(os.Stderr, "  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
+				} else if isDivergedHistoryErr(err) {
+					printDivergedHistoryGuidance("push")
 				}
 				os.Exit(1)
 			}
@@ -233,6 +277,8 @@ variables for authentication.`,
 				fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
 				fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
 				fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
+			} else if isDivergedHistoryErr(err) {
+				printDivergedHistoryGuidance("pull")
 			}
 			os.Exit(1)
 		}
