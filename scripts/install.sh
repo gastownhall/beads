@@ -19,15 +19,15 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 log_info() {
-    echo -e "${BLUE}==>${NC} $1"
+    echo -e "${BLUE}==>${NC} $1" >&2
 }
 
 log_success() {
-    echo -e "${GREEN}==>${NC} $1"
+    echo -e "${GREEN}==>${NC} $1" >&2
 }
 
 log_warning() {
-    echo -e "${YELLOW}==>${NC} $1"
+    echo -e "${YELLOW}==>${NC} $1" >&2
 }
 
 log_error() {
@@ -167,11 +167,11 @@ detect_platform() {
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
             log_error "Windows detected ($(uname -s))."
-            echo ""
-            echo "  This bash installer is for macOS/Linux. On Windows, use the PowerShell installer:"
-            echo ""
-            echo "    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex"
-            echo ""
+            echo "" >&2
+            echo "  This bash installer is for macOS/Linux. On Windows, use the PowerShell installer:" >&2
+            echo "" >&2
+            echo "    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex" >&2
+            echo "" >&2
             exit 1
             ;;
     esac
@@ -181,18 +181,18 @@ detect_platform() {
     # which is not accessible from native Windows tools.
     if [ -f /proc/version ] && grep -qi 'microsoft\|wsl' /proc/version 2>/dev/null; then
         log_warning "WSL (Windows Subsystem for Linux) detected."
-        echo ""
-        echo "  This will install the Linux version of bd, usable only inside WSL."
-        echo "  If you want bd available in native Windows (PowerShell, cmd), use:"
-        echo ""
-        echo "    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex"
-        echo ""
+        echo "" >&2
+        echo "  This will install the Linux version of bd, usable only inside WSL." >&2
+        echo "  If you want bd available in native Windows (PowerShell, cmd), use:" >&2
+        echo "" >&2
+        echo "    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex" >&2
+        echo "" >&2
         # Only show interactive message and pause if running in a terminal (skip in CI/non-interactive shells)
         if [ -t 0 ]; then
-            echo "  Continuing with Linux install for WSL in 5 seconds... (Ctrl+C to cancel)"
+            echo "  Continuing with Linux install for WSL in 5 seconds... (Ctrl+C to cancel)" >&2
             sleep 5
         else
-            echo "  Continuing with Linux install (non-interactive mode)..."
+            echo "  Continuing with Linux install (non-interactive mode)..." >&2
         fi
     fi
 
