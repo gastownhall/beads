@@ -943,6 +943,48 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 	}
 }
 
+// TestInitNonInteractiveAlwaysSetsRole verifies that bd init --non-interactive
+// always leaves beads.role set, even when no --role flag is provided (GH#2950).
+// This is the safety net for the init flow.
+func TestInitNonInteractiveAlwaysSetsRole(t *testing.T) {
+	skipIfNoDolt(t)
+
+	origDBPath := dbPath
+	defer func() { dbPath = origDBPath }()
+	dbPath = ""
+
+	beads.ResetCaches()
+	git.ResetCaches()
+	defer func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	}()
+
+	initCmd.Flags().Set("contributor", "false")
+	initCmd.Flags().Set("team", "false")
+	initCmd.Flags().Set("force", "false")
+	initCmd.Flags().Set("role", "")
+
+	tmpDir := newGitRepo(t)
+	t.Chdir(tmpDir)
+
+	// Ensure no role is set before init
+	exec.Command("git", "config", "--unset", "beads.role").Run() //nolint:errcheck
+
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--non-interactive"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("init --non-interactive failed: %v", err)
+	}
+
+	role, hasRole := getBeadsRole()
+	if !hasRole {
+		t.Fatal("expected beads.role to be configured after non-interactive init (GH#2950)")
+	}
+	if role != "maintainer" {
+		t.Fatalf("beads.role = %q, want %q (default for non-interactive)", role, "maintainer")
+	}
+}
+
 // TestInitWithRedirect verifies that bd init creates the database in the redirect target,
 // not in the local .beads directory. (GH#bd-0qel)
 // TestInitRedirect groups redirect-related init tests.
