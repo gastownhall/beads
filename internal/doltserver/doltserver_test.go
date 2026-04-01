@@ -894,9 +894,9 @@ func TestIsAutoStartDisabled_Sources(t *testing.T) {
 		{"both_empty", "", "", false},                       // neither set
 		{"env_off_config_true", "off", "true", true},        // env wins
 		// config with ParseBool-expanded values
-		{"env_empty_config_f", "", "f", true},               // config "f"
-		{"env_empty_config_F", "", "F", true},               // config "F"
-		{"env_t_config_empty", "t", "", false},              // env truthy, config unset
+		{"env_empty_config_f", "", "f", true},  // config "f"
+		{"env_empty_config_F", "", "F", true},  // config "F"
+		{"env_t_config_empty", "t", "", false}, // env truthy, config unset
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
