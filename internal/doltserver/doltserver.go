@@ -114,10 +114,10 @@ func IsSharedServerMode() bool {
 // This is used by KillStaleServers and Start to avoid killing or
 // interfering with externally-managed dolt processes (GH#2641).
 func IsAutoStartDisabled() bool {
-	if v := strings.ToLower(os.Getenv("BEADS_DOLT_AUTO_START")); v == "0" || v == "false" || v == "off" {
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("BEADS_DOLT_AUTO_START"))); v == "0" || v == "false" || v == "off" {
 		return true
 	}
-	v := strings.ToLower(config.GetString("dolt.auto-start"))
+	v := strings.ToLower(strings.TrimSpace(config.GetString("dolt.auto-start")))
 	return v == "false" || v == "0" || v == "off"
 }
 
