@@ -190,6 +190,10 @@ func loadServerModeFromConfig() {
 	}
 	repairSharedServerEmbeddedMismatch(beadsDir, cfg)
 	sm := cfg.IsDoltServerMode()
+	// GH#2946: shared-server override for stale metadata.json (no-db commands)
+	if !sm && doltserver.IsSharedServerMode() {
+		sm = true
+	}
 	serverMode = sm
 	if cmdCtx != nil {
 		cmdCtx.ServerMode = sm
