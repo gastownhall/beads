@@ -73,43 +73,8 @@ builds:
       - -X main.Commit={{.Commit}}
       - -X main.Branch={{.Branch}}
 
-  - id: bd-darwin-amd64
-    main: ./cmd/bd
-    binary: bd
-    env:
-      - CGO_ENABLED=0
-    tags:
-      - gms_pure_go
-      - netgo
-    goos:
-      - darwin
-    goarch:
-      - amd64
-    ldflags:
-      - -s -w
-      - -X main.Version={{.Version}}
-      - -X main.Build={{.ShortCommit}}
-      - -X main.Commit={{.Commit}}
-      - -X main.Branch={{.Branch}}
-
-  - id: bd-darwin-arm64
-    main: ./cmd/bd
-    binary: bd
-    env:
-      - CGO_ENABLED=0
-    tags:
-      - gms_pure_go
-      - netgo
-    goos:
-      - darwin
-    goarch:
-      - arm64
-    ldflags:
-      - -s -w
-      - -X main.Version={{.Version}}
-      - -X main.Build={{.ShortCommit}}
-      - -X main.Commit={{.Commit}}
-      - -X main.Branch={{.Branch}}
+  # darwin-amd64 and darwin-arm64 are built by a dedicated macOS CI job
+  # (release.yml: goreleaser-macos) with CGO_ENABLED=1 for embedded Dolt support.
 
   - id: bd-windows-amd64
     main: ./cmd/bd
@@ -196,7 +161,10 @@ brews:
       name: homebrew-beads
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
-    skip_upload: auto
+    # Disabled: macOS archives are built by a separate CI job (goreleaser-macos),
+    # so goreleaser can't generate a complete formula. The update-homebrew-formula
+    # job in release.yml generates the formula after all archives are uploaded.
+    skip_upload: true
     homepage: "https://github.com/steveyegge/beads"
     description: "AI-supervised issue tracker for coding workflows"
     license: "MIT"
