@@ -152,10 +152,11 @@ func loadEnvironment() {
 	}
 }
 
-// loadServerModeFromConfig loads the storage mode (embedded vs server) from
-// metadata.json so that isEmbeddedMode() returns the correct value. Called
-// for commands that skip full DB init but still need to know the mode.
-func warnSharedServerEmbeddedMismatch(cfg *configfile.Config) {
+// repairSharedServerEmbeddedMismatch detects and auto-repairs the case where
+// shared-server mode is active but metadata.json still pins dolt_mode=embedded.
+// This prevents the silent fallback into embedded mode that hides server-backed
+// issue state after upgrades (GH#2949).
+func repairSharedServerEmbeddedMismatch(beadsDir string, cfg *configfile.Config) {
 	if cfg == nil {
 		return
 	}
@@ -165,11 +166,19 @@ func warnSharedServerEmbeddedMismatch(cfg *configfile.Config) {
 	if !doltserver.IsSharedServerMode() {
 		return
 	}
-	fmt.Fprintln(os.Stderr, "Warning: shared-server is enabled but metadata.json still pins dolt_mode=embedded.")
-	fmt.Fprintln(os.Stderr, "Commands may reopen the repo in embedded mode and hide the expected server-backed issue state.")
-	fmt.Fprintln(os.Stderr, "Fix: re-run 'bd init --shared-server' after upgrading, or repair metadata.json to use server mode.")
+	fmt.Fprintln(os.Stderr, "Notice: shared-server is enabled but metadata.json had dolt_mode=embedded.")
+	cfg.DoltMode = configfile.DoltModeServer
+	if err := cfg.Save(beadsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to auto-repair metadata.json: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Fix manually: set dolt_mode to \"server\" in .beads/metadata.json")
+	} else {
+		fmt.Fprintln(os.Stderr, "Auto-repaired: dolt_mode updated to \"server\" in metadata.json.")
+	}
 }
 
+// loadServerModeFromConfig loads the storage mode (embedded vs server) from
+// metadata.json so that isEmbeddedMode() returns the correct value. Called
+// for commands that skip full DB init but still need to know the mode.
 func loadServerModeFromConfig() {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -179,7 +188,7 @@ func loadServerModeFromConfig() {
 	if err != nil || cfg == nil {
 		return
 	}
-	warnSharedServerEmbeddedMismatch(cfg)
+	repairSharedServerEmbeddedMismatch(beadsDir, cfg)
 	sm := cfg.IsDoltServerMode()
 	serverMode = sm
 	if cmdCtx != nil {
