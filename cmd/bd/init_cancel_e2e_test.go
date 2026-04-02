@@ -43,10 +43,12 @@ func TestInitCancel_E2E(t *testing.T) {
 	cmd.Stdin = stdinR
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stdoutW
-	cmd.Env = append(filteredEnv("BEADS_DB", "BEADS_DIR", "HOME", "XDG_CONFIG_HOME"),
+	cmd.Env = append(filteredEnv("BEADS_DB", "BEADS_DIR", "HOME", "XDG_CONFIG_HOME", "BD_NON_INTERACTIVE", "CI"),
 		"BEADS_DB=",
 		"HOME="+tmpDir,
 		"XDG_CONFIG_HOME="+filepath.Join(tmpDir, "xdg-config"),
+		"BD_NON_INTERACTIVE=0",
+		"CI=",
 	)
 
 	if err := cmd.Start(); err != nil {
