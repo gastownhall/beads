@@ -781,6 +781,22 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// Safety net: ensure beads.role is always set when in a git repo (GH#2950).
+		// Earlier code paths may skip role-setting when BEADS_DIR is set,
+		// promptContributorMode fails, or edge-case flag combinations are used.
+		// This guarantees every init leaves a usable role-configured state.
+		if isGitRepo() {
+			if _, hasRole := getBeadsRole(); !hasRole {
+				fallbackRole := "maintainer"
+				if roleFlag != "" {
+					fallbackRole = roleFlag
+				}
+				if err := setBeadsRole(fallbackRole); err != nil && !quiet {
+					fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role=%s: %v\n", fallbackRole, err)
+				}
+			}
+		}
+
 		// Auto-commit Dolt state so bd doctor doesn't warn about uncommitted
 		// changes and users don't need a separate "bd vc commit" step.
 		if err := store.Commit(ctx, "bd init"); err != nil {

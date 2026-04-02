@@ -78,8 +78,8 @@ func checkBeadsRoleNotInGit(path string) DoctorCheck {
 		Name:     "Role Configuration",
 		Status:   StatusWarning,
 		Message:  "beads.role not configured",
-		Detail:   "Run 'bd init' to configure your role (maintainer or contributor).",
-		Fix:      "bd config set beads.role maintainer",
+		Detail:   "Role must be set for routing to work. Run one of the commands below.",
+		Fix:      "git config beads.role maintainer",
 		Category: CategoryData,
 	}
 }

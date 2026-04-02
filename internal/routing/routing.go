@@ -48,7 +48,9 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 
 	// Fallback to URL heuristic (deprecated, with warning)
 	// This keeps existing users working while encouraging migration
-	fmt.Fprintln(os.Stderr, "warning: beads.role not configured. Run 'bd init' to set.")
+	fmt.Fprintln(os.Stderr, "warning: beads.role not configured (GH#2950).")
+	fmt.Fprintln(os.Stderr, "  Fix: git config beads.role maintainer")
+	fmt.Fprintln(os.Stderr, "  Or:  git config beads.role contributor")
 	return detectFromURL(repoPath), nil
 }
 
