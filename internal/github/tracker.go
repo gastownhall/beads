@@ -22,6 +22,10 @@ func init() {
 // issueNumberPattern matches GitHub issue URLs: .../issues/42
 var issueNumberPattern = regexp.MustCompile(`/issues/(\d+)`)
 
+// ghShorthandPattern matches the "github:{digits}" shorthand produced by BuildExternalRef
+// when a full URL is unavailable.
+var ghShorthandPattern = regexp.MustCompile(`^github:([1-9]\d*)$`)
+
 // Tracker implements tracker.IssueTracker for GitHub.
 type Tracker struct {
 	client *Client
@@ -160,11 +164,21 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 	return &githubFieldMapper{config: t.config}
 }
 
+// IsExternalRef checks if a ref belongs to this GitHub tracker.
+// It recognizes both full GitHub URLs and the "github:{id}" shorthand format
+// produced by BuildExternalRef when a URL is unavailable.
 func (t *Tracker) IsExternalRef(ref string) bool {
+	if ghShorthandPattern.MatchString(ref) {
+		return true
+	}
 	return strings.Contains(ref, "github.com") && issueNumberPattern.MatchString(ref)
 }
 
+// ExtractIdentifier extracts the issue number from a GitHub URL or shorthand ref.
 func (t *Tracker) ExtractIdentifier(ref string) string {
+	if m := ghShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
+		return m[1]
+	}
 	matches := issueNumberPattern.FindStringSubmatch(ref)
 	if len(matches) < 2 {
 		return ""

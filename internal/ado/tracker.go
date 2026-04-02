@@ -29,7 +29,7 @@ var adoWorkItemPattern = regexp.MustCompile(`/_workitems/edit/(\d+)`)
 
 // adoShorthandPattern matches the "ado:{digits}" shorthand produced by BuildExternalRef
 // when a full URL cannot be constructed (e.g., missing org/project config).
-var adoShorthandPattern = regexp.MustCompile(`^ado:(\d+)$`)
+var adoShorthandPattern = regexp.MustCompile(`^ado:([1-9]\d*)$`)
 
 // Tracker implements tracker.IssueTracker for Azure DevOps. It is registered
 // under the name "ado" and supports bidirectional sync of work items between

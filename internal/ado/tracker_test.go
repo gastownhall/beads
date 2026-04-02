@@ -309,6 +309,11 @@ func TestTracker_IsExternalRef(t *testing.T) {
 			ref:  "ado:123/extra",
 			want: false,
 		},
+		{
+			name: "ado shorthand zero rejected",
+			ref:  "ado:0",
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -364,6 +369,11 @@ func TestTracker_ExtractIdentifier(t *testing.T) {
 		{
 			name: "ado shorthand non-numeric",
 			ref:  "ado:abc",
+			want: "",
+		},
+		{
+			name: "ado shorthand zero rejected",
+			ref:  "ado:0",
 			want: "",
 		},
 	}
