@@ -67,7 +67,10 @@ Before starting a release:
 
 - [ ] All tests passing (`go test ./...`)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
+- [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](docs/RELEASE-STABILITY-GATE.md)
+- [ ] **Regression tests pass** (`make test-regression`)
 - [ ] **CHANGELOG.md updated with release notes** (see format below)
+- [ ] **Breaking changes documented** with migration steps and recovery instructions
 - [ ] No uncommitted changes
 - [ ] On `main` branch and up to date with origin
 
