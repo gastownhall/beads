@@ -266,10 +266,10 @@ func runClaudeRecipe() {
 		return
 	}
 	if setupRemove {
-		setup.RemoveClaude(setupProject)
+		setup.RemoveClaude(setupGlobal)
 		return
 	}
-	setup.InstallClaude(setupProject, setupStealth)
+	setup.InstallClaude(setupGlobal, setupStealth)
 }
 
 func runGeminiRecipe() {
@@ -366,8 +366,8 @@ func init() {
 	// Per-recipe flags
 	setupCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if integration is installed")
 	setupCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove the integration")
-	setupCmd.Flags().BoolVar(&setupProject, "project", false, "Install for this project only (claude/gemini/mux)")
-	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (mux only; writes ~/.mux/AGENTS.md)")
+	setupCmd.Flags().BoolVar(&setupProject, "project", false, "Install for this project only (gemini/mux)")
+	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (claude/mux; writes to ~/.claude/settings.json or ~/.mux/AGENTS.md)")
 	setupCmd.Flags().BoolVar(&setupStealth, "stealth", false, "Use stealth mode (claude/gemini)")
 
 	rootCmd.AddCommand(setupCmd)

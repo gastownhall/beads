@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/cmd/bd/setup"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -946,6 +947,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// Auto-setup Claude hooks for project (writes to .claude/settings.json)
+		// so bd prime runs automatically. Skip in stealth mode or when agents are skipped.
+		if !stealth && !skipAgents && !isBareGitRepo() {
+			if err := setup.InstallClaudeProject(stealth); err != nil {
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
+				}
+				// Non-fatal - continue with init
+			}
+		}
+
 		// Auto-stage and commit beads files so bd doctor doesn't warn about
 		// untracked files or dirty working tree in a clean room setup.
 		// Only runs when not stealth, in a git repo, and using local storage.
@@ -957,6 +969,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if _, statErr := os.Stat(agentsFileToStage); statErr == nil {
 					agentsCmd := exec.Command("git", "add", agentsFileToStage)
 					_ = agentsCmd.Run()
+				}
+				// Also stage Claude settings if created by init
+				claudeSettingsPath := filepath.Join(".claude", "settings.json")
+				if _, statErr := os.Stat(claudeSettingsPath); statErr == nil {
+					claudeCmd := exec.Command("git", "add", claudeSettingsPath)
+					_ = claudeCmd.Run()
+				}
+				// Also stage CLAUDE.md if created by setup
+				if _, statErr := os.Stat("CLAUDE.md"); statErr == nil {
+					claudeMdCmd := exec.Command("git", "add", "CLAUDE.md")
+					_ = claudeMdCmd.Run()
 				}
 				// Also stage .gitignore if modified by EnsureProjectGitignore
 				if _, statErr := os.Stat(".gitignore"); statErr == nil {

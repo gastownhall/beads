@@ -57,6 +57,10 @@ func defaultClaudeEnv() (claudeEnv, error) {
 }
 
 func projectSettingsPath(base string) string {
+	return filepath.Join(base, ".claude", "settings.json")
+}
+
+func legacyProjectSettingsPath(base string) string {
 	return filepath.Join(base, ".claude", "settings.local.json")
 }
 
@@ -73,26 +77,36 @@ func claudeAgentsEnv(env claudeEnv) agentsEnv {
 }
 
 // InstallClaude installs Claude Code hooks
-func InstallClaude(project bool, stealth bool) {
+func InstallClaude(global bool, stealth bool) {
 	env, err := claudeEnvProvider()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		setupExit(1)
 		return
 	}
-	if err := installClaude(env, project, stealth); err != nil {
+	if err := installClaude(env, global, stealth); err != nil {
 		setupExit(1)
 	}
 }
 
-func installClaude(env claudeEnv, project bool, stealth bool) error {
+// InstallClaudeProject installs project-local Claude hooks, returning an error
+// instead of exiting. Used by bd init to integrate Claude setup automatically.
+func InstallClaudeProject(stealth bool) error {
+	env, err := claudeEnvProvider()
+	if err != nil {
+		return err
+	}
+	return installClaude(env, false, stealth)
+}
+
+func installClaude(env claudeEnv, global bool, stealth bool) error {
 	var settingsPath string
-	if project {
-		settingsPath = projectSettingsPath(env.projectDir)
-		_, _ = fmt.Fprintln(env.stdout, "Installing Claude hooks for this project...")
-	} else {
+	if global {
 		settingsPath = globalSettingsPath(env.homeDir)
 		_, _ = fmt.Fprintln(env.stdout, "Installing Claude hooks globally...")
+	} else {
+		settingsPath = projectSettingsPath(env.projectDir)
+		_, _ = fmt.Fprintln(env.stdout, "Installing Claude hooks for this project...")
 	}
 
 	if err := env.ensureDir(filepath.Dir(settingsPath), 0o755); err != nil {
@@ -145,6 +159,29 @@ func installClaude(env claudeEnv, project bool, stealth bool) error {
 		return err
 	}
 
+	// Migrate legacy hooks: remove beads hooks from settings.local.json if present
+	if !global {
+		legacyPath := legacyProjectSettingsPath(env.projectDir)
+		if hasBeadsHooks(legacyPath) {
+			if legacyData, readErr := env.readFile(legacyPath); readErr == nil {
+				var legacySettings map[string]interface{}
+				if json.Unmarshal(legacyData, &legacySettings) == nil {
+					if legacyHooks, ok := legacySettings["hooks"].(map[string]interface{}); ok {
+						removeHookCommand(legacyHooks, "SessionStart", "bd prime")
+						removeHookCommand(legacyHooks, "PreCompact", "bd prime")
+						removeHookCommand(legacyHooks, "SessionStart", "bd prime --stealth")
+						removeHookCommand(legacyHooks, "PreCompact", "bd prime --stealth")
+						if migrated, marshalErr := json.MarshalIndent(legacySettings, "", "  "); marshalErr == nil {
+							if writeErr := env.writeFile(legacyPath, migrated); writeErr == nil {
+								_, _ = fmt.Fprintf(env.stdout, "✓ Migrated hooks from %s\n", legacyPath)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Install minimal beads section in CLAUDE.md.
 	// Hooks handle the heavy lifting via bd prime; CLAUDE.md just needs a pointer.
 	if err := installAgents(claudeAgentsEnv(env), claudeAgentsIntegration); err != nil {
@@ -172,14 +209,18 @@ func CheckClaude() {
 }
 
 func checkClaude(env claudeEnv) error {
-	globalSettings := globalSettingsPath(env.homeDir)
 	projectSettings := projectSettingsPath(env.projectDir)
+	globalSettings := globalSettingsPath(env.homeDir)
+	legacySettings := legacyProjectSettingsPath(env.projectDir)
 
 	switch {
-	case hasBeadsHooks(globalSettings):
-		_, _ = fmt.Fprintf(env.stdout, "✓ Global hooks installed: %s\n", globalSettings)
 	case hasBeadsHooks(projectSettings):
 		_, _ = fmt.Fprintf(env.stdout, "✓ Project hooks installed: %s\n", projectSettings)
+	case hasBeadsHooks(globalSettings):
+		_, _ = fmt.Fprintf(env.stdout, "✓ Global hooks installed: %s\n", globalSettings)
+	case hasBeadsHooks(legacySettings):
+		_, _ = fmt.Fprintf(env.stdout, "✓ Project hooks installed (legacy): %s\n", legacySettings)
+		_, _ = fmt.Fprintf(env.stdout, "  Consider running 'bd setup claude' to migrate to .claude/settings.json\n")
 	default:
 		_, _ = fmt.Fprintln(env.stdout, "✗ No hooks installed")
 		_, _ = fmt.Fprintln(env.stdout, "  Run: bd setup claude")
@@ -190,26 +231,26 @@ func checkClaude(env claudeEnv) error {
 }
 
 // RemoveClaude removes Claude Code hooks
-func RemoveClaude(project bool) {
+func RemoveClaude(global bool) {
 	env, err := claudeEnvProvider()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		setupExit(1)
 		return
 	}
-	if err := removeClaude(env, project); err != nil {
+	if err := removeClaude(env, global); err != nil {
 		setupExit(1)
 	}
 }
 
-func removeClaude(env claudeEnv, project bool) error {
+func removeClaude(env claudeEnv, global bool) error {
 	var settingsPath string
-	if project {
-		settingsPath = projectSettingsPath(env.projectDir)
-		_, _ = fmt.Fprintln(env.stdout, "Removing Claude hooks from project...")
-	} else {
+	if global {
 		settingsPath = globalSettingsPath(env.homeDir)
 		_, _ = fmt.Fprintln(env.stdout, "Removing Claude hooks globally...")
+	} else {
+		settingsPath = projectSettingsPath(env.projectDir)
+		_, _ = fmt.Fprintln(env.stdout, "Removing Claude hooks from project...")
 	}
 
 	data, err := env.readFile(settingsPath)
@@ -240,6 +281,25 @@ func removeClaude(env claudeEnv, project bool) error {
 			if err := env.writeFile(settingsPath, data); err != nil {
 				_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
 				return err
+			}
+		}
+	}
+
+	// Also clean legacy settings.local.json when removing project hooks
+	if !global {
+		legacyPath := legacyProjectSettingsPath(env.projectDir)
+		if legacyData, readErr := env.readFile(legacyPath); readErr == nil {
+			var legacySettings map[string]interface{}
+			if json.Unmarshal(legacyData, &legacySettings) == nil {
+				if legacyHooks, ok := legacySettings["hooks"].(map[string]interface{}); ok {
+					removeHookCommand(legacyHooks, "SessionStart", "bd prime")
+					removeHookCommand(legacyHooks, "PreCompact", "bd prime")
+					removeHookCommand(legacyHooks, "SessionStart", "bd prime --stealth")
+					removeHookCommand(legacyHooks, "PreCompact", "bd prime --stealth")
+					if migrated, marshalErr := json.MarshalIndent(legacySettings, "", "  "); marshalErr == nil {
+						_ = env.writeFile(legacyPath, migrated)
+					}
+				}
 			}
 		}
 	}
