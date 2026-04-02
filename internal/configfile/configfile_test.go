@@ -544,3 +544,36 @@ func TestEnvVarOverrides(t *testing.T) {
 		}
 	})
 }
+
+// --- Upgrade regression tests (GH#2949) ---
+
+func TestIsDoltServerMode_SharedServerOverridesEmbedded(t *testing.T) {
+	// GH#2949: shared-server env var must override stale dolt_mode=embedded
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+
+	cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded}
+	if !cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = false with BEADS_DOLT_SHARED_SERVER=1 + stale embedded, want true")
+	}
+}
+
+func TestIsDoltServerMode_SharedServerTrue(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "true")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+
+	cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded}
+	if !cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = false with BEADS_DOLT_SHARED_SERVER=true + stale embedded, want true")
+	}
+}
+
+func TestIsDoltServerMode_NoEnvRespectsMetadata(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+
+	cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded}
+	if cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = true with no env overrides + embedded metadata, want false")
+	}
+}

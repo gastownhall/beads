@@ -134,7 +134,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Shared server mode still uses a Dolt sql-server, so it must select
 		// the server-backed store path during init. Without this, init can
 		// persist shared-server intent in YAML while still creating an embedded
-		// store and recording dolt_mode=embedded in metadata.json.
+		// store and recording dolt_mode=embedded in metadata.json (GH#2946).
 		if sharedServer || strings.EqualFold(os.Getenv("BEADS_DOLT_SHARED_SERVER"), "true") || os.Getenv("BEADS_DOLT_SHARED_SERVER") == "1" {
 			initServerMode = true
 		}
@@ -503,6 +503,24 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// directory — including noms/LOCK files. These are Dolt-internal files.
 		// Removing them WILL cause unrecoverable data corruption and data loss.
 		// Dolt manages these files itself; external interference is never safe.
+
+		// In shared server mode, ensure the shared server is running before
+		// opening the store. EnsureRunning won't auto-start because
+		// ResolveServerMode returns ServerModeExternal, so start it
+		// explicitly via the shared server directory (GH#2946).
+		if sharedServer || doltserver.IsSharedServerMode() {
+			if sharedDir, err := doltserver.SharedServerDir(); err == nil {
+				if state, _ := doltserver.IsRunning(sharedDir); state == nil || !state.Running {
+					if _, startErr := doltserver.Start(sharedDir); startErr != nil {
+						fmt.Fprintf(os.Stderr, "Error: failed to start shared Dolt server: %v\n", startErr)
+						os.Exit(1)
+					}
+					if !quiet {
+						fmt.Printf("  %s Shared Dolt server started\n", ui.RenderPass("✓"))
+					}
+				}
+			}
+		}
 
 		store, err := newDoltStore(ctx, doltCfg)
 		if err != nil {

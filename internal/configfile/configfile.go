@@ -225,13 +225,27 @@ const (
 
 // IsDoltServerMode returns true if Dolt should connect via sql-server.
 // Server mode is the standard connection method.
-// Checks the BEADS_DOLT_SERVER_MODE env var first, then falls back to the
-// dolt_mode field in metadata.json. Only applies when backend is "dolt".
+//
+// Checks (in priority order):
+//  1. BEADS_DOLT_SERVER_MODE=1 env var
+//  2. BEADS_DOLT_SHARED_SERVER env var (shared-server implies server mode)
+//  3. dolt_mode field in metadata.json
+//
+// Runtime env vars take precedence over persisted metadata.json to prevent
+// stale dolt_mode=embedded from overriding active server intent (GH#2949).
 func (c *Config) IsDoltServerMode() bool {
-	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" && c.GetBackend() == BackendDolt {
+	if c.GetBackend() != BackendDolt {
+		return false
+	}
+	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
 		return true
 	}
-	return c.GetBackend() == BackendDolt && strings.ToLower(c.DoltMode) == DoltModeServer
+	// Shared-server mode implies server-backed storage. Check env var
+	// directly to avoid circular import with doltserver package.
+	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
+		return true
+	}
+	return strings.ToLower(c.DoltMode) == DoltModeServer
 }
 
 // GetDoltMode returns the Dolt connection mode, defaulting to server.

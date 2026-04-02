@@ -45,15 +45,31 @@ func (m ServerMode) String() string {
 // This is the single source of truth for how the server lifecycle is managed.
 //
 // Decision logic (checked in order):
-//  1. metadata.json dolt_mode == "embedded"       -> ServerModeEmbedded
-//  2. BEADS_DOLT_SHARED_SERVER env var is set      -> ServerModeExternal
-//  3. metadata.json has explicit dolt_server_port  -> ServerModeExternal
-//  4. BEADS_DOLT_SERVER_MODE=1 env var             -> ServerModeExternal
-//  5. default                                      -> ServerModeOwned
+//  1. BEADS_DOLT_SERVER_MODE=1 env var             -> ServerModeExternal
+//  2. BEADS_DOLT_SHARED_SERVER env var is set       -> ServerModeExternal
+//  3. metadata.json dolt_mode == "embedded"         -> ServerModeEmbedded
+//  4. metadata.json has explicit dolt_server_port   -> ServerModeExternal
+//  5. default                                       -> ServerModeOwned
+//
+// Runtime env vars (1, 2) take precedence over persisted metadata.json
+// to prevent stale dolt_mode=embedded from silently overriding an active
+// shared-server or server-mode configuration (GH#2949).
 //
 // The function loads metadata.json only if the file exists, to avoid
 // triggering the legacy config.json -> metadata.json migration side effect.
 func ResolveServerMode(beadsDir string) ServerMode {
+	// 1. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
+	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
+		return ServerModeExternal
+	}
+
+	// 2. Shared server mode (env var or config.yaml) -> external.
+	// Must be checked before metadata.json so that a stale
+	// dolt_mode=embedded cannot override active shared-server intent.
+	if IsSharedServerMode() {
+		return ServerModeExternal
+	}
+
 	var fileCfg *configfile.Config
 
 	// Only load config if metadata.json exists (avoids legacy migration side effect)
@@ -64,24 +80,14 @@ func ResolveServerMode(beadsDir string) ServerMode {
 		}
 	}
 
-	// 1. Explicit embedded mode in metadata.json
+	// 3. Explicit embedded mode in metadata.json
 	if fileCfg != nil && strings.ToLower(fileCfg.DoltMode) == configfile.DoltModeEmbedded &&
 		fileCfg.DoltMode != "" { // empty defaults to embedded in GetDoltMode, but we treat empty as "unset"
 		return ServerModeEmbedded
 	}
 
-	// 2. Shared server mode (env var or config.yaml) -> external
-	if IsSharedServerMode() {
-		return ServerModeExternal
-	}
-
-	// 3. Explicit server port in metadata.json -> external
+	// 4. Explicit server port in metadata.json -> external
 	if fileCfg != nil && fileCfg.DoltServerPort > 0 {
-		return ServerModeExternal
-	}
-
-	// 4. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
-	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
 		return ServerModeExternal
 	}
 
