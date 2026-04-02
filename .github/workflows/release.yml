@@ -122,7 +122,7 @@ jobs:
           git config user.name "CI" && git config user.email "ci@test"
           git commit --allow-empty -m "init"
           "$bd" init
-          "$bd" create "smoke test" --type issue
+          "$bd" create "smoke test" --type task
           "$bd" list | grep -q "smoke test"
           # Verify embedded mode (no server process)
           if pgrep -f "dolt sql-server" >/dev/null 2>&1; then
@@ -187,11 +187,17 @@ jobs:
           base_url="https://github.com/gastownhall/beads/releases/download/${tag}"
 
           # Download checksums (same repo, no --repo needed)
-          gh release download "${tag}" --pattern checksums.txt --dir /tmp || true
+          gh release download "${tag}" --pattern checksums.txt --dir /tmp
           checksums_file="/tmp/checksums.txt"
 
           get_sha256() {
-            grep "$1" "$checksums_file" | awk '{print $1}'
+            local sha
+            sha=$(grep "$1" "$checksums_file" | awk '{print $1}')
+            if [ -z "$sha" ]; then
+              echo "ERROR: missing checksum for $1" >&2
+              exit 1
+            fi
+            echo "$sha"
           }
 
           darwin_arm64_sha=$(get_sha256 "beads_${version}_darwin_arm64.tar.gz")
