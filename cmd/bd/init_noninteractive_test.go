@@ -73,6 +73,20 @@ func TestIsNonInteractiveInit(t *testing.T) {
 			// In test environment, stdin is piped (not a TTY), so non-interactive
 			want: true,
 		},
+		{
+			name:      "BD_NON_INTERACTIVE=0 forces interactive",
+			flagValue: false,
+			envCI:     "true",
+			envBDNI:   "0",
+			want:      false,
+		},
+		{
+			name:      "BD_NON_INTERACTIVE=false forces interactive",
+			flagValue: false,
+			envCI:     "true",
+			envBDNI:   "false",
+			want:      false,
+		},
 	}
 
 	for _, tt := range tests {

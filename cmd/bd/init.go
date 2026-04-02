@@ -1370,12 +1370,19 @@ func checkExistingBeadsData(prefix string) error {
 
 // isNonInteractiveInit returns true if init should run without interactive prompts.
 // Precedence: explicit flag > BD_NON_INTERACTIVE env > CI env > terminal detection.
+// Setting BD_NON_INTERACTIVE=0 or BD_NON_INTERACTIVE=false explicitly forces
+// interactive mode, overriding CI detection and terminal checks.
 func isNonInteractiveInit(flagValue bool) bool {
 	if flagValue {
 		return true
 	}
-	if v := os.Getenv("BD_NON_INTERACTIVE"); v == "1" || v == "true" {
-		return true
+	if v := os.Getenv("BD_NON_INTERACTIVE"); v != "" {
+		if v == "1" || v == "true" {
+			return true
+		}
+		// Explicit BD_NON_INTERACTIVE=0/false forces interactive mode,
+		// overriding CI and terminal detection.
+		return false
 	}
 	if v := os.Getenv("CI"); v == "true" || v == "1" {
 		return true
