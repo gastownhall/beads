@@ -10,16 +10,16 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdDiff runs "bd diff" with the given args and returns raw stdout.
+// Retries on flock contention.
 func bdDiff(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"diff"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd diff %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -41,13 +41,11 @@ func bdDiffFail(t *testing.T, bd, dir string, args ...string) string {
 }
 
 // bdDiffJSON runs "bd diff --json" and parses the result as a slice.
+// Retries on flock contention.
 func bdDiffJSON(t *testing.T, bd, dir string, args ...string) []map[string]interface{} {
 	t.Helper()
 	fullArgs := append([]string{"diff", "--json"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd diff --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -65,13 +63,20 @@ func bdDiffJSON(t *testing.T, bd, dir string, args ...string) []map[string]inter
 }
 
 // getCommitHash returns the current HEAD commit hash via the store.
+// The store is closed immediately to release the flock, allowing subsequent
+// bd subprocess commands to acquire it.
 func getCommitHash(t *testing.T, beadsDir, database string) string {
 	t.Helper()
-	s := openStore(t, beadsDir, database)
+	s, err := embeddeddolt.New(t.Context(), beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("openStore for getCommitHash: %v", err)
+	}
 	hash, err := s.GetCurrentCommit(t.Context())
 	if err != nil {
+		s.Close()
 		t.Fatalf("GetCurrentCommit: %v", err)
 	}
+	s.Close()
 	return hash
 }
 

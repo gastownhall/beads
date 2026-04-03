@@ -20,13 +20,11 @@ import (
 // ===== Close-specific test helpers =====
 
 // bdClose runs "bd close" with the given args and returns stdout.
+// Retries on flock contention.
 func bdClose(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"close"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd close %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -48,13 +46,11 @@ func bdCloseFail(t *testing.T, bd, dir string, args ...string) string {
 }
 
 // bdDepAdd runs "bd dep add" with the given args.
+// Retries on flock contention.
 func bdDepAdd(t *testing.T, bd, dir string, args ...string) {
 	t.Helper()
 	fullArgs := append([]string{"dep", "add"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd dep add %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}

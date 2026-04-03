@@ -13,13 +13,11 @@ import (
 )
 
 // bdShowRaw runs "bd show" with the given args and returns raw stdout.
+// Retries on flock contention.
 func bdShowRaw(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"show"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd show %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -27,12 +25,10 @@ func bdShowRaw(t *testing.T, bd, dir string, args ...string) string {
 }
 
 // bdShowDetails runs "bd show --json" and parses the IssueDetails.
+// Retries on flock contention.
 func bdShowDetails(t *testing.T, bd, dir, id string) map[string]interface{} {
 	t.Helper()
-	cmd := exec.Command(bd, "show", id, "--json")
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, "show", id, "--json")
 	if err != nil {
 		t.Fatalf("bd show %s --json failed: %v\n%s", id, err, out)
 	}
@@ -169,6 +165,7 @@ func TestEmbeddedShow(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Commented show", "--type", "task")
 		store := openStore(t, beadsDir, "ts")
 		_, _ = store.AddIssueComment(t.Context(), issue.ID, "tester", "A comment")
+		store.Close() // release flock before subprocess
 
 		m := bdShowDetails(t, bd, dir, issue.ID)
 		comments, _ := m["comments"].([]interface{})
@@ -257,6 +254,7 @@ func TestEmbeddedShow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetCurrentCommit: %v", err)
 		}
+		store.Close() // release flock before subprocess
 
 		// Update the issue
 		bdUpdate(t, bd, dir, issue.ID, "--title", "AsOf updated")

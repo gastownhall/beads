@@ -18,14 +18,11 @@ import (
 )
 
 // bdCreate runs "bd create" in the given dir with --json and extra args.
-// Returns the parsed issue JSON. Fatals on failure.
+// Returns the parsed issue JSON. Retries on flock contention, fatals on other failures.
 func bdCreate(t *testing.T, bd, dir string, args ...string) *types.Issue {
 	t.Helper()
 	fullArgs := append([]string{"create", "--json"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd create %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -58,13 +55,11 @@ func parseIssueJSON(t *testing.T, out []byte) *types.Issue {
 }
 
 // bdCreateSilent runs "bd create" with --silent and returns the issue ID.
+// Retries on flock contention.
 func bdCreateSilent(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"create", "--silent"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd create --silent %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}

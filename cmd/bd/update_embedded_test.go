@@ -20,13 +20,11 @@ import (
 // ===== Shared test helpers (used by both update and close tests) =====
 
 // bdUpdate runs "bd update" with the given args and returns stdout.
+// Retries on flock contention.
 func bdUpdate(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"update"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd update %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
