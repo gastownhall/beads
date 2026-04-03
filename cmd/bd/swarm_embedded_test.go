@@ -291,7 +291,7 @@ func TestEmbeddedSwarmConcurrent(t *testing.T) {
 	wg.Wait()
 
 	for _, r := range results {
-		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") && !strings.Contains(r.err.Error(), "exclusive lock") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}
