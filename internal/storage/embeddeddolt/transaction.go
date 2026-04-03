@@ -126,7 +126,23 @@ func (t *embeddedTransaction) GetLabels(ctx context.Context, issueID string) ([]
 
 func (t *embeddedTransaction) SetConfig(ctx context.Context, key, value string) error {
 	t.dirty.MarkDirty("config")
-	return issueops.SetConfigInTx(ctx, t.tx, key, value)
+	if err := issueops.SetConfigInTx(ctx, t.tx, key, value); err != nil {
+		return err
+	}
+	// Sync normalized tables when config keys change
+	switch key {
+	case "status.custom":
+		t.dirty.MarkDirty("custom_statuses")
+		if err := issueops.SyncCustomStatusesTable(ctx, t.tx, value); err != nil {
+			return fmt.Errorf("syncing custom_statuses table: %w", err)
+		}
+	case "types.custom":
+		t.dirty.MarkDirty("custom_types")
+		if err := issueops.SyncCustomTypesTable(ctx, t.tx, value); err != nil {
+			return fmt.Errorf("syncing custom_types table: %w", err)
+		}
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) GetConfig(ctx context.Context, key string) (string, error) {

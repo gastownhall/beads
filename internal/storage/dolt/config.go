@@ -21,11 +21,11 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 		// Sync normalized tables when config keys change
 		switch key {
 		case "status.custom":
-			if err := syncCustomStatusesTable(ctx, tx, value); err != nil {
+			if err := issueops.SyncCustomStatusesTable(ctx, tx, value); err != nil {
 				return fmt.Errorf("syncing custom_statuses table: %w", err)
 			}
 		case "types.custom":
-			if err := syncCustomTypesTable(ctx, tx, value); err != nil {
+			if err := issueops.SyncCustomTypesTable(ctx, tx, value); err != nil {
 				return fmt.Errorf("syncing custom_types table: %w", err)
 			}
 		}
@@ -57,44 +57,6 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 		}
 	}
 
-	return nil
-}
-
-// syncCustomStatusesTable replaces all rows in custom_statuses with parsed config value.
-func syncCustomStatusesTable(ctx context.Context, tx *sql.Tx, value string) error {
-	if _, err := tx.ExecContext(ctx, "DELETE FROM custom_statuses"); err != nil {
-		return err
-	}
-	if value == "" {
-		return nil
-	}
-	parsed, err := types.ParseCustomStatusConfig(value)
-	if err != nil {
-		return fmt.Errorf("invalid status.custom value: %w", err)
-	}
-	for _, s := range parsed {
-		if _, err := tx.ExecContext(ctx, "INSERT INTO custom_statuses (name, category) VALUES (?, ?)",
-			s.Name, string(s.Category)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// syncCustomTypesTable replaces all rows in custom_types with parsed config value.
-func syncCustomTypesTable(ctx context.Context, tx *sql.Tx, value string) error {
-	if _, err := tx.ExecContext(ctx, "DELETE FROM custom_types"); err != nil {
-		return err
-	}
-	if value == "" {
-		return nil
-	}
-	names := issueops.ParseCommaSeparatedList(value)
-	for _, name := range names {
-		if _, err := tx.ExecContext(ctx, "INSERT INTO custom_types (name) VALUES (?)", name); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 

@@ -702,16 +702,11 @@ func (s *EmbeddedDoltStore) DeleteConfig(ctx context.Context, key string) error 
 }
 
 func (s *EmbeddedDoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {
-	var result []string
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetCustomStatusesTx(ctx, tx)
-		return err
-	})
-	if err != nil || len(result) == 0 {
-		return config.GetCustomStatusesFromYAML(), nil
+	detailed, err := s.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return result, nil
+	return types.CustomStatusNames(detailed), nil
 }
 
 func (s *EmbeddedDoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error) {
