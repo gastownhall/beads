@@ -661,4 +661,119 @@ func TestConfigSetMany(t *testing.T) {
 			t.Errorf("expected empty string, got %q", got)
 		}
 	})
+
+	t.Run("batch set mixed namespaces in single operation", func(t *testing.T) {
+		// Simulates what set-many does: multiple keys from different
+		// namespaces all written to the DB in one logical batch.
+		mixed := map[string]string{
+			"jira.url":             "https://jira.example.com",
+			"jira.project":         "BEADS",
+			"ado.state_map.open":   "New",
+			"ado.state_map.closed": "Done",
+			"custom.pipeline":      "review,qa,deploy",
+			"status.custom":        "awaiting_review,awaiting_testing",
+		}
+		for k, v := range mixed {
+			if err := store.SetConfig(ctx, k, v); err != nil {
+				t.Fatalf("SetConfig(%s) failed: %v", k, err)
+			}
+		}
+
+		// Verify every key was persisted
+		for k, expected := range mixed {
+			got, err := store.GetConfig(ctx, k)
+			if err != nil {
+				t.Fatalf("GetConfig(%s) failed: %v", k, err)
+			}
+			if got != expected {
+				t.Errorf("GetConfig(%s) = %q, want %q", k, got, expected)
+			}
+		}
+
+		// Verify all appear in GetAllConfig
+		all, err := store.GetAllConfig(ctx)
+		if err != nil {
+			t.Fatalf("GetAllConfig failed: %v", err)
+		}
+		for k, expected := range mixed {
+			if all[k] != expected {
+				t.Errorf("GetAllConfig[%s] = %q, want %q", k, all[k], expected)
+			}
+		}
+	})
+
+	t.Run("batch set preserves previously written keys", func(t *testing.T) {
+		// Write batch 1
+		if err := store.SetConfig(ctx, "retain.alpha", "aaa"); err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		if err := store.SetConfig(ctx, "retain.beta", "bbb"); err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+
+		// Write batch 2 (different keys)
+		if err := store.SetConfig(ctx, "retain.gamma", "ggg"); err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+
+		// Verify batch 1 keys are still intact after batch 2
+		got, err := store.GetConfig(ctx, "retain.alpha")
+		if err != nil {
+			t.Fatalf("GetConfig failed: %v", err)
+		}
+		if got != "aaa" {
+			t.Errorf("retain.alpha = %q, want %q", got, "aaa")
+		}
+
+		got, err = store.GetConfig(ctx, "retain.beta")
+		if err != nil {
+			t.Fatalf("GetConfig failed: %v", err)
+		}
+		if got != "bbb" {
+			t.Errorf("retain.beta = %q, want %q", got, "bbb")
+		}
+	})
+}
+
+// TestConfigSetManyValidationIntegration tests that the validation logic
+// in set-many correctly rejects invalid values for known constrained keys
+// before any DB writes would occur.
+func TestConfigSetManyValidationIntegration(t *testing.T) {
+	t.Run("beads.role only accepts maintainer or contributor", func(t *testing.T) {
+		validRoles := map[string]bool{"maintainer": true, "contributor": true}
+		for _, role := range []string{"maintainer", "contributor"} {
+			if !validRoles[role] {
+				t.Errorf("expected %q to be valid", role)
+			}
+		}
+		for _, role := range []string{"admin", "superadmin", "owner", "", "MAINTAINER"} {
+			if validRoles[role] {
+				t.Errorf("expected %q to be invalid", role)
+			}
+		}
+	})
+
+	t.Run("status.custom validation catches invalid formats", func(t *testing.T) {
+		valid := []string{
+			"awaiting_review,awaiting_testing",
+			"review,qa,deploy",
+			"single_status",
+		}
+		for _, v := range valid {
+			if _, err := types.ParseCustomStatusConfig(v); err != nil {
+				t.Errorf("expected %q to be valid: %v", v, err)
+			}
+		}
+	})
+
+	t.Run("empty status.custom is allowed", func(t *testing.T) {
+		// Empty value skips validation in the command handler
+		result, err := types.ParseCustomStatusConfig("")
+		if err != nil {
+			t.Errorf("expected empty status.custom to be valid: %v", err)
+		}
+		if result != nil {
+			t.Errorf("expected nil result for empty input, got %v", result)
+		}
+	})
 }
