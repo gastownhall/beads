@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
@@ -827,12 +828,15 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	if sourceStore != nil {
 		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
 		if err == nil && sourcePrefix != "" {
+			// Sanitize prefix for SQL database name (same as bd init).
+			dbName := strings.ReplaceAll(sourcePrefix, "-", "_")
+
 			// Open target store temporarily to set prefix.
 			// Use newDoltStore with explicit config since the target .beads
 			// directory was just created and has no metadata.json yet.
 			tempStore, err := newDoltStore(ctx, &dolt.Config{
 				BeadsDir:        beadsDir,
-				Database:        sourcePrefix,
+				Database:        dbName,
 				CreateIfMissing: true,
 			})
 			if err != nil {
@@ -844,6 +848,17 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 			}
 			if err := tempStore.Close(); err != nil {
 				return fmt.Errorf("failed to close target store: %w", err)
+			}
+
+			// Write metadata.json so newDoltStoreFromConfig can find the
+			// correct database name on subsequent opens (GH#2988).
+			cfg := configfile.DefaultConfig()
+			cfg.Backend = configfile.BackendDolt
+			cfg.DoltDatabase = dbName
+			cfg.DoltMode = configfile.DoltModeEmbedded
+			cfg.ProjectID = configfile.GenerateProjectID()
+			if err := cfg.Save(beadsDir); err != nil {
+				return fmt.Errorf("failed to write metadata.json: %w", err)
 			}
 		}
 	}

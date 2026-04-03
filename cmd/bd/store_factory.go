@@ -65,7 +65,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
-	database := ""
+	database := configfile.DefaultDoltDatabase
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
 	}
