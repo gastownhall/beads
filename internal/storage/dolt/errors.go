@@ -108,9 +108,9 @@ func databaseNotFoundError(cfg *Config) error {
 	if HasBackupFiles(cfg.BeadsDir) {
 		b.WriteString("Backup files found in .beads/backup/ — this may be a branch-switch\n")
 		b.WriteString("or fresh-clone scenario where the Dolt database doesn't exist yet.\n\n")
-		b.WriteString("To restore your issues:\n")
-		b.WriteString("  bd init --prefix <prefix>    # Initialize the database\n")
-		b.WriteString("  bd backup restore            # Restore issues from backup\n\n")
+		b.WriteString("Use the safe entry point for existing-project recovery:\n")
+		b.WriteString("  bd bootstrap                 # Auto-detect remote/backup/JSONL recovery or initialization\n")
+		b.WriteString("  bd backup restore            # If backup recovery still needs manual restore\n\n")
 		b.WriteString("If this is NOT a branch switch, see common causes below.\n\n")
 	}
 
@@ -124,9 +124,12 @@ func databaseNotFoundError(cfg *Config) error {
 	b.WriteString("  bd dolt status             # Show which data directory the server is using")
 
 	if cfg.SyncGitRemote != "" {
-		fmt.Fprintf(&b, "\n\nTip: sync.git-remote is configured (%s).\nRun bd init to bootstrap from the remote.", cfg.SyncGitRemote)
+		fmt.Fprintf(&b, "\n\nTip: sync.git-remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", cfg.SyncGitRemote)
 	} else {
-		b.WriteString("\n\nTip: To bootstrap from an existing Dolt remote, set sync.git-remote\nin .beads/config.yaml and re-run bd init.")
+		b.WriteString("\n\nTip: If this is an existing project, fresh clone, or shared-server recovery, run bd bootstrap first.\n")
+		b.WriteString("If bootstrap cannot find the expected remote automatically, set sync.git-remote\nin .beads/config.yaml and re-run bd bootstrap.\n")
+		b.WriteString("Use bd bootstrap --dry-run if you need to confirm the plan before it initializes anything.\n")
+		b.WriteString("Use bd init only when creating a brand-new project with no existing .beads data.")
 	}
 
 	return errors.New(b.String())

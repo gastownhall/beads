@@ -122,12 +122,15 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 			t.Errorf("expected server address in error, got:\n%s", msg)
 		}
 
-		// Must contain existing suggestions
-		if !strings.Contains(msg, "bd init") {
-			t.Errorf("expected bd init suggestion, got:\n%s", msg)
+		// Must contain recovery suggestions
+		if !strings.Contains(msg, "bd bootstrap") {
+			t.Errorf("expected bd bootstrap suggestion, got:\n%s", msg)
 		}
 		if !strings.Contains(msg, "bd doctor") {
 			t.Errorf("expected bd doctor suggestion, got:\n%s", msg)
+		}
+		if strings.Contains(msg, "re-run bd init") {
+			t.Errorf("did not expect init-first recovery guidance, got:\n%s", msg)
 		}
 	})
 
@@ -145,8 +148,8 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 		if !strings.Contains(msg, "https://doltremoteapi.dolthub.com/myorg/beads") {
 			t.Errorf("expected remote URL in hint, got:\n%s", msg)
 		}
-		if !strings.Contains(msg, "bd init") {
-			t.Errorf("expected bd init suggestion, got:\n%s", msg)
+		if !strings.Contains(msg, "bd bootstrap") {
+			t.Errorf("expected bd bootstrap suggestion, got:\n%s", msg)
 		}
 	})
 
@@ -171,6 +174,9 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 		}
 		if !strings.Contains(msg, "bd backup restore") {
 			t.Errorf("expected bd backup restore suggestion, got:\n%s", msg)
+		}
+		if !strings.Contains(msg, "bd bootstrap") {
+			t.Errorf("expected bd bootstrap suggestion, got:\n%s", msg)
 		}
 		// Should still mention branch switching as a common cause
 		if !strings.Contains(msg, "branch") {

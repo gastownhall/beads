@@ -92,16 +92,18 @@ func initGuardServerMessage(dbName, host string, port int, prefix, syncGitRemote
 	b.WriteString("  bd doctor          # check project health\n")
 	b.WriteString("  bd dolt status     # inspect Dolt server state\n")
 
+	b.WriteString("\nIf this is an existing project, fresh clone, or shared-server recovery, run:\n")
+	b.WriteString("  bd bootstrap\n")
+	b.WriteString("This is the safe entry point for existing-project recovery and may recover or initialize depending on detected state.\n")
+
 	if syncGitRemote != "" {
 		fmt.Fprintf(&b, "\nTip: sync.git-remote is configured (%s).\n", syncGitRemote)
-		b.WriteString("If this is a fresh clone, run:\n")
-		fmt.Fprintf(&b, "  bd init --prefix %s\n", prefix)
-		b.WriteString("to bootstrap from the remote (existing data is preserved).\n")
+		b.WriteString("Run bd bootstrap to recover from the configured remote, or use --dry-run to inspect the plan first.\n")
 	} else {
 		b.WriteString("\nIf this is a brand-new project, create the database with:\n")
 		fmt.Fprintf(&b, "  bd init --prefix %s\n", prefix)
-		b.WriteString("\nTo bootstrap from an existing Dolt remote, set sync.git-remote\n")
-		b.WriteString("in .beads/config.yaml first, then run bd init.\n")
+		b.WriteString("\nIf bd bootstrap cannot find the expected remote automatically, set sync.git-remote\n")
+		b.WriteString("in .beads/config.yaml and re-run bd bootstrap.\n")
 	}
 
 	b.WriteString("\n⚠  Caution: bd init --force destroys ALL existing issues. Do not\n")

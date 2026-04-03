@@ -30,14 +30,11 @@ func handleFreshCloneError(err error) bool {
 	}
 
 	fmt.Fprintf(os.Stderr, "Error: Database not initialized\n\n")
-	fmt.Fprintf(os.Stderr, "This appears to be a fresh clone or the database needs initialization.\n")
-	if !isEmbeddedMode() {
-		fmt.Fprintf(os.Stderr, "\nTo diagnose, run:\n")
-		fmt.Fprintf(os.Stderr, "  bd doctor\n\n")
-	} else {
-		fmt.Fprintln(os.Stderr)
-	}
-	fmt.Fprintf(os.Stderr, "To initialize a new database: bd init --prefix <your-prefix>\n")
+	fmt.Fprintf(os.Stderr, "This appears to be a fresh clone or an existing project whose database needs recovery.\n")
+	fmt.Fprintf(os.Stderr, "\nTo diagnose, run:\n")
+	fmt.Fprintf(os.Stderr, "  bd doctor\n\n")
+	fmt.Fprintf(os.Stderr, "If this is an existing project or fresh clone, run: bd bootstrap\n")
+	fmt.Fprintf(os.Stderr, "To create a brand-new database from scratch: bd init --prefix <your-prefix>\n")
 	return true
 }
 

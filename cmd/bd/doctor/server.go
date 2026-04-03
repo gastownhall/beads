@@ -433,7 +433,7 @@ func checkDatabaseExists(db *sql.DB, database string) DoctorCheck {
 			Name:     "Database Exists",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("Database '%s' not found", database),
-			Fix:      fmt.Sprintf("Run 'bd init' to create the '%s' database", database),
+			Fix:      fmt.Sprintf("Run 'bd bootstrap' to recover the existing '%s' database safely. Use 'bd init' only for brand-new projects.", database),
 			Category: CategoryFederation,
 		}
 	}

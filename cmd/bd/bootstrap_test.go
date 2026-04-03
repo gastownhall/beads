@@ -3,64 +3,32 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
-func TestDetectBootstrapAction_NoneWhenDatabaseExists_Embedded(t *testing.T) {
+func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create embeddeddolt directory with content so it's detected as existing
+	// Create embeddeddolt directory with content so it's detected as existing.
+	// Default config uses embedded mode, so the detection logic looks for
+	// beadsDir/embeddeddolt (not beadsDir/dolt).
 	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
 	if err := os.MkdirAll(filepath.Join(embeddedDir, "beads"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run from tmpDir so auto-detect doesn't find parent git repo
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
-
-	// Embedded mode is the default — no need to set serverMode
-	cfg := configfile.DefaultConfig()
-	plan := detectBootstrapAction(beadsDir, cfg)
-
-	if plan.Action != "none" {
-		t.Errorf("action = %q, want %q", plan.Action, "none")
-	}
-	if !plan.HasExisting {
-		t.Error("HasExisting = false, want true")
-	}
-}
-
-func TestDetectBootstrapAction_NoneWhenDatabaseExists_Server(t *testing.T) {
-	// Switch to server mode for this test
-	oldServerMode := serverMode
-	serverMode = true
-	defer func() { serverMode = oldServerMode }()
-
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create dolt directory with content so it's detected as existing
-	doltDir := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(filepath.Join(doltDir, "beads"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
@@ -86,6 +54,10 @@ func TestDetectBootstrapAction_NoneWhenDatabaseExists_Server(t *testing.T) {
 }
 
 func TestDetectBootstrapAction_RestoreWhenBackupExists(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	backupDir := filepath.Join(beadsDir, "backup")
@@ -118,6 +90,10 @@ func TestDetectBootstrapAction_RestoreWhenBackupExists(t *testing.T) {
 }
 
 func TestDetectBootstrapAction_InitWhenNothingExists(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
@@ -142,7 +118,129 @@ func TestDetectBootstrapAction_InitWhenNothingExists(t *testing.T) {
 	}
 }
 
+func TestDetectBootstrapAction_ServerModeMissingConfiguredDBDoesNotReturnNone(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	sharedDir := filepath.Join(tmpDir, "shared-dolt")
+	if err := os.MkdirAll(filepath.Join(sharedDir, "hq"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedDir, "dolt-server.port"), []byte("3311"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = "project_missing"
+	cfg.DoltDataDir = sharedDir
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_DATA_DIR", sharedDir)
+
+	origCheck := checkBootstrapServerDB
+	checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		if probeCfg.database != "project_missing" {
+			t.Fatalf("unexpected dbName: %s", probeCfg.database)
+		}
+		if probeCfg.port != 3311 {
+			t.Fatalf("expected resolved server port 3311, got %d", probeCfg.port)
+		}
+		return bootstrapServerDBCheck{Exists: false, Reachable: true}
+	}
+	defer func() { checkBootstrapServerDB = origCheck }()
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+	if plan.Action == "none" {
+		t.Fatalf("expected bootstrap to continue recovery when configured server DB is missing, got plan %#v", plan)
+	}
+	if plan.Action != "init" {
+		t.Fatalf("expected init fallback when no remote/backup/jsonl exists, got %q", plan.Action)
+	}
+}
+
+func TestDetectBootstrapAction_ServerModeProbeErrorStopsWithReason(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	sharedDir := filepath.Join(tmpDir, "shared-dolt")
+	if err := os.MkdirAll(filepath.Join(sharedDir, "hq"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = "project_missing"
+	cfg.DoltDataDir = sharedDir
+	t.Setenv("BEADS_DOLT_DATA_DIR", sharedDir)
+
+	origCheck := checkBootstrapServerDB
+	checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		return bootstrapServerDBCheck{Reachable: true, Err: fmt.Errorf("permission denied")}
+	}
+	defer func() { checkBootstrapServerDB = origCheck }()
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+	if plan.Action != "none" {
+		t.Fatalf("expected bootstrap to stop when server probe errors, got %#v", plan)
+	}
+	if !strings.Contains(plan.Reason, "permission denied") {
+		t.Fatalf("expected probe error in plan reason, got %#v", plan)
+	}
+}
+
+func TestCheckBootstrapServerDB_HonorsTLSFlagInDSN(t *testing.T) {
+	probeCfg := bootstrapServerProbeConfig{
+		host:     "127.0.0.1",
+		port:     1,
+		user:     "root",
+		database: "beads",
+		tls:      true,
+	}
+
+	result := checkBootstrapServerDB(probeCfg)
+	if result.Reachable {
+		t.Fatal("expected unreachable test connection")
+	}
+	if result.Err == nil {
+		t.Fatal("expected connection error for unreachable test host")
+	}
+}
+
 func TestDetectBootstrapAction_SyncWhenOriginHasDoltRef(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	// Create a bare repo with a refs/dolt/data ref
 	bareDir := filepath.Join(t.TempDir(), "bare.git")
 	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
@@ -189,6 +287,10 @@ func TestDetectBootstrapAction_SyncWhenOriginHasDoltRef(t *testing.T) {
 }
 
 func TestDetectBootstrapAction_InitWhenOriginHasNoDoltRef(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	// Create a bare repo without refs/dolt/data
 	bareDir := filepath.Join(t.TempDir(), "bare.git")
 	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)

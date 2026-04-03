@@ -451,11 +451,11 @@ func TestCheckFreshClone(t *testing.T) {
 				if check.Fix == "" {
 					t.Error("Expected fix message for warning, got empty string")
 				}
-				if tt.expectPrefix != "" && !strings.Contains(check.Fix, tt.expectPrefix) {
-					t.Errorf("Expected fix to contain prefix %q, got: %s", tt.expectPrefix, check.Fix)
+				if tt.expectPrefix != "" && strings.Contains(check.Fix, "bd init") {
+					t.Errorf("did not expect legacy fresh-clone recovery to keep init-based guidance, got: %s", check.Fix)
 				}
-				if !strings.Contains(check.Fix, "bd init") {
-					t.Error("Expected fix to mention 'bd init'")
+				if !strings.Contains(check.Fix, "bd bootstrap") {
+					t.Error("Expected fix to mention 'bd bootstrap'")
 				}
 			}
 		})

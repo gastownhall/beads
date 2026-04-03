@@ -28,10 +28,9 @@ func TestInitGuardServerMessage(t *testing.T) {
 				`"acf_beads"`,
 				"127.0.0.1:3309",
 				"not found on server",
-				"server is running but this database hasn't been created yet",
 				"bd doctor",
 				"bd dolt status",
-				"bd init --prefix acf",
+				"bd bootstrap",
 				"set sync.git-remote",
 				".beads/config.yaml",
 				"Aborting",
@@ -53,13 +52,11 @@ func TestInitGuardServerMessage(t *testing.T) {
 				`"beads_kc"`,
 				"192.168.1.50:3307",
 				"not found on server",
-				"server is running but this database hasn't been created yet",
 				"bd doctor",
 				"bd dolt status",
-				"bd init --prefix kc",
+				"bd bootstrap",
 				"sync.git-remote is configured",
 				"https://doltremoteapi.dolthub.com/myorg/beads",
-				"existing data is preserved",
 				"--force destroys ALL existing issues",
 			},
 			wantNotContain: []string{
@@ -123,6 +120,9 @@ func TestInitGuardDBCheck_ExistsPath(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "not found on server") {
 			t.Errorf("expected 'not found on server' in message, got:\n%s", err.Error())
+		}
+		if !strings.Contains(err.Error(), "bd bootstrap") {
+			t.Errorf("expected bootstrap-first recovery guidance, got:\n%s", err.Error())
 		}
 	})
 }

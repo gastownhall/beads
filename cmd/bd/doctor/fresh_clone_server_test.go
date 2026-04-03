@@ -46,7 +46,7 @@ func TestFreshCloneServerResult(t *testing.T) {
 			wantNotContain: []string{
 				"sync.git-remote is configured",
 			},
-			wantFix: "bd init (after setting sync.git-remote in .beads/config.yaml)",
+			wantFix: "bd bootstrap",
 		},
 		"DB missing, sync.git-remote IS configured returns Warning with remote hint": {
 			dbExists:      false,
@@ -60,12 +60,12 @@ func TestFreshCloneServerResult(t *testing.T) {
 				"not found on server",
 				"sync.git-remote is configured",
 				"https://doltremoteapi.dolthub.com/myorg/beads",
-				"bd init to bootstrap",
+				"bd bootstrap",
 			},
 			wantNotContain: []string{
 				"Set sync.git-remote in .beads/config.yaml",
 			},
-			wantFix: "bd init",
+			wantFix: "bd bootstrap",
 		},
 	}
 
