@@ -117,11 +117,13 @@ jobs:
           # arm64 binary runs natively on macos-latest
           bd="$(pwd)/bd-darwin-arm64"
           tmpdir=$(mktemp -d)
-          cd "$tmpdir"
+          projdir="$tmpdir/smoketest"
+          mkdir -p "$projdir"
+          cd "$projdir"
           git init -b main
           git config user.name "CI" && git config user.email "ci@test"
           git commit --allow-empty -m "init"
-          "$bd" init
+          "$bd" init --prefix smoketest
           "$bd" create "smoke test" --type task
           "$bd" list | grep -q "smoke test"
           # Verify embedded mode (no server process)
