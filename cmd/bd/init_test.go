@@ -2167,3 +2167,98 @@ func TestInitBackendFlag(t *testing.T) {
 		}
 	})
 }
+
+// TestInitDatabaseAdoptsExistingProjectID verifies that bd init --database adopts
+// the _project_id from an existing server database instead of generating a new one.
+// This prevents PROJECT IDENTITY MISMATCH errors when multiple users connect to
+// a shared remote Dolt server. (GH#2922)
+func TestInitDatabaseAdoptsExistingProjectID(t *testing.T) {
+	skipIfNoDolt(t)
+
+	// Reset global state
+	origDBPath := dbPath
+	origStore := store
+	defer func() {
+		if store != nil && store != origStore {
+			store.Close()
+		}
+		store = origStore
+		dbPath = origDBPath
+	}()
+	dbPath = ""
+	store = nil
+
+	ctx := context.Background()
+
+	// Create a database with a known _project_id (simulates first user's init)
+	database := uniqueTestDBName(t)
+	firstBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(firstBeadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	doltNewMutex.Lock()
+	firstStore, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(firstBeadsDir, "dolt"),
+		BeadsDir:        firstBeadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	doltNewMutex.Unlock()
+	if err != nil {
+		t.Fatalf("create first store: %v", err)
+	}
+
+	knownProjectID := "test-known-project-id-gh2922"
+	if err := firstStore.SetMetadata(ctx, "_project_id", knownProjectID); err != nil {
+		t.Fatalf("set _project_id: %v", err)
+	}
+	if err := firstStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	firstStore.Close()
+
+	t.Cleanup(func() {
+		dropTestDatabase(database, testDoltServerPort)
+	})
+
+	// Simulate second user — init with --database pointing at the existing DB
+	secondDir := t.TempDir()
+	t.Chdir(secondDir)
+
+	// Set up minimal git repo (init expects it for repo_id)
+	if err := exec.Command("git", "-C", secondDir, "init").Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	_ = exec.Command("git", "-C", secondDir, "config", "user.email", "test@test.com").Run()
+	_ = exec.Command("git", "-C", secondDir, "config", "user.name", "Test").Run()
+
+	rootCmd.SetArgs([]string{
+		"init",
+		"--server",
+		"--server-host", "127.0.0.1",
+		"--server-port", fmt.Sprintf("%d", testDoltServerPort),
+		"--database", database,
+		"--prefix", "second",
+		"--quiet",
+		"--skip-hooks",
+		"--skip-agents",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("second init failed: %v", err)
+	}
+
+	// Verify the second user's metadata.json adopted the existing project_id
+	secondBeadsDir := filepath.Join(secondDir, ".beads")
+	cfg, err := configfile.Load(secondBeadsDir)
+	if err != nil {
+		t.Fatalf("load metadata.json: %v", err)
+	}
+
+	if cfg.ProjectID != knownProjectID {
+		t.Errorf("ProjectID = %q, want %q (should adopt existing project_id from server)", cfg.ProjectID, knownProjectID)
+	}
+}

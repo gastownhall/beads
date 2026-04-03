@@ -611,8 +611,23 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Generate project identity UUID if not already set (GH#2372).
 			// This UUID is stored in both metadata.json and the database,
 			// and verified on every connection to detect cross-project leakage.
+			//
+			// When --database is specified and the database already exists on the
+			// server, adopt the existing project_id instead of generating a new
+			// one. This prevents identity mismatch when a second user joins a
+			// shared remote Dolt server. (GH#2922)
 			if cfg.ProjectID == "" {
-				cfg.ProjectID = configfile.GenerateProjectID()
+				if database != "" && store != nil {
+					if existingID, err := store.GetMetadata(ctx, "_project_id"); err == nil && existingID != "" {
+						cfg.ProjectID = existingID
+						if !quiet {
+							fmt.Printf("  %s Adopted project identity from existing database\n", ui.RenderPass("✓"))
+						}
+					}
+				}
+				if cfg.ProjectID == "" {
+					cfg.ProjectID = configfile.GenerateProjectID()
+				}
 			}
 
 			// Always store backend explicitly in metadata.json
