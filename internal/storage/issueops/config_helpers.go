@@ -179,13 +179,28 @@ func SyncCustomTypesTable(ctx context.Context, tx *sql.Tx, value string) error {
 	if value == "" {
 		return nil
 	}
-	names := ParseCommaSeparatedList(value)
+	names := parseTypesValue(value)
 	for _, name := range names {
 		if _, err := tx.ExecContext(ctx, "INSERT INTO custom_types (name) VALUES (?)", name); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// parseTypesValue tries JSON array first, then falls back to comma-separated.
+func parseTypesValue(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	// Try JSON array first (e.g. '["gate","convoy"]')
+	var jsonTypes []string
+	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
+		return jsonTypes
+	}
+	// Fall back to comma-separated
+	return ParseCommaSeparatedList(value)
 }
 
 // ResolveInfraTypesInTx reads infrastructure types from the database,
