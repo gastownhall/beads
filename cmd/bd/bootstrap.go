@@ -38,13 +38,23 @@ This is the recommended command for:
   • Recovering after moving to a new machine
   • Repairing a broken database configuration
 
+Non-interactive mode (--non-interactive, --yes/-y, or BD_NON_INTERACTIVE=1):
+  Skips the confirmation prompt before executing the bootstrap plan.
+  Also auto-detected when stdin is not a terminal or CI=true is set.
+
 Examples:
   bd bootstrap              # Auto-detect and set up
   bd bootstrap --dry-run    # Show what would be done
   bd bootstrap --json       # Output plan as JSON
+  bd bootstrap --yes        # Skip confirmation prompt
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
+		yesFlag, _ := cmd.Flags().GetBool("yes")
+
+		// Resolve non-interactive mode: flag > env var > CI env > terminal detection.
+		nonInteractive := isNonInteractiveBootstrap(nonInteractiveFlag || yesFlag)
 
 		// Find beads directory
 		beadsDir := beads.FindBeadsDir()
@@ -109,7 +119,7 @@ Examples:
 		}
 
 		// Execute the plan
-		if err := executeBootstrapPlan(plan, cfg); err != nil {
+		if err := executeBootstrapPlan(plan, cfg, nonInteractive); err != nil {
 			FatalError("Bootstrap failed: %v", err)
 		}
 	},
@@ -222,9 +232,12 @@ func printBootstrapPlan(plan BootstrapPlan) {
 	}
 }
 
-// confirmPrompt asks the user to confirm an action. Returns true if the user
-// confirms or if stdin is not a terminal (non-interactive/CI contexts).
-func confirmPrompt(message string) bool {
+// confirmPrompt asks the user to confirm an action. Returns true if
+// nonInteractive is set, stdin is not a terminal, or the user confirms.
+func confirmPrompt(message string, nonInteractive bool) bool {
+	if nonInteractive {
+		return true
+	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return true
 	}
@@ -235,8 +248,8 @@ func confirmPrompt(message string) bool {
 	return line == "" || line == "y" || line == "yes"
 }
 
-func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config) error {
-	if !confirmPrompt("Proceed?") {
+func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInteractive bool) error {
+	if !confirmPrompt("Proceed?", nonInteractive) {
 		fmt.Fprintf(os.Stderr, "Aborted.\n")
 		return nil
 	}
@@ -412,7 +425,24 @@ func inferPrefix(cfg *configfile.Config) string {
 	return filepath.Base(cwd)
 }
 
+// isNonInteractiveBootstrap returns true if bootstrap should skip confirmation prompts.
+// Precedence: explicit flag > BD_NON_INTERACTIVE env > CI env > terminal detection.
+func isNonInteractiveBootstrap(flagValue bool) bool {
+	if flagValue {
+		return true
+	}
+	if v := os.Getenv("BD_NON_INTERACTIVE"); v == "1" || v == "true" {
+		return true
+	}
+	if v := os.Getenv("CI"); v == "true" || v == "1" {
+		return true
+	}
+	return !term.IsTerminal(int(os.Stdin.Fd()))
+}
+
 func init() {
 	bootstrapCmd.Flags().Bool("dry-run", false, "Show what would be done without doing it")
+	bootstrapCmd.Flags().BoolP("non-interactive", "y", false, "Skip confirmation prompt (auto-detected in CI or non-TTY environments)")
+	bootstrapCmd.Flags().Bool("yes", false, "Alias for --non-interactive")
 	rootCmd.AddCommand(bootstrapCmd)
 }
