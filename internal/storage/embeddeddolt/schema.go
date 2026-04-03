@@ -22,9 +22,9 @@ var (
 	latestVer  int
 )
 
-// latestVersion returns the highest version number among the embedded .up.sql files.
+// LatestVersion returns the highest version number among the embedded .up.sql files.
 // Computed once and cached.
-func latestVersion() int {
+func LatestVersion() int {
 	latestOnce.Do(func() {
 		entries, err := fs.ReadDir(upMigrations, "schema")
 		if err != nil {
@@ -76,7 +76,7 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 	}
 
 	// Fast path: if current version matches the highest embedded migration, nothing to do.
-	if current >= latestVersion() {
+	if current >= LatestVersion() {
 		return 0, nil
 	}
 

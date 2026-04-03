@@ -145,8 +145,8 @@ func TestSchemaAfterInit(t *testing.T) {
 	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
 		t.Fatalf("reading max migration version: %v", err)
 	}
-	if maxVersion != 23 {
-		t.Errorf("max migration version: got %d, want 23", maxVersion)
+	if maxVersion != embeddeddolt.LatestVersion() {
+		t.Errorf("max migration version: got %d, want %d", maxVersion, embeddeddolt.LatestVersion())
 	}
 
 	// --- Log all tables for debugging ---
@@ -180,15 +180,15 @@ func TestSchemaAfterInit(t *testing.T) {
 	if err := db2.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("counting migrations: %v", err)
 	}
-	if migrationCount != 23 {
-		t.Errorf("migration count after second init: got %d, want 23", migrationCount)
+	if migrationCount != embeddeddolt.LatestVersion() {
+		t.Errorf("migration count after second init: got %d, want %d", migrationCount, embeddeddolt.LatestVersion())
 	}
 
 	if err := db2.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
 		t.Fatalf("reading max version after second init: %v", err)
 	}
-	if maxVersion != 23 {
-		t.Errorf("max version after second init: got %d, want 23", maxVersion)
+	if maxVersion != embeddeddolt.LatestVersion() {
+		t.Errorf("max version after second init: got %d, want %d", maxVersion, embeddeddolt.LatestVersion())
 	}
 
 	cleanup2()
@@ -266,7 +266,7 @@ func TestBackfillCreatesWispTables(t *testing.T) {
 	if err := db2.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
 		t.Fatalf("reading max version: %v", err)
 	}
-	if maxVersion != 23 {
-		t.Errorf("max migration version after backfill: got %d, want 23", maxVersion)
+	if maxVersion != embeddeddolt.LatestVersion() {
+		t.Errorf("max migration version after backfill: got %d, want %d", maxVersion, embeddeddolt.LatestVersion())
 	}
 }
