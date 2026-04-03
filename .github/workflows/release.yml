@@ -47,12 +47,212 @@ jobs:
             ${{ github.repository != 'gastownhall/beads' && '--skip=publish --skip=announce' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Homebrew tap publishing (requires PAT with contents:write on homebrew-beads)
-          # If not set, goreleaser skips tap upload (skip_upload: auto in .goreleaser.yml)
+          # Homebrew tap is updated by the update-homebrew-formula job (not goreleaser)
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           # Windows code signing (optional - signing is skipped if not set)
           WINDOWS_SIGNING_CERT_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_PFX_BASE64 }}
           WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+
+  goreleaser-macos:
+    # Build macOS binaries with CGO_ENABLED=1 for embedded Dolt support.
+    # Runs on native macOS to avoid zig/osxcross cross-compilation issues.
+    if: ${{ github.repository == 'gastownhall/beads' }}
+    needs: goreleaser
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build darwin/arm64
+        env:
+          CGO_ENABLED: "1"
+          GOARCH: arm64
+          GOOS: darwin
+        run: |
+          go build -tags "gms_pure_go netgo" \
+            -ldflags "-s -w -X main.Version=${{ steps.version.outputs.version }} -X main.Build=$(git rev-parse --short HEAD) -X main.Commit=$(git rev-parse HEAD) -X main.Branch=$(git branch --show-current)" \
+            -o bd-darwin-arm64 ./cmd/bd
+          ./scripts/verify-cgo.sh bd-darwin-arm64
+          # Verify no ICU runtime dependency leaked through
+          if otool -L bd-darwin-arm64 | grep -qi icu; then
+            echo "ERROR: bd-darwin-arm64 has unexpected ICU runtime dependency" >&2
+            otool -L bd-darwin-arm64 >&2
+            exit 1
+          fi
+          codesign -s - -f bd-darwin-arm64
+
+      - name: Build darwin/amd64
+        env:
+          CGO_ENABLED: "1"
+          GOARCH: amd64
+          GOOS: darwin
+          # macos-latest is arm64; cross-compile CGO C code for x86_64
+          CC: clang -arch x86_64
+          CXX: clang++ -arch x86_64
+        run: |
+          go build -tags "gms_pure_go netgo" \
+            -ldflags "-s -w -X main.Version=${{ steps.version.outputs.version }} -X main.Build=$(git rev-parse --short HEAD) -X main.Commit=$(git rev-parse HEAD) -X main.Branch=$(git branch --show-current)" \
+            -o bd-darwin-amd64 ./cmd/bd
+          ./scripts/verify-cgo.sh bd-darwin-amd64
+          if otool -L bd-darwin-amd64 | grep -qi icu; then
+            echo "ERROR: bd-darwin-amd64 has unexpected ICU runtime dependency" >&2
+            otool -L bd-darwin-amd64 >&2
+            exit 1
+          fi
+          codesign -s - -f bd-darwin-amd64
+
+      - name: Smoke test embedded dolt (arm64 native)
+        run: |
+          # arm64 binary runs natively on macos-latest
+          bd="$(pwd)/bd-darwin-arm64"
+          tmpdir=$(mktemp -d)
+          cd "$tmpdir"
+          git init -b main
+          git config user.name "CI" && git config user.email "ci@test"
+          git commit --allow-empty -m "init"
+          "$bd" init
+          "$bd" create "smoke test" --type task
+          "$bd" list | grep -q "smoke test"
+          # Verify embedded mode (no server process)
+          if pgrep -f "dolt sql-server" >/dev/null 2>&1; then
+            echo "ERROR: unexpected dolt sql-server process running" >&2
+            exit 1
+          fi
+          echo "OK: embedded dolt smoke test passed"
+          cd - >/dev/null
+          rm -rf "$tmpdir"
+
+      - name: Package archives
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          for arch in arm64 amd64; do
+            staging="beads_${version}_darwin_${arch}"
+            mkdir -p "$staging"
+            cp "bd-darwin-${arch}" "$staging/bd"
+            cp LICENSE README.md CHANGELOG.md "$staging/"
+            tar -czf "${staging}.tar.gz" "$staging"
+            shasum -a 256 "${staging}.tar.gz" >> darwin-checksums.txt
+          done
+
+      - name: Upload to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          for arch in arm64 amd64; do
+            gh release upload "v${version}" "beads_${version}_darwin_${arch}.tar.gz" --clobber
+          done
+
+      - name: Append checksums to release checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          # Download existing checksums, append darwin entries, re-upload
+          gh release download "v${version}" --pattern checksums.txt --dir /tmp/checksums
+          cat darwin-checksums.txt >> /tmp/checksums/checksums.txt
+          gh release upload "v${version}" /tmp/checksums/checksums.txt --clobber
+
+  update-homebrew-formula:
+    # Generate Homebrew formula after all archives (Linux + macOS) are uploaded.
+    if: ${{ github.repository == 'gastownhall/beads' }}
+    needs: [goreleaser, goreleaser-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate and push Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          tag="v${version}"
+          base_url="https://github.com/gastownhall/beads/releases/download/${tag}"
+
+          # Download checksums (same repo, no --repo needed)
+          gh release download "${tag}" --pattern checksums.txt --dir /tmp
+          checksums_file="/tmp/checksums.txt"
+
+          get_sha256() {
+            local sha
+            sha=$(grep "$1" "$checksums_file" | awk '{print $1}')
+            if [ -z "$sha" ]; then
+              echo "ERROR: missing checksum for $1" >&2
+              exit 1
+            fi
+            echo "$sha"
+          }
+
+          darwin_arm64_sha=$(get_sha256 "beads_${version}_darwin_arm64.tar.gz")
+          darwin_amd64_sha=$(get_sha256 "beads_${version}_darwin_amd64.tar.gz")
+          linux_amd64_sha=$(get_sha256 "beads_${version}_linux_amd64.tar.gz")
+          linux_arm64_sha=$(get_sha256 "beads_${version}_linux_arm64.tar.gz")
+
+          cat > /tmp/bd.rb <<FORMULA
+          # typed: false
+          # frozen_string_literal: true
+
+          class Bd < Formula
+            desc "AI-supervised issue tracker for coding workflows"
+            homepage "https://github.com/gastownhall/beads"
+            version "${version}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base_url}/beads_${version}_darwin_arm64.tar.gz"
+                sha256 "${darwin_arm64_sha}"
+              else
+                url "${base_url}/beads_${version}_darwin_amd64.tar.gz"
+                sha256 "${darwin_amd64_sha}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${base_url}/beads_${version}_linux_arm64.tar.gz"
+                sha256 "${linux_arm64_sha}"
+              else
+                url "${base_url}/beads_${version}_linux_amd64.tar.gz"
+                sha256 "${linux_amd64_sha}"
+              end
+            end
+
+            def install
+              bin.install "bd"
+            end
+          end
+          FORMULA
+          # Strip leading whitespace from heredoc (YAML run: block indentation)
+          sed -i 's/^          //' /tmp/bd.rb
+
+          # Push formula to homebrew tap
+          cd /tmp
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/gastownhall/homebrew-beads.git"
+          cp bd.rb homebrew-beads/Formula/bd.rb
+          cd homebrew-beads
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/bd.rb
+          git commit -m "bd ${version}" || echo "No changes to commit"
+          git push
 
   publish-pypi:
     runs-on: ubuntu-latest
