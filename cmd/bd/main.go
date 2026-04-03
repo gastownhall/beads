@@ -767,6 +767,17 @@ var rootCmd = &cobra.Command{
 		storeActive = true
 		storeMutex.Unlock()
 
+		// Auto-import from issues.jsonl when embedded database is empty (GH#2994).
+		// This handles the upgrade path from pre-0.56 (dolt/) to 1.0+ (embeddeddolt/)
+		// where the new embedded database starts empty but the git-tracked JSONL
+		// still has all the user's data.
+		// Skip auto-import when the user is explicitly running "bd import" —
+		// the import command handles JSONL files itself and auto-importing
+		// first would interfere (double-import / upsert confusion).
+		if store != nil && !useReadOnly && cmd.Name() != "import" {
+			maybeAutoImportJSONL(rootCtx, store, beadsDir)
+		}
+
 		// Validate workspace identity for write commands (GH#2438, GH#2372)
 		// Skip for read-only commands since they can't corrupt data
 		if !useReadOnly && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
