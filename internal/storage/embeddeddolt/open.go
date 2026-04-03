@@ -100,15 +100,16 @@ func buildDSN(dir, database string) string {
 	if strings.TrimSpace(database) != "" {
 		v.Set(doltembed.DatabaseParam, database)
 	}
-	u := url.URL{Scheme: "file", Path: encodeDir(dir), RawQuery: v.Encode()}
-	return u.String()
-}
-
-func encodeDir(dir string) string {
+	// Build the DSN string manually instead of using url.URL.String(),
+	// which percent-encodes the path (spaces → %20). The embedded Dolt
+	// driver's ParseDataSource strips the "file://" prefix and uses the
+	// remainder as a literal filesystem path, so encoding breaks paths
+	// that contain spaces. See #2920.
+	path := dir
 	if os.PathSeparator == '\\' {
-		return strings.ReplaceAll(dir, `\`, `/`)
+		path = strings.ReplaceAll(path, `\`, `/`)
 	}
-	return dir
+	return "file://" + path + "?" + v.Encode()
 }
 
 func sqlStringLiteral(s string) string {
