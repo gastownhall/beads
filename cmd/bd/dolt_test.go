@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -987,5 +988,82 @@ func TestHTTPURLToTCPAddr(t *testing.T) {
 				t.Errorf("httpURLToTCPAddr(%q) = %q, want %q", tt.url, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsDivergedHistoryErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"unrelated error", fmt.Errorf("connection refused"), false},
+		{"remote not found", fmt.Errorf("remote 'origin' not found"), false},
+		{"no common ancestor", fmt.Errorf("Error 1105 (HY000): unknown push error; no common ancestor"), true},
+		{"no common ancestor lowercase", fmt.Errorf("no common ancestor"), true},
+		{"can't find common ancestor", fmt.Errorf("can't find common ancestor for merge"), true},
+		{"cannot find common ancestor", fmt.Errorf("cannot find common ancestor"), true},
+		{"wrapped error", fmt.Errorf("failed to push to origin/main: %w", fmt.Errorf("no common ancestor")), true},
+		{"mixed case", fmt.Errorf("No Common Ancestor found"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isDivergedHistoryErr(tt.err)
+			if got != tt.want {
+				t.Errorf("isDivergedHistoryErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsRemoteNotFoundErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"unrelated error", fmt.Errorf("connection refused"), false},
+		{"remote not found", fmt.Errorf("remote 'origin' not found"), true},
+		{"no common ancestor", fmt.Errorf("no common ancestor"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRemoteNotFoundErr(tt.err)
+			if got != tt.want {
+				t.Errorf("isRemoteNotFoundErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrintDivergedHistoryGuidance(t *testing.T) {
+	// Capture stderr output
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	printDivergedHistoryGuidance("push")
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+
+	// Verify key recovery options are mentioned
+	if !strings.Contains(output, "diverged") {
+		t.Error("expected guidance to mention 'diverged'")
+	}
+	if !strings.Contains(output, "bd bootstrap") {
+		t.Error("expected guidance to mention 'bd bootstrap'")
+	}
+	if !strings.Contains(output, "bd dolt push --force") {
+		t.Error("expected guidance to mention 'bd dolt push --force'")
+	}
+	if !strings.Contains(output, "rm -rf .beads/dolt") {
+		t.Error("expected guidance to mention manual recovery")
 	}
 }
