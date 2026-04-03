@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -25,24 +24,11 @@ import (
 func bdClose(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"close"}, args...)
-	var out []byte
-	var err error
-	for attempt := 0; attempt < 5; attempt++ {
-		cmd := exec.Command(bd, fullArgs...)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err = cmd.CombinedOutput()
-		if err == nil {
-			return string(out)
-		}
-		if !strings.Contains(string(out), "one writer at a time") {
-			break
-		}
-		t.Logf("bd close: flock contention (attempt %d/5), retrying...", attempt+1)
-		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd close %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	t.Fatalf("bd close %s failed: %v\n%s", strings.Join(args, " "), err, out)
-	return ""
+	return string(out)
 }
 
 // bdCloseFail runs "bd close" expecting failure.
@@ -64,23 +50,10 @@ func bdCloseFail(t *testing.T, bd, dir string, args ...string) string {
 func bdDepAdd(t *testing.T, bd, dir string, args ...string) {
 	t.Helper()
 	fullArgs := append([]string{"dep", "add"}, args...)
-	var out []byte
-	var err error
-	for attempt := 0; attempt < 5; attempt++ {
-		cmd := exec.Command(bd, fullArgs...)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err = cmd.CombinedOutput()
-		if err == nil {
-			return
-		}
-		if !strings.Contains(string(out), "one writer at a time") {
-			break
-		}
-		t.Logf("bd dep add: flock contention (attempt %d/5), retrying...", attempt+1)
-		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd dep add %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	t.Fatalf("bd dep add %s failed: %v\n%s", strings.Join(args, " "), err, out)
 }
 
 // querySessionSQL queries closed_by_session via raw SQL since it's not in IssueSelectColumns.

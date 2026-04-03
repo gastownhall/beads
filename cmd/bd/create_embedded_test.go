@@ -22,24 +22,11 @@ import (
 func bdCreate(t *testing.T, bd, dir string, args ...string) *types.Issue {
 	t.Helper()
 	fullArgs := append([]string{"create", "--json"}, args...)
-	var out []byte
-	var err error
-	for attempt := 0; attempt < 5; attempt++ {
-		cmd := exec.Command(bd, fullArgs...)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err = cmd.CombinedOutput()
-		if err == nil {
-			return parseIssueJSON(t, out)
-		}
-		if !strings.Contains(string(out), "one writer at a time") {
-			break
-		}
-		t.Logf("bd create: flock contention (attempt %d/5), retrying...", attempt+1)
-		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd create %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	t.Fatalf("bd create %s failed: %v\n%s", strings.Join(args, " "), err, out)
-	return nil
+	return parseIssueJSON(t, out)
 }
 
 // parseIssueJSON extracts a JSON issue object from command output that may
@@ -72,24 +59,11 @@ func parseIssueJSON(t *testing.T, out []byte) *types.Issue {
 func bdCreateSilent(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"create", "--silent"}, args...)
-	var out []byte
-	var err error
-	for attempt := 0; attempt < 5; attempt++ {
-		cmd := exec.Command(bd, fullArgs...)
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err = cmd.CombinedOutput()
-		if err == nil {
-			return strings.TrimSpace(string(out))
-		}
-		if !strings.Contains(string(out), "one writer at a time") {
-			break
-		}
-		t.Logf("bd create --silent: flock contention (attempt %d/5), retrying...", attempt+1)
-		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd create --silent %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	t.Fatalf("bd create --silent %s failed: %v\n%s", strings.Join(args, " "), err, out)
-	return ""
+	return strings.TrimSpace(string(out))
 }
 
 // bdCreateFail runs "bd create" expecting failure. Returns combined output.

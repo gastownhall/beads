@@ -13,13 +13,11 @@ import (
 )
 
 // bdDiff runs "bd diff" with the given args and returns raw stdout.
+// Retries on flock contention.
 func bdDiff(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"diff"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd diff %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -41,13 +39,11 @@ func bdDiffFail(t *testing.T, bd, dir string, args ...string) string {
 }
 
 // bdDiffJSON runs "bd diff --json" and parses the result as a slice.
+// Retries on flock contention.
 func bdDiffJSON(t *testing.T, bd, dir string, args ...string) []map[string]interface{} {
 	t.Helper()
 	fullArgs := append([]string{"diff", "--json"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd diff --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}

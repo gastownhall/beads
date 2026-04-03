@@ -88,6 +88,30 @@ func bdEnv(dir string) []string {
 	return append(env, "HOME="+dir, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1")
 }
 
+// bdRunWithFlockRetry runs a bd command with retry on flock contention.
+// Returns the combined output and nil on success, or the last output and error
+// after all retries are exhausted or a non-flock error occurs.
+func bdRunWithFlockRetry(t *testing.T, bd, dir string, args ...string) ([]byte, error) {
+	t.Helper()
+	var out []byte
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err = cmd.CombinedOutput()
+		if err == nil {
+			return out, nil
+		}
+		if !strings.Contains(string(out), "one writer at a time") {
+			return out, err
+		}
+		t.Logf("bd %s: flock contention (attempt %d/10), retrying...", args[0], attempt+1)
+		time.Sleep(time.Duration(500*(1<<min(attempt, 4))) * time.Millisecond)
+	}
+	return out, err
+}
+
 // bdInit creates a temp dir with a git repo, runs bd init --quiet with the
 // given extra args, and returns (dir, beadsDir, combined output).
 // Fatals if bd init fails.
