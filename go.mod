@@ -10,7 +10,6 @@ require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0
 	github.com/anthropics/anthropic-sdk-go v1.27.1
 	github.com/cenkalti/backoff/v4 v4.3.0
-	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/dolthub/driver v1.84.1
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/olebedev/when v1.1.0
@@ -19,14 +18,14 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/dolt v0.41.0
-	go.opentelemetry.io/otel v1.42.0
+	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.42.0
 	go.opentelemetry.io/otel/exporters/stdout/stdoutmetric v1.42.0
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.42.0
-	go.opentelemetry.io/otel/metric v1.42.0
+	go.opentelemetry.io/otel/metric v1.43.0
 	go.opentelemetry.io/otel/sdk v1.42.0
 	go.opentelemetry.io/otel/sdk/metric v1.42.0
-	go.opentelemetry.io/otel/trace v1.42.0
+	go.opentelemetry.io/otel/trace v1.43.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.42.0
 	golang.org/x/term v0.41.0
@@ -36,6 +35,7 @@ require (
 
 require (
 	github.com/JohannesKaufmann/dom v0.2.0 // indirect
+	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 )
 
