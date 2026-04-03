@@ -1051,31 +1051,27 @@ func isLocalHost(host string) bool {
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
 // If database is empty, connects without selecting a database (for init operations).
 func buildServerDSN(cfg *Config, database string) string {
-	var userPart string
-	if cfg.ServerPassword != "" {
-		userPart = fmt.Sprintf("%s:%s", cfg.ServerUser, cfg.ServerPassword)
-	} else {
-		userPart = cfg.ServerUser
+	// go-sql-driver/mysql DSN format: user:password@tcp(host:port)/db?params
+	// The password must not contain unescaped special characters that collide
+	// with DSN delimiters (@ : / ?). Use go-sql-driver's Config.FormatDSN()
+	// which handles escaping correctly.
+	dsnCfg := mysql.Config{
+		User:                 cfg.ServerUser,
+		Passwd:               cfg.ServerPassword,
+		Net:                  "tcp",
+		Addr:                 fmt.Sprintf("%s:%d", cfg.ServerHost, cfg.ServerPort),
+		DBName:               database,
+		ParseTime:            true,
+		Timeout:              5 * time.Second,
+		ReadTimeout:          10 * time.Second,
+		WriteTimeout:         10 * time.Second,
+		AllowNativePasswords: true,
 	}
-
-	var dbPart string
-	if database != "" {
-		dbPart = "/" + database
-	} else {
-		dbPart = "/"
-	}
-
-	// Timeouts prevent agents from blocking forever when Dolt server hangs.
-	// timeout=5s: TCP connect timeout
-	// readTimeout=10s: I/O read timeout (covers hung queries)
-	// writeTimeout=10s: I/O write timeout
-	params := "parseTime=true&timeout=5s&readTimeout=10s&writeTimeout=10s"
 	if cfg.ServerTLS {
-		params += "&tls=true"
+		dsnCfg.TLSConfig = "true"
 	}
 
-	return fmt.Sprintf("%s@tcp(%s:%d)%s?%s",
-		userPart, cfg.ServerHost, cfg.ServerPort, dbPart, params)
+	return dsnCfg.FormatDSN()
 }
 
 // execWithLongTimeout opens a one-shot database connection with readTimeout=5m

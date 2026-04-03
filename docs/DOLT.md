@@ -335,7 +335,7 @@ dolt:
   host: 127.0.0.1
   port: 3307
   user: root
-  # Password via BEADS_DOLT_PASSWORD env var
+  # Password: env var or credentials file (see below)
 
   # Shared server mode (GH#2377): all projects share a single Dolt server
   # at ~/.beads/shared-server/. Each project uses its own database (prefix-based).
@@ -350,7 +350,8 @@ dolt:
 
 | Variable | Purpose |
 |----------|---------|
-| `BEADS_DOLT_PASSWORD` | Server mode password |
+| `BEADS_DOLT_PASSWORD` | Server mode password (highest priority) |
+| `BEADS_CREDENTIALS_FILE` | Path to credentials file (overrides default location) |
 | `BEADS_DOLT_SERVER_MODE` | Enable server mode (set to "1") |
 | `BEADS_DOLT_SERVER_HOST` | Server host (default: 127.0.0.1) |
 | `BEADS_DOLT_SERVER_PORT` | Server port (default: 3307, or 3308 in shared mode) |
@@ -360,6 +361,49 @@ dolt:
 | `DOLT_REMOTE_USER` | Push/pull auth user |
 | `DOLT_REMOTE_PASSWORD` | Push/pull auth password |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
+
+### Credentials File
+
+For multi-server setups, you can store passwords in an INI-style credentials file
+instead of juggling environment variables per project. Passwords are looked up by
+`[host:port]` section, so each project automatically gets the right password based
+on its configured server.
+
+**Password resolution order:**
+1. `BEADS_DOLT_PASSWORD` env var (highest priority, existing behavior)
+2. Credentials file lookup by `[host:port]` (using the resolved runtime port)
+3. Empty string (no password)
+
+**Port resolution note:** The `[host:port]` used for credential lookup matches the
+resolved runtime port (from the port file, env var, or config — in that priority
+order), not necessarily the port stored in `metadata.json`. This matters when using
+IAP tunnels: if your tunnel maps remote:3307 to localhost:3308, store your password
+under `[127.0.0.1:3308]` and the credentials file will match the actual connection.
+
+**Default location:** `~/.config/beads/credentials` (Linux/macOS), `%APPDATA%\beads\credentials` (Windows)
+
+**Override location:** Set `BEADS_CREDENTIALS_FILE` env var.
+
+**File format:**
+
+```ini
+# ~/.config/beads/credentials
+[127.0.0.1:3307]
+password=localDevPassword
+
+[beads.company.com:3307]
+password=teamServerPassword
+
+[10.0.1.50:3308]
+password=officePassword
+```
+
+**Permissions:** On Linux/macOS, a warning is printed to stderr if the file is
+readable by group or others (mirrors ssh behavior). Set permissions with:
+
+```bash
+chmod 600 ~/.config/beads/credentials
+```
 
 ## Dolt Version Control
 

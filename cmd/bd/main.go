@@ -720,7 +720,9 @@ var rootCmd = &cobra.Command{
 			// config.yaml). Port 0 is fine here — auto-start will resolve it.
 			doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 			doltCfg.ServerUser = cfg.GetDoltServerUser()
-			doltCfg.ServerPassword = cfg.GetDoltServerPassword()
+			// Use the resolved port for credential lookup — metadata.json port
+			// and runtime port can diverge (e.g., tunnel on 3308 vs local on 3307).
+			doltCfg.ServerPassword = cfg.GetDoltServerPasswordForPort(doltCfg.ServerPort)
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 		} else if cfgErr == nil {
 			// Load returned (nil, nil) — no config file found.
