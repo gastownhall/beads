@@ -139,6 +139,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
 	allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
+	allComments, _ := store.GetCommentsForIssues(ctx, issueIDs)
 	commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
 	depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
 
@@ -146,6 +147,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	for _, issue := range issues {
 		issue.Labels = labelsMap[issue.ID]
 		issue.Dependencies = allDeps[issue.ID]
+		issue.Comments = allComments[issue.ID]
 	}
 
 	// Write JSONL: one JSON object per line
