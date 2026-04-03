@@ -162,6 +162,7 @@ func init() {
 	adoSyncCmd.Flags().StringVar(&adoFilterTypes, "types", "", "Filter to work item types, comma-separated (e.g., \"Bug,Task,User Story\")")
 	adoSyncCmd.Flags().StringVar(&adoFilterStates, "states", "", "Filter to ADO states, comma-separated (e.g., \"New,Active,Resolved\")")
 	adoSyncCmd.Flags().StringSlice("project", nil, "Project name(s) to sync (overrides configured project/projects)")
+	registerSelectiveSyncFlags(adoSyncCmd)
 
 	// Register ado command with root
 	rootCmd.AddCommand(adoCmd)
@@ -535,6 +536,10 @@ func runADOSync(cmd *cobra.Command, _ []string) error {
 		Pull:   pull,
 		Push:   push,
 		DryRun: adoSyncDryRun,
+	}
+
+	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
+		return err
 	}
 
 	// Map conflict resolution
