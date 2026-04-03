@@ -2,14 +2,12 @@ package dolt
 
 import (
 	"strings"
-
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // currentSchemaVersion is bumped whenever the schema or migrations change.
 // initSchemaOnDB checks this against the stored version and skips re-initialization
 // when they match, avoiding ~20 DDL statements per bd invocation.
-const currentSchemaVersion = 9
+const currentSchemaVersion = 10
 
 // schema defines the MySQL-compatible database schema for Dolt.
 const schema = `
@@ -242,6 +240,17 @@ CREATE TABLE IF NOT EXISTS federation_peers (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_federation_peers_sovereignty (sovereignty)
 );
+
+-- Custom statuses table (normalized from config status.custom)
+CREATE TABLE IF NOT EXISTS custom_statuses (
+    name VARCHAR(64) PRIMARY KEY,
+    category VARCHAR(32) NOT NULL DEFAULT 'unspecified'
+);
+
+-- Custom types table (normalized from config types.custom)
+CREATE TABLE IF NOT EXISTS custom_types (
+    name VARCHAR(64) PRIMARY KEY
+);
 `
 
 // defaultConfig contains the default configuration values
@@ -258,14 +267,11 @@ INSERT IGNORE INTO config (` + "`key`" + `, value) VALUES
     ('auto_compact_enabled', 'false');
 `
 
-// readyIssuesView is a MySQL-compatible view for ready work
+// readyIssuesView is a MySQL-compatible view for ready work.
+// Uses a subquery against custom_statuses table for active custom statuses.
 // Note: Dolt supports recursive CTEs.
 // Uses LEFT JOIN instead of NOT EXISTS to avoid Dolt mergeJoinIter panic.
 // See: https://github.com/dolthub/go-mysql-server/issues/3413
-//
-// Active status checks use NOT IN ('closed', 'pinned') rather than listing
-// active statuses explicitly — this ensures custom statuses (configured via
-// status.custom) are automatically included. (bd-1x0)
 const readyIssuesView = `
 CREATE OR REPLACE VIEW ready_issues AS
 WITH RECURSIVE
@@ -292,7 +298,10 @@ WITH RECURSIVE
 SELECT i.*
 FROM issues i
 LEFT JOIN blocked_transitively bt ON bt.issue_id = i.id
-WHERE i.status = 'open'
+WHERE (
+    i.status = 'open'
+    OR i.status IN (SELECT name FROM custom_statuses WHERE category = 'active')
+  )
   AND (i.ephemeral = 0 OR i.ephemeral IS NULL)
   AND bt.issue_id IS NULL
   AND (i.defer_until IS NULL OR i.defer_until <= UTC_TIMESTAMP())
@@ -307,6 +316,7 @@ WHERE i.status = 'open'
 `
 
 // blockedIssuesView is a MySQL-compatible view for blocked issues.
+// Uses subqueries against custom_statuses table for done/frozen exclusions.
 // Uses subquery instead of three-table join to avoid Dolt mergeJoinIter panic.
 const blockedIssuesView = `
 CREATE OR REPLACE VIEW blocked_issues AS
@@ -320,10 +330,12 @@ SELECT
          SELECT 1 FROM issues blocker
          WHERE blocker.id = d.depends_on_id
            AND blocker.status NOT IN ('closed', 'pinned')
+           AND blocker.status NOT IN (SELECT name FROM custom_statuses WHERE category IN ('done', 'frozen'))
        )
     ) as blocked_by_count
 FROM issues i
 WHERE i.status NOT IN ('closed', 'pinned')
+  AND i.status NOT IN (SELECT name FROM custom_statuses WHERE category IN ('done', 'frozen'))
   AND EXISTS (
     SELECT 1 FROM dependencies d
     WHERE d.issue_id = i.id
@@ -332,24 +344,15 @@ WHERE i.status NOT IN ('closed', 'pinned')
         SELECT 1 FROM issues blocker
         WHERE blocker.id = d.depends_on_id
           AND blocker.status NOT IN ('closed', 'pinned')
+          AND blocker.status NOT IN (SELECT name FROM custom_statuses WHERE category IN ('done', 'frozen'))
       )
   );
 `
 
 // BuildReadyIssuesView generates the ready_issues view SQL, incorporating
-// custom statuses with CategoryActive into the status filter.
-// When no active custom statuses exist, falls back to the static view.
-func BuildReadyIssuesView(customStatuses []types.CustomStatus) string {
-	active := types.CustomStatusesByCategory(customStatuses, types.CategoryActive)
-	if len(active) == 0 {
-		return readyIssuesView
-	}
-
-	statusList := "'open'"
-	for _, s := range active {
-		statusList += ", '" + escapeSQL(s.Name) + "'"
-	}
-
+// custom statuses with CategoryActive from the custom_statuses table.
+// The view uses a subquery against custom_statuses rather than dynamic IN clauses.
+func BuildReadyIssuesView() string {
 	return `
 CREATE OR REPLACE VIEW ready_issues AS
 WITH RECURSIVE
@@ -376,7 +379,10 @@ WITH RECURSIVE
 SELECT i.*
 FROM issues i
 LEFT JOIN blocked_transitively bt ON bt.issue_id = i.id
-WHERE i.status IN (` + statusList + `)
+WHERE (
+    i.status = 'open'
+    OR i.status IN (SELECT name FROM custom_statuses WHERE category = 'active')
+  )
   AND (i.ephemeral = 0 OR i.ephemeral IS NULL)
   AND bt.issue_id IS NULL
   AND (i.defer_until IS NULL OR i.defer_until <= UTC_TIMESTAMP())
@@ -392,24 +398,14 @@ WHERE i.status IN (` + statusList + `)
 }
 
 // BuildBlockedIssuesView generates the blocked_issues view SQL, incorporating
-// custom statuses with CategoryDone/CategoryFrozen into the exclusion filter.
-func BuildBlockedIssuesView(customStatuses []types.CustomStatus) string {
-	done := types.CustomStatusesByCategory(customStatuses, types.CategoryDone)
-	frozen := types.CustomStatusesByCategory(customStatuses, types.CategoryFrozen)
-	if len(done) == 0 && len(frozen) == 0 {
-		return blockedIssuesView
-	}
-
-	excludeList := "'closed', 'pinned'"
-	for _, s := range done {
-		excludeList += ", '" + escapeSQL(s.Name) + "'"
-	}
-	for _, s := range frozen {
-		excludeList += ", '" + escapeSQL(s.Name) + "'"
-	}
-
+// custom statuses with CategoryDone/CategoryFrozen from the custom_statuses table.
+// The view uses a CTE against custom_statuses to deduplicate the subquery.
+func BuildBlockedIssuesView() string {
 	return `
 CREATE OR REPLACE VIEW blocked_issues AS
+WITH done_frozen AS (
+    SELECT name FROM custom_statuses WHERE category IN ('done', 'frozen')
+)
 SELECT
     i.*,
     (SELECT COUNT(*)
@@ -419,11 +415,13 @@ SELECT
        AND EXISTS (
          SELECT 1 FROM issues blocker
          WHERE blocker.id = d.depends_on_id
-           AND blocker.status NOT IN (` + excludeList + `)
+           AND blocker.status NOT IN ('closed', 'pinned')
+           AND blocker.status NOT IN (SELECT name FROM done_frozen)
        )
     ) as blocked_by_count
 FROM issues i
-WHERE i.status NOT IN (` + excludeList + `)
+WHERE i.status NOT IN ('closed', 'pinned')
+  AND i.status NOT IN (SELECT name FROM done_frozen)
   AND EXISTS (
     SELECT 1 FROM dependencies d
     WHERE d.issue_id = i.id
@@ -431,15 +429,16 @@ WHERE i.status NOT IN (` + excludeList + `)
       AND EXISTS (
         SELECT 1 FROM issues blocker
         WHERE blocker.id = d.depends_on_id
-          AND blocker.status NOT IN (` + excludeList + `)
+          AND blocker.status NOT IN ('closed', 'pinned')
+          AND blocker.status NOT IN (SELECT name FROM done_frozen)
       )
   );
 `
 }
 
 // escapeSQL escapes a string for safe inclusion in SQL string literals.
-// Defense-in-depth: status names are already validated by ParseCustomStatusConfig
-// to match [a-z][a-z0-9_-]*, so this should never actually escape anything.
+// Deprecated: View building now uses JOINs against the custom_statuses table
+// instead of string interpolation. Retained for backward compatibility and testing.
 func escapeSQL(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
