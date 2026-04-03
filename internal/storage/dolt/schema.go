@@ -7,7 +7,7 @@ import (
 // currentSchemaVersion is bumped whenever the schema or migrations change.
 // initSchemaOnDB checks this against the stored version and skips re-initialization
 // when they match, avoiding ~20 DDL statements per bd invocation.
-const currentSchemaVersion = 10
+const currentSchemaVersion = 11
 
 // schema defines the MySQL-compatible database schema for Dolt.
 const schema = `
