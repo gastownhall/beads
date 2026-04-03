@@ -204,12 +204,16 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		Database: cfg.GetDoltDatabase(),
 	}
 
-	// Check for existing database (path differs between server and embedded mode)
+	// Check for existing database (path differs between server and embedded mode).
+	// Use cfg.GetDoltMode() rather than the global isEmbeddedMode() so that
+	// the detection logic respects the config object passed in by the caller
+	// (important for tests and for cases where the global serverMode flag
+	// has not been set yet).
 	var dbPath string
-	if isEmbeddedMode() {
-		dbPath = filepath.Join(beadsDir, "embeddeddolt")
-	} else {
+	if cfg.GetDoltMode() == configfile.DoltModeServer {
 		dbPath = doltserver.ResolveDoltDir(beadsDir)
+	} else {
+		dbPath = filepath.Join(beadsDir, "embeddeddolt")
 	}
 	if info, err := os.Stat(dbPath); err == nil && info.IsDir() {
 		entries, _ := os.ReadDir(dbPath)

@@ -24,9 +24,11 @@ func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create dolt directory with content so it's detected as existing
-	doltDir := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(filepath.Join(doltDir, "beads"), 0o750); err != nil {
+	// Create embeddeddolt directory with content so it's detected as existing.
+	// Default config uses embedded mode, so the detection logic looks for
+	// beadsDir/embeddeddolt (not beadsDir/dolt).
+	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
+	if err := os.MkdirAll(filepath.Join(embeddedDir, "beads"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 
