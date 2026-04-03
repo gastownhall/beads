@@ -554,11 +554,11 @@ func TestCheckMetadataVersionTracking(t *testing.T) {
 		{
 			name: "slightly outdated version",
 			setupVersion: func(beadsDir string) error {
-				// Use a version that's less than 10 minor versions behind current
+				// With Version=1.0.0, any 0.x version differs by major version and triggers a warning
 				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("0.55.0\n"), 0644)
 			},
-			expectedStatus: doctor.StatusOK,
-			expectWarning:  false,
+			expectedStatus: doctor.StatusWarning,
+			expectWarning:  true,
 		},
 		{
 			name: "very old version",

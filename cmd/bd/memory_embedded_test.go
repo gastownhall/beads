@@ -298,14 +298,21 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	wg.Wait()
 
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}
 
-	// Verify: mem0 forgotten, mem1 and mem2 still present for each worker
+	// Verify memories only for workers that succeeded (err==nil).
+	// With exclusive flock, some workers may fail with "one writer at a time".
 	out := bdMemories(t, bd, dir)
-	for w := 0; w < numWorkers; w++ {
+	var successCount int
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		successCount++
+		w := r.worker
 		forgottenKey := fmt.Sprintf("w%d-mem0", w)
 		if strings.Contains(out, forgottenKey) {
 			t.Errorf("expected %s to be forgotten", forgottenKey)
@@ -316,5 +323,8 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 				t.Errorf("expected %s to still exist in memories", key)
 			}
 		}
+	}
+	if successCount == 0 {
+		t.Fatal("expected at least 1 worker to succeed")
 	}
 }

@@ -589,7 +589,9 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 	var failures int
 	for _, r := range results {
 		if r.err != nil {
-			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
 			failures++
 			continue
 		}
@@ -601,16 +603,17 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 		}
 	}
 
-	if failures > 0 {
-		t.Fatalf("%d/%d workers failed", failures, numWorkers)
+	successes := numWorkers - failures
+	if successes == 0 {
+		t.Fatalf("all %d workers failed; expected at least 1 success", numWorkers)
+	}
+	t.Logf("%d/%d workers succeeded (flock contention expected)", successes, numWorkers)
+
+	if len(allIDs) == 0 {
+		t.Fatal("no IDs collected from successful workers")
 	}
 
-	expectedTotal := numWorkers * issuesPerWorker
-	if len(allIDs) != expectedTotal {
-		t.Errorf("expected %d unique IDs, got %d", expectedTotal, len(allIDs))
-	}
-
-	// Verify all issues exist and are closed.
+	// Verify issues from successful workers exist and are closed.
 	store := openStore(t, beadsDir, "cx")
 	for id := range allIDs {
 		issue, err := store.GetIssue(t.Context(), id)

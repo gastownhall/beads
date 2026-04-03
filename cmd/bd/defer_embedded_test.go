@@ -186,17 +186,30 @@ func TestEmbeddedDeferConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
+	var successes int
 	for _, r := range results {
 		if r.err != nil {
-			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
+			continue
 		}
+		successes++
 	}
+	if successes == 0 {
+		t.Fatal("all workers failed; expected at least 1 success")
+	}
+	t.Logf("%d/%d workers succeeded (flock contention expected)", successes, numWorkers)
 
-	// Verify all are deferred
-	for i, id := range issueIDs {
+	// Verify only successful workers' issues are deferred
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		id := issueIDs[r.worker]
 		status := getIssueStatus(t, bd, dir, id)
 		if status != "deferred" {
-			t.Errorf("issue %d (%s): expected status=deferred, got %q", i, id, status)
+			t.Errorf("issue %d (%s): expected status=deferred, got %q", r.worker, id, status)
 		}
 	}
 }

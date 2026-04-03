@@ -238,14 +238,21 @@ func TestEmbeddedKVConcurrent(t *testing.T) {
 	wg.Wait()
 
 	for _, r := range results {
-		if r.err != nil {
+		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
 	}
 
-	// Verify remaining keys (k1-k4 for each worker, k0 was cleared)
+	// Verify remaining keys only for workers that succeeded (err==nil).
+	// With exclusive flock, some workers may fail with "one writer at a time".
 	m := bdKVListJSON(t, bd, dir)
-	for w := 0; w < numWorkers; w++ {
+	var successCount int
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		successCount++
+		w := r.worker
 		clearedKey := fmt.Sprintf("w%d-k0", w)
 		if _, ok := m[clearedKey]; ok {
 			t.Errorf("expected %s to be cleared", clearedKey)
@@ -257,5 +264,8 @@ func TestEmbeddedKVConcurrent(t *testing.T) {
 				t.Errorf("key %s expected %q, got %q (exists=%v)", key, expected, v, ok)
 			}
 		}
+	}
+	if successCount == 0 {
+		t.Fatal("expected at least 1 worker to succeed")
 	}
 }
