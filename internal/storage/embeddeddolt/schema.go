@@ -22,9 +22,9 @@ var (
 	latestVer  int
 )
 
-// latestVersion returns the highest version number among the embedded .up.sql files.
+// LatestVersion returns the highest version number among the embedded .up.sql files.
 // Computed once and cached.
-func latestVersion() int {
+func LatestVersion() int {
 	latestOnce.Do(func() {
 		entries, err := fs.ReadDir(upMigrations, "schema")
 		if err != nil {
@@ -76,7 +76,7 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 	}
 
 	// Fast path: if current version matches the highest embedded migration, nothing to do.
-	if current >= latestVersion() {
+	if current >= LatestVersion() {
 		return 0, nil
 	}
 
@@ -90,15 +90,31 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 		}
 	}
 
-	// Collect and sort migration files.
+	return runMigrations(ctx, tx, current, false)
+}
+
+// backfillMigrations runs all migrations in order, ignoring "already exists"
+// errors, and records each version. Used when a database is restored from a
+// backup that predates the schema_migrations tracking table — most of the
+// schema is already correct, but dolt_ignore'd tables (wisps) may be missing.
+func backfillMigrations(ctx context.Context, tx *sql.Tx) (int, error) {
+	return runMigrations(ctx, tx, 0, true)
+}
+
+type migrationFile struct {
+	version int
+	name    string
+}
+
+// runMigrations collects all embedded .up.sql files with version > minVersion,
+// sorts them, and executes each one. When tolerateExisting is true, "already
+// exists" SQL errors are ignored and versions are recorded with INSERT IGNORE
+// (backfill path). Otherwise errors are fatal and versions use plain INSERT
+// (normal migration path).
+func runMigrations(ctx context.Context, tx *sql.Tx, minVersion int, tolerateExisting bool) (int, error) {
 	entries, err := fs.ReadDir(upMigrations, "schema")
 	if err != nil {
 		return 0, fmt.Errorf("reading embedded migrations: %w", err)
-	}
-
-	type migrationFile struct {
-		version int
-		name    string
 	}
 
 	var pending []migrationFile
@@ -110,7 +126,7 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("parsing migration filename %q: %w", e.Name(), err)
 		}
-		if v > current {
+		if v > minVersion {
 			pending = append(pending, migrationFile{version: v, name: e.Name()})
 		}
 	}
@@ -121,22 +137,25 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 		return 0, nil
 	}
 
-	// Apply each pending migration. The DSN has multiStatements=true,
-	// so each file is executed as a single ExecContext call.
 	for _, mf := range pending {
 		data, err := upMigrations.ReadFile("schema/" + mf.name)
 		if err != nil {
 			return 0, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
 
-		sql := strings.TrimSpace(string(data))
-		if sql != "" {
+		if sql := strings.TrimSpace(string(data)); sql != "" {
 			if _, err := tx.ExecContext(ctx, sql); err != nil {
-				return 0, fmt.Errorf("migration %s failed: %w", mf.name, err)
+				if !tolerateExisting || !isAlreadyExistsError(err) {
+					return 0, fmt.Errorf("migration %s failed: %w", mf.name, err)
+				}
 			}
 		}
 
-		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", mf.version); err != nil {
+		insertSQL := "INSERT INTO schema_migrations (version) VALUES (?)"
+		if tolerateExisting {
+			insertSQL = "INSERT IGNORE INTO schema_migrations (version) VALUES (?)"
+		}
+		if _, err := tx.ExecContext(ctx, insertSQL, mf.version); err != nil {
 			return 0, fmt.Errorf("recording migration %s: %w", mf.name, err)
 		}
 	}
@@ -144,28 +163,10 @@ func migrateUp(ctx context.Context, tx *sql.Tx) (int, error) {
 	return len(pending), nil
 }
 
-// backfillMigrations marks all known migrations as applied without executing them.
-// Used when a database is restored from a backup that predates the schema_migrations
-// tracking table — the schema is already correct, we just need to record that fact.
-func backfillMigrations(ctx context.Context, tx *sql.Tx) (int, error) {
-	entries, err := fs.ReadDir(upMigrations, "schema")
-	if err != nil {
-		return 0, fmt.Errorf("reading embedded migrations for backfill: %w", err)
-	}
-
-	n := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".up.sql") {
-			continue
-		}
-		v, err := parseVersion(e.Name())
-		if err != nil {
-			return 0, fmt.Errorf("parsing migration filename %q: %w", e.Name(), err)
-		}
-		if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations (version) VALUES (?)", v); err != nil {
-			return 0, fmt.Errorf("backfilling migration %s: %w", e.Name(), err)
-		}
-		n++
-	}
-	return n, nil
+// isAlreadyExistsError returns true for MySQL errors indicating a schema
+// object already exists (table, column, index/key).
+func isAlreadyExistsError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "already exists") || // 1050 table, 1061 key
+		strings.Contains(msg, "duplicate column") // 1060
 }
