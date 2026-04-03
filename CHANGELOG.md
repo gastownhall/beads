@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-02
+
+### 1.0 — Stable Release
+
+Beads 1.0 marks the transition from rapid iteration to production stability. The Dolt migration that began in v0.55.0 is complete: embedded Dolt is the default on all platforms, server lifecycle management is no longer required, and the critical reliability issues that affected the v0.55–v0.63 series have been resolved.
+
+### Added
+
+- **Embedded Dolt default on macOS** — Native CGO builds on macOS enable embedded Dolt by default, eliminating the external Dolt server entirely. ([PR #2971](https://github.com/steveyegge/beads/pull/2971))
+- **Custom status/type normalized tables** — `custom_statuses(name, category)` and `custom_types(name)` tables replace comma-separated config strings. Views use table-backed subqueries instead of dynamic IN clauses. Migration is automatic and idempotent. ([PR #2961](https://github.com/steveyegge/beads/pull/2961))
+- **`bd rules audit` and `bd rules compact`** — Scan `.claude/rules/*.md` for contradictions and near-duplicates; merge rule groups with deduplication. ([PR #2810](https://github.com/steveyegge/beads/pull/2810))
+- **`bd config set-many`** — Batch config operations across yaml, git, and database keys in a single command. ([PR #2943](https://github.com/steveyegge/beads/pull/2943))
+- **Credentials file support** — `~/.config/beads/credentials` for Dolt server passwords with Unix permission checks, env var override, and proper DSN escaping. ([PR #2854](https://github.com/steveyegge/beads/pull/2854))
+- **Spike, story, and milestone issue types** — First-class support with constants, validation, and normalization aliases. ([PR #2923](https://github.com/steveyegge/beads/pull/2923))
+- **GitLab sync: epic→milestone, task hierarchy, type filtering** — Epics sync as GitLab milestones, tasks create work items via GraphQL with parent hierarchy, internal types excluded from push by default. ([PR #2889](https://github.com/steveyegge/beads/pull/2889))
+- **ADO shorthand refs** — `ado:NNNNN` recognized in IsExternalRef and ExtractIdentifier, preventing duplicates on sync. ([PR #2966](https://github.com/steveyegge/beads/pull/2966))
+- **ADO push filters** — `--types`, `--states`, and `--no-create` flags now apply to push operations. ([PR #2944](https://github.com/steveyegge/beads/pull/2944))
+- **Public format package** — `format.PrettyIssue`, `CompactIssue`, `LongIssue` for external tooling. ([PR #2871](https://github.com/steveyegge/beads/pull/2871))
+- **SlotSet/SlotGet/SlotClear** — Per-issue metadata slots in the Storage interface for delegation tracking and hook state. ([PR #2870](https://github.com/steveyegge/beads/pull/2870))
+- **WispFilter export** — `beads.WispFilter` type alias exported from root package. ([PR #2868](https://github.com/steveyegge/beads/pull/2868))
+- **`--non-interactive` / `--yes` for bootstrap** — Skip confirmation prompts in CI/automation. ([PR #2942](https://github.com/steveyegge/beads/pull/2942))
+- **Batch dependency list** — `GetDependenciesWithMetadata` supports multiple issue IDs. ([PR #2875](https://github.com/steveyegge/beads/pull/2875))
+- **`bd ready --explain`** — Dependency-aware reasoning for why issues are or aren't ready. ([PR #2814](https://github.com/steveyegge/beads/pull/2814))
+- **Graph integrity enforcement** — Extended cycle detection and `bd graph check` command. ([PR #2814](https://github.com/steveyegge/beads/pull/2814))
+- **Tracker hardening** — Retry logic with jitter for all tracker HTTP clients, pagination guards for Linear/Jira, response size limits, terminal-safe content sanitization. ([PRs #2814](https://github.com/steveyegge/beads/pull/2814))
+- **Release stability gate** — Upgrade safety checks and breaking-change communication. ([GH#2951](https://github.com/steveyegge/beads/issues/2951))
+- **Hook firing in storage layer** — `HookFiringStore` decorator moves hook logic out of CLI layer. ([PR #2891](https://github.com/steveyegge/beads/pull/2891))
+
+### Changed
+
+- **`bd setup claude` defaults to project-local** — Settings written to `.claude/settings.json` (shared/team) by default; `--global` for user-level. Auto-runs during `bd init`. ([PR #2972](https://github.com/steveyegge/beads/pull/2972))
+- **`strconv.ParseBool` for env vars** — `IsAutoStartDisabled` uses standard boolean parsing with whitespace trimming. ([PRs #2955, #2956](https://github.com/steveyegge/beads/pull/2956))
+- **Comma-separated `--status` filter** — `bd list --status open,in_progress` now works. ([GH#2846](https://github.com/steveyegge/beads/issues/2846))
+- **Custom types from YAML** — `ResolveCustomTypesInTx` honors config.yaml custom types in create path. ([GH#2793](https://github.com/steveyegge/beads/issues/2793))
+- **lipgloss v2, backoff v5, goldmark 1.8.2** — Dependency updates.
+
+### Fixed
+
+- **Concurrent embedded Dolt panic** — Exclusive flock acquired on embedded store open, held for store lifetime. Second concurrent opener gets a clear error instead of a nil-pointer panic. ([GH#2571](https://github.com/steveyegge/beads/issues/2571))
+- **Spaces in repo path** — Embedded Dolt no longer URL-encodes local filesystem paths, fixing `%20` lookup failures on macOS. ([GH#2920](https://github.com/steveyegge/beads/issues/2920))
+- **Schema version bump** — `currentSchemaVersion` bumped to 11 for custom_statuses/custom_types migration. Prevents "table not found" errors on upgrade. ([GH#2974](https://github.com/steveyegge/beads/issues/2974))
+- **Dolt init failure** — Embedded-by-default eliminates server port 0 / connection refused issues for new users. ([GH#2656](https://github.com/steveyegge/beads/issues/2656))
+- **Bootstrap for missing database** — `bd bootstrap` probes server for actual database existence before declaring no-op. Recovery guidance updated across all error surfaces. ([PR #2940](https://github.com/steveyegge/beads/pull/2940))
+- **Diverged history recovery** — Dolt push/pull detect diverged history and print actionable recovery guidance. ([PR #2941](https://github.com/steveyegge/beads/pull/2941))
+- **No-db command routing** — `bd context`, `bd dolt show`, etc. honor `--db` flag, `BEADS_DB` env, and external `dolt_data_dir` layouts. ([PR #2844](https://github.com/steveyegge/beads/pull/2844))
+- **Auto-backup address conflict** — Detects when another backup remote owns the URL and syncs through it. ([PR #2927](https://github.com/steveyegge/beads/pull/2927))
+- **Shared server project_id** — `bd init --database` on a shared server adopts existing `_project_id` instead of generating a new one. ([PR #2925](https://github.com/steveyegge/beads/pull/2925))
+- **Init leaves beads.role unset** — Fixed edge cases where role was not persisted during init. ([GH#2950](https://github.com/steveyegge/beads/issues/2950))
+- **`--shared-server` mode detection** — Correctly treated as server mode for DoltMode resolution. ([PR #2947](https://github.com/steveyegge/beads/pull/2947))
+- **GitLab work_items URL dedup** — Pull dedup checks both issues and wisps tables; URL pattern matches `/work_items/` paths. ([PR #2889](https://github.com/steveyegge/beads/pull/2889))
+- **GitLab work item type ID** — Dynamic GraphQL query with per-session cache instead of hardcoded `gid://...`. ([Follow-up to PR #2889](https://github.com/steveyegge/beads/pull/2889))
+- **Stale noms LOCK files** — Cleaned after bootstrap clone. ([PR #2913](https://github.com/steveyegge/beads/pull/2913))
+- **ADO WIQL date precision** — RFC3339 timezone formatting in WIQL queries. ([PR #2911](https://github.com/steveyegge/beads/pull/2911))
+- **Blocked icon in `bd list`** — Dependency-blocked issues now show blocked indicator. ([GH#2858](https://github.com/steveyegge/beads/issues/2858))
+- **Installer ICU/CGO fallback** — Correct handling on systems without ICU libraries. ([PR #2965](https://github.com/steveyegge/beads/pull/2965))
+
+### Community
+
+Contributors: harry-miller-trimble, coffeegoddd, quad341, Bella-Giraffety, maphew, rjc123, Fredkr, sammywachtel, anupamchugh, ktoulgaridis, outdoorsea, Geargrindadmin.
+
 ## [0.63.3] - 2026-03-30
 
 ### Added
