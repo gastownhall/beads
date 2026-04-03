@@ -47,6 +47,14 @@ func readLineWithContext(ctx context.Context, reader *bufio.Reader, closer io.Cl
 		}
 		return "", sigCtx.Err()
 	case res := <-resultCh:
+		// When both channels are ready simultaneously (e.g., context canceled
+		// at the same time the pipe closes with EOF), prefer the cancellation
+		// error. This prevents a race on macOS where EOF wins the select.
+		select {
+		case <-sigCtx.Done():
+			return "", sigCtx.Err()
+		default:
+		}
 		return res.line, res.err
 	}
 }

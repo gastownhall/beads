@@ -771,7 +771,10 @@ var rootCmd = &cobra.Command{
 		// This handles the upgrade path from pre-0.56 (dolt/) to 1.0+ (embeddeddolt/)
 		// where the new embedded database starts empty but the git-tracked JSONL
 		// still has all the user's data.
-		if store != nil && !useReadOnly {
+		// Skip auto-import when the user is explicitly running "bd import" —
+		// the import command handles JSONL files itself and auto-importing
+		// first would interfere (double-import / upsert confusion).
+		if store != nil && !useReadOnly && cmd.Name() != "import" {
 			maybeAutoImportJSONL(rootCtx, store, beadsDir)
 		}
 
