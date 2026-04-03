@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -242,7 +243,11 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				return fmt.Errorf("dolt add after migrations: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
-				return fmt.Errorf("dolt commit after migrations: %w", err)
+				// Backfill migrations may only create dolt_ignore'd tables (e.g. wisps),
+				// leaving nothing staged for commit. This is expected.
+				if !strings.Contains(err.Error(), "nothing to commit") {
+					return fmt.Errorf("dolt commit after migrations: %w", err)
+				}
 			}
 		}
 		return nil

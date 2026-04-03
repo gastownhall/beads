@@ -194,3 +194,79 @@ func TestSchemaAfterInit(t *testing.T) {
 	cleanup2()
 	store2.Close()
 }
+
+// TestBackfillCreatesWispTables simulates the server-to-embedded upgrade path
+// where core tables exist but schema_migrations is empty. The backfill must
+// actually execute migrations (not just mark them applied) so that dolt_ignore'd
+// wisp tables get created. Regression test for GH#2979.
+func TestBackfillCreatesWispTables(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	ctx := t.Context()
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	// Step 1: Normal init — creates everything including wisp tables.
+	store, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Step 2: Drop wisp tables and clear schema_migrations to simulate
+	// an upgrade from server-mode (core tables exist, no migration tracking,
+	// no wisp tables since they're dolt_ignore'd and weren't imported).
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		store.Close()
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	for _, stmt := range []string{
+		"DROP TABLE IF EXISTS wisp_comments",
+		"DROP TABLE IF EXISTS wisp_events",
+		"DROP TABLE IF EXISTS wisp_labels",
+		"DROP TABLE IF EXISTS wisp_dependencies",
+		"DROP TABLE IF EXISTS wisps",
+		"DELETE FROM schema_migrations",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("setup: %s: %v", stmt, err)
+		}
+	}
+	cleanup()
+	store.Close()
+
+	// Step 3: Re-open. This triggers the backfill path (schema_migrations
+	// empty, issues table exists). The old code would mark all migrations
+	// as applied without executing them, leaving wisp tables missing.
+	store2, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("New after backfill: %v", err)
+	}
+
+	db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		store2.Close()
+		t.Fatalf("OpenSQL after backfill: %v", err)
+	}
+	defer func() { cleanup2(); store2.Close() }()
+
+	// Verify all wisp tables were created by the backfill.
+	for _, table := range []string{"wisps", "wisp_dependencies", "wisp_labels", "wisp_events", "wisp_comments"} {
+		var count int
+		if err := db2.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+table+"`").Scan(&count); err != nil {
+			t.Errorf("wisp table %s missing after backfill: %v", table, err)
+		}
+	}
+
+	// Verify schema_migrations is fully populated.
+	var maxVersion int
+	if err := db2.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
+		t.Fatalf("reading max version: %v", err)
+	}
+	if maxVersion != 23 {
+		t.Errorf("max migration version after backfill: got %d, want 23", maxVersion)
+	}
+}
