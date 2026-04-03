@@ -67,7 +67,7 @@ func GetReadyWorkInTx(
 	}
 	// Exclude future-deferred issues unless IncludeDeferred is set.
 	if !filter.IncludeDeferred {
-		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= NOW())")
+		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
 	}
 	// Exclude children of future-deferred parents.
 	if !filter.IncludeDeferred {
@@ -238,7 +238,7 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx *sql.Tx) ([]string
 	// Step 1: Get IDs of issues with future defer_until.
 	deferredRows, err := tx.QueryContext(ctx, `
 		SELECT id FROM issues
-		WHERE defer_until IS NOT NULL AND defer_until > NOW()
+		WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("deferred parents: get deferred issues: %w", err)
