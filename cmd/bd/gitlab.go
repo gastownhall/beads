@@ -84,6 +84,11 @@ var (
 	gitlabFilterProject   string
 	gitlabFilterMilestone string
 	gitlabFilterAssignee  string
+
+	// Type filtering flags
+	gitlabTypeFilter   string
+	gitlabExcludeTypes string
+	gitlabNoEphemeral  bool
 )
 
 // issueIDCounter is used to generate unique issue IDs.
@@ -186,6 +191,11 @@ func init() {
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterProject, "project", "", "Filter to issues from this project ID (group mode)")
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterMilestone, "milestone", "", "Filter by milestone title")
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterAssignee, "assignee", "", "Filter by assignee username")
+
+	// Type filtering flags
+	gitlabSyncCmd.Flags().StringVar(&gitlabTypeFilter, "type", "", "Only sync these issue types (comma-separated, e.g. 'epic,feature,task')")
+	gitlabSyncCmd.Flags().StringVar(&gitlabExcludeTypes, "exclude-type", "", "Exclude these issue types from sync (comma-separated)")
+	gitlabSyncCmd.Flags().BoolVar(&gitlabNoEphemeral, "no-ephemeral", true, "Exclude ephemeral/wisp issues from push (default: true)")
 
 	// Register gitlab command with root
 	rootCmd.AddCommand(gitlabCmd)
@@ -442,10 +452,24 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	pull := !gitlabSyncPushOnly
 	push := !gitlabSyncPullOnly
 
+	excludeTypes := parseTypeList(gitlabExcludeTypes)
+	// Default: exclude internal coordination types from push unless
+	// the user provided an explicit --type whitelist.
+	if gitlabTypeFilter == "" && gitlabExcludeTypes == "" {
+		excludeTypes = []types.IssueType{
+			types.TypeMolecule,
+			types.TypeMessage,
+			types.TypeEvent,
+		}
+	}
+
 	opts := tracker.SyncOptions{
-		Pull:   pull,
-		Push:   push,
-		DryRun: gitlabSyncDryRun,
+		Pull:             pull,
+		Push:             push,
+		DryRun:           gitlabSyncDryRun,
+		ExcludeEphemeral: gitlabNoEphemeral,
+		TypeFilter:       parseTypeList(gitlabTypeFilter),
+		ExcludeTypes:     excludeTypes,
 	}
 
 	// Map conflict resolution
@@ -533,4 +557,21 @@ func buildGitLabPullHooks(ctx context.Context) *tracker.PullHooks {
 			return nil
 		},
 	}
+}
+
+// parseTypeList splits a comma-separated string of issue types.
+// Returns nil for empty input.
+func parseTypeList(s string) []types.IssueType {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	result := make([]types.IssueType, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, types.IssueType(p))
+		}
+	}
+	return result
 }

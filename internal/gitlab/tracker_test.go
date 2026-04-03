@@ -34,6 +34,7 @@ func TestIsExternalRef(t *testing.T) {
 	}{
 		{"https://gitlab.com/group/project/-/issues/42", true},
 		{"https://my-gitlab.example.com/team/repo/-/issues/123", true},
+		{"https://gitlab.com/group/project/-/work_items/42", true},
 		{"https://linear.app/team/issue/PROJ-123", false},
 		{"https://github.com/org/repo/issues/1", false},
 		{"", false},
@@ -59,6 +60,7 @@ func TestExtractIdentifier(t *testing.T) {
 	}{
 		{"https://gitlab.com/group/project/-/issues/42", "42"},
 		{"https://gitlab.example.com/team/repo/-/issues/123", "123"},
+		{"https://gitlab.com/group/project/-/work_items/42", "42"},
 		{"not-a-url", ""},
 		// Shorthand format
 		{"gitlab:681509", "681509"},

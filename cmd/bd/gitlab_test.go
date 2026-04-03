@@ -336,11 +336,41 @@ func TestBuildCLIFilter_PartialFlags(t *testing.T) {
 
 // TestSyncCmdHasFilterFlags verifies filter flags are registered on sync command.
 func TestSyncCmdHasFilterFlags(t *testing.T) {
-	flags := []string{"label", "project", "milestone", "assignee"}
+	flags := []string{"label", "project", "milestone", "assignee", "type", "exclude-type", "no-ephemeral"}
 	for _, name := range flags {
 		f := gitlabSyncCmd.Flags().Lookup(name)
 		if f == nil {
 			t.Errorf("sync command missing --%s flag", name)
 		}
+	}
+}
+
+// TestParseTypeList verifies comma-separated type parsing.
+func TestParseTypeList(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"", 0},
+		{"epic", 1},
+		{"epic,task,feature", 3},
+		{" epic , task ", 2},
+	}
+	for _, tt := range tests {
+		got := parseTypeList(tt.input)
+		if len(got) != tt.want {
+			t.Errorf("parseTypeList(%q) len = %d, want %d", tt.input, len(got), tt.want)
+		}
+	}
+}
+
+// TestNoEphemeralDefaultTrue verifies --no-ephemeral defaults to true.
+func TestNoEphemeralDefaultTrue(t *testing.T) {
+	f := gitlabSyncCmd.Flags().Lookup("no-ephemeral")
+	if f == nil {
+		t.Fatal("missing --no-ephemeral flag")
+	}
+	if f.DefValue != "true" {
+		t.Errorf("--no-ephemeral default = %q, want %q", f.DefValue, "true")
 	}
 }

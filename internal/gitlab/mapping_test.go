@@ -111,6 +111,12 @@ func TestStatusFromLabelsAndState(t *testing.T) {
 		wantStatus string
 	}{
 		{
+			name:       "status::open explicit label",
+			labels:     []string{"status::open"},
+			state:      "opened",
+			wantStatus: "open",
+		},
+		{
 			name:       "status::in_progress overrides opened state",
 			labels:     []string{"status::in_progress"},
 			state:      "opened",
@@ -127,6 +133,12 @@ func TestStatusFromLabelsAndState(t *testing.T) {
 			labels:     []string{"status::deferred"},
 			state:      "opened",
 			wantStatus: "deferred",
+		},
+		{
+			name:       "status::done maps to closed",
+			labels:     []string{"status::done"},
+			state:      "opened",
+			wantStatus: "closed",
 		},
 		{
 			name:       "closed state wins over status labels",
@@ -399,6 +411,26 @@ func TestBeadsIssueToGitLabFields_StateEvent(t *testing.T) {
 
 	if fields["state_event"] != "close" {
 		t.Errorf("fields[\"state_event\"] = %v, want \"close\"", fields["state_event"])
+	}
+}
+
+// TestBeadsIssueToGitLabFields_OpenStatus verifies open issues don't get redundant status labels.
+func TestBeadsIssueToGitLabFields_OpenStatus(t *testing.T) {
+	config := DefaultMappingConfig()
+
+	openIssue := &types.Issue{
+		Title:     "New task",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+	}
+
+	fields := BeadsIssueToGitLabFields(openIssue, config)
+	labels := fields["labels"].([]string)
+
+	for _, l := range labels {
+		if l == "status::open" {
+			t.Errorf("open issue should not get status::open label (handled by GitLab state), got %v", labels)
+		}
 	}
 }
 

@@ -76,14 +76,17 @@ func statusFromLabelsAndState(labels []string, state string, config *MappingConf
 		prefix, value := parseLabelPrefix(label)
 		if prefix == "status" {
 			normalized := strings.ToLower(value)
-			if normalized == "in_progress" {
+			switch normalized {
+			case "open":
+				return "open"
+			case "in_progress":
 				return "in_progress"
-			}
-			if normalized == "blocked" {
+			case "blocked":
 				return "blocked"
-			}
-			if normalized == "deferred" {
+			case "deferred":
 				return "deferred"
+			case "done":
+				return "closed"
 			}
 		}
 	}
@@ -178,7 +181,7 @@ func BeadsIssueToGitLabFields(issue *types.Issue, config *MappingConfig) map[str
 		labels = append(labels, "priority::"+priorityLabel)
 	}
 
-	// Add status label (if not open or closed - those are handled by state)
+	// Add status label (if not open or closed - those are handled by GitLab state)
 	if issue.Status == types.StatusInProgress {
 		labels = append(labels, "status::in_progress")
 	} else if issue.Status == types.StatusBlocked {
