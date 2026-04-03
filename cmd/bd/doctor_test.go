@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -537,8 +538,28 @@ func TestGetClaudePluginVersion(t *testing.T) {
 
 func TestCheckMetadataVersionTracking(t *testing.T) {
 	// GH#662: Tests updated to use .local_version file instead of metadata.json:LastBdVersion
+	// Compute versions relative to current Version so the test doesn't break
+	// when Version is bumped (GH#2957).
+	parts := doctor.ParseVersionParts(Version)
+
+	// "slightly old" = same major, a few minor versions behind (< 10 threshold).
+	// Only valid when minor >= 2, otherwise there's no room for a "slightly old" version.
+	canTestSlightlyOld := parts[1] >= 2
+	slightlyOld := fmt.Sprintf("%d.%d.0", parts[0], parts[1]-2)
+
+	// "very old" = either 15+ minor versions behind or a prior major version.
+	var veryOld string
+	if parts[1] >= 15 {
+		veryOld = fmt.Sprintf("%d.%d.0", parts[0], parts[1]-15)
+	} else if parts[0] >= 1 {
+		veryOld = fmt.Sprintf("%d.0.0", parts[0]-1)
+	} else {
+		veryOld = "0.0.1"
+	}
+
 	tests := []struct {
 		name           string
+		skip           bool
 		setupVersion   func(beadsDir string) error
 		expectedStatus string
 		expectWarning  bool
@@ -553,18 +574,17 @@ func TestCheckMetadataVersionTracking(t *testing.T) {
 		},
 		{
 			name: "slightly outdated version",
+			skip: !canTestSlightlyOld,
 			setupVersion: func(beadsDir string) error {
-				// With Version=1.0.0, any 0.x version differs by major version and triggers a warning
-				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("0.55.0\n"), 0644)
+				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(slightlyOld+"\n"), 0644)
 			},
-			expectedStatus: doctor.StatusWarning,
-			expectWarning:  true,
+			expectedStatus: doctor.StatusOK,
+			expectWarning:  false,
 		},
 		{
 			name: "very old version",
 			setupVersion: func(beadsDir string) error {
-				// Use a version that's 10+ minor versions behind current (triggers warning)
-				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte("0.49.0\n"), 0644)
+				return os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(veryOld+"\n"), 0644)
 			},
 			expectedStatus: doctor.StatusWarning,
 			expectWarning:  true,
@@ -598,6 +618,10 @@ func TestCheckMetadataVersionTracking(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.skip {
+				t.Skipf("no valid %q version for Version=%s", tc.name, Version)
+			}
+
 			tmpDir := t.TempDir()
 			beadsDir := filepath.Join(tmpDir, ".beads")
 			if err := os.Mkdir(beadsDir, 0750); err != nil {
