@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -20,17 +21,28 @@ import (
 // ===== Shared test helpers (used by both update and close tests) =====
 
 // bdUpdate runs "bd update" with the given args and returns stdout.
+// Retries on flock contention.
 func bdUpdate(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"update"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd update %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	var out []byte
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		cmd := exec.Command(bd, fullArgs...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err = cmd.CombinedOutput()
+		if err == nil {
+			return string(out)
+		}
+		if !strings.Contains(string(out), "one writer at a time") {
+			break
+		}
+		t.Logf("bd update: flock contention (attempt %d/5), retrying...", attempt+1)
+		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 	}
-	return string(out)
+	t.Fatalf("bd update %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	return ""
 }
 
 // bdUpdateFail runs "bd update" expecting failure.

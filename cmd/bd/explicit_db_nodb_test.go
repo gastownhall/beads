@@ -113,6 +113,18 @@ func writeProjectConfig(t *testing.T, beadsDir string, syncRemote string, port i
 	))
 }
 
+// evalPath resolves symlinks in a path for consistent comparison.
+// On macOS, t.TempDir() returns /var/folders/... but binaries resolve
+// it to /private/var/folders/..., causing string comparison failures.
+func evalPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", path, err)
+	}
+	return resolved
+}
+
 func decodeJSONOutput(t *testing.T, out []byte, target any) {
 	t.Helper()
 	trimmed := strings.TrimSpace(string(out))
@@ -160,7 +172,7 @@ func TestContextUsesExplicitDBFlagForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -209,7 +221,7 @@ func TestContextUsesBEADSDBForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -229,7 +241,7 @@ func TestContextUsesBEADSDBDirectoryForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -249,7 +261,7 @@ func TestContextUsesExplicitDBFlagForExternalDoltDataDir(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -274,7 +286,7 @@ func TestContextExplicitDBFlagOverridesBEADSDBForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {
@@ -296,7 +308,7 @@ func TestContextBEADSDBOverridesBDDBForNoDBCommand(t *testing.T) {
 
 	var got map[string]any
 	decodeJSONOutput(t, out, &got)
-	if got["beads_dir"] != beadsDirB {
+	if evalPath(t, got["beads_dir"].(string)) != evalPath(t, beadsDirB) {
 		t.Fatalf("beads_dir = %v, want %s", got["beads_dir"], beadsDirB)
 	}
 	if got["database"] != "repo_b_db" {

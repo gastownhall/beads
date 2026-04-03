@@ -18,18 +18,28 @@ import (
 )
 
 // bdCreate runs "bd create" in the given dir with --json and extra args.
-// Returns the parsed issue JSON. Fatals on failure.
+// Returns the parsed issue JSON. Retries on flock contention, fatals on other failures.
 func bdCreate(t *testing.T, bd, dir string, args ...string) *types.Issue {
 	t.Helper()
 	fullArgs := append([]string{"create", "--json"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd create %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	var out []byte
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		cmd := exec.Command(bd, fullArgs...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err = cmd.CombinedOutput()
+		if err == nil {
+			return parseIssueJSON(t, out)
+		}
+		if !strings.Contains(string(out), "one writer at a time") {
+			break
+		}
+		t.Logf("bd create: flock contention (attempt %d/5), retrying...", attempt+1)
+		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 	}
-	return parseIssueJSON(t, out)
+	t.Fatalf("bd create %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	return nil
 }
 
 // parseIssueJSON extracts a JSON issue object from command output that may
@@ -58,17 +68,28 @@ func parseIssueJSON(t *testing.T, out []byte) *types.Issue {
 }
 
 // bdCreateSilent runs "bd create" with --silent and returns the issue ID.
+// Retries on flock contention.
 func bdCreateSilent(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"create", "--silent"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd create --silent %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	var out []byte
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		cmd := exec.Command(bd, fullArgs...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err = cmd.CombinedOutput()
+		if err == nil {
+			return strings.TrimSpace(string(out))
+		}
+		if !strings.Contains(string(out), "one writer at a time") {
+			break
+		}
+		t.Logf("bd create --silent: flock contention (attempt %d/5), retrying...", attempt+1)
+		time.Sleep(time.Duration(100*(1<<attempt)) * time.Millisecond)
 	}
-	return strings.TrimSpace(string(out))
+	t.Fatalf("bd create --silent %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	return ""
 }
 
 // bdCreateFail runs "bd create" expecting failure. Returns combined output.
