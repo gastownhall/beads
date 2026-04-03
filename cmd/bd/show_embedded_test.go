@@ -165,6 +165,7 @@ func TestEmbeddedShow(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Commented show", "--type", "task")
 		store := openStore(t, beadsDir, "ts")
 		_, _ = store.AddIssueComment(t.Context(), issue.ID, "tester", "A comment")
+		store.Close() // release flock before subprocess
 
 		m := bdShowDetails(t, bd, dir, issue.ID)
 		comments, _ := m["comments"].([]interface{})
@@ -253,6 +254,7 @@ func TestEmbeddedShow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetCurrentCommit: %v", err)
 		}
+		store.Close() // release flock before subprocess
 
 		// Update the issue
 		bdUpdate(t, bd, dir, issue.ID, "--title", "AsOf updated")

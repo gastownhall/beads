@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdDiff runs "bd diff" with the given args and returns raw stdout.
@@ -61,13 +63,20 @@ func bdDiffJSON(t *testing.T, bd, dir string, args ...string) []map[string]inter
 }
 
 // getCommitHash returns the current HEAD commit hash via the store.
+// The store is closed immediately to release the flock, allowing subsequent
+// bd subprocess commands to acquire it.
 func getCommitHash(t *testing.T, beadsDir, database string) string {
 	t.Helper()
-	s := openStore(t, beadsDir, database)
+	s, err := embeddeddolt.New(t.Context(), beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("openStore for getCommitHash: %v", err)
+	}
 	hash, err := s.GetCurrentCommit(t.Context())
 	if err != nil {
+		s.Close()
 		t.Fatalf("GetCurrentCommit: %v", err)
 	}
+	s.Close()
 	return hash
 }
 
