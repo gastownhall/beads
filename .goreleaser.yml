@@ -157,7 +157,7 @@ archives:
 brews:
   - name: bd
     repository:
-      owner: steveyegge
+      owner: gastownhall
       name: homebrew-beads
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
@@ -199,7 +199,7 @@ changelog:
 
 release:
   github:
-    owner: steveyegge
+    owner: gastownhall
     name: beads
   draft: false
   prerelease: auto
