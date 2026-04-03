@@ -250,9 +250,16 @@ func TestEmbeddedConfigConcurrent(t *testing.T) {
 		}
 	}
 
-	// Verify all keys exist after concurrent writes
+	// Verify keys only for workers that succeeded (err==nil).
+	// With exclusive flock, some workers may fail with "one writer at a time".
 	m := bdConfigListJSON(t, bd, dir)
-	for w := 0; w < numWorkers; w++ {
+	var successCount int
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		successCount++
+		w := r.worker
 		for i := 0; i < 5; i++ {
 			key := fmt.Sprintf("worker%d.key%d", w, i)
 			expected := fmt.Sprintf("value-%d-%d", w, i)
@@ -260,5 +267,8 @@ func TestEmbeddedConfigConcurrent(t *testing.T) {
 				t.Errorf("after concurrent writes: key %s expected %q, got %q (exists=%v)", key, expected, v, ok)
 			}
 		}
+	}
+	if successCount == 0 {
+		t.Fatal("expected at least 1 worker to succeed")
 	}
 }
