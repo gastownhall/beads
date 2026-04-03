@@ -53,7 +53,7 @@ func TryLock(dataDir string) (*Lock, error) {
 }
 
 // WaitLock blocks until an exclusive flock on <dataDir>/.lock can be acquired
-// or the context is cancelled. It uses exponential backoff with non-blocking
+// or the context is canceled. It uses exponential backoff with non-blocking
 // lock attempts so the wait is interruptible via context cancellation.
 // Non-lock filesystem errors are returned immediately without retrying.
 func WaitLock(ctx context.Context, dataDir string) (*Lock, error) {

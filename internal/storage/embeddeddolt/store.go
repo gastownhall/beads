@@ -72,7 +72,7 @@ func WithLock(lock Unlocker) Option {
 // An exclusive flock is held on the data directory for the store's entire
 // lifetime. If another process already holds the lock, New queues with
 // exponential backoff until the lock becomes available or the context is
-// cancelled, instead of panicking during concurrent engine initialization
+// canceled, instead of panicking during concurrent engine initialization
 // (GH#2571). The lock is released when Close is called, unless a pre-acquired
 // lock was supplied via WithLock (in which case the caller is responsible for it).
 func New(ctx context.Context, beadsDir, database, branch string, opts ...Option) (*EmbeddedDoltStore, error) {
