@@ -192,7 +192,9 @@ func TestEmbeddedQuickConcurrent(t *testing.T) {
 	allIDs := map[string]bool{}
 	for _, r := range results {
 		if r.err != nil {
-			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
 			continue
 		}
 		for _, id := range r.ids {

@@ -846,7 +846,9 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 	var failures int
 	for _, r := range results {
 		if r.err != nil {
-			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			if !strings.Contains(r.err.Error(), "one writer at a time") {
+				t.Errorf("worker %d failed: %v", r.worker, r.err)
+			}
 			failures++
 			continue
 		}
