@@ -442,14 +442,14 @@ func cookFormulaToSubgraph(f *formula.Formula, protoID string) (*TemplateSubgrap
 		rootDesc = "{{desc}}"
 	}
 
-	// Create root proto epic
+	// Create root proto molecule
 	rootIssue := &types.Issue{
 		ID:          protoID,
 		Title:       rootTitle,
 		Description: rootDesc,
 		Status:      types.StatusOpen,
 		Priority:    2,
-		IssueType:   types.TypeEpic,
+		IssueType:   types.TypeMolecule,
 		IsTemplate:  true,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
@@ -812,14 +812,14 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 		rootDesc = "{{desc}}"
 	}
 
-	// Create root proto epic using provided protoID (may include prefix)
+	// Create root proto molecule using provided protoID (may include prefix)
 	rootIssue := &types.Issue{
 		ID:          protoID,
 		Title:       rootTitle,
 		Description: rootDesc,
 		Status:      types.StatusOpen,
 		Priority:    2,
-		IssueType:   types.TypeEpic,
+		IssueType:   types.TypeMolecule,
 		IsTemplate:  true,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
