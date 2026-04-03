@@ -51,6 +51,10 @@ type Client struct {
 	ProjectID  string       // Project ID or URL-encoded path (e.g., "group/project")
 	GroupID    string       // Optional group ID or path for group-level issue fetching
 	HTTPClient *http.Client // Optional custom HTTP client
+
+	// taskTypeID caches the GraphQL GID for the "Task" work item type.
+	// Populated lazily on first call to getTaskWorkItemTypeID.
+	taskTypeID string
 }
 
 // Issue represents an issue from the GitLab API.

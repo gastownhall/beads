@@ -36,6 +36,7 @@ func (c *Client) WithGroupID(groupID string) *Client {
 		ProjectID:  c.ProjectID,
 		GroupID:    groupID,
 		HTTPClient: c.HTTPClient,
+		taskTypeID: c.taskTypeID,
 	}
 }
 
@@ -48,6 +49,7 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 		ProjectID:  c.ProjectID,
 		GroupID:    c.GroupID,
 		HTTPClient: httpClient,
+		taskTypeID: c.taskTypeID,
 	}
 }
 
@@ -60,6 +62,7 @@ func (c *Client) WithEndpoint(endpoint string) *Client {
 		ProjectID:  c.ProjectID,
 		GroupID:    c.GroupID,
 		HTTPClient: c.HTTPClient,
+		taskTypeID: c.taskTypeID,
 	}
 }
 
@@ -430,6 +433,31 @@ func (c *Client) FetchMilestones(ctx context.Context, state string) ([]Milestone
 	return milestones, nil
 }
 
+// FetchMilestoneByIID retrieves a single milestone by its project-scoped IID.
+// Returns nil if no milestone matches the given IID.
+func (c *Client) FetchMilestoneByIID(ctx context.Context, iid int) (*Milestone, error) {
+	params := map[string]string{
+		"iids[]": strconv.Itoa(iid),
+	}
+
+	urlStr := c.buildURL("/projects/"+c.projectPath()+"/milestones", params)
+	respBody, _, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch milestone by IID %d: %w", iid, err)
+	}
+
+	var milestones []Milestone
+	if err := json.Unmarshal(respBody, &milestones); err != nil {
+		return nil, fmt.Errorf("failed to parse milestone response: %w", err)
+	}
+
+	if len(milestones) == 0 {
+		return nil, nil
+	}
+
+	return &milestones[0], nil
+}
+
 // CreateMilestone creates a new milestone in GitLab.
 func (c *Client) CreateMilestone(ctx context.Context, title, description string) (*Milestone, error) {
 	body := map[string]interface{}{
@@ -506,10 +534,56 @@ type WorkItem struct {
 	Type  string `json:"type"` // Work item type name
 }
 
+// defaultTaskTypeID is the fallback GID for older GitLab instances where the
+// workItemTypes GraphQL query is unavailable.
+const defaultTaskTypeID = "gid://gitlab/WorkItems::Type/5"
+
+// getTaskWorkItemTypeID returns the GraphQL GID for the "Task" work item type.
+// It queries the GitLab instance once per session and caches the result.
+// Falls back to the hardcoded default if the query fails (e.g., older GitLab versions).
+func (c *Client) getTaskWorkItemTypeID(ctx context.Context, projectPath string) string {
+	if c.taskTypeID != "" {
+		return c.taskTypeID
+	}
+
+	query := fmt.Sprintf(`{
+		project(fullPath: %q) {
+			workItemTypes(name: "Task") {
+				nodes { id }
+			}
+		}
+	}`, projectPath)
+
+	data, err := c.graphqlRequest(ctx, query, nil)
+	if err != nil {
+		c.taskTypeID = defaultTaskTypeID
+		return c.taskTypeID
+	}
+
+	var resp struct {
+		Project struct {
+			WorkItemTypes struct {
+				Nodes []struct {
+					ID string `json:"id"`
+				} `json:"nodes"`
+			} `json:"workItemTypes"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil || len(resp.Project.WorkItemTypes.Nodes) == 0 {
+		c.taskTypeID = defaultTaskTypeID
+		return c.taskTypeID
+	}
+
+	c.taskTypeID = resp.Project.WorkItemTypes.Nodes[0].ID
+	return c.taskTypeID
+}
+
 // CreateTaskWorkItem creates a Task-type work item via GraphQL, optionally with a parent.
 // parentGID is the global ID of the parent work item (e.g., "gid://gitlab/WorkItem/456").
 // If parentGID is empty, creates a standalone task.
 func (c *Client) CreateTaskWorkItem(ctx context.Context, projectPath, title, description, parentGID string) (*WorkItem, error) {
+	typeID := c.getTaskWorkItemTypeID(ctx, projectPath)
+
 	hierarchyPart := ""
 	if parentGID != "" {
 		hierarchyPart = fmt.Sprintf(`, hierarchyWidget: { parentId: %q }`, parentGID)
@@ -520,12 +594,12 @@ func (c *Client) CreateTaskWorkItem(ctx context.Context, projectPath, title, des
 			projectPath: %q,
 			title: %q,
 			description: %q,
-			workItemTypeId: "gid://gitlab/WorkItems::Type/5"%s
+			workItemTypeId: %q%s
 		}) {
 			errors
 			workItem { id iid title workItemType { name } webUrl }
 		}
-	}`, projectPath, title, description, hierarchyPart)
+	}`, projectPath, title, description, typeID, hierarchyPart)
 
 	data, err := c.graphqlRequest(ctx, query, nil)
 	if err != nil {

@@ -304,17 +304,12 @@ func (t *Tracker) findParentEpicMilestone(ctx context.Context, issueID string) i
 				if err != nil {
 					return 0
 				}
-				// Look up API ID by IID
-				milestones, err := t.client.FetchMilestones(ctx, "")
-				if err != nil {
+				// Look up API ID by IID (single API call instead of fetching all milestones)
+				ms, err := t.client.FetchMilestoneByIID(ctx, milestoneIID)
+				if err != nil || ms == nil {
 					return 0
 				}
-				for _, ms := range milestones {
-					if ms.IID == milestoneIID {
-						return ms.ID
-					}
-				}
-				return 0
+				return ms.ID
 			}
 			// Not an epic — keep walking up
 			currentID = dep.Issue.ID
