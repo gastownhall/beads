@@ -191,6 +191,7 @@ func init() {
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterProject, "project", "", "Filter to issues from this project ID (group mode)")
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterMilestone, "milestone", "", "Filter by milestone title")
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterAssignee, "assignee", "", "Filter by assignee username")
+	registerSelectiveSyncFlags(gitlabSyncCmd)
 
 	// Type filtering flags
 	gitlabSyncCmd.Flags().StringVar(&gitlabTypeFilter, "type", "", "Only sync these issue types (comma-separated, e.g. 'epic,feature,task')")
@@ -470,6 +471,10 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		ExcludeEphemeral: gitlabNoEphemeral,
 		TypeFilter:       parseTypeList(gitlabTypeFilter),
 		ExcludeTypes:     excludeTypes,
+	}
+
+	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
+		return err
 	}
 
 	// Map conflict resolution

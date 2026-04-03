@@ -152,6 +152,7 @@ func init() {
 	linearSyncCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps, etc.) when pushing to Linear")
 	linearSyncCmd.Flags().String("parent", "", "Limit push to this beads ticket and its descendants")
 	linearSyncCmd.Flags().StringSlice("team", nil, "Team ID(s) to sync (overrides configured team_id/team_ids)")
+	registerSelectiveSyncFlags(linearSyncCmd)
 
 	linearCmd.AddCommand(linearSyncCmd)
 	linearCmd.AddCommand(linearStatusCmd)
@@ -170,12 +171,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	typeFilters, _ := cmd.Flags().GetStringSlice("type")
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
 	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
-	parentID, _ := cmd.Flags().GetString("parent")
 	cliTeams, _ := cmd.Flags().GetStringSlice("team")
-
-	if parentID != "" && !push {
-		FatalError("--parent requires --push")
-	}
 
 	if !dryRun {
 		CheckReadonly("linear sync")
@@ -239,7 +235,10 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	if !includeEphemeral {
 		opts.ExcludeEphemeral = true
 	}
-	opts.ParentID = parentID
+
+	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
+		FatalError("%v", err)
+	}
 
 	// Map conflict resolution
 	if preferLocal {
