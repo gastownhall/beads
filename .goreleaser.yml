@@ -80,7 +80,9 @@ builds:
     main: ./cmd/bd
     binary: bd
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=x86_64-w64-mingw32-gcc
+      - CXX=x86_64-w64-mingw32-g++
     tags:
       - gms_pure_go
     goos:
@@ -96,6 +98,7 @@ builds:
       - -buildmode=exe
     hooks:
       post:
+        - ./scripts/verify-cgo.sh "{{ .Path }}"
         # Sign Windows executable with Authenticode certificate
         # Requires WINDOWS_SIGNING_CERT_PFX_BASE64 and WINDOWS_SIGNING_CERT_PASSWORD secrets
         - ./scripts/sign-windows.sh "{{ .Path }}"
