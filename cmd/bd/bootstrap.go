@@ -50,11 +50,11 @@ Examples:
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
-		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 		yesFlag, _ := cmd.Flags().GetBool("yes")
+		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 
 		// Resolve non-interactive mode: flag > env var > CI env > terminal detection.
-		nonInteractive := isNonInteractiveBootstrap(nonInteractiveFlag || yesFlag)
+		nonInteractive := isNonInteractiveBootstrap(yesFlag || nonInteractiveFlag)
 
 		// Find beads directory
 		beadsDir := beads.FindBeadsDir()
@@ -442,7 +442,7 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 
 func init() {
 	bootstrapCmd.Flags().Bool("dry-run", false, "Show what would be done without doing it")
-	bootstrapCmd.Flags().BoolP("non-interactive", "y", false, "Skip confirmation prompt (auto-detected in CI or non-TTY environments)")
-	bootstrapCmd.Flags().Bool("yes", false, "Alias for --non-interactive")
+	bootstrapCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompts (for CI/automation)")
+	bootstrapCmd.Flags().Bool("non-interactive", false, "Alias for --yes")
 	rootCmd.AddCommand(bootstrapCmd)
 }
