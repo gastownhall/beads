@@ -543,12 +543,12 @@ func TestCookFormulaToSubgraph_StandaloneExpansion(t *testing.T) {
 		}
 	}
 
-	// Root epic
+	// Root molecule
 	if subgraph.Root.ID != "rule-of-five" {
 		t.Errorf("Root.ID = %q, want %q", subgraph.Root.ID, "rule-of-five")
 	}
-	if subgraph.Root.IssueType != types.TypeEpic {
-		t.Errorf("Root.IssueType = %q, want %q", subgraph.Root.IssueType, types.TypeEpic)
+	if subgraph.Root.IssueType != types.TypeMolecule {
+		t.Errorf("Root.IssueType = %q, want %q", subgraph.Root.IssueType, types.TypeMolecule)
 	}
 
 	// Verify child issue IDs
