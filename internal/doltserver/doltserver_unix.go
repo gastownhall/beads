@@ -83,7 +83,9 @@ func listDoltProcessPIDs() []int {
 // Uses lsof to look up the CWD, which is more reliable than checking command-line
 // args since dolt sql-server is started with cmd.Dir (not a --data-dir flag).
 func isProcessInDir(pid int, dir string) bool {
-	out, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	// On macOS, lsof requires -a to AND selectors together; without it,
+	// "-p <pid>" and "-d cwd" can yield cwd entries from unrelated processes.
+	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
 	if err != nil {
 		return false
 	}
