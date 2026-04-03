@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -523,7 +524,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		store, err := newDoltStore(ctx, doltCfg)
+		store, err := newDoltStore(ctx, doltCfg, embeddeddolt.WithLock(initLock))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %v\n", err)
 			os.Exit(1)

@@ -211,6 +211,78 @@ func mustQueryRow(t *testing.T, db *sql.DB, ctx context.Context, query string, a
 	return row
 }
 
+// TestConcurrentNewReturnsError verifies that opening a second EmbeddedDoltStore
+// on the same data directory returns a clear error instead of panicking with a
+// nil-pointer dereference in the embedded Dolt engine (GH#2571).
+func TestConcurrentNewReturnsError(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt concurrency tests")
+	}
+
+	ctx := t.Context()
+	beadsDir := t.TempDir()
+
+	// First store opens successfully and holds the exclusive flock.
+	store1, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("first New: %v", err)
+	}
+	defer store1.Close()
+
+	// Second store on the same directory must fail with a lock error, not panic.
+	store2, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
+	if err == nil {
+		store2.Close()
+		t.Fatal("second New succeeded; expected lock contention error")
+	}
+	if !strings.Contains(err.Error(), "another process holds the exclusive lock") {
+		t.Fatalf("unexpected error from second New: %v", err)
+	}
+	t.Logf("second New correctly returned: %v", err)
+
+	// After closing the first store, a third open must succeed.
+	store1.Close()
+	store3, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("third New (after close): %v", err)
+	}
+	store3.Close()
+}
+
+// TestWithLockBypassesDoubleLock verifies that WithLock allows the caller to
+// supply a pre-acquired lock so New does not attempt a second flock (which
+// would fail on macOS where flock is per-fd, not per-process).
+func TestWithLockBypassesDoubleLock(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt concurrency tests")
+	}
+
+	ctx := t.Context()
+	beadsDir := t.TempDir()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	// Acquire the lock externally (as bd init does).
+	lock, err := embeddeddolt.TryLock(dataDir)
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	defer lock.Unlock()
+
+	// New with WithLock must succeed without double-locking.
+	store, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main", embeddeddolt.WithLock(lock))
+	if err != nil {
+		t.Fatalf("New with WithLock: %v", err)
+	}
+	// Close must NOT release the caller-supplied lock.
+	store.Close()
+
+	// The lock should still be held — verify by trying to lock again (should fail).
+	_, err = embeddeddolt.TryLock(dataDir)
+	if err == nil {
+		t.Fatal("TryLock succeeded after Close; expected lock to still be held by caller")
+	}
+}
+
 func envInt(name string, def int) int {
 	v := strings.TrimSpace(os.Getenv(name))
 	if v == "" {

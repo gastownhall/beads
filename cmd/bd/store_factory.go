@@ -38,11 +38,11 @@ func isEmbeddedMode() bool {
 // When cfg.ServerMode is true, connects to an external dolt sql-server;
 // otherwise uses the embedded Dolt engine (default).
 // Used by bd init and PersistentPreRun.
-func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
+func newDoltStore(ctx context.Context, cfg *dolt.Config, opts ...embeddeddolt.Option) (storage.DoltStorage, error) {
 	if cfg.ServerMode {
 		return dolt.New(ctx, cfg)
 	}
-	return embeddeddolt.New(ctx, cfg.BeadsDir, cfg.Database, "main")
+	return embeddeddolt.New(ctx, cfg.BeadsDir, cfg.Database, "main", opts...)
 }
 
 // acquireEmbeddedLock acquires an exclusive flock on the embeddeddolt data
