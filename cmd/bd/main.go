@@ -200,18 +200,75 @@ func loadServerModeFromConfig() {
 	}
 }
 
+func preserveRedirectSourceDatabase(beadsDir string) {
+	if beadsDir == "" || os.Getenv("BEADS_DOLT_SERVER_DATABASE") != "" {
+		return
+	}
+
+	rInfo := beads.ResolveRedirect(beadsDir)
+	if rInfo.WasRedirected && rInfo.SourceDatabase != "" {
+		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", rInfo.SourceDatabase)
+		if os.Getenv("BD_DEBUG_ROUTING") != "" {
+			fmt.Fprintf(os.Stderr, "[routing] Preserved source dolt_database %q across redirect\n", rInfo.SourceDatabase)
+		}
+	}
+}
+
+func selectedNoDBBeadsDir() string {
+	selectedDBPath := ""
+	if rootCmd.PersistentFlags().Changed("db") && dbPath != "" {
+		selectedDBPath = dbPath
+	} else if envDB := os.Getenv("BEADS_DB"); envDB != "" {
+		selectedDBPath = envDB
+	} else if envDB := os.Getenv("BD_DB"); envDB != "" {
+		selectedDBPath = envDB
+	} else {
+		selectedDBPath = dbPath
+	}
+	if selectedDBPath != "" {
+		if selectedBeadsDir := resolveCommandBeadsDir(selectedDBPath); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
+	}
+	return beads.FindBeadsDir()
+}
+
+func isSelectedNoDBCommand(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Name() == "context" {
+		return true
+	}
+	if cmd.Parent() == nil || cmd.Parent().Name() != "dolt" {
+		return false
+	}
+	switch cmd.Name() {
+	case "push", "pull", "commit":
+		return false
+	default:
+		return true
+	}
+}
+
+func prepareSelectedNoDBContext(beadsDir string) {
+	if beadsDir == "" {
+		return
+	}
+	_ = os.Setenv("BEADS_DIR", beadsDir)
+	loadBeadsEnvFile(beadsDir)
+	preserveRedirectSourceDatabase(beadsDir)
+	if err := config.Initialize(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to reinitialize config for selected beads dir: %v\n", err)
+	}
+}
+
 // resolveCommandBeadsDir maps a discovered Dolt data path back to the owning
 // .beads directory. filepath.Dir(dbPath) only works when the Dolt data lives
 // under .beads/dolt; custom dolt_data_dir values can place it elsewhere.
 func resolveCommandBeadsDir(dbPath string) string {
 	if dbPath == "" {
 		return ""
-	}
-
-	// BEADS_DB is an explicit database override, so preserve its legacy
-	// filepath.Dir behavior instead of trying to rediscover a repo-local .beads.
-	if os.Getenv("BEADS_DB") != "" {
-		return filepath.Dir(dbPath)
 	}
 
 	// Use the same validated candidate logic as the helper/reopen path
@@ -221,6 +278,13 @@ func resolveCommandBeadsDir(dbPath string) string {
 	// an explicit --db flag.
 	if beadsDir := resolveBeadsDirForDBPath(dbPath); beadsDir != "" {
 		return beadsDir
+	}
+
+	for dir := filepath.Dir(dbPath); dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		candidate := filepath.Join(dir, ".beads")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
 	}
 
 	// No candidate matched — fall back to parent directory of the db path.
@@ -450,7 +514,9 @@ var rootCmd = &cobra.Command{
 
 		// GH#2677: Load .beads/.env before the noDbCommands early return so that
 		// commands like "bd doctor --server" pick up per-project Dolt credentials.
-		loadEnvironment()
+		if !isSelectedNoDBCommand(cmd) {
+			loadEnvironment()
+		}
 
 		// Load storage mode (embedded vs server) early so that isEmbeddedMode()
 		// returns the correct value for all commands, including those that skip
@@ -549,21 +615,7 @@ var rootCmd = &cobra.Command{
 		// When .beads/redirect points to a shared directory with a different
 		// dolt_database, the source's database name would be lost. Capture it
 		// early and set BEADS_DOLT_SERVER_DATABASE so all store opens use it.
-		redirectInfo := beads.GetRedirectInfo()
-		var sourceDoltDatabase string
-		if redirectInfo.IsRedirected && redirectInfo.LocalDir != "" {
-			rInfo := beads.ResolveRedirect(redirectInfo.LocalDir)
-			sourceDoltDatabase = rInfo.SourceDatabase
-		}
-		// Set env var early so ALL store opens (main + routed) use the correct
-		// database. Redirects may resolve to a shared .beads dir that serves
-		// multiple databases; the env var ensures the right one is selected.
-		if sourceDoltDatabase != "" && os.Getenv("BEADS_DOLT_SERVER_DATABASE") == "" {
-			_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", sourceDoltDatabase)
-			if os.Getenv("BD_DEBUG_ROUTING") != "" {
-				fmt.Fprintf(os.Stderr, "[routing] Preserved source dolt_database %q across redirect\n", sourceDoltDatabase)
-			}
-		}
+		preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
 
 		// Initialize database path
 		if dbPath == "" {

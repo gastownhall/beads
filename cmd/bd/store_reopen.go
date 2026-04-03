@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -33,8 +34,18 @@ func openReadOnlyStoreForDBPath(ctx context.Context, dbPath string) (storage.Dol
 // non-default dolt_database names or custom dolt_data_dir locations.
 func resolveBeadsDirForDBPath(dbPath string) string {
 	actualDBPath := utils.CanonicalizePath(dbPath)
+	if parent := filepath.Dir(dbPath); filepath.Base(parent) == ".beads" {
+		if _, err := os.Stat(filepath.Join(parent, "metadata.json")); err == nil {
+			return parent
+		}
+	}
+	if parent := filepath.Dir(actualDBPath); filepath.Base(parent) == ".beads" {
+		if _, err := os.Stat(filepath.Join(parent, "metadata.json")); err == nil {
+			return parent
+		}
+	}
 	seen := map[string]struct{}{}
-	candidates := make([]string, 0, 4)
+	candidates := make([]string, 0, 16)
 
 	addCandidate := func(path string) {
 		if path == "" {
@@ -51,8 +62,26 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 		candidates = append(candidates, path)
 	}
 
+	addAncestorCandidates := func(path string) {
+		for dir := path; dir != "" && dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+			addCandidate(filepath.Join(dir, ".beads"))
+			if filepath.Base(dir) == ".beads" {
+				addCandidate(dir)
+			}
+		}
+	}
+
+	if info, err := os.Stat(dbPath); err == nil && info.IsDir() {
+		addCandidate(dbPath)
+	}
+	if info, err := os.Stat(actualDBPath); err == nil && info.IsDir() {
+		addCandidate(actualDBPath)
+	}
+
 	addCandidate(filepath.Dir(dbPath))
 	addCandidate(filepath.Dir(actualDBPath))
+	addAncestorCandidates(filepath.Dir(dbPath))
+	addAncestorCandidates(filepath.Dir(actualDBPath))
 
 	if found := beads.FindBeadsDir(); found != "" {
 		addCandidate(found)
@@ -63,6 +92,9 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 		cfg, err := configfile.Load(beadsDir)
 		if err != nil || cfg == nil {
 			continue
+		}
+		if utils.PathsEqual(beadsDir, dbPath) || utils.PathsEqual(beadsDir, actualDBPath) {
+			return beadsDir
 		}
 		if utils.PathsEqual(cfg.DatabasePath(beadsDir), dbPath) || utils.PathsEqual(cfg.DatabasePath(beadsDir), actualDBPath) {
 			return beadsDir
