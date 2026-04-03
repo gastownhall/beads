@@ -522,8 +522,130 @@ func findBeadsRepoRoot(startPath string) string {
 	}
 }
 
+var configSetManyCmd = &cobra.Command{
+	Use:   "set-many <key=value>...",
+	Short: "Set multiple configuration values in one operation",
+	Long: `Set multiple configuration values at once with a single auto-commit and auto-push.
+
+Each argument must be in key=value format. All values are validated before
+any writes occur. This is faster and less noisy than separate 'bd config set'
+calls, especially in CI.
+
+Examples:
+  bd config set-many ado.state_map.open=New ado.state_map.closed=Closed
+  bd config set-many jira.url=https://example.atlassian.net jira.project=PROJ`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(_ *cobra.Command, args []string) {
+		// Phase 1: Parse all key=value pairs
+		type kvPair struct {
+			key, value string
+		}
+		pairs := make([]kvPair, 0, len(args))
+		for _, arg := range args {
+			idx := strings.Index(arg, "=")
+			if idx <= 0 {
+				fmt.Fprintf(os.Stderr, "Error: invalid argument %q (expected key=value format)\n", arg)
+				os.Exit(1)
+			}
+			pairs = append(pairs, kvPair{key: arg[:idx], value: arg[idx+1:]})
+		}
+
+		// Phase 2: Validate all pairs before writing any
+		for _, p := range pairs {
+			if p.key == "beads.role" {
+				validRoles := map[string]bool{"maintainer": true, "contributor": true}
+				if !validRoles[p.value] {
+					fmt.Fprintf(os.Stderr, "Error: invalid role %q (valid values: maintainer, contributor)\n", p.value)
+					os.Exit(1)
+				}
+			}
+			if p.key == "status.custom" && p.value != "" {
+				if _, err := types.ParseCustomStatusConfig(p.value); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid status.custom value: %v\n", err)
+					os.Exit(1)
+				}
+			}
+		}
+
+		// Phase 3: Separate into categories
+		var yamlPairs, gitPairs, dbPairs []kvPair
+		for _, p := range pairs {
+			if config.IsYamlOnlyKey(p.key) {
+				yamlPairs = append(yamlPairs, p)
+			} else if p.key == "beads.role" {
+				gitPairs = append(gitPairs, p)
+			} else {
+				dbPairs = append(dbPairs, p)
+			}
+		}
+
+		// Phase 4: Write yaml-only keys
+		for _, p := range yamlPairs {
+			if err := config.SetYamlConfig(p.key, p.value); err != nil {
+				fmt.Fprintf(os.Stderr, "Error setting config %s: %v\n", p.key, err)
+				os.Exit(1)
+			}
+		}
+
+		// Phase 5: Write git config keys
+		for _, p := range gitPairs {
+			cmd := exec.Command("git", "config", "beads.role", p.value) //nolint:gosec // value is validated against allowlist above
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error setting %s in git config: %v\n", p.key, err)
+				os.Exit(1)
+			}
+		}
+
+		// Phase 6: Write DB keys in batch
+		if len(dbPairs) > 0 {
+			if err := ensureDirectMode("config set-many requires direct database access"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			ctx := rootCtx
+			for _, p := range dbPairs {
+				if err := store.SetConfig(ctx, p.key, p.value); err != nil {
+					fmt.Fprintf(os.Stderr, "Error setting config %s: %v\n", p.key, err)
+					os.Exit(1)
+				}
+			}
+		}
+
+		// Phase 7: Output results
+		if jsonOutput {
+			results := make([]map[string]string, 0, len(pairs))
+			for _, p := range pairs {
+				location := "database"
+				if config.IsYamlOnlyKey(p.key) {
+					location = "config.yaml"
+				} else if p.key == "beads.role" {
+					location = "git config"
+				}
+				results = append(results, map[string]string{
+					"key":      p.key,
+					"value":    p.value,
+					"location": location,
+				})
+			}
+			outputJSON(results)
+		} else {
+			for _, p := range pairs {
+				location := ""
+				if config.IsYamlOnlyKey(p.key) {
+					location = " (in config.yaml)"
+				} else if p.key == "beads.role" {
+					location = " (in git config)"
+				}
+				fmt.Printf("Set %s = %s%s\n", p.key, p.value, location)
+			}
+		}
+	},
+}
+
 func init() {
 	configCmd.AddCommand(configSetCmd)
+	configCmd.AddCommand(configSetManyCmd)
 	configCmd.AddCommand(configGetCmd)
 	configCmd.AddCommand(configListCmd)
 	configCmd.AddCommand(configUnsetCmd)

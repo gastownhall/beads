@@ -575,3 +575,90 @@ func TestCustomStatusConfig(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigSetMany tests the batch config set functionality used by 'bd config set-many'.
+func TestConfigSetMany(t *testing.T) {
+	ctx := context.Background()
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	t.Run("batch set multiple DB keys", func(t *testing.T) {
+		pairs := map[string]string{
+			"ado.state_map.open":        "New",
+			"ado.state_map.in_progress": "Active",
+			"ado.state_map.closed":      "Closed",
+		}
+		for k, v := range pairs {
+			if err := store.SetConfig(ctx, k, v); err != nil {
+				t.Fatalf("SetConfig(%s) failed: %v", k, err)
+			}
+		}
+
+		// Verify all values were set correctly
+		for k, expected := range pairs {
+			got, err := store.GetConfig(ctx, k)
+			if err != nil {
+				t.Fatalf("GetConfig(%s) failed: %v", k, err)
+			}
+			if got != expected {
+				t.Errorf("GetConfig(%s) = %q, want %q", k, got, expected)
+			}
+		}
+
+		// Verify they appear in GetAllConfig
+		all, err := store.GetAllConfig(ctx)
+		if err != nil {
+			t.Fatalf("GetAllConfig failed: %v", err)
+		}
+		for k, expected := range pairs {
+			if all[k] != expected {
+				t.Errorf("GetAllConfig[%s] = %q, want %q", k, all[k], expected)
+			}
+		}
+	})
+
+	t.Run("batch set overwrites existing values", func(t *testing.T) {
+		// Set initial values
+		if err := store.SetConfig(ctx, "test.batch.a", "old-a"); err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		if err := store.SetConfig(ctx, "test.batch.b", "old-b"); err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+
+		// Overwrite with batch
+		updates := map[string]string{
+			"test.batch.a": "new-a",
+			"test.batch.b": "new-b",
+			"test.batch.c": "new-c",
+		}
+		for k, v := range updates {
+			if err := store.SetConfig(ctx, k, v); err != nil {
+				t.Fatalf("SetConfig(%s) failed: %v", k, err)
+			}
+		}
+
+		for k, expected := range updates {
+			got, err := store.GetConfig(ctx, k)
+			if err != nil {
+				t.Fatalf("GetConfig(%s) failed: %v", k, err)
+			}
+			if got != expected {
+				t.Errorf("GetConfig(%s) = %q, want %q", k, got, expected)
+			}
+		}
+	})
+
+	t.Run("batch set with empty value", func(t *testing.T) {
+		if err := store.SetConfig(ctx, "test.empty", ""); err != nil {
+			t.Fatalf("SetConfig failed: %v", err)
+		}
+		got, err := store.GetConfig(ctx, "test.empty")
+		if err != nil {
+			t.Fatalf("GetConfig failed: %v", err)
+		}
+		if got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+}
