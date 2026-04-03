@@ -37,6 +37,12 @@ func TestIsExternalRef(t *testing.T) {
 		{"https://linear.app/team/issue/PROJ-123", false},
 		{"https://github.com/org/repo/issues/1", false},
 		{"", false},
+		// Shorthand format produced by BuildExternalRef
+		{"gitlab:681509", true},
+		{"gitlab:1", true},
+		{"gitlab:abc", false},
+		{"gitlab:123/extra", false},
+		{"gitlab:0", false},
 	}
 	for _, tt := range tests {
 		if got := tr.IsExternalRef(tt.ref); got != tt.want {
@@ -54,6 +60,10 @@ func TestExtractIdentifier(t *testing.T) {
 		{"https://gitlab.com/group/project/-/issues/42", "42"},
 		{"https://gitlab.example.com/team/repo/-/issues/123", "123"},
 		{"not-a-url", ""},
+		// Shorthand format
+		{"gitlab:681509", "681509"},
+		{"gitlab:1", "1"},
+		{"gitlab:abc", ""},
 	}
 	for _, tt := range tests {
 		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {

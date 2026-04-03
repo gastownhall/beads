@@ -27,6 +27,10 @@ func init() {
 // adoWorkItemPattern matches ADO work item URLs containing /_workitems/edit/{digits}.
 var adoWorkItemPattern = regexp.MustCompile(`/_workitems/edit/(\d+)`)
 
+// adoShorthandPattern matches the "ado:{digits}" shorthand produced by BuildExternalRef
+// when a full URL cannot be constructed (e.g., missing org/project config).
+var adoShorthandPattern = regexp.MustCompile(`^ado:([1-9]\d*)$`)
+
 // Tracker implements tracker.IssueTracker for Azure DevOps. It is registered
 // under the name "ado" and supports bidirectional sync of work items between
 // ADO and the local beads database.
@@ -274,7 +278,12 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 }
 
 // IsExternalRef checks if a URL belongs to this Azure DevOps tracker.
+// It recognizes both full ADO URLs and the "ado:{id}" shorthand format
+// produced by BuildExternalRef when org/project config is unavailable.
 func (t *Tracker) IsExternalRef(ref string) bool {
+	if adoShorthandPattern.MatchString(ref) {
+		return true
+	}
 	if !adoWorkItemPattern.MatchString(ref) {
 		return false
 	}
@@ -284,8 +293,11 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 	return strings.Contains(ref, "dev.azure.com") || strings.Contains(ref, "visualstudio.com")
 }
 
-// ExtractIdentifier extracts the work item ID from an ADO URL.
+// ExtractIdentifier extracts the work item ID from an ADO URL or shorthand ref.
 func (t *Tracker) ExtractIdentifier(ref string) string {
+	if m := adoShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
+		return m[1]
+	}
 	matches := adoWorkItemPattern.FindStringSubmatch(ref)
 	if len(matches) < 2 {
 		return ""

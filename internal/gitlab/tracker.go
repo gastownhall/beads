@@ -22,6 +22,10 @@ func init() {
 // issueIIDPattern matches GitLab issue URLs: .../issues/42
 var issueIIDPattern = regexp.MustCompile(`/issues/(\d+)`)
 
+// glShorthandPattern matches the "gitlab:{digits}" shorthand produced by BuildExternalRef
+// when a full URL is unavailable.
+var glShorthandPattern = regexp.MustCompile(`^gitlab:([1-9]\d*)$`)
+
 // Tracker implements tracker.IssueTracker for GitLab.
 type Tracker struct {
 	client *Client
@@ -197,11 +201,21 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 	return &gitlabFieldMapper{config: t.config}
 }
 
+// IsExternalRef checks if a ref belongs to this GitLab tracker.
+// It recognizes both full GitLab URLs and the "gitlab:{id}" shorthand format
+// produced by BuildExternalRef when a URL is unavailable.
 func (t *Tracker) IsExternalRef(ref string) bool {
+	if glShorthandPattern.MatchString(ref) {
+		return true
+	}
 	return strings.Contains(ref, "gitlab") && issueIIDPattern.MatchString(ref)
 }
 
+// ExtractIdentifier extracts the issue IID from a GitLab URL or shorthand ref.
 func (t *Tracker) ExtractIdentifier(ref string) string {
+	if m := glShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
+		return m[1]
+	}
 	matches := issueIIDPattern.FindStringSubmatch(ref)
 	if len(matches) < 2 {
 		return ""

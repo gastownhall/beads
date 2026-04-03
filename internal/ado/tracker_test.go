@@ -289,6 +289,31 @@ func TestTracker_IsExternalRef(t *testing.T) {
 			ref:  "https://other-tfs.example.com/proj/_workitems/edit/10",
 			want: false,
 		},
+		{
+			name: "ado shorthand format",
+			ref:  "ado:681509",
+			want: true,
+		},
+		{
+			name: "ado shorthand single digit",
+			ref:  "ado:1",
+			want: true,
+		},
+		{
+			name: "ado shorthand non-numeric",
+			ref:  "ado:abc",
+			want: false,
+		},
+		{
+			name: "ado prefix but not shorthand",
+			ref:  "ado:123/extra",
+			want: false,
+		},
+		{
+			name: "ado shorthand zero rejected",
+			ref:  "ado:0",
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -329,6 +354,26 @@ func TestTracker_ExtractIdentifier(t *testing.T) {
 		{
 			name: "empty string",
 			ref:  "",
+			want: "",
+		},
+		{
+			name: "ado shorthand format",
+			ref:  "ado:681509",
+			want: "681509",
+		},
+		{
+			name: "ado shorthand single digit",
+			ref:  "ado:1",
+			want: "1",
+		},
+		{
+			name: "ado shorthand non-numeric",
+			ref:  "ado:abc",
+			want: "",
+		},
+		{
+			name: "ado shorthand zero rejected",
+			ref:  "ado:0",
 			want: "",
 		},
 	}
