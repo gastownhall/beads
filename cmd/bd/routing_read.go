@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -84,4 +85,53 @@ func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storag
 		return nil, false, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
 	}
 	return targetStore, true, nil
+}
+
+// openTownRootReadStore opens a read-only store for the town root database.
+// This is used as a fallback when looking up wisp IDs that may have been created
+// in the town/HQ context but whose prefix routes to a different rig's database.
+//
+// The town root is found by walking up from the current beads directory (dbPath)
+// to find a parent directory containing .beads/routes.jsonl — the presence of
+// routes.jsonl indicates a multi-rig orchestrator root (the town).
+//
+// Returns nil if no town root is found, or if the town root is the same as the
+// current database (no need to open a second store).
+func openTownRootReadStore(ctx context.Context) (storage.DoltStorage, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("no database path available")
+	}
+
+	// Resolve the current beads directory from dbPath.
+	currentBeadsDir := filepath.Dir(dbPath)
+
+	// Walk up from the current beads directory's parent to find the town root.
+	// The town root contains .beads/routes.jsonl (multi-rig routing config).
+	dir := filepath.Dir(currentBeadsDir) // parent of .beads
+	for dir != "" && dir != filepath.Dir(dir) {
+		candidateBeadsDir := filepath.Join(dir, ".beads")
+		candidateRoutes := filepath.Join(candidateBeadsDir, "routes.jsonl")
+
+		if _, err := os.Stat(candidateRoutes); err == nil {
+			// Found a town root with routes.jsonl.
+			// Skip if it's the same as our current beads directory.
+			absCandidate, _ := filepath.Abs(candidateBeadsDir)
+			absCurrent, _ := filepath.Abs(currentBeadsDir)
+			if absCandidate == absCurrent {
+				debug.Logf("wisp town fallback: town root is same as current store, skipping")
+				return nil, fmt.Errorf("town root is same as current store")
+			}
+
+			debug.Logf("wisp town fallback: found town root at %s", candidateBeadsDir)
+			townStore, err := newReadOnlyStoreFromConfig(ctx, candidateBeadsDir)
+			if err != nil {
+				return nil, fmt.Errorf("failed to open town root store at %s: %w", candidateBeadsDir, err)
+			}
+			return townStore, nil
+		}
+
+		dir = filepath.Dir(dir)
+	}
+
+	return nil, fmt.Errorf("no town root found (no routes.jsonl in ancestor directories)")
 }

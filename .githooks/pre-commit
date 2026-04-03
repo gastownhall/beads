@@ -17,8 +17,10 @@ GOLANGCI_LINT="go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.
 echo "$staged_go_files" | xargs gofmt -w
 echo "$staged_go_files" | xargs git add
 
-# Lint changed code with auto-fix; block on remaining issues
-$GOLANGCI_LINT run --new-from-rev=HEAD --fix || exit 1
+# Lint changed code with auto-fix; block on remaining issues.
+# CGO_ENABLED=0 avoids typecheck failures from CGO-only dependencies
+# (e.g., dolthub/go-icu-regex) that require system headers not always present.
+CGO_ENABLED=0 $GOLANGCI_LINT run --new-from-rev=HEAD --fix || exit 1
 
 # Re-stage any auto-fixes from the linter
 echo "$staged_go_files" | xargs git add

@@ -42,6 +42,10 @@ func (r *RoutedResult) Close() {
 
 // resolveAndGetIssueWithRouting resolves a partial ID and gets the issue.
 // Tries the local store first, then falls back to contributor auto-routing.
+// For ephemeral/wisp IDs (containing "-wisp-"), also checks the town root
+// database as a fallback, since wisps are stored in the database where they
+// were created (typically HQ) but their prefix may match a different rig's
+// route (e.g., sh-wisp-xxx has "sh-" prefix but lives in hq.wisps).
 //
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
@@ -50,6 +54,16 @@ func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.DoltS
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
 		return result, nil
+	}
+
+	// For ephemeral/wisp IDs, try the town root database before prefix-based
+	// routing. Wisps are created in the town context (HQ database) regardless
+	// of their ID prefix, so prefix-based routing would misroute them to the
+	// wrong database (e.g., sh-wisp-xxx routes to shipyard but lives in hq).
+	if isNotFoundErr(err) && strings.Contains(id, "-wisp-") {
+		if townResult, townErr := resolveViaWispTownFallback(ctx, localStore, id); townErr == nil {
+			return townResult, nil
+		}
 	}
 
 	// If not found locally, try contributor auto-routing as fallback (GH#2345).
@@ -102,8 +116,31 @@ func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, 
 	return result, nil
 }
 
+// resolveViaWispTownFallback attempts to find a wisp in the town root database.
+// Wisps are always stored in the database where they were created (typically HQ/town),
+// but their ID prefix may match a different rig's route in routes.jsonl. For example,
+// sh-wisp-xxx has "sh-" prefix (routes to shipyard) but was created and stored in hq.wisps.
+//
+// This fallback walks up from the current beads directory to find the town root's
+// .beads directory and opens a read-only store to check for the wisp there.
+func resolveViaWispTownFallback(ctx context.Context, _ storage.DoltStorage, id string) (*RoutedResult, error) {
+	townStore, err := openTownRootReadStore(ctx)
+	if err != nil || townStore == nil {
+		return nil, fmt.Errorf("no town root store available for wisp fallback")
+	}
+
+	result, err := resolveAndGetFromStore(ctx, townStore, id, true)
+	if err != nil {
+		_ = townStore.Close()
+		return nil, err
+	}
+	result.closeFn = func() { _ = townStore.Close() }
+	return result, nil
+}
+
 // getIssueWithRouting gets an issue by exact ID.
-// Tries the local store first, then falls back to contributor auto-routing.
+// Tries the local store first, then falls back to town root for wisps,
+// then to contributor auto-routing.
 //
 // Returns a RoutedResult containing the issue and the store to use for related queries.
 // The caller MUST call result.Close() when done to release any routed storage.
@@ -117,6 +154,15 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 			Routed:     false,
 			ResolvedID: id,
 		}, nil
+	}
+
+	// For ephemeral/wisp IDs, try the town root database before prefix-based
+	// routing. Wisps live in the creating database (typically HQ), not where
+	// their prefix routes to.
+	if isNotFoundErr(err) && strings.Contains(id, "-wisp-") {
+		if townResult, townErr := resolveViaWispTownFallback(ctx, localStore, id); townErr == nil {
+			return townResult, nil
+		}
 	}
 
 	// If not found locally, try contributor auto-routing as fallback (GH#2345).
