@@ -20,6 +20,9 @@ var coreWorkTypes = []struct {
 	{types.TypeChore, "Maintenance or housekeeping"},
 	{types.TypeEpic, "Large body of work spanning multiple issues"},
 	{types.TypeDecision, "Architecture decision record (ADR)"},
+	{types.TypeSpike, "Timeboxed investigation to reduce uncertainty before committing to a story"},
+	{types.TypeStory, "User story describing a feature from the user's perspective"},
+	{types.TypeMilestone, "Marks completion of a set of related issues (contains no work itself)"},
 }
 
 var typesCmd = &cobra.Command{
