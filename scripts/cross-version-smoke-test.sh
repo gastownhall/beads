@@ -160,27 +160,37 @@ bd_create() {
     return 1
 }
 
-# stop any dolt server or daemon in a workspace (best-effort, never fails)
+# stop any dolt server or daemon in a workspace using bd's own stop commands
+# falls back to pid files if commands fail (best-effort, never fails)
 stop_dolt_server() {
     local ws="$1"
+    local bin="${2:-}"
+
+    # use bd's own stop commands first (cleanest shutdown)
+    if [ -n "$bin" ] && [ -x "$bin" ]; then
+        bd_in "$ws" "$bin" dolt stop >/dev/null 2>&1 || true
+        bd_in "$ws" "$bin" daemon stop >/dev/null 2>&1 || true
+    fi
+
+    # fallback: kill by pid file if still running
     local pid
     for pidfile in "$ws/.beads/dolt-server.pid" "$ws/.beads/daemon.pid"; do
         if [ -f "$pidfile" ]; then
             pid=$(cat "$pidfile" 2>/dev/null || echo "")
-            if [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null; then
+            if [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null && kill -0 "$pid" 2>/dev/null; then
                 kill "$pid" 2>/dev/null || true
                 sleep 1
                 kill -9 "$pid" 2>/dev/null || true
             fi
         fi
     done
-    # also remove socket files to avoid stale lock issues
     rm -f "$ws/.beads/bd.sock" "$ws/.beads/dolt-server.lock" 2>/dev/null || true
 }
 
 cleanup_workspace() {
     local ws="$1"
-    stop_dolt_server "$ws"
+    local bin="${2:-}"
+    stop_dolt_server "$ws" "$bin"
     rm -rf "$ws"
 }
 
@@ -287,7 +297,7 @@ test_version() {
         # capture the actual error for the report
         local init_err=""
         init_err=$(bd_in "$WS" "$prev_bin" init --quiet --prefix smoke </dev/null 2>&1 | head -1 || true)
-        cleanup_workspace "$WS"
+        cleanup_workspace "$WS" "$prev_bin"
 
         if echo "$init_err" | grep -qi "CGO"; then
             record_result "$version" "SKIP" "binary built without CGO (${ARCH})"
@@ -308,7 +318,7 @@ test_version() {
     ID2=$(bd_create "$WS" "$prev_bin" --title "Smoke task beta" --type bug --priority 1) || true
 
     if [ -z "${EPIC:-}" ] || [ -z "${ID1:-}" ] || [ -z "${ID2:-}" ]; then
-        cleanup_workspace "$WS"
+        cleanup_workspace "$WS" "$prev_bin"
         record_result "$version" "FAIL" "create failed (epic=${EPIC:-?} id1=${ID1:-?} id2=${ID2:-?})"
         echo -e "  ${RED}FAIL: ${RESULT_DETAILS[-1]}${NC}"
         return 0
@@ -318,7 +328,7 @@ test_version() {
     echo -e "  created: epic=$EPIC task=$ID1 bug=$ID2"
 
     # stop any dolt server before handing to candidate
-    stop_dolt_server "$WS"
+    stop_dolt_server "$WS" "$prev_bin"
 
     # -- step 3: verify with candidate --
     local errors=0
@@ -369,7 +379,7 @@ test_version() {
         [ -z "$error_details" ] && error_details="doctor failed"
     fi
 
-    cleanup_workspace "$WS"
+    cleanup_workspace "$WS" "$prev_bin"
 
     if [ $errors -eq 0 ]; then
         record_result "$version" "PASS" "all checks passed"
