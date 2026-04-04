@@ -71,12 +71,16 @@ func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx *sql.Tx) ([]types
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("reading custom_statuses: %w", err)
 		}
-		// Table query succeeded — return result even if empty.
-		// Only fall through to config string when the table doesn't exist (query error above).
-		return result, nil
+		// Table has rows — use them as the authoritative source.
+		// If the table is empty (e.g. schema migration created the table but
+		// failed to populate it from status.custom config), fall through to
+		// the config string so existing custom statuses aren't silently lost.
+		if len(result) > 0 {
+			return result, nil
+		}
 	}
 
-	// Fallback: table doesn't exist (pre-migration) — read from config string
+	// Fallback: table doesn't exist or is empty — read from config string
 	value, err := GetConfigInTx(ctx, tx, "status.custom")
 	if err != nil {
 		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
