@@ -19,7 +19,7 @@ var exportCmd = &cobra.Command{
 	Long: `Export all issues to JSONL (newline-delimited JSON) format.
 
 Each line is a complete JSON object representing one issue, including its
-labels, dependencies, and comment count.
+labels, dependencies, and comments.
 
 This command is for issue export, migration, and interoperability. It does
 not produce the JSONL backup snapshot used by 'bd backup restore'. For
@@ -139,6 +139,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
 	allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
+	commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
 	commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
 	depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
 
@@ -146,6 +147,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	for _, issue := range issues {
 		issue.Labels = labelsMap[issue.ID]
 		issue.Dependencies = allDeps[issue.ID]
+		issue.Comments = commentsMap[issue.ID]
 	}
 
 	// Write JSONL: one JSON object per line

@@ -161,12 +161,14 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		}
 		labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
 		allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
+		commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
 		commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
 		depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
 
 		for _, issue := range issues {
 			issue.Labels = labelsMap[issue.ID]
 			issue.Dependencies = allDeps[issue.ID]
+			issue.Comments = commentsMap[issue.ID]
 		}
 
 		// Write issues
