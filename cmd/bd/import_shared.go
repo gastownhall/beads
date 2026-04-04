@@ -139,6 +139,16 @@ func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, lo
 		if issue.Status == "tombstone" {
 			continue
 		}
+
+		// v0.35–v0.37 exported "wisp" (bool), renamed to "ephemeral" in v0.38+.
+		// map old field name so the flag is preserved on import.
+		if _, hasWisp := peek["wisp"]; hasWisp && !issue.Ephemeral {
+			var wisp bool
+			if err := json.Unmarshal(peek["wisp"], &wisp); err == nil && wisp {
+				issue.Ephemeral = true
+			}
+		}
+
 		issue.SetDefaults()
 		issues = append(issues, &issue)
 	}

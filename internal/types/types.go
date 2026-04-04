@@ -923,6 +923,33 @@ type Comment struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// UnmarshalJSON handles backward compatibility for Comment.
+// Pre-v1.0 exported Comment.ID as int64; current schema uses string.
+func (c *Comment) UnmarshalJSON(data []byte) error {
+	type commentAlias Comment // avoid recursion
+	var raw struct {
+		commentAlias
+		RawID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = Comment(raw.commentAlias)
+	if len(raw.RawID) > 0 {
+		// try string first, fall back to number
+		var s string
+		if err := json.Unmarshal(raw.RawID, &s); err == nil {
+			c.ID = s
+		} else {
+			var n json.Number
+			if err := json.Unmarshal(raw.RawID, &n); err == nil {
+				c.ID = n.String()
+			}
+		}
+	}
+	return nil
+}
+
 // Event represents an audit trail entry
 type Event struct {
 	ID        string    `json:"id"`
@@ -1342,6 +1369,24 @@ type BondRef struct {
 	SourceID  string `json:"source_id"`            // Source proto or molecule ID
 	BondType  string `json:"bond_type"`            // sequential, parallel, conditional
 	BondPoint string `json:"bond_point,omitempty"` // Attachment site (issue ID or empty for root)
+}
+
+// UnmarshalJSON handles backward compatibility for BondRef.
+// Pre-v0.63 used "proto_id" instead of "source_id".
+func (b *BondRef) UnmarshalJSON(data []byte) error {
+	type bondAlias BondRef // avoid recursion
+	var raw struct {
+		bondAlias
+		ProtoID string `json:"proto_id"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*b = BondRef(raw.bondAlias)
+	if b.SourceID == "" && raw.ProtoID != "" {
+		b.SourceID = raw.ProtoID
+	}
+	return nil
 }
 
 // Bond type constants for compound molecules
