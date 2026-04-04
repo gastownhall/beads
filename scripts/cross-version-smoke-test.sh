@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
 # =============================================================================
 # Cross-Version Smoke Test
@@ -160,30 +160,20 @@ bd_create() {
     return 1
 }
 
-# stop any dolt server or daemon in a workspace using bd's own stop commands
-# falls back to pid files if commands fail (best-effort, never fails)
+# kill all background processes associated with a workspace (best-effort, never fails)
 stop_dolt_server() {
     local ws="$1"
-    local bin="${2:-}"
-
-    # use bd's own stop commands first (cleanest shutdown)
-    if [ -n "$bin" ] && [ -x "$bin" ]; then
-        bd_in "$ws" "$bin" dolt stop >/dev/null 2>&1 || true
-        bd_in "$ws" "$bin" daemon stop >/dev/null 2>&1 || true
-    fi
-
-    # fallback: kill by pid file if still running
-    local pid
-    for pidfile in "$ws/.beads/dolt-server.pid" "$ws/.beads/daemon.pid"; do
+    # kill by pid file — covers dolt server, monitor, and daemon
+    local pid=""
+    for pidfile in "$ws/.beads/dolt-server.pid" "$ws/.beads/dolt-monitor.pid" "$ws/.beads/daemon.pid"; do
         if [ -f "$pidfile" ]; then
-            pid=$(cat "$pidfile" 2>/dev/null || echo "")
-            if [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null && kill -0 "$pid" 2>/dev/null; then
-                kill "$pid" 2>/dev/null || true
-                sleep 1
-                kill -9 "$pid" 2>/dev/null || true
-            fi
+            pid=$(cat "$pidfile" 2>/dev/null) || true
+            [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
         fi
     done
+    # kill any process with this workspace path in its command line
+    pkill -9 -f "$ws" 2>/dev/null || true
+    sleep 1
     rm -f "$ws/.beads/bd.sock" "$ws/.beads/dolt-server.lock" 2>/dev/null || true
 }
 
@@ -392,6 +382,8 @@ test_version() {
 
     # -- step 3: verify with candidate (direct read) --
     verify_candidate "$WS" "$cand_bin" "$EPIC" "$ID1" "$ID2"
+    # candidate may auto-start a dolt server — stop it to prevent orphaned processes
+    stop_dolt_server "$WS"
     local errors=$VERIFY_ERRORS
     local error_details="$VERIFY_DETAIL"
 
