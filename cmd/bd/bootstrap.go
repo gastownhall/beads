@@ -215,12 +215,13 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	}
 
 	// Check for existing database (path differs between server and embedded mode).
-	// Use cfg.GetDoltMode() rather than the global isEmbeddedMode() so that
-	// the detection logic respects the config object passed in by the caller
-	// (important for tests and for cases where the global serverMode flag
-	// has not been set yet).
+	// Use cfg.IsDoltServerMode() (which checks metadata.json + env vars) plus
+	// doltserver.IsSharedServerMode() (which also checks config.yaml) so that
+	// shared-server mode configured via dolt.shared-server: true in config.yaml
+	// correctly resolves the database path. (GH#30)
+	isServer := cfg.IsDoltServerMode() || doltserver.IsSharedServerMode()
 	var dbPath string
-	if cfg.GetDoltMode() == configfile.DoltModeServer {
+	if isServer {
 		dbPath = doltserver.ResolveDoltDir(beadsDir)
 	} else {
 		dbPath = filepath.Join(beadsDir, "embeddeddolt")
@@ -228,7 +229,7 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	if info, err := os.Stat(dbPath); err == nil && info.IsDir() {
 		entries, _ := os.ReadDir(dbPath)
 		if len(entries) > 0 {
-			if cfg.GetDoltMode() == configfile.DoltModeServer {
+			if isServer {
 				resolved := doltserver.DefaultConfig(beadsDir)
 				probeCfg := bootstrapServerProbeConfig{
 					host:     cfg.GetDoltServerHost(),
