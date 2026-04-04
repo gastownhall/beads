@@ -145,6 +145,21 @@ bd_in() {
     (cd "$ws" && "$bin" "$@")
 }
 
+# create an issue, returning just the ID on stdout
+# tries --silent first, falls back to parsing "Created issue: <id>" output
+bd_create() {
+    local ws="$1"
+    local bin="$2"
+    shift 2
+    # try --silent first
+    local id
+    id=$(bd_in "$ws" "$bin" create --silent "$@" 2>/dev/null) && [ -n "$id" ] && echo "$id" && return 0
+    # fallback: parse verbose output
+    id=$(bd_in "$ws" "$bin" create "$@" 2>&1 | grep -oP 'Created issue: \K\S+' || true)
+    [ -n "$id" ] && echo "$id" && return 0
+    return 1
+}
+
 # stop any dolt server or daemon in a workspace (best-effort, never fails)
 stop_dolt_server() {
     local ws="$1"
@@ -288,9 +303,9 @@ test_version() {
 
     # -- step 2: create data with old binary --
     local EPIC ID1 ID2
-    EPIC=$(bd_in "$WS" "$prev_bin" create --silent --title "Smoke epic" --type epic 2>/dev/null) || true
-    ID1=$(bd_in "$WS" "$prev_bin" create --silent --title "Smoke task alpha" --type task --priority 2 2>/dev/null) || true
-    ID2=$(bd_in "$WS" "$prev_bin" create --silent --title "Smoke task beta" --type bug --priority 1 2>/dev/null) || true
+    EPIC=$(bd_create "$WS" "$prev_bin" --title "Smoke epic" --type epic --priority 2) || true
+    ID1=$(bd_create "$WS" "$prev_bin" --title "Smoke task alpha" --type task --priority 2) || true
+    ID2=$(bd_create "$WS" "$prev_bin" --title "Smoke task beta" --type bug --priority 1) || true
 
     if [ -z "${EPIC:-}" ] || [ -z "${ID1:-}" ] || [ -z "${ID2:-}" ]; then
         cleanup_workspace "$WS"
