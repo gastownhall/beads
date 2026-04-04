@@ -30,6 +30,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libicu-dev
 
+      - name: Install Dolt
+        run: |
+          curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+          dolt version
+
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"

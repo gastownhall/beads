@@ -11,10 +11,8 @@ set -euo pipefail
 # For each version tested:
 #   1. Init a fresh workspace with the old binary
 #   2. Create an epic, two issues, and a dependency
-#   3. Verify all data is readable with the candidate binary
-#
-# Versions before embedded Dolt (< v0.63.0) require a running Dolt server
-# and will be skipped automatically.
+#   3. Read all data with the candidate binary
+#   4. Verify all items are visible and dependency is preserved
 #
 # Usage:
 #   ./scripts/cross-version-smoke-test.sh                       # last 30 tags
@@ -35,6 +33,7 @@ set -euo pipefail
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -70,7 +69,7 @@ download_binary() {
     local asset="beads_${ver_bare}_${OS}_${ARCH}.tar.gz"
     local url="https://github.com/steveyegge/beads/releases/download/${version}/${asset}"
 
-    echo -e "${YELLOW}  downloading ${version}...${NC}" >&2
+    echo -e "  ${YELLOW}downloading ${version}...${NC}" >&2
     local tmpdir
     tmpdir=$(mktemp -d)
     if ! curl -fsSL "$url" -o "$tmpdir/archive.tar.gz" 2>/dev/null; then
@@ -113,7 +112,6 @@ download_all_binaries() {
 
 build_candidate() {
     if [ -n "${CANDIDATE_BIN:-}" ] && [ -x "${CANDIDATE_BIN}" ]; then
-        # resolve to absolute path
         echo "$(cd "$(dirname "$CANDIDATE_BIN")" && pwd)/$(basename "$CANDIDATE_BIN")"
         return
     fi
@@ -125,10 +123,9 @@ build_candidate() {
 }
 
 # ---------------------------------------------------------------------------
-# Workspace helpers
+# Workspace and server helpers
 # ---------------------------------------------------------------------------
 
-# creates a temp workspace with git init and a clean directory name (no dots)
 new_workspace() {
     local dir
     dir=$(mktemp -d /tmp/bdxver-XXXXXX)
@@ -141,7 +138,6 @@ new_workspace() {
     echo "$dir"
 }
 
-# run bd in a workspace directory (all commands run from cwd for compatibility)
 bd_in() {
     local ws="$1"
     local bin="$2"
@@ -149,8 +145,32 @@ bd_in() {
     (cd "$ws" && "$bin" "$@")
 }
 
+# stop any dolt server or daemon in a workspace (best-effort, never fails)
+stop_dolt_server() {
+    local ws="$1"
+    local pid
+    for pidfile in "$ws/.beads/dolt-server.pid" "$ws/.beads/daemon.pid"; do
+        if [ -f "$pidfile" ]; then
+            pid=$(cat "$pidfile" 2>/dev/null || echo "")
+            if [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null; then
+                kill "$pid" 2>/dev/null || true
+                sleep 1
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        fi
+    done
+    # also remove socket files to avoid stale lock issues
+    rm -f "$ws/.beads/bd.sock" "$ws/.beads/dolt-server.lock" 2>/dev/null || true
+}
+
+cleanup_workspace() {
+    local ws="$1"
+    stop_dolt_server "$ws"
+    rm -rf "$ws"
+}
+
 # ---------------------------------------------------------------------------
-# Test runner
+# Results tracking
 # ---------------------------------------------------------------------------
 
 PASS=0
@@ -158,61 +178,136 @@ FAIL=0
 SKIP=0
 FAILED_VERSIONS=""
 
+# parallel arrays for table output
+declare -a RESULT_VERSIONS=()
+declare -a RESULT_STATUSES=()
+declare -a RESULT_DETAILS=()
+
+record_result() {
+    local version="$1"
+    local status="$2"
+    local detail="$3"
+    RESULT_VERSIONS+=("$version")
+    RESULT_STATUSES+=("$status")
+    RESULT_DETAILS+=("$detail")
+
+    case "$status" in
+        PASS) PASS=$((PASS + 1)) ;;
+        FAIL) FAIL=$((FAIL + 1)); FAILED_VERSIONS="${FAILED_VERSIONS} ${version}" ;;
+        SKIP) SKIP=$((SKIP + 1)) ;;
+    esac
+}
+
+print_results_table() {
+    echo ""
+    echo -e "${BOLD}Results Table${NC}"
+    printf "%-12s %-6s %s\n" "Version" "Status" "Detail"
+    printf "%-12s %-6s %s\n" "-------" "------" "------"
+
+    for i in "${!RESULT_VERSIONS[@]}"; do
+        local ver="${RESULT_VERSIONS[$i]}"
+        local status="${RESULT_STATUSES[$i]}"
+        local detail="${RESULT_DETAILS[$i]}"
+
+        case "$status" in
+            PASS) printf "%-12s ${GREEN}%-6s${NC} %s\n" "$ver" "$status" "$detail" ;;
+            FAIL) printf "%-12s ${RED}%-6s${NC} %s\n" "$ver" "$status" "$detail" ;;
+            SKIP) printf "%-12s ${YELLOW}%-6s${NC} %s\n" "$ver" "$status" "$detail" ;;
+        esac
+    done
+}
+
+# GitHub Actions compatible markdown summary
+print_ci_summary() {
+    if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
+        return
+    fi
+
+    {
+        echo "## Cross-Version Smoke Test Results"
+        echo ""
+        echo "| Version | Status | Detail |"
+        echo "|---------|--------|--------|"
+        for i in "${!RESULT_VERSIONS[@]}"; do
+            local ver="${RESULT_VERSIONS[$i]}"
+            local status="${RESULT_STATUSES[$i]}"
+            local detail="${RESULT_DETAILS[$i]}"
+            local icon=""
+            case "$status" in
+                PASS) icon="✅" ;;
+                FAIL) icon="❌" ;;
+                SKIP) icon="⏭️" ;;
+            esac
+            echo "| ${ver} | ${icon} ${status} | ${detail} |"
+        done
+        echo ""
+        echo "**${PASS} passed, ${FAIL} failed, ${SKIP} skipped**"
+    } >> "$GITHUB_STEP_SUMMARY"
+}
+
+# ---------------------------------------------------------------------------
+# Test runner
+# ---------------------------------------------------------------------------
+
 test_version() {
     local version="$1"
     local prev_bin="$2"
     local cand_bin="$3"
-    local errors=0
 
     echo -e "● ${version} → candidate"
 
     local WS
     WS=$(new_workspace)
 
-    # init with old binary; try --non-interactive (v1.0.0+), fall back without
-    if ! bd_in "$WS" "$prev_bin" init --quiet --non-interactive --prefix smoke </dev/null >/dev/null 2>&1; then
-        if ! bd_in "$WS" "$prev_bin" init --quiet --prefix smoke </dev/null >/dev/null 2>&1; then
-            echo -e "  ${YELLOW}⊘ init failed (needs Dolt server?), skipping${NC}"
-            SKIP=$((SKIP + 1))
-            rm -rf "$WS"
-            return 0
+    # -- step 1: init with old binary --
+    # try --non-interactive (v1.0.0+), fall back without
+    local init_ok=false
+    if bd_in "$WS" "$prev_bin" init --quiet --non-interactive --prefix smoke </dev/null >/dev/null 2>&1; then
+        init_ok=true
+    elif bd_in "$WS" "$prev_bin" init --quiet --prefix smoke </dev/null >/dev/null 2>&1; then
+        init_ok=true
+    fi
+
+    if ! $init_ok; then
+        # capture the actual error for the report
+        local init_err=""
+        init_err=$(bd_in "$WS" "$prev_bin" init --quiet --prefix smoke </dev/null 2>&1 | head -1 || true)
+        cleanup_workspace "$WS"
+
+        if echo "$init_err" | grep -qi "CGO"; then
+            record_result "$version" "SKIP" "binary built without CGO (${ARCH})"
+        elif echo "$init_err" | grep -qi "dolt.*server\|unreachable\|auto-start failed"; then
+            record_result "$version" "SKIP" "needs dolt server (not installed)"
+        else
+            record_result "$version" "FAIL" "init failed: ${init_err}"
         fi
+        echo -e "  ${RESULT_STATUSES[-1]}: ${RESULT_DETAILS[-1]}"
+        return 0
     fi
     git -C "$WS" config beads.role maintainer 2>/dev/null || true
 
-    # create epic
-    local EPIC
+    # -- step 2: create data with old binary --
+    local EPIC ID1 ID2
     EPIC=$(bd_in "$WS" "$prev_bin" create --silent --title "Smoke epic" --type epic 2>/dev/null) || true
-    if [ -z "${EPIC:-}" ]; then
-        echo -e "  ${YELLOW}⊘ create epic failed, skipping${NC}"
-        SKIP=$((SKIP + 1))
-        rm -rf "$WS"
-        return 0
-    fi
-
-    # create two issues
-    local ID1 ID2
     ID1=$(bd_in "$WS" "$prev_bin" create --silent --title "Smoke task alpha" --type task --priority 2 2>/dev/null) || true
     ID2=$(bd_in "$WS" "$prev_bin" create --silent --title "Smoke task beta" --type bug --priority 1 2>/dev/null) || true
 
-    if [ -z "${ID1:-}" ] || [ -z "${ID2:-}" ]; then
-        echo -e "  ${YELLOW}⊘ create issues failed, skipping${NC}"
-        SKIP=$((SKIP + 1))
-        rm -rf "$WS"
+    if [ -z "${EPIC:-}" ] || [ -z "${ID1:-}" ] || [ -z "${ID2:-}" ]; then
+        cleanup_workspace "$WS"
+        record_result "$version" "FAIL" "create failed (epic=${EPIC:-?} id1=${ID1:-?} id2=${ID2:-?})"
+        echo -e "  ${RED}FAIL: ${RESULT_DETAILS[-1]}${NC}"
         return 0
     fi
 
-    # add dependency: ID2 depends on ID1
-    if ! bd_in "$WS" "$prev_bin" dep add "$ID2" "$ID1" >/dev/null 2>&1; then
-        echo -e "  ${YELLOW}⊘ dep add failed, skipping${NC}"
-        SKIP=$((SKIP + 1))
-        rm -rf "$WS"
-        return 0
-    fi
+    bd_in "$WS" "$prev_bin" dep add "$ID2" "$ID1" >/dev/null 2>&1 || true
+    echo -e "  created: epic=$EPIC task=$ID1 bug=$ID2"
 
-    echo -e "  created: epic=$EPIC task=$ID1 bug=$ID2 dep=${ID2}→${ID1}"
+    # stop any dolt server before handing to candidate
+    stop_dolt_server "$WS"
 
-    # ---- verify with candidate (no re-init needed, just read) ----
+    # -- step 3: verify with candidate --
+    local errors=0
+    local error_details=""
 
     local LIST_OUT
     LIST_OUT=$(bd_in "$WS" "$cand_bin" list --json -n 0 --all 2>/dev/null || echo "")
@@ -223,6 +318,7 @@ test_version() {
         else
             echo -e "  ${RED}✗${NC} '$title' NOT visible"
             errors=$((errors + 1))
+            error_details="list missing items"
         fi
     done
 
@@ -230,8 +326,11 @@ test_version() {
         if bd_in "$WS" "$cand_bin" show "$id" --json >/dev/null 2>&1; then
             echo -e "  ${GREEN}✓${NC} show $id"
         else
-            echo -e "  ${RED}✗${NC} show $id failed"
+            local show_err=""
+            show_err=$(bd_in "$WS" "$cand_bin" show "$id" --json 2>&1 | grep -i error | head -1 | cut -c1-120 || true)
+            echo -e "  ${RED}✗${NC} show $id failed: ${show_err}"
             errors=$((errors + 1))
+            error_details="${show_err:-show failed}"
         fi
     done
 
@@ -243,6 +342,7 @@ test_version() {
     else
         echo -e "  ${RED}✗${NC} dependency NOT preserved"
         errors=$((errors + 1))
+        [ -z "$error_details" ] && error_details="dependency lost"
     fi
 
     # doctor check
@@ -251,20 +351,20 @@ test_version() {
     else
         echo -e "  ${RED}✗${NC} doctor quick failed"
         errors=$((errors + 1))
+        [ -z "$error_details" ] && error_details="doctor failed"
     fi
 
-    rm -rf "$WS"
+    cleanup_workspace "$WS"
 
     if [ $errors -eq 0 ]; then
-        PASS=$((PASS + 1))
+        record_result "$version" "PASS" "all checks passed"
     else
-        FAIL=$((FAIL + 1))
-        FAILED_VERSIONS="${FAILED_VERSIONS} ${version}"
+        record_result "$version" "FAIL" "${errors} errors: ${error_details}"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Parse arguments and determine versions to test
+# Parse arguments
 # ---------------------------------------------------------------------------
 
 VERSIONS=()
@@ -297,7 +397,6 @@ if [ ${#VERSIONS[@]} -eq 0 ]; then
             fi
         done < <(git -C "$PROJECT_ROOT" tag --sort=version:refname | grep '^v')
     else
-        # last 30 tags (default)
         while IFS= read -r tag; do
             VERSIONS+=("$tag")
         done < <(git -C "$PROJECT_ROOT" tag --sort=-version:refname | grep '^v' | head -30)
@@ -315,6 +414,11 @@ fi
 
 CAND_BIN=$(build_candidate)
 echo "Candidate: $CAND_BIN"
+DOLT_STATUS="not installed"
+if command -v dolt >/dev/null 2>&1; then
+    DOLT_STATUS="$(dolt version 2>/dev/null | head -1)"
+fi
+echo "Dolt: $DOLT_STATUS"
 echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -322,7 +426,7 @@ echo "  Cross-Version Smoke Test: ${#VERSIONS[@]} version(s) → candidate"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# download all binaries upfront (skip for --local mode)
+# download all binaries upfront
 if [ "${VERSIONS[0]}" != "local" ]; then
     download_all_binaries "${VERSIONS[@]}"
 fi
@@ -333,8 +437,8 @@ for version in "${VERSIONS[@]}"; do
     else
         prev_bin=$(download_binary "$version" 2>/dev/null) || {
             echo -e "● ${version} → candidate"
-            echo -e "  ${YELLOW}⊘ no binary available, skipping${NC}"
-            SKIP=$((SKIP + 1))
+            record_result "$version" "SKIP" "no binary for ${OS}/${ARCH}"
+            echo -e "  ${YELLOW}SKIP: no binary for ${OS}/${ARCH}${NC}"
             echo ""
             continue
         }
@@ -347,6 +451,10 @@ done
 # Summary
 # ---------------------------------------------------------------------------
 
+print_results_table
+print_ci_summary
+
+echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 TOTAL=$((PASS + FAIL + SKIP))
 if [ $FAIL -eq 0 ]; then
