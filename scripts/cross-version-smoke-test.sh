@@ -387,9 +387,6 @@ test_version() {
     bd_in "$WS" "$prev_bin" dep add "$ID2" "$ID1" >/dev/null 2>&1 || true
     echo -e "  created: epic=$EPIC task=$ID1 bug=$ID2"
 
-    # export to jsonl with old binary (for migration path)
-    bd_in "$WS" "$prev_bin" export -o "$WS/.beads/issues.jsonl" >/dev/null 2>&1 || true
-
     # stop any dolt server before handing to candidate
     stop_dolt_server "$WS" "$prev_bin"
 
@@ -397,27 +394,6 @@ test_version() {
     verify_candidate "$WS" "$cand_bin" "$EPIC" "$ID1" "$ID2"
     local errors=$VERIFY_ERRORS
     local error_details="$VERIFY_DETAIL"
-
-    # -- step 4: if direct read failed, try migration via init --from-jsonl --
-    if [ "$errors" -gt 0 ]; then
-        local jsonl_size
-        jsonl_size=$(wc -c < "$WS/.beads/issues.jsonl" 2>/dev/null || echo "0")
-        if [ "$jsonl_size" -gt 0 ]; then
-            echo -e "  ${YELLOW}direct read failed, trying migration via init --from-jsonl...${NC}"
-            bd_in "$WS" "$cand_bin" init --quiet --non-interactive --prefix sm-o_ke --from-jsonl </dev/null >/dev/null 2>&1 || \
-                bd_in "$WS" "$cand_bin" init --quiet --non-interactive --prefix sm-o_ke </dev/null >/dev/null 2>&1 || true
-
-            verify_candidate "$WS" "$cand_bin" "$EPIC" "$ID1" "$ID2"
-
-            if [ "$VERIFY_ERRORS" -eq 0 ]; then
-                record_result "${version}" "PASS" "all checks passed (after migration)"
-                cleanup_workspace "$WS" "$prev_bin"
-                return 0
-            fi
-            error_details="direct: ${error_details}; after migration: ${VERIFY_DETAIL}"
-            errors=$VERIFY_ERRORS
-        fi
-    fi
 
     cleanup_workspace "$WS" "$prev_bin"
 
