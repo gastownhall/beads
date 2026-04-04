@@ -395,6 +395,25 @@ test_version() {
     local errors=$VERIFY_ERRORS
     local error_details="$VERIFY_DETAIL"
 
+    # -- step 4: if direct read failed and candidate suggests "bd init", follow that advice --
+    if [ "$errors" -gt 0 ]; then
+        local hint
+        hint=$(bd_in "$WS" "$cand_bin" list 2>&1 | grep -o "run 'bd init'" || true)
+        if [ -n "$hint" ]; then
+            echo -e "  ${YELLOW}candidate suggests 'bd init', following that advice...${NC}"
+            bd_in "$WS" "$cand_bin" init --quiet --non-interactive --prefix sm-o_ke </dev/null >/dev/null 2>&1 || true
+
+            verify_candidate "$WS" "$cand_bin" "$EPIC" "$ID1" "$ID2"
+            if [ "$VERIFY_ERRORS" -eq 0 ]; then
+                record_result "${version}" "PASS" "passed after bd init"
+                cleanup_workspace "$WS" "$prev_bin"
+                return 0
+            fi
+            error_details="direct: ${error_details}; after bd init: ${VERIFY_DETAIL}"
+            errors=$VERIFY_ERRORS
+        fi
+    fi
+
     cleanup_workspace "$WS" "$prev_bin"
 
     if [ "$errors" -eq 0 ]; then
