@@ -271,6 +271,66 @@ print_ci_summary() {
 }
 
 # ---------------------------------------------------------------------------
+# Verification helper (sets VERIFY_DETAIL, returns error count)
+# ---------------------------------------------------------------------------
+
+VERIFY_ERRORS=0
+VERIFY_DETAIL=""
+
+verify_candidate() {
+    local ws="$1"
+    local cand_bin="$2"
+    local epic="$3"
+    local id1="$4"
+    local id2="$5"
+    VERIFY_ERRORS=0
+    VERIFY_DETAIL=""
+
+    local LIST_OUT
+    LIST_OUT=$(bd_in "$ws" "$cand_bin" list --json -n 0 --all 2>/dev/null || echo "")
+
+    for title in "Smoke epic" "Smoke task alpha" "Smoke task beta"; do
+        if echo "$LIST_OUT" | grep -qF "$title"; then
+            echo -e "  ${GREEN}✓${NC} '$title' visible"
+        else
+            echo -e "  ${RED}✗${NC} '$title' NOT visible"
+            VERIFY_ERRORS=$((VERIFY_ERRORS + 1))
+            VERIFY_DETAIL="list missing items"
+        fi
+    done
+
+    for id in "$epic" "$id1" "$id2"; do
+        if bd_in "$ws" "$cand_bin" show "$id" --json >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} show $id"
+        else
+            local show_err=""
+            show_err=$(bd_in "$ws" "$cand_bin" show "$id" --json 2>&1 | grep -i error | head -1 | cut -c1-120 || true)
+            echo -e "  ${RED}✗${NC} show $id failed: ${show_err}"
+            VERIFY_ERRORS=$((VERIFY_ERRORS + 1))
+            VERIFY_DETAIL="${show_err:-show failed}"
+        fi
+    done
+
+    local DEP_OUT
+    DEP_OUT=$(bd_in "$ws" "$cand_bin" show "$id2" --json 2>/dev/null || echo "")
+    if echo "$DEP_OUT" | grep -qF "$id1"; then
+        echo -e "  ${GREEN}✓${NC} dependency preserved"
+    else
+        echo -e "  ${RED}✗${NC} dependency NOT preserved"
+        VERIFY_ERRORS=$((VERIFY_ERRORS + 1))
+        [ -z "$VERIFY_DETAIL" ] && VERIFY_DETAIL="dependency lost"
+    fi
+
+    if bd_in "$ws" "$cand_bin" doctor quick >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} doctor quick"
+    else
+        echo -e "  ${RED}✗${NC} doctor quick failed"
+        VERIFY_ERRORS=$((VERIFY_ERRORS + 1))
+        [ -z "$VERIFY_DETAIL" ] && VERIFY_DETAIL="doctor failed"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Test runner
 # ---------------------------------------------------------------------------
 
@@ -287,16 +347,16 @@ test_version() {
     # -- step 1: init with old binary --
     # try --non-interactive (v1.0.0+), fall back without
     local init_ok=false
-    if bd_in "$WS" "$prev_bin" init --quiet --non-interactive --prefix smoke </dev/null >/dev/null 2>&1; then
+    if bd_in "$WS" "$prev_bin" init --quiet --non-interactive --prefix sm-o_ke </dev/null >/dev/null 2>&1; then
         init_ok=true
-    elif bd_in "$WS" "$prev_bin" init --quiet --prefix smoke </dev/null >/dev/null 2>&1; then
+    elif bd_in "$WS" "$prev_bin" init --quiet --prefix sm-o_ke </dev/null >/dev/null 2>&1; then
         init_ok=true
     fi
 
     if ! $init_ok; then
         # capture the actual error for the report
         local init_err=""
-        init_err=$(bd_in "$WS" "$prev_bin" init --quiet --prefix smoke </dev/null 2>&1 | head -1 || true)
+        init_err=$(bd_in "$WS" "$prev_bin" init --quiet --prefix sm-o_ke </dev/null 2>&1 | head -1 || true)
         cleanup_workspace "$WS" "$prev_bin"
 
         if echo "$init_err" | grep -qi "CGO"; then
@@ -327,61 +387,41 @@ test_version() {
     bd_in "$WS" "$prev_bin" dep add "$ID2" "$ID1" >/dev/null 2>&1 || true
     echo -e "  created: epic=$EPIC task=$ID1 bug=$ID2"
 
+    # export to jsonl with old binary (for migration path)
+    bd_in "$WS" "$prev_bin" export -o "$WS/.beads/issues.jsonl" >/dev/null 2>&1 || true
+
     # stop any dolt server before handing to candidate
     stop_dolt_server "$WS" "$prev_bin"
 
-    # -- step 3: verify with candidate --
-    local errors=0
-    local error_details=""
+    # -- step 3: verify with candidate (direct read) --
+    verify_candidate "$WS" "$cand_bin" "$EPIC" "$ID1" "$ID2"
+    local errors=$VERIFY_ERRORS
+    local error_details="$VERIFY_DETAIL"
 
-    local LIST_OUT
-    LIST_OUT=$(bd_in "$WS" "$cand_bin" list --json -n 0 --all 2>/dev/null || echo "")
+    # -- step 4: if direct read failed, try migration via init --from-jsonl --
+    if [ "$errors" -gt 0 ]; then
+        local jsonl_size
+        jsonl_size=$(wc -c < "$WS/.beads/issues.jsonl" 2>/dev/null || echo "0")
+        if [ "$jsonl_size" -gt 0 ]; then
+            echo -e "  ${YELLOW}direct read failed, trying migration via init --from-jsonl...${NC}"
+            bd_in "$WS" "$cand_bin" init --quiet --non-interactive --prefix sm-o_ke --from-jsonl </dev/null >/dev/null 2>&1 || \
+                bd_in "$WS" "$cand_bin" init --quiet --non-interactive --prefix sm-o_ke </dev/null >/dev/null 2>&1 || true
 
-    for title in "Smoke epic" "Smoke task alpha" "Smoke task beta"; do
-        if echo "$LIST_OUT" | grep -q "$title"; then
-            echo -e "  ${GREEN}✓${NC} '$title' visible"
-        else
-            echo -e "  ${RED}✗${NC} '$title' NOT visible"
-            errors=$((errors + 1))
-            error_details="list missing items"
+            verify_candidate "$WS" "$cand_bin" "$EPIC" "$ID1" "$ID2"
+
+            if [ "$VERIFY_ERRORS" -eq 0 ]; then
+                record_result "${version}" "PASS" "all checks passed (after migration)"
+                cleanup_workspace "$WS" "$prev_bin"
+                return 0
+            fi
+            error_details="direct: ${error_details}; after migration: ${VERIFY_DETAIL}"
+            errors=$VERIFY_ERRORS
         fi
-    done
-
-    for id in "$EPIC" "$ID1" "$ID2"; do
-        if bd_in "$WS" "$cand_bin" show "$id" --json >/dev/null 2>&1; then
-            echo -e "  ${GREEN}✓${NC} show $id"
-        else
-            local show_err=""
-            show_err=$(bd_in "$WS" "$cand_bin" show "$id" --json 2>&1 | grep -i error | head -1 | cut -c1-120 || true)
-            echo -e "  ${RED}✗${NC} show $id failed: ${show_err}"
-            errors=$((errors + 1))
-            error_details="${show_err:-show failed}"
-        fi
-    done
-
-    # dependency preserved
-    local DEP_OUT
-    DEP_OUT=$(bd_in "$WS" "$cand_bin" show "$ID2" --json 2>/dev/null || echo "")
-    if echo "$DEP_OUT" | grep -q "$ID1"; then
-        echo -e "  ${GREEN}✓${NC} dependency preserved"
-    else
-        echo -e "  ${RED}✗${NC} dependency NOT preserved"
-        errors=$((errors + 1))
-        [ -z "$error_details" ] && error_details="dependency lost"
-    fi
-
-    # doctor check
-    if bd_in "$WS" "$cand_bin" doctor quick >/dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${NC} doctor quick"
-    else
-        echo -e "  ${RED}✗${NC} doctor quick failed"
-        errors=$((errors + 1))
-        [ -z "$error_details" ] && error_details="doctor failed"
     fi
 
     cleanup_workspace "$WS" "$prev_bin"
 
-    if [ $errors -eq 0 ]; then
+    if [ "$errors" -eq 0 ]; then
         record_result "$version" "PASS" "all checks passed"
     else
         record_result "$version" "FAIL" "${errors} errors: ${error_details}"
