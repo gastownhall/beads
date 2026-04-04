@@ -211,10 +211,10 @@ func mustQueryRow(t *testing.T, db *sql.DB, ctx context.Context, query string, a
 	return row
 }
 
-// TestConcurrentNewReturnsError verifies that opening a second EmbeddedDoltStore
-// on the same data directory returns a clear error instead of panicking with a
-// nil-pointer dereference in the embedded Dolt engine (GH#2571).
-func TestConcurrentNewReturnsError(t *testing.T) {
+// TestConcurrentNewQueues verifies that opening a second EmbeddedDoltStore
+// on the same data directory blocks until the first is closed, rather than
+// failing immediately or panicking (GH#2571).
+func TestConcurrentNewQueues(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt concurrency tests")
 	}
@@ -227,26 +227,125 @@ func TestConcurrentNewReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first New: %v", err)
 	}
-	defer store1.Close()
 
-	// Second store on the same directory must fail with a lock error, not panic.
-	store2, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
-	if err == nil {
-		store2.Close()
-		t.Fatal("second New succeeded; expected lock contention error")
+	// Launch second New in a goroutine — it should block on the lock.
+	type result struct {
+		store *embeddeddolt.EmbeddedDoltStore
+		err   error
 	}
-	if !strings.Contains(err.Error(), "another process holds the exclusive lock") {
-		t.Fatalf("unexpected error from second New: %v", err)
-	}
-	t.Logf("second New correctly returned: %v", err)
+	ch := make(chan result, 1)
+	go func() {
+		s, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
+		ch <- result{s, err}
+	}()
 
-	// After closing the first store, a third open must succeed.
+	// Give the goroutine time to start waiting, then release the first store.
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("second New returned early with error: %v", r.err)
+		}
+		t.Fatal("second New returned before first store was closed")
+	default:
+		// Good — still blocking.
+	}
+
 	store1.Close()
-	store3, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
-	if err != nil {
-		t.Fatalf("third New (after close): %v", err)
+
+	// The second New should now succeed.
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("second New failed after first close: %v", r.err)
+		}
+		r.store.Close()
+		t.Log("second New succeeded after first store closed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("second New did not complete within 10s after first store closed")
 	}
-	store3.Close()
+}
+
+// TestWaitLockBlocksAndSucceeds verifies that WaitLock blocks until the lock
+// is released, then acquires it successfully.
+func TestWaitLockBlocksAndSucceeds(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt concurrency tests")
+	}
+
+	dataDir := filepath.Join(t.TempDir(), "embeddeddolt")
+
+	// Acquire with TryLock first.
+	lock1, err := embeddeddolt.TryLock(dataDir)
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+
+	ctx := t.Context()
+	type result struct {
+		lock *embeddeddolt.Lock
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		l, err := embeddeddolt.WaitLock(ctx, dataDir)
+		ch <- result{l, err}
+	}()
+
+	// WaitLock should be blocking.
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("WaitLock returned early with error: %v", r.err)
+		}
+		t.Fatal("WaitLock returned before first lock was released")
+	default:
+	}
+
+	// Release first lock.
+	lock1.Unlock()
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("WaitLock failed after unlock: %v", r.err)
+		}
+		r.lock.Unlock()
+		t.Log("WaitLock succeeded after first lock released")
+	case <-time.After(10 * time.Second):
+		t.Fatal("WaitLock did not complete within 10s after unlock")
+	}
+}
+
+// TestWaitLockRespectsContextCancellation verifies that WaitLock returns a
+// context error when the context is cancelled while waiting.
+func TestWaitLockRespectsContextCancellation(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt concurrency tests")
+	}
+
+	dataDir := filepath.Join(t.TempDir(), "embeddeddolt")
+
+	// Hold the lock.
+	lock1, err := embeddeddolt.TryLock(dataDir)
+	if err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	defer lock1.Unlock()
+
+	// WaitLock with a short timeout should fail with context error.
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	_, err = embeddeddolt.WaitLock(ctx, dataDir)
+	if err == nil {
+		t.Fatal("WaitLock succeeded; expected context deadline error")
+	}
+	if !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("expected context deadline error, got: %v", err)
+	}
+	t.Logf("WaitLock correctly returned: %v", err)
 }
 
 // TestWithLockBypassesDoubleLock verifies that WithLock allows the caller to

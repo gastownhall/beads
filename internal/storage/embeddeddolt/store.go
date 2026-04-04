@@ -71,10 +71,11 @@ func WithLock(lock Unlocker) Option {
 // The database is created automatically if it doesn't exist (initSchema handles this).
 //
 // An exclusive flock is held on the data directory for the store's entire
-// lifetime. If another process already holds the lock, New returns an error
-// instead of panicking during concurrent engine initialization (GH#2571).
-// The lock is released when Close is called, unless a pre-acquired lock was
-// supplied via WithLock (in which case the caller is responsible for it).
+// lifetime. If another process already holds the lock, New queues with
+// exponential backoff until the lock becomes available or the context is
+// canceled, instead of panicking during concurrent engine initialization
+// (GH#2571). The lock is released when Close is called, unless a pre-acquired
+// lock was supplied via WithLock (in which case the caller is responsible for it).
 func New(ctx context.Context, beadsDir, database, branch string, opts ...Option) (*EmbeddedDoltStore, error) {
 	var o options
 	for _, fn := range opts {
@@ -100,7 +101,7 @@ func New(ctx context.Context, beadsDir, database, branch string, opts ...Option)
 	lock := o.lock
 	ownsLock := lock == nil
 	if ownsLock {
-		lock, err = TryLock(dataDir)
+		lock, err = WaitLock(ctx, dataDir)
 		if err != nil {
 			return nil, err
 		}
