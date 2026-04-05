@@ -100,7 +100,7 @@ This package downloads the appropriate native binary for your platform:
 For complete documentation, see the [beads GitHub repository](https://github.com/steveyegge/beads):
 
 - [Complete README](https://github.com/steveyegge/beads#readme)
-- [Quick Start Guide](https://github.com/steveyegge/beads/blob/main/docs/QUICKSTART.md)
+- [Quick Start (documentation site)](https://steveyegge.github.io/beads/getting-started/quickstart) · [repo pointer](https://github.com/steveyegge/beads/blob/main/docs/QUICKSTART.md)
 - [Installation Guide](https://github.com/steveyegge/beads/blob/main/docs/INSTALLING.md)
 - [FAQ](https://github.com/steveyegge/beads/blob/main/docs/FAQ.md)
 - [Troubleshooting](https://github.com/steveyegge/beads/blob/main/docs/TROUBLESHOOTING.md)
