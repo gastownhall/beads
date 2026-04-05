@@ -64,30 +64,14 @@ Beads supports hierarchical IDs for epics:
 
 ## 📦 Installation
 
-* **npm:** `npm install -g @beads/bd`
-* **Homebrew:** `brew install beads`
-* **Go:** `go install github.com/steveyegge/beads/cmd/bd@latest`
-
-**Requirements:** Linux, FreeBSD, macOS, or Windows.
-
-### Building from Source
-
-Building from source requires **CGO** (a C compiler). The embedded Dolt engine
-links against C libraries.
-
 ```bash
-# Install dependencies
-# macOS: xcode-select --install && brew install icu4c
-# Ubuntu/Debian: sudo apt install build-essential
-# Fedora: sudo dnf install gcc gcc-c++
-
-# Build and install
-make install
+brew install beads           # macOS / Linux (recommended)
+npm install -g @beads/bd     # Node.js users
 ```
 
-`CGO_ENABLED=1` is set automatically by the Makefile. On macOS, Homebrew's
-`icu4c` paths are detected automatically. On Windows, MinGW or MSYS2 provides
-the C compiler (ICU is not required — a pure-Go fallback is used).
+**Other methods:** [install script](docs/INSTALLING.md#quick-install-script-all-platforms) | [go install](docs/INSTALLING.md#quick-install-recommended) | [from source](docs/INSTALLING.md#build-dependencies-contributors-only) | [Windows](docs/INSTALLING.md#windows-11) | [Arch AUR](docs/INSTALLING.md#linux)
+
+**Requirements:** macOS, Linux, Windows, or FreeBSD. See [docs/INSTALLING.md](docs/INSTALLING.md) for complete installation guide.
 
 ### Security And Verification
 

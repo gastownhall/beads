@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
 )
@@ -208,6 +209,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 		"Project Gitignore",
 		"Metadata Config",
 		"Lock Files",
+		"Circuit Breaker",
 		"Permissions",
 		"Database Config",
 		"Config Values",
@@ -329,6 +331,9 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.PatrolPollution(path)
 		case "Lock Files":
 			err = fix.StaleLockFiles(path)
+		case "Circuit Breaker":
+			dolt.CleanStaleCircuitBreakerFiles()
+			fmt.Printf("  %s Cleared stale circuit breaker files\n", ui.RenderPass("✓"))
 		case "Fresh Clone":
 			err = fix.FreshCloneImport(path, Version)
 		case "Pending Migrations":
