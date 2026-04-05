@@ -170,7 +170,7 @@ func runConventionsStale() []doctorCheck {
 
 // runConventionsOrphans checks for issues referenced in commits but still open.
 func runConventionsOrphans(path string) []doctorCheck {
-	orphans, err := findOrphanedIssues(path)
+	orphans, err := findOrphanedIssues(path, nil, nil)
 	if err != nil {
 		// Not an error - orphan detection may fail in non-git repos
 		return []doctorCheck{{
