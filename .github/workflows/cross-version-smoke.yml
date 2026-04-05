@@ -1,0 +1,65 @@
+name: Cross-Version Smoke Test
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Versions to test (space-separated, e.g. "v0.55.0 v0.56.1"), or empty for last 30'
+        required: false
+        default: ''
+
+jobs:
+  smoke-test:
+    name: Cross-version compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install ICU4C
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev
+
+      - name: Install Dolt
+        run: |
+          curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+          dolt version
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Cache old binaries
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/beads-regression
+          key: cross-version-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build candidate
+        run: go build -o bd ./cmd/bd
+
+      - name: Run cross-version smoke tests
+        env:
+          CANDIDATE_BIN: ./bd
+          GIT_CONFIG_NOSYSTEM: "1"
+          BEADS_TEST_MODE: "1"
+        run: |
+          if [ -n "${{ github.event.inputs.versions }}" ]; then
+            ./scripts/cross-version-smoke-test.sh ${{ github.event.inputs.versions }}
+          else
+            ./scripts/cross-version-smoke-test.sh
+          fi
