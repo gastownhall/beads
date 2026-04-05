@@ -3,6 +3,9 @@ package migrations
 import (
 	"database/sql"
 	"fmt"
+	"log"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // BackfillCustomTables populates custom_types and custom_statuses tables
@@ -80,12 +83,17 @@ func backfillCustomStatuses(db *sql.DB) error {
 		return nil // No config to backfill from
 	}
 
-	// Status config can be JSON array of strings or comma-separated.
-	// Categories are not stored in config — use "unspecified" default.
-	for _, name := range parseTypesValue(value) {
-		_, err = db.Exec("INSERT IGNORE INTO custom_statuses (name, category) VALUES (?, 'unspecified')", name)
+	// Use ParseCustomStatusConfig to preserve categories (e.g. "reviewing:active").
+	// Matches migration 015 behavior. Invalid entries are logged and skipped.
+	parsed, parseErr := types.ParseCustomStatusConfig(value)
+	if parseErr != nil {
+		log.Printf("migration: skipping invalid status.custom entries: %v", parseErr)
+		return nil
+	}
+	for _, s := range parsed {
+		_, err = db.Exec("INSERT IGNORE INTO custom_statuses (name, category) VALUES (?, ?)", s.Name, string(s.Category))
 		if err != nil {
-			return fmt.Errorf("inserting status %q: %w", name, err)
+			return fmt.Errorf("inserting status %q: %w", s.Name, err)
 		}
 	}
 
