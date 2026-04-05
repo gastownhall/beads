@@ -443,9 +443,7 @@ var listCmd = &cobra.Command{
 			if store != nil {
 				cs, err := store.GetCustomStatuses(rootCtx)
 				if err != nil {
-					if !jsonOutput {
-						fmt.Fprintf(os.Stderr, "%s Failed to get custom statuses: %v\n", ui.RenderWarn("!"), err)
-					}
+					fmt.Fprintf(os.Stderr, "%s Could not load custom statuses from database: %v (falling back to config)\n", ui.RenderWarn("!"), err)
 				} else {
 					customStatuses = cs
 				}
