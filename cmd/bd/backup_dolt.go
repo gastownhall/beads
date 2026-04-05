@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // --- Dolt-native backup commands ---
@@ -62,12 +63,17 @@ After adding, run 'bd backup sync' to push your data.`,
 
 		// Register the backup with Dolt
 		if err := bs.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
-			// Check if backup already exists
 			if strings.Contains(err.Error(), "already exists") {
-				// Remove and re-add to update the URL
+				// Same name, different URL — remove and re-add to update
 				_ = bs.BackupRemove(ctx, defaultDoltBackupName)
 				if err := bs.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
 					return fmt.Errorf("failed to update backup destination: %w", err)
+				}
+			} else if conflict := versioncontrolops.ExtractAddressConflictName(err); conflict != "" {
+				// Different name (e.g. "backup_export") points at same URL — remove it, re-add as "default"
+				_ = bs.BackupRemove(ctx, conflict)
+				if err := bs.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
+					return fmt.Errorf("failed to add backup destination: %w", err)
 				}
 			} else {
 				return fmt.Errorf("failed to add backup destination: %w", err)
@@ -407,6 +413,9 @@ backup configuration. The backup data at the destination is not deleted.`,
 			}
 			return fmt.Errorf("failed to remove backup: %w", err)
 		}
+
+		// Also remove backup_export if it exists (auto-export may have created it at same URL)
+		_ = bs.BackupRemove(ctx, "backup_export")
 
 		// Remove local config
 		if path, err := doltBackupConfigPath(); err == nil {
