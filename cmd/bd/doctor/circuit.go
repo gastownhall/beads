@@ -39,7 +39,16 @@ func CheckCircuitBreaker() DoctorCheck {
 			continue
 		}
 		if state.State == "open" || state.State == "half-open" {
-			staleCount++
+			// Only flag as stale if the breaker has been tripped for longer
+			// than the staleness TTL (5 minutes). A recently-tripped breaker
+			// during a real outage should not be cleared.
+			ref := state.TrippedAt
+			if ref.IsZero() {
+				ref = state.LastFail
+			}
+			if ref.IsZero() || time.Since(ref) > 5*time.Minute {
+				staleCount++
+			}
 		}
 	}
 
