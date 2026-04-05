@@ -377,3 +377,88 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 }
+
+func TestImportFromLocalJSONL_LegacyFormats(t *testing.T) {
+	skipIfNoDolt(t)
+
+	t.Run("numeric comment IDs from pre-v1.0", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlContent := `{"id":"test-numcmt","title":"Old comments","status":"open","priority":1,"issue_type":"task","comments":[{"id":7,"issue_id":"test-numcmt","author":"alice","text":"numeric id comment","created_at":"2025-01-01T01:00:00Z"}],"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("import with numeric comment IDs should not fail: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("Expected 1 issue imported, got %d", count)
+		}
+
+		issue, err := store.GetIssue(ctx, "test-numcmt")
+		if err != nil {
+			t.Fatalf("Failed to get issue: %v", err)
+		}
+		if len(issue.Comments) != 1 {
+			t.Fatalf("Expected 1 comment, got %d", len(issue.Comments))
+		}
+		if issue.Comments[0].Text != "numeric id comment" {
+			t.Errorf("Comment text = %q, want %q", issue.Comments[0].Text, "numeric id comment")
+		}
+	})
+
+	t.Run("wisp field mapped to ephemeral", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlContent := `{"id":"test-wisp1","title":"Wisp true","status":"open","priority":0,"issue_type":"task","wisp":true,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-wisp2","title":"Wisp false","status":"open","priority":0,"issue_type":"task","wisp":false,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-wisp3","title":"No wisp field","status":"open","priority":0,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("import with wisp field should not fail: %v", err)
+		}
+		if count != 3 {
+			t.Errorf("Expected 3 issues imported, got %d", count)
+		}
+
+		issue1, err := store.GetIssue(ctx, "test-wisp1")
+		if err != nil {
+			t.Fatalf("Failed to get wisp=true issue: %v", err)
+		}
+		if !issue1.Ephemeral {
+			t.Error("wisp=true should map to ephemeral=true")
+		}
+
+		issue2, err := store.GetIssue(ctx, "test-wisp2")
+		if err != nil {
+			t.Fatalf("Failed to get wisp=false issue: %v", err)
+		}
+		if issue2.Ephemeral {
+			t.Error("wisp=false should not set ephemeral=true")
+		}
+
+		issue3, err := store.GetIssue(ctx, "test-wisp3")
+		if err != nil {
+			t.Fatalf("Failed to get no-wisp issue: %v", err)
+		}
+		if issue3.Ephemeral {
+			t.Error("missing wisp field should not set ephemeral=true")
+		}
+	})
+}

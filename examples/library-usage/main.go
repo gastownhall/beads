@@ -94,7 +94,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to add comment: %v", err)
 	}
-	fmt.Printf("Added comment #%d\n", comment.ID)
+	fmt.Printf("Added comment #%s\n", comment.ID)
 
 	// Example 6: Update issue status
 	fmt.Println("\n=== Updating Status ===")

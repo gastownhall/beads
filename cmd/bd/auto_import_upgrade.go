@@ -41,6 +41,9 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	result, err := importFromLocalJSONLFull(ctx, s, jsonlPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
+		fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)
+		fmt.Fprintf(os.Stderr, "Try: bd init --from-jsonl   (re-initialize and import from the JSONL file)\n")
+		fmt.Fprintf(os.Stderr, "If this persists, please report at https://github.com/gastownhall/beads/issues\n\n")
 		return
 	}
 
