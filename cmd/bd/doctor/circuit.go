@@ -25,7 +25,7 @@ func CheckCircuitBreaker() DoctorCheck {
 
 	staleCount := 0
 	for _, path := range matches {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G304: path is from filepath.Glob with controlled pattern
 		if err != nil {
 			continue
 		}
