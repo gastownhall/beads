@@ -530,6 +530,20 @@ else
     echo -e "  ${RED}${FAIL} FAILED${NC}, ${PASS} passed, ${SKIP} skipped (of ${TOTAL})"
     echo -e "  Failed:${FAILED_VERSIONS}"
 fi
+
+# Warn if >80% of versions were skipped — something may be wrong with
+# binary downloads or platform support.
+if [ $TOTAL -gt 0 ] && [ $SKIP -gt 0 ]; then
+    SKIP_PCT=$((SKIP * 100 / TOTAL))
+    if [ $SKIP_PCT -gt 80 ]; then
+        WARN_MSG="WARNING: ${SKIP} of ${TOTAL} versions skipped (${SKIP_PCT}%) — check binary availability"
+        echo -e "  ${YELLOW}${WARN_MSG}${NC}" >&2
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ${WARN_MSG}" >> "$GITHUB_STEP_SUMMARY"
+        fi
+    fi
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # clean up candidate if we built it
