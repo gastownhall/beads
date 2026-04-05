@@ -31,10 +31,12 @@ The agent picks the right task every time. No wasted cycles.
 
 ## Installation
 
+Install bd using your preferred method (see [INSTALLING.md](INSTALLING.md) for all options):
+
 ```bash
-cd ~/src/beads
-go build -o bd ./cmd/bd
-./bd --help
+brew install beads        # macOS/Linux
+# or
+npm install -g @beads/bd  # Node.js users
 ```
 
 ## Initialize
@@ -98,12 +100,12 @@ git config --get beads.role
 
 ```bash
 # Create a few issues
-./bd create "Set up database" -p 1 -t task
-./bd create "Create API" -p 2 -t feature
-./bd create "Add authentication" -p 2 -t feature
+bd create "Set up database" -p 1 -t task
+bd create "Create API" -p 2 -t feature
+bd create "Add authentication" -p 2 -t feature
 
 # List them
-./bd list
+bd list
 ```
 
 **Note:** Issue IDs are hash-based (e.g., `bd-a1b2`, `bd-f14c`) to prevent collisions when multiple agents/branches work concurrently.
@@ -114,16 +116,16 @@ For large features, use hierarchical IDs to organize work:
 
 ```bash
 # Create epic (generates parent hash ID)
-./bd create "Auth System" -t epic -p 1
+bd create "Auth System" -t epic -p 1
 # Returns: bd-a3f8e9
 
 # Create child tasks (automatically get .1, .2, .3 suffixes)
-./bd create "Design login UI" -p 1 --parent bd-a3f8e9       # bd-a3f8e9.1
-./bd create "Backend validation" -p 1 --parent bd-a3f8e9    # bd-a3f8e9.2
-./bd create "Integration tests" -p 1 --parent bd-a3f8e9     # bd-a3f8e9.3
+bd create "Design login UI" -p 1 --parent bd-a3f8e9       # bd-a3f8e9.1
+bd create "Backend validation" -p 1 --parent bd-a3f8e9    # bd-a3f8e9.2
+bd create "Integration tests" -p 1 --parent bd-a3f8e9     # bd-a3f8e9.3
 
 # View hierarchy
-./bd dep tree bd-a3f8e9
+bd dep tree bd-a3f8e9
 ```
 
 Output:
@@ -140,13 +142,13 @@ Output:
 
 ```bash
 # API depends on database
-./bd dep add bd-2 bd-1
+bd dep add bd-2 bd-1
 
 # Auth depends on API
-./bd dep add bd-3 bd-2
+bd dep add bd-3 bd-2
 
 # View the tree
-./bd dep tree bd-3
+bd dep tree bd-3
 ```
 
 Output:
@@ -168,7 +170,7 @@ Output:
 ## Find Ready Work
 
 ```bash
-./bd ready
+bd ready
 ```
 
 Output:
@@ -183,7 +185,7 @@ Only bd-1 is ready because bd-2 and bd-3 are blocked!
 **Understanding why:** Use `--explain` to see the full graph reasoning:
 
 ```bash
-./bd ready --explain
+bd ready --explain
 ```
 
 Output:
@@ -213,13 +215,13 @@ Output:
 
 ```bash
 # Start working on bd-1
-./bd update bd-1 --claim
+bd update bd-1 --claim
 
 # Complete it
-./bd close bd-1 --reason "Database setup complete"
+bd close bd-1 --reason "Database setup complete"
 
 # Check ready work again
-./bd ready
+bd ready
 ```
 
 Now bd-2 is ready! 🎉
@@ -228,10 +230,10 @@ Now bd-2 is ready! 🎉
 
 ```bash
 # See blocked issues
-./bd blocked
+bd blocked
 
 # View statistics
-./bd stats
+bd stats
 ```
 
 ## Team Sync
@@ -253,102 +255,21 @@ When a teammate clones the repo, `bd bootstrap` auto-detects the existing databa
 
 See [DOLT-BACKEND.md](DOLT-BACKEND.md#dolt-remotes) for remote configuration details and [FEDERATION-SETUP.md](../FEDERATION-SETUP.md) for multi-team sync.
 
-## Optional: Notion Sync
-
-If you keep project issues in Notion, save an integration token first:
-
-```bash
-bd config set notion.token <your-token>
-```
-
-Then either create a new Beads database under a parent page or connect to an existing target:
-
-```bash
-bd notion init --parent <page-id>
-# or
-bd notion connect --url <notion-database-or-data-source-url>
-```
-
-The same auth value can also come from `NOTION_TOKEN`. Directly setting `notion.data_source_id` remains available as an escape hatch for advanced setups.
-
-Check which auth source is active and whether the target schema is ready:
-
-```bash
-bd notion status
-bd notion status --json
-```
-
-Preview or run sync:
-
-```bash
-bd notion sync --dry-run
-bd notion sync
-bd notion sync --pull
-bd notion sync --push
-```
-
 ## Database Location
 
 By default (embedded mode), data is stored in `.beads/embeddeddolt/` within your repository.
 In server mode, data is managed by the external `dolt sql-server`.
 
-## Migrating Databases
-
-After upgrading bd, use `bd migrate` to check for and migrate old database files:
-
-```bash
-# Inspect migration plan (AI agents)
-./bd migrate --inspect --json
-
-# Check schema and config
-./bd info --schema --json
-
-# Preview migration changes
-./bd migrate --dry-run
-
-# Migrate old databases to beads.db
-./bd migrate
-
-# Migrate and clean up old files
-./bd migrate --cleanup --yes
-```
-
-**AI agents:** Use `--inspect` to analyze migration safety before running. The system verifies required config keys and data integrity invariants.
-
-## Database Maintenance
-
-As your project accumulates closed issues, the database grows. Manage size with these commands:
-
-```bash
-# View compaction statistics
-bd admin compact --stats
-
-# Preview compaction candidates (30+ days closed)
-bd admin compact --analyze --json
-
-# Apply agent-generated summary
-bd admin compact --apply --id bd-42 --summary summary.txt
-
-# Immediately delete closed issues (CAUTION: permanent!)
-bd admin cleanup --force
-```
-
-**When to compact:**
-- Database file > 10MB with many old closed issues
-- After major project milestones when old issues are no longer relevant
-- Before archiving a project phase
-
-**Note:** Compaction is permanent graceful decay. Original content is discarded but viewable via `bd restore <id>` from git history.
-
 ## Next Steps
 
-- Add labels: `./bd create "Task" -l "backend,urgent"`
-- Filter ready work: `./bd ready --priority 1`
-- Explain the graph: `./bd ready --explain`
-- Check graph integrity: `./bd graph check`
-- Search issues: `./bd list --status open`
-- Detect cycles: `./bd dep cycles`
+- Add labels: `bd create "Task" -l "backend,urgent"`
+- Filter ready work: `bd ready --priority 1`
+- Explain the graph: `bd ready --explain`
+- Check graph integrity: `bd graph check`
+- Search issues: `bd list --status open`
+- Detect cycles: `bd dep cycles`
 - Use gates for PR/CI sync: See [DEPENDENCIES.md](DEPENDENCIES.md)
 - Sync across computers: See [SYNC_SETUP.md](SYNC_SETUP.md)
+- Database maintenance: See [ADVANCED.md](ADVANCED.md)
 
 See [README.md](../README.md) for full documentation.
