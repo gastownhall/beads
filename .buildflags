@@ -1,0 +1,14 @@
+# This file is sourced by scripts to provide standard build flags
+# Mirrors Makefile CGO configuration for consistency
+
+export CGO_ENABLED=1
+
+# ICU configuration (Homebrew or system)
+ICU_PREFIX=$(brew --prefix icu4c 2>/dev/null || true)
+if [ -n "$ICU_PREFIX" ]; then
+  export CGO_CFLAGS="-I${ICU_PREFIX}/include"
+  export CGO_LDFLAGS="-L${ICU_PREFIX}/lib"
+else
+  export CGO_CFLAGS="-I/usr/include"
+  export CGO_LDFLAGS="-L/usr/lib/x86_64-linux-gnu -licui18n -licuuc -licudata"
+fi
