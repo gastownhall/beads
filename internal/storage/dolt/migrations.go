@@ -34,6 +34,7 @@ var migrationsList = []Migration{
 	{"drop_child_counters_fk", migrations.MigrateDropChildCountersFK},
 	{"wisp_events_created_at_index", migrations.MigrateWispEventsCreatedAtIndex},
 	{"custom_status_type_tables", migrations.MigrateCustomStatusTypeTables},
+	{"backfill_custom_tables", migrations.BackfillCustomTables},
 }
 
 // RunMigrations executes all registered Dolt migrations in order.
