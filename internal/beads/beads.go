@@ -555,13 +555,21 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 
 // FindBeadsDir finds the .beads/ directory in the current directory tree.
 // Returns empty string if not found.
-// Stops at the git repository root to avoid finding unrelated directories.
-// Validates that the directory contains actual project files.
-// Redirect files are supported: if a .beads/redirect file exists, its contents
-// are used as the actual .beads directory path.
-// For worktrees, checks in order: worktree redirect, worktree's own .beads
-// (separate-DB mode), then main repository's .beads (shared-DB fallback).
-// This is useful for commands that need to detect beads projects without requiring a database.
+//
+// Resolution order:
+//  1. BEADS_DIR environment variable (highest priority)
+//  2. Walk up from CWD toward repo root boundary, checking each directory
+//     for .beads/ with valid project files. For worktrees, stops at the
+//     worktree root; for non-worktrees, stops at the git root.
+//  3. Worktree-specific fallback: per-worktree redirect, worktree's own
+//     .beads (separate-DB mode), shared .beads via git-common-dir.
+//  4. Extended walk from the boundary to the main repo root (worktrees)
+//     or checks the git root itself (non-worktrees).
+//
+// Validates that directories contain actual project files (metadata.json,
+// config.yaml, dolt/, embeddeddolt/, or *.db).
+// Redirect files are supported: if a .beads/redirect file exists, its
+// contents are used as the actual .beads directory path.
 func FindBeadsDir() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
@@ -578,24 +586,60 @@ func FindBeadsDir() string {
 		}
 	}
 
-	// 1b. Check cwd for .beads/ before git-worktree resolution.
-	// This handles rigs (subdirectories with their own .beads/) inside a
-	// git repo that also has .beads/. Without this, step 2b grabs the
-	// git root's .beads/ and the rig's local one is never found.
-	if cwd, err := os.Getwd(); err == nil {
-		cwdBeadsDir := filepath.Join(cwd, ".beads")
-		if info, err := os.Stat(cwdBeadsDir); err == nil && info.IsDir() {
-			cwdBeadsDir = FollowRedirect(cwdBeadsDir)
-			if hasBeadsProjectFiles(cwdBeadsDir) {
-				return cwdBeadsDir
-			}
-		}
+	// 2. Walk up from CWD toward the repo root, checking each directory for .beads/.
+	// This replaces the former step 1b (CWD-only check) with a proper ancestor walk,
+	// fixing the case where CWD is a subdirectory within a rig (not the rig root itself).
+	// For worktrees, the walk stops at the worktree root boundary to avoid finding
+	// git-tracked .beads/ at the worktree root that has metadata but no database.
+	// The worktree-specific fallback logic (step 3) handles worktree root resolution.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
 	}
 
-	// 2. For worktrees, check worktree-local redirect first, then own .beads, then main repo
+	gitRoot := findGitRoot()
+
+	// Determine the walk-up boundary: worktree root for worktrees, git root otherwise.
+	// We stop BEFORE the boundary so worktree fallback logic can handle the root's .beads/.
+	isWt := git.IsWorktree()
+	walkBoundary := gitRoot
+	if isWt {
+		// For worktrees, stop the walk at the worktree root.
+		// The worktree root's .beads/ may be git-tracked metadata without a real database;
+		// the worktree fallback logic (step 3) handles this correctly.
+		walkBoundary = git.GetRepoRoot()
+	}
+
+	for dir := cwd; dir != "/" && dir != "."; {
+		// Stop at the walk boundary (exclusive — don't check this directory).
+		// For worktrees: stops before worktree root so step 3 handles it.
+		// For non-worktrees: stops before git root (which is checked below in the
+		// post-worktree walk, step 4).
+		if walkBoundary != "" && dir == walkBoundary {
+			break
+		}
+
+		beadsDir := filepath.Join(dir, ".beads")
+		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+			beadsDir = FollowRedirect(beadsDir)
+			if hasBeadsProjectFiles(beadsDir) {
+				return beadsDir
+			}
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	// 3. Worktree-specific fallback: redirect, own .beads, shared .beads.
+	// This runs after the walk-up so that rig subdirectories win, but before
+	// the extended walk (step 4) so worktree-aware logic is preferred.
 	var mainRepoRoot string
-	if git.IsWorktree() {
-		// 2a. Per-worktree redirect override
+	if isWt {
+		// 3a. Per-worktree redirect override
 		if target := worktreeRedirectTarget(); target != "" {
 			if info, err := os.Stat(target); err == nil && info.IsDir() {
 				if hasBeadsProjectFiles(target) {
@@ -604,7 +648,7 @@ func FindBeadsDir() string {
 			}
 		}
 
-		// 2b. Worktree's own .beads (separate-DB mode, no redirect)
+		// 3b. Worktree's own .beads (separate-DB mode, no redirect)
 		if worktreeRoot := git.GetRepoRoot(); worktreeRoot != "" {
 			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
 			if info, err := os.Stat(worktreeBeadsDir); err == nil && info.IsDir() {
@@ -614,7 +658,7 @@ func FindBeadsDir() string {
 			}
 		}
 
-		// 2c. Fall back to the canonical shared .beads for this worktree.
+		// 3c. Fall back to the canonical shared .beads for this worktree.
 		if fallbackBeadsDir := GetWorktreeFallbackBeadsDir(); fallbackBeadsDir != "" {
 			if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
 				fallbackBeadsDir = FollowRedirect(fallbackBeadsDir)
@@ -631,52 +675,37 @@ func FindBeadsDir() string {
 		}
 	}
 
-	// 3. Search for .beads/ in current directory and ancestors
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
+	// 4. Extended walk: from walk boundary to git/main-repo root.
+	// For non-worktrees, this checks the git root itself (the walk-up in step 2
+	// stopped before it). For worktrees, this walks from worktree root to main
+	// repo root, handling edge cases where .beads/ is between the two.
+	// Skip if there was no walk boundary (step 2 already searched everything).
+	if walkBoundary != "" {
+		extendedRoot := gitRoot
+		if isWt && mainRepoRoot != "" {
+			extendedRoot = mainRepoRoot
+		}
 
-	// Find git root to limit the search
-	gitRoot := findGitRoot()
-	worktreeRoot := gitRoot // save worktree-specific boundary
-	if git.IsWorktree() && mainRepoRoot != "" {
-		// For worktrees, extend search boundary to include main repo
-		gitRoot = mainRepoRoot
-	}
-
-	for dir := cwd; dir != "/" && dir != "."; {
-		beadsDir := filepath.Join(dir, ".beads")
-		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-			// Follow redirect if present
-			beadsDir = FollowRedirect(beadsDir)
-
-			// Validate directory contains actual project files
-			if hasBeadsProjectFiles(beadsDir) {
-				return beadsDir
+		for dir := walkBoundary; dir != "/" && dir != "."; {
+			beadsDir := filepath.Join(dir, ".beads")
+			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+				beadsDir = FollowRedirect(beadsDir)
+				if hasBeadsProjectFiles(beadsDir) {
+					return beadsDir
+				}
 			}
-		}
 
-		// Stop at git root to avoid finding unrelated directories
-		if gitRoot != "" && dir == gitRoot {
-			break
-		}
+			// Stop at the extended root
+			if extendedRoot != "" && dir == extendedRoot {
+				break
+			}
 
-		// Also stop at worktree root when it differs from main repo root
-		// This prevents escaping the worktree boundary into unrelated directories
-		if worktreeRoot != "" && worktreeRoot != gitRoot && dir == worktreeRoot {
-			break
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
-
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root (works on both Unix and Windows)
-			// On Unix: filepath.Dir("/") returns "/"
-			// On Windows: filepath.Dir("C:\\") returns "C:\\"
-			break
-		}
-		dir = parent
 	}
 
 	return ""
