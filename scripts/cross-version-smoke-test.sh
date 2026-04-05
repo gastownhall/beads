@@ -356,7 +356,8 @@ test_version() {
         else
             record_result "$version" "FAIL" "init failed: ${init_err}"
         fi
-        echo -e "  ${RESULT_STATUSES[-1]}: ${RESULT_DETAILS[-1]}"
+        local _idx=$(( ${#RESULT_STATUSES[@]} - 1 ))
+        echo -e "  ${RESULT_STATUSES[$_idx]}: ${RESULT_DETAILS[$_idx]}"
         return 0
     fi
     git -C "$WS" config beads.role maintainer 2>/dev/null || true
@@ -370,12 +371,18 @@ test_version() {
     if [ -z "${EPIC:-}" ] || [ -z "${ID1:-}" ] || [ -z "${ID2:-}" ]; then
         cleanup_workspace "$WS" "$prev_bin"
         record_result "$version" "FAIL" "create failed (epic=${EPIC:-?} id1=${ID1:-?} id2=${ID2:-?})"
-        echo -e "  ${RED}FAIL: ${RESULT_DETAILS[-1]}${NC}"
+        local _idx2=$(( ${#RESULT_DETAILS[@]} - 1 ))
+        echo -e "  ${RED}FAIL: ${RESULT_DETAILS[$_idx2]}${NC}"
         return 0
     fi
 
     bd_in "$WS" "$prev_bin" dep add "$ID2" "$ID1" >/dev/null 2>&1 || true
     echo -e "  created: epic=$EPIC task=$ID1 bug=$ID2"
+
+    # commit to trigger JSONL export via git hooks (pre-embeddeddolt versions
+    # only populate issues.jsonl on commit, not on create)
+    git -C "$WS" add -A 2>/dev/null || true
+    git -C "$WS" commit --quiet -m "smoke test data" 2>/dev/null || true
 
     # stop any dolt server before handing to candidate
     stop_dolt_server "$WS" "$prev_bin"
@@ -388,12 +395,20 @@ test_version() {
     local error_details="$VERIFY_DETAIL"
 
     # -- step 4: if direct read failed and candidate suggests "bd init", follow that advice --
+    #            use --from-jsonl to import data from the git-tracked JSONL export
     if [ "$errors" -gt 0 ]; then
         local hint
         hint=$(bd_in "$WS" "$cand_bin" list 2>&1 | grep -o "run 'bd init'" || true)
         if [ -n "$hint" ]; then
-            echo -e "  ${YELLOW}candidate suggests 'bd init', following that advice...${NC}"
-            bd_in "$WS" "$cand_bin" init --quiet --non-interactive --prefix sm-o_ke </dev/null >/dev/null 2>&1 || true
+            local init_flags="--quiet --non-interactive --prefix sm-o_ke"
+            # use --from-jsonl when JSONL has data (pre-embeddeddolt versions exported via git hooks)
+            if [ -s "$WS/.beads/issues.jsonl" ]; then
+                init_flags="--from-jsonl $init_flags"
+                echo -e "  ${YELLOW}candidate suggests 'bd init', using --from-jsonl to recover data...${NC}"
+            else
+                echo -e "  ${YELLOW}candidate suggests 'bd init', following that advice...${NC}"
+            fi
+            bd_in "$WS" "$cand_bin" init $init_flags </dev/null >/dev/null 2>&1 || true
 
             verify_candidate "$WS" "$cand_bin" "$EPIC" "$ID1" "$ID2"
             if [ "$VERIFY_ERRORS" -eq 0 ]; then
