@@ -2,7 +2,11 @@
 # Workspace helpers — create isolated git repos, run bd commands, cleanup.
 
 export BEADS_TEST_MODE="${BEADS_TEST_MODE:-1}"
-export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_NOSYSTEM="${GIT_CONFIG_NOSYSTEM:-1}"
+
+# Timeout for bd operations (seconds). Prevents hangs from dolt server
+# startup, embedded engine locks, etc.
+BD_OP_TIMEOUT="${BD_OP_TIMEOUT:-30}"
 
 new_workspace() {
     local dir
@@ -20,7 +24,7 @@ bd_in() {
     local ws="$1"
     local bin="$2"
     shift 2
-    (cd "$ws" && "$bin" "$@")
+    (cd "$ws" && timeout "$BD_OP_TIMEOUT" "$bin" "$@")
 }
 
 # Create an issue, returning just the ID on stdout.

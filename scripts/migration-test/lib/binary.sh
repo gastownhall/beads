@@ -5,6 +5,8 @@
 CACHE_DIR="${HOME}/.cache/beads-regression"
 mkdir -p "$CACHE_DIR"
 
+DOWNLOAD_TIMEOUT="${DOWNLOAD_TIMEOUT:-60}"
+
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -28,7 +30,7 @@ download_binary() {
     echo -e "  ${YELLOW:-}downloading ${version}...${NC:-}" >&2
     local tmpdir
     tmpdir=$(mktemp -d)
-    if ! curl -fsSL "$url" -o "$tmpdir/archive.tar.gz" 2>/dev/null; then
+    if ! curl -fsSL --max-time "$DOWNLOAD_TIMEOUT" "$url" -o "$tmpdir/archive.tar.gz" 2>/dev/null; then
         rm -rf "$tmpdir"
         return 1
     fi

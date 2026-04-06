@@ -27,8 +27,11 @@ set -uo pipefail
 #   CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh # prebuilt candidate
 #
 # Environment:
-#   CANDIDATE_BIN    Path to prebuilt candidate binary (skip build)
-#   BEADS_TEST_MODE  Set to 1 to suppress telemetry/prompts (default: 1)
+#   CANDIDATE_BIN      Path to prebuilt candidate binary (skip build)
+#   BEADS_TEST_MODE    Set to 1 to suppress telemetry/prompts (default: 1)
+#   GIT_CONFIG_NOSYSTEM  Set to 1 to ignore system git config (default: 1)
+#   BD_OP_TIMEOUT      Timeout in seconds for bd operations (default: 30)
+#   DOWNLOAD_TIMEOUT   Timeout in seconds for binary downloads (default: 60)
 #
 # Exit codes:
 #   0  No BLOCKED paths (AUTO and MANUAL are both acceptable)

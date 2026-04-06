@@ -58,12 +58,12 @@ recipe_fix_dash_prefix() {
     fi
 
     # Re-init with sanitized prefix
-    local init_flags="--quiet --non-interactive --prefix $sanitized"
+    local -a init_flags=(--quiet --non-interactive --prefix "$sanitized")
     if [ -s "$ws/.beads/issues.jsonl" ]; then
-        init_flags="--from-jsonl $init_flags"
+        init_flags=(--from-jsonl "${init_flags[@]}")
     fi
 
-    if bd_in "$ws" "$cand_bin" init $init_flags </dev/null >/dev/null 2>&1; then
+    if bd_in "$ws" "$cand_bin" init "${init_flags[@]}" </dev/null >/dev/null 2>&1; then
         echo "  re-init with sanitized prefix succeeded"
         return 0
     else
