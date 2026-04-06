@@ -1,0 +1,90 @@
+#!/bin/bash
+# Recipe: SQLite-era (v0.30.0–v0.50.3) → current embedded Dolt.
+#
+# SQLite-era versions store data in .beads/beads.db. The current binary
+# only looks for embeddeddolt/ or dolt/ directories and ignores beads.db.
+# The auto-import logic (auto_import_upgrade.go) only fires when
+# issues.jsonl has data, but SQLite-era versions keep it empty.
+#
+# Strategy:
+#   1. Use the OLD binary to export issues to JSONL (if it has an export command)
+#   2. If no export command, use sqlite3 to dump issues directly
+#   3. Init with candidate using --from-jsonl
+#
+# User-facing instructions:
+#   If upgrading from a SQLite-era version (v0.30–v0.50):
+#     1. Keep your old bd binary (or download it from releases)
+#     2. Run: old-bd export --format jsonl > .beads/issues.jsonl
+#        (or: old-bd list --json -n 0 --all > .beads/issues.jsonl)
+#     3. Run: bd init --from-jsonl --quiet
+#     4. Verify: bd list --all
+
+recipe_sqlite_to_current() {
+    local ws="$1"
+    local old_bin="$2"
+    local cand_bin="$3"
+    local version="$4"
+
+    echo "  Trying SQLite→current recipe..."
+
+    # Strategy 1: Use old binary's export command
+    if bd_in "$ws" "$old_bin" export --format jsonl > "$ws/.beads/issues.jsonl.tmp" 2>/dev/null; then
+        if [ -s "$ws/.beads/issues.jsonl.tmp" ]; then
+            mv "$ws/.beads/issues.jsonl.tmp" "$ws/.beads/issues.jsonl"
+            echo "  exported via 'bd export --format jsonl'"
+        else
+            rm -f "$ws/.beads/issues.jsonl.tmp"
+        fi
+    fi
+
+    # Strategy 2: Use old binary's list --json as fallback JSONL source
+    if [ ! -s "$ws/.beads/issues.jsonl" ]; then
+        local list_json
+        list_json=$(bd_in "$ws" "$old_bin" list --json -n 0 --all 2>/dev/null) || true
+        if [ -n "$list_json" ] && [ "$list_json" != "[]" ] && [ "$list_json" != "null" ]; then
+            # Convert JSON array to JSONL (one object per line)
+            echo "$list_json" | jq -c '.[]' > "$ws/.beads/issues.jsonl" 2>/dev/null || true
+            if [ -s "$ws/.beads/issues.jsonl" ]; then
+                echo "  exported via 'bd list --json' → JSONL conversion"
+            fi
+        fi
+    fi
+
+    # Strategy 3: Direct sqlite3 extraction (last resort)
+    if [ ! -s "$ws/.beads/issues.jsonl" ] && command -v sqlite3 >/dev/null 2>&1; then
+        local db_path=""
+        for candidate_db in "$ws/.beads/beads.db" "$ws/beads.db"; do
+            [ -f "$candidate_db" ] && db_path="$candidate_db" && break
+        done
+        if [ -n "$db_path" ]; then
+            sqlite3 -json "$db_path" "SELECT * FROM issues;" > "$ws/.beads/issues.jsonl.tmp" 2>/dev/null || true
+            if [ -s "$ws/.beads/issues.jsonl.tmp" ]; then
+                # Convert JSON array to JSONL
+                jq -c '.[]' "$ws/.beads/issues.jsonl.tmp" > "$ws/.beads/issues.jsonl" 2>/dev/null || true
+                rm -f "$ws/.beads/issues.jsonl.tmp"
+                echo "  exported via direct sqlite3 extraction"
+            else
+                rm -f "$ws/.beads/issues.jsonl.tmp"
+            fi
+        fi
+    fi
+
+    if [ ! -s "$ws/.beads/issues.jsonl" ]; then
+        echo "  FAILED: could not export data from SQLite-era binary"
+        return 1
+    fi
+
+    # Stop any old dolt server
+    stop_dolt_server "$ws"
+
+    # Init with candidate, importing from JSONL
+    if bd_in "$ws" "$cand_bin" init --from-jsonl --quiet --non-interactive </dev/null >/dev/null 2>&1; then
+        echo "  candidate init --from-jsonl succeeded"
+        return 0
+    else
+        local init_err
+        init_err=$(bd_in "$ws" "$cand_bin" init --from-jsonl --quiet --non-interactive </dev/null 2>&1 | head -1)
+        echo "  FAILED: candidate init --from-jsonl: $init_err"
+        return 1
+    fi
+}

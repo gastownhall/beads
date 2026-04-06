@@ -1,0 +1,77 @@
+name: Migration Test Harness
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Specific versions to test (space-separated), or empty for all eras'
+        required: false
+        default: ''
+      mode:
+        description: 'Test mode'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - direct-only
+          - stepping-only
+
+jobs:
+  migration-test:
+    name: Migration fidelity
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libicu-dev jq sqlite3
+
+      - name: Install Dolt
+        run: |
+          curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+          dolt version
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Cache old binaries
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/beads-regression
+          key: migration-test-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build candidate
+        run: go build -o bd ./cmd/bd
+
+      - name: Run migration test harness
+        env:
+          CANDIDATE_BIN: ./bd
+          GIT_CONFIG_NOSYSTEM: "1"
+          BEADS_TEST_MODE: "1"
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.mode }}" = "direct-only" ]; then
+            ARGS="--direct-only"
+          elif [ "${{ github.event.inputs.mode }}" = "stepping-only" ]; then
+            ARGS="--stepping-only"
+          fi
+          if [ -n "${{ github.event.inputs.versions }}" ]; then
+            ./scripts/migration-test/run.sh ${{ github.event.inputs.versions }}
+          else
+            ./scripts/migration-test/run.sh $ARGS
+          fi
