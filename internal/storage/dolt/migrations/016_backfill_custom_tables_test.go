@@ -22,7 +22,7 @@ func TestMigrateCustomStatusTypeTables_EmptyConfig(t *testing.T) {
 
 	// Verify tables exist
 	for _, table := range []string{"custom_types", "custom_statuses"} {
-		exists, err := tableExists(db, table)
+		exists, err := TableExists(db, table)
 		if err != nil {
 			t.Fatalf("tableExists(%s): %v", table, err)
 		}

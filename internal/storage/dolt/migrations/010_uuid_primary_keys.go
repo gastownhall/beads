@@ -37,7 +37,7 @@ func MigrateUUIDPrimaryKeys(db *sql.DB) error {
 // Dolt doesn't support ALTER COLUMN to change a PK's type in place.
 func migrateTableToUUID(db *sql.DB, table string) error {
 	// Check if table exists
-	exists, err := tableExists(db, table)
+	exists, err := TableExists(db, table)
 	if err != nil {
 		return fmt.Errorf("check table existence: %w", err)
 	}

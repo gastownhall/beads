@@ -10,6 +10,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // TestConcurrentInitSchema verifies that concurrent initSchemaOnDB calls on a
@@ -29,7 +31,7 @@ func TestConcurrentInitSchema(t *testing.T) {
 
 	// Create a fresh database that has never been initialized.
 	dbName := uniqueTestDBName(t)
-	initDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", testServerPort)
+	initDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String()
 	initDB, err := sql.Open("mysql", initDSN)
 	if err != nil {
 		t.Fatalf("open init connection: %v", err)
@@ -43,7 +45,7 @@ func TestConcurrentInitSchema(t *testing.T) {
 	// Open N independent sql.DB pools pointing at the fresh database.
 	// Each simulates a separate bd process connecting simultaneously.
 	const numConcurrent = 20
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true", testServerPort, dbName)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName}.String()
 
 	tmpDir, err := os.MkdirTemp("", "dolt-concurrent-init-*")
 	if err != nil {
@@ -95,12 +97,12 @@ func TestConcurrentInitSchema(t *testing.T) {
 	}
 	defer verifyDB.Close()
 
-	var version int
-	if err := verifyDB.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version); err != nil {
-		t.Fatalf("schema_version not found after concurrent init: %v", err)
+	var maxVersion int
+	if err := verifyDB.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&maxVersion); err != nil {
+		t.Fatalf("schema_migrations query failed after concurrent init: %v", err)
 	}
-	if version != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", version, currentSchemaVersion)
+	if maxVersion != schema.LatestVersion() {
+		t.Errorf("max migration version = %d, want %d", maxVersion, schema.LatestVersion())
 	}
 
 	for _, table := range []string{"issues", "dependencies", "config", "comments"} {

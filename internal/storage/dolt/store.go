@@ -40,6 +40,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -1000,6 +1001,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}, backoff.WithContext(schemaBO, ctx)); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
+
+		// Ensure dolt_ignore'd tables (wisps, wisp_*) exist in the working set.
+		// These tables are not persisted in commits, so they need recreation
+		// after a server restart. Short-circuits if they already exist (1 query).
+		if err := versioncontrolops.EnsureIgnoredTables(ctx, db); err != nil {
+			return nil, fmt.Errorf("failed to ensure ignored tables: %w", err)
+		}
 	}
 
 	// Initialize credential encryption key (loads from file or generates new random key).
@@ -1094,28 +1102,24 @@ func isLocalHost(host string) bool {
 
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
 // If database is empty, connects without selecting a database (for init operations).
+// Adds ReadTimeout/WriteTimeout for long-lived connection pools.
 func buildServerDSN(cfg *Config, database string) string {
-	// go-sql-driver/mysql DSN format: user:password@tcp(host:port)/db?params
-	// The password must not contain unescaped special characters that collide
-	// with DSN delimiters (@ : / ?). Use go-sql-driver's Config.FormatDSN()
-	// which handles escaping correctly.
-	dsnCfg := mysql.Config{
-		User:                 cfg.ServerUser,
-		Passwd:               cfg.ServerPassword,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", cfg.ServerHost, cfg.ServerPort),
-		DBName:               database,
-		ParseTime:            true,
-		Timeout:              5 * time.Second,
-		ReadTimeout:          10 * time.Second,
-		WriteTimeout:         10 * time.Second,
-		AllowNativePasswords: true,
+	base := doltutil.ServerDSN{
+		Host:     cfg.ServerHost,
+		Port:     cfg.ServerPort,
+		User:     cfg.ServerUser,
+		Password: cfg.ServerPassword,
+		Database: database,
+		TLS:      cfg.ServerTLS,
 	}
-	if cfg.ServerTLS {
-		dsnCfg.TLSConfig = "true"
+	// Parse the base DSN and add pool-specific timeouts.
+	parsed, err := mysql.ParseDSN(base.String())
+	if err != nil {
+		return base.String()
 	}
-
-	return dsnCfg.FormatDSN()
+	parsed.ReadTimeout = 10 * time.Second
+	parsed.WriteTimeout = 10 * time.Second
+	return parsed.FormatDSN()
 }
 
 // execWithLongTimeout opens a one-shot database connection with readTimeout=5m
@@ -1279,110 +1283,42 @@ func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool,
 	return false, rows.Err()
 }
 
-// initSchema creates all tables if they don't exist
+// initSchemaOnDB applies pending schema migrations and DoltStore-specific
+// backward-compat transforms. Uses the shared schema.MigrateUp runner which
+// tracks applied versions in the schema_migrations table.
 func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
-	// Fast path: if schema is already at current version, skip initialization.
-	// This avoids ~20 DDL statements per bd invocation when schema is current.
-	var version int
-	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version)
-	if err == nil && version >= currentSchemaVersion {
-		// Wisps tables are dolt_ignore'd (not persisted in commit history),
-		// so they must be recreated on every server session. (GH#2271)
-		if err := createIgnoredTables(db); err != nil {
-			return err
-		}
-		// Rebuild status views to match current custom status config.
-		// This ensures views stay in sync even after direct SQL config edits.
-		if _, err := db.ExecContext(ctx, BuildReadyIssuesView()); err != nil {
-			return fmt.Errorf("failed to create ready_issues view: %w", err)
-		}
-		if _, err := db.ExecContext(ctx, BuildBlockedIssuesView()); err != nil {
-			return fmt.Errorf("failed to create blocked_issues view: %w", err)
-		}
-		return nil
+	applied, err := schema.MigrateUp(ctx, db)
+	if err != nil {
+		return fmt.Errorf("schema migration: %w", err)
 	}
 
-	// Execute schema creation - split into individual statements
-	// because MySQL/Dolt doesn't support multiple statements in one Exec
-	for _, stmt := range splitStatements(schema) {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
+	if applied > 0 {
+		// Stage only schema tables — avoid DOLT_ADD('-A') which can sweep up
+		// unrelated dirty tables like config from concurrent operations (GH#2455).
+		schemaTables := []string{
+			"issues", "dependencies", "labels", "comments", "events",
+			"config", "metadata", "child_counters",
+			"issue_snapshots", "compaction_snapshots",
+			"repo_mtimes", "routes", "issue_counter",
+			"interactions", "federation_peers",
+			"custom_statuses", "custom_types",
+			"dolt_ignore", "schema_migrations",
 		}
-		// Skip pure comment-only statements, but execute statements that start with comments
-		if isOnlyComments(stmt) {
-			continue
+		for _, table := range schemaTables {
+			_, _ = db.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 		}
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to create schema: %w\nStatement: %s", err, truncateForError(stmt))
+		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+				return fmt.Errorf("failed to commit schema migrations: %w", err)
+			}
 		}
 	}
 
-	// Insert default config values
-	for _, stmt := range splitStatements(defaultConfig) {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-		if isOnlyComments(stmt) {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to insert default config: %w", err)
-		}
-	}
-
-	// Apply index migrations for existing databases.
-	// CREATE TABLE IF NOT EXISTS won't add new indexes to existing tables.
-	indexMigrations := []string{
-		"CREATE INDEX idx_issues_issue_type ON issues(issue_type)",
-	}
-	for _, migration := range indexMigrations {
-		_, err := db.ExecContext(ctx, migration)
-		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate") &&
-			!strings.Contains(strings.ToLower(err.Error()), "already exists") {
-			return fmt.Errorf("failed to apply index migration: %w", err)
-		}
-	}
-
-	// Remove FK constraint on depends_on_id to allow external references.
-	// This is idempotent - DROP FOREIGN KEY fails silently if constraint doesn't exist.
-	_, err = db.ExecContext(ctx, "ALTER TABLE dependencies DROP FOREIGN KEY fk_dep_depends_on")
-	if err == nil {
-		// DDL change succeeded - commit it so it persists (required for Dolt server mode)
-		// GH#2455: Stage only the affected table, not all dirty tables.
-		_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('dependencies')")
-		_, _ = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'migration: remove fk_dep_depends_on for external references')") // Best effort: migration commit is advisory; schema change already applied
-	} else if !strings.Contains(strings.ToLower(err.Error()), "can't drop") &&
-		!strings.Contains(strings.ToLower(err.Error()), "doesn't exist") &&
-		!strings.Contains(strings.ToLower(err.Error()), "check that it exists") &&
-		!strings.Contains(strings.ToLower(err.Error()), "was not found") {
-		return fmt.Errorf("failed to drop fk_dep_depends_on: %w", err)
-	}
-
-	// Create views — table-backed, no dynamic IN clauses needed.
-	if _, err := db.ExecContext(ctx, BuildReadyIssuesView()); err != nil {
-		return fmt.Errorf("failed to create ready_issues view: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, BuildBlockedIssuesView()); err != nil {
-		return fmt.Errorf("failed to create blocked_issues view: %w", err)
-	}
-
-	// Run schema migrations for existing databases (bd-ijw)
-	if err := RunMigrations(db); err != nil {
-		return fmt.Errorf("failed to run dolt migrations: %w", err)
-	}
-
-	// Mark schema as current so subsequent invocations skip initialization
-	_, _ = db.ExecContext(ctx,
-		"INSERT INTO config (`key`, `value`) VALUES ('schema_version', ?) "+
-			"ON DUPLICATE KEY UPDATE `value` = ?",
-		currentSchemaVersion, currentSchemaVersion)
-	_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('config')")
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: update schema_version')"); err != nil {
-		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
-			return fmt.Errorf("failed to commit schema_version update: %w", err)
-		}
+	// Run DoltStore-specific backward-compat migrations for databases that
+	// predate the embedded migration system (e.g. ALTER TABLE ADD COLUMN,
+	// historical data transforms). These are idempotent.
+	if err := RunCompatMigrations(db); err != nil {
+		return fmt.Errorf("failed to run compat migrations: %w", err)
 	}
 
 	return nil
@@ -1390,74 +1326,6 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 
 func (s *DoltStore) initSchema(ctx context.Context) error {
 	return initSchemaOnDB(ctx, s.db)
-}
-
-// splitStatements splits a SQL script into individual statements
-func splitStatements(script string) []string {
-	var statements []string
-	var current strings.Builder
-	inString := false
-	stringChar := byte(0)
-
-	for i := 0; i < len(script); i++ {
-		c := script[i]
-
-		if inString {
-			current.WriteByte(c)
-			if c == stringChar && (i == 0 || script[i-1] != '\\') {
-				inString = false
-			}
-			continue
-		}
-
-		if c == '\'' || c == '"' || c == '`' {
-			inString = true
-			stringChar = c
-			current.WriteByte(c)
-			continue
-		}
-
-		if c == ';' {
-			stmt := strings.TrimSpace(current.String())
-			if stmt != "" {
-				statements = append(statements, stmt)
-			}
-			current.Reset()
-			continue
-		}
-
-		current.WriteByte(c)
-	}
-
-	// Handle last statement without semicolon
-	stmt := strings.TrimSpace(current.String())
-	if stmt != "" {
-		statements = append(statements, stmt)
-	}
-
-	return statements
-}
-
-// truncateForError truncates a string for use in error messages
-func truncateForError(s string) string {
-	if len(s) > 100 {
-		return s[:100] + "..."
-	}
-	return s
-}
-
-// isOnlyComments returns true if the statement contains only SQL comments
-func isOnlyComments(stmt string) bool {
-	lines := strings.Split(stmt, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "--") {
-			continue
-		}
-		// Found a non-comment, non-empty line
-		return false
-	}
-	return true
 }
 
 // IsClosed returns true if the store has been closed.
@@ -2164,7 +2032,20 @@ func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	return versioncontrolops.CreateBranch(ctx, s.db, name)
+	// Pin a single connection so DOLT_BRANCH and EnsureIgnoredTables run on
+	// the same session. Using s.db (pool) could dispatch them to different
+	// connections where the branch context differs.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for branch: %w", err)
+	}
+	defer conn.Close()
+	if err := versioncontrolops.CreateBranch(ctx, conn, name); err != nil {
+		return err
+	}
+	// dolt_ignore'd tables (wisps, wisp_*) don't carry over to new branches —
+	// ensure they exist on the newly created branch.
+	return schema.EnsureIgnoredTables(ctx, conn)
 }
 
 // Checkout switches to the specified branch
@@ -2176,11 +2057,21 @@ func (s *DoltStore) Checkout(ctx context.Context, branch string) (retErr error) 
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	if err := versioncontrolops.CheckoutBranch(ctx, s.db, branch); err != nil {
+	// Pin a single connection so DOLT_CHECKOUT and EnsureIgnoredTables run on
+	// the same session. DOLT_CHECKOUT is session-scoped — using s.db (pool)
+	// could dispatch EnsureIgnoredTables to a connection still on the old branch.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for checkout: %w", err)
+	}
+	defer conn.Close()
+	if err := versioncontrolops.CheckoutBranch(ctx, conn, branch); err != nil {
 		return err
 	}
 	s.branch = branch
-	return nil
+	// dolt_ignore'd tables (wisps, wisp_*) may not exist on the target branch —
+	// ensure they exist after checkout.
+	return schema.EnsureIgnoredTables(ctx, conn)
 }
 
 // Merge merges the specified branch into the current branch.

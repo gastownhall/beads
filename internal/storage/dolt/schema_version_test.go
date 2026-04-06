@@ -5,39 +5,32 @@ import (
 	"fmt"
 	"os"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
-// TestSchemaVersionSetAfterInit verifies that initSchemaOnDB sets
-// schema_version in the config table after successful initialization.
-func TestSchemaVersionSetAfterInit(t *testing.T) {
+// TestSchemaMigrationsPopulatedAfterInit verifies that initSchemaOnDB populates
+// the schema_migrations table after successful initialization.
+func TestSchemaMigrationsPopulatedAfterInit(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	var version int
-	err := store.db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version)
+	var maxVersion int
+	err := store.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&maxVersion)
 	if err != nil {
-		t.Fatalf("schema_version not found in config after init: %v", err)
+		t.Fatalf("schema_migrations query failed: %v", err)
 	}
-	if version != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", version, currentSchemaVersion)
-	}
-
-	var stagedRows int
-	err = store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'").Scan(&stagedRows)
-	if err != nil {
-		t.Fatalf("query dolt_status for config: %v", err)
-	}
-	if stagedRows != 0 {
-		t.Fatalf("config left staged in dolt_status after init: %d row(s)", stagedRows)
+	if maxVersion != schema.LatestVersion() {
+		t.Errorf("max migration version = %d, want %d", maxVersion, schema.LatestVersion())
 	}
 }
 
-// TestSchemaVersionSkipsReinit verifies that initSchemaOnDB returns early
-// when the stored version matches currentSchemaVersion, skipping all DDL.
-func TestSchemaVersionSkipsReinit(t *testing.T) {
+// TestSchemaSkipsReinit verifies that initSchemaOnDB returns early
+// when all migrations are already applied, skipping all DDL.
+func TestSchemaSkipsReinit(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -50,7 +43,7 @@ func TestSchemaVersionSkipsReinit(t *testing.T) {
 		t.Fatalf("failed to drop export_hashes: %v", err)
 	}
 
-	// Run initSchemaOnDB again — should skip because version matches
+	// Run initSchemaOnDB again — should skip because migrations are current
 	if err := initSchemaOnDB(ctx, store.db); err != nil {
 		t.Fatalf("initSchemaOnDB failed: %v", err)
 	}
@@ -62,121 +55,45 @@ func TestSchemaVersionSkipsReinit(t *testing.T) {
 		t.Fatalf("failed to check for export_hashes: %v", err)
 	}
 	if count != 0 {
-		t.Error("export_hashes was recreated — initSchemaOnDB should have skipped when version matches")
+		t.Error("export_hashes was recreated — initSchemaOnDB should have skipped when migrations are current")
 	}
 }
 
-// TestSchemaVersionRunsInitWhenStale verifies that initSchemaOnDB runs
-// full initialization when the stored version is lower than currentSchemaVersion.
-func TestSchemaVersionRunsInitWhenStale(t *testing.T) {
+// TestSchemaRunsInitWhenStale verifies that initSchemaOnDB runs
+// migrations when the schema_migrations table is behind.
+func TestSchemaRunsInitWhenStale(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Set version to an old value
+	// Remove the latest migration record to simulate a stale schema
 	_, err := store.db.ExecContext(ctx,
-		"UPDATE config SET `value` = '1' WHERE `key` = 'schema_version'")
+		"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion())
 	if err != nil {
-		t.Fatalf("failed to set old schema_version: %v", err)
+		t.Fatalf("failed to delete latest migration: %v", err)
 	}
 
-	// Drop a table so we can detect re-creation
-	_, err = store.db.ExecContext(ctx, "DROP TABLE IF EXISTS interactions")
-	if err != nil {
-		t.Fatalf("failed to drop interactions: %v", err)
-	}
-
-	// Run initSchemaOnDB — should run full init because version is stale
+	// Run initSchemaOnDB — should detect stale and re-apply
 	if err := initSchemaOnDB(ctx, store.db); err != nil {
 		t.Fatalf("initSchemaOnDB failed: %v", err)
 	}
 
-	// interactions should be recreated
-	var count int
-	err = store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'interactions' AND table_schema = DATABASE()").Scan(&count)
+	// Latest version should be back
+	var maxVersion int
+	err = store.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&maxVersion)
 	if err != nil {
-		t.Fatalf("failed to check for interactions: %v", err)
+		t.Fatalf("reading max version: %v", err)
 	}
-	if count != 1 {
-		t.Error("interactions was not recreated — initSchemaOnDB should have run full init for stale version")
-	}
-
-	// Version should be updated to current
-	var version int
-	err = store.db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version)
-	if err != nil {
-		t.Fatalf("schema_version not found after re-init: %v", err)
-	}
-	if version != currentSchemaVersion {
-		t.Errorf("schema_version = %d after re-init, want %d", version, currentSchemaVersion)
+	if maxVersion != schema.LatestVersion() {
+		t.Errorf("max migration version = %d after re-init, want %d", maxVersion, schema.LatestVersion())
 	}
 }
 
-// TestSchemaVersionRunsLatestMigrationsWhenOneVersionBehind verifies that a
-// database marked one schema version behind re-enters initSchemaOnDB and picks
-// up the latest migration-backed columns.
-func TestSchemaVersionRunsLatestMigrationsWhenOneVersionBehind(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx, cancel := testContext(t)
-	defer cancel()
-
-	for _, stmt := range []string{
-		"ALTER TABLE issues DROP COLUMN no_history",
-		"ALTER TABLE wisps DROP COLUMN no_history",
-	} {
-		if _, err := store.db.ExecContext(ctx, stmt); err != nil {
-			t.Fatalf("exec %q: %v", stmt, err)
-		}
-	}
-
-	_, err := store.db.ExecContext(ctx,
-		"UPDATE config SET `value` = ? WHERE `key` = 'schema_version'",
-		currentSchemaVersion-1,
-	)
-	if err != nil {
-		t.Fatalf("failed to set prior schema_version: %v", err)
-	}
-
-	if err := initSchemaOnDB(ctx, store.db); err != nil {
-		t.Fatalf("initSchemaOnDB failed: %v", err)
-	}
-
-	for _, table := range []string{"issues", "wisps"} {
-		var count int
-		err := store.db.QueryRowContext(
-			ctx,
-			"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'no_history'",
-			table,
-		).Scan(&count)
-		if err != nil {
-			t.Fatalf("check %s.no_history: %v", table, err)
-		}
-		if count != 1 {
-			t.Fatalf("%s.no_history missing after initSchemaOnDB", table)
-		}
-	}
-
-	// Verify that config is NOT left dirty in dolt_status (GH#2634).
-	// The schema_version write must be committed as part of the migration.
-	var stagedRows int
-	err = store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'").Scan(&stagedRows)
-	if err != nil {
-		t.Fatalf("query dolt_status for config: %v", err)
-	}
-	if stagedRows != 0 {
-		t.Fatalf("config left staged in dolt_status after upgrade from one version behind: %d row(s)", stagedRows)
-	}
-}
-
-// TestSchemaVersionRunsInitWhenMissing verifies that initSchemaOnDB runs
-// full initialization when the schema_version key doesn't exist (fresh db
-// or pre-versioning upgrade).
-func TestSchemaVersionRunsInitWhenMissing(t *testing.T) {
+// TestSchemaRunsInitWhenMissing verifies that initSchemaOnDB runs
+// full initialization when schema_migrations doesn't exist (fresh db).
+func TestSchemaRunsInitWhenMissing(t *testing.T) {
 	skipIfNoDolt(t)
 
 	ctx, cancel := testContext(t)
@@ -194,34 +111,21 @@ func TestSchemaVersionRunsInitWhenMissing(t *testing.T) {
 		CommitterName:   "test",
 		CommitterEmail:  "test@example.com",
 		Database:        dbName,
-		CreateIfMissing: true, // test creates a fresh database
+		CreateIfMissing: true,
 	}
 
-	// First open — creates schema and sets version
 	store, err := New(ctx, cfg)
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
 
-	// Delete the schema_version key to simulate a pre-versioning database
-	_, err = store.db.ExecContext(ctx, "DELETE FROM config WHERE `key` = 'schema_version'")
+	var maxVersion int
+	err = store.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&maxVersion)
 	if err != nil {
-		t.Fatalf("failed to delete schema_version: %v", err)
+		t.Fatalf("schema_migrations query failed: %v", err)
 	}
-
-	// Run initSchemaOnDB — should run full init (SELECT fails, no version found)
-	if err := initSchemaOnDB(ctx, store.db); err != nil {
-		t.Fatalf("initSchemaOnDB failed on missing version: %v", err)
-	}
-
-	// Version should now be set
-	var version int
-	err = store.db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version)
-	if err != nil {
-		t.Fatalf("schema_version not set after init with missing key: %v", err)
-	}
-	if version != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", version, currentSchemaVersion)
+	if maxVersion != schema.LatestVersion() {
+		t.Errorf("max migration version = %d, want %d", maxVersion, schema.LatestVersion())
 	}
 
 	dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*testTimeout)

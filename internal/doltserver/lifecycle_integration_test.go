@@ -4,7 +4,6 @@ package doltserver_test
 
 import (
 	"database/sql"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/integration"
 )
 
@@ -54,7 +54,7 @@ func setupLifecycleTestDir(t *testing.T) string {
 // Caller is responsible for closing the returned *sql.DB.
 func connectMySQL(t *testing.T, port int) *sql.DB {
 	t.Helper()
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)

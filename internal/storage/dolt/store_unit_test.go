@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // newTestDoltDB creates a temporary database on the test Dolt server.
@@ -24,7 +25,7 @@ func newTestDoltDB(t *testing.T) (*sql.DB, func()) {
 
 	dbName := uniqueTestDBName(t)
 
-	adminDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", testServerPort)
+	adminDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String()
 	admin, err := sql.Open("mysql", adminDSN)
 	if err != nil {
 		t.Fatalf("failed to connect to test Dolt server: %v", err)
@@ -35,7 +36,7 @@ func newTestDoltDB(t *testing.T) (*sql.DB, func()) {
 	}
 	admin.Close()
 
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s", testServerPort, dbName)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("failed to connect to test database %s: %v", dbName, err)

@@ -2,11 +2,12 @@ package migrations
 
 import (
 	"database/sql"
-	"fmt"
 	"os/exec"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -24,8 +25,7 @@ func openTestDoltBranch(t *testing.T) *sql.DB {
 	}
 	t.Parallel()
 
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true&timeout=10s",
-		testServerPort, testSharedDB)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: testSharedDB, Timeout: 10 * time.Second}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("failed to open connection: %v", err)
@@ -98,7 +98,7 @@ func TestColumnExists(t *testing.T) {
 func TestTableExists(t *testing.T) {
 	db := openTestDoltBranch(t)
 
-	exists, err := tableExists(db, "issues")
+	exists, err := TableExists(db, "issues")
 	if err != nil {
 		t.Fatalf("failed to check table: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestTableExists(t *testing.T) {
 		t.Fatal("issues table should exist")
 	}
 
-	exists, err = tableExists(db, "nonexistent")
+	exists, err = TableExists(db, "nonexistent")
 	if err != nil {
 		t.Fatalf("failed to check table: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestMigrateWispsTable(t *testing.T) {
 	db := openTestDoltBranch(t)
 
 	// Verify wisps table doesn't exist yet
-	exists, err := tableExists(db, "wisps")
+	exists, err := TableExists(db, "wisps")
 	if err != nil {
 		t.Fatalf("failed to check table: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestMigrateWispsTable(t *testing.T) {
 	}
 
 	// Verify wisps table now exists
-	exists, err = tableExists(db, "wisps")
+	exists, err = TableExists(db, "wisps")
 	if err != nil {
 		t.Fatalf("failed to check table after migration: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestMigrateIssueCounterTable(t *testing.T) {
 	db := openTestDoltBranch(t)
 
 	// Verify issue_counter table does not exist yet
-	exists, err := tableExists(db, "issue_counter")
+	exists, err := TableExists(db, "issue_counter")
 	if err != nil {
 		t.Fatalf("failed to check table: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestMigrateIssueCounterTable(t *testing.T) {
 	}
 
 	// Verify issue_counter table now exists
-	exists, err = tableExists(db, "issue_counter")
+	exists, err = TableExists(db, "issue_counter")
 	if err != nil {
 		t.Fatalf("failed to check table after migration: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 	}
 
 	// Positive: still finds tables
-	exists, err = tableExists(db, "issues")
+	exists, err = TableExists(db, "issues")
 	if err != nil {
 		t.Fatalf("tableExists failed with phantom present: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestColumnExistsWithPhantom(t *testing.T) {
 	}
 
 	// Negative: missing table still returns (false, nil)
-	exists, err = tableExists(db, "nonexistent_table")
+	exists, err = TableExists(db, "nonexistent_table")
 	if err != nil {
 		t.Fatalf("should not error for missing table: %v", err)
 	}

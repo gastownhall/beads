@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // Tests for the CreateIfMissing guard on CREATE DATABASE.
@@ -34,7 +35,7 @@ import (
 // a database. Caller must defer db.Close().
 func rawTestConn(t *testing.T, port int) *sql.DB {
 	t.Helper()
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("failed to connect to test server on port %d: %v", port, err)

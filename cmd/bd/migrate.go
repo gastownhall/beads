@@ -640,7 +640,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 
 // listMigrations returns registered Dolt schema migrations.
 func listMigrations() []string {
-	return dolt.ListMigrations()
+	return dolt.ListCompatMigrations()
 }
 
 // migrateSyncCmd is the "bd migrate sync <branch>" subcommand that

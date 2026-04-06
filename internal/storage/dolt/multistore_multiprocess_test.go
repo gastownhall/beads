@@ -16,6 +16,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/integration"
 	"golang.org/x/sync/errgroup"
 )
@@ -44,7 +45,12 @@ func TestHelperMultiStore(t *testing.T) {
 		}
 	}
 
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/%s?parseTime=true", port, dbName)
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: invalid port %q: %v\n", port, err)
+		os.Exit(1)
+	}
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: portNum, User: "root", Database: dbName}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: sql.Open: %v\n", err)
@@ -120,7 +126,7 @@ func TestMultiStoreConcurrent_InProcess(t *testing.T) {
 
 	// Create a fresh database with schema.
 	dbName := uniqueTestDBName(t)
-	initDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", testServerPort)
+	initDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String()
 	adminDB, err := sql.Open("mysql", initDSN)
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
@@ -131,7 +137,7 @@ func TestMultiStoreConcurrent_InProcess(t *testing.T) {
 	}
 
 	// Initialize schema once.
-	schemaDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true", testServerPort, dbName)
+	schemaDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName}.String()
 	schemaDB, err := sql.Open("mysql", schemaDSN)
 	if err != nil {
 		t.Fatalf("schema connect: %v", err)
@@ -266,7 +272,7 @@ func TestMultiStoreConcurrent_Subprocess(t *testing.T) {
 
 	// Create a fresh database with schema.
 	dbName := uniqueTestDBName(t)
-	initDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", testServerPort)
+	initDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String()
 	adminDB, err := sql.Open("mysql", initDSN)
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
@@ -276,7 +282,7 @@ func TestMultiStoreConcurrent_Subprocess(t *testing.T) {
 		t.Fatalf("create database: %v", err)
 	}
 
-	schemaDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true", testServerPort, dbName)
+	schemaDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName}.String()
 	schemaDB, err := sql.Open("mysql", schemaDSN)
 	if err != nil {
 		t.Fatalf("schema connect: %v", err)
@@ -371,7 +377,7 @@ func TestMultiStoreConcurrent_CloseIsolation(t *testing.T) {
 	defer cancel()
 
 	dbName := uniqueTestDBName(t)
-	initDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", testServerPort)
+	initDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String()
 	adminDB, err := sql.Open("mysql", initDSN)
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
@@ -381,7 +387,7 @@ func TestMultiStoreConcurrent_CloseIsolation(t *testing.T) {
 		t.Fatalf("create database: %v", err)
 	}
 
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true", testServerPort, dbName)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName}.String()
 
 	// Open two pools.
 	db1, err := sql.Open("mysql", dsn)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -88,12 +89,7 @@ func setupGitRemote(t *testing.T) *gitRemoteSetup {
 
 	// Initialize beads schema via CLI (mirrors what New() does).
 	// dolt sql in the repo dir already defaults to the repo's database.
-	initSchemaSQL := fmt.Sprintf(`%s
-%s
-%s
-%s
-CALL DOLT_ADD('.');
-CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, readyIssuesView, blockedIssuesView)
+	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
 	runDoltSQL(t, sourceDir, initSchemaSQL)
 
 	return &gitRemoteSetup{
@@ -1034,12 +1030,7 @@ func TestGitRemoteExternalServerRouting(t *testing.T) {
 	runCmd(t, testdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
 	runCmd(t, testdbDir, "dolt", "remote", "add", "origin", "git+https://example.com/test.git")
 
-	initSchemaSQL := fmt.Sprintf(`%s
-%s
-%s
-%s
-CALL DOLT_ADD('.');
-CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, readyIssuesView, blockedIssuesView)
+	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
 	runDoltSQL(t, testdbDir, initSchemaSQL)
 
 	// Start sql-server from the server root
@@ -1158,12 +1149,7 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 	// Add remote to server's testdb (so SQL DOLT_REMOTE -v can see it)
 	runCmd(t, testdbDir, "dolt", "remote", "add", "origin", remoteURL)
 
-	initSchemaSQL := fmt.Sprintf(`%s
-%s
-%s
-%s
-CALL DOLT_ADD('.');
-CALL DOLT_COMMIT('-Am', 'Genesis: schema and config');`, schema, defaultConfig, readyIssuesView, blockedIssuesView)
+	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
 	runDoltSQL(t, testdbDir, initSchemaSQL)
 
 	// 3. Start dolt sql-server from server root

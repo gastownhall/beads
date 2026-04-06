@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -62,7 +64,7 @@ func testMainInner(m *testing.M) int {
 // initMigrationSharedSchema creates the minimal issues table and commits it
 // to main so branches get a clean snapshot.
 func initMigrationSharedSchema(port int) error {
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true&timeout=10s", port, testSharedDB)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: testSharedDB, Timeout: 10 * time.Second}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return fmt.Errorf("open connection: %w", err)

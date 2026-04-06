@@ -12,6 +12,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // MySQL driver for direct DB connections
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // branchPrefix is the prefix for all test branches, used for cleanup.
@@ -141,7 +142,7 @@ func SetupSharedTestDB(port int, dbName string) (*sql.DB, error) {
 	defer cancel()
 
 	// Open a connection without selecting a database
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/?parseTime=true&timeout=10s", port)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Timeout: 10 * time.Second}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("SetupSharedTestDB: open connection: %w", err)

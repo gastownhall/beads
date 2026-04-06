@@ -24,7 +24,7 @@ func MigrateCustomStatusTypeTables(db *sql.DB) error {
 }
 
 func migrateCustomStatusesTable(db *sql.DB) error {
-	exists, err := tableExists(db, "custom_statuses")
+	exists, err := TableExists(db, "custom_statuses")
 	if err != nil {
 		return err
 	}
@@ -67,7 +67,7 @@ func migrateCustomStatusesTable(db *sql.DB) error {
 }
 
 func migrateCustomTypesTable(db *sql.DB) error {
-	exists, err := tableExists(db, "custom_types")
+	exists, err := TableExists(db, "custom_types")
 	if err != nil {
 		return err
 	}

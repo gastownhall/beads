@@ -18,7 +18,7 @@ var infraTypes = []string{"agent", "rig", "role", "message"}
 // Idempotent: skips if no matching rows exist in issues table.
 func MigrateInfraToWisps(db *sql.DB) error {
 	// Check if wisps table exists (migration 004 must have run first)
-	exists, err := tableExists(db, "wisps")
+	exists, err := TableExists(db, "wisps")
 	if err != nil {
 		return fmt.Errorf("checking wisps table: %w", err)
 	}

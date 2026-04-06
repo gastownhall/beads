@@ -1,24 +1,26 @@
 package dolt
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dolt/migrations"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
-// Migration represents a single schema migration for Dolt.
-type Migration struct {
+// CompatMigration represents a DoltStore-specific backward-compat migration.
+type CompatMigration struct {
 	Name string
 	Func func(*sql.DB) error
 }
 
-// migrationsList is the ordered list of all Dolt schema migrations.
-// Each migration must be idempotent - safe to run multiple times.
-// New migrations should be appended to the end of this list.
-var migrationsList = []Migration{
+// compatMigrationsList is the ordered list of DoltStore-specific migrations
+// for databases that predate the embedded migration system. Each migration
+// must be idempotent — safe to run multiple times.
+var compatMigrationsList = []CompatMigration{
 	{"wisp_type_column", migrations.MigrateWispTypeColumn},
 	{"spec_id_column", migrations.MigrateSpecIDColumn},
 	{"orphan_detection", migrations.DetectOrphanedChildren},
@@ -37,19 +39,19 @@ var migrationsList = []Migration{
 	{"backfill_custom_tables", migrations.BackfillCustomTables},
 }
 
-// RunMigrations executes all registered Dolt migrations in order.
-// Each migration is idempotent and checks whether its changes have
-// already been applied before making modifications.
-func RunMigrations(db *sql.DB) error {
-	for _, m := range migrationsList {
+// RunCompatMigrations executes all DoltStore-specific backward-compat migrations.
+// These handle historical data transforms for databases that predate the embedded
+// migration system (ALTER TABLE ADD COLUMN, data moves, FK drops, etc.).
+// Each migration is idempotent and checks whether its changes have already been applied.
+func RunCompatMigrations(db *sql.DB) error {
+	for _, m := range compatMigrationsList {
 		if err := m.Func(db); err != nil {
-			return fmt.Errorf("dolt migration %q failed: %w", m.Name, err)
+			return fmt.Errorf("compat migration %q failed: %w", m.Name, err)
 		}
 	}
 
 	// GH#2455: Stage only schema tables (not config) to avoid sweeping up
-	// stale issue_prefix changes from concurrent operations. The old '-Am'
-	// approach staged ALL dirty tables including config.
+	// stale issue_prefix changes from concurrent operations.
 	migrationTables := []string{
 		"issues", "wisps", "events", "wisp_events", "dependencies",
 		"wisp_dependencies", "labels", "wisp_labels", "comments",
@@ -65,7 +67,7 @@ func RunMigrations(db *sql.DB) error {
 	if err != nil {
 		// "nothing to commit" is expected when migrations were already applied
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
-			log.Printf("dolt migration commit warning: %v", err)
+			log.Printf("dolt compat migration commit warning: %v", err)
 		}
 	}
 
@@ -77,24 +79,13 @@ func RunMigrations(db *sql.DB) error {
 // are not inherited when branching. Safe to call repeatedly (idempotent).
 // Exported for use by test helpers in other packages.
 func CreateIgnoredTables(db *sql.DB) error {
-	return createIgnoredTables(db)
+	return schema.CreateIgnoredTables(context.Background(), db)
 }
 
-// createIgnoredTables is the internal implementation.
-func createIgnoredTables(db *sql.DB) error {
-	if err := migrations.MigrateWispsTable(db); err != nil {
-		return fmt.Errorf("wisps table: %w", err)
-	}
-	if err := migrations.MigrateWispAuxiliaryTables(db); err != nil {
-		return fmt.Errorf("wisp auxiliary tables: %w", err)
-	}
-	return nil
-}
-
-// ListMigrations returns the names of all registered migrations.
-func ListMigrations() []string {
-	names := make([]string, len(migrationsList))
-	for i, m := range migrationsList {
+// ListCompatMigrations returns the names of all registered compat migrations.
+func ListCompatMigrations() []string {
+	names := make([]string, len(compatMigrationsList))
+	for i, m := range compatMigrationsList {
 		names[i] = m.Name
 	}
 	return names

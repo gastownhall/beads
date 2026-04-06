@@ -14,6 +14,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // DoltPerfMetrics holds performance metrics for Dolt operations
@@ -112,14 +113,13 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int, d
 		user = cfg.GetDoltServerUser()
 	}
 
-	var dsn string
-	if password != "" {
-		dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, password, host, port, dbName)
-	} else {
-		dsn = fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, host, port, dbName)
-	}
+	dsn := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		Database: dbName,
+	}.String()
 
 	// Measure connection time
 	start := time.Now()

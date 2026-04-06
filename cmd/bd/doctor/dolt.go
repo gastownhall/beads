@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // openDoltDB opens a connection to the Dolt SQL server via MySQL protocol.
@@ -41,14 +42,13 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 		return nil, nil, fmt.Errorf("no Dolt server port configured and no server running; run any bd command to auto-start")
 	}
 
-	var connStr string
-	if password != "" {
-		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, password, host, port, database)
-	} else {
-		connStr = fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, host, port, database)
-	}
+	connStr := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		Database: database,
+	}.String()
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
