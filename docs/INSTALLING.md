@@ -98,36 +98,11 @@ BEADS_INSTALL_RESIGN_MACOS=1 curl -fsSL https://raw.githubusercontent.com/stevey
 | **npm** | JS/Node.js projects | `npm update -g @beads/bd` | Node.js | Convenient if npm is your ecosystem |
 | **bun** | JS/Bun.js projects | `bun install -g --trust @beads/bd` | Bun.js | Convenient if bun is your ecosystem |
 | **Install script** | Quick setup, CI/CD | Re-run script | curl, bash | Good for automation and one-liners |
-| **go install** | Go developers | Re-run command | Go 1.24+ | Builds from source, always latest |
-| **From source** | Contributors, custom builds | `git pull && go build` | Go, git | Full control, can modify code |
+| **go install** | Contributors / Go developers | Re-run command | Go 1.24+ | Builds from source, always latest |
+| **From source** | Contributors only | `git pull && go build` | Go, git | Full control, can modify code |
 | **AUR (Arch)** | Arch Linux users | `yay -Syu` | yay/paru | Community-maintained |
 
 **TL;DR:** Use Homebrew if available. Use npm if you're in a Node.js environment. Use the script for quick one-off installs or CI.
-
-## Build Dependencies (go install / from source)
-
-If you install via `go install` or build from source, you need system dependencies for CGO:
-
-macOS (Homebrew):
-```bash
-brew install icu4c zstd
-```
-
-Linux (Debian/Ubuntu):
-```bash
-sudo apt-get install -y libicu-dev libzstd-dev
-```
-
-Linux (Fedora/RHEL):
-```bash
-sudo dnf install -y libicu-devel libzstd-devel
-```
-
-If you see `unicode/uregex.h` missing on macOS, `icu4c` is keg-only. Use:
-```bash
-ICU_PREFIX="$(brew --prefix icu4c)"
-CGO_CFLAGS="-I${ICU_PREFIX}/include" CGO_CPPFLAGS="-I${ICU_PREFIX}/include" CGO_LDFLAGS="-L${ICU_PREFIX}/lib" go install github.com/steveyegge/beads/cmd/bd@latest
-```
 
 ## Platform-Specific Installation
 
@@ -239,6 +214,33 @@ bd version
 **Windows notes:**
 - The Dolt server listens on a loopback TCP endpoint
 - Allow `bd.exe` loopback traffic through any host firewall
+
+## Build Dependencies (Contributors Only)
+
+> **Note:** These dependencies are only needed if you install via `go install` or build from source. If you installed via Homebrew, npm, or the install script, skip this section entirely.
+
+If you install via `go install` or build from source, you need system dependencies for CGO:
+
+macOS (Homebrew):
+```bash
+brew install icu4c zstd
+```
+
+Linux (Debian/Ubuntu):
+```bash
+sudo apt-get install -y libicu-dev libzstd-dev
+```
+
+Linux (Fedora/RHEL):
+```bash
+sudo dnf install -y libicu-devel libzstd-devel
+```
+
+If you see `unicode/uregex.h` missing on macOS, `icu4c` is keg-only. Use:
+```bash
+ICU_PREFIX="$(brew --prefix icu4c)"
+CGO_CFLAGS="-I${ICU_PREFIX}/include" CGO_CPPFLAGS="-I${ICU_PREFIX}/include" CGO_LDFLAGS="-L${ICU_PREFIX}/lib" go install github.com/steveyegge/beads/cmd/bd@latest
+```
 
 ## IDE and Editor Integrations
 
@@ -404,6 +406,8 @@ bd help
 ```
 
 ## Troubleshooting Installation
+
+For additional troubleshooting, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ### `bd: command not found`
 

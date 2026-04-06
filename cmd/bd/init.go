@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -329,6 +330,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if useLocalBeads {
 			// Create .beads directory with owner-only permissions (0700).
 			if err := os.MkdirAll(beadsDir, config.BeadsDirPerm); err != nil {
+				if os.IsPermission(err) {
+					if runtime.GOOS == "windows" {
+						FatalError("failed to create .beads directory: %v\n\n"+
+							"Windows Controlled Folder Access may be blocking bd.exe.\n"+
+							"To fix: Open Windows Security > Virus & threat protection >\n"+
+							"Ransomware protection > Allow an app through Controlled folder access\n"+
+							"and add bd.exe (typically %%USERPROFILE%%\\go\\bin\\bd.exe).", err)
+					} else {
+						FatalError("failed to create .beads directory: %v\n\n"+
+							"Permission denied. Check directory ownership and permissions:\n"+
+							"  ls -la %s\n"+
+							"  chmod 755 %s", err, filepath.Dir(beadsDir), filepath.Dir(beadsDir))
+					}
+				}
 				FatalError("failed to create .beads directory: %v", err)
 			}
 

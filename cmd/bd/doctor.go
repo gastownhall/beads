@@ -525,6 +525,13 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 7e2: Stale circuit breaker files
+	circuitCheck := convertDoctorCheck(doctor.CheckCircuitBreaker())
+	result.Checks = append(result.Checks, circuitCheck)
+	if circuitCheck.Status == statusWarning || circuitCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
 	// Check 7f: Remote consistency (SQL vs CLI)
 	remoteCheck := convertWithCategory(doctor.CheckRemoteConsistency(path), doctor.CategoryData)
 	result.Checks = append(result.Checks, remoteCheck)

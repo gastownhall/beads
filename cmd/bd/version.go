@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 
@@ -47,6 +50,15 @@ var versionCmd = &cobra.Command{
 			} else {
 				fmt.Printf("bd version %s (%s)\n", Version, Build)
 			}
+		}
+
+		// Check for multiple bd binaries in PATH
+		if dups := findDuplicateBinaries(); len(dups) > 1 {
+			fmt.Fprintf(os.Stderr, "\nWarning: multiple 'bd' binaries found in PATH:\n")
+			for _, p := range dups {
+				fmt.Fprintf(os.Stderr, "  %s\n", p)
+			}
+			fmt.Fprintf(os.Stderr, "The first one is being used. Remove duplicates to avoid confusion.\n")
 		}
 	},
 }
@@ -105,4 +117,38 @@ func resolveBranch() string {
 	}
 
 	return ""
+}
+
+// findDuplicateBinaries searches PATH for all "bd" executables.
+// Returns their full paths. If len > 1, there are duplicates.
+func findDuplicateBinaries() []string {
+	name := "bd"
+	if runtime.GOOS == "windows" {
+		name = "bd.exe"
+	}
+
+	seen := make(map[string]bool)
+	var paths []string
+
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		candidate := filepath.Join(dir, name)
+		// Resolve symlinks so we don't double-count
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			// Try the raw path (might be a valid binary without symlinks)
+			resolved = candidate
+		}
+		info, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		if !seen[resolved] {
+			seen[resolved] = true
+			paths = append(paths, candidate)
+		}
+	}
+	return paths
 }

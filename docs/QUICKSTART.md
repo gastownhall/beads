@@ -14,14 +14,10 @@ For dependencies, sync, Notion, migrations, and maintenance, use the [full Quick
 
 ---
 
-## Anchor compatibility
+## Why Beads?
 
-The following headings match topics that previously lived in this file; use the published doc for detail.
+See **[Why Beads?](https://steveyegge.github.io/beads/getting-started/quickstart#why-beads)** on the documentation site.
 
-### Dependencies
+## Dependencies
 
-See [Add dependencies](https://steveyegge.github.io/beads/getting-started/quickstart#add-dependencies) on the site.
-
-### Why Beads?
-
-See [Why Beads?](https://steveyegge.github.io/beads/getting-started/quickstart#why-beads) on the site.
+See **[Add dependencies](https://steveyegge.github.io/beads/getting-started/quickstart#add-dependencies)** on the documentation site (blocking dependencies and `bd dep`).
