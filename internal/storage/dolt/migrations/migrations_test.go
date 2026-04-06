@@ -2,11 +2,12 @@ package migrations
 
 import (
 	"database/sql"
-	"fmt"
 	"os/exec"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -24,8 +25,7 @@ func openTestDoltBranch(t *testing.T) *sql.DB {
 	}
 	t.Parallel()
 
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true&timeout=10s",
-		testServerPort, testSharedDB)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: testSharedDB, Timeout: 10 * time.Second}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("failed to open connection: %v", err)

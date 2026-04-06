@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"golang.org/x/term"
@@ -40,20 +41,14 @@ type bootstrapServerDBCheck struct {
 var checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
 	host := probeCfg.host
 	port := probeCfg.port
-	user := probeCfg.user
-	password := probeCfg.pass
 	dbName := probeCfg.database
-	var userPart string
-	if password != "" {
-		userPart = fmt.Sprintf("%s:%s", user, password)
-	} else {
-		userPart = user
-	}
-	params := "timeout=5s"
-	if probeCfg.tls {
-		params += "&tls=true"
-	}
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?%s", userPart, host, port, params)
+	dsn := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     probeCfg.user,
+		Password: probeCfg.pass,
+		TLS:      probeCfg.tls,
+	}.String()
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {

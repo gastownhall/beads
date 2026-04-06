@@ -17,6 +17,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/integration"
 	"golang.org/x/sync/errgroup"
 )
@@ -38,7 +39,12 @@ func TestHelperSchemaInit(t *testing.T) {
 		os.Exit(1)
 	}
 
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/%s?parseTime=true", port, dbName)
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: invalid port %q: %v\n", port, err)
+		os.Exit(1)
+	}
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: portNum, User: "root", Database: dbName}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: sql.Open: %v\n", err)
@@ -96,7 +102,7 @@ func TestMultiProcessSchemaInit(t *testing.T) {
 
 	// Create a fresh database.
 	dbName := uniqueTestDBName(t)
-	initDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", testServerPort)
+	initDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String()
 	initDB, err := sql.Open("mysql", initDSN)
 	if err != nil {
 		t.Fatalf("open init connection: %v", err)
@@ -156,7 +162,7 @@ func TestMultiProcessSchemaInit(t *testing.T) {
 	t.Logf("All %d subprocesses completed successfully", numProcs)
 
 	// Verify schema integrity.
-	verifyDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true", testServerPort, dbName)
+	verifyDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName}.String()
 	verifyDB, err := sql.Open("mysql", verifyDSN)
 	if err != nil {
 		t.Fatalf("open verify connection: %v", err)
@@ -237,7 +243,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 
 	// Create a fresh database on the local server.
 	dbName := uniqueTestDBName(t)
-	adminDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", state.Port)
+	adminDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: state.Port, User: "root"}.String()
 	adminDB, err := sql.Open("mysql", adminDSN)
 	if err != nil {
 		t.Fatalf("admin connect: %v", err)
@@ -253,7 +259,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 
 	// Run concurrent schema inits (in-process, since we need dolt verify after).
 	const numConcurrent = 10
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true", state.Port, dbName)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: state.Port, User: "root", Database: dbName}.String()
 	eg, egCtx := errgroup.WithContext(ctx)
 
 	ready := make(chan struct{})

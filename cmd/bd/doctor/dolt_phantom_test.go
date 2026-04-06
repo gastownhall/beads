@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -30,7 +32,7 @@ func openSharedDoltForPhantom(t *testing.T) *sql.DB {
 
 	// Ensure a "beads" database exists on the shared server for phantom tests.
 	// This matches configfile.DefaultDoltDatabase which checkPhantomDatabases uses.
-	rootDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/?parseTime=true&timeout=10s", port)
+	rootDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Timeout: 10 * time.Second}.String()
 	rootDB, err := sql.Open("mysql", rootDSN)
 	if err != nil {
 		t.Fatalf("failed to open root connection: %v", err)
@@ -45,7 +47,7 @@ func openSharedDoltForPhantom(t *testing.T) *sql.DB {
 	}
 	rootDB.Close()
 
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/beads?parseTime=true&timeout=10s", port)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: "beads", Timeout: 10 * time.Second}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("failed to open connection: %v", err)

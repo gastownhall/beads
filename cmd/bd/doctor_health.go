@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -52,8 +54,13 @@ func runCheckHealth(path string) {
 
 	var issues []string
 
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/%s?timeout=2s",
-		cfg.GetDoltServerUser(), host, port, database)
+	dsn := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     cfg.GetDoltServerUser(),
+		Database: database,
+		Timeout:  2 * time.Second,
+	}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err == nil {
 		defer db.Close()

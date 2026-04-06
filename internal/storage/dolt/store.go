@@ -1102,29 +1102,24 @@ func isLocalHost(host string) bool {
 
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
 // If database is empty, connects without selecting a database (for init operations).
+// Adds ReadTimeout/WriteTimeout for long-lived connection pools.
 func buildServerDSN(cfg *Config, database string) string {
-	// go-sql-driver/mysql DSN format: user:password@tcp(host:port)/db?params
-	// The password must not contain unescaped special characters that collide
-	// with DSN delimiters (@ : / ?). Use go-sql-driver's Config.FormatDSN()
-	// which handles escaping correctly.
-	dsnCfg := mysql.Config{
-		User:                 cfg.ServerUser,
-		Passwd:               cfg.ServerPassword,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", cfg.ServerHost, cfg.ServerPort),
-		DBName:               database,
-		ParseTime:            true,
-		MultiStatements:      true,
-		Timeout:              5 * time.Second,
-		ReadTimeout:          10 * time.Second,
-		WriteTimeout:         10 * time.Second,
-		AllowNativePasswords: true,
+	base := doltutil.ServerDSN{
+		Host:     cfg.ServerHost,
+		Port:     cfg.ServerPort,
+		User:     cfg.ServerUser,
+		Password: cfg.ServerPassword,
+		Database: database,
+		TLS:      cfg.ServerTLS,
 	}
-	if cfg.ServerTLS {
-		dsnCfg.TLSConfig = "true"
+	// Parse the base DSN and add pool-specific timeouts.
+	parsed, err := mysql.ParseDSN(base.String())
+	if err != nil {
+		return base.String()
 	}
-
-	return dsnCfg.FormatDSN()
+	parsed.ReadTimeout = 10 * time.Second
+	parsed.WriteTimeout = 10 * time.Second
+	return parsed.FormatDSN()
 }
 
 // execWithLongTimeout opens a one-shot database connection with readTimeout=5m

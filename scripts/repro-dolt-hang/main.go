@@ -32,6 +32,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 const (
@@ -170,7 +171,7 @@ func runMode(ctx context.Context, mode string, workers, opsPerWorker int) runSta
 		_ = serverCmd.Wait()
 	}()
 
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/repro_db", serverPort)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: serverPort, User: "root", Database: "repro_db"}.String()
 	if err := waitForServer(ctx, dsn); err != nil {
 		log.Fatalf("Server not ready: %v", err)
 	}

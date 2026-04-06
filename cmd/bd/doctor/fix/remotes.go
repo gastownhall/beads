@@ -92,14 +92,13 @@ func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	password := cfg.GetDoltServerPassword()
 	port := doltserver.DefaultConfig(beadsDir).Port
 
-	var connStr string
-	if password != "" {
-		connStr = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, password, host, port, database)
-	} else {
-		connStr = fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s",
-			user, host, port, database)
-	}
+	connStr := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		Database: database,
+	}.String()
 	return sql.Open("mysql", connStr)
 }
 

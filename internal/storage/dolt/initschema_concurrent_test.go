@@ -10,6 +10,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -30,7 +31,7 @@ func TestConcurrentInitSchema(t *testing.T) {
 
 	// Create a fresh database that has never been initialized.
 	dbName := uniqueTestDBName(t)
-	initDSN := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", testServerPort)
+	initDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root"}.String()
 	initDB, err := sql.Open("mysql", initDSN)
 	if err != nil {
 		t.Fatalf("open init connection: %v", err)
@@ -44,7 +45,7 @@ func TestConcurrentInitSchema(t *testing.T) {
 	// Open N independent sql.DB pools pointing at the fresh database.
 	// Each simulates a separate bd process connecting simultaneously.
 	const numConcurrent = 20
-	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%d)/%s?parseTime=true", testServerPort, dbName)
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: testServerPort, User: "root", Database: dbName}.String()
 
 	tmpDir, err := os.MkdirTemp("", "dolt-concurrent-init-*")
 	if err != nil {
