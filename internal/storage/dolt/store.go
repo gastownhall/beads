@@ -40,6 +40,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -1113,6 +1114,7 @@ func buildServerDSN(cfg *Config, database string) string {
 		Addr:                 fmt.Sprintf("%s:%d", cfg.ServerHost, cfg.ServerPort),
 		DBName:               database,
 		ParseTime:            true,
+		MultiStatements:      true,
 		Timeout:              5 * time.Second,
 		ReadTimeout:          10 * time.Second,
 		WriteTimeout:         10 * time.Second,
@@ -1286,97 +1288,30 @@ func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool,
 	return false, rows.Err()
 }
 
-// initSchema creates all tables if they don't exist
+// initSchemaOnDB applies pending schema migrations and DoltStore-specific
+// backward-compat transforms. Uses the shared schema.MigrateUp runner which
+// tracks applied versions in the schema_migrations table.
 func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
-	// Fast path: if schema is already at current version, skip initialization.
-	// This avoids ~20 DDL statements per bd invocation when schema is current.
-	var version int
-	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version)
-	if err == nil && version >= currentSchemaVersion {
-		return nil
+	applied, err := schema.MigrateUp(ctx, db)
+	if err != nil {
+		return fmt.Errorf("schema migration: %w", err)
 	}
 
-	// Execute schema creation - split into individual statements
-	// because MySQL/Dolt doesn't support multiple statements in one Exec
-	for _, stmt := range splitStatements(schema) {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-		// Skip pure comment-only statements, but execute statements that start with comments
-		if isOnlyComments(stmt) {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to create schema: %w\nStatement: %s", err, truncateForError(stmt))
+	if applied > 0 {
+		// Stage and commit schema changes to Dolt history.
+		_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('-A')")
+		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+				return fmt.Errorf("failed to commit schema migrations: %w", err)
+			}
 		}
 	}
 
-	// Insert default config values
-	for _, stmt := range splitStatements(defaultConfig) {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-		if isOnlyComments(stmt) {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("failed to insert default config: %w", err)
-		}
-	}
-
-	// Apply index migrations for existing databases.
-	// CREATE TABLE IF NOT EXISTS won't add new indexes to existing tables.
-	indexMigrations := []string{
-		"CREATE INDEX idx_issues_issue_type ON issues(issue_type)",
-	}
-	for _, migration := range indexMigrations {
-		_, err := db.ExecContext(ctx, migration)
-		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate") &&
-			!strings.Contains(strings.ToLower(err.Error()), "already exists") {
-			return fmt.Errorf("failed to apply index migration: %w", err)
-		}
-	}
-
-	// Remove FK constraint on depends_on_id to allow external references.
-	// This is idempotent - DROP FOREIGN KEY fails silently if constraint doesn't exist.
-	_, err = db.ExecContext(ctx, "ALTER TABLE dependencies DROP FOREIGN KEY fk_dep_depends_on")
-	if err == nil {
-		// DDL change succeeded - commit it so it persists (required for Dolt server mode)
-		// GH#2455: Stage only the affected table, not all dirty tables.
-		_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('dependencies')")
-		_, _ = db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'migration: remove fk_dep_depends_on for external references')") // Best effort: migration commit is advisory; schema change already applied
-	} else if !strings.Contains(strings.ToLower(err.Error()), "can't drop") &&
-		!strings.Contains(strings.ToLower(err.Error()), "doesn't exist") &&
-		!strings.Contains(strings.ToLower(err.Error()), "check that it exists") &&
-		!strings.Contains(strings.ToLower(err.Error()), "was not found") {
-		return fmt.Errorf("failed to drop fk_dep_depends_on: %w", err)
-	}
-
-	// Create views — table-backed, no dynamic IN clauses needed.
-	if _, err := db.ExecContext(ctx, BuildReadyIssuesView()); err != nil {
-		return fmt.Errorf("failed to create ready_issues view: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, BuildBlockedIssuesView()); err != nil {
-		return fmt.Errorf("failed to create blocked_issues view: %w", err)
-	}
-
-	// Run schema migrations for existing databases (bd-ijw)
-	if err := RunMigrations(db); err != nil {
-		return fmt.Errorf("failed to run dolt migrations: %w", err)
-	}
-
-	// Mark schema as current so subsequent invocations skip initialization
-	_, _ = db.ExecContext(ctx,
-		"INSERT INTO config (`key`, `value`) VALUES ('schema_version', ?) "+
-			"ON DUPLICATE KEY UPDATE `value` = ?",
-		currentSchemaVersion, currentSchemaVersion)
-	_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('config')")
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: update schema_version')"); err != nil {
-		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
-			return fmt.Errorf("failed to commit schema_version update: %w", err)
-		}
+	// Run DoltStore-specific backward-compat migrations for databases that
+	// predate the embedded migration system (e.g. ALTER TABLE ADD COLUMN,
+	// historical data transforms). These are idempotent.
+	if err := RunCompatMigrations(db); err != nil {
+		return fmt.Errorf("failed to run compat migrations: %w", err)
 	}
 
 	return nil
@@ -1384,74 +1319,6 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 
 func (s *DoltStore) initSchema(ctx context.Context) error {
 	return initSchemaOnDB(ctx, s.db)
-}
-
-// splitStatements splits a SQL script into individual statements
-func splitStatements(script string) []string {
-	var statements []string
-	var current strings.Builder
-	inString := false
-	stringChar := byte(0)
-
-	for i := 0; i < len(script); i++ {
-		c := script[i]
-
-		if inString {
-			current.WriteByte(c)
-			if c == stringChar && (i == 0 || script[i-1] != '\\') {
-				inString = false
-			}
-			continue
-		}
-
-		if c == '\'' || c == '"' || c == '`' {
-			inString = true
-			stringChar = c
-			current.WriteByte(c)
-			continue
-		}
-
-		if c == ';' {
-			stmt := strings.TrimSpace(current.String())
-			if stmt != "" {
-				statements = append(statements, stmt)
-			}
-			current.Reset()
-			continue
-		}
-
-		current.WriteByte(c)
-	}
-
-	// Handle last statement without semicolon
-	stmt := strings.TrimSpace(current.String())
-	if stmt != "" {
-		statements = append(statements, stmt)
-	}
-
-	return statements
-}
-
-// truncateForError truncates a string for use in error messages
-func truncateForError(s string) string {
-	if len(s) > 100 {
-		return s[:100] + "..."
-	}
-	return s
-}
-
-// isOnlyComments returns true if the statement contains only SQL comments
-func isOnlyComments(stmt string) bool {
-	lines := strings.Split(stmt, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "--") {
-			continue
-		}
-		// Found a non-comment, non-empty line
-		return false
-	}
-	return true
 }
 
 // IsClosed returns true if the store has been closed.

@@ -120,11 +120,11 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	// Re-create dolt_ignore'd tables (wisps, etc.) on the branch.
 	// These tables are in dolt_ignore so they only exist in the working set,
 	// not in commits. Branching from main doesn't inherit them.
-	if err := createIgnoredTablesViaMigration(store.db); err != nil {
+	if err := CreateIgnoredTables(store.db); err != nil {
 		branchCleanup()
 		store.Close()
 		os.RemoveAll(tmpDir)
-		t.Fatalf("createIgnoredTablesViaMigration on branch failed: %v", err)
+		t.Fatalf("CreateIgnoredTables on branch failed: %v", err)
 	}
 
 	cleanup := func() {

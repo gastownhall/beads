@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -235,7 +236,7 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			}
 		}
 
-		applied, err := migrateUp(ctx, tx)
+		applied, err := schema.MigrateUp(ctx, tx)
 		if err != nil {
 			return err
 		}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // MigrateWispsTable adds dolt_ignore patterns for wisps tables and creates the
@@ -47,7 +47,7 @@ func MigrateWispsTable(db *sql.DB) error {
 	}
 
 	// Step 2: Create wisps table using shared schema constant.
-	_, err = db.Exec(versioncontrolops.WispsTableSchema)
+	_, err = db.Exec(schema.WispsTableSchema)
 	if err != nil {
 		return fmt.Errorf("failed to create wisps table: %w", err)
 	}

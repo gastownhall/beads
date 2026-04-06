@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // MigrateWispAuxiliaryTables creates auxiliary tables for wisps: labels,
@@ -13,10 +13,10 @@ import (
 // by the dolt_ignore pattern "wisp_%" added in migration 004.
 func MigrateWispAuxiliaryTables(db *sql.DB) error {
 	auxiliaryDDL := []string{
-		versioncontrolops.WispLabelsSchema,
-		versioncontrolops.WispDependenciesSchema,
-		versioncontrolops.WispEventsSchema,
-		versioncontrolops.WispCommentsSchema,
+		schema.WispLabelsSchema,
+		schema.WispDependenciesSchema,
+		schema.WispEventsSchema,
+		schema.WispCommentsSchema,
 	}
 
 	for _, ddl := range auxiliaryDDL {

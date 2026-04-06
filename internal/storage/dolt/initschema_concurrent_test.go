@@ -10,6 +10,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // TestConcurrentInitSchema verifies that concurrent initSchemaOnDB calls on a
@@ -95,12 +96,12 @@ func TestConcurrentInitSchema(t *testing.T) {
 	}
 	defer verifyDB.Close()
 
-	var version int
-	if err := verifyDB.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'schema_version'").Scan(&version); err != nil {
-		t.Fatalf("schema_version not found after concurrent init: %v", err)
+	var maxVersion int
+	if err := verifyDB.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&maxVersion); err != nil {
+		t.Fatalf("schema_migrations query failed after concurrent init: %v", err)
 	}
-	if version != currentSchemaVersion {
-		t.Errorf("schema_version = %d, want %d", version, currentSchemaVersion)
+	if maxVersion != schema.LatestVersion() {
+		t.Errorf("max migration version = %d, want %d", maxVersion, schema.LatestVersion())
 	}
 
 	for _, table := range []string{"issues", "dependencies", "config", "comments"} {
