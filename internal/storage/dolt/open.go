@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -113,9 +114,10 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 //  2. BEADS_DOLT_AUTO_START=0              → always false (explicit env opt-out)
 //  3. mode == ServerModeExternal           → always false (server is externally managed;
 //     auto-starting a different server would create shadow databases)
-//  4. current == true                      → true  (caller option wins over config file,
-//     per NewFromConfigWithOptions contract)
-//  5. doltAutoStartCfg == "false"/"0"/"off" → false (config.yaml opt-out)
+//  4. doltAutoStartCfg == "false"/"0"/"off" → false (config.yaml explicit opt-out;
+//     user intent to disable auto-start must be respected even when callers
+//     like ApplyCLIAutoStart or bootstrap pass current=true — GH#autostart-bug)
+//  5. current == true                      → true  (caller option wins over default)
 //  6. default                              → true  (standalone user; safe default)
 //
 // doltAutoStartCfg is the raw value of the "dolt.auto-start" key from config.yaml
@@ -138,12 +140,17 @@ func resolveAutoStart(current bool, doltAutoStartCfg string, mode ServerMode) bo
 	if mode == ServerModeExternal {
 		return false
 	}
-	// Caller option wins over config.yaml (NewFromConfigWithOptions contract).
+	// Config.yaml explicit opt-out takes precedence over caller-provided
+	// current=true. Without this, ApplyCLIAutoStart (which passes current=true)
+	// and bootstrap paths (which hardcode AutoStart=true) would ignore the
+	// user's dolt.auto-start: false setting, spawning rogue dolt servers that
+	// overwrite port files and cause DB lock conflicts.
+	if strings.EqualFold(doltAutoStartCfg, "false") || doltAutoStartCfg == "0" || strings.EqualFold(doltAutoStartCfg, "off") {
+		return false
+	}
+	// Caller option wins over default.
 	if current {
 		return true
-	}
-	if doltAutoStartCfg == "false" || doltAutoStartCfg == "0" || doltAutoStartCfg == "off" {
-		return false
 	}
 	// Default: auto-start for standalone users.
 	return true

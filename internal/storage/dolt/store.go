@@ -922,8 +922,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			if breaker != nil {
 				breaker.RecordFailure()
 			}
-			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start",
-				addr, dialErr)
+			hint := "The Dolt server may not be running. Try:\n  bd dolt start"
+			if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
+				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
+					"Start the server manually:\n  bd dolt start"
+			}
+			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
+				addr, dialErr, hint)
 		}
 	}
 	_ = conn.Close()

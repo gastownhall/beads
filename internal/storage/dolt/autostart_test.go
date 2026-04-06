@@ -34,6 +34,38 @@ func TestAutoStart_ExternalMode_CallerOverrideIgnored(t *testing.T) {
 	}
 }
 
+// TestAutoStart_ConfigFalse_OverridesCallerTrue verifies that dolt.auto-start: false
+// in config.yaml takes precedence over a caller passing current=true. This is the
+// core fix for the auto-start bug where ApplyCLIAutoStart and bootstrap paths
+// hardcoded current=true, ignoring the user's config.yaml opt-out.
+func TestAutoStart_ConfigFalse_OverridesCallerTrue(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+
+	for _, cfgVal := range []string{"false", "False", "FALSE", "0", "off", "Off", "OFF"} {
+		got := resolveAutoStart(true, cfgVal, ServerModeOwned)
+		if got != false {
+			t.Errorf("resolveAutoStart(true, %q, Owned) = true, want false: config.yaml opt-out must override caller", cfgVal)
+		}
+	}
+}
+
+// TestAutoStart_ConfigEmpty_CallerTrueWins verifies that when config.yaml
+// does not set dolt.auto-start, the caller's current=true is respected.
+func TestAutoStart_ConfigEmpty_CallerTrueWins(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+
+	got := resolveAutoStart(true, "", ServerModeOwned)
+	if got != true {
+		t.Error("resolveAutoStart(true, \"\", Owned) should return true when config is not set")
+	}
+}
+
 // TestAutoStart_EnvOverrideStillWins verifies that BEADS_DOLT_AUTO_START=0
 // still takes precedence even in Owned mode (defense-in-depth).
 func TestAutoStart_EnvOverrideStillWins(t *testing.T) {
