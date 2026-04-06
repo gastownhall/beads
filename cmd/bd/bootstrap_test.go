@@ -469,3 +469,65 @@ func TestBootstrapExistingBeadsDirUnchanged(t *testing.T) {
 		t.Errorf("action = %q, want %q for existing empty .beads", plan.Action, "init")
 	}
 }
+
+// TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
+// BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
+// detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.
+// This is the root cause of GH#30.
+func TestDetectBootstrapAction_SharedServerEnvUsesSharedPath(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Override HOME so SharedDoltDir() resolves to our temp directory
+	// instead of the real ~/.beads/shared-server/dolt/.
+	t.Setenv("HOME", tmpDir)
+
+	// Create a database directory at the shared-server location.
+	// SharedDoltDir() returns $HOME/.beads/shared-server/dolt/.
+	sharedDoltDir := filepath.Join(tmpDir, ".beads", "shared-server", "dolt")
+	if err := os.MkdirAll(filepath.Join(sharedDoltDir, "beads"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shared server enabled, but cfg.DoltMode is default (embedded).
+	// Before the fix, this would look in embeddeddolt/ and miss the
+	// existing shared-server database.
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	cfg := configfile.DefaultConfig()
+	// Deliberately do NOT set cfg.DoltMode = configfile.DoltModeServer.
+	// This reproduces the bug: shared-server via env var with default DoltMode.
+
+	// The server probe stub: report the DB exists so we get action=none.
+	origCheck := checkBootstrapServerDB
+	checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		return bootstrapServerDBCheck{Exists: true, Reachable: true}
+	}
+	defer func() { checkBootstrapServerDB = origCheck }()
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Action != "none" {
+		t.Fatalf("expected action=none (existing shared-server DB detected), got %q: %s", plan.Action, plan.Reason)
+	}
+	if !plan.HasExisting {
+		t.Error("HasExisting = false, want true")
+	}
+}
