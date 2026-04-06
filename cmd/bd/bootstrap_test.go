@@ -446,6 +446,133 @@ func TestBootstrapFreshCloneNoRemoteData(t *testing.T) {
 
 // TestBootstrapExistingBeadsDirUnchanged verifies that when .beads already
 // exists, the normal bootstrap flow is unaffected by the fresh-clone fix.
+// TestDetectBootstrapAction_PlanUsesConfiguredDatabaseName verifies that
+// detectBootstrapAction carries the configured dolt_database into the plan,
+// rather than silently falling back to the default "beads". This is the
+// core regression test for GH#3029.
+func TestDetectBootstrapAction_PlanUsesConfiguredDatabaseName(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.DoltDatabase = "my_project_db"
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Database != "my_project_db" {
+		t.Errorf("plan.Database = %q, want %q; bootstrap must use the configured database name, not the default",
+			plan.Database, "my_project_db")
+	}
+}
+
+// TestDetectBootstrapAction_PlanDefaultDatabaseWhenNotConfigured verifies
+// that the default "beads" is used when no dolt_database is configured.
+func TestDetectBootstrapAction_PlanDefaultDatabaseWhenNotConfigured(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Database != configfile.DefaultDoltDatabase {
+		t.Errorf("plan.Database = %q, want %q (default)", plan.Database, configfile.DefaultDoltDatabase)
+	}
+}
+
+// TestDetectBootstrapAction_ServerModePlanUsesConfiguredDatabaseName verifies
+// that in server mode, the plan carries the configured database name for
+// both the plan.Database field and the server probe. This is the specific
+// failure mode reported in GH#3029: when FindBeadsDir resolved to the wrong
+// .beads/, the config had no dolt_database, and the plan fell back to "beads".
+func TestDetectBootstrapAction_ServerModePlanUsesConfiguredDatabaseName(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a dolt data dir with a subdirectory so the existing-DB check fires.
+	// Use BEADS_DOLT_DATA_DIR (not shared server mode) so ResolveDoltDir
+	// returns our test directory instead of ~/.beads/shared-server/dolt/.
+	doltDataDir := filepath.Join(tmpDir, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(doltDataDir, "myrig"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DOLT_DATA_DIR", doltDataDir)
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = "myrig"
+	cfg.DoltDataDir = doltDataDir
+
+	var probedDBName string
+	origCheck := checkBootstrapServerDB
+	checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		probedDBName = probeCfg.database
+		return bootstrapServerDBCheck{Exists: false, Reachable: true}
+	}
+	defer func() { checkBootstrapServerDB = origCheck }()
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Database != "myrig" {
+		t.Errorf("plan.Database = %q, want %q", plan.Database, "myrig")
+	}
+	if probedDBName != "myrig" {
+		t.Errorf("server probe used database %q, want %q; bootstrap must probe the configured database, not the default",
+			probedDBName, "myrig")
+	}
+}
+
 func TestBootstrapExistingBeadsDirUnchanged(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

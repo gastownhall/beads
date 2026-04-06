@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -24,24 +25,27 @@ const staleLockAge = 5 * time.Minute
 // dolt clone creates <target>/.dolt/ directly (no database subdirectory),
 // but the embedded driver expects <doltDir>/<database>/.dolt/. To reconcile,
 // we clone into <doltDir>/<database>/ so the embedded driver finds it.
-// If database is empty, "beads" is used.
+// Uses the default database name ("beads"). Prefer BootstrapFromGitRemoteWithDB
+// when a configured database name is available.
 //
 // Returns true if the clone was performed, false if skipped (dolt dir already exists).
 func BootstrapFromGitRemote(ctx context.Context, doltDir, gitRemoteURL string) (bool, error) {
-	return BootstrapFromGitRemoteWithDB(ctx, doltDir, gitRemoteURL, "")
+	return BootstrapFromGitRemoteWithDB(ctx, doltDir, gitRemoteURL, configfile.DefaultDoltDatabase)
 }
 
 // BootstrapFromGitRemoteWithDB is like BootstrapFromGitRemote but allows
 // specifying the database name (used by the embedded driver for the
-// subdirectory structure).
+// subdirectory structure). The database parameter must not be empty;
+// callers should use cfg.GetDoltDatabase() which applies the fallback chain
+// (env var → config → default).
 func BootstrapFromGitRemoteWithDB(ctx context.Context, doltDir, gitRemoteURL, database string) (bool, error) {
 	// Skip if Dolt database already exists
 	if doltExists(doltDir) {
 		return false, nil
 	}
 
-	if database == "" {
-		database = configfile.DefaultDoltDatabase
+	if strings.TrimSpace(database) == "" {
+		return false, fmt.Errorf("database name must not be empty; use cfg.GetDoltDatabase() to resolve the configured name")
 	}
 
 	// Verify dolt CLI is available
