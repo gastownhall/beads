@@ -1293,8 +1293,20 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 	}
 
 	if applied > 0 {
-		// Stage and commit schema changes to Dolt history.
-		_, _ = db.ExecContext(ctx, "CALL DOLT_ADD('-A')")
+		// Stage only schema tables — avoid DOLT_ADD('-A') which can sweep up
+		// unrelated dirty tables like config from concurrent operations (GH#2455).
+		schemaTables := []string{
+			"issues", "dependencies", "labels", "comments", "events",
+			"config", "metadata", "child_counters",
+			"issue_snapshots", "compaction_snapshots",
+			"repo_mtimes", "routes", "issue_counter",
+			"interactions", "federation_peers",
+			"custom_statuses", "custom_types",
+			"dolt_ignore", "schema_migrations",
+		}
+		for _, table := range schemaTables {
+			_, _ = db.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
 		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
 			if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 				return fmt.Errorf("failed to commit schema migrations: %w", err)
@@ -2020,12 +2032,20 @@ func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	if err := versioncontrolops.CreateBranch(ctx, s.db, name); err != nil {
+	// Pin a single connection so DOLT_BRANCH and EnsureIgnoredTables run on
+	// the same session. Using s.db (pool) could dispatch them to different
+	// connections where the branch context differs.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for branch: %w", err)
+	}
+	defer conn.Close()
+	if err := versioncontrolops.CreateBranch(ctx, conn, name); err != nil {
 		return err
 	}
 	// dolt_ignore'd tables (wisps, wisp_*) don't carry over to new branches —
 	// ensure they exist on the newly created branch.
-	return versioncontrolops.EnsureIgnoredTables(ctx, s.db)
+	return schema.EnsureIgnoredTables(ctx, conn)
 }
 
 // Checkout switches to the specified branch
@@ -2037,13 +2057,21 @@ func (s *DoltStore) Checkout(ctx context.Context, branch string) (retErr error) 
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	if err := versioncontrolops.CheckoutBranch(ctx, s.db, branch); err != nil {
+	// Pin a single connection so DOLT_CHECKOUT and EnsureIgnoredTables run on
+	// the same session. DOLT_CHECKOUT is session-scoped — using s.db (pool)
+	// could dispatch EnsureIgnoredTables to a connection still on the old branch.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for checkout: %w", err)
+	}
+	defer conn.Close()
+	if err := versioncontrolops.CheckoutBranch(ctx, conn, branch); err != nil {
 		return err
 	}
 	s.branch = branch
 	// dolt_ignore'd tables (wisps, wisp_*) may not exist on the target branch —
 	// ensure they exist after checkout.
-	return versioncontrolops.EnsureIgnoredTables(ctx, s.db)
+	return schema.EnsureIgnoredTables(ctx, conn)
 }
 
 // Merge merges the specified branch into the current branch.

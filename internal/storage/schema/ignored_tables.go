@@ -91,7 +91,9 @@ const WispDependenciesSchema = `CREATE TABLE IF NOT EXISTS wisp_dependencies (
     metadata JSON DEFAULT (JSON_OBJECT()),
     thread_id VARCHAR(255) DEFAULT '',
     PRIMARY KEY (issue_id, depends_on_id),
-    INDEX idx_wisp_dep_depends (depends_on_id)
+    INDEX idx_wisp_dep_depends (depends_on_id),
+    INDEX idx_wisp_dep_type (type),
+    INDEX idx_wisp_dep_type_depends (type, depends_on_id)
 )`
 
 const WispEventsSchema = `CREATE TABLE IF NOT EXISTS wisp_events (
