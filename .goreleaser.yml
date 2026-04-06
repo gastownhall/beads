@@ -19,6 +19,8 @@ builds:
       - CGO_ENABLED=1
       - CC=gcc
       - CXX=g++
+    tags:
+      - gms_pure_go
     goos:
       - linux
     goarch:
