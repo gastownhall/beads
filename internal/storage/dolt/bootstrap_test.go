@@ -23,6 +23,20 @@ func TestBootstrapFromGitRemoteWithDB_RejectsEmptyDatabase(t *testing.T) {
 	}
 }
 
+// TestBootstrapFromGitRemoteWithDB_RejectsWhitespaceDatabase verifies that
+// whitespace-only database names are also rejected (defense-in-depth).
+func TestBootstrapFromGitRemoteWithDB_RejectsWhitespaceDatabase(t *testing.T) {
+	doltDir := t.TempDir()
+
+	_, err := BootstrapFromGitRemoteWithDB(context.Background(), doltDir, "file:///dev/null", "   ")
+	if err == nil {
+		t.Fatal("expected error for whitespace-only database name, got nil")
+	}
+	if !strings.Contains(err.Error(), "database name must not be empty") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
 // TestBootstrapFromGitRemote_UsesDefaultDatabase verifies that the
 // convenience wrapper BootstrapFromGitRemote explicitly passes the
 // default database name rather than an empty string.

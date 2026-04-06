@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -43,7 +44,7 @@ func BootstrapFromGitRemoteWithDB(ctx context.Context, doltDir, gitRemoteURL, da
 		return false, nil
 	}
 
-	if database == "" {
+	if strings.TrimSpace(database) == "" {
 		return false, fmt.Errorf("database name must not be empty; use cfg.GetDoltDatabase() to resolve the configured name")
 	}
 
