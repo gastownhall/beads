@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/tracker"
 )
 
 // TestParentFlagRegistered verifies --parent flag exists on all tracker sync commands.
@@ -45,5 +46,31 @@ func TestParentFlagNotOnNotion(t *testing.T) {
 	// For now, we don't add it to Notion since Notion doesn't support parent-child deps.
 	if flag != nil {
 		t.Log("Notion sync has --parent flag (may be intentional for future use)")
+	}
+}
+
+// TestIssuesAndParentAreMutuallyExclusive verifies that specifying both --issues
+// and --parent on the same sync command returns an error.
+//
+// The two flags cannot be combined: --issues targets specific bead IDs while
+// --parent scopes by subtree. Silently ANDing them would produce confusing
+// results where only issues that appear in both sets are synced.
+func TestIssuesAndParentAreMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{Use: "test"}
+	registerSelectiveSyncFlags(cmd)
+
+	if err := cmd.Flags().Set("issues", "bd-123"); err != nil {
+		t.Fatalf("setting --issues: %v", err)
+	}
+	if err := cmd.Flags().Set("parent", "bd-456"); err != nil {
+		t.Fatalf("setting --parent: %v", err)
+	}
+
+	var opts tracker.SyncOptions
+	err := applySelectiveSyncFlags(cmd, &opts, true /* push */)
+	if err == nil {
+		t.Fatal("expected error when both --issues and --parent are set, got nil")
 	}
 }
