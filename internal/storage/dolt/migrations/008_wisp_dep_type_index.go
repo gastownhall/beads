@@ -12,7 +12,7 @@ import (
 //
 // Idempotent: checks for existing indices before creating.
 func MigrateWispDepTypeIndex(db *sql.DB) error {
-	exists, err := tableExists(db, "wisp_dependencies")
+	exists, err := TableExists(db, "wisp_dependencies")
 	if err != nil {
 		return fmt.Errorf("checking wisp_dependencies table: %w", err)
 	}

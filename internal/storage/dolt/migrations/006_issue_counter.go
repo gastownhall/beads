@@ -9,7 +9,7 @@ import (
 // sequential issue ID generation when issue_id_mode=counter is configured.
 // The table stores one row per prefix, tracking the last assigned integer.
 func MigrateIssueCounterTable(db *sql.DB) error {
-	exists, err := tableExists(db, "issue_counter")
+	exists, err := TableExists(db, "issue_counter")
 	if err != nil {
 		return fmt.Errorf("failed to check issue_counter existence: %w", err)
 	}

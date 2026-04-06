@@ -18,7 +18,7 @@ import (
 // that implicitly casts CHAR(36) UUID values to float64, causing overflow on
 // UUIDs that resemble scientific notation (e.g. 001e914b... → 1e914 → +Inf).
 func MigrateWispEventsCreatedAtIndex(db *sql.DB) error {
-	exists, err := tableExists(db, "wisp_events")
+	exists, err := TableExists(db, "wisp_events")
 	if err != nil {
 		return fmt.Errorf("checking wisp_events: %w", err)
 	}

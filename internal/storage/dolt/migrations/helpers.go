@@ -75,12 +75,12 @@ func constraintExists(db *sql.DB, table, constraint string) (bool, error) {
 	return strings.Contains(createStmt, constraint), nil
 }
 
-// tableExists checks if a table exists using SHOW TABLES.
+// TableExists checks if a table exists using SHOW TABLES.
 // Uses SHOW TABLES LIKE instead of information_schema to avoid crashes
 // when the Dolt server catalog contains stale database entries from
 // cleaned-up worktrees (GH#2051). SHOW TABLES is inherently scoped
 // to the current database.
-func tableExists(db *sql.DB, table string) (bool, error) {
+func TableExists(db *sql.DB, table string) (bool, error) {
 	// Use string interpolation instead of parameterized query because Dolt
 	// doesn't support prepared-statement parameters for SHOW commands.
 	// Table names come from internal constants, not user input.

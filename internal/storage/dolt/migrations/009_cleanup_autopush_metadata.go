@@ -10,7 +10,7 @@ import (
 // history, causing recurring merge conflicts on multi-machine setups (GH#2466).
 // The auto-push state is now tracked in a local file (.beads/push-state.json).
 func MigrateCleanupAutopushMetadata(db *sql.DB) error {
-	exists, err := tableExists(db, "metadata")
+	exists, err := TableExists(db, "metadata")
 	if err != nil {
 		return fmt.Errorf("failed to check metadata table existence: %w", err)
 	}

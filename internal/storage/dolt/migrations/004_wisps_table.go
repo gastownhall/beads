@@ -14,6 +14,17 @@ import (
 // The wisps table has the same schema as the issues table — it stores ephemeral
 // "wisp" beads that should not be version-tracked in Dolt history.
 func MigrateWispsTable(db *sql.DB) error {
+	// Fast path: if wisps table already exists, nothing to do.
+	// The dolt_ignore entries are committed and persist across sessions;
+	// the table itself lives in the working set and just needs CREATE IF NOT EXISTS.
+	exists, err := TableExists(db, "wisps")
+	if err != nil {
+		return fmt.Errorf("failed to check wisps table existence: %w", err)
+	}
+	if exists {
+		return nil
+	}
+
 	// Step 1: Add dolt_ignore patterns BEFORE creating the table.
 	// Use REPLACE to be idempotent (dolt_ignore has pattern as PK).
 	for _, pattern := range []string{"wisps", "wisp_%"} {
@@ -24,7 +35,7 @@ func MigrateWispsTable(db *sql.DB) error {
 	}
 
 	// Explicitly stage dolt_ignore and commit so the ignore is active before table creation.
-	_, err := db.Exec("CALL DOLT_ADD('dolt_ignore')")
+	_, err = db.Exec("CALL DOLT_ADD('dolt_ignore')")
 	if err != nil {
 		return fmt.Errorf("failed to stage dolt_ignore: %w", err)
 	}
@@ -33,16 +44,7 @@ func MigrateWispsTable(db *sql.DB) error {
 		return fmt.Errorf("failed to commit dolt_ignore changes: %w", err)
 	}
 
-	// Step 2: Check if wisps table already exists.
-	exists, err := tableExists(db, "wisps")
-	if err != nil {
-		return fmt.Errorf("failed to check wisps table existence: %w", err)
-	}
-	if exists {
-		return nil
-	}
-
-	// Step 3: Create wisps table with same schema as issues.
+	// Step 2: Create wisps table with same schema as issues.
 	_, err = db.Exec(wispsTableSchema)
 	if err != nil {
 		return fmt.Errorf("failed to create wisps table: %w", err)

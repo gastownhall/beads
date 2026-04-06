@@ -32,7 +32,7 @@ func BackfillCustomTables(db *sql.DB) error {
 }
 
 func backfillCustomTypes(db *sql.DB) error {
-	exists, err := tableExists(db, "custom_types")
+	exists, err := TableExists(db, "custom_types")
 	if err != nil || !exists {
 		return err
 	}
@@ -63,7 +63,7 @@ func backfillCustomTypes(db *sql.DB) error {
 }
 
 func backfillCustomStatuses(db *sql.DB) error {
-	exists, err := tableExists(db, "custom_statuses")
+	exists, err := TableExists(db, "custom_statuses")
 	if err != nil || !exists {
 		return err
 	}
