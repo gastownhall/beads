@@ -9,7 +9,7 @@ SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
 endif
 endif
 
-.PHONY: all build test test-full-cgo test-regression test-upgrade test-cross-version bench bench-quick clean install install-force help check-up-to-date fmt fmt-check
+.PHONY: all build test test-full-cgo test-regression test-upgrade test-cross-version test-migration bench bench-quick clean install install-force help check-up-to-date fmt fmt-check
 
 # Default target
 all: build
@@ -102,6 +102,14 @@ test-upgrade: build
 test-cross-version: build
 	@echo "Running cross-version smoke tests..."
 	@CANDIDATE_BIN=./bd ./scripts/cross-version-smoke-test.sh
+
+# Run migration test harness (rich dataset, fidelity checks, recipe discovery).
+# Tests direct and stepping-stone upgrade paths from all storage eras.
+# Direct only: ./scripts/migration-test/run.sh --direct-only
+# Single version: ./scripts/migration-test/run.sh v0.49.6
+test-migration: build
+	@echo "Running migration test harness..."
+	@CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh
 
 # Run performance benchmarks against Dolt storage backend
 # Requires CGO and Dolt; generates CPU profile files
@@ -196,6 +204,7 @@ help:
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
 	@echo "  make test-upgrade  - Run upgrade smoke tests (release stability gate)"
 	@echo "  make test-cross-version - Run cross-version smoke tests (last 30 tags)"
+	@echo "  make test-migration - Run migration test harness (fidelity checks, recipes)"
 	@echo "  make bench        - Run performance benchmarks (generates CPU profiles)"
 	@echo "  make bench-quick  - Run quick benchmarks (shorter benchtime)"
 	@echo "  make install      - Install bd to ~/.local/bin (with codesign on macOS, includes 'beads' alias)"
