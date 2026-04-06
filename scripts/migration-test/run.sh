@@ -22,6 +22,7 @@ set -uo pipefail
 #   ./scripts/migration-test/run.sh                    # all direct + stepping-stone paths
 #   ./scripts/migration-test/run.sh --direct-only      # only direct paths
 #   ./scripts/migration-test/run.sh --stepping-only    # only stepping-stone paths
+#   ./scripts/migration-test/run.sh --self-test        # candidate → candidate (harness validation)
 #   ./scripts/migration-test/run.sh v0.49.6            # single version
 #   CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh # prebuilt candidate
 #
@@ -373,6 +374,7 @@ test_stepping_stone_path() {
 
 RUN_DIRECT=true
 RUN_STEPPING=true
+SELF_TEST=false
 SPECIFIC_VERSIONS=()
 
 while [ $# -gt 0 ]; do
@@ -383,6 +385,12 @@ while [ $# -gt 0 ]; do
             ;;
         --stepping-only)
             RUN_DIRECT=false
+            shift
+            ;;
+        --self-test)
+            SELF_TEST=true
+            RUN_DIRECT=false
+            RUN_STEPPING=false
             shift
             ;;
         --help|-h)
@@ -408,6 +416,45 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Migration Test Harness"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Self-test: candidate as both source and target (validates the harness itself)
+if $SELF_TEST; then
+    echo ""
+    echo -e "${BOLD}● Self-test: candidate → candidate${NC}"
+
+    WS=$(new_workspace)
+    SNAPSHOTS_DIR=$(mktemp -d /tmp/bd-snapshots-XXXXXX)
+
+    # Init with candidate
+    if ! bd_in "$WS" "$CAND_BIN" init --quiet --non-interactive --prefix smoke </dev/null >/dev/null 2>&1; then
+        cleanup_workspace "$WS"
+        rm -rf "$SNAPSHOTS_DIR"
+        echo -e "  ${RED}BLOCKED: candidate init failed${NC}"
+        record_result "candidate → candidate" "BLOCKED" "init failed"
+    else
+        git -C "$WS" config beads.role maintainer 2>/dev/null || true
+
+        # Create dataset
+        if create_dataset "$WS" "$CAND_BIN" "candidate"; then
+            capture_snapshot "$WS" "$CAND_BIN" > "$SNAPSHOTS_DIR/before.json"
+            before_count=$(jq 'length' "$SNAPSHOTS_DIR/before.json" 2>/dev/null) || before_count=0
+            echo "  snapshot: $before_count items"
+
+            # "Upgrade" is a no-op — just re-read with the same binary
+            capture_snapshot "$WS" "$CAND_BIN" > "$SNAPSHOTS_DIR/after.json"
+
+            violations=0
+            check_fidelity "candidate" "$SNAPSHOTS_DIR/before.json" "$SNAPSHOTS_DIR/after.json" || violations=$?
+
+            stop_dolt_server "$WS"
+            record_result "candidate → candidate" "AUTO" "self-test, $violations fidelity violations" "" "$violations"
+        else
+            record_result "candidate → candidate" "BLOCKED" "could not create test data"
+        fi
+        cleanup_workspace "$WS"
+        rm -rf "$SNAPSHOTS_DIR"
+    fi
+fi
 
 # Direct paths
 if $RUN_DIRECT; then

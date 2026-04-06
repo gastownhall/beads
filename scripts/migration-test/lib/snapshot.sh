@@ -4,11 +4,15 @@
 
 # Capture a full JSON snapshot of all issues in a workspace.
 # Output: JSON array with one object per issue, sorted by title.
+#
+# Uses `bd list --json` which includes all fields we need for fidelity
+# checking (id, title, status, priority, issue_type, comment_count, etc.)
+# For richer data (labels, dependencies), also calls `bd show` per issue.
 capture_snapshot() {
     local ws="$1"
     local bin="$2"
 
-    # Get all issue IDs
+    # bd list --json returns a flat array of issue objects
     local list_json
     list_json=$(bd_in "$ws" "$bin" list --json -n 0 --all 2>/dev/null) || true
 
@@ -17,32 +21,32 @@ capture_snapshot() {
         return 1
     fi
 
-    # Extract IDs from the list output
+    # Extract IDs for detailed show queries
     local ids
     ids=$(echo "$list_json" | jq -r '.[].id // empty' 2>/dev/null) || true
-    if [ -z "$ids" ]; then
-        # Try alternate JSON structure
-        ids=$(echo "$list_json" | jq -r '.[] | .id // .ID // empty' 2>/dev/null) || true
-    fi
 
     if [ -z "$ids" ]; then
-        echo "$list_json" | jq -S '.' 2>/dev/null || echo "[]"
+        # No IDs extractable, return list output as-is
+        echo "$list_json" | jq -S 'sort_by(.title // "")' 2>/dev/null || echo "$list_json"
         return 0
     fi
 
-    # Collect detailed show output for each issue
+    # Collect detailed show output for each issue.
+    # bd show --json returns an ARRAY (even for one item), so we flatten.
     local items="[]"
     while IFS= read -r id; do
         [ -z "$id" ] && continue
         local show_json
         show_json=$(bd_in "$ws" "$bin" show "$id" --json 2>/dev/null) || true
         if [ -n "$show_json" ] && [ "$show_json" != "null" ]; then
-            items=$(echo "$items" | jq --argjson item "$show_json" '. + [$item]' 2>/dev/null) || true
+            # show returns an array — concatenate it
+            items=$(echo "$items" | jq --argjson arr "$show_json" \
+                'if ($arr | type) == "array" then . + $arr else . + [$arr] end' 2>/dev/null) || true
         fi
     done <<< "$ids"
 
     # Sort by title for stable comparison
-    echo "$items" | jq -S 'sort_by(.title // .Title // "")' 2>/dev/null || echo "$items"
+    echo "$items" | jq -S 'sort_by(.title // "")' 2>/dev/null || echo "$items"
 }
 
 # Compare two snapshots and report fidelity.
@@ -73,23 +77,24 @@ check_fidelity() {
         violations=$(( before_count - after_count ))
     fi
 
-    # Compare critical invariants for each item (matched by title)
-    local INVARIANTS=("title" "description" "priority" "type")
+    # Critical invariant fields to check.
+    # bd uses "issue_type" not "type" in its JSON output.
+    local INVARIANTS=("title" "description" "priority" "issue_type")
 
     local i=0
     while [ "$i" -lt "$before_count" ]; do
         local title
-        title=$(jq -r ".[$i].title // .[$i].Title // \"item-$i\"" "$before" 2>/dev/null)
+        title=$(jq -r ".[$i].title // \"\"" "$before" 2>/dev/null)
 
-        # Skip probe issues
-        if [ "$title" = "__probe__" ]; then
+        # Skip items with no title (probe issues, etc.)
+        if [ -z "$title" ] || [ "$title" = "__probe__" ]; then
             i=$((i + 1))
             continue
         fi
 
         # Find matching item in after-snapshot by title
         local match
-        match=$(jq --arg t "$title" '[.[] | select((.title // .Title) == $t)] | .[0]' "$after" 2>/dev/null)
+        match=$(jq --arg t "$title" '[.[] | select(.title == $t)] | .[0]' "$after" 2>/dev/null)
 
         if [ -z "$match" ] || [ "$match" = "null" ]; then
             echo -e "  ${RED:-}FIDELITY VIOLATION: '$title' missing after upgrade${NC:-}"
@@ -101,11 +106,12 @@ check_fidelity() {
         # Check each invariant field
         for field in "${INVARIANTS[@]}"; do
             local before_val after_val
-            before_val=$(jq -r ".[$i].${field} // .[$i].$(echo "$field" | sed 's/./\U&/') // \"\"" "$before" 2>/dev/null)
-            after_val=$(echo "$match" | jq -r ".${field} // .$(echo "$field" | sed 's/./\U&/') // \"\"" 2>/dev/null)
+            before_val=$(jq -r ".[$i].${field} // \"\"" "$before" 2>/dev/null)
+            after_val=$(echo "$match" | jq -r ".${field} // \"\"" 2>/dev/null)
 
-            # Skip empty fields (feature not available in old version)
+            # Skip empty/null fields (feature not available in old version)
             [ -z "$before_val" ] && continue
+            [ "$before_val" = "null" ] && continue
 
             if [ "$before_val" != "$after_val" ]; then
                 echo -e "  ${RED:-}FIDELITY VIOLATION: '$title'.${field}: '$before_val' -> '$after_val'${NC:-}"
@@ -115,10 +121,9 @@ check_fidelity() {
 
         # Check status category (open vs closed)
         local before_status after_status
-        before_status=$(jq -r ".[$i].status // .[$i].Status // \"\"" "$before" 2>/dev/null)
-        after_status=$(echo "$match" | jq -r ".status // .Status // \"\"" 2>/dev/null)
+        before_status=$(jq -r ".[$i].status // \"\"" "$before" 2>/dev/null)
+        after_status=$(echo "$match" | jq -r ".status // \"\"" 2>/dev/null)
         if [ -n "$before_status" ] && [ -n "$after_status" ]; then
-            # Normalize: both should be open or both closed
             local before_closed after_closed
             before_closed=$(echo "$before_status" | grep -ciE "closed|done|resolved" || true)
             after_closed=$(echo "$after_status" | grep -ciE "closed|done|resolved" || true)
@@ -128,10 +133,10 @@ check_fidelity() {
             fi
         fi
 
-        # Check dependency preservation (if present)
+        # Check dependency preservation
         local before_deps after_deps
-        before_deps=$(jq -r ".[$i].dependencies // .[$i].blocked_by // [] | [.[].id // .] | sort | join(\",\")" "$before" 2>/dev/null)
-        after_deps=$(echo "$match" | jq -r ".dependencies // .blocked_by // [] | [.[].id // .] | sort | join(\",\")" 2>/dev/null)
+        before_deps=$(jq -r ".[$i].dependencies // [] | [.[].id // .] | sort | join(\",\")" "$before" 2>/dev/null)
+        after_deps=$(echo "$match" | jq -r ".dependencies // [] | [.[].id // .] | sort | join(\",\")" 2>/dev/null)
         if [ -n "$before_deps" ] && [ "$before_deps" != "$after_deps" ]; then
             echo -e "  ${RED:-}FIDELITY VIOLATION: '$title' dependencies changed: '$before_deps' -> '$after_deps'${NC:-}"
             violations=$((violations + 1))
@@ -139,8 +144,11 @@ check_fidelity() {
 
         # Check comment count preservation
         local before_comments after_comments
-        before_comments=$(jq -r ".[$i].comments // .[$i].comment_count // 0 | if type == \"array\" then length else . end" "$before" 2>/dev/null)
-        after_comments=$(echo "$match" | jq -r ".comments // .comment_count // 0 | if type == \"array\" then length else . end" 2>/dev/null)
+        before_comments=$(jq -r ".[$i].comment_count // (.comments // [] | length) // 0" "$before" 2>/dev/null)
+        after_comments=$(echo "$match" | jq -r ".comment_count // (.comments // [] | length) // 0" 2>/dev/null)
+        # Normalize: treat empty/null as 0
+        [ -z "$before_comments" ] && before_comments=0
+        [ -z "$after_comments" ] && after_comments=0
         if [ "$before_comments" != "0" ] && [ "$before_comments" != "$after_comments" ]; then
             echo -e "  ${RED:-}FIDELITY VIOLATION: '$title' comment count: $before_comments -> $after_comments${NC:-}"
             violations=$((violations + 1))
