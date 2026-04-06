@@ -28,7 +28,7 @@ set -uo pipefail
 #
 # Environment:
 #   CANDIDATE_BIN      Path to prebuilt candidate binary (skip build)
-#   BEADS_TEST_MODE    Set to 1 to suppress telemetry/prompts (default: 1)
+#   BEADS_TEST_MODE    Set to 1 to disable Dolt auto-start (default: 0)
 #   GIT_CONFIG_NOSYSTEM  Set to 1 to ignore system git config (default: 1)
 #   BD_OP_TIMEOUT      Timeout in seconds for bd operations (default: 30)
 #   DOWNLOAD_TIMEOUT   Timeout in seconds for binary downloads (default: 60)

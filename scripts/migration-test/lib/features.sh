@@ -50,15 +50,24 @@ create_dataset() {
 
     # --- Core items (all versions) ---
 
-    # 1. Epic
+    # 1. Epic (optional — older server-era versions may fail if the Dolt
+    #    server hasn't finished starting).  Fall back to a plain task so the
+    #    dataset is still useful for upgrade-fidelity checks.
     local epic_id
     epic_id=$(bd_create "$ws" "$bin" --title "Migration epic" --type epic --priority 2 --description "Epic for migration testing") || true
-    if [ -z "${epic_id:-}" ]; then
-        echo "  FATAL: could not create epic" >&2
-        return 1
+    if [ -n "${epic_id:-}" ]; then
+        DATASET_IDS[epic]="$epic_id"
+        DATASET_FEATURES+=("epic")
+    else
+        echo "  WARN: epic creation failed, falling back to task" >&2
+        epic_id=$(bd_create "$ws" "$bin" --title "Migration epic (as task)" --type task --priority 2 --description "Epic for migration testing") || true
+        if [ -z "${epic_id:-}" ]; then
+            echo "  FATAL: could not create any issue — database may be unreachable" >&2
+            return 1
+        fi
+        DATASET_IDS[epic_fallback]="$epic_id"
+        DATASET_FEATURES+=("epic_fallback")
     fi
-    DATASET_IDS[epic]="$epic_id"
-    DATASET_FEATURES+=("epic")
 
     # 2. Task (will be child of epic if supported)
     local task_args=(--title "Migration task alpha" --type task --priority 1)
