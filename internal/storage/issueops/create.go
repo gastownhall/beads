@@ -300,8 +300,8 @@ func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) error 
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT COUNT(*) FROM %s
-			WHERE issue_id = ? AND author = ? AND created_at = ?
-		`, commentTable), issue.ID, comment.Author, createdAt).Scan(&exists); err != nil {
+			WHERE issue_id = ? AND author = ? AND created_at = ? AND text = ?
+		`, commentTable), issue.ID, comment.Author, createdAt, comment.Text).Scan(&exists); err != nil {
 			return fmt.Errorf("failed to check comment existence for %s: %w", issue.ID, err)
 		}
 		if exists > 0 {
