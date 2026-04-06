@@ -1,6 +1,6 @@
 # Beads Skill for Claude Code
 
-A comprehensive skill for using [beads](https://github.com/steveyegge/beads) (bd) issue tracking with Claude Code.
+A comprehensive skill for using [beads](https://github.com/gastownhall/beads) (bd) issue tracking with Claude Code.
 
 ## What This Skill Does
 
@@ -91,7 +91,7 @@ NEXT: Implement rate limiting"
 
 ## Requirements
 
-- [bd CLI](https://github.com/steveyegge/beads) installed (`brew install beads`)
+- [bd CLI](https://github.com/gastownhall/beads) installed (`brew install beads`)
 - A git repository (bd requires git for sync)
 - Initialized database (`bd init` in project root)
 
@@ -111,7 +111,7 @@ NEXT: Implement rate limiting"
 
 ## Contributing
 
-This skill is maintained at [github.com/steveyegge/beads](https://github.com/steveyegge/beads) in the `claude-plugin/skills/beads/` directory.
+This skill is maintained at [github.com/gastownhall/beads](https://github.com/gastownhall/beads) in the `claude-plugin/skills/beads/` directory.
 
 Issues and PRs welcome for:
 - Documentation improvements

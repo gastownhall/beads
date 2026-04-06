@@ -55,4 +55,4 @@ Use these via the beads MCP server:
 - `dep` (manage dependencies), `blocked`, `stats`
 - `init` (initialize bd in a project)
 
-For more details, see the beads README at: https://github.com/steveyegge/beads
+For more details, see the beads README at: https://github.com/gastownhall/beads
