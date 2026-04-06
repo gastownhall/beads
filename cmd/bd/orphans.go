@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // doctorFindOrphanedIssues is the function used to find orphaned issues.
@@ -36,10 +37,16 @@ Examples:
   bd orphans              # Show orphaned issues
   bd orphans --json       # Machine-readable output
   bd orphans --details    # Show full commit information
-  bd orphans --fix        # Close orphaned issues with confirmation`,
+  bd orphans --fix        # Close orphaned issues with confirmation
+  bd orphans --label theme:personal             # Only orphans with this label
+  bd orphans --label-any theme:personal,theme:ventures  # Orphans with either label`,
 	Run: func(cmd *cobra.Command, args []string) {
 		path := "."
-		orphans, err := findOrphanedIssues(path)
+		labels, _ := cmd.Flags().GetStringSlice("label")
+		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+		labels = utils.NormalizeLabels(labels)
+		labelsAny = utils.NormalizeLabels(labelsAny)
+		orphans, err := findOrphanedIssues(path, labels, labelsAny)
 		if err != nil {
 			FatalError("%v", err)
 		}
@@ -109,16 +116,27 @@ type orphanIssueOutput struct {
 }
 
 // doltStoreProvider wraps storage.DoltStorage to implement types.IssueProvider.
-type doltStoreProvider struct{}
+type doltStoreProvider struct {
+	labels    []string // AND semantics: issue must have ALL these labels
+	labelsAny []string // OR semantics: issue must have AT LEAST ONE of these labels
+}
 
 func (p *doltStoreProvider) GetOpenIssues(ctx context.Context) ([]*types.Issue, error) {
 	openStatus := types.StatusOpen
-	openIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{Status: &openStatus})
+	openIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		Status:    &openStatus,
+		Labels:    p.labels,
+		LabelsAny: p.labelsAny,
+	})
 	if err != nil {
 		return nil, err
 	}
 	inProgressStatus := types.StatusInProgress
-	inProgressIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{Status: &inProgressStatus})
+	inProgressIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		Status:    &inProgressStatus,
+		Labels:    p.labels,
+		LabelsAny: p.labelsAny,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -139,18 +157,26 @@ func (p *doltStoreProvider) GetIssuePrefix() string {
 	return prefix
 }
 
-// getIssueProvider returns an IssueProvider backed by the global Dolt store.
-func getIssueProvider() (types.IssueProvider, func(), error) {
+// getIssueProviderFn is the function used to create an IssueProvider.
+// It is a variable so tests can substitute a mock without needing a real store.
+var getIssueProviderFn = func(labels, labelsAny []string) (types.IssueProvider, func(), error) {
 	if store != nil {
-		return &doltStoreProvider{}, func() {}, nil
+		return &doltStoreProvider{labels: labels, labelsAny: labelsAny}, func() {}, nil
 	}
 	return nil, nil, fmt.Errorf("no database available")
 }
 
+// getIssueProvider returns an IssueProvider backed by the global Dolt store.
+// labels and labelsAny are passed through to SearchIssues for label filtering.
+func getIssueProvider(labels, labelsAny []string) (types.IssueProvider, func(), error) {
+	return getIssueProviderFn(labels, labelsAny)
+}
+
 // findOrphanedIssues wraps the shared doctor package function and converts to output format.
 // It respects the --db flag for cross-repo orphan detection.
-func findOrphanedIssues(path string) ([]orphanIssueOutput, error) {
-	provider, cleanup, err := getIssueProvider()
+// labels and labelsAny are passed to the issue provider to restrict which issues are considered.
+func findOrphanedIssues(path string, labels, labelsAny []string) ([]orphanIssueOutput, error) {
+	provider, cleanup, err := getIssueProvider(labels, labelsAny)
 	if err != nil {
 		return nil, fmt.Errorf("unable to find orphaned issues: %w", err)
 	}
@@ -182,5 +208,7 @@ func closeIssue(issueID string) error {
 func init() {
 	orphansCmd.Flags().BoolP("fix", "f", false, "Close orphaned issues with confirmation")
 	orphansCmd.Flags().Bool("details", false, "Show full commit information")
+	orphansCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	orphansCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	rootCmd.AddCommand(orphansCmd)
 }
