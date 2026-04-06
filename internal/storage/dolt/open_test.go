@@ -71,11 +71,11 @@ func TestResolveAutoStart(t *testing.T) {
 			wantAutoStart: true,
 		},
 		{
-			// Caller option wins over config.yaml per NewFromConfigWithOptions contract.
-			name:             "caller true wins over config.yaml opt-out",
+			// Config opt-out must still win when callers pass current=true.
+			name:             "config.yaml opt-out wins over caller true",
 			currentValue:     true,
 			doltAutoStartCfg: "false",
-			wantAutoStart:    true,
+			wantAutoStart:    false,
 		},
 		{
 			name:          "test mode overrides caller true",
