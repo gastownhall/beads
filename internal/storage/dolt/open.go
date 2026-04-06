@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -144,7 +145,7 @@ func resolveAutoStart(current bool, doltAutoStartCfg string, mode ServerMode) bo
 	// and bootstrap paths (which hardcode AutoStart=true) would ignore the
 	// user's dolt.auto-start: false setting, spawning rogue dolt servers that
 	// overwrite port files and cause DB lock conflicts.
-	if doltAutoStartCfg == "false" || doltAutoStartCfg == "0" || doltAutoStartCfg == "off" {
+	if strings.EqualFold(doltAutoStartCfg, "false") || doltAutoStartCfg == "0" || strings.EqualFold(doltAutoStartCfg, "off") {
 		return false
 	}
 	// Caller option wins over default.

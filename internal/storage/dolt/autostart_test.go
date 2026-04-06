@@ -44,7 +44,7 @@ func TestAutoStart_ConfigFalse_OverridesCallerTrue(t *testing.T) {
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "")
 
-	for _, cfgVal := range []string{"false", "0", "off"} {
+	for _, cfgVal := range []string{"false", "False", "FALSE", "0", "off", "Off", "OFF"} {
 		got := resolveAutoStart(true, cfgVal, ServerModeOwned)
 		if got != false {
 			t.Errorf("resolveAutoStart(true, %q, Owned) = true, want false: config.yaml opt-out must override caller", cfgVal)
