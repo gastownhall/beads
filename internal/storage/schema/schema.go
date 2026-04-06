@@ -154,10 +154,10 @@ type migrationFile struct {
 }
 
 // runMigrations collects all embedded .up.sql files with version > minVersion,
-// sorts them, and executes each one. When tolerateExisting is true, "already
-// exists" SQL errors are ignored and versions are recorded with INSERT IGNORE
-// (backfill path). Otherwise errors are fatal and versions use plain INSERT
-// (normal migration path).
+// sorts them, and executes each one. DDL "already exists" errors and duplicate
+// version inserts are always tolerated to support concurrent initialization
+// (multiple processes racing to apply the same migration). When tolerateExisting
+// is true, ALL "already exists" errors are silently ignored (backfill path).
 func runMigrations(ctx context.Context, db DBConn, minVersion int, tolerateExisting bool) (int, error) {
 	entries, err := fs.ReadDir(upMigrations, "migrations")
 	if err != nil {
@@ -195,28 +195,34 @@ func runMigrations(ctx context.Context, db DBConn, minVersion int, tolerateExist
 		// files can be executed in a single Exec call.
 		if sqlStr := strings.TrimSpace(string(data)); sqlStr != "" {
 			if _, err := db.ExecContext(ctx, sqlStr); err != nil {
-				if !tolerateExisting || !isAlreadyExistsError(err) {
+				if !tolerateExisting && !isConcurrentInitError(err) {
 					return 0, fmt.Errorf("migration %s failed: %w", mf.name, err)
 				}
 			}
 		}
 
-		insertSQL := "INSERT INTO schema_migrations (version) VALUES (?)"
-		if tolerateExisting {
-			insertSQL = "INSERT IGNORE INTO schema_migrations (version) VALUES (?)"
-		}
-		if _, err := db.ExecContext(ctx, insertSQL, mf.version); err != nil {
-			return 0, fmt.Errorf("recording migration %s: %w", mf.name, err)
+		// Always use INSERT IGNORE — concurrent processes may race to record
+		// the same migration version. Duplicate PK is expected and harmless.
+		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO schema_migrations (version) VALUES (?)", mf.version); err != nil {
+			if !isConcurrentInitError(err) {
+				return 0, fmt.Errorf("recording migration %s: %w", mf.name, err)
+			}
 		}
 	}
 
 	return len(pending), nil
 }
 
-// isAlreadyExistsError returns true for MySQL errors indicating a schema
-// object already exists (table, column, index/key).
-func isAlreadyExistsError(err error) bool {
+// isConcurrentInitError returns true for errors that are expected and harmless
+// during concurrent schema initialization:
+//   - "already exists" — table/index/key created by another process (1050, 1061)
+//   - "duplicate column" — ALTER TABLE ADD COLUMN raced (1060)
+//   - "duplicate key name" — CREATE INDEX raced (1061)
+//   - "serialization failure" — Dolt write conflict from concurrent transaction
+func isConcurrentInitError(err error) bool {
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "already exists") || // 1050 table, 1061 key
-		strings.Contains(msg, "duplicate column") // 1060
+	return strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "duplicate column") ||
+		strings.Contains(msg, "duplicate key name") ||
+		strings.Contains(msg, "serialization failure")
 }
