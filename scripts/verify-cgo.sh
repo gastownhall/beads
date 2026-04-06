@@ -27,4 +27,16 @@ if strings "$binary_path" | awk '/^build[[:space:]]+CGO_ENABLED=0$/ { found=1 } 
     exit 1
 fi
 
+# On Linux (ELF binaries), verify no ICU shared-library dependency.
+# The gms_pure_go build tag should eliminate this; if it appears, the build
+# environment leaked ICU flags onto the link line.
+if command -v readelf >/dev/null 2>&1; then
+    if readelf -d "$binary_path" 2>/dev/null | grep -qi 'libicu'; then
+        echo "ERROR: $binary_path has unexpected ICU runtime dependency" >&2
+        readelf -d "$binary_path" | grep -i 'libicu' >&2
+        echo "Ensure the binary is built with -tags gms_pure_go and without ICU CGO_LDFLAGS" >&2
+        exit 1
+    fi
+fi
+
 echo "OK: $binary_path has CGO support"

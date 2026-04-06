@@ -40,30 +40,19 @@ ifneq ($(GO_VERSION),)
 export GOTOOLCHAIN := go$(GO_VERSION)
 endif
 
-# ICU4C is keg-only in Homebrew (not symlinked into the prefix).
-# Dolt's go-icu-regex dependency needs these paths to compile and link.
-# This handles both macOS (brew --prefix icu4c) and Linux/Linuxbrew.
-# On Windows, ICU is not needed (pure-Go regex via gms_pure_go + regex_windows.go).
-ifneq ($(OS),Windows_NT)
-ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
-ifneq ($(ICU_PREFIX),)
-export CGO_CFLAGS   += -I$(ICU_PREFIX)/include
-export CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
-export CGO_LDFLAGS  += -L$(ICU_PREFIX)/lib
-# Linuxbrew gcc doesn't install a 'c++' symlink; point CGO at g++
-ifeq ($(shell uname),Linux)
-export CXX ?= g++
-endif
-endif
-endif
+# gms_pure_go tells go-mysql-server to use Go's stdlib regex instead of
+# ICU-backed go-icu-regex.  This eliminates the ICU shared-library runtime
+# dependency, making release binaries portable across Linux distros.
+# ICU flags are only needed for test-cgo.sh (which exercises the ICU path).
+BUILD_TAGS := gms_pure_go
 
 # Build the bd binary
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
-	go build -tags gms_pure_go -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd
+	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd
 else
-	go build -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
+	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 ifeq ($(shell uname),Darwin)
 	@codesign -s - -f $(BUILD_DIR)/bd 2>/dev/null || true
 	@echo "Signed bd for macOS"
