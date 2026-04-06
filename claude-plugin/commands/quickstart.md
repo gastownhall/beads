@@ -3,7 +3,7 @@ description: Quick start guide for bd workflows (deprecated)
 argument-hint: []
 ---
 
-**Note:** The `bd quickstart` command is deprecated. See [docs/QUICKSTART.md](../docs/QUICKSTART.md) instead.
+**Note:** The `bd quickstart` command is deprecated. See the [Quick Start](https://steveyegge.github.io/beads/getting-started/quickstart) on the documentation site, or the repo pointer [docs/QUICKSTART.md](../docs/QUICKSTART.md).
 
 The quickstart documentation covers:
 - Getting started with bd
