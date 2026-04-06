@@ -119,3 +119,94 @@ func TestCloseIssue_PropagatesError(t *testing.T) {
 		t.Fatalf("expected delegated error, got %v", err)
 	}
 }
+
+func TestOrphansLabelFlagsRegistered(t *testing.T) {
+	labelFlag := orphansCmd.Flags().Lookup("label")
+	if labelFlag == nil {
+		t.Fatal("--label flag not registered on orphansCmd")
+	}
+	labelAnyFlag := orphansCmd.Flags().Lookup("label-any")
+	if labelAnyFlag == nil {
+		t.Fatal("--label-any flag not registered on orphansCmd")
+	}
+}
+
+func TestDoltStoreProvider_LabelFields(t *testing.T) {
+	p := &doltStoreProvider{
+		labels:    []string{"theme:personal"},
+		labelsAny: []string{"theme:ventures", "theme:probono"},
+	}
+	if len(p.labels) != 1 || p.labels[0] != "theme:personal" {
+		t.Fatalf("unexpected labels: %v", p.labels)
+	}
+	if len(p.labelsAny) != 2 {
+		t.Fatalf("unexpected labelsAny: %v", p.labelsAny)
+	}
+}
+
+// TestFindOrphanedIssues_LabelArgs verifies that label args are passed to the doctor
+// function via a provider that was constructed with those labels. We intercept
+// doctorFindOrphanedIssues to capture the provider and inspect its fields.
+func TestFindOrphanedIssues_LabelArgs(t *testing.T) {
+	orig := doctorFindOrphanedIssues
+	t.Cleanup(func() { doctorFindOrphanedIssues = orig })
+
+	var capturedProvider types.IssueProvider
+	doctorFindOrphanedIssues = func(path string, provider types.IssueProvider) ([]doctor.OrphanIssue, error) {
+		capturedProvider = provider
+		return nil, nil
+	}
+
+	// Substitute getIssueProvider so we don't need a real store.
+	origProviderFn := getIssueProviderFn
+	t.Cleanup(func() { getIssueProviderFn = origProviderFn })
+	getIssueProviderFn = func(labels, labelsAny []string) (types.IssueProvider, func(), error) {
+		return &doltStoreProvider{labels: labels, labelsAny: labelsAny}, func() {}, nil
+	}
+
+	wantLabels := []string{"theme:personal"}
+	wantLabelsAny := []string{"theme:ventures"}
+	_, err := findOrphanedIssues(".", wantLabels, wantLabelsAny)
+	if err != nil {
+		t.Fatalf("findOrphanedIssues returned unexpected error: %v", err)
+	}
+	p, ok := capturedProvider.(*doltStoreProvider)
+	if !ok {
+		t.Fatalf("expected *doltStoreProvider, got %T", capturedProvider)
+	}
+	if len(p.labels) != 1 || p.labels[0] != "theme:personal" {
+		t.Fatalf("labels not propagated: got %v", p.labels)
+	}
+	if len(p.labelsAny) != 1 || p.labelsAny[0] != "theme:ventures" {
+		t.Fatalf("labelsAny not propagated: got %v", p.labelsAny)
+	}
+}
+
+func TestFindOrphanedIssues_NoLabels(t *testing.T) {
+	orig := doctorFindOrphanedIssues
+	t.Cleanup(func() { doctorFindOrphanedIssues = orig })
+
+	var capturedProvider types.IssueProvider
+	doctorFindOrphanedIssues = func(_ string, provider types.IssueProvider) ([]doctor.OrphanIssue, error) {
+		capturedProvider = provider
+		return nil, nil
+	}
+
+	origProviderFn := getIssueProviderFn
+	t.Cleanup(func() { getIssueProviderFn = origProviderFn })
+	getIssueProviderFn = func(labels, labelsAny []string) (types.IssueProvider, func(), error) {
+		return &doltStoreProvider{labels: labels, labelsAny: labelsAny}, func() {}, nil
+	}
+
+	_, err := findOrphanedIssues(".", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p, ok := capturedProvider.(*doltStoreProvider)
+	if !ok {
+		t.Fatalf("expected *doltStoreProvider, got %T", capturedProvider)
+	}
+	if len(p.labels) != 0 || len(p.labelsAny) != 0 {
+		t.Fatalf("expected empty label filters, got labels=%v labelsAny=%v", p.labels, p.labelsAny)
+	}
+}

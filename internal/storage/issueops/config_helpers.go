@@ -123,9 +123,12 @@ func ResolveCustomTypesInTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
 		if err := rows.Err(); err != nil {
 			return nil, fmt.Errorf("reading custom_types: %w", err)
 		}
-		// Table query succeeded — return result even if empty.
-		// Only fall through to config string when the table doesn't exist (query error above).
-		return result, nil
+		if len(result) > 0 {
+			return result, nil
+		}
+		// Table exists but is empty — fall through to config string.
+		// This handles the case where schema migration created the table
+		// but didn't populate it from the existing types.custom config.
 	}
 
 	// Fallback: table doesn't exist (pre-migration) — read from config string

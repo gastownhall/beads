@@ -152,6 +152,7 @@ func init() {
 	githubSyncCmd.Flags().BoolVar(&githubPreferLocal, "prefer-local", false, "On conflict, keep local beads version")
 	githubSyncCmd.Flags().BoolVar(&githubPreferGitHub, "prefer-github", false, "On conflict, use GitHub version")
 	githubSyncCmd.Flags().BoolVar(&githubPreferNewer, "prefer-newer", false, "On conflict, use most recent version (default)")
+	registerSelectiveSyncFlags(githubSyncCmd)
 
 	// Register github command with root
 	rootCmd.AddCommand(githubCmd)
@@ -378,6 +379,10 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 		Pull:   pull,
 		Push:   push,
 		DryRun: githubSyncDryRun,
+	}
+
+	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
+		return err
 	}
 
 	// Map conflict resolution

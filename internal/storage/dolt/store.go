@@ -341,9 +341,49 @@ func wrapLockError(err error) error {
 	if !isLockError(err) {
 		return err
 	}
-	return fmt.Errorf("%w\n\nThe Dolt database is locked. This usually means the Dolt server's "+
-		"storage is held by another process or a stale lock file exists.\n"+
-		"Try restarting the Dolt server, or run 'bd doctor --fix' to clean stale lock files.", err)
+	hint := lockProcessHint()
+	return fmt.Errorf("%w\n\nThe Dolt database is locked.%s\n"+
+		"Try: bd doctor --fix (clears stale locks), or kill the holding process.", err, hint)
+}
+
+// lockProcessHint tries to identify the process holding the database lock.
+// Returns a hint string like " Process 12345 (bd) may be holding the lock."
+// Returns empty string if identification fails or on unsupported platforms.
+func lockProcessHint() string {
+	// Look for other bd/dolt processes that might hold the lock
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		// /proc not available (macOS, Windows, FreeBSD) — skip PID detection
+		return ""
+	}
+
+	myPID := os.Getpid()
+	var holders []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == myPID {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		cmd := string(cmdline)
+		if strings.Contains(cmd, "bd") || strings.Contains(cmd, "dolt") {
+			holders = append(holders, fmt.Sprintf("%d", pid))
+		}
+	}
+
+	if len(holders) == 0 {
+		return ""
+	}
+	if len(holders) == 1 {
+		return fmt.Sprintf(" Process %s (bd/dolt) may be holding the lock.", holders[0])
+	}
+	return fmt.Sprintf(" Processes %s (bd/dolt) may be holding the lock.", strings.Join(holders, ", "))
 }
 
 // withRetry executes an operation with retry for transient errors.
