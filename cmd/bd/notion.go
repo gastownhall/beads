@@ -123,6 +123,7 @@ func init() {
 	notionSyncCmd.Flags().BoolVar(&notionPreferNotion, "prefer-notion", false, "On conflict, use the Notion version")
 	notionSyncCmd.Flags().BoolVar(&notionCreateOnly, "create-only", false, "Only create missing remote pages, do not update existing ones")
 	notionSyncCmd.Flags().StringVar(&notionSyncState, "state", "all", "Issue state to sync: open, closed, or all")
+	registerSelectiveSyncFlags(notionSyncCmd)
 
 	notionCmd.AddCommand(
 		notionInitCmd,
@@ -449,7 +450,7 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		conflictResolution = tracker.ConflictExternal
 	}
 
-	result, err := engine.Sync(ctx, tracker.SyncOptions{
+	syncOpts := tracker.SyncOptions{
 		Pull:               pull,
 		Push:               push,
 		DryRun:             notionSyncDryRun,
@@ -457,7 +458,13 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		State:              notionSyncState,
 		ExcludeEphemeral:   true,
 		ConflictResolution: conflictResolution,
-	})
+	}
+
+	if err := applySelectiveSyncFlags(cmd, &syncOpts, push); err != nil {
+		return err
+	}
+
+	result, err := engine.Sync(ctx, syncOpts)
 	if err != nil {
 		return err
 	}

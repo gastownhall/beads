@@ -83,6 +83,7 @@ func init() {
 	jiraSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
 	jiraSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
 	jiraSyncCmd.Flags().StringSlice("project", nil, "Project key(s) to sync (overrides configured project/projects)")
+	registerSelectiveSyncFlags(jiraSyncCmd)
 
 	jiraCmd.AddCommand(jiraSyncCmd)
 	jiraCmd.AddCommand(jiraStatusCmd)
@@ -141,6 +142,10 @@ func runJiraSync(cmd *cobra.Command, args []string) {
 		DryRun:     dryRun,
 		CreateOnly: createOnly,
 		State:      state,
+	}
+
+	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
+		FatalError("%v", err)
 	}
 
 	// Map conflict resolution
