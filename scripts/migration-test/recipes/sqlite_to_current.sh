@@ -57,7 +57,10 @@ recipe_sqlite_to_current() {
             [ -f "$candidate_db" ] && db_path="$candidate_db" && break
         done
         if [ -n "$db_path" ]; then
-            sqlite3 -json "$db_path" "SELECT * FROM issues;" > "$ws/.beads/issues.jsonl.tmp" 2>/dev/null || true
+            # Use .mode json (broadly compatible) instead of -json flag
+            # which may not exist in older sqlite3 builds.
+            sqlite3 "$db_path" ".mode json" "SELECT * FROM issues;" \
+                > "$ws/.beads/issues.jsonl.tmp" 2>/dev/null || true
             if [ -s "$ws/.beads/issues.jsonl.tmp" ]; then
                 # Convert JSON array to JSONL
                 jq -c '.[]' "$ws/.beads/issues.jsonl.tmp" > "$ws/.beads/issues.jsonl" 2>/dev/null || true
@@ -74,8 +77,46 @@ recipe_sqlite_to_current() {
         return 1
     fi
 
+    # Normalize SQLite type mismatches. SQLite has no native bool, array, or
+    # JSON types, so exports produce integer booleans ("ephemeral":0), empty
+    # strings for arrays ("waiters":""), and empty strings for JSON objects
+    # ("metadata":""). The Go JSONL importer expects real types for these.
+    local bool_fields="ephemeral|pinned|is_template|crystallizes|no_history"
+    local array_fields="waiters"
+    local json_fields="metadata"
+    if jq -c "
+        walk(if type == \"object\" then
+            with_entries(
+                if (.key | test(\"^(${bool_fields})$\")) and (.value | type == \"number\")
+                then .value = (.value != 0)
+                elif (.key | test(\"^(${array_fields})$\")) and (.value | type == \"string\")
+                then .value = (if .value == \"\" then [] else (.value | split(\",\") | map(select(. != \"\"))) end)
+                elif (.key | test(\"^(${json_fields})$\")) and (.value | type == \"string\")
+                then .value = (if .value == \"\" then {} else (.value | fromjson? // {}) end)
+                else . end
+            )
+        else . end)
+    " "$ws/.beads/issues.jsonl" > "$ws/.beads/issues.jsonl.normalized" 2>/dev/null; then
+        mv "$ws/.beads/issues.jsonl.normalized" "$ws/.beads/issues.jsonl"
+        echo "  normalized SQLite types to JSON types"
+    else
+        rm -f "$ws/.beads/issues.jsonl.normalized"
+    fi
+
     # Stop any old dolt server
     stop_dolt_server "$ws"
+
+    # Move old artifacts out of the way so the candidate's
+    # checkExistingBeadsData guard does not reject init as "already initialized".
+    # Includes embeddeddolt/ which may have been created empty by a failed
+    # direct upgrade attempt in the harness.
+    for old_file in "$ws/.beads/beads.db" "$ws/.beads/beads.db-wal" "$ws/.beads/beads.db-shm" \
+                     "$ws/.beads/metadata.json" "$ws/.beads/config.json"; do
+        [ -f "$old_file" ] && mv "$old_file" "${old_file}.pre-migration" 2>/dev/null || true
+    done
+    for old_dir in "$ws/.beads/embeddeddolt" "$ws/.beads/dolt"; do
+        [ -d "$old_dir" ] && mv "$old_dir" "${old_dir}.pre-migration" 2>/dev/null || true
+    done
 
     # Init with candidate, importing from JSONL
     if bd_in "$ws" "$cand_bin" init --from-jsonl --quiet --non-interactive </dev/null >/dev/null 2>&1; then
