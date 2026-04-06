@@ -1004,7 +1004,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		// Ensure dolt_ignore'd tables (wisps, wisp_*) exist in the working set.
 		// These tables are not persisted in commits, so they need recreation
 		// after a server restart. Short-circuits if they already exist (1 query).
-		if err := ensureIgnoredTables(db); err != nil {
+		if err := versioncontrolops.EnsureIgnoredTables(ctx, db); err != nil {
 			return nil, fmt.Errorf("failed to ensure ignored tables: %w", err)
 		}
 	}
@@ -2163,7 +2163,7 @@ func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
 	}
 	// dolt_ignore'd tables (wisps, wisp_*) don't carry over to new branches —
 	// ensure they exist on the newly created branch.
-	return ensureIgnoredTables(s.db)
+	return versioncontrolops.EnsureIgnoredTables(ctx, s.db)
 }
 
 // Checkout switches to the specified branch
@@ -2181,7 +2181,7 @@ func (s *DoltStore) Checkout(ctx context.Context, branch string) (retErr error) 
 	s.branch = branch
 	// dolt_ignore'd tables (wisps, wisp_*) may not exist on the target branch —
 	// ensure they exist after checkout.
-	return ensureIgnoredTables(s.db)
+	return versioncontrolops.EnsureIgnoredTables(ctx, s.db)
 }
 
 // Merge merges the specified branch into the current branch.

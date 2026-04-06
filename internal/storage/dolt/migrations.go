@@ -1,12 +1,14 @@
 package dolt
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dolt/migrations"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // Migration represents a single schema migration for Dolt.
@@ -77,13 +79,12 @@ func RunMigrations(db *sql.DB) error {
 // are not inherited when branching. Safe to call repeatedly (idempotent).
 // Exported for use by test helpers in other packages.
 func CreateIgnoredTables(db *sql.DB) error {
-	return createIgnoredTables(db)
+	return versioncontrolops.CreateIgnoredTables(context.Background(), db)
 }
 
-// createIgnoredTables is the internal implementation.
-// It unconditionally ensures dolt_ignore entries and creates all ignored tables.
-// Used during full schema initialization (bd init / migration path).
-func createIgnoredTables(db *sql.DB) error {
+// createIgnoredTablesViaMigration runs the full migration path including
+// dolt_ignore entry setup. Used during bd init / schema initialization.
+func createIgnoredTablesViaMigration(db *sql.DB) error {
 	if err := migrations.MigrateWispsTable(db); err != nil {
 		return fmt.Errorf("wisps table: %w", err)
 	}
@@ -91,21 +92,6 @@ func createIgnoredTables(db *sql.DB) error {
 		return fmt.Errorf("wisp auxiliary tables: %w", err)
 	}
 	return nil
-}
-
-// ensureIgnoredTables creates dolt_ignore'd tables only if they don't already
-// exist. This is the fast path used after branch creation and checkout — the
-// dolt_ignore entries are already committed and persist across branches, so
-// only the tables themselves (which live in the working set) need recreation.
-func ensureIgnoredTables(db *sql.DB) error {
-	exists, err := migrations.TableExists(db, "wisps")
-	if err != nil {
-		return fmt.Errorf("check wisps table: %w", err)
-	}
-	if exists {
-		return nil
-	}
-	return createIgnoredTables(db)
 }
 
 // ListMigrations returns the names of all registered migrations.
