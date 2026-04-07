@@ -6,9 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -20,15 +18,10 @@ import (
 )
 
 // doctorTestServerPort returns the Dolt server port for doctor tests.
-// Returns 0 when BEADS_DOLT_PORT is unset so callers fail safely
-// instead of accidentally connecting to a production server on 3307.
+// Uses DoltContainerPortInt so the port is only non-zero when TestMain
+// actually started a container, ignoring any external BEADS_DOLT_PORT.
 func doctorTestServerPort() int {
-	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, _ := strconv.Atoi(p); port > 0 {
-			return port
-		}
-	}
-	return 0 // no test server available; sentinel triggers applyConfigDefaults safety guard
+	return testutil.DoltContainerPortInt()
 }
 
 // newTestDoltStore creates a DoltStore for testing in the doctor package.
