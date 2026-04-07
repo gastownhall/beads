@@ -69,12 +69,43 @@ recipe_sqlite_to_current() {
             else
                 rm -f "$ws/.beads/issues.jsonl.tmp"
             fi
+
+            # Extract dependencies and labels from SQLite while db is still accessible.
+            # Tables may not exist in very old versions — failures are silently ignored.
+            sqlite3 "$db_path" ".mode json" \
+                "SELECT issue_id, depends_on_id FROM dependencies;" \
+                > "$ws/.beads/deps.json" 2>/dev/null || true
+            sqlite3 "$db_path" ".mode json" \
+                "SELECT issue_id, label FROM labels;" \
+                > "$ws/.beads/labels.json" 2>/dev/null || true
         fi
     fi
 
     if [ ! -s "$ws/.beads/issues.jsonl" ]; then
         echo "  FAILED: could not export data from SQLite-era binary"
         return 1
+    fi
+
+    # Extract dependencies and labels from SQLite if not already done (Strategies 1/2).
+    # Strategy 3 extracts these inline; this covers the case where issues came from
+    # the old binary but deps/labels were not included in its output.
+    if [ ! -s "$ws/.beads/deps.json" ] || [ ! -s "$ws/.beads/labels.json" ]; then
+        if command -v sqlite3 >/dev/null 2>&1; then
+            local db_path=""
+            for candidate_db in "$ws/.beads/beads.db" "$ws/beads.db"; do
+                [ -f "$candidate_db" ] && db_path="$candidate_db" && break
+            done
+            if [ -n "$db_path" ]; then
+                [ ! -s "$ws/.beads/deps.json" ] && \
+                    sqlite3 "$db_path" ".mode json" \
+                        "SELECT issue_id, depends_on_id FROM dependencies;" \
+                        > "$ws/.beads/deps.json" 2>/dev/null || true
+                [ ! -s "$ws/.beads/labels.json" ] && \
+                    sqlite3 "$db_path" ".mode json" \
+                        "SELECT issue_id, label FROM labels;" \
+                        > "$ws/.beads/labels.json" 2>/dev/null || true
+            fi
+        fi
     fi
 
     # Normalize SQLite type mismatches. SQLite has no native bool, array, or
@@ -121,6 +152,40 @@ recipe_sqlite_to_current() {
     # Init with candidate, importing from JSONL
     if bd_in "$ws" "$cand_bin" init --from-jsonl --quiet --non-interactive </dev/null >/dev/null 2>&1; then
         echo "  candidate init --from-jsonl succeeded"
+
+        # Replay dependencies extracted from SQLite
+        if [ -s "$ws/.beads/deps.json" ]; then
+            local dep_count=0
+            while IFS= read -r line; do
+                local dep_issue dep_on
+                dep_issue=$(echo "$line" | jq -r '.issue_id') || continue
+                dep_on=$(echo "$line" | jq -r '.depends_on_id') || continue
+                [ -z "$dep_issue" ] || [ -z "$dep_on" ] && continue
+                if bd_in "$ws" "$cand_bin" dep add "$dep_issue" "$dep_on" >/dev/null 2>&1; then
+                    dep_count=$((dep_count + 1))
+                fi
+            done < <(jq -c '.[]' "$ws/.beads/deps.json" 2>/dev/null)
+            [ "$dep_count" -gt 0 ] && echo "  replayed $dep_count dependencies"
+        fi
+
+        # Replay labels extracted from SQLite
+        if [ -s "$ws/.beads/labels.json" ]; then
+            local label_count=0
+            while IFS= read -r line; do
+                local lbl_issue lbl_name
+                lbl_issue=$(echo "$line" | jq -r '.issue_id') || continue
+                lbl_name=$(echo "$line" | jq -r '.label') || continue
+                [ -z "$lbl_issue" ] || [ -z "$lbl_name" ] && continue
+                if bd_in "$ws" "$cand_bin" label add "$lbl_issue" "$lbl_name" >/dev/null 2>&1; then
+                    label_count=$((label_count + 1))
+                fi
+            done < <(jq -c '.[]' "$ws/.beads/labels.json" 2>/dev/null)
+            [ "$label_count" -gt 0 ] && echo "  replayed $label_count labels"
+        fi
+
+        # Clean up temporary extraction files
+        rm -f "$ws/.beads/deps.json" "$ws/.beads/labels.json"
+
         return 0
     else
         local init_err
