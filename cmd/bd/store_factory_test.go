@@ -4,9 +4,11 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // TestNewDoltStoreFromConfig_NoMetadata verifies that newDoltStoreFromConfig
@@ -35,4 +37,18 @@ func TestNewDoltStoreFromConfig_NoMetadata(t *testing.T) {
 		t.Fatalf("newDoltStoreFromConfig failed: %v", err)
 	}
 	defer store.Close()
+}
+
+// TestEmbeddedNew_EmptyDatabaseRejected verifies that embeddeddolt.New fails
+// with a clear error when called with an empty database name, rather than
+// deferring to a confusing "no database selected" SQL error.
+// Belt-and-suspenders defense for be-sy8 / GH#2988.
+func TestEmbeddedNew_EmptyDatabaseRejected(t *testing.T) {
+	_, err := embeddeddolt.New(t.Context(), t.TempDir(), "", "main")
+	if err == nil {
+		t.Fatal("expected error for empty database name")
+	}
+	if !strings.Contains(err.Error(), "database name must not be empty") {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
