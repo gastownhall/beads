@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 // WorktreeInfo contains information about a git worktree
@@ -36,12 +35,11 @@ var worktreeCmd = &cobra.Command{
 Worktrees allow multiple working directories sharing the same git repository,
 enabling parallel development (e.g., multiple agents or features).
 
-When creating a worktree, beads automatically sets up a redirect file so all
-worktrees share the same .beads database. This ensures consistent issue state
-across all worktrees.
+Worktrees automatically share the same beads database as the main repository
+via git common directory discovery — no manual redirect configuration needed.
 
 Examples:
-  bd worktree create feature-auth           # Create worktree with beads redirect
+  bd worktree create feature-auth           # Create worktree
   bd worktree create bugfix --branch fix-1  # Create with specific branch name
   bd worktree list                          # List all worktrees
   bd worktree remove feature-auth           # Remove worktree (with safety checks)
@@ -50,16 +48,15 @@ Examples:
 
 var worktreeCreateCmd = &cobra.Command{
 	Use:   "create <name> [--branch=<branch>]",
-	Short: "Create a worktree with beads redirect",
-	Long: `Create a git worktree with proper beads configuration.
+	Short: "Create a worktree",
+	Long: `Create a git worktree for parallel development.
 
 This command:
 1. Creates a git worktree at ./<name> (or specified path)
-2. Sets up .beads/redirect pointing to the main repository's .beads
-3. Adds the worktree path to .gitignore (if inside repo root)
+2. Adds the worktree path to .gitignore (if inside repo root)
 
-The worktree will share the same beads database as the main repository,
-ensuring consistent issue state across all worktrees.
+The worktree automatically shares the same beads database as the main
+repository via git common directory discovery — no redirect file needed.
 
 Examples:
   bd worktree create feature-auth           # Create at ./feature-auth
@@ -169,9 +166,6 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a git repository")
 	}
 
-	// Use BeadsDir from RepoContext (already follows redirects)
-	mainBeadsDir := rc.BeadsDir
-
 	// Determine branch name
 	branch := worktreeBranch
 	if branch == "" {
@@ -190,38 +184,6 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Helper to clean up worktree on failure
-	cleanupWorktree := func() {
-		cleanupCmd := gitCmdInDir(ctx, repoRoot, "worktree", "remove", "--force", worktreePath)
-		_ = cleanupCmd.Run()
-	}
-
-	// Create .beads directory in worktree
-	worktreeBeadsDir := filepath.Join(worktreePath, ".beads")
-	if err := os.MkdirAll(worktreeBeadsDir, 0755); err != nil {
-		cleanupWorktree()
-		return fmt.Errorf("failed to create .beads directory: %w", err)
-	}
-
-	// Create redirect file
-	redirectPath := filepath.Join(worktreeBeadsDir, beads.RedirectFileName)
-	// Ensure mainBeadsDir is absolute for correct filepath.Rel() computation (GH#1098)
-	// beads.FindBeadsDir() may return a relative path in some contexts
-	absMainBeadsDir := utils.CanonicalizeIfRelative(mainBeadsDir)
-	// Compute relative path from worktree root (not .beads dir) because
-	// FollowRedirect resolves paths relative to the parent of .beads
-	worktreeRoot := filepath.Dir(worktreeBeadsDir)
-	relPath, err := filepath.Rel(worktreeRoot, absMainBeadsDir)
-	if err != nil {
-		// Fall back to absolute path
-		relPath = absMainBeadsDir
-	}
-	// #nosec G306 - redirect file needs to be readable
-	if err := os.WriteFile(redirectPath, []byte(relPath+"\n"), 0644); err != nil {
-		cleanupWorktree()
-		return fmt.Errorf("failed to create redirect file: %w", err)
-	}
-
 	// Add to .gitignore if worktree is inside repo root
 	if strings.HasPrefix(worktreePath, repoRoot+string(os.PathSeparator)) {
 		// Use relative path from repo root for gitignore entry
@@ -237,9 +199,8 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 
 	if jsonOutput {
 		result := map[string]interface{}{
-			"path":        worktreePath,
-			"branch":      branch,
-			"redirect_to": mainBeadsDir,
+			"path":   worktreePath,
+			"branch": branch,
 		}
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
@@ -248,7 +209,6 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Created worktree: %s\n", ui.RenderPass("✓"), worktreePath)
 	fmt.Printf("  Branch: %s\n", branch)
-	fmt.Printf("  Beads: redirects to %s\n", mainBeadsDir)
 	return nil
 }
 
