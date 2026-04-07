@@ -11,10 +11,12 @@ import (
 	"time"
 )
 
+var latestGitHubReleaseFetcher = fetchLatestGitHubRelease
+
 // CheckCLIVersion checks if the CLI version is up to date.
 // Takes cliVersion parameter since it can't access the Version variable from main package.
 func CheckCLIVersion(cliVersion string) DoctorCheck {
-	latestVersion, err := fetchLatestGitHubRelease()
+	latestVersion, err := latestGitHubReleaseFetcher()
 	if err != nil {
 		// Network error or API issue - don't fail, just warn
 		return DoctorCheck{
@@ -47,6 +49,18 @@ func CheckCLIVersion(cliVersion string) DoctorCheck {
 		Name:    "CLI Version",
 		Status:  StatusOK,
 		Message: fmt.Sprintf("%s (latest)", cliVersion),
+	}
+}
+
+// CheckCLIVersionLocalOnly reports the local CLI version without making
+// network calls. This is intended for machine-readable or other
+// non-interactive contexts where deterministic exit behavior matters more than
+// update discovery.
+func CheckCLIVersionLocalOnly(cliVersion string) DoctorCheck {
+	return DoctorCheck{
+		Name:    "CLI Version",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("%s (update check skipped in non-interactive mode)", cliVersion),
 	}
 }
 

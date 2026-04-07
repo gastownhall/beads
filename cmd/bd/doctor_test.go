@@ -138,6 +138,37 @@ func TestDoctorJSONOutput(t *testing.T) {
 	}
 }
 
+func TestRunDiagnostics_JSONSkipsNetworkUpdateChecks(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"sqlite"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prevJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = prevJSON })
+
+	result := runDiagnostics(tmpDir)
+
+	var versionMessage string
+	for _, check := range result.Checks {
+		if check.Name == "CLI Version" {
+			versionMessage = check.Message
+			break
+		}
+	}
+	if versionMessage == "" {
+		t.Fatal("CLI Version check not found")
+	}
+	if !strings.Contains(versionMessage, "skipped in non-interactive mode") {
+		t.Fatalf("CLI Version message = %q, want non-interactive skip notice", versionMessage)
+	}
+}
+
 func TestDetectHashBasedIDs(t *testing.T) {
 	t.Skip("Dolt schema always includes child_counters table, so DetectHashBasedIDs always returns true at heuristic 1; ID-pattern heuristics (2/3) cannot be tested in isolation with Dolt")
 }

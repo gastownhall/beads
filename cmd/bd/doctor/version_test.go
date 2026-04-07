@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,32 @@ func TestUpgradeCommandForPath(t *testing.T) {
 				t.Errorf("upgradeCommandForPath(%q)\n  got:  %q\n  want: %q", tt.execPath, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestCheckCLIVersionLocalOnly(t *testing.T) {
+	check := CheckCLIVersionLocalOnly("1.0.0")
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if !strings.Contains(check.Message, "skipped in non-interactive mode") {
+		t.Fatalf("Message = %q, want skip notice", check.Message)
+	}
+}
+
+func TestCheckCLIVersionUsesFetcher(t *testing.T) {
+	orig := latestGitHubReleaseFetcher
+	latestGitHubReleaseFetcher = func() (string, error) {
+		return "", errors.New("boom")
+	}
+	t.Cleanup(func() { latestGitHubReleaseFetcher = orig })
+
+	check := CheckCLIVersion("1.0.0")
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if !strings.Contains(check.Message, "unable to check for updates") {
+		t.Fatalf("Message = %q, want network fallback notice", check.Message)
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+var latestPyPIVersionFetcher = fetchLatestPyPIVersion
+
 // CheckClaude returns Claude integration verification as a DoctorCheck.
 // repoPath is the project root directory.
 func CheckClaude(repoPath string) DoctorCheck {
@@ -454,7 +456,7 @@ func CheckClaudePlugin() DoctorCheck {
 	}
 
 	// Query PyPI for latest MCP version
-	latestMCPVersion, err := fetchLatestPyPIVersion("beads-mcp")
+	latestMCPVersion, err := latestPyPIVersionFetcher("beads-mcp")
 	if err != nil {
 		// Network error - don't fail
 		return DoctorCheck{
@@ -486,6 +488,43 @@ func CheckClaudePlugin() DoctorCheck {
 		Name:    "Claude Plugin",
 		Status:  StatusOK,
 		Message: fmt.Sprintf("version %s", pluginVersion),
+	}
+}
+
+// CheckClaudePluginLocalOnly validates local Claude plugin presence/version
+// without contacting PyPI.
+func CheckClaudePluginLocalOnly() DoctorCheck {
+	if os.Getenv("CLAUDECODE") != "1" || !isClaudePresent() {
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusOK,
+			Message: "N/A (not running in Claude Code)",
+		}
+	}
+
+	pluginVersion, pluginInstalled, err := GetClaudePluginVersion()
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusWarning,
+			Message: "Unable to check plugin version",
+			Detail:  err.Error(),
+		}
+	}
+
+	if !pluginInstalled {
+		return DoctorCheck{
+			Name:    "Claude Plugin",
+			Status:  StatusWarning,
+			Message: "beads plugin not installed",
+			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/PLUGIN.md)",
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Claude Plugin",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("version %s (update check skipped in non-interactive mode)", pluginVersion),
 	}
 }
 
