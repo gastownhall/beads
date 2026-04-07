@@ -293,6 +293,43 @@ func TestScanForArtifacts_SkipsGitkeep(t *testing.T) {
 	}
 }
 
+func TestScanForArtifacts_SkipsGitInternalsButScansBeadsWorktrees(t *testing.T) {
+	dir := t.TempDir()
+
+	// A bogus .beads under .git internals should be ignored entirely.
+	ignoredBeads := filepath.Join(dir, ".git", "objects", "pack", ".beads")
+	if err := os.MkdirAll(ignoredBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ignoredBeads, "beads.db"), []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A worktree .beads under .git/beads-worktrees must still be scanned.
+	worktreeBeads := filepath.Join(dir, ".git", "beads-worktrees", "test", ".beads")
+	if err := os.MkdirAll(worktreeBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeBeads, "extra.txt"), []byte("cruft"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(report.SQLiteArtifacts) != 0 {
+		t.Fatalf("expected .git internals to be skipped, got %d sqlite findings", len(report.SQLiteArtifacts))
+	}
+	if len(report.CruftBeadsDirs) != 1 {
+		t.Fatalf("expected 1 worktree cruft finding, got %d", len(report.CruftBeadsDirs))
+	}
+	if got := report.CruftBeadsDirs[0].Path; got != worktreeBeads {
+		t.Fatalf("cruft finding path = %q, want %q", got, worktreeBeads)
+	}
+}
+
 // TestScanForArtifacts_NonEmptyInteractionsJSONL — JSONL artifact scanning removed (bd-9ni.2)
 func TestScanForArtifacts_NonEmptyInteractionsJSONL(t *testing.T) {
 	t.Skip("JSONL artifact scanning removed as part of JSONL removal (bd-9ni.2)")

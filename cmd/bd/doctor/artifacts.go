@@ -103,11 +103,10 @@ func ScanForArtifacts(rootPath string) (ArtifactReport, error) {
 			return nil // Skip directories we can't read
 		}
 
-		// Skip .git directories (but not .git/beads-worktrees)
 		base := filepath.Base(path)
 		if base == ".git" && info.IsDir() {
-			// Allow descent into .git to find beads-worktrees
-			return nil
+			scanGitWorktreeArtifacts(path, &report)
+			return filepath.SkipDir
 		}
 
 		// Skip node_modules and similar
@@ -145,6 +144,28 @@ func ScanForArtifacts(rootPath string) (ArtifactReport, error) {
 	}
 
 	return report, nil
+}
+
+// scanGitWorktreeArtifacts scans the git-managed worktree area only.
+// This avoids traversing the entire .git directory tree, which can be large and
+// is unrelated to classic beads artifact cleanup.
+func scanGitWorktreeArtifacts(gitDir string, report *ArtifactReport) {
+	worktreesDir := filepath.Join(gitDir, "beads-worktrees")
+	info, err := os.Stat(worktreesDir)
+	if err != nil || !info.IsDir() {
+		return
+	}
+
+	_ = filepath.Walk(worktreesDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() || filepath.Base(path) != ".beads" {
+			return nil
+		}
+		scanBeadsDir(path, report)
+		return filepath.SkipDir
+	})
 }
 
 // scanBeadsDir checks a single .beads directory for artifacts.
