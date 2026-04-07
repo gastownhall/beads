@@ -460,8 +460,8 @@ func bondMolProto(ctx context.Context, s storage.DoltStorage, mol, proto *types.
 // wouldCreateCycle checks whether adding an edge (newDepID depends on newDependsOnID)
 // would create a cycle in the dependency graph. It does a BFS from newDependsOnID
 // following "depends on" edges; if newDepID is reachable, a cycle would be formed.
-// Returns (hasCycle, cyclePath, error) where cyclePath shows the chain if found.
-func wouldCreateCycle(ctx context.Context, s storage.DoltStorage, newDepID, newDependsOnID string) (bool, []string, error) {
+// Returns (hasCycle, cyclePath) where cyclePath shows the chain if found.
+func wouldCreateCycle(ctx context.Context, s storage.DoltStorage, newDepID, newDependsOnID string) (bool, []string) {
 	visited := map[string]bool{newDependsOnID: true}
 	// parent tracks how we reached each node, for path reconstruction.
 	parent := map[string]string{newDependsOnID: ""}
@@ -490,7 +490,7 @@ func wouldCreateCycle(ctx context.Context, s storage.DoltStorage, newDepID, newD
 				}
 				// Append newDepID again to show the cycle closing.
 				path = append(path, newDepID)
-				return true, path, nil
+				return true, path
 			}
 			if !visited[next] {
 				visited[next] = true
@@ -499,7 +499,7 @@ func wouldCreateCycle(ctx context.Context, s storage.DoltStorage, newDepID, newD
 			}
 		}
 	}
-	return false, nil, nil
+	return false, nil
 }
 
 // bondMolMol bonds two molecules together.
@@ -508,16 +508,13 @@ func bondMolMol(ctx context.Context, s storage.DoltStorage, molA, molB *types.Is
 	// The bond creates: molB depends on molA (IssueID=molB.ID, DependsOnID=molA.ID).
 	// A cycle exists if molA already transitively depends on molB, because then
 	// adding molB→molA would close the loop: molA→...→molB→molA.
-	hasCycle, cyclePath, err := wouldCreateCycle(ctx, s, molB.ID, molA.ID)
-	if err != nil {
-		return nil, fmt.Errorf("checking for dependency cycles: %w", err)
-	}
+	hasCycle, cyclePath := wouldCreateCycle(ctx, s, molB.ID, molA.ID)
 	if hasCycle {
 		return nil, fmt.Errorf("cannot bond %s → %s: would create a transitive dependency cycle: %s",
 			molA.ID, molB.ID, strings.Join(cyclePath, " → "))
 	}
 
-	err = transact(ctx, s, fmt.Sprintf("bd: bond molecules %s + %s", molA.ID, molB.ID), func(tx storage.Transaction) error {
+	err := transact(ctx, s, fmt.Sprintf("bd: bond molecules %s + %s", molA.ID, molB.ID), func(tx storage.Transaction) error {
 		// Add dependency: B links to A
 		// Sequential: use blocks (B runs after A completes)
 		// Conditional: use conditional-blocks (B runs only if A fails)

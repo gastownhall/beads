@@ -34,10 +34,7 @@ func TestWouldCreateCycle(t *testing.T) {
 
 	t.Run("no_cycle_no_deps", func(t *testing.T) {
 		// No dependencies exist, so no cycle possible.
-		hasCycle, _, err := wouldCreateCycle(ctx, s, "cycle-b", "cycle-a")
-		if err != nil {
-			t.Fatal(err)
-		}
+		hasCycle, _ := wouldCreateCycle(ctx, s, "cycle-b", "cycle-a")
 		if hasCycle {
 			t.Error("expected no cycle when no dependencies exist")
 		}
@@ -56,10 +53,7 @@ func TestWouldCreateCycle(t *testing.T) {
 		// B has no deps, so BFS from B won't find A... wait.
 		// Actually the proposed edge is B depends on A. So newDepID=B, newDependsOnID=A.
 		// BFS from A: A depends on B, so we visit B. B == newDepID? Yes. Cycle!
-		hasCycle, path, err := wouldCreateCycle(ctx, s, "cycle-b", "cycle-a")
-		if err != nil {
-			t.Fatal(err)
-		}
+		hasCycle, path := wouldCreateCycle(ctx, s, "cycle-b", "cycle-a")
 		if !hasCycle {
 			t.Fatal("expected cycle: A -> B -> A")
 		}
@@ -71,10 +65,7 @@ func TestWouldCreateCycle(t *testing.T) {
 
 	t.Run("no_cycle_different_direction", func(t *testing.T) {
 		// A depends on B. Adding A depends on C is fine (no cycle).
-		hasCycle, _, err := wouldCreateCycle(ctx, s, "cycle-a", "cycle-c")
-		if err != nil {
-			t.Fatal(err)
-		}
+		hasCycle, _ := wouldCreateCycle(ctx, s, "cycle-a", "cycle-c")
 		if hasCycle {
 			t.Error("expected no cycle for unrelated dependency")
 		}
@@ -90,10 +81,7 @@ func TestWouldCreateCycle(t *testing.T) {
 	t.Run("transitive_cycle_A_B_C", func(t *testing.T) {
 		// Chain: A -> B -> C. Adding C depends on A would create: C -> A -> B -> C.
 		// wouldCreateCycle(newDepID=C, newDependsOnID=A): BFS from A finds B, then C. C == newDepID. Cycle!
-		hasCycle, path, err := wouldCreateCycle(ctx, s, "cycle-c", "cycle-a")
-		if err != nil {
-			t.Fatal(err)
-		}
+		hasCycle, path := wouldCreateCycle(ctx, s, "cycle-c", "cycle-a")
 		if !hasCycle {
 			t.Fatal("expected transitive cycle: A -> B -> C -> A")
 		}
@@ -106,10 +94,7 @@ func TestWouldCreateCycle(t *testing.T) {
 
 	t.Run("no_cycle_isolated_node", func(t *testing.T) {
 		// D is completely isolated. Adding D depends on A should not create a cycle.
-		hasCycle, _, err := wouldCreateCycle(ctx, s, "cycle-d", "cycle-a")
-		if err != nil {
-			t.Fatal(err)
-		}
+		hasCycle, _ := wouldCreateCycle(ctx, s, "cycle-d", "cycle-a")
 		if hasCycle {
 			t.Error("expected no cycle with isolated node as newDepID")
 		}
@@ -123,9 +108,6 @@ func TestWouldCreateCycle(t *testing.T) {
 		// unless there's already a cycle. This is actually correct behavior — the storage layer
 		// should prevent self-referential deps, or we check explicitly.
 		// For now just verify it doesn't panic or error.
-		_, _, err := wouldCreateCycle(ctx, s, "cycle-a", "cycle-a")
-		if err != nil {
-			t.Fatal(err)
-		}
+		wouldCreateCycle(ctx, s, "cycle-a", "cycle-a")
 	})
 }
