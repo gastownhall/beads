@@ -16,6 +16,7 @@ func TestIsRemoteURL(t *testing.T) {
 		{"http://localhost:50051/mydb", true},
 		{"s3://my-bucket/beads", true},
 		{"gs://my-bucket/beads", true},
+		{"az://account.blob.core.windows.net/container/beads", true},
 		{"file:///tmp/dolt-remote", true},
 		{"ssh://git@github.com/org/repo", true},
 		{"git+ssh://git@github.com/org/repo", true},

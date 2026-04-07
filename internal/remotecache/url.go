@@ -12,6 +12,7 @@ var remoteSchemes = []string{
 	"dolthub://",
 	"gs://",
 	"s3://",
+	"az://",
 	"file://",
 	"https://",
 	"http://",
@@ -25,7 +26,7 @@ var gitSSHPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+@[a-zA-Z0-9][a-zA-Z0-9._
 
 // IsRemoteURL returns true if s looks like a dolt remote URL rather than
 // a local filesystem path. Recognized schemes: dolthub://, https://, http://,
-// s3://, gs://, file://, ssh://, git+ssh://, git+https://, and SCP-style
+// s3://, gs://, az://, file://, ssh://, git+ssh://, git+https://, and SCP-style
 // git@host:path.
 func IsRemoteURL(s string) bool {
 	for _, scheme := range remoteSchemes {

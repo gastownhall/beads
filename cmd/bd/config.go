@@ -406,7 +406,7 @@ var configValidateCmd = &cobra.Command{
 Checks:
   - federation.sovereignty is valid (T1, T2, T3, T4, or empty)
   - federation.remote is set for Dolt sync
-  - Remote URL format is valid (dolthub://, gs://, s3://, file://)
+  - Remote URL format is valid (dolthub://, gs://, s3://, az://, file://)
   - routing.mode is valid (auto, maintainer, contributor, explicit)
 
 Examples:
@@ -499,7 +499,7 @@ func validateSyncConfig(repoPath string) []string {
 	// Validate remote URL format
 	if federationRemote != "" {
 		if !isValidRemoteURL(federationRemote) {
-			issues = append(issues, fmt.Sprintf("federation.remote: %q is not a valid remote URL (expected dolthub://, gs://, s3://, file://, or standard git URL)", federationRemote))
+			issues = append(issues, fmt.Sprintf("federation.remote: %q is not a valid remote URL (expected dolthub://, gs://, s3://, az://, file://, or standard git URL)", federationRemote))
 		}
 	}
 

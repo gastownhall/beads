@@ -222,6 +222,7 @@ uncommitted changes in its working set).`,
 					fmt.Fprintln(os.Stderr, "Supported remote URLs:")
 					fmt.Fprintln(os.Stderr, "  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
 					fmt.Fprintln(os.Stderr, "  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
+					fmt.Fprintln(os.Stderr, "  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("push --force")
 				}
@@ -244,6 +245,7 @@ uncommitted changes in its working set).`,
 					fmt.Fprintln(os.Stderr, "Supported remote URLs:")
 					fmt.Fprintln(os.Stderr, "  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
 					fmt.Fprintln(os.Stderr, "  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
+					fmt.Fprintln(os.Stderr, "  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("push")
 				}
