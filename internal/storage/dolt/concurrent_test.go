@@ -896,6 +896,43 @@ func TestConcurrentCommentAndCloseWithoutCallerRetry(t *testing.T) {
 	}
 }
 
+func TestServerWriteLockReleasedAfterWrite(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "lock-release",
+		Title:       "Lock release",
+		Description: "verify write lock is not leaked",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+
+	var locked int
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 0)", store.serverWriteLockName()).Scan(&locked); err != nil {
+		t.Fatalf("GET_LOCK: %v", err)
+	}
+	if locked != 1 {
+		t.Fatalf("expected GET_LOCK to succeed after write, got %d", locked)
+	}
+	if _, err := conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", store.serverWriteLockName()); err != nil {
+		t.Fatalf("RELEASE_LOCK: %v", err)
+	}
+}
+
 // =============================================================================
 // Test: Serialization Conflict Retry
 // 10 goroutines all add a label to the SAME issue concurrently, forcing Dolt

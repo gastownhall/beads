@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestIsRetryableError(t *testing.T) {
@@ -178,6 +180,86 @@ func TestWithRetry_NonRetryableError(t *testing.T) {
 
 	if err == nil {
 		t.Error("expected error, got nil")
+	}
+	if callCount != 1 {
+		t.Errorf("expected 1 call for non-retryable error, got %d", callCount)
+	}
+}
+
+func TestIsRetryableWriteError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "database is locked",
+			err:      errors.New("database is locked"),
+			expected: true,
+		},
+		{
+			name:     "serialization error",
+			err:      &mysql.MySQLError{Number: 1213, Message: "deadlock found when trying to get lock"},
+			expected: true,
+		},
+		{
+			name:     "database is read only",
+			err:      errors.New("cannot update manifest: database is read only"),
+			expected: true,
+		},
+		{
+			name:     "write lock timeout",
+			err:      errors.New("failed to acquire write lock: timeout after 2s"),
+			expected: true,
+		},
+		{
+			name:     "syntax error",
+			err:      errors.New("syntax error in SQL"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRetryableWriteError(tt.err)
+			if got != tt.expected {
+				t.Errorf("isRetryableWriteError(%v) = %v, want %v", tt.err, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestWithWriteRetry_RetryableError(t *testing.T) {
+	store := &DoltStore{}
+
+	callCount := 0
+	err := store.withWriteRetry(context.Background(), func() error {
+		callCount++
+		if callCount < 3 {
+			return errors.New("database is locked")
+		}
+		return nil
+	})
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if callCount != 3 {
+		t.Errorf("expected 3 calls (2 retries + success), got %d", callCount)
+	}
+}
+
+func TestWithWriteRetry_NonRetryableError(t *testing.T) {
+	store := &DoltStore{}
+
+	callCount := 0
+	err := store.withWriteRetry(context.Background(), func() error {
+		callCount++
+		return errors.New("validation failed")
+	})
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
 	}
 	if callCount != 1 {
 		t.Errorf("expected 1 call for non-retryable error, got %d", callCount)
