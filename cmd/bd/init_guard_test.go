@@ -131,7 +131,7 @@ func TestInitGuardDBCheck_ServerUnreachable(t *testing.T) {
 	// FR-030: When server is unreachable, should return Reachable=false
 	// so caller falls through to existing error path without panic.
 
-	result := checkDatabaseOnServer("127.0.0.1", 1, "root", "", "nonexistent_db")
+	result := checkDatabaseOnServer("127.0.0.1", 1, "root", "", "nonexistent_db", false)
 	if result.Reachable {
 		t.Fatal("expected Reachable=false for connection refused")
 	}

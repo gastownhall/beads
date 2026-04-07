@@ -312,7 +312,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			user := cfg.GetDoltServerUser()
 			password := cfg.GetDoltServerPassword()
 			dbName := cfg.GetDoltDatabase()
-			result := checkFreshCloneDB(host, port, user, password, dbName)
+			result := checkFreshCloneDB(host, port, user, password, dbName, cfg.GetDoltServerTLS())
 			if result.Reachable {
 				syncGitRemote := config.GetStringFromDir(beadsDir, "sync.git-remote")
 				return freshCloneServerResult(result.Exists, dbName, host, port, syncGitRemote)

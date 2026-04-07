@@ -98,6 +98,7 @@ func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 		User:     user,
 		Password: password,
 		Database: database,
+		TLS:      cfg.GetDoltServerTLS(),
 	}.String()
 	return sql.Open("mysql", connStr)
 }

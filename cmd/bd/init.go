@@ -1277,7 +1277,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				password := cfg.GetDoltServerPassword()
 				user := cfg.GetDoltServerUser()
 
-				result := checkDatabaseOnServer(host, port, user, password, dbName)
+				result := checkDatabaseOnServer(host, port, user, password, dbName, cfg.GetDoltServerTLS())
 				if result.Reachable && !result.Exists && result.Err == nil {
 					// Server is up but DB doesn't exist. Since we also know
 					// doltDirExists==false, this is a fresh clone — there's no

@@ -24,12 +24,13 @@ type freshCloneDBCheck struct {
 // whether the named database exists via SHOW DATABASES. The connection is
 // closed before returning. Returns Reachable=false when the server cannot be
 // reached, so the caller can skip the server-mode check (FR-030).
-func checkFreshCloneDB(host string, port int, user, password, dbName string) freshCloneDBCheck {
+func checkFreshCloneDB(host string, port int, user, password, dbName string, tls bool) freshCloneDBCheck {
 	dsn := doltutil.ServerDSN{
 		Host:     host,
 		Port:     port,
 		User:     user,
 		Password: password,
+		TLS:      tls,
 	}.String()
 
 	db, err := sql.Open("mysql", dsn)

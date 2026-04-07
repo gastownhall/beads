@@ -60,6 +60,7 @@ func runCheckHealth(path string) {
 		User:     cfg.GetDoltServerUser(),
 		Database: database,
 		Timeout:  2 * time.Second,
+		TLS:      cfg.GetDoltServerTLS(),
 	}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err == nil {

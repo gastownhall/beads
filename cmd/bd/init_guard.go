@@ -28,12 +28,13 @@ type initGuardDBCheck struct {
 //
 // Returns Reachable=false when the server cannot be reached (FR-030), so the
 // caller can fall through to existing "already initialized" behavior.
-func checkDatabaseOnServer(host string, port int, user, password, dbName string) initGuardDBCheck {
+func checkDatabaseOnServer(host string, port int, user, password, dbName string, tls bool) initGuardDBCheck {
 	dsn := doltutil.ServerDSN{
 		Host:     host,
 		Port:     port,
 		User:     user,
 		Password: password,
+		TLS:      tls,
 	}.String()
 
 	db, err := sql.Open("mysql", dsn)

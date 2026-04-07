@@ -301,6 +301,7 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 		Port:     port,
 		User:     user,
 		Password: password,
+		TLS:      cfg.GetDoltServerTLS(),
 	}.String()
 
 	db, err := sql.Open("mysql", connStr)

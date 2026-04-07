@@ -48,6 +48,7 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 		User:     user,
 		Password: password,
 		Database: database,
+		TLS:      cfg.GetDoltServerTLS(),
 	}.String()
 
 	db, err := sql.Open("mysql", connStr)

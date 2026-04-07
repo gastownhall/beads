@@ -40,6 +40,12 @@ func (d ServerDSN) String() string {
 	}
 	if d.TLS {
 		cfg.TLSConfig = "true"
+	} else {
+		// go-sql-driver/mysql v1.8+ defaults to tls=preferred when TLSConfig
+		// is empty. Dolt servers without TLS reject preferred-mode negotiation
+		// with "TLS requested but server does not support TLS". Explicitly
+		// disable TLS so connections work against non-TLS Dolt instances.
+		cfg.TLSConfig = "false"
 	}
 
 	return cfg.FormatDSN()
