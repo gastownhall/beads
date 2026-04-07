@@ -310,6 +310,21 @@ func GetValueSource(key string) ConfigSource {
 	return SourceDefault
 }
 
+// EnvVarName returns the environment variable name that would override the given
+// config key, if one is set. Returns the BD_ or BEADS_ prefixed name, or empty
+// string if no env var is set for this key.
+func EnvVarName(key string) string {
+	envKey := "BD_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
+	if _, ok := os.LookupEnv(envKey); ok {
+		return envKey
+	}
+	beadsEnvKey := "BEADS_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
+	if _, ok := os.LookupEnv(beadsEnvKey); ok {
+		return beadsEnvKey
+	}
+	return ""
+}
+
 // CheckOverrides checks for configuration overrides and returns a list of detected overrides.
 // This is useful for informing users when env vars or flags override config file values.
 // flagOverrides is a map of key -> (flagValue, flagWasSet) for flags that were explicitly set.
@@ -562,6 +577,15 @@ func AllSettings() map[string]interface{} {
 		return map[string]interface{}{}
 	}
 	return v.AllSettings()
+}
+
+// AllKeys returns all keys in the viper registry (defaults + config file + env).
+// Keys are returned in lowercase dot-notation (e.g., "federation.remote").
+func AllKeys() []string {
+	if v == nil {
+		return nil
+	}
+	return v.AllKeys()
 }
 
 // ConfigFileUsed returns the path to the config file that was loaded.
