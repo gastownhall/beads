@@ -27,9 +27,9 @@ type DriftItem struct {
 
 const (
 	driftStatusOK      = "ok"
-	driftStatusDrift    = "drift"
-	driftStatusInfo     = "info"
-	driftStatusSkipped  = "skipped"
+	driftStatusDrift   = "drift"
+	driftStatusInfo    = "info"
+	driftStatusSkipped = "skipped"
 )
 
 var configDriftCmd = &cobra.Command{
