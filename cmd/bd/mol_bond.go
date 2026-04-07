@@ -457,22 +457,64 @@ func bondMolProto(ctx context.Context, s storage.DoltStorage, mol, proto *types.
 	return bondProtoMol(ctx, s, proto, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
 }
 
-// bondMolMol bonds two molecules together.
-// It checks for existing inverse dependencies to prevent creating direct cycles (GH#2719).
-func bondMolMol(ctx context.Context, s storage.DoltStorage, molA, molB *types.Issue, bondType, actorName string) (*BondResult, error) {
-	// Check for existing dependency in the inverse direction (GH#2719).
-	// If A already depends on B, creating B→A would form a direct cycle.
-	// Note: this only detects direct A⇆B cycles, not transitive ones (A→B→C→A).
-	existingDeps, err := s.GetDependencyRecords(ctx, molA.ID)
-	if err == nil {
-		for _, dep := range existingDeps {
-			if dep.DependsOnID == molB.ID {
-				return nil, fmt.Errorf("cannot bond %s → %s: inverse dependency already exists (%s depends on %s), which would create a cycle", molA.ID, molB.ID, molA.ID, molB.ID)
+// wouldCreateCycle checks whether adding an edge (newDepID depends on newDependsOnID)
+// would create a cycle in the dependency graph. It does a BFS from newDependsOnID
+// following "depends on" edges; if newDepID is reachable, a cycle would be formed.
+// Returns (hasCycle, cyclePath) where cyclePath shows the chain if found.
+func wouldCreateCycle(ctx context.Context, s storage.DoltStorage, newDepID, newDependsOnID string) (bool, []string) {
+	visited := map[string]bool{newDependsOnID: true}
+	// parent tracks how we reached each node, for path reconstruction.
+	parent := map[string]string{newDependsOnID: ""}
+	queue := []string{newDependsOnID}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		deps, err := s.GetDependencyRecords(ctx, current)
+		if err != nil {
+			// If we can't query deps for a node, skip it rather than failing.
+			continue
+		}
+		for _, dep := range deps {
+			next := dep.DependsOnID
+			if next == newDepID {
+				// Found the cycle. Reconstruct the path.
+				path := []string{newDepID}
+				for node := current; node != ""; node = parent[node] {
+					path = append(path, node)
+				}
+				// Reverse to get forward direction.
+				for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
+					path[i], path[j] = path[j], path[i]
+				}
+				// Append newDepID again to show the cycle closing.
+				path = append(path, newDepID)
+				return true, path
+			}
+			if !visited[next] {
+				visited[next] = true
+				parent[next] = current
+				queue = append(queue, next)
 			}
 		}
 	}
+	return false, nil
+}
 
-	err = transact(ctx, s, fmt.Sprintf("bd: bond molecules %s + %s", molA.ID, molB.ID), func(tx storage.Transaction) error {
+// bondMolMol bonds two molecules together.
+// It checks for transitive cycles in the dependency graph (GH#2719).
+func bondMolMol(ctx context.Context, s storage.DoltStorage, molA, molB *types.Issue, bondType, actorName string) (*BondResult, error) {
+	// The bond creates: molB depends on molA (IssueID=molB.ID, DependsOnID=molA.ID).
+	// A cycle exists if molA already transitively depends on molB, because then
+	// adding molB→molA would close the loop: molA→...→molB→molA.
+	hasCycle, cyclePath := wouldCreateCycle(ctx, s, molB.ID, molA.ID)
+	if hasCycle {
+		return nil, fmt.Errorf("cannot bond %s → %s: would create a transitive dependency cycle: %s",
+			molA.ID, molB.ID, strings.Join(cyclePath, " → "))
+	}
+
+	err := transact(ctx, s, fmt.Sprintf("bd: bond molecules %s + %s", molA.ID, molB.ID), func(tx storage.Transaction) error {
 		// Add dependency: B links to A
 		// Sequential: use blocks (B runs after A completes)
 		// Conditional: use conditional-blocks (B runs only if A fails)
