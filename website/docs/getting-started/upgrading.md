@@ -104,6 +104,88 @@ bd migrate
 bd migrate --cleanup --yes
 ```
 
+## Cross-era Upgrades
+
+If you're upgrading from a much older version of bd, your project may use a different storage backend. bd has gone through several storage eras:
+
+| Era | Versions | Storage | 
+|---|---|---|
+| SQLite | v0.30–v0.50 | `.beads/beads.db` |
+| Dolt server | v0.50–v0.58 | `.beads/dolt/` (external server) |
+| Embedded Dolt (old) | v0.59–v0.63.2 | `.beads/dolt/` (in-process) |
+| Embedded Dolt (current) | v0.63.3+ | `.beads/embeddeddolt/` |
+
+### From v0.63.3+ (current era)
+
+No special steps needed. Just upgrade the binary and run:
+
+```bash
+bd migrate
+```
+
+### From v0.59–v0.63.2 (old embedded)
+
+Direct upgrade works automatically:
+
+```bash
+# Just use the new binary — it handles the conversion
+bd list
+```
+
+### From v0.50–v0.58 (Dolt server era)
+
+The old binary used an external Dolt SQL server. The new binary uses an embedded engine.
+
+```bash
+# 1. Export your data while the old binary still works
+bd list --json -n 0 --all > .beads/issues.jsonl
+
+# 2. Stop the Dolt server
+dolt sql-server --stop  # or kill the process
+
+# 3. Remove stale server metadata and old storage directories
+rm -f .beads/metadata.json .beads/config.json
+rm -rf .beads/dolt .beads/embeddeddolt
+
+# 4. Initialize with the new binary
+bd init --from-jsonl --quiet
+
+# 5. Verify
+bd list --all
+```
+
+### From v0.30–v0.50 (SQLite era)
+
+The old binary stored data in SQLite. The new binary uses Dolt.
+
+**Recommended: use the migration script** (requires `sqlite3` and `jq`):
+
+```bash
+# Download the script from the beads repo
+curl -fsSLO https://raw.githubusercontent.com/steveyegge/beads/main/scripts/migrate-sqlite-to-current.sh
+chmod +x migrate-sqlite-to-current.sh
+
+# Run it in your project directory
+./migrate-sqlite-to-current.sh
+```
+
+The script exports issues, dependencies, and labels from SQLite, handles type normalization, and imports everything into the new Dolt backend.
+
+**Alternative: manual export with the old binary.** Old binaries are always available on [GitHub Releases](https://github.com/steveyegge/beads/releases). Download the version that matches your project, then:
+
+```bash
+# 1. Export with the old binary
+./bd-old list --json -n 0 --all > .beads/issues.jsonl
+
+# 2. Import with the current binary
+bd init --from-jsonl --quiet
+
+# 3. Verify
+bd list --all
+```
+
+> **Note:** The manual export preserves issue content but not dependencies or labels. Use the migration script for a more complete transfer.
+
 ## Troubleshooting Upgrades
 
 ### Hooks out of date
