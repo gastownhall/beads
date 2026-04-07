@@ -282,34 +282,53 @@ var configListCmd = &cobra.Command{
 // This addresses the confusion when `bd config list` shows one value but the effective
 // value used by commands is different due to higher-priority config sources.
 func showConfigYAMLOverrides(dbConfig map[string]string) {
-	var warnings []string
+	var envWarnings []string
 
-	// Check each DB config key for env var overrides
+	// Check each DB config key for env var overrides using config.EnvVarName
+	// which handles both BD_* and legacy BEADS_* prefixes with LookupEnv.
 	for key, dbValue := range dbConfig {
-		envKey := "BD_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
-		if envValue := os.Getenv(envKey); envValue != "" && envValue != dbValue {
-			warnings = append(warnings, fmt.Sprintf("  %s: DB has %q, but env %s=%q takes precedence", key, dbValue, envKey, envValue))
+		if envName := config.EnvVarName(key); envName != "" {
+			envValue := os.Getenv(envName)
+			if envValue != dbValue {
+				envWarnings = append(envWarnings, fmt.Sprintf("  %s: DB has %q, but env %s=%q takes precedence", key, dbValue, envName, envValue))
+			}
 		}
 	}
 
-	// Check for yaml-only keys set in config.yaml that aren't visible in DB output
-	yamlKeys := []string{
-		"no-db", "json", "actor", "identity",
-		"routing.mode", "routing.default", "routing.maintainer", "routing.contributor",
-		"sync.git-remote", "no-push", "no-git-ops",
-		"git.author", "git.no-gpg-sign",
-		"create.require-description",
-		"validation.on-create", "validation.on-close", "validation.on-sync",
-		"hierarchy.max-depth",
-		"backup.enabled", "backup.interval", "backup.git-push", "backup.git-repo",
-		"dolt.idle-timeout", "dolt.shared-server",
-	}
+	// Discover yaml-only keys dynamically via AllKeys() instead of a hardcoded list.
+	// This stays in sync as new yaml-only keys are added to the config system.
+	allKeys := config.AllKeys()
+	sort.Strings(allKeys)
 
 	var yamlOverrides []string
-	for _, key := range yamlKeys {
-		val := config.GetYamlConfig(key)
-		if val != "" && config.GetValueSource(key) == config.SourceConfigFile {
+	for _, key := range allKeys {
+		// Skip keys already shown in the DB config section
+		if _, inDB := dbConfig[key]; inDB {
+			continue
+		}
+		// Only show yaml-only keys that are explicitly set in config.yaml
+		if !config.IsYamlOnlyKey(key) {
+			continue
+		}
+		if config.GetValueSource(key) != config.SourceConfigFile {
+			continue
+		}
+		val := config.GetString(key)
+		if val != "" {
 			yamlOverrides = append(yamlOverrides, fmt.Sprintf("  %s = %s", key, val))
+		}
+	}
+
+	// Also check yaml-only keys for env var overrides
+	for _, key := range allKeys {
+		if _, inDB := dbConfig[key]; inDB {
+			continue // already checked above
+		}
+		if envName := config.EnvVarName(key); envName != "" {
+			src := config.GetValueSource(key)
+			if src == config.SourceEnvVar {
+				envWarnings = append(envWarnings, fmt.Sprintf("  %s: env %s=%q overrides config", key, envName, os.Getenv(envName)))
+			}
 		}
 	}
 
@@ -320,13 +339,15 @@ func showConfigYAMLOverrides(dbConfig map[string]string) {
 		}
 	}
 
-	if len(warnings) > 0 {
-		sort.Strings(warnings)
+	if len(envWarnings) > 0 {
+		sort.Strings(envWarnings)
 		fmt.Println("\n⚠ Environment variable overrides detected:")
-		for _, w := range warnings {
+		for _, w := range envWarnings {
 			fmt.Println(w)
 		}
 	}
+
+	fmt.Println("\nTip: Run 'bd config show' for all effective config with provenance.")
 }
 
 var configUnsetCmd = &cobra.Command{
