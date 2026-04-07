@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -63,17 +62,6 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		ctx := rootCtx
-
-		// Block rename-prefix in worktrees (same guard as init.go:168-186)
-		if isGitRepo() && git.IsWorktree() {
-			mainRepoRoot, _ := git.GetMainRepoRoot()
-			fmt.Fprintf(os.Stderr, "Error: cannot run 'bd rename-prefix' from a git worktree\n\n")
-			fmt.Fprintf(os.Stderr, "Worktrees share the .beads database from the main repository.\n\n")
-			fmt.Fprintf(os.Stderr, "Run this command from the main repository instead:\n")
-			fmt.Fprintf(os.Stderr, "  cd %s\n", mainRepoRoot)
-			fmt.Fprintf(os.Stderr, "  bd rename-prefix %s\n", newPrefix)
-			os.Exit(1)
-		}
 
 		// rename-prefix requires direct database access
 		if store == nil {
