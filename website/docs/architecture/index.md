@@ -14,7 +14,7 @@ Beads uses **Dolt** as its sole storage backend -- a version-controlled SQL data
 
 By default, Dolt runs in **embedded mode** (in-process, no separate server). For multi-writer
 setups (multiple agents, orchestrator), switch to **server mode** which connects to a
-running `dolt sql-server`. See [DOLT.md](/docs/DOLT.md) for details.
+running `dolt sql-server`. See the [Dolt Server Mode](#dolt-server-mode) section below for details.
 
 ```mermaid
 flowchart TD

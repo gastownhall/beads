@@ -71,6 +71,6 @@ Declarative workflow templates:
 ## Navigation
 
 - [Issues & Dependencies](/core-concepts/issues)
-- [Dolt Server Mode](/core-concepts/dolt-server)
-- [Dolt Sync](/core-concepts/dolt-sync)
+- [Dolt Server Mode](#dolt-server-mode)
+- [Dolt Sync](#dolt-sync)
 - [Hash-based IDs](/core-concepts/hash-ids)
