@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -54,8 +55,8 @@ func runReset(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Check if .beads directory exists
-	beadsDir := ".beads"
+	// Resolve .beads directory (worktree-aware)
+	beadsDir := beads.FindBeadsDir()
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
