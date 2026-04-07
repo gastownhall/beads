@@ -134,6 +134,9 @@ var configSetCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
 			os.Exit(1)
 		}
+		if _, err := store.CommitPending(ctx, getActor()); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to commit config change: %v\n", err)
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]string{
@@ -381,6 +384,9 @@ var configUnsetCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Error deleting config: %v\n", err)
 			os.Exit(1)
 		}
+		if _, err := store.CommitPending(ctx, getActor()); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to commit config change: %v\n", err)
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]string{
@@ -609,6 +615,9 @@ Examples:
 					fmt.Fprintf(os.Stderr, "Error setting config %s: %v\n", p.key, err)
 					os.Exit(1)
 				}
+			}
+			if _, err := store.CommitPending(ctx, getActor()); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to commit config changes: %v\n", err)
 			}
 		}
 
