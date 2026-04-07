@@ -11,7 +11,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -522,10 +524,18 @@ func findBeadsRepoRoot(startPath string) string {
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
-			return ""
+			break
 		}
 		path = parent
 	}
+
+	if isGitRepo() && git.IsWorktree() {
+		if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
+			return filepath.Dir(fallbackDir)
+		}
+	}
+
+	return ""
 }
 
 var configSetManyCmd = &cobra.Command{
