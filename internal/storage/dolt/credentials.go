@@ -521,8 +521,8 @@ func (s *DoltStore) shouldUseCLIForPeerCredentials(_ context.Context, peer strin
 //  2. Server is in server mode (not embedded)
 //  3. Local CLI directory is available
 //  4. The remote is configured in the local CLI directory
-func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context) bool {
-	if s.remoteUser == "" && s.remotePassword == "" {
+func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context, remote string, creds *remoteCredentials) bool {
+	if creds.empty() {
 		return false // no credentials to pass
 	}
 	if !s.serverMode {
@@ -535,27 +535,50 @@ func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context) bool {
 	// Only route to CLI if the remote is configured locally.
 	// Shared server / external server modes may have CLIDir pointing
 	// to wrong directory — FindCLIRemote returns "" in those cases.
-	return doltutil.FindCLIRemote(cliDir, s.remote) != ""
+	return doltutil.FindCLIRemote(cliDir, remote) != ""
 }
 
-// cloudAuthEnvPrefixes lists environment variable prefixes used by cloud
-// storage providers for authentication. When any of these are set and the
-// store is in server mode, push/pull must route through a CLI subprocess
-// so the dolt process inherits the current env vars. The SQL path
-// (CALL DOLT_PUSH/PULL) executes inside the dolt-sql-server, which only
-// has env vars from when it was started — not from the current shell.
-var cloudAuthEnvPrefixes = []string{
-	"AZURE_STORAGE_", // Azure Blob Storage (AZURE_STORAGE_ACCOUNT, AZURE_STORAGE_KEY, AZURE_STORAGE_SAS_TOKEN)
-	"AWS_",           // AWS S3 (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION)
-	"GOOGLE_",        // GCS (GOOGLE_APPLICATION_CREDENTIALS)
-	"GCS_",           // GCS alternate (GCS_CREDENTIALS_FILE)
-	"OCI_",           // Oracle Cloud Infrastructure
-	"DOLT_REMOTE_",   // Dolt-specific remote credentials
+// cloudAuthSchemeMap maps remote URL scheme prefixes to the environment
+// variable prefixes that provide credentials for that scheme. Only env vars
+// relevant to the remote's scheme are checked, preventing misrouting when
+// multiple remotes use different cloud providers (e.g., DoltHub + Azure).
+//
+// The CLI subprocess inherits the current process env, so these env vars
+// reach the dolt binary. The SQL server process may not have them if it was
+// started in a different context (GH#6).
+var cloudAuthSchemeMap = map[string][]string{
+	"az://":      {"AZURE_STORAGE_"},  // Azure Blob Storage
+	"s3://":      {"AWS_"},            // AWS S3
+	"gs://":      {"GOOGLE_", "GCS_"}, // Google Cloud Storage
+	"oci://":     {"OCI_"},            // Oracle Cloud Infrastructure
+	"dolthub://": {"DOLT_REMOTE_"},    // DoltHub
+	"https://":   {"DOLT_REMOTE_"},    // Hosted Dolt / DoltHub HTTPS
+	"http://":    {"DOLT_REMOTE_"},    // Hosted Dolt HTTP
+}
+
+// envPrefixesForRemoteURL returns the env var prefixes relevant to the
+// given remote URL based on its scheme. Returns nil for unrecognized schemes
+// (git-protocol remotes are handled by isGitProtocolRemote, not here).
+func envPrefixesForRemoteURL(url string) []string {
+	for scheme, prefixes := range cloudAuthSchemeMap {
+		if strings.HasPrefix(url, scheme) {
+			return prefixes
+		}
+	}
+	return nil
 }
 
 // shouldUseCLIForCloudAuth returns true when CLI subprocess routing should
-// be used for push/pull because cloud storage credentials are present in the
-// environment and the store is using an external dolt-sql-server.
+// be used for push/pull because cloud storage credentials relevant to this
+// specific remote are present in the environment and the store is using an
+// external dolt-sql-server.
+//
+// Unlike a global heuristic, this checks only the env var prefixes that
+// match the remote's URL scheme. An Azure env var (AZURE_STORAGE_ACCOUNT)
+// will trigger CLI routing for an az:// remote but NOT for a dolthub:// remote.
+//
+// The CLI remote URL is used for scheme detection because that is the URL
+// the CLI subprocess will actually use (SQL remotes may differ due to drift).
 //
 // When bd connects to an external dolt-sql-server (server mode), CALL
 // DOLT_PUSH/PULL executes inside the server process. That process only has
@@ -563,7 +586,7 @@ var cloudAuthEnvPrefixes = []string{
 // changed) after the server started, the SQL path silently fails to
 // authenticate. Routing through a CLI subprocess (dolt push/pull) ensures
 // the child process inherits the current environment (GH#6).
-func (s *DoltStore) shouldUseCLIForCloudAuth() bool {
+func (s *DoltStore) shouldUseCLIForCloudAuth(remote string) bool {
 	if !s.serverMode {
 		return false // embedded mode: env vars are in-process
 	}
@@ -571,11 +594,16 @@ func (s *DoltStore) shouldUseCLIForCloudAuth() bool {
 	if cliDir == "" {
 		return false
 	}
-	if doltutil.FindCLIRemote(cliDir, s.remote) == "" {
+	cliURL := doltutil.FindCLIRemote(cliDir, remote)
+	if cliURL == "" {
 		return false
 	}
+	prefixes := envPrefixesForRemoteURL(cliURL)
+	if len(prefixes) == 0 {
+		return false // unknown scheme — not a cloud remote
+	}
 	for _, e := range os.Environ() {
-		for _, prefix := range cloudAuthEnvPrefixes {
+		for _, prefix := range prefixes {
 			if strings.HasPrefix(e, prefix) {
 				return true
 			}

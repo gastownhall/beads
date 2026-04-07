@@ -195,7 +195,10 @@ For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
 variables for authentication.
 
 Use --force to overwrite remote changes (e.g., when the remote has
-uncommitted changes in its working set).`,
+uncommitted changes in its working set).
+
+Use --remote to push to a specific named remote instead of the default.
+The remote must already exist (see 'bd dolt remote add').`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
 		st := getStore()
@@ -204,6 +207,23 @@ uncommitted changes in its working set).`,
 			os.Exit(1)
 		}
 		force, _ := cmd.Flags().GetBool("force")
+		remote, _ := cmd.Flags().GetString("remote")
+		if remote != "" {
+			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
+			if err := st.PushRemote(ctx, remote, force); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				if isRemoteNotFoundErr(err) {
+					fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
+					fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")
+					fmt.Fprintln(os.Stderr, "Use 'bd dolt remote list' to see configured remotes.")
+				} else if isDivergedHistoryErr(err) {
+					printDivergedHistoryGuidance("push --force")
+				}
+				os.Exit(1)
+			}
+			fmt.Println("Push complete.")
+			return
+		}
 		fmt.Println("Pushing to Dolt remote...")
 		if force {
 			if err := st.ForcePush(ctx); err != nil {
@@ -263,13 +283,33 @@ var doltPullCmd = &cobra.Command{
 
 Requires a Dolt remote to be configured in the database directory.
 For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
-variables for authentication.`,
+variables for authentication.
+
+Use --remote to pull from a specific named remote instead of the default.
+The remote must already exist (see 'bd dolt remote add').`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
 			os.Exit(1)
+		}
+		remote, _ := cmd.Flags().GetString("remote")
+		if remote != "" {
+			fmt.Printf("Pulling from Dolt remote %q...\n", remote)
+			if err := st.PullRemote(ctx, remote); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				if isRemoteNotFoundErr(err) {
+					fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
+					fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")
+					fmt.Fprintln(os.Stderr, "Use 'bd dolt remote list' to see configured remotes.")
+				} else if isDivergedHistoryErr(err) {
+					printDivergedHistoryGuidance("pull")
+				}
+				os.Exit(1)
+			}
+			fmt.Println("Pull complete.")
+			return
 		}
 		fmt.Println("Pulling from Dolt remote...")
 		if err := st.Pull(ctx); err != nil {
@@ -1001,6 +1041,8 @@ func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
 	doltStopCmd.Flags().Bool("force", false, "Force stop the server")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
+	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
+	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltRemoteRemoveCmd.Flags().Bool("force", false, "Force remove even when SQL and CLI URLs conflict")

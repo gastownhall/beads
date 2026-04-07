@@ -221,6 +221,21 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 	})
 }
 
+func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if force {
+			return versioncontrolops.ForcePush(ctx, db, remote, s.branch)
+		}
+		return versioncontrolops.Push(ctx, db, remote, s.branch)
+	})
+}
+
+func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.Pull(ctx, db, remote, s.branch)
+	})
+}
+
 func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.Fetch(ctx, db, peer)
