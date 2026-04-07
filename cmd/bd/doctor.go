@@ -347,7 +347,8 @@ func runDiagnostics(path string) doctorResult {
 
 	// Auto-detect orchestrator mode: routes.jsonl is only created by orchestrator workspaces
 	if !doctorOrchestrator {
-		routesFile := filepath.Join(path, ".beads", "routes.jsonl")
+		resolvedBeadsDir := doctor.ResolveBeadsDirForRepo(path)
+		routesFile := filepath.Join(resolvedBeadsDir, "routes.jsonl")
 		if _, err := os.Stat(routesFile); err == nil {
 			doctorOrchestrator = true
 		}

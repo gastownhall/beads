@@ -69,8 +69,12 @@ func CheckGitHooks(cliVersion string) DoctorCheck {
 		}
 	}
 
-	// Get repo root for external manager detection
-	repoRoot := git.GetRepoRoot()
+	var repoRoot string
+	if hooksDir != "" {
+		repoRoot = filepath.Dir(filepath.Dir(hooksDir))
+	} else {
+		repoRoot = git.GetRepoRoot()
+	}
 
 	// Check for external hook managers (lefthook, husky, etc.)
 	externalManagers := fix.DetectExternalHookManagers(repoRoot)

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,7 +19,7 @@ import (
 // Silent on success, prints a hint if issues detected.
 // Respects hints.doctor config setting.
 func runCheckHealth(path string) {
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := doctor.ResolveBeadsDirForRepo(path)
 
 	// Check if .beads/ exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
