@@ -542,7 +542,7 @@ build_from_source() {
         cd beads
         log_info "Building binary..."
 
-        if CGO_ENABLED=1 go build -o bd ./cmd/bd; then
+        if CGO_ENABLED=1 go build -tags gms_pure_go -o bd ./cmd/bd; then
             if ! verify_binary_has_cgo "./bd" "source build"; then
                 cd - > /dev/null || cd "$HOME"
                 rm -rf "$tmp_dir"
