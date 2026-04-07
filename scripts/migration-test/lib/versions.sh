@@ -20,11 +20,12 @@ DIRECT_PATHS=(
 
 # Stepping-stone paths: version1,version2,...,versionN
 # Each version upgrades to the next, then finally to candidate.
-STEPPING_STONE_PATHS=(
-    "v0.49.6,v0.57.0"
-    "v0.49.6,v0.55.4,v0.63.3"
-    "v0.57.0,v0.63.3"
-)
+#
+# NOTE: Multi-hop paths through old releases are not a supported upgrade path.
+# Old binaries (v0.57.0, v0.55.4, v0.63.3) have inherent bugs that cannot be
+# patched retroactively. Users should always upgrade directly to the latest
+# release — the direct paths above cover all supported eras.
+STEPPING_STONE_PATHS=()
 
 # Semver comparison: returns 0 if $1 <= $2
 version_lte() {
