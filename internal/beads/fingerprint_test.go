@@ -330,6 +330,128 @@ func TestComputeRepoIDForPath_UsesTargetRepoOutsideCWD(t *testing.T) {
 	}
 }
 
+// TestComputeRepoID_WorktreeMatchesMainRepo verifies that ComputeRepoIDForPath
+// returns the same fingerprint from a worktree as from the main repo, even for
+// local repos without a remote (path-based fallback). GH#2867.
+func TestComputeRepoID_WorktreeMatchesMainRepo(t *testing.T) {
+	mainRepo := t.TempDir()
+
+	// Create main repo (no remote — forces path-based fingerprint)
+	initFingerprintGitRepo(t, mainRepo, "")
+	// Need at least one commit for worktree creation
+	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "init")
+	cmd.Dir = mainRepo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit failed: %v", err)
+	}
+
+	// Compute fingerprint from main repo
+	mainID, err := ComputeRepoIDForPath(mainRepo)
+	if err != nil {
+		t.Fatalf("ComputeRepoIDForPath(mainRepo) error: %v", err)
+	}
+
+	// Create a worktree
+	worktreeDir := t.TempDir()
+	cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-wt")
+	cmd.Dir = mainRepo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git worktree add failed: %v", err)
+	}
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd.Dir = mainRepo
+		_ = cmd.Run()
+	})
+
+	// Compute fingerprint from worktree — must match main repo
+	wtID, err := ComputeRepoIDForPath(worktreeDir)
+	if err != nil {
+		t.Fatalf("ComputeRepoIDForPath(worktree) error: %v", err)
+	}
+
+	if mainID != wtID {
+		t.Errorf("fingerprint mismatch: main=%s worktree=%s (GH#2867)", mainID, wtID)
+	}
+}
+
+// TestComputeRepoID_WorktreeWithRemoteMatchesMainRepo verifies fingerprint
+// stability across worktrees when a remote is configured.
+func TestComputeRepoID_WorktreeWithRemoteMatchesMainRepo(t *testing.T) {
+	mainRepo := t.TempDir()
+
+	initFingerprintGitRepo(t, mainRepo, "https://github.com/test/repo.git")
+	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "init")
+	cmd.Dir = mainRepo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit failed: %v", err)
+	}
+
+	mainID, err := ComputeRepoIDForPath(mainRepo)
+	if err != nil {
+		t.Fatalf("ComputeRepoIDForPath(mainRepo) error: %v", err)
+	}
+
+	worktreeDir := t.TempDir()
+	cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-wt-remote")
+	cmd.Dir = mainRepo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git worktree add failed: %v", err)
+	}
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd.Dir = mainRepo
+		_ = cmd.Run()
+	})
+
+	wtID, err := ComputeRepoIDForPath(worktreeDir)
+	if err != nil {
+		t.Fatalf("ComputeRepoIDForPath(worktree) error: %v", err)
+	}
+
+	if mainID != wtID {
+		t.Errorf("fingerprint mismatch with remote: main=%s worktree=%s", mainID, wtID)
+	}
+}
+
+// TestGetCloneID_WorktreeMatchesMainRepo verifies clone ID stability across worktrees.
+func TestGetCloneID_WorktreeMatchesMainRepo(t *testing.T) {
+	mainRepo := t.TempDir()
+
+	initFingerprintGitRepo(t, mainRepo, "")
+	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "init")
+	cmd.Dir = mainRepo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git commit failed: %v", err)
+	}
+
+	mainID, err := GetCloneIDForPath(mainRepo)
+	if err != nil {
+		t.Fatalf("GetCloneIDForPath(mainRepo) error: %v", err)
+	}
+
+	worktreeDir := t.TempDir()
+	cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-wt-clone")
+	cmd.Dir = mainRepo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git worktree add failed: %v", err)
+	}
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd.Dir = mainRepo
+		_ = cmd.Run()
+	})
+
+	wtID, err := GetCloneIDForPath(worktreeDir)
+	if err != nil {
+		t.Fatalf("GetCloneIDForPath(worktree) error: %v", err)
+	}
+
+	if mainID != wtID {
+		t.Errorf("clone ID mismatch: main=%s worktree=%s (GH#2867)", mainID, wtID)
+	}
+}
+
 func TestGetCloneIDForPath_UsesTargetRepoOutsideCWD(t *testing.T) {
 	repoA := t.TempDir()
 	repoB := t.TempDir()
