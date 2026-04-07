@@ -56,13 +56,12 @@ jobs:
           key: migration-test-${{ runner.os }}-${{ runner.arch }}
 
       - name: Build candidate
-        run: go build -o bd ./cmd/bd
+        run: go build -tags gms_pure_go -o bd ./cmd/bd
 
       - name: Run migration test harness
         env:
           CANDIDATE_BIN: ./bd
           GIT_CONFIG_NOSYSTEM: "1"
-          BEADS_TEST_MODE: "1"
         run: |
           ARGS=""
           if [ "${{ github.event.inputs.mode }}" = "direct-only" ]; then
