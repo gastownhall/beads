@@ -174,6 +174,20 @@ Monitor at: https://github.com/steveyegge/beads/actions
 
 The release will appear at: https://github.com/steveyegge/beads/releases
 
+### Documentation site (Docusaurus)
+
+The published docs at GitHub Pages are versioned. Unreleased edits live in `website/docs/` (**Next**); each release should add a snapshot:
+
+```bash
+cd website
+npm ci
+npm run docusaurus docs:version X.Y.Z
+```
+
+Then set `lastVersion` in `website/docusaurus.config.ts` to `X.Y.Z` so visitors default to the latest stable docs (not **Next**).
+
+Commit `website/versioned_docs/`, `website/versioned_sidebars/`, and `website/versions.json` with the release. The `scripts/generate-llms-full.sh` script pulls from the latest entry in `versions.json` so `llms-full.txt` stays aligned with that snapshot.
+
 ## Post-Release
 
 1. **Stop old Dolt servers**:

@@ -1,0 +1,89 @@
+---
+id: intro
+title: Introduction
+sidebar_position: 1
+slug: /
+---
+
+# Beads Documentation
+
+**Beads** (`bd`) is a Dolt-powered issue tracker designed for AI-supervised coding workflows.
+
+## Why Beads?
+
+Traditional issue trackers (Jira, GitHub Issues) weren't designed for AI agents. Beads was built from the ground up for:
+
+- **AI-native workflows** - Hash-based IDs prevent collisions when multiple agents work concurrently
+- **Dolt-backed storage** - Issues stored in a version-controlled SQL database, enabling collaboration via Dolt-native replication
+- **Dependency-aware execution** - `bd ready` shows only unblocked work
+- **Formula system** - Declarative templates for repeatable workflows
+- **Multi-agent coordination** - Routing, gates, and molecules for complex workflows
+
+## Quick Start
+
+```bash
+# Install via Homebrew (macOS/Linux)
+brew install beads
+
+# Or quick install (macOS/Linux/FreeBSD)
+curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+
+# Initialize in your project
+cd your-project
+bd init --quiet
+
+# Create your first issue
+bd create "Set up database" -p 1 -t task
+
+# See ready work
+bd ready
+```
+
+## Core Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Issues** | Work items with priorities, types, labels, and dependencies |
+| **Dependencies** | `blocks`, `parent-child`, `discovered-from`, `related` |
+| **Dolt Server** | Database server for multi-writer access and performance |
+| **Formulas** | Declarative workflow templates (TOML or JSON) |
+| **Molecules** | Work graphs with parent-child relationships |
+| **Gates** | Async coordination primitives (human, timer, GitHub) |
+
+## For AI Agents
+
+Beads is optimized for AI coding agents:
+
+```bash
+# Always use --json for programmatic access
+bd list --json
+bd show bd-42 --json
+
+# Track discovered work during implementation
+bd create "Found bug in auth" --description="Details..." \
+  --deps discovered-from:bd-100 --json
+
+# Push changes at end of session
+bd dolt push
+```
+
+See the [Claude Code integration](/integrations/claude-code) for detailed agent instructions.
+
+## Architecture
+
+```
+Dolt DB (.beads/dolt/, gitignored)
+    ↕ dolt commit
+Local Dolt history
+    ↕ dolt push/pull
+Remote Dolt repository (shared across machines)
+```
+
+The magic is automatic synchronization via Dolt's version-controlled database with built-in replication.
+
+## Next Steps
+
+- [Installation](/getting-started/installation) - Get bd installed
+- [Quick Start](/getting-started/quickstart) - Create your first issues
+- [CLI Reference](/cli-reference) - All available commands
+- [Workflows](/workflows) - Formulas, molecules, and gates
