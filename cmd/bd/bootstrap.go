@@ -137,11 +137,15 @@ Examples:
 			if isGitRepo() && !isBareGitRepo() {
 				if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
 					if gitLsRemoteHasRef("origin", "refs/dolt/data") {
-						cwd, err := os.Getwd()
-						if err != nil {
-							FatalError("failed to get working directory: %v", err)
+						if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
+							beadsDir = fallbackDir
+						} else {
+							cwd, err := os.Getwd()
+							if err != nil {
+								FatalError("failed to get working directory: %v", err)
+							}
+							beadsDir = filepath.Join(cwd, ".beads")
 						}
-						beadsDir = filepath.Join(cwd, ".beads")
 					}
 				}
 			}
