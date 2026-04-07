@@ -45,6 +45,11 @@ jobs:
         working-directory: website
         run: npm run build
 
+      - name: Prepare link check (map baseUrl /beads/ to build output)
+        run: |
+          mkdir -p website/link-check-root
+          ln -s "$PWD/website/build" website/link-check-root/beads
+
       - name: Check internal links
         uses: lycheeverse/lychee-action@v2
         with:
@@ -54,9 +59,8 @@ jobs:
             --offline
             --include-fragments
             --timeout 30
-            --root-dir website/build
+            --root-dir website/link-check-root
             --exclude-path 'website/build/search/**'
-            --remap '/beads/(.*) /$1'
             website/build
           fail: true
 
