@@ -597,6 +597,279 @@ func TestBootstrapExistingBeadsDirUnchanged(t *testing.T) {
 	}
 }
 
+// TestDetectBootstrapAction_ServerModeUsesCustomDatabaseName verifies that when
+// metadata.json has dolt_database set to a custom name (e.g. "my_rig"),
+// detectBootstrapAction uses that name in the plan instead of the default "beads".
+// This is the core fix for GH#3029.
+func TestDetectBootstrapAction_ServerModeUsesCustomDatabaseName(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write metadata.json with a custom dolt_database name
+	metadataJSON := `{"dolt_mode": "server", "dolt_database": "my_rig"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load config the same way bootstrap.go does (lines 172-174)
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+
+	// Verify config loaded the custom database name
+	if got := cfg.GetDoltDatabase(); got != "my_rig" {
+		t.Fatalf("GetDoltDatabase() = %q, want %q (metadata.json dolt_database ignored)", got, "my_rig")
+	}
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	// The plan should use the custom database name, not "beads"
+	if plan.Database != "my_rig" {
+		t.Errorf("plan.Database = %q, want %q", plan.Database, "my_rig")
+	}
+}
+
+// TestDetectBootstrapAction_FreshCloneUsesMetadataDBName verifies that when
+// .beads doesn't exist but origin has refs/dolt/data, and metadata.json is
+// committed to git with a custom dolt_database, the bootstrap plan uses the
+// correct database name after .beads/metadata.json is loaded.
+// Part of the fix for GH#3029.
+func TestDetectBootstrapAction_FreshCloneUsesMetadataDBName(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// Create a bare repo with refs/dolt/data
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", "--initial-branch=main", bareDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+
+	// Commit .beads/metadata.json with custom dolt_database to the source repo
+	srcBeads := filepath.Join(sourceDir, ".beads")
+	if err := os.MkdirAll(srcBeads, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	metadataJSON := `{"dolt_mode": "server", "dolt_database": "my_rig"}`
+	if err := os.WriteFile(filepath.Join(srcBeads, "metadata.json"), []byte(metadataJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForBootstrapTest(t, sourceDir, "add", ".beads/metadata.json")
+	runGitForBootstrapTest(t, sourceDir, "commit", "-m", "add beads metadata")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	// Clone and verify .beads/metadata.json is checked out.
+	// Use a subdirectory of TempDir so git clone creates it (clone fails
+	// if the target directory already exists and is non-empty).
+	cloneDir := filepath.Join(t.TempDir(), "repo")
+	runGitForBootstrapTest(t, "", "clone", bareDir, cloneDir)
+
+	beadsDir := filepath.Join(cloneDir, ".beads")
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(cloneDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load config the same way bootstrap.go does
+	cfg, cfgErr := configfile.Load(beadsDir)
+	if cfgErr != nil || cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+
+	// After a git clone with committed metadata.json, the config should
+	// have the custom database name
+	if got := cfg.GetDoltDatabase(); got != "my_rig" {
+		t.Fatalf("GetDoltDatabase() = %q, want %q (metadata.json dolt_database not loaded after clone)", got, "my_rig")
+	}
+
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Action != "sync" {
+		t.Errorf("action = %q, want %q", plan.Action, "sync")
+	}
+	if plan.Database != "my_rig" {
+		t.Errorf("plan.Database = %q, want %q", plan.Database, "my_rig")
+	}
+}
+
+// TestBootstrapFreshCloneSynthesizedDirUsesDefaultDB verifies that when
+// .beads directory doesn't exist (no metadata.json committed to git) and
+// beadsDir is synthesized from the remote-probe path, the config falls back
+// to DefaultConfig and uses the default "beads" database name.
+// This is the expected behavior for repos that never committed metadata.json.
+func TestBootstrapFreshCloneSynthesizedDirUsesDefaultDB(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// Create a bare repo with refs/dolt/data but NO .beads/metadata.json
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	// Clone — no .beads dir
+	cloneDir := t.TempDir()
+	runGitForBootstrapTest(t, cloneDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", bareDir)
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(cloneDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Synthesize beadsDir the way the Run handler does
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	synthesizedDir := filepath.Join(cwd, ".beads")
+
+	// Load config the same way bootstrap.go does — synthesized dir doesn't exist
+	cfg, cfgErr := configfile.Load(synthesizedDir)
+	if cfgErr != nil || cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+
+	// Without metadata.json, default "beads" is expected
+	if got := cfg.GetDoltDatabase(); got != "beads" {
+		t.Fatalf("GetDoltDatabase() = %q, want %q (should default when no metadata.json)", got, "beads")
+	}
+
+	plan := detectBootstrapAction(synthesizedDir, cfg)
+	if plan.Action != "sync" {
+		t.Errorf("action = %q, want %q", plan.Action, "sync")
+	}
+	if plan.Database != "beads" {
+		t.Errorf("plan.Database = %q, want %q (default when no metadata.json)", plan.Database, "beads")
+	}
+}
+
+// TestBootstrapRigSubdirUsesParentDBName verifies that when running bootstrap
+// from a rig subdirectory (its own git repo) that doesn't have a local .beads,
+// but the parent workspace has .beads/metadata.json with dolt_database set,
+// the bootstrap plan uses the parent workspace's database name instead of "beads".
+// This is the core reproduction for GH#3029.
+func TestBootstrapRigSubdirUsesParentDBName(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// Create workspace layout:
+	//   workspace/
+	//     .beads/metadata.json  (dolt_database: "my_rig")
+	//     mayor/rig/            (its own git repo, no .beads)
+	workspace := t.TempDir()
+	beadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	metadataJSON := `{"dolt_mode": "server", "dolt_database": "my_rig"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a rig subdirectory with its own git repo and remote that has refs/dolt/data
+	rigDir := filepath.Join(workspace, "mayor", "rig")
+	if err := os.MkdirAll(rigDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	bareDir := filepath.Join(t.TempDir(), "rig-origin.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", "--initial-branch=main", bareDir)
+	runGitForBootstrapTest(t, rigDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, rigDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, rigDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, rigDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, rigDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, rigDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, rigDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what the bootstrap Run handler does when FindBeadsDir returns "":
+	// 1. beadsDir is empty (rig's git root has no .beads)
+	// 2. Remote probe finds refs/dolt/data on origin
+	// 3. beadsDir is synthesized as <cwd>/.beads
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	synthesizedDir := filepath.Join(cwd, ".beads")
+
+	// configfile.Load on synthesized dir fails — no metadata.json there
+	cfg, cfgErr := configfile.Load(synthesizedDir)
+	if cfgErr != nil || cfg == nil {
+		// This is the fix path: search parent directories for metadata.json
+		cfg = findParentConfig(synthesizedDir)
+	}
+	if cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+
+	// The key assertion: should find the workspace's dolt_database, not default "beads"
+	if got := cfg.GetDoltDatabase(); got != "my_rig" {
+		t.Fatalf("GetDoltDatabase() = %q, want %q (parent workspace metadata.json not found)", got, "my_rig")
+	}
+
+	plan := detectBootstrapAction(synthesizedDir, cfg)
+	if plan.Action != "sync" {
+		t.Errorf("action = %q, want %q", plan.Action, "sync")
+	}
+	if plan.Database != "my_rig" {
+		t.Errorf("plan.Database = %q, want %q", plan.Database, "my_rig")
+	}
+}
+
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
 // BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
 // detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.

@@ -163,9 +163,17 @@ Examples:
 			os.Exit(1)
 		}
 
-		// Load config
+		// Load config from .beads/metadata.json. When the beadsDir was
+		// synthesized (fresh clone or rig with no local .beads), the file
+		// won't exist. In that case, walk up parent directories to find a
+		// workspace-level metadata.json that contains the correct database
+		// name (e.g. dolt_database). Without this, server-mode rigs get the
+		// default name "beads" instead of their configured name. (GH#3029)
 		cfg, err := configfile.Load(beadsDir)
 		if err != nil || cfg == nil {
+			cfg = findParentConfig(beadsDir)
+		}
+		if cfg == nil {
 			cfg = configfile.DefaultConfig()
 		}
 
@@ -533,6 +541,36 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 		return true
 	}
 	return !term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// findParentConfig walks up from beadsDir's parent looking for a
+// .beads/metadata.json in ancestor directories. This handles the case where a
+// rig subdirectory (its own git repo) doesn't have a local .beads but its
+// parent workspace does. Returns nil if no parent config is found.
+func findParentConfig(beadsDir string) *configfile.Config {
+	// Start from the parent of beadsDir's enclosing directory.
+	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
+	start := filepath.Dir(filepath.Dir(beadsDir))
+	homeDir, _ := os.UserHomeDir()
+
+	for dir := start; dir != "/" && dir != "."; {
+		candidate := filepath.Join(dir, ".beads")
+		if cfg, err := configfile.Load(candidate); err == nil && cfg != nil {
+			return cfg
+		}
+
+		// Don't search above $HOME
+		if homeDir != "" && dir == homeDir {
+			break
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return nil
 }
 
 func init() {
