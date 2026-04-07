@@ -86,6 +86,7 @@ var configSetCmd = &cobra.Command{
 			} else {
 				fmt.Printf("Set %s = %s (in config.yaml)\n", key, value)
 			}
+			printConfigSideEffects(checkConfigSetSideEffects(key, value))
 			return
 		}
 
@@ -146,6 +147,7 @@ var configSetCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Set %s = %s\n", key, value)
 		}
+		printConfigSideEffects(checkConfigSetSideEffects(key, value))
 	},
 }
 
@@ -352,6 +354,7 @@ var configUnsetCmd = &cobra.Command{
 			} else {
 				fmt.Printf("Unset %s (in config.yaml)\n", key)
 			}
+			printConfigSideEffects(checkConfigUnsetSideEffects(key))
 			return
 		}
 
@@ -395,6 +398,7 @@ var configUnsetCmd = &cobra.Command{
 		} else {
 			fmt.Printf("Unset %s\n", key)
 		}
+		printConfigSideEffects(checkConfigUnsetSideEffects(key))
 	},
 }
 
