@@ -80,6 +80,9 @@ func (c *Cache) lockPath(remoteURL string) string {
 // DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD, or DoltHub credentials
 // configured via `dolt creds`.
 func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
+	if err := ValidateRemoteURL(remoteURL); err != nil {
+		return "", fmt.Errorf("invalid remote URL: %w", err)
+	}
 	if _, err := exec.LookPath("dolt"); err != nil {
 		return "", fmt.Errorf("dolt CLI not found (required for remote cache): %w", err)
 	}

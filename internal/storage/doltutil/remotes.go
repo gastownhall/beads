@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -60,7 +61,15 @@ func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 }
 
 // AddCLIRemote adds a remote at the filesystem level via dolt CLI.
+// Both name and URL are validated before being passed to exec.Command
+// as a defense-in-depth measure.
 func AddCLIRemote(dbPath, name, url string) error {
+	if err := remotecache.ValidateRemoteName(name); err != nil {
+		return fmt.Errorf("invalid remote name: %w", err)
+	}
+	if err := remotecache.ValidateRemoteURL(url); err != nil {
+		return fmt.Errorf("invalid remote URL: %w", err)
+	}
 	cmd := exec.Command("dolt", "remote", "add", name, url) // #nosec G204
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
@@ -71,7 +80,11 @@ func AddCLIRemote(dbPath, name, url string) error {
 }
 
 // RemoveCLIRemote removes a remote at the filesystem level via dolt CLI.
+// The name is validated before being passed to exec.Command.
 func RemoveCLIRemote(dbPath, name string) error {
+	if err := remotecache.ValidateRemoteName(name); err != nil {
+		return fmt.Errorf("invalid remote name: %w", err)
+	}
 	cmd := exec.Command("dolt", "remote", "remove", name) // #nosec G204
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
