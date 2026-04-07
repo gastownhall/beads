@@ -633,7 +633,7 @@ var rootCmd = &cobra.Command{
 					if (cmd.Name() == "set" || cmd.Name() == "get") && len(args) > 0 && config.IsYamlOnlyKey(args[0]) {
 						isYamlOnlyConfigOp = true
 					}
-					if cmd.Name() == "show" || cmd.Name() == "validate" || cmd.Name() == "drift" {
+					if cmd.Name() == "show" || cmd.Name() == "validate" || cmd.Name() == "drift" || cmd.Name() == "apply" {
 						isYamlOnlyConfigOp = true
 					}
 				}
