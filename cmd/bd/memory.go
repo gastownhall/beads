@@ -91,6 +91,9 @@ Examples:
 		if err := store.SetConfig(ctx, storageKey, insight); err != nil {
 			FatalErrorRespectJSON("storing memory: %v", err)
 		}
+		if _, err := store.CommitPending(ctx, getActor()); err != nil {
+			WarnError("failed to commit memory: %v", err)
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]string{
@@ -229,6 +232,9 @@ Examples:
 
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
 			FatalErrorRespectJSON("forgetting memory: %v", err)
+		}
+		if _, err := store.CommitPending(ctx, getActor()); err != nil {
+			WarnError("failed to commit forget: %v", err)
 		}
 
 		if jsonOutput {
