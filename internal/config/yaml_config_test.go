@@ -180,6 +180,18 @@ func TestNormalizeYamlKey(t *testing.T) {
 }
 
 func TestSetYamlConfig(t *testing.T) {
+	oldBeadsDir := os.Getenv("BEADS_DIR")
+	if err := os.Unsetenv("BEADS_DIR"); err != nil {
+		t.Fatalf("Failed to unset BEADS_DIR: %v", err)
+	}
+	defer func() {
+		if oldBeadsDir == "" {
+			_ = os.Unsetenv("BEADS_DIR")
+		} else {
+			_ = os.Setenv("BEADS_DIR", oldBeadsDir)
+		}
+	}()
+
 	// Create a temp directory with .beads/config.yaml
 	tmpDir, err := os.MkdirTemp("", "beads-yaml-test-*")
 	if err != nil {
@@ -343,6 +355,18 @@ func TestCommentOutYamlKey(t *testing.T) {
 }
 
 func TestUnsetYamlConfig(t *testing.T) {
+	oldBeadsDir := os.Getenv("BEADS_DIR")
+	if err := os.Unsetenv("BEADS_DIR"); err != nil {
+		t.Fatalf("Failed to unset BEADS_DIR: %v", err)
+	}
+	defer func() {
+		if oldBeadsDir == "" {
+			_ = os.Unsetenv("BEADS_DIR")
+		} else {
+			_ = os.Setenv("BEADS_DIR", oldBeadsDir)
+		}
+	}()
+
 	// Create a temp directory with .beads/config.yaml
 	tmpDir, err := os.MkdirTemp("", "beads-yaml-unset-test-*")
 	if err != nil {
@@ -388,5 +412,128 @@ other-setting: value
 	}
 	if !strings.Contains(contentStr, "other-setting: value") {
 		t.Errorf("config.yaml should preserve other settings, got:\n%s", contentStr)
+	}
+}
+
+func TestFindProjectConfigYaml_UsesBEADS_DIRFirst(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "beads-yaml-beadsdir-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Runtime config pointed to by BEADS_DIR
+	runtimeBeadsDir := filepath.Join(tmpDir, "runtime", ".beads")
+	if err := os.MkdirAll(runtimeBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create runtime .beads dir: %v", err)
+	}
+	runtimeConfigPath := filepath.Join(runtimeBeadsDir, "config.yaml")
+	if err := os.WriteFile(runtimeConfigPath, []byte("no-git-ops: false\n"), 0644); err != nil {
+		t.Fatalf("Failed to write runtime config.yaml: %v", err)
+	}
+
+	// Also create a local .beads/config.yaml under CWD that should be ignored
+	cwdRepoDir := filepath.Join(tmpDir, "cwd-repo")
+	if err := os.MkdirAll(filepath.Join(cwdRepoDir, ".beads"), 0755); err != nil {
+		t.Fatalf("Failed to create cwd repo .beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cwdRepoDir, ".beads", "config.yaml"), []byte("no-git-ops: true\n"), 0644); err != nil {
+		t.Fatalf("Failed to write cwd config.yaml: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(cwdRepoDir); err != nil {
+		t.Fatalf("Failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	oldBeadsDir := os.Getenv("BEADS_DIR")
+	if err := os.Setenv("BEADS_DIR", runtimeBeadsDir); err != nil {
+		t.Fatalf("Failed to set BEADS_DIR: %v", err)
+	}
+	defer func() {
+		if oldBeadsDir == "" {
+			_ = os.Unsetenv("BEADS_DIR")
+		} else {
+			_ = os.Setenv("BEADS_DIR", oldBeadsDir)
+		}
+	}()
+
+	got, err := findProjectConfigYaml()
+	if err != nil {
+		t.Fatalf("findProjectConfigYaml() error = %v", err)
+	}
+	if got != runtimeConfigPath {
+		t.Fatalf("findProjectConfigYaml() = %q, want %q", got, runtimeConfigPath)
+	}
+}
+
+func TestSetAndUnsetYamlConfig_WithBEADS_DIR_FromOutsideRepo(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "beads-yaml-beadsdir-outside-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	runtimeBeadsDir := filepath.Join(tmpDir, "runtime", ".beads")
+	if err := os.MkdirAll(runtimeBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create runtime .beads dir: %v", err)
+	}
+	configPath := filepath.Join(runtimeBeadsDir, "config.yaml")
+	initialConfig := "no-git-ops: false\nother-setting: value\n"
+	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
+		t.Fatalf("Failed to write runtime config.yaml: %v", err)
+	}
+
+	// CWD intentionally has no .beads/config.yaml
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("Failed to create outside dir: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(outsideDir); err != nil {
+		t.Fatalf("Failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	oldBeadsDir := os.Getenv("BEADS_DIR")
+	if err := os.Setenv("BEADS_DIR", runtimeBeadsDir); err != nil {
+		t.Fatalf("Failed to set BEADS_DIR: %v", err)
+	}
+	defer func() {
+		if oldBeadsDir == "" {
+			_ = os.Unsetenv("BEADS_DIR")
+		} else {
+			_ = os.Setenv("BEADS_DIR", oldBeadsDir)
+		}
+	}()
+
+	if err := SetYamlConfig("no-git-ops", "true"); err != nil {
+		t.Fatalf("SetYamlConfig() error = %v", err)
+	}
+
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("Failed to read runtime config.yaml: %v", err)
+	}
+	contentStr := string(content)
+	if !strings.Contains(contentStr, "no-git-ops: true") {
+		t.Fatalf("expected runtime config to contain no-git-ops: true, got:\n%s", contentStr)
+	}
+
+	if err := UnsetYamlConfig("no-git-ops"); err != nil {
+		t.Fatalf("UnsetYamlConfig() error = %v", err)
+	}
+	content, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("Failed to read runtime config.yaml after unset: %v", err)
+	}
+	contentStr = string(content)
+	if !strings.Contains(contentStr, "# no-git-ops: true") {
+		t.Fatalf("expected runtime config to comment out no-git-ops, got:\n%s", contentStr)
+	}
+	if !strings.Contains(contentStr, "other-setting: value") {
+		t.Fatalf("expected runtime config to preserve other settings, got:\n%s", contentStr)
 	}
 }
