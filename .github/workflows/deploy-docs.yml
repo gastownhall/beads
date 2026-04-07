@@ -56,6 +56,7 @@ jobs:
             --timeout 30
             --root-dir website/build
             --exclude-path 'website/build/search/**'
+            --remap '/beads/(.*) /$1'
             website/build
           fail: true
 

@@ -65,7 +65,7 @@ bd config set issue_id_mode hash
 | `counter` | `bd-1` | Single-writer, project-management UIs |
 
 Counter IDs are sequential and human-friendly. Hash IDs are collision-free across concurrent
-branches. See [docs/CONFIG.md](/docs/CONFIG.md) for migration guidance and full details.
+branches. See [CONFIG.md](https://github.com/gastownhall/beads/blob/main/docs/CONFIG.md) for migration guidance and full details.
 
 ### Import
 
