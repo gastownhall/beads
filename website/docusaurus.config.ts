@@ -6,7 +6,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 // SITE_URL: Full URL (e.g., "https://myuser.github.io/beads" or "https://myuser.github.io")
 // ORG_NAME: GitHub organization/user name (defaults to "steveyegge")
 // PROJECT_NAME: Repository/project name (defaults to "beads")
-const orgName = process.env.ORG_NAME || 'steveyegge';
+const orgName = process.env.ORG_NAME || 'gastownhall';
 const projectName = process.env.PROJECT_NAME || 'beads';
 const siteUrlEnv = process.env.SITE_URL || `https://${orgName}.github.io/${projectName}`;
 
