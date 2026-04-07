@@ -627,9 +627,13 @@ var rootCmd = &cobra.Command{
 				// - import: auto-initializes database if missing
 				// - setup: creates editor integration files (no DB needed)
 				// - config set/get for yaml-only keys: writes to config.yaml, not db (GH#536)
+				// - config show/validate: read-only diagnostics, degrade gracefully (bd-934)
 				isYamlOnlyConfigOp := false
-				if (cmd.Name() == "set" || cmd.Name() == "get") && cmd.Parent() != nil && cmd.Parent().Name() == "config" {
-					if len(args) > 0 && config.IsYamlOnlyKey(args[0]) {
+				if cmd.Parent() != nil && cmd.Parent().Name() == "config" {
+					if (cmd.Name() == "set" || cmd.Name() == "get") && len(args) > 0 && config.IsYamlOnlyKey(args[0]) {
+						isYamlOnlyConfigOp = true
+					}
+					if cmd.Name() == "show" || cmd.Name() == "validate" {
 						isYamlOnlyConfigOp = true
 					}
 				}
