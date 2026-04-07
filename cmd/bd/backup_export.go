@@ -32,7 +32,7 @@ func backupDir() (string, error) {
 			gitRepo = filepath.Join(home, gitRepo[2:])
 		}
 		if _, err := os.Stat(filepath.Join(gitRepo, ".git")); err != nil {
-			debug.Logf("backup: git-repo %s is not a git repo, falling back to .beads/backup\n", gitRepo)
+			fmt.Fprintf(os.Stderr, "Warning: backup.git-repo %s is not a git repo, falling back to .beads/backup\n", gitRepo)
 		} else {
 			dir := filepath.Join(gitRepo, "backup")
 			if err := os.MkdirAll(dir, 0700); err != nil {
