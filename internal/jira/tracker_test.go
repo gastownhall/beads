@@ -97,7 +97,7 @@ func TestJiraToTrackerIssue(t *testing.T) {
 		},
 	}
 
-	ti := jiraToTrackerIssue(ji)
+	ti := jiraToTrackerIssue(ji, nil)
 
 	if ti.ID != "10001" {
 		t.Errorf("ID = %q, want %q", ti.ID, "10001")
@@ -214,7 +214,7 @@ func TestFieldMapperIssueToBeads(t *testing.T) {
 		},
 	}
 
-	ti := jiraToTrackerIssue(ji)
+	ti := jiraToTrackerIssue(ji, nil)
 	mapper := &jiraFieldMapper{}
 	conv := mapper.IssueToBeads(&ti)
 
@@ -784,5 +784,109 @@ func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
 	gotTracker, _ = mapper.TypeToTracker(types.TypeEpic).(string)
 	if gotTracker != "Epic" {
 		t.Errorf("TypeToTracker(epic) = %q, want %q", gotTracker, "Epic")
+	}
+}
+
+func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
+	store := &configStore{
+		data: map[string]string{
+			"jira.url":              "https://example.atlassian.net",
+			"jira.project":          "PROJ",
+			"jira.api_token":        "token123",
+			"jira.priority_map.0":   "Critical",
+			"jira.priority_map.2":   "Normal",
+		},
+	}
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), store); err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	if tr.priorityMap == nil {
+		t.Fatal("priorityMap should not be nil after Init with jira.priority_map.* config")
+	}
+	if tr.priorityMap["0"] != "Critical" {
+		t.Errorf("priorityMap[\"0\"] = %q, want %q", tr.priorityMap["0"], "Critical")
+	}
+	if tr.priorityMap["2"] != "Normal" {
+		t.Errorf("priorityMap[\"2\"] = %q, want %q", tr.priorityMap["2"], "Normal")
+	}
+}
+
+func TestPriorityToTrackerUsesCustomMap(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		priorityMap: map[string]string{
+			"0": "Critical",
+			"2": "Normal",
+		},
+	}
+
+	tests := []struct {
+		priority int
+		want     string
+	}{
+		{0, "Critical"},  // from custom map
+		{1, "High"},      // not in map → default
+		{2, "Normal"},    // from custom map
+		{3, "Low"},       // not in map → default
+		{4, "Lowest"},    // not in map → default
+	}
+	for _, tt := range tests {
+		got, _ := mapper.PriorityToTracker(tt.priority).(string)
+		if got != tt.want {
+			t.Errorf("PriorityToTracker(%d) = %q, want %q", tt.priority, got, tt.want)
+		}
+	}
+}
+
+func TestPriorityToBeadsUsesCustomMap(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		priorityMap: map[string]string{
+			"0": "Critical",
+			"2": "Normal",
+		},
+	}
+
+	tests := []struct {
+		name string
+		want int
+	}{
+		{"Critical", 0},  // from custom map
+		{"Normal", 2},    // from custom map
+		{"High", 1},      // not in map → default
+		{"Low", 3},       // not in map → default
+		{"Lowest", 4},    // not in map → default
+	}
+	for _, tt := range tests {
+		got := mapper.PriorityToBeads(tt.name)
+		if got != tt.want {
+			t.Errorf("PriorityToBeads(%q) = %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestPriorityMapCaseInsensitiveMatch(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		priorityMap: map[string]string{
+			"0": "Critical",
+		},
+	}
+
+	// PriorityToBeads should match case-insensitively
+	tests := []struct {
+		name string
+		want int
+	}{
+		{"Critical", 0},
+		{"critical", 0},
+		{"CRITICAL", 0},
+		{"CrItIcAl", 0},
+	}
+	for _, tt := range tests {
+		got := mapper.PriorityToBeads(tt.name)
+		if got != tt.want {
+			t.Errorf("PriorityToBeads(%q) = %d, want %d", tt.name, got, tt.want)
+		}
 	}
 }

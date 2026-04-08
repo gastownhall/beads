@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/debug"
@@ -27,6 +28,7 @@ type Tracker struct {
 	apiVersion  string            // "2" or "3" (default: "3")
 	statusMap   map[string]string // beads status → Jira status name (from jira.status_map.* config)
 	typeMap     map[string]string // beads type → Jira type (from jira.type_map.* config)
+	priorityMap map[string]string // beads priority → Jira priority name (from jira.priority_map.* config)
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -110,6 +112,17 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 		if len(typeMap) > 0 {
 			t.typeMap = typeMap
 		}
+
+		const priorityPrefix = "jira.priority_map."
+		priorityMap := make(map[string]string)
+		for key, val := range allConfig {
+			if strings.HasPrefix(key, priorityPrefix) && val != "" {
+				priorityMap[strings.TrimPrefix(key, priorityPrefix)] = val
+			}
+		}
+		if len(priorityMap) > 0 {
+			t.priorityMap = priorityMap
+		}
 	}
 
 	return nil
@@ -164,7 +177,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 
 	result := make([]tracker.TrackerIssue, 0, len(issues))
 	for i := range issues {
-		result = append(result, jiraToTrackerIssue(&issues[i]))
+		result = append(result, jiraToTrackerIssue(&issues[i], t.priorityMap))
 	}
 	return result, nil
 }
@@ -177,7 +190,7 @@ func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.T
 	if issue == nil {
 		return nil, nil
 	}
-	ti := jiraToTrackerIssue(issue)
+	ti := jiraToTrackerIssue(issue, t.priorityMap)
 	return &ti, nil
 }
 
@@ -193,7 +206,7 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		return nil, err
 	}
 
-	ti := jiraToTrackerIssue(created)
+	ti := jiraToTrackerIssue(created, t.priorityMap)
 	return &ti, nil
 }
 
@@ -229,7 +242,7 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 		}
 	}
 
-	ti := jiraToTrackerIssue(current)
+	ti := jiraToTrackerIssue(current, t.priorityMap)
 	return &ti, nil
 }
 
@@ -259,7 +272,7 @@ func (t *Tracker) applyTransition(ctx context.Context, key string, status types.
 }
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
-	return &jiraFieldMapper{apiVersion: t.apiVersion, statusMap: t.statusMap, typeMap: t.typeMap}
+	return &jiraFieldMapper{apiVersion: t.apiVersion, statusMap: t.statusMap, typeMap: t.typeMap, priorityMap: t.priorityMap}
 }
 
 func (t *Tracker) IsExternalRef(ref string) bool {
@@ -289,7 +302,8 @@ func (t *Tracker) getConfig(ctx context.Context, key, envVar string) (string, er
 }
 
 // jiraToTrackerIssue converts a Jira API Issue to the generic TrackerIssue format.
-func jiraToTrackerIssue(ji *Issue) tracker.TrackerIssue {
+// priorityMap is optional (nil uses hardcoded defaults).
+func jiraToTrackerIssue(ji *Issue, priorityMap map[string]string) tracker.TrackerIssue {
 	ti := tracker.TrackerIssue{
 		ID:         ji.ID,
 		Identifier: ji.Key,
@@ -304,7 +318,7 @@ func jiraToTrackerIssue(ji *Issue) tracker.TrackerIssue {
 
 	// Priority
 	if ji.Fields.Priority != nil {
-		ti.Priority = jiraPriorityToNumeric(ji.Fields.Priority.Name)
+		ti.Priority = jiraPriorityToNumeric(ji.Fields.Priority.Name, priorityMap)
 	}
 
 	// State
@@ -344,7 +358,20 @@ func jiraToTrackerIssue(ji *Issue) tracker.TrackerIssue {
 }
 
 // jiraPriorityToNumeric converts a Jira priority name to a numeric value (0=highest, 4=lowest).
-func jiraPriorityToNumeric(name string) int {
+// If priorityMap is non-nil, it checks the custom mapping first (inverted: find which beads
+// priority key maps to a Jira name matching the input).
+func jiraPriorityToNumeric(name string, priorityMap map[string]string) int {
+	// Check custom map first (inverted lookup: find beads key whose value matches name).
+	if priorityMap != nil {
+		for beadsKey, jiraName := range priorityMap {
+			if strings.EqualFold(name, jiraName) {
+				if v, err := strconv.Atoi(beadsKey); err == nil && v >= 0 && v <= 4 {
+					return v
+				}
+			}
+		}
+	}
+	// Hardcoded defaults.
 	switch strings.ToLower(name) {
 	case "highest":
 		return 0

@@ -1,6 +1,7 @@
 package jira
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/tracker"
@@ -9,13 +10,23 @@ import (
 
 // jiraFieldMapper implements tracker.FieldMapper for Jira.
 type jiraFieldMapper struct {
-	apiVersion string            // "2" or "3" (default: "3")
-	statusMap  map[string]string // beads status → Jira status name (from jira.status_map.* config)
-	typeMap    map[string]string // beads type → Jira type (from jira.type_map.* config)
+	apiVersion  string            // "2" or "3" (default: "3")
+	statusMap   map[string]string // beads status → Jira status name (from jira.status_map.* config)
+	typeMap     map[string]string // beads type → Jira type (from jira.type_map.* config)
+	priorityMap map[string]string // beads priority (as string "0"-"4") → Jira priority name (from jira.priority_map.* config)
 }
 
 func (m *jiraFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
 	if name, ok := trackerPriority.(string); ok {
+		// Check custom map first (inverted: Jira name → beads priority).
+		for beadsPri, jiraName := range m.priorityMap {
+			if strings.EqualFold(name, jiraName) {
+				if v, err := strconv.Atoi(beadsPri); err == nil && v >= 0 && v <= 4 {
+					return v
+				}
+			}
+		}
+		// Jira defaults.
 		switch name {
 		case "Highest":
 			return 0
@@ -33,6 +44,14 @@ func (m *jiraFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
 }
 
 func (m *jiraFieldMapper) PriorityToTracker(beadsPriority int) interface{} {
+	// Check custom map first (beads priority as string key → Jira name).
+	if m.priorityMap != nil {
+		key := strconv.Itoa(beadsPriority)
+		if name, ok := m.priorityMap[key]; ok {
+			return name
+		}
+	}
+	// Jira defaults.
 	switch beadsPriority {
 	case 0:
 		return "Highest"
