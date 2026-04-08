@@ -936,7 +936,7 @@ func exportJSONLForCommit() {
 
 	debug.Logf("pre-commit: exporting JSONL to %s\n", fullPath)
 
-	// Shell out to `bd export` which initialises its own store.
+	// Shell out to `bd export` which initializes its own store.
 	// Clear BD_GIT_HOOK from the subprocess env so that its
 	// PersistentPostRun auto-export path does not also fire.
 	cmd := exec.Command("bd", "export", "-o", fullPath)
