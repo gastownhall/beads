@@ -11,6 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -902,7 +904,70 @@ func runPreCommitHook() int {
 	if exitCode := runChainedHook("pre-commit", nil); exitCode != 0 {
 		return exitCode
 	}
+
+	// GH#2489, GH#1863: Export JSONL before commit so issue state lands in
+	// the same commit as code changes.  maybeAutoExport() skips when
+	// BD_GIT_HOOK=1, so we invoke `bd export` as a subprocess instead.
+	exportJSONLForCommit()
+
 	return 0
+}
+
+// exportJSONLForCommit exports Dolt issue state to the git-tracked JSONL file
+// when export.auto is enabled. Called from the pre-commit hook so that the
+// exported file can be staged and included in the pending commit.
+//
+// Errors are logged as warnings but never block the commit.
+func exportJSONLForCommit() {
+	if !config.GetBool("export.auto") {
+		return
+	}
+
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+
+	exportPath := config.GetString("export.path")
+	if exportPath == "" {
+		exportPath = "export.jsonl"
+	}
+	fullPath := filepath.Join(beadsDir, exportPath)
+
+	debug.Logf("pre-commit: exporting JSONL to %s\n", fullPath)
+
+	// Shell out to `bd export` which initializes its own store.
+	// Clear BD_GIT_HOOK from the subprocess env so that its
+	// PersistentPostRun auto-export path does not also fire.
+	cmd := exec.Command("bd", "export", "-o", fullPath)
+	cmd.Dir = beadsDir
+	cmd.Env = filterEnv(os.Environ(), "BD_GIT_HOOK")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "beads: pre-commit export warning: %v\n", err)
+		return
+	}
+
+	// Stage the exported file if configured.
+	if config.GetBool("export.git-add") {
+		addCmd := exec.Command("git", "add", fullPath)
+		addCmd.Dir = filepath.Dir(fullPath)
+		if err := addCmd.Run(); err != nil {
+			debug.Logf("pre-commit: git add failed: %v\n", err)
+		}
+	}
+}
+
+// filterEnv returns a copy of env with entries matching the given key removed.
+func filterEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // runPostMergeHook runs chained hooks after merge.
