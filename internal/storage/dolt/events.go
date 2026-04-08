@@ -13,19 +13,12 @@ import (
 // AddComment adds a comment event to an issue
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return s.withSerializedWrite(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin tx: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {
+		if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			return issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment)
+		}); err != nil {
 			return err
 		}
-		if err := tx.Commit(); err != nil {
-			return wrapTransactionError("commit add comment event", err)
-		}
-		return s.doltAddAndCommit(ctx, []string{"events"}, fmt.Sprintf("bd: event %s", issueID))
+		return s.commitVersionedWrite(ctx, "add comment event", []string{"events"}, fmt.Sprintf("bd: event %s", issueID))
 	})
 }
 
@@ -72,7 +65,7 @@ func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, tex
 		if s.isActiveWisp(ctx, issueID) {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"comments"}, fmt.Sprintf("bd: comment %s", issueID))
+		return s.commitVersionedWrite(ctx, "import issue comment", []string{"comments"}, fmt.Sprintf("bd: comment %s", issueID))
 	})
 	return result, err
 }

@@ -20,7 +20,7 @@ func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) 
 		if s.isActiveWisp(ctx, issueID) {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"labels", "events"}, fmt.Sprintf("bd: label add %s", issueID))
+		return s.commitVersionedWrite(ctx, "add label", []string{"labels", "events"}, fmt.Sprintf("bd: label add %s", issueID))
 	})
 }
 
@@ -36,7 +36,7 @@ func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor strin
 		if s.isActiveWisp(ctx, issueID) {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"labels", "events"}, fmt.Sprintf("bd: label remove %s", issueID))
+		return s.commitVersionedWrite(ctx, "remove label", []string{"labels", "events"}, fmt.Sprintf("bd: label remove %s", issueID))
 	})
 }
 

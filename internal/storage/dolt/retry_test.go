@@ -2,7 +2,11 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	mysql "github.com/go-sql-driver/mysql"
@@ -263,5 +267,81 @@ func TestWithWriteRetry_NonRetryableError(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Errorf("expected 1 call for non-retryable error, got %d", callCount)
+	}
+}
+
+func TestWithSerializedWrite_SkipsLockOutsideServerMode(t *testing.T) {
+	store := &DoltStore{serverMode: false}
+
+	called := false
+	err := store.withSerializedWrite(context.Background(), func() error {
+		called = true
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("withSerializedWrite returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("expected callback to run without server-mode lock")
+	}
+}
+
+func TestCommitVersionedWrite_WrapsPartialWriteError(t *testing.T) {
+	store := &DoltStore{
+		commitVersionedWriteFn: func(context.Context, []string, string) error {
+			return errors.New("commit failed")
+		},
+	}
+
+	err := store.commitVersionedWrite(context.Background(), "add label", []string{"labels"}, "bd: label add test-1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	var partialErr *PartialWriteError
+	if !errors.As(err, &partialErr) {
+		t.Fatalf("expected PartialWriteError, got %T", err)
+	}
+	if partialErr.Operation != "add label" {
+		t.Fatalf("expected operation to be recorded, got %q", partialErr.Operation)
+	}
+	if !strings.Contains(partialErr.Error(), "SQL write committed but Dolt history commit failed") {
+		t.Fatalf("expected repairable-state wording, got %q", partialErr.Error())
+	}
+}
+
+func TestReleaseServerWriteLock_LogsWarningOnFailure(t *testing.T) {
+	store := &DoltStore{
+		releaseServerWriteLockFn: func(context.Context, *sql.Conn, string) error {
+			return errors.New("release failed")
+		},
+	}
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+	})
+
+	store.releaseServerWriteLock(context.Background(), nil, "bd_write_testdb")
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close read pipe: %v", err)
+	}
+
+	if !strings.Contains(string(output), `failed to release write lock "bd_write_testdb"`) {
+		t.Fatalf("expected release warning, got %q", string(output))
 	}
 }

@@ -41,7 +41,7 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		}
 
 		if !issue.Ephemeral && !issue.NoHistory {
-			if err := s.doltAddAndCommit(ctx, []string{"issues", "events"},
+			if err := s.commitVersionedWrite(ctx, "create issue", []string{"issues", "events"},
 				fmt.Sprintf("bd: create %s", issue.ID)); err != nil {
 				return err
 			}
@@ -90,7 +90,8 @@ func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*t
 			return err
 		}
 
-		return s.doltAddAndCommit(ctx,
+		return s.commitVersionedWrite(ctx,
+			"create issues",
 			[]string{"issues", "events", "labels", "comments", "dependencies", "child_counters"},
 			fmt.Sprintf("bd: create %d issue(s)", len(issues)))
 	})
