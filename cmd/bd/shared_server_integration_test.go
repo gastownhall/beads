@@ -45,8 +45,8 @@ func ssEnvInt(key string, def int) int {
 // Recommended: set BEADS_TEST_EMBEDDED_DOLT=1 to skip the unrelated
 // singleton Dolt container that TestMain starts for other tests in this package.
 func TestSharedServerConcurrent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
+	if os.Getenv("BEADS_TEST_SHARED_SERVER") == "" {
+		t.Skip("skipping: set BEADS_TEST_SHARED_SERVER=1 to run")
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("shared server integration test not supported on Windows")
@@ -594,9 +594,20 @@ var (
 	sharedServerBuildErr  error
 )
 
+// buildSharedServerTestBinary returns the path to a bd binary.
+// If BEADS_TEST_BD_BINARY is set, uses that pre-built binary.
+// Otherwise builds one from source (cached across tests via sync.Once).
 func buildSharedServerTestBinary(t *testing.T) string {
 	t.Helper()
 	sharedServerBuildOnce.Do(func() {
+		if prebuilt := os.Getenv("BEADS_TEST_BD_BINARY"); prebuilt != "" {
+			if _, err := os.Stat(prebuilt); err != nil {
+				sharedServerBuildErr = fmt.Errorf("BEADS_TEST_BD_BINARY=%q not found: %w", prebuilt, err)
+				return
+			}
+			sharedServerBdBinary = prebuilt
+			return
+		}
 		pkgDir, err := os.Getwd()
 		if err != nil {
 			sharedServerBuildErr = fmt.Errorf("getwd: %w", err)
