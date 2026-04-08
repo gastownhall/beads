@@ -572,7 +572,8 @@ func (s *DoltStore) withSerializedWrite(ctx context.Context, fn func() error) er
 // Callers should assume the logical write took effect and the working set may
 // require a later repair/commit to restore versioned history. Blind retries are
 // only safe for write paths that are idempotent at the SQL layer; non-idempotent
-// operations such as comment insertion may duplicate logical effects if replayed.
+// operations such as comment or event insertion may duplicate logical effects
+// if replayed.
 type PartialWriteError struct {
 	Operation string
 	Err       error

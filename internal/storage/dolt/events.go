@@ -10,7 +10,11 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// AddComment adds a comment event to an issue
+// AddComment adds a comment event to an issue.
+// If SQL commit succeeds but Dolt history finalization fails, it returns
+// PartialWriteError. Callers should not blindly retry that error because
+// comment events are not idempotent and replaying the operation will append a
+// second logical comment.
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return s.withSerializedWrite(ctx, func() error {
 		if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
@@ -52,6 +56,9 @@ func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text s
 
 // ImportIssueComment adds a comment during import, preserving the original timestamp.
 // This prevents comment timestamp drift across import/export cycles.
+// Like AddComment, PartialWriteError means the SQL row already committed, so
+// callers must not blindly retry unless they also deduplicate imported
+// comments.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	var result *types.Comment
 	err := s.withSerializedWrite(ctx, func() error {
