@@ -190,6 +190,78 @@ func setupConcurrentTestStore(t *testing.T) (*DoltStore, func()) {
 	return store, cleanup
 }
 
+// setupConcurrentPeerStores creates two stores that point at the same shared
+// server database through different local paths. This exercises the production
+// shared-server shape where separate worktrees/processes must still contend on
+// one advisory lock and one backing Dolt repo identity.
+func setupConcurrentPeerStores(t *testing.T) (*DoltStore, *DoltStore, func()) {
+	t.Helper()
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	dbName := uniqueTestDBName(t)
+	tmpDirA, err := os.MkdirTemp("", "dolt-concurrent-peer-a-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir A: %v", err)
+	}
+	tmpDirB, err := os.MkdirTemp("", "dolt-concurrent-peer-b-*")
+	if err != nil {
+		os.RemoveAll(tmpDirA)
+		t.Fatalf("failed to create temp dir B: %v", err)
+	}
+
+	newPeer := func(path, name string) (*DoltStore, error) {
+		store, err := New(ctx, &Config{
+			Path:            path,
+			CommitterName:   name,
+			CommitterEmail:  name + "@example.com",
+			Database:        dbName,
+			MaxOpenConns:    2,
+			CreateIfMissing: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		store.db.SetMaxIdleConns(0)
+		store.db.SetConnMaxIdleTime(time.Second)
+		return store, nil
+	}
+
+	storeA, err := newPeer(tmpDirA, "peer-a")
+	if err != nil {
+		os.RemoveAll(tmpDirA)
+		os.RemoveAll(tmpDirB)
+		t.Fatalf("failed to create store A: %v", err)
+	}
+	if err := storeA.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		storeA.Close()
+		os.RemoveAll(tmpDirA)
+		os.RemoveAll(tmpDirB)
+		t.Fatalf("failed to set prefix for store A: %v", err)
+	}
+
+	storeB, err := newPeer(tmpDirB, "peer-b")
+	if err != nil {
+		storeA.Close()
+		os.RemoveAll(tmpDirA)
+		os.RemoveAll(tmpDirB)
+		t.Fatalf("failed to create store B: %v", err)
+	}
+
+	cleanup := func() {
+		storeA.Close()
+		storeB.Close()
+		os.RemoveAll(tmpDirA)
+		os.RemoveAll(tmpDirB)
+	}
+
+	return storeA, storeB, cleanup
+}
+
 func TestNewDoltStore(t *testing.T) {
 	skipIfNoDolt(t)
 

@@ -212,6 +212,42 @@ func TestAddComment_PartialWriteLeavesCommittedSQLState(t *testing.T) {
 	}
 }
 
+func TestAddComment_RetryAfterPartialWriteDuplicatesLogicalWrite(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := newVersionedTestIssue("comment-partial-retry", "Comment partial retry")
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	beforeEvents, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents before retry: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	err = store.AddComment(ctx, issue.ID, "tester", "retry me")
+	requirePartialWriteError(t, err)
+	store.commitVersionedWriteFn = nil
+
+	if err := store.AddComment(ctx, issue.ID, "tester", "retry me"); err != nil {
+		t.Fatalf("second AddComment: %v", err)
+	}
+
+	afterEvents, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents after retry: %v", err)
+	}
+	if len(afterEvents) != len(beforeEvents)+2 {
+		t.Fatalf("expected blind retry to append a second comment event, before=%d after=%d", len(beforeEvents), len(afterEvents))
+	}
+}
+
 func TestImportIssueComment_HistoryBehaviorAndPartialFailure(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -286,5 +322,45 @@ func TestImportIssueComment_HistoryBehaviorAndPartialFailure(t *testing.T) {
 	}
 	if len(afterComments) != len(beforeComments)+1 {
 		t.Fatalf("expected SQL comment row to persist despite partial failure, before=%d after=%d", len(beforeComments), len(afterComments))
+	}
+}
+
+func TestImportIssueComment_RetryAfterPartialWriteDuplicatesLogicalWrite(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := newVersionedTestIssue("import-comment-retry", "Import retry")
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	beforeComments, err := store.GetIssueComments(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssueComments before retry: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	createdAt := time.Now().UTC()
+	if _, err := store.ImportIssueComment(ctx, issue.ID, "tester", "retry me", createdAt); err == nil {
+		t.Fatal("expected partial write error")
+	} else {
+		requirePartialWriteError(t, err)
+	}
+	store.commitVersionedWriteFn = nil
+
+	if _, err := store.ImportIssueComment(ctx, issue.ID, "tester", "retry me", createdAt); err != nil {
+		t.Fatalf("second ImportIssueComment: %v", err)
+	}
+
+	afterComments, err := store.GetIssueComments(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssueComments after retry: %v", err)
+	}
+	if len(afterComments) != len(beforeComments)+2 {
+		t.Fatalf("expected blind retry to append a second imported comment, before=%d after=%d", len(beforeComments), len(afterComments))
 	}
 }

@@ -933,6 +933,103 @@ func TestServerWriteLockReleasedAfterWrite(t *testing.T) {
 	}
 }
 
+func TestServerWriteLockSerializesAcrossStores(t *testing.T) {
+	storeA, storeB, cleanup := setupConcurrentPeerStores(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	if storeA.serverWriteLockName() != storeB.serverWriteLockName() {
+		t.Fatalf("expected peer stores to share advisory lock name, got %q vs %q", storeA.serverWriteLockName(), storeB.serverWriteLockName())
+	}
+
+	enterFinalize := make(chan struct{})
+	releaseFinalize := make(chan struct{})
+	storeA.commitVersionedWriteFn = func(context.Context, []string, string) error {
+		close(enterFinalize)
+		<-releaseFinalize
+		return nil
+	}
+
+	doneA := make(chan error, 1)
+	go func() {
+		doneA <- storeA.CreateIssue(ctx, &types.Issue{
+			ID:          "peer-lock-a",
+			Title:       "Peer lock A",
+			Description: "first peer holds shared advisory lock",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}, "peer-a")
+	}()
+
+	<-enterFinalize
+
+	doneB := make(chan error, 1)
+	go func() {
+		doneB <- storeB.CreateIssue(ctx, &types.Issue{
+			ID:          "peer-lock-b",
+			Title:       "Peer lock B",
+			Description: "second peer must wait for advisory lock release",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}, "peer-b")
+	}()
+
+	select {
+	case err := <-doneB:
+		t.Fatalf("expected second store write to wait for shared advisory lock, got %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(releaseFinalize)
+
+	if err := <-doneA; err != nil {
+		t.Fatalf("storeA CreateIssue: %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("storeB CreateIssue: %v", err)
+	}
+}
+
+func TestServerWriteLockReleasedAfterCanceledCallback(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	err := store.withSerializedWrite(ctx, func() error {
+		cancel()
+		return ctx.Err()
+	})
+	if err == nil {
+		t.Fatal("expected canceled callback to return an error")
+	}
+
+	lockCtx, lockCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer lockCancel()
+
+	conn, err := store.db.Conn(lockCtx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+
+	var locked int
+	if err := conn.QueryRowContext(lockCtx, "SELECT GET_LOCK(?, 0)", store.serverWriteLockName()).Scan(&locked); err != nil {
+		t.Fatalf("GET_LOCK after canceled callback: %v", err)
+	}
+	if locked != 1 {
+		t.Fatalf("expected lock to be released after canceled callback, got %d", locked)
+	}
+	if _, err := conn.ExecContext(lockCtx, "SELECT RELEASE_LOCK(?)", store.serverWriteLockName()); err != nil {
+		t.Fatalf("RELEASE_LOCK: %v", err)
+	}
+}
+
 // =============================================================================
 // Test: Serialization Conflict Retry
 // 10 goroutines all add a label to the SAME issue concurrently, forcing Dolt
