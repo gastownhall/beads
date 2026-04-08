@@ -59,8 +59,8 @@ func ForcePush(ctx context.Context, db DBConn, remote, branch string) error {
 }
 
 // Pull pulls changes from the named remote.
-func Pull(ctx context.Context, db DBConn, remote string) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_PULL(?)", remote); err != nil {
+func Pull(ctx context.Context, db DBConn, remote, branch string) error {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_PULL(?, ?)", remote, branch); err != nil {
 		return fmt.Errorf("pull from %s: %w", remote, err)
 	}
 	return nil
