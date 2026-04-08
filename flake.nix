@@ -18,18 +18,6 @@
         "x86_64-linux"
       ];
 
-      # Go 1.25.8: go.mod requires it, nixpkgs has 1.25.7
-      # Remove when nixpkgs ships Go >= 1.25.8
-      goOverlay = final: prev: {
-        go_1_25 = prev.go_1_25.overrideAttrs {
-          version = "1.25.8";
-          src = prev.fetchurl {
-            url = "https://go.dev/dl/go1.25.8.src.tar.gz";
-            hash = "sha256-6YjUokRqx/4/baoImljpk2pSo4E1Wt7ByJgyMKjWxZ4=";
-          };
-        };
-      };
-
       forAllSystems =
         f:
         nixpkgs.lib.genAttrs systems (
@@ -37,22 +25,22 @@
           f {
             pkgs = import nixpkgs {
               inherit system;
-              overlays = [ goOverlay ];
             };
             inherit system self;
           }
         );
-    in
-    {
-      packages = forAllSystems (args: import ./packages.nix args);
+    in rec {
+      icu = nixpkgs.icu77;
+      packages = forAllSystems (args: import ./packages.nix (args // { inherit icu; }));
 
       apps = forAllSystems (
         { self, system, ... }:
-        {
-          default = {
+        rec {
+          bd = {
             type = "app";
             program = "${self.packages.${system}.default}/bin/bd";
           };
+          default = bd;
         }
       );
 

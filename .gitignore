@@ -122,3 +122,6 @@ bd_test
 .logs/
 .beads/
 .opencode/
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key

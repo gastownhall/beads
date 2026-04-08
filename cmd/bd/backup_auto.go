@@ -44,13 +44,13 @@ func maybeAutoBackup(ctx context.Context) {
 
 	dir, err := backupDir()
 	if err != nil {
-		debug.Logf("backup: failed to get backup dir: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-backup skipped: %v\n", err)
 		return
 	}
 
 	state, err := loadBackupState(dir)
 	if err != nil {
-		debug.Logf("backup: failed to load state: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-backup skipped: %v\n", err)
 		return
 	}
 
@@ -68,7 +68,7 @@ func maybeAutoBackup(ctx context.Context) {
 	// Change detection: skip if nothing changed
 	currentCommit, err := store.GetCurrentCommit(ctx)
 	if err != nil {
-		debug.Logf("backup: failed to get current commit: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-backup skipped: failed to get current commit: %v\n", err)
 		return
 	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
