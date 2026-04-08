@@ -67,7 +67,7 @@ func maybeAutoExport(ctx context.Context) {
 	// Change detection via Dolt commit hash
 	currentCommit, err := store.GetCurrentCommit(ctx)
 	if err != nil {
-		debug.Logf("auto-export: failed to get current commit: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
 		return
 	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
@@ -95,7 +95,7 @@ func maybeAutoExport(ctx context.Context) {
 	// Optional git add
 	if config.GetBool("export.git-add") {
 		if err := gitAddFile(fullPath); err != nil {
-			debug.Logf("auto-export: git add failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Warning: auto-export: git add failed: %v\n", err)
 		}
 	}
 
@@ -246,11 +246,11 @@ func saveExportAutoState(beadsDir string, state *exportAutoState) {
 	path := filepath.Join(beadsDir, exportAutoStateFile)
 	data, err := json.Marshal(state)
 	if err != nil {
-		debug.Logf("auto-export: failed to marshal state: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-export: failed to marshal state: %v\n", err)
 		return
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		debug.Logf("auto-export: failed to save state: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: auto-export: failed to save state: %v\n", err)
 	}
 }
 

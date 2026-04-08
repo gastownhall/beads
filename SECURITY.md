@@ -73,7 +73,7 @@ When syncing with external trackers (GitHub Issues, Jira, Linear, GitLab, Azure 
 
 **Sync security model:**
 - Sync is always **user-initiated** — no background daemons, no inbound webhooks, no listening ports
-- No data is sent to external trackers unless the user explicitly runs `bd push` or `bd sync`
+- No data is sent to external trackers unless the user explicitly runs a sync command such as `bd dolt push`
 - Conflict resolution strategies are deterministic and auditable via Dolt history
 
 **Content safety for AI agents:**
