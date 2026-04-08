@@ -7,7 +7,7 @@ import (
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
-const DoltDockerImage = "dolthub/dolt-sql-server:1.84.0"
+const DoltDockerImage = "dolthub/dolt-sql-server:1.86.0"
 
 // FindFreePort finds an available TCP port by binding to :0.
 func FindFreePort() (int, error) {

@@ -137,12 +137,18 @@ func isFalsyBool(s string) bool {
 
 // SharedServerDir returns the directory for shared server state files.
 // Returns ~/.beads/shared-server/ (created on first use).
+// Override with BEADS_SHARED_SERVER_DIR env var for testing or custom layouts.
 func SharedServerDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	var dir string
+	if d := os.Getenv("BEADS_SHARED_SERVER_DIR"); d != "" {
+		dir = d
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine home directory: %w", err)
+		}
+		dir = filepath.Join(home, ".beads", "shared-server")
 	}
-	dir := filepath.Join(home, ".beads", "shared-server")
 	if err := os.MkdirAll(dir, config.BeadsDirPerm); err != nil {
 		return "", fmt.Errorf("cannot create shared server directory %s: %w", dir, err)
 	}
@@ -856,7 +862,6 @@ func FlushWorkingSet(host string, port int) error {
 	return nil
 }
 
-// Stop gracefully stops the managed server and its idle monitor.
 // Stop is idempotent: when the server is already stopped it returns
 // ErrServerNotRunning after cleaning up any leftover state files.
 // Callers should use errors.Is(err, ErrServerNotRunning) to distinguish
@@ -867,7 +872,6 @@ func Stop(beadsDir string) error {
 
 // StopWithForce is like Stop but with an optional force flag.
 func StopWithForce(beadsDir string, force bool) error {
-
 	state, err := IsRunning(beadsDir)
 	if err != nil {
 		return err

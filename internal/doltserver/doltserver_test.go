@@ -1263,6 +1263,31 @@ func TestSharedDoltDir(t *testing.T) {
 	}
 }
 
+func TestSharedServerDir_EnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", tmp)
+	dir, err := SharedServerDir()
+	if err != nil {
+		t.Fatalf("SharedServerDir: %v", err)
+	}
+	if dir != tmp {
+		t.Errorf("SharedServerDir = %q, want %q (from BEADS_SHARED_SERVER_DIR)", dir, tmp)
+	}
+}
+
+func TestSharedDoltDir_EnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", tmp)
+	dir, err := SharedDoltDir()
+	if err != nil {
+		t.Fatalf("SharedDoltDir: %v", err)
+	}
+	expected := filepath.Join(tmp, "dolt")
+	if dir != expected {
+		t.Errorf("SharedDoltDir = %q, want %q", dir, expected)
+	}
+}
+
 func TestResolveServerDir_PerProject(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	config.ResetForTesting()
