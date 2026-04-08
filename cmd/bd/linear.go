@@ -557,6 +557,21 @@ func maskAPIKey(key string) string {
 // getLinearConfig reads a Linear configuration value. Returns the value and its source.
 // Priority: project config > environment variable.
 func getLinearConfig(ctx context.Context, key string) (value string, source string) {
+	// Secret keys (e.g. linear.api_key) are stored in config.yaml, not the
+	// Dolt database, to avoid leaking secrets when pushing to remotes.
+	if config.IsYamlOnlyKey(key) {
+		if value := config.GetString(key); value != "" {
+			return value, "project config (config.yaml)"
+		}
+		envKey := linearConfigToEnvVar(key)
+		if envKey != "" {
+			if value := os.Getenv(envKey); value != "" {
+				return value, fmt.Sprintf("environment variable (%s)", envKey)
+			}
+		}
+		return "", ""
+	}
+
 	// Try to read from store (works in direct mode)
 	if store != nil {
 		value, _ = store.GetConfig(ctx, key) // Best effort: empty value is valid fallback
