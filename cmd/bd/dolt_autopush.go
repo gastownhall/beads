@@ -142,6 +142,9 @@ func maybeAutoPush(ctx context.Context) {
 	if err := st.Push(ctx); err != nil {
 		if !isQuiet() && !jsonOutput {
 			fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
+			if isDivergedHistoryErr(err) {
+				printDivergedHistoryGuidance("push")
+			}
 		}
 		debug.Logf("dolt auto-push: push error: %v\n", err)
 		return
