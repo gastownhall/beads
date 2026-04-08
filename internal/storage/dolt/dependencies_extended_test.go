@@ -263,6 +263,55 @@ func TestDependencyHistoryAndPartialFailure(t *testing.T) {
 	}
 }
 
+func TestAddDependency_RetryAfterPartialWriteIsIdempotent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	parent := &types.Issue{ID: "dep-retry-parent", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	child := newVersionedTestIssue("dep-retry-child", "Child")
+	for _, issue := range []*types.Issue{parent, child} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+		}
+	}
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: parent.ID,
+		Type:        types.DepBlocks,
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	err := store.AddDependency(ctx, dep, "tester")
+	requirePartialWriteError(t, err)
+	store.commitVersionedWriteFn = nil
+
+	beforeRetryHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before retry: %v", err)
+	}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("second AddDependency: %v", err)
+	}
+	afterRetryHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after retry: %v", err)
+	}
+	requireHeadChanged(t, beforeRetryHead, afterRetryHead, "retry AddDependency")
+
+	records, err := store.GetDependencyRecords(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords after retry: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected retry to reuse the existing dependency row, got %d records", len(records))
+	}
+}
+
 // =============================================================================
 // GetDependencyCounts Tests
 // =============================================================================

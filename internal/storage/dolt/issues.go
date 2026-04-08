@@ -159,6 +159,9 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 			return err
 		}
 		if _, hasStatus := updates["status"]; hasStatus {
+			// Cache invalidation follows the committed SQL status change. A later
+			// PartialWriteError means Dolt history repair is still needed, but the
+			// issue's blocker state has already changed for readers.
 			s.invalidateBlockedIDsCache()
 		}
 		return s.commitVersionedWrite(ctx, "update issue", []string{"issues", "events"}, fmt.Sprintf("bd: update %s", id))
@@ -181,6 +184,8 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 		if err := s.claimIssueSQL(ctx, id, actor); err != nil {
 			return err
 		}
+		// Cache should reflect the SQL-visible assignee/status change even if the
+		// follow-up Dolt history finalize needs later repair.
 		s.invalidateBlockedIDsCache()
 		return s.commitVersionedWrite(ctx, "claim issue", []string{"issues", "events"}, fmt.Sprintf("bd: claim %s", id))
 	})
@@ -225,6 +230,8 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		if err := s.closeIssueSQL(ctx, id, reason, actor, session); err != nil {
 			return err
 		}
+		// Keep blocker cache aligned with committed SQL state rather than waiting
+		// for Dolt history finalize, which may surface as PartialWriteError.
 		s.invalidateBlockedIDsCache()
 		return s.commitVersionedWrite(ctx, "close issue", []string{"issues", "events"}, fmt.Sprintf("bd: close %s", id))
 	})
@@ -241,6 +248,8 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 		if err := s.deleteIssueSQL(ctx, id); err != nil {
 			return err
 		}
+		// Deletion is logically complete once SQL commits, so cache invalidation
+		// stays here even if versioned history repair is deferred.
 		s.invalidateBlockedIDsCache()
 		return s.commitVersionedWrite(
 			ctx,
@@ -316,6 +325,8 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 		if dryRun {
 			return nil
 		}
+		// Bulk deletes follow the same rule as single deletes: cache tracks the
+		// SQL-visible result, while Dolt history repair can be retried separately.
 		s.invalidateBlockedIDsCache()
 		return s.commitVersionedWrite(
 			ctx,

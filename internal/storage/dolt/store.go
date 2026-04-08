@@ -445,8 +445,9 @@ func (s *DoltStore) versionedWriteLockIdentity() string {
 	// each project gets its own Dolt database, and cross-project mismatches
 	// are rejected during verifyProjectIdentity. Prefer it for process-wide
 	// write serialization so all clients touching the same shared database
-	// contend on the same advisory lock. Fall back to local paths only when
-	// tests construct a store without a configured database.
+	// contend on the same advisory lock even when they come from different
+	// worktrees or store instances. Fall back to local paths only when tests
+	// construct a store without a configured database.
 	if s.database != "" {
 		return "db:" + s.database
 	}
@@ -547,7 +548,9 @@ func (s *DoltStore) withSerializedWrite(ctx context.Context, fn func() error) er
 // PartialWriteError reports the shared-server repairable state where SQL
 // changes committed successfully but the follow-up Dolt history commit failed.
 // Callers should assume the logical write took effect and the working set may
-// require a later repair/commit to restore versioned history.
+// require a later repair/commit to restore versioned history. Blind retries are
+// only safe for write paths that are idempotent at the SQL layer; non-idempotent
+// operations such as comment insertion may duplicate logical effects if replayed.
 type PartialWriteError struct {
 	Operation string
 	Err       error

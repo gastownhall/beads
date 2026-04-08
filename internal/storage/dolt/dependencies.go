@@ -46,6 +46,9 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 			if err := issueops.AddDependencyInTx(ctx, tx, dep, actor, opts); err != nil {
 				return err
 			}
+			// Blocked-ID cache follows committed SQL state, not Dolt history state.
+			// If finalize later returns PartialWriteError the dependency still exists,
+			// so keeping cache invalidation here avoids serving stale blockers.
 			s.invalidateBlockedIDsCache()
 			return nil
 		}); err != nil {
@@ -82,6 +85,8 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 			if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
 				return err
 			}
+			// See AddDependency: cache should track the SQL mutation even when
+			// the follow-up Dolt history commit needs later repair.
 			s.invalidateBlockedIDsCache()
 			return nil
 		}); err != nil {
