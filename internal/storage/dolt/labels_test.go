@@ -217,6 +217,87 @@ func TestAddAndRemoveLabel(t *testing.T) {
 	}
 }
 
+func TestAddLabel_CommitsPermanentIssueHistory(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "label-history-perm",
+		Title:     "Permanent label history",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	before, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before add: %v", err)
+	}
+	if err := store.AddLabel(ctx, issue.ID, "history-check", "tester"); err != nil {
+		t.Fatalf("failed to add label: %v", err)
+	}
+	afterAdd, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after add: %v", err)
+	}
+	if before == afterAdd {
+		t.Fatal("expected AddLabel on permanent issue to advance Dolt HEAD")
+	}
+
+	if err := store.RemoveLabel(ctx, issue.ID, "history-check", "tester"); err != nil {
+		t.Fatalf("failed to remove label: %v", err)
+	}
+	afterRemove, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after remove: %v", err)
+	}
+	if afterAdd == afterRemove {
+		t.Fatal("expected RemoveLabel on permanent issue to advance Dolt HEAD")
+	}
+}
+
+func TestAddLabel_SkipsDoltCommitForWisp(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "label-history-wisp",
+		Title:       "Wisp label history",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		Ephemeral:   true,
+		Description: "wisp labels should remain no-history",
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create wisp: %v", err)
+	}
+
+	before, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before add: %v", err)
+	}
+	if err := store.AddLabel(ctx, issue.ID, "history-check", "tester"); err != nil {
+		t.Fatalf("failed to add label to wisp: %v", err)
+	}
+	after, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after add: %v", err)
+	}
+	if before != after {
+		t.Fatal("expected AddLabel on wisp to skip Dolt commit")
+	}
+}
+
 func TestAddLabel_Duplicate(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
