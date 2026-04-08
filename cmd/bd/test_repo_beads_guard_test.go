@@ -34,7 +34,7 @@ func testMainInner(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
 		return 1
 	}
-	defer func() { _ = os.RemoveAll(tmp) }()
+	defer func() { _ = forceRemoveAll(tmp) }()
 
 	// Preserve Go build cache before changing HOME.
 	// On macOS, GOCACHE defaults to $HOME/Library/Caches/go-build.
@@ -171,6 +171,23 @@ func findRepoRoot() string {
 		return ""
 	}
 	return findRepoRootFrom(wd)
+}
+
+// forceRemoveAll removes a directory tree, handling read-only files
+// (e.g., Go module cache entries under $HOME/go/pkg/mod/).
+// os.RemoveAll fails silently on read-only files; this makes them
+// writable first so cleanup actually succeeds.
+func forceRemoveAll(dir string) error {
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && info.Mode()&0200 == 0 {
+			_ = os.Chmod(path, info.Mode()|0200)
+		}
+		return nil
+	})
+	return os.RemoveAll(dir)
 }
 
 func findRepoRootFrom(wd string) string {
