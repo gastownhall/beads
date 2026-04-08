@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/testutil"
 	"golang.org/x/sync/errgroup"
@@ -52,20 +53,26 @@ func TestSharedServerConcurrent(t *testing.T) {
 	}
 
 	numDirs := ssEnvInt("BEADS_TEST_SS_DIRS", 50)
-	numClients := ssEnvInt("BEADS_TEST_SS_CLIENTS", 250)
+	numClients := ssEnvInt("BEADS_TEST_SS_CLIENTS", 500)
 	maxProcs := ssEnvInt("BEADS_TEST_SS_MAXPROCS", runtime.GOMAXPROCS(0)*4)
 	t.Logf("config: dirs=%d clients=%d maxprocs=%d", numDirs, numClients, maxProcs)
 
+	testStart := time.Now()
+
 	// ── 1. Build bd binary ──────────────────────────────────────────────
+	phase := time.Now()
 	bdBinary := buildSharedServerTestBinary(t)
+	t.Logf("build bd binary: %s", time.Since(phase))
 
 	// ── 2. Start testcontainers Dolt server ─────────────────────────────
+	phase = time.Now()
 	cp, err := testutil.NewContainerProvider()
 	if err != nil {
 		t.Skipf("cannot start Dolt container: %v", err)
 	}
 	containerPort := cp.Port()
 	t.Cleanup(func() { _ = cp.Stop("") })
+	t.Logf("start container (port %d): %s", containerPort, time.Since(phase))
 
 	// ── 3. Prepare shared server directory ──────────────────────────────
 	sharedDir := t.TempDir()
@@ -100,6 +107,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 	}
 
 	// ── 5. Init project directories ─────────────────────────────────────
+	phase = time.Now()
 	type project struct {
 		dir    string
 		prefix string
@@ -134,9 +142,10 @@ func TestSharedServerConcurrent(t *testing.T) {
 	if err := eg.Wait(); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	t.Logf("initialized %d project dirs", numDirs)
+	t.Logf("init %d dirs: %s", numDirs, time.Since(phase))
 
 	// ── 6. Fan out client workloads ─────────────────────────────────────
+	phase = time.Now()
 	eg, egCtx = errgroup.WithContext(ctx)
 	eg.SetLimit(maxProcs)
 	for c := range numClients {
@@ -151,7 +160,8 @@ func TestSharedServerConcurrent(t *testing.T) {
 	if err := eg.Wait(); err != nil {
 		t.Fatalf("workload: %v", err)
 	}
-	t.Logf("completed %d client workloads across %d dirs", numClients, numDirs)
+	t.Logf("workloads (%d clients x %d dirs): %s", numClients, numDirs, time.Since(phase))
+	t.Logf("total: %s", time.Since(testStart))
 }
 
 // runWorkload performs a realistic issue management workflow against the shared
@@ -166,20 +176,32 @@ func runWorkload(ctx context.Context, t *testing.T, bdBinary, dir, clientTag str
 	op := 0
 	bd := func(args ...string) (string, error) {
 		op++
-		return ssBdExec(ctx, bdBinary, dir, env, args...)
+		start := time.Now()
+		out, err := ssBdExec(ctx, bdBinary, dir, env, args...)
+		t.Logf("%s [op %d] %s — %s", clientTag, op, strings.Join(args, " "), time.Since(start))
+		return out, err
 	}
 	create := func(title string, extra ...string) (string, error) {
 		op++
+		start := time.Now()
 		args := append([]string{"create", title, "--json"}, extra...)
-		return ssBdCreateJSON(ctx, bdBinary, dir, env, args...)
+		id, err := ssBdCreateJSON(ctx, bdBinary, dir, env, args...)
+		t.Logf("%s [op %d] create %q — %s", clientTag, op, title, time.Since(start))
+		return id, err
 	}
 	show := func(id string) (map[string]any, error) {
 		op++
-		return ssBdShowJSON(ctx, bdBinary, dir, env, id)
+		start := time.Now()
+		m, err := ssBdShowJSON(ctx, bdBinary, dir, env, id)
+		t.Logf("%s [op %d] show %s — %s", clientTag, op, id, time.Since(start))
+		return m, err
 	}
 	list := func(extra ...string) ([]any, error) {
 		op++
-		return ssBdListJSON(ctx, bdBinary, dir, env, extra...)
+		start := time.Now()
+		arr, err := ssBdListJSON(ctx, bdBinary, dir, env, extra...)
+		t.Logf("%s [op %d] list %s — %s", clientTag, op, strings.Join(extra, " "), time.Since(start))
+		return arr, err
 	}
 
 	ids := make([]string, 30)
