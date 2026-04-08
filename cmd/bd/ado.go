@@ -239,10 +239,10 @@ func adoConfigToEnvVar(key string) string {
 // validateADOConfig checks that required configuration is present.
 func validateADOConfig(cfg ADOConfig) error {
 	if cfg.PAT == "" {
-		return fmt.Errorf("ado.pat not configured: set via 'bd config ado.pat <token>' or AZURE_DEVOPS_PAT env var")
+		return fmt.Errorf("ado.pat not configured: set via 'bd config set ado.pat <token>' or AZURE_DEVOPS_PAT env var")
 	}
 	if cfg.Org == "" && cfg.URL == "" {
-		return fmt.Errorf("ado.org not configured: set via 'bd config ado.org <org>' or AZURE_DEVOPS_ORG env var")
+		return fmt.Errorf("ado.org not configured: set via 'bd config set ado.org <org>' or AZURE_DEVOPS_ORG env var")
 	}
 	if len(cfg.Projects) == 0 {
 		return fmt.Errorf("no ADO project configured\nSet via 'bd config set ado.project <project>'\nOr:  'bd config set ado.projects \"proj1,proj2\"'\nOr: AZURE_DEVOPS_PROJECT env var")
@@ -404,10 +404,10 @@ func runADOStatus(cmd *cobra.Command, _ []string) error {
 func runADOProjects(cmd *cobra.Command, _ []string) error {
 	cfg := getADOConfig()
 	if cfg.PAT == "" {
-		return fmt.Errorf("ado.pat not configured: set via 'bd config ado.pat <token>' or AZURE_DEVOPS_PAT env var")
+		return fmt.Errorf("ado.pat not configured: set via 'bd config set ado.pat <token>' or AZURE_DEVOPS_PAT env var")
 	}
 	if cfg.Org == "" && cfg.URL == "" {
-		return fmt.Errorf("ado.org not configured: set via 'bd config ado.org <org>' or AZURE_DEVOPS_ORG env var")
+		return fmt.Errorf("ado.org not configured: set via 'bd config set ado.org <org>' or AZURE_DEVOPS_ORG env var")
 	}
 
 	out := cmd.OutOrStdout()
