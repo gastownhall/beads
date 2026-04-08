@@ -155,34 +155,13 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	}
 
 	return s.withSerializedWrite(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
-		if err != nil {
+		if err := s.updateIssueSQL(ctx, id, updates, actor); err != nil {
 			return err
-		}
-
-		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
-		commitMsg := fmt.Sprintf("bd: update %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return wrapTransactionError("commit update issue", err)
 		}
 		if _, hasStatus := updates["status"]; hasStatus {
 			s.invalidateBlockedIDsCache()
 		}
-		_ = result
-		return nil
+		return s.commitVersionedWrite(ctx, "update issue", []string{"issues", "events"}, fmt.Sprintf("bd: update %s", id))
 	})
 }
 
@@ -199,30 +178,11 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 	}
 
 	return s.withSerializedWrite(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
+		if err := s.claimIssueSQL(ctx, id, actor); err != nil {
 			return err
 		}
-
-		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
-		commitMsg := fmt.Sprintf("bd: claim %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return wrapTransactionError("commit claim issue", err)
-		}
 		s.invalidateBlockedIDsCache()
-		return nil
+		return s.commitVersionedWrite(ctx, "claim issue", []string{"issues", "events"}, fmt.Sprintf("bd: claim %s", id))
 	})
 }
 
@@ -262,30 +222,11 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 	}
 
 	return s.withSerializedWrite(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
+		if err := s.closeIssueSQL(ctx, id, reason, actor, session); err != nil {
 			return err
 		}
-
-		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
-		commitMsg := fmt.Sprintf("bd: close %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return wrapTransactionError("commit close issue", err)
-		}
 		s.invalidateBlockedIDsCache()
-		return nil
+		return s.commitVersionedWrite(ctx, "close issue", []string{"issues", "events"}, fmt.Sprintf("bd: close %s", id))
 	})
 }
 
@@ -297,30 +238,16 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 	}
 
 	return s.withSerializedWrite(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		if err := issueops.DeleteIssueInTx(ctx, tx, id); err != nil {
-			return err
-		}
-
-		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
-		commitMsg := fmt.Sprintf("bd: delete %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
+		if err := s.deleteIssueSQL(ctx, id); err != nil {
 			return err
 		}
 		s.invalidateBlockedIDsCache()
-		return nil
+		return s.commitVersionedWrite(
+			ctx,
+			"delete issue",
+			[]string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"},
+			fmt.Sprintf("bd: delete %s", id),
+		)
 	})
 }
 
@@ -376,41 +303,26 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 
 	var result *types.DeleteIssuesResult
 	err := s.withSerializedWrite(ctx, func() error {
-		tx, txErr := s.db.BeginTx(ctx, nil)
-		if txErr != nil {
-			return fmt.Errorf("failed to begin transaction: %w", txErr)
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		// Delegate core logic (cascade/force/dryRun, stats, batch deletion) to issueops.
-		var opErr error
-		result, opErr = issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun)
-		if opErr != nil {
+		var err error
+		result, err = s.deleteIssuesSQL(ctx, ids, cascade, force, dryRun)
+		if err != nil {
 			if result != nil {
 				result.DeletedCount += wispDeleteCount
 			}
-			return opErr
+			return err
 		}
 		result.DeletedCount += wispDeleteCount
 
 		if dryRun {
 			return nil
 		}
-
-		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
-		commitMsg := fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount-wispDeleteCount)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
-		}
 		s.invalidateBlockedIDsCache()
-		return nil
+		return s.commitVersionedWrite(
+			ctx,
+			"delete issues",
+			[]string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"},
+			fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount-wispDeleteCount),
+		)
 	})
 	if err != nil {
 		if result != nil {
@@ -430,6 +342,43 @@ func doltBuildSQLInClause(ids []string) (string, []interface{}) {
 		args[i] = id
 	}
 	return strings.Join(placeholders, ","), args
+}
+
+func (s *DoltStore) updateIssueSQL(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+		return err
+	})
+}
+
+func (s *DoltStore) claimIssueSQL(ctx context.Context, id string, actor string) error {
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := issueops.ClaimIssueInTx(ctx, tx, id, actor)
+		return err
+	})
+}
+
+func (s *DoltStore) closeIssueSQL(ctx context.Context, id string, reason string, actor string, session string) error {
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session)
+		return err
+	})
+}
+
+func (s *DoltStore) deleteIssueSQL(ctx context.Context, id string) error {
+	return s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return issueops.DeleteIssueInTx(ctx, tx, id)
+	})
+}
+
+func (s *DoltStore) deleteIssuesSQL(ctx context.Context, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
+	var result *types.DeleteIssuesResult
+	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun)
+		return err
+	})
+	return result, err
 }
 
 // =============================================================================
