@@ -195,6 +195,10 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// Test-only hooks for write-finalization behavior. Nil in production.
+	commitVersionedWriteFn   func(context.Context, []string, string) error
+	releaseServerWriteLockFn func(context.Context, *sql.Conn, string) error
 }
 
 // Config holds Dolt database configuration
@@ -425,11 +429,12 @@ func isRetryableWriteError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isRetryableError(err) || isLockError(err) || isSerializationError(err) {
+	if isLockError(err) || isSerializationError(err) {
 		return true
 	}
 	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "failed to acquire write lock")
+	return strings.Contains(errStr, "failed to acquire write lock") ||
+		strings.Contains(errStr, "database is read only")
 }
 
 func writeLockName(database string) string {
@@ -457,8 +462,51 @@ func writeLockName(database string) string {
 	return prefix + strconv.FormatUint(h.Sum64(), 16)
 }
 
+func (s *DoltStore) versionedWriteLockIdentity() string {
+	// In shared-server mode the database name is the project identity:
+	// each project gets its own Dolt database, and cross-project mismatches
+	// are rejected during verifyProjectIdentity. Prefer it for process-wide
+	// write serialization so all clients touching the same shared database
+	// contend on the same advisory lock. Fall back to local paths only when
+	// tests construct a store without a configured database.
+	if s.database != "" {
+		return "db:" + s.database
+	}
+	if s.beadsDir != "" {
+		return "beads:" + filepath.Clean(s.beadsDir)
+	}
+	if s.dbPath != "" {
+		return "path:" + filepath.Clean(s.dbPath)
+	}
+	return "default"
+}
+
 func (s *DoltStore) serverWriteLockName() string {
-	return writeLockName(s.database)
+	return writeLockName(s.versionedWriteLockIdentity())
+}
+
+func defaultReleaseServerWriteLock(ctx context.Context, conn *sql.Conn, lockName string) error {
+	if conn == nil {
+		return fmt.Errorf("release write lock %q: nil connection", lockName)
+	}
+	var released sql.NullInt64
+	if err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", lockName).Scan(&released); err != nil {
+		return err
+	}
+	if !released.Valid || released.Int64 != 1 {
+		return fmt.Errorf("lock %q was not released cleanly", lockName)
+	}
+	return nil
+}
+
+func (s *DoltStore) releaseServerWriteLock(ctx context.Context, conn *sql.Conn, lockName string) {
+	releaseFn := s.releaseServerWriteLockFn
+	if releaseFn == nil {
+		releaseFn = defaultReleaseServerWriteLock
+	}
+	if err := releaseFn(ctx, conn, lockName); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to release write lock %q: %v\n", lockName, err)
+	}
 }
 
 func (s *DoltStore) withServerWriteLock(ctx context.Context, fn func() error) error {
@@ -478,7 +526,12 @@ func (s *DoltStore) withServerWriteLock(ctx context.Context, fn func() error) er
 	if locked != 1 {
 		return fmt.Errorf("failed to acquire write lock: timeout after %s (another process holds it)", serverWriteLockWait)
 	}
-	defer conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", s.serverWriteLockName()) //nolint:errcheck
+	lockName := s.serverWriteLockName()
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		s.releaseServerWriteLock(releaseCtx, conn, lockName)
+	}()
 
 	return fn()
 }
@@ -504,12 +557,48 @@ func (s *DoltStore) withWriteRetry(ctx context.Context, op func() error) error {
 }
 
 func (s *DoltStore) withSerializedWrite(ctx context.Context, fn func() error) error {
+	// Shared-server mode is the only place we need cross-process advisory
+	// locking. Embedded mode relies on the local Dolt/OS locking model and
+	// intentionally skips GET_LOCK-based serialization.
 	if !s.serverMode {
 		return fn()
 	}
-	return wrapLockError(s.withWriteRetry(ctx, func() error {
-		return s.withServerWriteLock(ctx, fn)
-	}))
+	return wrapLockError(s.withServerWriteLock(ctx, fn))
+}
+
+// PartialWriteError reports the shared-server repairable state where SQL
+// changes committed successfully but the follow-up Dolt history commit failed.
+// Callers should assume the logical write took effect and the working set may
+// require a later repair/commit to restore versioned history.
+type PartialWriteError struct {
+	Operation string
+	Err       error
+}
+
+func (e *PartialWriteError) Error() string {
+	return fmt.Sprintf("%s: SQL write committed but Dolt history commit failed: %v", e.Operation, e.Err)
+}
+
+func (e *PartialWriteError) Unwrap() error {
+	return e.Err
+}
+
+func (s *DoltStore) commitVersionedWrite(ctx context.Context, operation string, tables []string, commitMsg string) error {
+	// Only the Dolt history finalize step is retried. The SQL write has already
+	// committed by the time this helper runs, so retrying the whole operation
+	// would risk duplicating user-visible side effects.
+	commitFn := s.commitVersionedWriteFn
+	if commitFn == nil {
+		commitFn = func(ctx context.Context, tables []string, commitMsg string) error {
+			return s.doltAddAndCommit(ctx, tables, commitMsg)
+		}
+	}
+	if err := s.withWriteRetry(ctx, func() error {
+		return commitFn(ctx, tables, commitMsg)
+	}); err != nil {
+		return &PartialWriteError{Operation: operation, Err: err}
+	}
+	return nil
 }
 
 // withRetry executes an operation with retry for transient errors.

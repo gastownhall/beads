@@ -1,11 +1,62 @@
 package dolt
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+func newVersionedTestIssue(id, title string) *types.Issue {
+	return &types.Issue{
+		ID:        id,
+		Title:     title,
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+}
+
+func stubVersionedWriteFailure(t *testing.T, store *DoltStore) {
+	t.Helper()
+
+	store.commitVersionedWriteFn = func(context.Context, []string, string) error {
+		return errors.New("history finalize failed")
+	}
+	t.Cleanup(func() {
+		store.commitVersionedWriteFn = nil
+	})
+}
+
+func requirePartialWriteError(t *testing.T, err error) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatal("expected partial write error")
+	}
+	var partialErr *PartialWriteError
+	if !errors.As(err, &partialErr) {
+		t.Fatalf("expected PartialWriteError, got %T", err)
+	}
+}
+
+func requireHeadChanged(t *testing.T, before, after string, action string) {
+	t.Helper()
+
+	if before == after {
+		t.Fatalf("expected %s to advance Dolt HEAD", action)
+	}
+}
+
+func requireHeadUnchanged(t *testing.T, before, after string, action string) {
+	t.Helper()
+
+	if before != after {
+		t.Fatalf("expected %s to leave Dolt HEAD unchanged", action)
+	}
+}
 
 // TestGetAllEventsSince_UnionBothTables verifies that GetAllEventsSince returns
 // events from both the events table (permanent issues) and wisp_events table
@@ -91,5 +142,149 @@ func TestGetAllEventsSince_EmptyStore(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Errorf("expected 0 events from empty store, got %d", len(events))
+	}
+}
+
+func TestAddComment_CommitsPermanentIssueHistory(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := newVersionedTestIssue("comment-history-perm", "Permanent comment history")
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	before, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before add: %v", err)
+	}
+	if err := store.AddComment(ctx, issue.ID, "tester", "hello history"); err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	after, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after add: %v", err)
+	}
+	requireHeadChanged(t, before, after, "AddComment on permanent issue")
+}
+
+func TestAddComment_PartialWriteLeavesCommittedSQLState(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := newVersionedTestIssue("comment-partial", "Comment partial failure")
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	beforeHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before add: %v", err)
+	}
+	beforeEvents, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents before add: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	err = store.AddComment(ctx, issue.ID, "tester", "hello partial")
+	requirePartialWriteError(t, err)
+
+	afterHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after add: %v", err)
+	}
+	requireHeadUnchanged(t, beforeHead, afterHead, "partial AddComment")
+
+	afterEvents, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents after add: %v", err)
+	}
+	if len(afterEvents) != len(beforeEvents)+1 {
+		t.Fatalf("expected SQL event row to persist despite partial failure, before=%d after=%d", len(beforeEvents), len(afterEvents))
+	}
+}
+
+func TestImportIssueComment_HistoryBehaviorAndPartialFailure(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	permanent := newVersionedTestIssue("import-comment-perm", "Permanent imported comment")
+	wisp := &types.Issue{
+		ID:        "import-comment-wisp",
+		Title:     "Wisp imported comment",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	for _, issue := range []*types.Issue{permanent, wisp} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+		}
+	}
+
+	beforePerm, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before permanent import: %v", err)
+	}
+	if _, err := store.ImportIssueComment(ctx, permanent.ID, "tester", "perm", time.Now().UTC()); err != nil {
+		t.Fatalf("ImportIssueComment permanent: %v", err)
+	}
+	afterPerm, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after permanent import: %v", err)
+	}
+	requireHeadChanged(t, beforePerm, afterPerm, "permanent ImportIssueComment")
+
+	beforeWisp, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before wisp import: %v", err)
+	}
+	if _, err := store.ImportIssueComment(ctx, wisp.ID, "tester", "wisp", time.Now().UTC()); err != nil {
+		t.Fatalf("ImportIssueComment wisp: %v", err)
+	}
+	afterWisp, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after wisp import: %v", err)
+	}
+	requireHeadUnchanged(t, beforeWisp, afterWisp, "wisp ImportIssueComment")
+
+	beforePartialHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before partial import: %v", err)
+	}
+	beforeComments, err := store.GetIssueComments(ctx, permanent.ID)
+	if err != nil {
+		t.Fatalf("GetIssueComments before partial import: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	_, err = store.ImportIssueComment(ctx, permanent.ID, "tester", "perm-partial", time.Now().UTC())
+	requirePartialWriteError(t, err)
+
+	afterPartialHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after partial import: %v", err)
+	}
+	requireHeadUnchanged(t, beforePartialHead, afterPartialHead, "partial ImportIssueComment")
+
+	afterComments, err := store.GetIssueComments(ctx, permanent.ID)
+	if err != nil {
+		t.Fatalf("GetIssueComments after partial import: %v", err)
+	}
+	if len(afterComments) != len(beforeComments)+1 {
+		t.Fatalf("expected SQL comment row to persist despite partial failure, before=%d after=%d", len(beforeComments), len(afterComments))
 	}
 }

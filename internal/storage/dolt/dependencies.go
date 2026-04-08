@@ -51,7 +51,12 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 		}); err != nil {
 			return err
 		}
-		return s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
+		return s.commitVersionedWrite(
+			ctx,
+			"add dependency",
+			[]string{"dependencies"},
+			"dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID,
+		)
 	})
 }
 
@@ -73,21 +78,21 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 	}
 
 	return s.withSerializedWrite(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
+		if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
+				return err
+			}
+			s.invalidateBlockedIDsCache()
+			return nil
+		}); err != nil {
 			return err
 		}
-
-		s.invalidateBlockedIDsCache()
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("sql commit: %w", err)
-		}
-		return s.doltAddAndCommit(ctx, []string{"dependencies"}, "dependency: remove "+issueID+" -> "+dependsOnID)
+		return s.commitVersionedWrite(
+			ctx,
+			"remove dependency",
+			[]string{"dependencies"},
+			"dependency: remove "+issueID+" -> "+dependsOnID,
+		)
 	})
 }
 

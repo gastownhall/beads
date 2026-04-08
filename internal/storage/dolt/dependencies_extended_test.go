@@ -191,6 +191,78 @@ func TestGetAllDependencyRecords(t *testing.T) {
 	}
 }
 
+func TestDependencyHistoryAndPartialFailure(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	parent := &types.Issue{ID: "dep-history-parent", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	child := newVersionedTestIssue("dep-history-child", "Child")
+	for _, issue := range []*types.Issue{parent, child} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+		}
+	}
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: parent.ID,
+		Type:        types.DepBlocks,
+	}
+
+	beforeAdd, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before add: %v", err)
+	}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	afterAdd, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after add: %v", err)
+	}
+	requireHeadChanged(t, beforeAdd, afterAdd, "AddDependency")
+
+	if err := store.RemoveDependency(ctx, child.ID, parent.ID, "tester"); err != nil {
+		t.Fatalf("RemoveDependency: %v", err)
+	}
+	afterRemove, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after remove: %v", err)
+	}
+	requireHeadChanged(t, afterAdd, afterRemove, "RemoveDependency")
+
+	beforePartialHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before partial add: %v", err)
+	}
+	beforeRecords, err := store.GetDependencyRecords(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords before partial add: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	err = store.AddDependency(ctx, dep, "tester")
+	requirePartialWriteError(t, err)
+
+	afterPartialHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after partial add: %v", err)
+	}
+	requireHeadUnchanged(t, beforePartialHead, afterPartialHead, "partial AddDependency")
+
+	afterRecords, err := store.GetDependencyRecords(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords after partial add: %v", err)
+	}
+	if len(afterRecords) != len(beforeRecords)+1 {
+		t.Fatalf("expected SQL dependency row to persist despite partial failure, before=%d after=%d", len(beforeRecords), len(afterRecords))
+	}
+}
+
 // =============================================================================
 // GetDependencyCounts Tests
 // =============================================================================

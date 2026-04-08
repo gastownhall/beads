@@ -224,13 +224,7 @@ func TestAddLabel_CommitsPermanentIssueHistory(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	issue := &types.Issue{
-		ID:        "label-history-perm",
-		Title:     "Permanent label history",
-		Status:    types.StatusOpen,
-		Priority:  2,
-		IssueType: types.TypeTask,
-	}
+	issue := newVersionedTestIssue("label-history-perm", "Permanent label history")
 	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
 		t.Fatalf("failed to create issue: %v", err)
 	}
@@ -246,9 +240,7 @@ func TestAddLabel_CommitsPermanentIssueHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentCommit after add: %v", err)
 	}
-	if before == afterAdd {
-		t.Fatal("expected AddLabel on permanent issue to advance Dolt HEAD")
-	}
+	requireHeadChanged(t, before, afterAdd, "AddLabel on permanent issue")
 
 	if err := store.RemoveLabel(ctx, issue.ID, "history-check", "tester"); err != nil {
 		t.Fatalf("failed to remove label: %v", err)
@@ -257,9 +249,7 @@ func TestAddLabel_CommitsPermanentIssueHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCurrentCommit after remove: %v", err)
 	}
-	if afterAdd == afterRemove {
-		t.Fatal("expected RemoveLabel on permanent issue to advance Dolt HEAD")
-	}
+	requireHeadChanged(t, afterAdd, afterRemove, "RemoveLabel on permanent issue")
 }
 
 func TestAddLabel_SkipsDoltCommitForWisp(t *testing.T) {
@@ -340,5 +330,48 @@ func TestAddLabel_Duplicate(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected exactly 1 instance of 'duplicate' label, got %d", count)
+	}
+}
+
+func TestAddLabel_PartialWriteLeavesCommittedSQLState(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "label-partial",
+		Title:     "Label partial failure",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	beforeHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before add: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	err = store.AddLabel(ctx, issue.ID, "partial", "tester")
+	requirePartialWriteError(t, err)
+
+	afterHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after add: %v", err)
+	}
+	requireHeadUnchanged(t, beforeHead, afterHead, "partial AddLabel")
+
+	labels, err := store.GetLabels(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetLabels after add: %v", err)
+	}
+	if len(labels) != 1 || labels[0] != "partial" {
+		t.Fatalf("expected SQL label row to persist despite partial failure, got %v", labels)
 	}
 }
