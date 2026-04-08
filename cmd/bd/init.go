@@ -438,6 +438,25 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if database != "" {
 			dbName = database
 		}
+
+		// Validate the auto-derived database name early so we can surface a clear,
+		// actionable error instead of a cryptic failure from the storage layer.
+		// The --database flag is already validated above; this catches cases where
+		// the directory name produces an invalid identifier after sanitization
+		// (e.g. spaces, '@', '!' that survive the hyphen/dot replacement).
+		// Skip when dbName came from an existing config — it was valid when stored.
+		if database == "" {
+			if existingCfg, _ := configfile.Load(beadsDir); existingCfg == nil || existingCfg.DoltDatabase == "" {
+				if err := dolt.ValidateDatabaseName(dbName); err != nil {
+					dirName := filepath.Base(cwd)
+					fmt.Fprintf(os.Stderr, "Error: directory name %q produces an invalid database name %q.\n", dirName, dbName)
+					fmt.Fprintf(os.Stderr, "Re-run with a valid prefix: bd init --prefix <name>\n")
+					fmt.Fprintf(os.Stderr, "(Database names must start with a letter or underscore and contain only letters, digits, underscores, or hyphens.)\n")
+					os.Exit(1)
+				}
+			}
+		}
+
 		// Auto-bootstrap from git remote if sync.git-remote is configured.
 		// This enables the new-machine story: set sync.git-remote in config.yaml,
 		// run bd init, and the Dolt database is cloned from the git remote
@@ -662,8 +681,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if database != "" {
 					cfg.DoltDatabase = database
 				} else if cfg.DoltDatabase == "" && prefix != "" {
-					// Sanitize hyphens to underscores for SQL-idiomatic names (GH#2142).
+					// Sanitize hyphens and dots to underscores for SQL-idiomatic names (GH#2142).
+					// Must match the sanitization applied to dbName above (lines 430-431),
+					// otherwise init creates a database with one name but metadata.json
+					// records a different name, causing reopens to fail.
 					cfg.DoltDatabase = strings.ReplaceAll(prefix, "-", "_")
+					cfg.DoltDatabase = strings.ReplaceAll(cfg.DoltDatabase, ".", "_")
 				}
 
 				// Persist the connection mode matching this build.
