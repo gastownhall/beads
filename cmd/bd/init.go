@@ -80,6 +80,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		database, _ := cmd.Flags().GetString("database")
 		destroyToken, _ := cmd.Flags().GetString("destroy-token")
 		sharedServer, _ := cmd.Flags().GetBool("shared-server")
+		externalServer, _ := cmd.Flags().GetBool("external")
 
 		// Handle --backend flag: "dolt" is the only supported backend.
 		// "sqlite" is accepted for backward compatibility but prints a
@@ -525,7 +526,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// opening the store. EnsureRunning won't auto-start because
 		// ResolveServerMode returns ServerModeExternal, so start it
 		// explicitly via the shared server directory (GH#2946).
-		if sharedServer || doltserver.IsSharedServerMode() {
+		//
+		// --external skips this: the server is managed outside bd (e.g.
+		// Docker, systemd, testcontainers). The caller is responsible for
+		// ensuring the server is reachable and the port file exists.
+		if !externalServer && (sharedServer || doltserver.IsSharedServerMode()) {
 			if sharedDir, err := doltserver.SharedServerDir(); err == nil {
 				if state, _ := doltserver.IsRunning(sharedDir); state == nil || !state.Running {
 					if _, startErr := doltserver.Start(sharedDir); startErr != nil {
@@ -1149,6 +1154,7 @@ func init() {
 	initCmd.Flags().String("server-user", "", "Dolt server MySQL user (default: root)")
 	initCmd.Flags().String("database", "", "Use existing server database name (overrides prefix-based naming)")
 	initCmd.Flags().Bool("shared-server", false, "Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)")
+	initCmd.Flags().Bool("external", false, "Server is externally managed (skip server startup); use with --shared-server or --server")
 
 	rootCmd.AddCommand(initCmd)
 }

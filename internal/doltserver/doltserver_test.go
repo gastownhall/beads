@@ -1263,6 +1263,99 @@ func TestSharedDoltDir(t *testing.T) {
 	}
 }
 
+func TestSharedServerDir_EnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", tmp)
+	dir, err := SharedServerDir()
+	if err != nil {
+		t.Fatalf("SharedServerDir: %v", err)
+	}
+	if dir != tmp {
+		t.Errorf("SharedServerDir = %q, want %q (from BEADS_SHARED_SERVER_DIR)", dir, tmp)
+	}
+}
+
+func TestSharedDoltDir_EnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", tmp)
+	dir, err := SharedDoltDir()
+	if err != nil {
+		t.Fatalf("SharedDoltDir: %v", err)
+	}
+	expected := filepath.Join(tmp, "dolt")
+	if dir != expected {
+		t.Errorf("SharedDoltDir = %q, want %q", dir, expected)
+	}
+}
+
+func TestSetProvider_DelegatesToCustomProvider(t *testing.T) {
+	// Create a mock provider that records calls.
+	mock := &mockProvider{}
+	SetProvider(mock)
+	t.Cleanup(func() { SetProvider(nil) }) // restore default
+
+	dir := t.TempDir()
+
+	// IsRunning should delegate to mock.
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || state.Port != 9999 {
+		t.Errorf("IsRunning = %+v, want Running=true Port=9999", state)
+	}
+	if mock.isRunningCalls != 1 {
+		t.Errorf("IsRunning calls = %d, want 1", mock.isRunningCalls)
+	}
+
+	// Start should delegate to mock.
+	state, err = Start(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Port != 9999 {
+		t.Errorf("Start port = %d, want 9999", state.Port)
+	}
+	if mock.startCalls != 1 {
+		t.Errorf("Start calls = %d, want 1", mock.startCalls)
+	}
+
+	// Stop should delegate to mock.
+	if err := Stop(dir); err != nil {
+		t.Fatal(err)
+	}
+	if mock.stopCalls != 1 {
+		t.Errorf("Stop calls = %d, want 1", mock.stopCalls)
+	}
+
+	// Restore nil → should reset to CLIProvider.
+	SetProvider(nil)
+	if _, ok := getProvider().(*CLIProvider); !ok {
+		t.Error("SetProvider(nil) did not restore CLIProvider")
+	}
+}
+
+type mockProvider struct {
+	isRunningCalls int
+	startCalls     int
+	stopCalls      int
+}
+
+func (m *mockProvider) IsRunning(serverDir string) (*State, error) {
+	m.isRunningCalls++
+	return &State{Running: true, Port: 9999}, nil
+}
+
+func (m *mockProvider) Start(serverDir string) (*State, error) {
+	m.startCalls++
+	return &State{Running: true, Port: 9999}, nil
+}
+
+func (m *mockProvider) Stop(serverDir string) error {
+	m.stopCalls++
+	return nil
+}
+
 func TestResolveServerDir_PerProject(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	config.ResetForTesting()
