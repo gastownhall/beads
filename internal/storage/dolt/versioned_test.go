@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -166,4 +167,78 @@ func TestCommitPending(t *testing.T) {
 			t.Fatalf("cleanup commit failed: %v", err)
 		}
 	})
+}
+
+func TestUpdateIssue_PartialWriteLeavesCommittedSQLState(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := newVersionedTestIssue("update-partial", "Update partial write")
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	beforeHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before update: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	err = store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"title": "Updated title"}, "tester")
+	requirePartialWriteError(t, err)
+
+	afterHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after update: %v", err)
+	}
+	requireHeadUnchanged(t, beforeHead, afterHead, "partial UpdateIssue")
+
+	updated, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue after partial update: %v", err)
+	}
+	if updated.Title != "Updated title" {
+		t.Fatalf("expected SQL issue row to persist despite partial failure, got title %q", updated.Title)
+	}
+}
+
+func TestUpdateIssue_CommitsPermanentIssueHistory(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := newVersionedTestIssue("update-history", "Update history")
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	beforeHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before update: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"title": "Updated title"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	afterHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after update: %v", err)
+	}
+	requireHeadChanged(t, beforeHead, afterHead, "UpdateIssue")
+}
+
+func TestPartialWriteError_Unwrap(t *testing.T) {
+	root := errors.New("boom")
+	err := &PartialWriteError{Operation: "update issue", Err: root}
+	if !errors.Is(err, root) {
+		t.Fatal("expected PartialWriteError to unwrap to underlying error")
+	}
+	if !strings.Contains(err.Error(), "update issue") {
+		t.Fatalf("expected operation in error string, got %q", err.Error())
+	}
 }
