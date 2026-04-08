@@ -71,13 +71,12 @@ func TestSharedServerConcurrent(t *testing.T) {
 		t.Skipf("cannot start Dolt container: %v", err)
 	}
 	containerPort := cp.Port()
-	t.Cleanup(func() { _ = cp.Stop("") })
+	t.Cleanup(func() { _ = cp.Stop() })
 	t.Logf("start container (port %d): %s", containerPort, time.Since(phase))
 
 	// ── 3. Prepare shared server directory ──────────────────────────────
 	sharedDir := t.TempDir()
-	portFile := filepath.Join(sharedDir, "dolt-server.port")
-	if err := os.WriteFile(portFile, []byte(strconv.Itoa(containerPort)), 0600); err != nil {
+	if err := cp.WritePortFile(sharedDir); err != nil {
 		t.Fatalf("write port file: %v", err)
 	}
 

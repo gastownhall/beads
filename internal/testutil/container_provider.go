@@ -5,28 +5,22 @@ package testutil
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
-
-	"github.com/steveyegge/beads/internal/doltserver"
 )
 
-// ContainerProvider is a doltserver.ServerProvider backed by a testcontainers
-// Dolt SQL server. It implements Start/Stop/IsRunning so that integration
-// tests can swap it in via doltserver.SetProvider.
+// ContainerProvider manages a testcontainers Dolt SQL server for integration
+// tests. Use NewContainerProvider to start the container, Port() to get the
+// mapped host port, and Stop() to tear it down.
 type ContainerProvider struct {
 	container *dolt.DoltContainer
 	port      int
 }
 
-// NewContainerProvider starts a Dolt container and returns a provider that
-// satisfies doltserver.ServerProvider. The container is terminated when the
-// provider's Stop method is called.
+// NewContainerProvider starts a Dolt container and returns a provider.
 func NewContainerProvider() (*ContainerProvider, error) {
 	if state := checkDolt(); state != doltReady {
 		return nil, fmt.Errorf("cannot create container provider: %s", state)
@@ -66,45 +60,19 @@ func (p *ContainerProvider) Port() int {
 	return p.port
 }
 
-// Start writes the port file into serverDir so that DefaultConfig and other
-// code that reads state files can discover the container's port. The
-// container itself is already running (started in NewContainerProvider).
-func (p *ContainerProvider) Start(serverDir string) (*doltserver.State, error) {
-	// Write port file so DefaultConfig / readPortFile can find the port.
+// WritePortFile writes the container port to the given shared server directory
+// so that bd subprocesses can discover it via DefaultConfig / readPortFile.
+func (p *ContainerProvider) WritePortFile(serverDir string) error {
 	portPath := serverDir + "/dolt-server.port"
-	if err := os.WriteFile(portPath, []byte(strconv.Itoa(p.port)), 0600); err != nil {
-		return nil, fmt.Errorf("writing port file: %w", err)
-	}
-	return &doltserver.State{
-		Running: true,
-		Port:    p.port,
-	}, nil
+	return os.WriteFile(portPath, []byte(strconv.Itoa(p.port)), 0600)
 }
 
-// Stop terminates the container and cleans up state files.
-func (p *ContainerProvider) Stop(serverDir string) error {
-	// Clean up state files.
-	_ = os.Remove(serverDir + "/dolt-server.port")
-	_ = os.Remove(serverDir + "/dolt-server.pid")
-
+// Stop terminates the container.
+func (p *ContainerProvider) Stop() error {
 	if p.container == nil {
 		return nil
 	}
 	err := testcontainers.TerminateContainer(p.container)
 	p.container = nil
 	return err
-}
-
-// IsRunning checks if the container is reachable via TCP dial.
-func (p *ContainerProvider) IsRunning(serverDir string) (*doltserver.State, error) {
-	addr := fmt.Sprintf("127.0.0.1:%d", p.port)
-	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-	if err != nil {
-		return &doltserver.State{Running: false}, nil
-	}
-	_ = conn.Close()
-	return &doltserver.State{
-		Running: true,
-		Port:    p.port,
-	}, nil
 }

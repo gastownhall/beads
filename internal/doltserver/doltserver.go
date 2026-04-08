@@ -457,13 +457,7 @@ func DefaultConfig(beadsDir string) *Config {
 
 // IsRunning checks if a managed server is running for this beadsDir.
 // Returns a State with Running=true if a valid dolt process is found.
-// Delegates to the active ServerProvider (default: CLIProvider).
 func IsRunning(beadsDir string) (*State, error) {
-	return getProvider().IsRunning(beadsDir)
-}
-
-// cliIsRunning is the CLIProvider implementation of IsRunning.
-func cliIsRunning(beadsDir string) (*State, error) {
 	data, err := os.ReadFile(pidPath(beadsDir))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -593,13 +587,7 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
-// Delegates to the active ServerProvider (default: CLIProvider).
 func Start(beadsDir string) (*State, error) {
-	return getProvider().Start(beadsDir)
-}
-
-// cliStart is the CLIProvider implementation of Start.
-func cliStart(beadsDir string) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
 	doltDir := ResolveDoltDir(beadsDir)
 
@@ -619,7 +607,7 @@ func cliStart(beadsDir string) (*State, error) {
 			defer func() { _ = lockfile.FlockUnlock(lockF) }()
 
 			// Lock acquired — check if server is now running
-			state, err := cliIsRunning(beadsDir)
+			state, err := IsRunning(beadsDir)
 			if err != nil {
 				return nil, err
 			}
@@ -635,7 +623,7 @@ func cliStart(beadsDir string) (*State, error) {
 	}
 
 	// Re-check after acquiring lock (double-check pattern)
-	if state, _ := cliIsRunning(beadsDir); state != nil && state.Running {
+	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
 		return state, nil
 	}
 
@@ -879,35 +867,17 @@ func FlushWorkingSet(host string, port int) error {
 // ErrServerNotRunning after cleaning up any leftover state files.
 // Callers should use errors.Is(err, ErrServerNotRunning) to distinguish
 // this expected condition from real failures.
-// Delegates to the active ServerProvider (default: CLIProvider).
+// Stop is idempotent: when the server is already stopped it returns
+// ErrServerNotRunning after cleaning up any leftover state files.
+// Callers should use errors.Is(err, ErrServerNotRunning) to distinguish
+// this expected condition from real failures.
 func Stop(beadsDir string) error {
-	return getProvider().Stop(beadsDir)
+	return StopWithForce(beadsDir, false)
 }
 
 // StopWithForce is like Stop but with an optional force flag.
-// It flushes the working set before stopping to prevent data loss.
 func StopWithForce(beadsDir string, force bool) error {
 	state, err := IsRunning(beadsDir)
-	if err != nil {
-		return err
-	}
-	if !state.Running {
-		cleanupErr := cleanupStateFiles(beadsDir)
-		return errors.Join(ErrServerNotRunning, cleanupErr)
-	}
-
-	// Flush uncommitted working set changes before stopping the server.
-	cfg := DefaultConfig(beadsDir)
-	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
-	}
-
-	return Stop(beadsDir)
-}
-
-// cliStop is the CLIProvider implementation of Stop.
-func cliStop(beadsDir string) error {
-	state, err := cliIsRunning(beadsDir)
 	if err != nil {
 		return err
 	}
@@ -918,6 +888,13 @@ func cliStop(beadsDir string) error {
 		// errors.Is(err, ErrServerNotRunning) while operators see filesystem issues.
 		cleanupErr := cleanupStateFiles(beadsDir)
 		return errors.Join(ErrServerNotRunning, cleanupErr)
+	}
+
+	// Flush uncommitted working set changes before stopping the server.
+	// This prevents data loss when changes have been written but not yet committed.
+	cfg := DefaultConfig(beadsDir)
+	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
 	}
 
 	if err := gracefulStop(state.PID, 5*time.Second); err != nil {
