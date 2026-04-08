@@ -151,6 +151,9 @@ func TestResolveCommandBeadsDir_NoCWDFallbackForExplicitPath(t *testing.T) {
 }
 
 func TestGetGitHubConfigValue_UsesMetadataWhenStoreNil(t *testing.T) {
+	// github.token is now a YAML-only key (not stored in Dolt DB) to avoid
+	// leaking secrets when pushing to remotes. Test that the env-var fallback
+	// still works when the store is nil.
 	originalStore := store
 	originalDBPath := dbPath
 	defer func() {
@@ -159,14 +162,10 @@ func TestGetGitHubConfigValue_UsesMetadataWhenStoreNil(t *testing.T) {
 	}()
 
 	ctx := context.Background()
-	testDBPath := filepath.Join(t.TempDir(), "dolt")
-	testStore := newTestStoreIsolatedDB(t, testDBPath, "cfg")
-	if err := testStore.SetConfig(ctx, "github.token", "ghp_test_token"); err != nil {
-		t.Fatalf("SetConfig: %v", err)
-	}
-
 	store = nil
-	dbPath = testDBPath
+	dbPath = ""
+
+	t.Setenv("GITHUB_TOKEN", "ghp_test_token")
 
 	if got := getGitHubConfigValue(ctx, "github.token"); got != "ghp_test_token" {
 		t.Fatalf("getGitHubConfigValue() = %q, want %q", got, "ghp_test_token")

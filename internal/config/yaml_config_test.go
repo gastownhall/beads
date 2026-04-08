@@ -37,10 +37,13 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"backup.git-repo", true},
 		{"backup.future-key", true}, // prefix match
 
+		// Secret keys (stored in yaml to avoid leaking via Dolt push)
+		{"github.token", true},
+		{"linear.api_key", true},
+
 		// Non-yaml keys (should return false)
 		{"jira.url", false},
 		{"jira.project", false},
-		{"linear.api_key", false},
 		{"github.org", false},
 		{"custom.setting", false},
 		{"status.custom", false},

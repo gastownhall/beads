@@ -187,6 +187,22 @@ func getGitHubConfig() GitHubConfig {
 
 // getGitHubConfigValue reads a GitHub configuration value from store or environment.
 func getGitHubConfigValue(ctx context.Context, key string) string {
+	// Secret keys (e.g. github.token) are stored in config.yaml, not the
+	// Dolt database, to avoid leaking secrets when pushing to remotes.
+	if config.IsYamlOnlyKey(key) {
+		if value := config.GetString(key); value != "" {
+			return value
+		}
+		// Fall back to environment variable
+		envKey := githubConfigToEnvVar(key)
+		if envKey != "" {
+			if value := os.Getenv(envKey); value != "" {
+				return value
+			}
+		}
+		return ""
+	}
+
 	// Try to read from store (works in direct mode)
 	if store != nil {
 		value, _ := store.GetConfig(ctx, key)
