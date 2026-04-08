@@ -613,12 +613,18 @@ func buildSharedServerTestBinary(t *testing.T) string {
 			sharedServerBuildErr = fmt.Errorf("getwd: %w", err)
 			return
 		}
-		bdBin := filepath.Join(t.TempDir(), "bd")
+		buildDir, err := os.MkdirTemp("", "beads-shared-server-bd-*")
+		if err != nil {
+			sharedServerBuildErr = fmt.Errorf("mkdirtemp: %w", err)
+			return
+		}
+		bdBin := filepath.Join(buildDir, "bd")
 		cmd := exec.Command("go", "build", "-o", bdBin, ".")
 		cmd.Dir = pkgDir
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
+			_ = os.RemoveAll(buildDir)
 			sharedServerBuildErr = fmt.Errorf("go build: %s: %w", string(out), err)
 			return
 		}

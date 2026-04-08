@@ -862,11 +862,6 @@ func FlushWorkingSet(host string, port int) error {
 	return nil
 }
 
-// Stop gracefully stops the managed server and its idle monitor.
-// Stop is idempotent: when the server is already stopped it returns
-// ErrServerNotRunning after cleaning up any leftover state files.
-// Callers should use errors.Is(err, ErrServerNotRunning) to distinguish
-// this expected condition from real failures.
 // Stop is idempotent: when the server is already stopped it returns
 // ErrServerNotRunning after cleaning up any leftover state files.
 // Callers should use errors.Is(err, ErrServerNotRunning) to distinguish

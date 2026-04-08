@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/testcontainers/testcontainers-go"
@@ -63,7 +64,7 @@ func (p *ContainerProvider) Port() int {
 // WritePortFile writes the container port to the given shared server directory
 // so that bd subprocesses can discover it via DefaultConfig / readPortFile.
 func (p *ContainerProvider) WritePortFile(serverDir string) error {
-	portPath := serverDir + "/dolt-server.port"
+	portPath := filepath.Join(serverDir, "dolt-server.port")
 	return os.WriteFile(portPath, []byte(strconv.Itoa(p.port)), 0600)
 }
 
