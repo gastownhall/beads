@@ -548,7 +548,7 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 		// Use .beads/hooks/ directory (preferred for Dolt backend)
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
-			return fmt.Errorf("not in a beads workspace (no .beads directory found)")
+			return fmt.Errorf("%s", activeWorkspaceNotFoundError())
 		}
 		hooksDir = filepath.Join(beadsDir, "hooks")
 	} else if shared {

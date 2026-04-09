@@ -57,7 +57,12 @@ func commitFile(t *testing.T, dir, name, content, msg string) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	runGit(t, dir, "add", name)
+	addArgs := []string{"add"}
+	if name == ".beads" || strings.HasPrefix(name, ".beads/") {
+		addArgs = append(addArgs, "-f")
+	}
+	addArgs = append(addArgs, name)
+	runGit(t, dir, addArgs...)
 	runGit(t, dir, "commit", "-m", msg)
 }
 

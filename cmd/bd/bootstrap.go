@@ -157,11 +157,11 @@ Examples:
 				outputJSON(map[string]interface{}{
 					"action":     "none",
 					"reason":     "no .beads directory found",
-					"suggestion": "Run 'bd init' to create a new project",
+					"suggestion": whereDiagHint(),
 				})
 			} else {
-				fmt.Fprintf(os.Stderr, "No .beads directory found.\n")
-				fmt.Fprintf(os.Stderr, "To create a new project, use: bd init\n")
+				fmt.Fprintf(os.Stderr, "%s\n", activeWorkspaceNotFoundMessage())
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", whereDiagHint())
 				fmt.Fprintf(os.Stderr, "Bootstrap is for existing projects that need database setup.\n")
 			}
 			os.Exit(1)

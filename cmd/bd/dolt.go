@@ -358,8 +358,7 @@ required. Use this command for explicit control or diagnostics.`,
 		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
-			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-			os.Exit(1)
+			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
@@ -396,8 +395,7 @@ on the next bd command unless auto-start is disabled.`,
 		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
-			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-			os.Exit(1)
+			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 		force, _ := cmd.Flags().GetBool("force")
@@ -423,8 +421,7 @@ Displays whether the server is running, its PID, port, and data directory.`,
 		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
-			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-			os.Exit(1)
+			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
@@ -1013,8 +1010,7 @@ func selectedDoltBeadsDir() string {
 func showDoltConfig(testConnection bool) {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)
@@ -1133,8 +1129,7 @@ func showDoltConfig(testConnection bool) {
 func setDoltConfig(key, value string, updateConfig bool) {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)
@@ -1296,8 +1291,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 func testDoltConnection() {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-		os.Exit(1)
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)
@@ -1465,8 +1459,7 @@ func testHTTPConnectivity(url string) bool {
 func openDoltServerConnection() (*sql.DB, func()) {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		fmt.Fprintln(os.Stderr, "Error: not in a beads repository (no .beads directory found)")
-		os.Exit(1)
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)

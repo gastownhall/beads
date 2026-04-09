@@ -174,6 +174,24 @@ func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
 	}
 }
 
+func TestPrimeContextUsesWorkspaceLanguage(t *testing.T) {
+	defer stubIsEphemeralBranch(false)()
+	defer stubPrimeHasGitRemote(true)()
+
+	var buf bytes.Buffer
+	if err := outputPrimeContext(&buf, false, false); err != nil {
+		t.Fatalf("outputPrimeContext failed: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "resolved") || !strings.Contains(output, "workspace") {
+		t.Fatalf("prime output should describe resolved workspace semantics: %s", output)
+	}
+	if strings.Contains(output, "when .beads/ detected") {
+		t.Fatal("prime output should not imply local .beads detection is required")
+	}
+}
+
 // stubIsEphemeralBranch temporarily replaces isEphemeralBranch
 // with a stub returning returnValue.
 //

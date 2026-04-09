@@ -177,6 +177,7 @@ Creates or updates `AGENTS.md` with the beads integration section (same markers 
 ### Notes
 
 - Restart Codex if it's already running to pick up the new instructions.
+- In worktree/shared/`BEADS_DIR` setups, use `bd where` to confirm the resolved workspace; the integration does not require a local `./.beads`.
 
 ## Mux
 
@@ -268,6 +269,7 @@ The hooks call `bd prime` which:
 1. Outputs workflow context for Claude to read
 2. Syncs any pending changes
 3. Ensures Claude always knows how to use beads
+4. Follows resolved workspace semantics, so `bd where` is the right diagnostic check when local `./.beads` is absent
 
 This is more context-efficient than MCP tools (~1-2k tokens vs 10-50k for MCP schemas).
 

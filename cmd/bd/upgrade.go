@@ -157,7 +157,8 @@ Examples:
 	Run: func(cmd *cobra.Command, args []string) {
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
-			fmt.Println("Error: No .beads directory found")
+			fmt.Println("Error: " + activeWorkspaceNotFoundMessage())
+			fmt.Println("Hint: " + diagHint())
 			return
 		}
 

@@ -436,21 +436,13 @@ Checks:
   - Remote URL format is valid (dolthub://, gs://, s3://, az://, file://)
   - routing.mode is valid (auto, maintainer, contributor, explicit)
 
-Examples:
-  bd config validate
-  bd config validate --json`,
+	Examples:
+	  bd config validate
+	  bd config validate --json`,
 	Run: func(cmd *cobra.Command, args []string) {
-		cwd, err := os.Getwd()
+		repoPath, err := resolvedConfigRepoRoot()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Find repo root by walking up to find .beads directory
-		repoPath := findBeadsRepoRoot(cwd)
-		if repoPath == "" {
-			fmt.Fprintf(os.Stderr, "Error: not in a beads repository (no .beads directory found)\n")
-			os.Exit(1)
+			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
 
 		// Run the existing doctor config values check
@@ -561,6 +553,17 @@ func findBeadsRepoRoot(startPath string) string {
 	}
 
 	return ""
+}
+
+// resolvedConfigRepoRoot returns the repository root for the active beads
+// workspace. It follows FindBeadsDir semantics, including BEADS_DIR and
+// worktree/shared fallback resolution.
+func resolvedConfigRepoRoot() (string, error) {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return "", fmt.Errorf("%s", activeWorkspaceNotFoundError())
+	}
+	return filepath.Dir(beadsDir), nil
 }
 
 var configSetManyCmd = &cobra.Command{

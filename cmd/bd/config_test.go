@@ -10,7 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -420,40 +422,100 @@ federation:
 	})
 }
 
-// TestFindBeadsRepoRoot tests the repo root finding function
-func TestFindBeadsRepoRoot(t *testing.T) {
-	// Create a temp directory structure
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	subDir := filepath.Join(tmpDir, "sub", "dir")
-
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
-		t.Fatalf("Failed to create .beads dir: %v", err)
-	}
-	if err := os.MkdirAll(subDir, 0755); err != nil {
-		t.Fatalf("Failed to create sub dir: %v", err)
+func TestResolvedConfigRepoRoot(t *testing.T) {
+	resetResolutionCaches := func(t *testing.T) {
+		t.Helper()
+		beads.ResetCaches()
+		git.ResetCaches()
+		t.Cleanup(func() {
+			beads.ResetCaches()
+			git.ResetCaches()
+		})
 	}
 
-	t.Run("from repo root", func(t *testing.T) {
-		got := findBeadsRepoRoot(tmpDir)
-		if got != tmpDir {
-			t.Errorf("findBeadsRepoRoot(%q) = %q, want %q", tmpDir, got, tmpDir)
+	assertSameResolvedPath := func(t *testing.T, got, want string) {
+		t.Helper()
+
+		gotResolved, err := filepath.EvalSymlinks(got)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", got, err)
 		}
+		wantResolved, err := filepath.EvalSymlinks(want)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q): %v", want, err)
+		}
+		if gotResolved != wantResolved {
+			t.Errorf("resolvedConfigRepoRoot() = %q (resolved %q), want %q (resolved %q)", got, gotResolved, want, wantResolved)
+		}
+	}
+
+	t.Run("uses local workspace from subdirectory", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		subDir := filepath.Join(tmpDir, "sub", "dir")
+
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatalf("Failed to create .beads dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+			t.Fatalf("Failed to create metadata.json: %v", err)
+		}
+		if err := os.MkdirAll(subDir, 0o755); err != nil {
+			t.Fatalf("Failed to create sub dir: %v", err)
+		}
+
+		t.Chdir(subDir)
+		resetResolutionCaches(t)
+
+		got, err := resolvedConfigRepoRoot()
+		if err != nil {
+			t.Fatalf("resolvedConfigRepoRoot returned error: %v", err)
+		}
+		assertSameResolvedPath(t, got, tmpDir)
 	})
 
-	t.Run("from subdirectory", func(t *testing.T) {
-		got := findBeadsRepoRoot(subDir)
-		if got != tmpDir {
-			t.Errorf("findBeadsRepoRoot(%q) = %q, want %q", subDir, got, tmpDir)
+	t.Run("uses BEADS_DIR target", func(t *testing.T) {
+		cwdDir := t.TempDir()
+		targetRepo := t.TempDir()
+		targetBeadsDir := filepath.Join(targetRepo, ".beads")
+
+		if err := os.MkdirAll(targetBeadsDir, 0o755); err != nil {
+			t.Fatalf("Failed to create target .beads dir: %v", err)
 		}
+		if err := os.WriteFile(filepath.Join(targetBeadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+			t.Fatalf("Failed to create target metadata.json: %v", err)
+		}
+
+		t.Setenv("BEADS_DIR", targetBeadsDir)
+		t.Chdir(cwdDir)
+		resetResolutionCaches(t)
+
+		got, err := resolvedConfigRepoRoot()
+		if err != nil {
+			t.Fatalf("resolvedConfigRepoRoot returned error: %v", err)
+		}
+		assertSameResolvedPath(t, got, targetRepo)
 	})
 
-	t.Run("not in repo", func(t *testing.T) {
-		noRepoDir := t.TempDir()
-		got := findBeadsRepoRoot(noRepoDir)
-		if got != "" {
-			t.Errorf("findBeadsRepoRoot(%q) = %q, want empty string", noRepoDir, got)
+	t.Run("uses worktree fallback when local .beads is absent", func(t *testing.T) {
+		bareDir, worktreeDir := setupBareParentInitWorktree(t)
+		bareBeadsDir := filepath.Join(bareDir, ".beads")
+
+		if err := os.MkdirAll(bareBeadsDir, 0o755); err != nil {
+			t.Fatalf("Failed to create bare .beads dir: %v", err)
 		}
+		if err := os.WriteFile(filepath.Join(bareBeadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+			t.Fatalf("Failed to create bare metadata.json: %v", err)
+		}
+
+		t.Chdir(worktreeDir)
+		resetResolutionCaches(t)
+
+		got, err := resolvedConfigRepoRoot()
+		if err != nil {
+			t.Fatalf("resolvedConfigRepoRoot returned error: %v", err)
+		}
+		assertSameResolvedPath(t, got, bareDir)
 	})
 }
 

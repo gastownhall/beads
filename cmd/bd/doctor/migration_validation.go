@@ -60,12 +60,12 @@ func CheckMigrationReadiness(path string) (DoctorCheck, MigrationValidationResul
 	// Check if .beads exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		result.Ready = false
-		result.Errors = append(result.Errors, "No .beads directory found")
+		result.Errors = append(result.Errors, "No active beads workspace found")
 		return DoctorCheck{
 			Name:     "Migration Readiness",
 			Status:   StatusError,
-			Message:  "No beads installation found",
-			Fix:      "Run 'bd init' first to create a beads installation",
+			Message:  "No active beads workspace found",
+			Fix:      "Run 'bd where' to inspect the resolved workspace, or 'bd init' to create a beads installation",
 			Category: CategoryMaintenance,
 		}, result
 	}
@@ -173,11 +173,11 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		result.Ready = false
 		result.DoltHealthy = false
-		result.Errors = append(result.Errors, "No .beads directory found")
+		result.Errors = append(result.Errors, "No active beads workspace found")
 		return DoctorCheck{
 			Name:     "Migration Completion",
 			Status:   StatusError,
-			Message:  "No beads installation found",
+			Message:  "No active beads workspace found",
 			Category: CategoryMaintenance,
 		}, result
 	}

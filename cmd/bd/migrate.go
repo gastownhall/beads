@@ -56,11 +56,11 @@ Subcommands:
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
 					"error":   "no_beads_directory",
-					"message": "No .beads directory found. " + diagHint() + ".",
+					"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
 				})
 				os.Exit(1)
 			} else {
-				FatalErrorWithHint("no .beads directory found", diagHint())
+				FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 			}
 		}
 
@@ -404,11 +404,11 @@ func handleInspect() {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
-				"message": "No .beads directory found. " + diagHint() + ".",
+				"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
 			})
 			os.Exit(1)
 		}
-		FatalErrorWithHint("no .beads directory found", diagHint())
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	// Check if database is available via the global store
@@ -549,11 +549,11 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
-				"message": "No .beads directory found. " + diagHint() + ".",
+				"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
 			})
 			os.Exit(1)
 		}
-		FatalErrorWithHint("no .beads directory found", diagHint())
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	store := getStore()

@@ -24,8 +24,8 @@ var whereCmd = &cobra.Command{
 	Short:   "Show active beads location",
 	Long: `Show the active beads database location, including redirect information.
 
-This command is useful for debugging when using redirects, to understand
-which .beads directory is actually being used.
+	This command is useful for debugging when using redirects, to understand
+	which beads workspace is actually being used.
 
 Examples:
   bd where           # Show active beads location
@@ -38,10 +38,14 @@ Examples:
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			if jsonOutput {
-				outputJSON(map[string]string{"error": "no beads directory found"})
+				outputJSON(map[string]string{
+					"error":   "no_beads_directory",
+					"message": activeWorkspaceNotFoundMessage(),
+					"hint":    whereDiagHint(),
+				})
 			} else {
-				fmt.Fprintln(os.Stderr, "Error: no beads directory found")
-				fmt.Fprintln(os.Stderr, "Hint: "+diagHint())
+				fmt.Fprintln(os.Stderr, "Error: "+activeWorkspaceNotFoundMessage())
+				fmt.Fprintln(os.Stderr, "Hint: "+whereDiagHint())
 			}
 			os.Exit(1)
 		}

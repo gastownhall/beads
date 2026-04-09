@@ -210,7 +210,7 @@ type doltBackupState struct {
 func doltBackupConfigPath() (string, error) {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		return "", fmt.Errorf("not in a beads repository")
+		return "", fmt.Errorf("%s", activeWorkspaceNotFoundError())
 	}
 	return filepath.Join(beadsDir, "dolt-backup.json"), nil
 }
@@ -218,7 +218,7 @@ func doltBackupConfigPath() (string, error) {
 func doltBackupStatePath() (string, error) {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		return "", fmt.Errorf("not in a beads repository")
+		return "", fmt.Errorf("%s", activeWorkspaceNotFoundError())
 	}
 	return filepath.Join(beadsDir, "dolt-backup-state.json"), nil
 }
@@ -346,7 +346,7 @@ func showDoltBackupStatusJSON() map[string]interface{} {
 func doltBackupSize() (int64, error) {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		return 0, fmt.Errorf("not in a beads repository")
+		return 0, fmt.Errorf("%s", activeWorkspaceNotFoundError())
 	}
 	dataDir := doltserver.ResolveDoltDir(beadsDir)
 	return dirSize(dataDir)

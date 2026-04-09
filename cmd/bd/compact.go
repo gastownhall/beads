@@ -750,8 +750,7 @@ func runCompactDolt() {
 	// Find beads directory
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		fmt.Fprintf(os.Stderr, "Error: could not find .beads directory\n")
-		os.Exit(1)
+		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	// Check for dolt directory

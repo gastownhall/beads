@@ -155,7 +155,7 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 			Check:   "remote",
 			Action:  "configure",
 			Status:  applyStatusSkipped,
-			Message: "No .beads directory found",
+			Message: "No active beads workspace found",
 		}
 	}
 
@@ -259,7 +259,7 @@ func applyServer(drifted bool, dryRun bool) ApplyResult {
 			Check:   "server",
 			Action:  "start",
 			Status:  applyStatusSkipped,
-			Message: "No .beads directory found",
+			Message: "No active beads workspace found",
 		}
 	}
 

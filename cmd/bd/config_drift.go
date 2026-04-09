@@ -149,7 +149,7 @@ func checkRemoteDrift() []DriftItem {
 		return []DriftItem{{
 			Check:   "remote",
 			Status:  driftStatusSkipped,
-			Message: "No .beads directory found",
+			Message: "No active beads workspace found",
 		}}
 	}
 
@@ -234,7 +234,7 @@ func checkServerDrift() []DriftItem {
 		return []DriftItem{{
 			Check:   "server",
 			Status:  driftStatusSkipped,
-			Message: "No .beads directory found",
+			Message: "No active beads workspace found",
 		}}
 	}
 

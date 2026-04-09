@@ -53,7 +53,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		// Default: .beads/issues.jsonl
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
-			return fmt.Errorf("no .beads directory found — run 'bd init' first")
+			return fmt.Errorf("%s — %s", activeWorkspaceNotFoundError(), diagHint())
 		}
 		jsonlPath = filepath.Join(beadsDir, "issues.jsonl")
 	}

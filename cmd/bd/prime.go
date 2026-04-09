@@ -61,11 +61,11 @@ Config options:
   Set via: bd config set no-git-ops true
   Useful when you want to control when commits happen manually.
 
-Workflow customization:
-- Place a .beads/PRIME.md file to override the default output entirely.
-- Use --export to dump the default content for customization.`,
+	Workflow customization:
+	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default output entirely.
+	- Use --export to dump the default content for customization.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Find .beads/ directory
+		// Resolve the active beads workspace.
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			// Not in a beads project - silent exit with success
@@ -89,7 +89,8 @@ Workflow customization:
 
 		// Check for custom PRIME.md override (unless --export flag)
 		// This allows users to fully customize workflow instructions
-		// Check local .beads/ first (even if redirected), then redirected location
+		// Check local .beads/ first (clone-specific override), then the
+		// resolved workspace location.
 		if !primeExportMode {
 			localPrimePath := filepath.Join(".beads", "PRIME.md")
 			redirectedPrimePath := filepath.Join(beadsDir, "PRIME.md")
@@ -410,7 +411,7 @@ git push                    # Push to remote
 	context := `# Beads Workflow Context
 
 > **Context Recovery**: Run ` + "`bd prime`" + ` after compaction, clear, or new session
-> Hooks auto-call this in Claude Code when .beads/ detected
+> Hooks auto-call this in Claude Code when a beads workspace is resolved
 
 ` + redirectNotice + `# 🚨 SESSION CLOSE PROTOCOL 🚨
 

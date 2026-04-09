@@ -1047,7 +1047,7 @@ func TestGitCmd_WorktreeContext(t *testing.T) {
 		t.Fatalf("failed to get relative path: %v", err)
 	}
 
-	addCmd := rc.GitCmd(ctx, "add", relPath)
+	addCmd := rc.GitCmd(ctx, "add", "-f", relPath)
 	addOutput, err := addCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("GitCmd git add failed: %v\nOutput: %s", err, addOutput)

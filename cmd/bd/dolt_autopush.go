@@ -25,7 +25,7 @@ type pushState struct {
 func pushStatePath() (string, error) {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		return "", fmt.Errorf("not in a beads repository")
+		return "", fmt.Errorf("%s", activeWorkspaceNotFoundError())
 	}
 	return filepath.Join(beadsDir, "push-state.json"), nil
 }

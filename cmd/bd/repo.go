@@ -68,7 +68,7 @@ shared across all clones of this repository.`,
 
 			beadsDir := filepath.Join(expandedPath, ".beads")
 			if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-				return fmt.Errorf("no .beads directory found at %s - is this a beads repository?", expandedPath)
+				return fmt.Errorf("no beads workspace found at %s", expandedPath)
 			}
 		}
 
