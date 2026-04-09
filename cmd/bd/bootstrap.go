@@ -154,11 +154,7 @@ Examples:
 		if beadsDir == "" {
 			// No .beads and no remote data — nothing to bootstrap from.
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"action":     "none",
-					"reason":     "no .beads directory found",
-					"suggestion": whereDiagHint(),
-				})
+				outputJSON(noWorkspaceBootstrapPayload())
 			} else {
 				fmt.Fprintf(os.Stderr, "%s\n", activeWorkspaceNotFoundMessage())
 				fmt.Fprintf(os.Stderr, "Hint: %s\n", whereDiagHint())
@@ -213,6 +209,14 @@ type BootstrapPlan struct {
 	BackupDir   string `json:"backup_dir,omitempty"`
 	JSONLFile   string `json:"jsonl_file,omitempty"`
 	HasExisting bool   `json:"has_existing"`
+}
+
+func noWorkspaceBootstrapPayload() map[string]interface{} {
+	return map[string]interface{}{
+		"action":     "none",
+		"reason":     activeWorkspaceNotFoundError(),
+		"suggestion": whereDiagHint(),
+	}
 }
 
 func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPlan {

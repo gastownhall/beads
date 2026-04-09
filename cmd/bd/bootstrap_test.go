@@ -118,6 +118,20 @@ func TestDetectBootstrapAction_InitWhenNothingExists(t *testing.T) {
 	}
 }
 
+func TestNoWorkspaceBootstrapPayload(t *testing.T) {
+	payload := noWorkspaceBootstrapPayload()
+
+	if got := payload["action"]; got != "none" {
+		t.Fatalf("action = %v, want %q", got, "none")
+	}
+	if got := payload["reason"]; got != activeWorkspaceNotFoundError() {
+		t.Fatalf("reason = %v, want %q", got, activeWorkspaceNotFoundError())
+	}
+	if got := payload["suggestion"]; got != whereDiagHint() {
+		t.Fatalf("suggestion = %v, want %q", got, whereDiagHint())
+	}
+}
+
 func TestDetectBootstrapAction_ServerModeMissingConfiguredDBDoesNotReturnNone(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
