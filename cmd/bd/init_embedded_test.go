@@ -596,6 +596,47 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Errorf("sanitized issue_prefix: got %q, want %q", val, "bd_001")
 		}
 	})
+
+	t.Run("invalid_dirname_errors_early", func(t *testing.T) {
+		// A directory name like "my project" (space) survives hyphen/dot sanitization
+		// and produces an invalid Dolt database name. The init command should exit
+		// non-zero with a human-readable error rather than a cryptic storage failure.
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "my project")
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		initGitRepoAt(t, dir)
+		cmd := exec.Command(bd, "init", "--quiet")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatal("bd init should have failed for directory with invalid name")
+		}
+		outStr := string(out)
+		if !strings.Contains(outStr, "invalid database name") && !strings.Contains(outStr, "produces an invalid") {
+			t.Errorf("expected actionable error message, got: %s", outStr)
+		}
+	})
+
+	t.Run("prefix_dot_sanitized", func(t *testing.T) {
+		// A Julia package repo like GPUPolynomials.jl passes --prefix GPUPolynomials.jl.
+		// The dot must be replaced with underscore in both the Dolt database name and
+		// metadata.json DoltDatabase, otherwise reopens fail with a name mismatch.
+		_, beadsDir, _ := bdInit(t, bd, "--prefix", "GPUPolynomials.jl")
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("failed to load metadata.json: %v", err)
+		}
+		const want = "GPUPolynomials_jl"
+		if cfg.DoltDatabase != want {
+			t.Errorf("DoltDatabase: got %q, want %q", cfg.DoltDatabase, want)
+		}
+		if val := readBack(t, beadsDir, want, "issue_prefix", false); val != "GPUPolynomials_jl" {
+			t.Errorf("issue_prefix: got %q, want %q", val, "GPUPolynomials_jl")
+		}
+	})
 }
 
 // TestEmbeddedInitConcurrent verifies the exclusive flock prevents concurrent
