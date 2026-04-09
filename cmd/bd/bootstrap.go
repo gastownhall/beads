@@ -384,16 +384,16 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 	case "sync":
 		return executeSyncAction(ctx, plan, cfg, suffix, checkoutID)
 	case "restore":
-		return executeRestoreAction(ctx, plan, cfg, suffix, checkoutID)
+		return executeRestoreAction(ctx, plan, cfg, suffix)
 	case "jsonl-import":
-		return executeJSONLImportAction(ctx, plan, cfg, suffix, checkoutID)
+		return executeJSONLImportAction(ctx, plan, cfg, suffix)
 	case "init":
-		return executeInitAction(ctx, plan, cfg, suffix, checkoutID)
+		return executeInitAction(ctx, plan, cfg, suffix)
 	}
 	return nil
 }
 
-func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix, checkoutID string) error {
+func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix string) error {
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
@@ -423,7 +423,7 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	return nil
 }
 
-func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix, checkoutID string) error {
+func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix string) error {
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
@@ -457,7 +457,7 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 	return nil
 }
 
-func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix, checkoutID string) error {
+func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix string) error {
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
