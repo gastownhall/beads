@@ -111,6 +111,25 @@ Crew workers push directly to main. **Never create pull requests.**
 - When handling external PRs, use fix-merge: checkout the PR branch locally,
   fix/rebase onto main, merge locally, `git push`, then close the PR
 
+### External Contributor PRs: Check Before You Build
+
+**Read [CONTRIBUTING.md](CONTRIBUTING.md)** — it contains promises we've made to contributors. Violating them damages trust and community.
+
+**Before implementing any feature or fix, check for existing open PRs on the same topic:**
+
+```bash
+gh pr list --repo gastownhall/beads --state open --search "<topic keywords>" --json number,title,author,headRefName
+```
+
+**Contributor work gets priority.** If an external PR already exists:
+1. **Review it first** — read the diff, understand the approach
+2. **Build on their work, don't rewrite it** — checkout their branch, fix/adapt as needed
+3. **Preserve their tests** — contributor tests are signal; keep them unless they're wrong
+4. **Attribute properly** — use `Co-authored-by:` in commits, reference their PR number
+5. **Never auto-close a contributor PR** by merging a rewrite — that discards their contribution silently
+
+If you must rewrite (e.g., fundamentally different approach needed), explain why on the original PR and credit the contributor's design/tests in your commits.
+
 This is enforced by pre-use hooks. If you try `gh pr create`, it will be blocked.
 
 ## Landing the Plane
