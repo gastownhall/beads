@@ -277,6 +277,17 @@ When proposing new features:
 - Consider backwards compatibility
 - Discuss alternatives you've considered
 
+## Your PR Will Not Be Overwritten
+
+This project uses AI agents for maintenance. We've established strict rules to protect contributor work:
+
+- **Your PR has priority.** If you've submitted a PR, agents must review and build on your work — not rewrite it from scratch.
+- **Your tests matter.** Agents must preserve contributor tests unless they're actually wrong.
+- **You'll get attribution.** Your commits and `Co-authored-by:` will be preserved.
+- **No silent closes.** Your PR will never be auto-closed by a parallel rewrite. If changes are needed, they'll be discussed on your PR.
+
+If any of this goes wrong, please open an issue — we take contributor experience seriously.
+
 ## Code Review Process
 
 All contributions go through code review:

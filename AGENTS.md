@@ -9,6 +9,7 @@ This file exists for compatibility with tools that look for AGENTS.md.
 - **Issue Tracking** - How to use bd for work management
 - **Development Guidelines** - Code standards and testing
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
+- **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs
 
 ## Visual Design Anti-Patterns
 
