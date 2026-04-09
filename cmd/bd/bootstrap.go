@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"golang.org/x/term"
 )
@@ -411,8 +412,8 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := applyCheckoutSuffix(ctx, s, suffix, checkoutID); err != nil {
-		return err
+	if err := s.SetCheckoutSuffix(ctx, suffix); err != nil {
+		return fmt.Errorf("set checkout suffix: %w", err)
 	}
 	if err := s.Commit(ctx, "bd bootstrap"); err != nil {
 		return fmt.Errorf("commit: %w", err)
@@ -441,8 +442,8 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := applyCheckoutSuffix(ctx, s, suffix, checkoutID); err != nil {
-		return err
+	if err := s.SetCheckoutSuffix(ctx, suffix); err != nil {
+		return fmt.Errorf("set checkout suffix: %w", err)
 	}
 	if err := s.Commit(ctx, "bd bootstrap: init"); err != nil {
 		return fmt.Errorf("commit init: %w", err)
@@ -475,8 +476,8 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := applyCheckoutSuffix(ctx, s, suffix, checkoutID); err != nil {
-		return err
+	if err := s.SetCheckoutSuffix(ctx, suffix); err != nil {
+		return fmt.Errorf("set checkout suffix: %w", err)
 	}
 	if err := s.Commit(ctx, "bd bootstrap: init"); err != nil {
 		return fmt.Errorf("commit init: %w", err)
@@ -545,9 +546,10 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 			}
 			defer func() { _ = cleanup2() }()
 
-			if err := applyCheckoutSuffixSQL(ctx, db2, suffix, checkoutID); err != nil {
-				return err
+			if err := issueops.SetCheckoutSuffixAndCommit(ctx, db2, checkoutID, suffix, "bd bootstrap: set checkout suffix"); err != nil {
+				return fmt.Errorf("set checkout suffix: %w", err)
 			}
+			fmt.Fprintf(os.Stderr, "Checkout suffix set to %q (checkout %s)\n", suffix, checkoutID)
 		}
 	} else {
 		doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
@@ -576,12 +578,13 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 			}
 			defer func() { _ = s.Close() }()
 
-			if err := applyCheckoutSuffix(ctx, s, suffix, checkoutID); err != nil {
-				return err
+			if err := s.SetCheckoutSuffix(ctx, suffix); err != nil {
+				return fmt.Errorf("set checkout suffix: %w", err)
 			}
 			if err := s.Commit(ctx, "bd bootstrap: set checkout suffix"); err != nil {
 				return fmt.Errorf("commit checkout suffix: %w", err)
 			}
+			fmt.Fprintf(os.Stderr, "Checkout suffix set to %q (checkout %s)\n", suffix, checkoutID)
 		}
 	}
 

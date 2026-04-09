@@ -586,13 +586,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// bd init creates a fresh database — no collision risk unless the
 		// user specifically wants isolation.
 		if checkoutSuffixFlag != "" {
-			checkoutID := computeCheckoutID(beadsDir)
 			if suffix, err := resolveCheckoutSuffix(checkoutSuffixFlag, nonInteractive); err != nil {
 				_ = store.Close()
 				FatalError("checkout suffix: %v", err)
-			} else if err := applyCheckoutSuffix(ctx, store, suffix, checkoutID); err != nil {
+			} else if err := store.SetCheckoutSuffix(ctx, suffix); err != nil {
 				_ = store.Close()
-				FatalError("%v", err)
+				FatalError("set checkout suffix: %v", err)
 			}
 		}
 

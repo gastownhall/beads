@@ -13,6 +13,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+func (s *EmbeddedDoltStore) SetCheckoutSuffix(ctx context.Context, suffix string) error {
+	if suffix == "" {
+		return nil
+	}
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.SetCheckoutSuffixInTx(ctx, tx, s.CheckoutID(), suffix)
+	})
+}
+
 func (s *EmbeddedDoltStore) SetConfig(ctx context.Context, key, value string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		if err := issueops.SetConfigInTx(ctx, tx, key, value); err != nil {

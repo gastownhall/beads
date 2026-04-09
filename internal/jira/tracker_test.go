@@ -616,9 +616,10 @@ func (s *configStore) SlotSet(_ context.Context, _, _, _, _ string) error    { r
 func (s *configStore) SlotGet(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }
-func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error { return nil }
-func (s *configStore) CheckoutID() string                                 { return "" }
-func (s *configStore) Close() error                                      { return nil }
+func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error   { return nil }
+func (s *configStore) CheckoutID() string                                  { return "" }
+func (s *configStore) SetCheckoutSuffix(_ context.Context, _ string) error { return nil }
+func (s *configStore) Close() error                                        { return nil }
 
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	var capturedJQL string

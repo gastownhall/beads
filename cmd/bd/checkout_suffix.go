@@ -2,9 +2,7 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"crypto/rand"
-	"database/sql"
 	"fmt"
 	"math/big"
 	"os"
@@ -12,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
 	"golang.org/x/term"
 )
 
@@ -118,53 +115,4 @@ func promptCheckoutSuffix() (string, error) {
 // beads directory path. Delegates to storage.ComputeCheckoutID.
 func computeCheckoutID(beadsDir string) string {
 	return storage.ComputeCheckoutID(beadsDir)
-}
-
-// checkoutSuffixKey returns the config key for a checkout suffix.
-func checkoutSuffixKey(checkoutID string) string {
-	if checkoutID != "" {
-		return "checkout_suffix." + checkoutID
-	}
-	return "checkout_suffix"
-}
-
-// applyCheckoutSuffix sets the checkout_suffix config via a storage.Storage.
-// No-op when suffix is empty.
-func applyCheckoutSuffix(ctx context.Context, s storage.Storage, suffix, checkoutID string) error {
-	if suffix == "" {
-		return nil
-	}
-	if err := s.SetConfig(ctx, checkoutSuffixKey(checkoutID), suffix); err != nil {
-		return fmt.Errorf("set checkout suffix: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "Checkout suffix set to %q (checkout %s)\n", suffix, checkoutID)
-	return nil
-}
-
-// applyCheckoutSuffixSQL sets the checkout suffix and commits using a raw
-// *sql.DB already scoped to the target database. Used by the embedded-mode
-// sync path where opening a second embedded engine would deadlock on the
-// exclusive flock.
-func applyCheckoutSuffixSQL(ctx context.Context, db *sql.DB, suffix, checkoutID string) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx for checkout suffix: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := issueops.SetConfigInTx(ctx, tx, checkoutSuffixKey(checkoutID), suffix); err != nil {
-		return fmt.Errorf("set checkout suffix: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
-		return fmt.Errorf("dolt add: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", "bd bootstrap: set checkout suffix"); err != nil {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Checkout suffix set to %q (checkout %s)\n", suffix, checkoutID)
-	return nil
 }

@@ -12,6 +12,17 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// SetCheckoutSuffix persists the checkout suffix for this checkout.
+// Uses the store's own checkoutID. No-op when suffix is empty.
+func (s *DoltStore) SetCheckoutSuffix(ctx context.Context, suffix string) error {
+	if suffix == "" {
+		return nil
+	}
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		return issueops.SetCheckoutSuffixInTx(ctx, tx, s.checkoutID, suffix)
+	})
+}
+
 // SetConfig sets a configuration value
 func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {

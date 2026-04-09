@@ -25,6 +25,9 @@ func WithLock(_ Unlocker) Option {
 // CheckoutID returns empty in the stub build.
 func (s *EmbeddedDoltStore) CheckoutID() string { return "" }
 
+// SetCheckoutSuffix is a no-op in the stub build.
+func (s *EmbeddedDoltStore) SetCheckoutSuffix(_ context.Context, _ string) error { return nil }
+
 // New returns an error when CGO is not enabled.
 func New(_ context.Context, _, _, _ string, _ ...Option) (*EmbeddedDoltStore, error) {
 	return nil, errors.New("embeddeddolt: requires CGO (build with CGO_ENABLED=1)")

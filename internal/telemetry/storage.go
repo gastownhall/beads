@@ -415,6 +415,13 @@ func (s *InstrumentedStorage) CheckoutID() string {
 	return s.inner.CheckoutID()
 }
 
+func (s *InstrumentedStorage) SetCheckoutSuffix(ctx context.Context, suffix string) error {
+	ctx, span, t := s.op(ctx, "SetCheckoutSuffix")
+	err := s.inner.SetCheckoutSuffix(ctx, suffix)
+	s.done(ctx, span, t, err)
+	return err
+}
+
 // ── Transactions ─────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {

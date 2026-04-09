@@ -109,6 +109,10 @@ type Storage interface {
 	// sharing a database don't collide.
 	CheckoutID() string
 
+	// SetCheckoutSuffix persists the checkout suffix for this checkout.
+	// Uses the store's own CheckoutID(). No-op when suffix is empty.
+	SetCheckoutSuffix(ctx context.Context, suffix string) error
+
 	// Transactions
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 

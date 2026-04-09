@@ -53,6 +53,48 @@ func GetAllConfigInTx(ctx context.Context, tx *sql.Tx) (map[string]string, error
 	return result, rows.Err()
 }
 
+// CheckoutSuffixKey returns the config key for a checkout suffix.
+func CheckoutSuffixKey(checkoutID string) string {
+	if checkoutID != "" {
+		return "checkout_suffix." + checkoutID
+	}
+	return "checkout_suffix"
+}
+
+// SetCheckoutSuffixInTx sets the checkout_suffix.<checkoutID> config key
+// within an existing transaction. No-op when suffix is empty.
+func SetCheckoutSuffixInTx(ctx context.Context, tx *sql.Tx, checkoutID, suffix string) error {
+	if suffix == "" {
+		return nil
+	}
+	return SetConfigInTx(ctx, tx, CheckoutSuffixKey(checkoutID), suffix)
+}
+
+// SetCheckoutSuffixAndCommit sets the checkout suffix and creates a dolt
+// commit in a single transaction. For use when only a raw *sql.DB is
+// available (e.g., embedded bootstrap sync path where no store is open).
+func SetCheckoutSuffixAndCommit(ctx context.Context, db *sql.DB, checkoutID, suffix, commitMsg string) error {
+	if suffix == "" {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := SetCheckoutSuffixInTx(ctx, tx, checkoutID, suffix); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
+		return fmt.Errorf("dolt add: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", commitMsg); err != nil {
+		return fmt.Errorf("dolt commit: %w", err)
+	}
+	return tx.Commit()
+}
+
 // SetMetadataInTx sets a metadata value within an existing transaction.
 func SetMetadataInTx(ctx context.Context, tx *sql.Tx, key, value string) error {
 	_, err := tx.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value)
