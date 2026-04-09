@@ -208,6 +208,72 @@ func TestOpenFromConfig_NoMetadata(t *testing.T) {
 	}
 }
 
+func TestOpenBestAvailable_ServerMode(t *testing.T) {
+	skipIfNoDoltServer(t)
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	metadata := fmt.Sprintf(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d}`, testServerPort)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+
+	ctx := context.Background()
+	store, lock, err := beads.OpenBestAvailable(ctx, beadsDir)
+	if err != nil {
+		t.Fatalf("OpenBestAvailable (server mode) failed: %v", err)
+	}
+	defer lock.Unlock()
+	defer store.Close()
+
+	if store == nil {
+		t.Error("expected non-nil storage")
+	}
+}
+
+func TestOpenBestAvailable_ServerMode_FailsWithoutServer(t *testing.T) {
+	// OpenBestAvailable in server mode should propagate the fail-fast error.
+	if prev := os.Getenv("BEADS_DOLT_PORT"); prev != "" {
+		os.Unsetenv("BEADS_DOLT_PORT")
+		t.Cleanup(func() { os.Setenv("BEADS_DOLT_PORT", prev) })
+	}
+	if prev := os.Getenv("BEADS_TEST_MODE"); prev != "" {
+		os.Unsetenv("BEADS_TEST_MODE")
+		t.Cleanup(func() { os.Setenv("BEADS_TEST_MODE", prev) })
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to find free port: %v", err)
+	}
+	freePort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	metadata := fmt.Sprintf(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d}`, freePort)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+
+	ctx := context.Background()
+	_, _, openErr := beads.OpenBestAvailable(ctx, beadsDir)
+	if openErr == nil {
+		t.Fatal("OpenBestAvailable (server mode) should fail when no server is running")
+	}
+	if !strings.Contains(openErr.Error(), "unreachable") {
+		t.Errorf("expected 'unreachable' in error, got: %v", openErr)
+	}
+}
+
 func TestFindAllDatabases(t *testing.T) {
 	// This scans the file system, just verify it doesn't panic
 	dbs := beads.FindAllDatabases()
