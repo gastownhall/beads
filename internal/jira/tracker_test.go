@@ -617,6 +617,7 @@ func (s *configStore) SlotGet(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }
 func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) CheckoutID() string                                 { return "" }
 func (s *configStore) Close() error                                      { return nil }
 
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
