@@ -275,10 +275,10 @@ func gitlabConfigToEnvVar(key string) string {
 // validateGitLabConfig checks that required configuration is present.
 func validateGitLabConfig(config GitLabConfig) error {
 	if config.URL == "" {
-		return fmt.Errorf("gitlab.url is not configured. Set via 'bd config gitlab.url <url>' or GITLAB_URL environment variable")
+		return fmt.Errorf("gitlab.url is not configured. Set via 'bd config set gitlab.url <url>' or GITLAB_URL environment variable")
 	}
 	if config.Token == "" {
-		return fmt.Errorf("gitlab.token is not configured. Set via 'bd config gitlab.token <token>' or GITLAB_TOKEN environment variable")
+		return fmt.Errorf("gitlab.token is not configured. Set via 'bd config set gitlab.token <token>' or GITLAB_TOKEN environment variable")
 	}
 	if config.ProjectID == "" && config.GroupID == "" {
 		return fmt.Errorf("gitlab.project_id or gitlab.group_id is not configured. Set via 'bd config' or environment variables")

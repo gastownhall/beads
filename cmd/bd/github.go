@@ -252,13 +252,13 @@ func githubConfigToEnvVar(key string) string {
 // validateGitHubConfig checks that required configuration is present.
 func validateGitHubConfig(config GitHubConfig) error {
 	if config.Token == "" {
-		return fmt.Errorf("github.token is not configured. Set via 'bd config github.token <token>' or GITHUB_TOKEN environment variable")
+		return fmt.Errorf("github.token is not configured. Set via 'bd config set github.token <token>' or GITHUB_TOKEN environment variable")
 	}
 	if config.Owner == "" {
-		return fmt.Errorf("github.owner is not configured. Set via 'bd config github.owner <owner>' or GITHUB_OWNER environment variable")
+		return fmt.Errorf("github.owner is not configured. Set via 'bd config set github.owner <owner>' or GITHUB_OWNER environment variable")
 	}
 	if config.Repo == "" {
-		return fmt.Errorf("github.repo is not configured. Set via 'bd config github.repo <repo>' or GITHUB_REPO environment variable")
+		return fmt.Errorf("github.repo is not configured. Set via 'bd config set github.repo <repo>' or GITHUB_REPO environment variable")
 	}
 	return nil
 }
@@ -314,7 +314,7 @@ func runGitHubStatus(cmd *cobra.Command, args []string) error {
 func runGitHubRepos(cmd *cobra.Command, args []string) error {
 	config := getGitHubConfig()
 	if config.Token == "" {
-		return fmt.Errorf("github.token is not configured. Set via 'bd config github.token <token>' or GITHUB_TOKEN environment variable")
+		return fmt.Errorf("github.token is not configured. Set via 'bd config set github.token <token>' or GITHUB_TOKEN environment variable")
 	}
 
 	out := cmd.OutOrStdout()
