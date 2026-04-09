@@ -584,6 +584,39 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 
+	t.Run("auto_detect_dotted_dirname", func(t *testing.T) {
+		// bd init in a directory named like "MyPkg.jl" (common in Julia repos)
+		// must sanitize the dot when auto-detecting the prefix: metadata.json
+		// DoltDatabase must match the actual Dolt database name so that reopens
+		// succeed and bd list works immediately after init.
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "MyPkg.jl")
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		initGitRepoAt(t, dir)
+		runBDInit(t, bd, dir)
+
+		beadsDir := filepath.Join(dir, ".beads")
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("failed to load metadata.json: %v", err)
+		}
+		const want = "MyPkg_jl"
+		if cfg.DoltDatabase != want {
+			t.Errorf("DoltDatabase: got %q, want %q (dot must be sanitized)", cfg.DoltDatabase, want)
+		}
+
+		// Verify bd list succeeds — confirms the database name in metadata.json
+		// matches the actual Dolt database created during init.
+		listCmd := exec.Command(bd, "list", "--json")
+		listCmd.Dir = dir
+		listCmd.Env = bdEnv(dir)
+		if out, err := listCmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd list failed after init in dotted dirname: %v\n%s", err, out)
+		}
+	})
+
 	t.Run("prefix_numeric_sanitized", func(t *testing.T) {
 		parent := t.TempDir()
 		dir := filepath.Join(parent, "001")
