@@ -419,6 +419,11 @@ func (s *EmbeddedDoltStore) Close() error {
 	return nil
 }
 
+// CheckoutID returns the deterministic identifier for this checkout.
+func (s *EmbeddedDoltStore) CheckoutID() string {
+	return storage.ComputeCheckoutID(s.beadsDir)
+}
+
 // DoltGC runs Dolt garbage collection to reclaim disk space.
 func (s *EmbeddedDoltStore) DoltGC(ctx context.Context) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {

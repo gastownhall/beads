@@ -507,6 +507,34 @@ func ReadConfigPrefix(ctx context.Context, tx *sql.Tx) (string, error) {
 	return strings.TrimSuffix(configPrefix, "-"), nil
 }
 
+// ReadEffectivePrefix reads issue_prefix and checkout_suffix.<checkoutID> from
+// the config table and returns the combined effective prefix for ID generation.
+// If checkoutID is empty, no suffix lookup is performed (backward compat).
+// Returns ErrNotInitialized if issue_prefix is missing.
+func ReadEffectivePrefix(ctx context.Context, tx *sql.Tx, checkoutID string) (string, error) {
+	prefix, err := ReadConfigPrefix(ctx, tx)
+	if err != nil {
+		return "", err
+	}
+
+	if checkoutID == "" {
+		return prefix, nil
+	}
+
+	var suffix string
+	key := "checkout_suffix." + checkoutID
+	sErr := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&suffix)
+	if sErr != nil && sErr != sql.ErrNoRows {
+		return "", fmt.Errorf("failed to get %s: %w", key, sErr)
+	}
+	suffix = strings.TrimSuffix(suffix, "-")
+
+	if suffix != "" {
+		return prefix + "-" + suffix, nil
+	}
+	return prefix, nil
+}
+
 // ---------------------------------------------------------------------------
 // Nullable value helpers
 // ---------------------------------------------------------------------------

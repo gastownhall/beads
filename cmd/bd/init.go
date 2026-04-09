@@ -70,6 +70,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		force, _ := cmd.Flags().GetBool("force")
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 		roleFlag, _ := cmd.Flags().GetString("role")
+		checkoutSuffixFlag, _ := cmd.Flags().GetString("checkout-suffix")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 		// Dolt server connection flags
 		backendFlag, _ := cmd.Flags().GetString("backend")
@@ -578,6 +579,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 				_ = store.Close()
 				FatalError("failed to set issue prefix: %v", err)
+			}
+		}
+
+		// Apply checkout suffix only if explicitly requested via flag.
+		// bd init creates a fresh database — no collision risk unless the
+		// user specifically wants isolation.
+		if checkoutSuffixFlag != "" {
+			checkoutID := computeCheckoutID(beadsDir)
+			if suffix, err := resolveCheckoutSuffix(checkoutSuffixFlag, nonInteractive); err != nil {
+				_ = store.Close()
+				FatalError("checkout suffix: %v", err)
+			} else if err := applyCheckoutSuffix(ctx, store, suffix, checkoutID); err != nil {
+				_ = store.Close()
+				FatalError("%v", err)
 			}
 		}
 
@@ -1143,6 +1158,7 @@ func init() {
 	// Non-interactive mode for CI/cloud agents
 	initCmd.Flags().Bool("non-interactive", false, "Skip all interactive prompts (auto-detected in CI or non-TTY environments)")
 	initCmd.Flags().String("role", "", "Set beads role without prompting: \"maintainer\" or \"contributor\"")
+	initCmd.Flags().String("checkout-suffix", "", "Unique suffix for this checkout's issues (\"auto\" to generate, \"none\" to skip)")
 
 	// Backend selection (dolt is the only supported backend; sqlite accepted for deprecation notice)
 	initCmd.Flags().String("backend", "", "Storage backend (default: dolt). --backend=sqlite prints deprecation notice.")

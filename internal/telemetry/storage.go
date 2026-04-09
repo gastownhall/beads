@@ -411,6 +411,10 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 	return v, err
 }
 
+func (s *InstrumentedStorage) CheckoutID() string {
+	return s.inner.CheckoutID()
+}
+
 // ── Transactions ─────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {

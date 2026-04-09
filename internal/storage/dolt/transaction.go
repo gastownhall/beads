@@ -124,16 +124,10 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 
 	// Generate ID if not provided
 	if issue.ID == "" {
-		var configPrefix string
-		err := t.tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_prefix").Scan(&configPrefix)
-		if err == sql.ErrNoRows || configPrefix == "" {
-			return fmt.Errorf("%w: issue_prefix config is missing", storage.ErrNotInitialized)
-		} else if err != nil {
-			return fmt.Errorf("failed to get config: %w", err)
+		configPrefix, err := issueops.ReadEffectivePrefix(ctx, t.tx, t.store.checkoutID)
+		if err != nil {
+			return err
 		}
-
-		// Normalize prefix: strip trailing hyphen to prevent double-hyphen IDs (bd-6uly)
-		configPrefix = strings.TrimSuffix(configPrefix, "-")
 
 		var prefix string
 		if issue.Ephemeral {

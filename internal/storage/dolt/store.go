@@ -190,6 +190,7 @@ type DoltStore struct {
 	remoteUser     string // Remote auth user for Hosted Dolt push/pull (optional)
 	remotePassword string // Remote auth password for Hosted Dolt push/pull (optional)
 	serverMode     bool   // true when connected to external dolt sql-server (not embedded)
+	checkoutID     string // Deterministic ID for this checkout (from beadsDir path)
 
 	// autoStartedServerDir is set when this store triggered a dolt sql-server
 	// auto-start. Close() uses it to stop the server when the last store
@@ -596,6 +597,11 @@ func (s *DoltStore) DB() *sql.DB {
 	return s.db
 }
 
+// CheckoutID returns the deterministic identifier for this checkout.
+func (s *DoltStore) CheckoutID() string {
+	return s.checkoutID
+}
+
 // BackupAdd registers a Dolt backup destination.
 func (s *DoltStore) BackupAdd(ctx context.Context, name, url string) error {
 	return versioncontrolops.BackupAdd(ctx, s.db, name, url)
@@ -979,6 +985,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		serverMode:           true,
 		readOnly:             cfg.ReadOnly,
 		autoStartedServerDir: autoStartedDir,
+		checkoutID:           storage.ComputeCheckoutID(beadsDir),
 	}
 
 	// Schema initialization for server mode (idempotent).

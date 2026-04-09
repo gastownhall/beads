@@ -22,4 +22,7 @@ type BatchCreateOptions struct {
 	OrphanHandling OrphanHandling
 	// SkipPrefixValidation skips prefix validation for existing IDs (used during import)
 	SkipPrefixValidation bool
+	// CheckoutID is the deterministic identifier for this checkout, used to
+	// look up the namespaced checkout_suffix.<id> config key.
+	CheckoutID string
 }

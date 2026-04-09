@@ -30,17 +30,32 @@ func NewBatchContext(ctx context.Context, tx *sql.Tx, opts storage.BatchCreateOp
 	if err != nil {
 		return nil, fmt.Errorf("failed to get custom types: %w", err)
 	}
-	configPrefix, err := ReadConfigPrefix(ctx, tx)
+	basePrefix, err := ReadConfigPrefix(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	effectivePrefix, err := ReadEffectivePrefix(ctx, tx, opts.CheckoutID)
 	if err != nil {
 		return nil, err
 	}
 	var allowedPrefixes string
 	_ = tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "allowed_prefixes").Scan(&allowedPrefixes)
 
+	// If the effective prefix differs from the base (checkout_suffix is set),
+	// add the base prefix to allowed_prefixes so cross-checkout issues are
+	// accepted during prefix validation.
+	if effectivePrefix != basePrefix {
+		if allowedPrefixes == "" {
+			allowedPrefixes = basePrefix
+		} else {
+			allowedPrefixes = allowedPrefixes + "," + basePrefix
+		}
+	}
+
 	return &BatchContext{
 		CustomStatuses:  customStatuses,
 		CustomTypes:     customTypes,
-		ConfigPrefix:    configPrefix,
+		ConfigPrefix:    effectivePrefix,
 		AllowedPrefixes: allowedPrefixes,
 		Opts:            opts,
 	}, nil

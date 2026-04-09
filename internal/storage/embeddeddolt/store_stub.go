@@ -22,6 +22,9 @@ func WithLock(_ Unlocker) Option {
 	return func(*struct{}) {}
 }
 
+// CheckoutID returns empty in the stub build.
+func (s *EmbeddedDoltStore) CheckoutID() string { return "" }
+
 // New returns an error when CGO is not enabled.
 func New(_ context.Context, _, _, _ string, _ ...Option) (*EmbeddedDoltStore, error) {
 	return nil, errors.New("embeddeddolt: requires CGO (build with CGO_ENABLED=1)")

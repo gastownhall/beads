@@ -970,6 +970,85 @@ func TestResolvePartialID_TitleFalsePositive(t *testing.T) {
 }
 
 // TestLooksLikePrefixedID tests the helper function for detecting prefixed IDs
+func TestResolvePartialID_CheckoutSuffix(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	// Set checkout_suffix with namespaced key
+	key := "checkout_suffix." + store.CheckoutID()
+	if err := store.SetConfig(ctx, key, "k9x"); err != nil {
+		t.Fatalf("Failed to set %s: %v", key, err)
+	}
+
+	// Create an issue — it will get the suffixed prefix "bd-k9x-"
+	issue := &types.Issue{
+		Title:     "suffixed issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	fullID := issue.ID
+	if fullID == "" {
+		t.Fatal("issue ID is empty after creation")
+	}
+
+	// Also create an unsuffixed issue (simulating cross-checkout)
+	crossIssue := &types.Issue{
+		ID:        "bd-cross1",
+		Title:     "cross-checkout issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, crossIssue, "test"); err != nil {
+		t.Fatalf("CreateIssue cross: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		input       string
+		expected    string
+		shouldError bool
+	}{
+		{
+			name:     "resolve full suffixed ID",
+			input:    fullID,
+			expected: fullID,
+		},
+		{
+			name:     "resolve cross-checkout issue by full ID",
+			input:    "bd-cross1",
+			expected: "bd-cross1",
+		},
+		{
+			name:     "resolve cross-checkout issue by bare hash",
+			input:    "cross1",
+			expected: "bd-cross1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ResolvePartialID(ctx, store, tt.input)
+			if tt.shouldError {
+				if err == nil {
+					t.Errorf("expected error, got %q", result)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolvePartialID(%q) error: %v", tt.input, err)
+			}
+			if result != tt.expected {
+				t.Errorf("ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestLooksLikePrefixedID(t *testing.T) {
 	tests := []struct {
 		input    string

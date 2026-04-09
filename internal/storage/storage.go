@@ -7,12 +7,31 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// ComputeCheckoutID derives a deterministic 8-hex-char identifier from the
+// beads directory path. The parent of beadsDir (the project/git root) is
+// used as the stable identity. Returns "" if beadsDir is empty.
+func ComputeCheckoutID(beadsDir string) string {
+	if beadsDir == "" {
+		return ""
+	}
+	root := filepath.Dir(beadsDir)
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	hash := sha256.Sum256([]byte(abs))
+	return hex.EncodeToString(hash[:4])
+}
 
 // ErrAlreadyClaimed is returned when attempting to claim an issue that is already
 // claimed by another user. The error message contains the current assignee.
@@ -83,6 +102,12 @@ type Storage interface {
 	SetConfig(ctx context.Context, key, value string) error
 	GetConfig(ctx context.Context, key string) (string, error)
 	GetAllConfig(ctx context.Context) (map[string]string, error)
+
+	// CheckoutID returns a deterministic identifier for this checkout,
+	// derived from the beads directory path. Used to namespace per-checkout
+	// config keys (e.g., checkout_suffix.<id>) so parallel checkouts
+	// sharing a database don't collide.
+	CheckoutID() string
 
 	// Transactions
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error

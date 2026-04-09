@@ -32,6 +32,7 @@ func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor s
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
 			SkipPrefixValidation: true,
+			CheckoutID:           s.checkoutID,
 		})
 		if err != nil {
 			return err
@@ -64,6 +65,11 @@ func (s *DoltStore) CreateIssues(ctx context.Context, issues []*types.Issue, act
 func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
 	if len(issues) == 0 {
 		return nil
+	}
+
+	// Ensure checkout ID is set for suffix-aware prefix resolution.
+	if opts.CheckoutID == "" {
+		opts.CheckoutID = s.checkoutID
 	}
 
 	// All-wisps fast path: individual transactions, no Dolt versioning.

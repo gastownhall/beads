@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -322,6 +324,125 @@ func TestSetConfigNormalizesIssuePrefix(t *testing.T) {
 	}
 	if value != "gt" {
 		t.Errorf("expected issue_prefix 'gt' (trailing hyphen stripped), got %q", value)
+	}
+}
+
+// TestSetConfigNormalizesCheckoutSuffix verifies that SetConfig strips trailing
+// hyphens from checkout_suffix.* keys, same as issue_prefix normalization.
+func TestSetConfigNormalizesCheckoutSuffix(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	key := "checkout_suffix." + store.CheckoutID()
+
+	// Set suffix WITH trailing hyphen — should be normalized
+	if err := store.SetConfig(ctx, key, "k9x-"); err != nil {
+		t.Fatalf("SetConfig failed: %v", err)
+	}
+
+	value, err := store.GetConfig(ctx, key)
+	if err != nil {
+		t.Fatalf("GetConfig failed: %v", err)
+	}
+	if value != "k9x" {
+		t.Errorf("expected checkout_suffix 'k9x' (trailing hyphen stripped), got %q", value)
+	}
+}
+
+// TestReadEffectivePrefix verifies that ReadEffectivePrefix combines
+// issue_prefix and checkout_suffix.<checkoutID> correctly.
+func TestReadEffectivePrefix(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	cid := store.CheckoutID()
+	key := "checkout_suffix." + cid
+
+	readEffective := func() string {
+		var result string
+		err := store.withReadTx(ctx, func(tx *sql.Tx) error {
+			var rErr error
+			result, rErr = issueops.ReadEffectivePrefix(ctx, tx, cid)
+			return rErr
+		})
+		if err != nil {
+			t.Fatalf("ReadEffectivePrefix: %v", err)
+		}
+		return result
+	}
+
+	prefix, _ := store.GetConfig(ctx, "issue_prefix")
+
+	// Case 1: no checkout_suffix — effective prefix equals issue_prefix
+	if got := readEffective(); got != prefix {
+		t.Errorf("no suffix: got %q, want %q", got, prefix)
+	}
+
+	// Case 2: set checkout_suffix.<id> — effective prefix is "prefix-suffix"
+	if err := store.SetConfig(ctx, key, "k9x"); err != nil {
+		t.Fatalf("SetConfig(%s): %v", key, err)
+	}
+	if got := readEffective(); got != prefix+"-k9x" {
+		t.Errorf("with suffix: got %q, want %q", got, prefix+"-k9x")
+	}
+
+	// Case 3: suffix with trailing hyphen is normalized on write
+	if err := store.SetConfig(ctx, key, "m2p-"); err != nil {
+		t.Fatalf("SetConfig(%s): %v", key, err)
+	}
+	if got := readEffective(); got != prefix+"-m2p" {
+		t.Errorf("suffix with hyphen: got %q, want %q", got, prefix+"-m2p")
+	}
+
+	// Case 4: empty checkoutID skips suffix lookup
+	var noSuffix string
+	err := store.withReadTx(ctx, func(tx *sql.Tx) error {
+		var rErr error
+		noSuffix, rErr = issueops.ReadEffectivePrefix(ctx, tx, "")
+		return rErr
+	})
+	if err != nil {
+		t.Fatalf("ReadEffectivePrefix (empty id): %v", err)
+	}
+	if noSuffix != prefix {
+		t.Errorf("empty checkoutID: got %q, want %q", noSuffix, prefix)
+	}
+}
+
+// TestCreateIssueWithCheckoutSuffix verifies that issue IDs include the
+// checkout_suffix when set (e.g., "test-k9x-XXXX" instead of "test-XXXX").
+func TestCreateIssueWithCheckoutSuffix(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	key := "checkout_suffix." + store.CheckoutID()
+	if err := store.SetConfig(ctx, key, "k9x"); err != nil {
+		t.Fatalf("SetConfig(%s): %v", key, err)
+	}
+
+	issue := &types.Issue{
+		Title:     "test with suffix",
+		Status:    types.StatusOpen,
+		Priority:  3,
+		IssueType: types.TypeBug,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	prefix, _ := store.GetConfig(ctx, "issue_prefix")
+	expectedPrefix := prefix + "-k9x-"
+	if !strings.HasPrefix(issue.ID, expectedPrefix) {
+		t.Errorf("issue ID should start with %q, got %q", expectedPrefix, issue.ID)
 	}
 }
 

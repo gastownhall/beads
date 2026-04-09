@@ -8,9 +8,9 @@ import (
 )
 
 // SetConfigInTx sets a configuration value within an existing transaction.
-// Normalizes issue_prefix by stripping trailing hyphens.
+// Normalizes issue_prefix and checkout_suffix.* by stripping trailing hyphens.
 func SetConfigInTx(ctx context.Context, tx *sql.Tx, key, value string) error {
-	if key == "issue_prefix" {
+	if key == "issue_prefix" || strings.HasPrefix(key, "checkout_suffix") {
 		value = strings.TrimSuffix(value, "-")
 	}
 	_, err := tx.ExecContext(ctx, "REPLACE INTO config (`key`, value) VALUES (?, ?)", key, value)

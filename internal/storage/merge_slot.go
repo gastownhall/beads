@@ -30,6 +30,11 @@ func MergeSlotID(ctx context.Context, s Storage) string {
 	if p, err := s.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
 		prefix = strings.TrimSuffix(p, "-")
 	}
+	if cid := s.CheckoutID(); cid != "" {
+		if suffix, err := s.GetConfig(ctx, "checkout_suffix."+cid); err == nil && suffix != "" {
+			prefix = prefix + "-" + strings.TrimSuffix(suffix, "-")
+		}
+	}
 	return prefix + "-merge-slot"
 }
 

@@ -118,6 +118,7 @@ Examples:
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		yesFlag, _ := cmd.Flags().GetBool("yes")
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
+		checkoutSuffixFlag, _ := cmd.Flags().GetString("checkout-suffix")
 
 		// Resolve non-interactive mode: flag > env var > CI env > terminal detection.
 		nonInteractive := isNonInteractiveBootstrap(yesFlag || nonInteractiveFlag)
@@ -193,7 +194,7 @@ Examples:
 		}
 
 		// Execute the plan
-		if err := executeBootstrapPlan(plan, cfg, nonInteractive); err != nil {
+		if err := executeBootstrapPlan(plan, cfg, nonInteractive, checkoutSuffixFlag); err != nil {
 			FatalError("Bootstrap failed: %v", err)
 		}
 	},
@@ -346,33 +347,52 @@ func confirmPrompt(message string, nonInteractive bool) bool {
 	}
 	fmt.Fprintf(os.Stderr, "%s [Y/n] ", message)
 	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
+	line, err := readLineWithContext(getRootContext(), reader, os.Stdin)
+	if err != nil {
+		if isCanceled(err) {
+			exitCanceled()
+		}
+		return false
+	}
 	line = strings.TrimSpace(strings.ToLower(line))
 	return line == "" || line == "y" || line == "yes"
 }
 
-func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInteractive bool) error {
+func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInteractive bool, checkoutSuffixFlag string) error {
 	if !confirmPrompt("Proceed?", nonInteractive) {
 		fmt.Fprintf(os.Stderr, "Aborted.\n")
 		return nil
 	}
 
+	checkoutID := computeCheckoutID(plan.BeadsDir)
 	ctx := context.Background()
+
+	// Resolve checkout suffix. The interactive prompt fires for the "sync"
+	// action (cloning an existing DB where namespace collision is a real
+	// risk). For other actions, only apply if the flag was explicitly set.
+	var suffix string
+	if checkoutSuffixFlag != "" || plan.Action == "sync" {
+		var err error
+		suffix, err = resolveCheckoutSuffix(checkoutSuffixFlag, nonInteractive)
+		if err != nil {
+			return fmt.Errorf("checkout suffix: %w", err)
+		}
+	}
 
 	switch plan.Action {
 	case "sync":
-		return executeSyncAction(ctx, plan, cfg)
+		return executeSyncAction(ctx, plan, cfg, suffix, checkoutID)
 	case "restore":
-		return executeRestoreAction(ctx, plan, cfg)
+		return executeRestoreAction(ctx, plan, cfg, suffix, checkoutID)
 	case "jsonl-import":
-		return executeJSONLImportAction(ctx, plan, cfg)
+		return executeJSONLImportAction(ctx, plan, cfg, suffix, checkoutID)
 	case "init":
-		return executeInitAction(ctx, plan, cfg)
+		return executeInitAction(ctx, plan, cfg, suffix, checkoutID)
 	}
 	return nil
 }
 
-func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix, checkoutID string) error {
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
@@ -390,6 +410,9 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
+	}
+	if err := applyCheckoutSuffix(ctx, s, suffix, checkoutID); err != nil {
+		return err
 	}
 	if err := s.Commit(ctx, "bd bootstrap"); err != nil {
 		return fmt.Errorf("commit: %w", err)
@@ -399,7 +422,7 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	return nil
 }
 
-func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix, checkoutID string) error {
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
@@ -417,6 +440,9 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
+	}
+	if err := applyCheckoutSuffix(ctx, s, suffix, checkoutID); err != nil {
+		return err
 	}
 	if err := s.Commit(ctx, "bd bootstrap: init"); err != nil {
 		return fmt.Errorf("commit init: %w", err)
@@ -430,7 +456,7 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 	return nil
 }
 
-func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix, checkoutID string) error {
 	prefix := inferPrefix(cfg)
 	dbName := cfg.GetDoltDatabase()
 
@@ -448,6 +474,9 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
+	}
+	if err := applyCheckoutSuffix(ctx, s, suffix, checkoutID); err != nil {
+		return err
 	}
 	if err := s.Commit(ctx, "bd bootstrap: init"); err != nil {
 		return fmt.Errorf("commit init: %w", err)
@@ -466,7 +495,7 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 	return nil
 }
 
-func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config) error {
+func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.Config, suffix, checkoutID string) error {
 	// Ensure .beads directory exists — it may not in the "fresh clone"
 	// bootstrap path where we detected remote data before .beads was
 	// created. Deferred here to preserve --dry-run semantics. (GH#2792)
@@ -489,10 +518,16 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		if err != nil {
 			return fmt.Errorf("open embedded engine for clone: %w", err)
 		}
-		defer func() { _ = cleanup() }()
 
 		if err := versioncontrolops.DoltClone(ctx, db, plan.SyncRemote, dbName); err != nil {
+			_ = cleanup()
 			return fmt.Errorf("clone from remote: %w", err)
+		}
+
+		// Close the clone connection to release the exclusive flock before
+		// opening a new one scoped to the cloned database.
+		if err := cleanup(); err != nil {
+			return fmt.Errorf("close clone connection: %w", err)
 		}
 
 		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
@@ -501,21 +536,55 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		// Dolt manages these files itself; external interference is never safe.
 
 		fmt.Fprintf(os.Stderr, "Synced database from %s\n", plan.SyncRemote)
-		return nil
+
+		// Apply checkout suffix via a fresh connection scoped to the cloned DB.
+		if suffix != "" {
+			db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, dbName, "")
+			if err != nil {
+				return fmt.Errorf("open cloned database for checkout suffix: %w", err)
+			}
+			defer func() { _ = cleanup2() }()
+
+			if err := applyCheckoutSuffixSQL(ctx, db2, suffix, checkoutID); err != nil {
+				return err
+			}
+		}
+	} else {
+		doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
+		synced, err := dolt.BootstrapFromGitRemoteWithDB(ctx, doltDir, plan.SyncRemote, dbName)
+		if err != nil {
+			return fmt.Errorf("sync from remote: %w", err)
+		}
+		if synced {
+			// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
+			// directory — including noms/LOCK files. These are Dolt-internal files.
+			// Removing them WILL cause unrecoverable data corruption and data loss.
+			// Dolt manages these files itself; external interference is never safe.
+			fmt.Fprintf(os.Stderr, "Synced database from %s\n", plan.SyncRemote)
+		}
+
+		// Apply checkout suffix via a store (non-embedded path has no lock conflict).
+		if suffix != "" {
+			s, err := newDoltStore(ctx, &dolt.Config{
+				Path:      doltserver.ResolveDoltDir(plan.BeadsDir),
+				Database:  dbName,
+				AutoStart: true,
+				BeadsDir:  plan.BeadsDir,
+			})
+			if err != nil {
+				return fmt.Errorf("open database for checkout suffix: %w", err)
+			}
+			defer func() { _ = s.Close() }()
+
+			if err := applyCheckoutSuffix(ctx, s, suffix, checkoutID); err != nil {
+				return err
+			}
+			if err := s.Commit(ctx, "bd bootstrap: set checkout suffix"); err != nil {
+				return fmt.Errorf("commit checkout suffix: %w", err)
+			}
+		}
 	}
 
-	doltDir := doltserver.ResolveDoltDir(plan.BeadsDir)
-	synced, err := dolt.BootstrapFromGitRemoteWithDB(ctx, doltDir, plan.SyncRemote, dbName)
-	if err != nil {
-		return fmt.Errorf("sync from remote: %w", err)
-	}
-	if synced {
-		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/
-		// directory — including noms/LOCK files. These are Dolt-internal files.
-		// Removing them WILL cause unrecoverable data corruption and data loss.
-		// Dolt manages these files itself; external interference is never safe.
-		fmt.Fprintf(os.Stderr, "Synced database from %s\n", plan.SyncRemote)
-	}
 	return nil
 }
 
@@ -577,5 +646,6 @@ func init() {
 	bootstrapCmd.Flags().Bool("dry-run", false, "Show what would be done without doing it")
 	bootstrapCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompts (for CI/automation)")
 	bootstrapCmd.Flags().Bool("non-interactive", false, "Alias for --yes")
+	bootstrapCmd.Flags().String("checkout-suffix", "", "Unique suffix for this checkout's issues (\"auto\" to generate, \"none\" to skip)")
 	rootCmd.AddCommand(bootstrapCmd)
 }

@@ -65,7 +65,18 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 	// Build known prefixes from config for deterministic multi-hyphen prefix handling.
 	// This avoids relying solely on looksLikePrefixedID heuristics when the repo
 	// explicitly declares which prefixes are valid.
-	knownPrefixes := []string{strings.TrimSuffix(prefix, "-")}
+	basePrefix := strings.TrimSuffix(prefix, "-")
+	knownPrefixes := []string{basePrefix}
+	if cid := store.CheckoutID(); cid != "" {
+		if suffix, sErr := store.GetConfig(ctx, "checkout_suffix."+cid); sErr == nil && suffix != "" {
+			suffix = strings.TrimSuffix(suffix, "-")
+			// Add the effective prefix (base + suffix) so IDs like "bd-k9x-a3f8"
+			// are correctly parsed as prefix="bd-k9x", hash="a3f8".
+			knownPrefixes = append(knownPrefixes, basePrefix+"-"+suffix)
+			// Update prefixWithHyphen to match the effective prefix for normalization.
+			prefixWithHyphen = basePrefix + "-" + suffix + "-"
+		}
+	}
 	if allowed, aErr := store.GetConfig(ctx, "allowed_prefixes"); aErr == nil && allowed != "" {
 		for _, p := range strings.Split(allowed, ",") {
 			p = strings.TrimSpace(p)
