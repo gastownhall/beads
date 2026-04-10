@@ -65,6 +65,7 @@ var YamlOnlyKeys = map[string]bool{
 	// Dolt server settings
 	"dolt.idle-timeout":  true, // Idle auto-stop timeout (default "30m", "0" disables)
 	"dolt.shared-server": true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
+	"dolt.max-conns":     true, // Connection pool size override (default 10, GH#3140)
 
 	// Secrets: tokens and API keys must NOT be stored in the Dolt database
 	// because that data is pushed to remotes, triggering secret-scanning

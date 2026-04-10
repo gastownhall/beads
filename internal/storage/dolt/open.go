@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -200,5 +201,22 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 	}
 	if cfg.ServerUser == "" {
 		cfg.ServerUser = fileCfg.GetDoltServerUser()
+	}
+
+	// Pool size: env var > config.yaml > caller override > default (10).
+	// Useful for shared-server setups with many worktrees (GH#3140).
+	if cfg.MaxOpenConns == 0 {
+		if v := os.Getenv("BEADS_DOLT_MAX_CONNS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxOpenConns = n
+			}
+		}
+	}
+	if cfg.MaxOpenConns == 0 {
+		if v := config.GetString("dolt.max-conns"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.MaxOpenConns = n
+			}
+		}
 	}
 }

@@ -581,6 +581,9 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 // (MySQL 1213 deadlock, 1205 lock wait timeout). These errors guarantee the
 // transaction was rolled back, so retrying is always safe.
 //
+// In shared-server mode the retry window is extended to 15s (from 5s) because
+// multiple worktrees sharing one server produce higher contention (GH#3140).
+//
 // Connection-level errors (broken pipe, bad connection) are NOT retried here
 // because they can occur after a successful commit, making retry unsafe for
 // non-idempotent operations. Callers that need connection-level retry should
@@ -589,6 +592,9 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
 	bo.MaxElapsedTime = 5 * time.Second
+	if s.serverMode {
+		bo.MaxElapsedTime = 15 * time.Second
+	}
 	return backoff.Retry(func() error {
 		err := s.withWriteTx(ctx, fn)
 		if err != nil && isSerializationError(err) {
