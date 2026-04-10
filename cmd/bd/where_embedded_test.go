@@ -26,6 +26,66 @@ func bdWhere(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+func bdWhereAllowError(t *testing.T, bd, dir string, args ...string) (string, error) {
+	t.Helper()
+	fullArgs := append([]string{"where"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestWhereNoWorkspace(t *testing.T) {
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir := t.TempDir()
+
+	t.Run("default_output", func(t *testing.T) {
+		out, err := bdWhereAllowError(t, bd, dir)
+		if err == nil {
+			t.Fatal("expected bd where to exit non-zero without a workspace")
+		}
+		if !strings.Contains(out, activeWorkspaceNotFoundMessage()) {
+			t.Fatalf("expected no-workspace message, got: %s", out)
+		}
+		if strings.Contains(out, "no beads database found") {
+			t.Fatalf("where should report workspace resolution failure, not database init failure: %s", out)
+		}
+	})
+
+	t.Run("json_output", func(t *testing.T) {
+		out, err := bdWhereAllowError(t, bd, dir, "--json")
+		if err == nil {
+			t.Fatal("expected bd where --json to exit non-zero without a workspace")
+		}
+
+		s := strings.TrimSpace(out)
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("expected JSON object in output, got: %s", out)
+		}
+
+		var payload map[string]string
+		if err := json.Unmarshal([]byte(s[start:]), &payload); err != nil {
+			t.Fatalf("parse where JSON: %v\n%s", err, s)
+		}
+		if payload["error"] != "no_beads_directory" {
+			t.Fatalf("error = %q, want %q", payload["error"], "no_beads_directory")
+		}
+		if payload["message"] != activeWorkspaceNotFoundMessage() {
+			t.Fatalf("message = %q, want %q", payload["message"], activeWorkspaceNotFoundMessage())
+		}
+		if !strings.Contains(payload["hint"], "BEADS_DIR/worktree setup") {
+			t.Fatalf("hint should mention workspace diagnostics, got: %q", payload["hint"])
+		}
+		if !strings.Contains(payload["hint"], "bd init") {
+			t.Fatalf("hint should mention bd init, got: %q", payload["hint"])
+		}
+	})
+}
+
 func TestEmbeddedWhere(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")

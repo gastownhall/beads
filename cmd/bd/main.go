@@ -548,6 +548,7 @@ var rootCmd = &cobra.Command{
 			"quickstart",
 			"setup",
 			"version",
+			"where",
 			"zsh",
 		}
 
