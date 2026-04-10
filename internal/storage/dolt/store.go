@@ -437,10 +437,14 @@ var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
 // Instruments are registered against the global delegating provider at init time,
 // so they automatically forward to the real provider once telemetry.Init() runs.
 var doltMetrics struct {
-	retryCount      metric.Int64Counter
-	lockWaitMs      metric.Float64Histogram
-	circuitTrips    metric.Int64Counter
-	circuitRejected metric.Int64Counter
+	retryCount          metric.Int64Counter
+	lockWaitMs          metric.Float64Histogram
+	circuitTrips        metric.Int64Counter
+	circuitRejected     metric.Int64Counter
+	serializationErrors metric.Int64Counter
+	connAcquireMs       metric.Float64Histogram
+	poolWaitCount       metric.Int64Counter
+	poolWaitMs          metric.Float64Histogram
 }
 
 func init() {
@@ -460,6 +464,63 @@ func init() {
 	doltMetrics.circuitRejected, _ = m.Int64Counter("bd.db.circuit_rejected",
 		metric.WithDescription("Requests rejected by open circuit breaker (fail-fast)"),
 		metric.WithUnit("{request}"),
+	)
+	doltMetrics.serializationErrors, _ = m.Int64Counter("bd.db.serialization_errors",
+		metric.WithDescription("Serialization failures (MySQL 1213/1205) before retry"),
+		metric.WithUnit("{error}"),
+	)
+	doltMetrics.connAcquireMs, _ = m.Float64Histogram("bd.db.conn_acquire_ms",
+		metric.WithDescription("Time to acquire a pooled connection for a Dolt transaction"),
+		metric.WithUnit("ms"),
+	)
+	doltMetrics.poolWaitCount, _ = m.Int64Counter("bd.db.pool_wait_count",
+		metric.WithDescription("Number of times a connection acquisition had to wait for the pool"),
+		metric.WithUnit("{wait}"),
+	)
+	doltMetrics.poolWaitMs, _ = m.Float64Histogram("bd.db.pool_wait_ms",
+		metric.WithDescription("Total time connections spent waiting due to pool exhaustion"),
+		metric.WithUnit("ms"),
+	)
+}
+
+// registerPoolGauges registers observable gauges that report sql.DB pool stats
+// on each OTel collection cycle. These are essential for diagnosing shared-server
+// degradation under multi-worktree load (GH#3140).
+func (s *DoltStore) registerPoolGauges() {
+	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
+	db := s.db
+
+	m.Int64ObservableGauge("bd.db.pool_open", //nolint:errcheck
+		metric.WithDescription("Current number of open connections (in-use + idle)"),
+		metric.WithUnit("{connection}"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(db.Stats().OpenConnections))
+			return nil
+		}),
+	)
+	m.Int64ObservableGauge("bd.db.pool_in_use", //nolint:errcheck
+		metric.WithDescription("Connections currently in use"),
+		metric.WithUnit("{connection}"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(db.Stats().InUse))
+			return nil
+		}),
+	)
+	m.Int64ObservableGauge("bd.db.pool_idle", //nolint:errcheck
+		metric.WithDescription("Idle connections in pool"),
+		metric.WithUnit("{connection}"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(db.Stats().Idle))
+			return nil
+		}),
+	)
+	m.Int64ObservableGauge("bd.db.pool_max_open", //nolint:errcheck
+		metric.WithDescription("Maximum number of open connections (pool limit)"),
+		metric.WithUnit("{connection}"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(db.Stats().MaxOpenConnections))
+			return nil
+		}),
 	)
 }
 
@@ -531,6 +592,7 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	return backoff.Retry(func() error {
 		err := s.withWriteTx(ctx, fn)
 		if err != nil && isSerializationError(err) {
+			doltMetrics.serializationErrors.Add(ctx, 1)
 			return err // retryable
 		}
 		if err != nil {
@@ -1047,6 +1109,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if !cfg.ReadOnly {
 		store.syncCLIRemotesToSQL(ctx)
 	}
+
+	// Register observable pool gauges for diagnosing shared-server degradation (GH#3140).
+	// These report sql.DB.Stats() on each OTel scrape — no-op when telemetry is off.
+	store.registerPoolGauges()
 
 	return store, nil
 }

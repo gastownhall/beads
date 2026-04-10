@@ -54,7 +54,26 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 	// session. Each pool connection has an independent working set in Dolt
 	// SQL server mode, so mixing connections causes DOLT_COMMIT to see
 	// stale or unrelated changes. (GH#2455)
+
+	// Snapshot pool stats before acquisition to detect pool-wait events (GH#3140).
+	statsBefore := s.db.Stats()
+	acquireStart := time.Now()
+
 	conn, err := s.db.Conn(ctx)
+	acquireMs := float64(time.Since(acquireStart).Microseconds()) / 1000.0
+	doltMetrics.connAcquireMs.Record(ctx, acquireMs)
+
+	// Detect pool-wait: if WaitCount increased, the pool was exhausted and
+	// this caller had to wait for a connection to become available.
+	if err == nil {
+		statsAfter := s.db.Stats()
+		if statsAfter.WaitCount > statsBefore.WaitCount {
+			doltMetrics.poolWaitCount.Add(ctx, statsAfter.WaitCount-statsBefore.WaitCount)
+			waitMs := float64(statsAfter.WaitDuration-statsBefore.WaitDuration) / float64(time.Millisecond)
+			doltMetrics.poolWaitMs.Record(ctx, waitMs)
+		}
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to acquire connection: %w", err)
 	}
