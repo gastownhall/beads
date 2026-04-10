@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Beads (bd) installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 #
 # ⚠️ IMPORTANT: This script must be EXECUTED, never SOURCED
 # ❌ WRONG: source install.sh (will exit your shell on errors)
@@ -169,7 +169,7 @@ verify_release_checksum() {
     local archive_path=$4
 
     local checksums_name="checksums.txt"
-    local checksums_url="https://github.com/steveyegge/beads/releases/download/${version}/${checksums_name}"
+    local checksums_url="https://github.com/gastownhall/beads/releases/download/${version}/${checksums_name}"
 
     if ! release_has_asset "$release_json" "$checksums_name"; then
         log_error "Release metadata is missing ${checksums_name}; refusing to install unverified binary"
@@ -201,6 +201,24 @@ verify_release_checksum() {
 
     log_success "Checksum verified for ${archive_name}"
     return 0
+}
+
+find_extracted_bd() {
+    local search_dir=$1
+
+    if [ -x "$search_dir/bd" ]; then
+        printf '%s\n' "$search_dir/bd"
+        return 0
+    fi
+
+    local extracted_bd
+    extracted_bd=$(find "$search_dir" -mindepth 2 -maxdepth 2 -type f -name bd | head -n 1)
+    if [ -n "$extracted_bd" ] && [ -x "$extracted_bd" ]; then
+        printf '%s\n' "$extracted_bd"
+        return 0
+    fi
+
+    return 1
 }
 
 # Re-sign binary for macOS only when explicitly requested.
@@ -248,7 +266,7 @@ detect_platform() {
             echo "" >&2
             echo "  This bash installer is for macOS/Linux. On Windows, use the PowerShell installer:" >&2
             echo "" >&2
-            echo "    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex" >&2
+            echo "    irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex" >&2
             echo "" >&2
             exit 1
             ;;
@@ -263,7 +281,7 @@ detect_platform() {
         echo "  This will install the Linux version of bd, usable only inside WSL." >&2
         echo "  If you want bd available in native Windows (PowerShell, cmd), use:" >&2
         echo "" >&2
-        echo "    irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex" >&2
+        echo "    irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex" >&2
         echo "" >&2
         # Only show interactive message and pause if running in a terminal (skip in CI/non-interactive shells)
         if [ -t 0 ]; then
@@ -333,7 +351,7 @@ install_from_release() {
 
     # Get latest release version
     log_info "Fetching latest release..."
-    local latest_url="https://api.github.com/repos/steveyegge/beads/releases/latest"
+    local latest_url="https://api.github.com/repos/gastownhall/beads/releases/latest"
     local version
     local release_json
 
@@ -357,7 +375,7 @@ install_from_release() {
 
     # Download URL
     local archive_name="beads_${version#v}_${platform}.tar.gz"
-    local download_url="https://github.com/steveyegge/beads/releases/download/${version}/${archive_name}"
+    local download_url="https://github.com/gastownhall/beads/releases/download/${version}/${archive_name}"
 
     if ! release_has_asset "$release_json" "$archive_name"; then
         log_warning "No prebuilt archive available for platform ${platform}. Falling back to source installation methods."
@@ -390,6 +408,14 @@ install_from_release() {
         return 1
     fi
 
+    local extracted_bd
+    if ! extracted_bd=$(find_extracted_bd "$tmp_dir"); then
+        log_error "Extracted archive does not contain an executable 'bd' binary"
+        cd - > /dev/null || cd "$HOME"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
     # Determine install location
     local install_dir
     if [[ -w /usr/local/bin ]]; then
@@ -402,9 +428,19 @@ install_from_release() {
     # Install binary
     log_info "Installing to $install_dir..."
     if [[ -w "$install_dir" ]]; then
-        mv bd "$install_dir/"
+        if ! mv "$extracted_bd" "$install_dir/bd"; then
+            log_error "Failed to install bd to $install_dir"
+            cd - > /dev/null || cd "$HOME"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     else
-        sudo mv bd "$install_dir/"
+        if ! sudo mv "$extracted_bd" "$install_dir/bd"; then
+            log_error "Failed to install bd to $install_dir"
+            cd - > /dev/null || cd "$HOME"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     fi
 
     # Optional local ad-hoc re-sign for macOS (off by default)
@@ -414,6 +450,10 @@ install_from_release() {
     create_beads_alias "$install_dir"
 
     log_success "bd installed to $install_dir/bd"
+
+    # Record where we installed the binary so PATH precedence warnings can
+    # point to the newly installed release binary.
+    LAST_INSTALL_PATH="$install_dir/bd"
 
     # Check if install_dir is in PATH
     if [[ ":$PATH:" != *":$install_dir:"* ]]; then
@@ -486,7 +526,7 @@ install_with_go() {
     log_info "Installing bd using 'go install'..."
     configure_cgo_build_env
 
-    if CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest; then
+    if CGO_ENABLED=1 go install github.com/gastownhall/beads/cmd/bd@latest; then
         log_success "bd installed successfully via go install"
 
         # Record where we expect the binary to have been installed
@@ -538,7 +578,7 @@ build_from_source() {
     cd "$tmp_dir"
     log_info "Cloning repository..."
 
-    if git clone --depth 1 https://github.com/steveyegge/beads.git; then
+    if git clone --depth 1 https://github.com/gastownhall/beads.git; then
         cd beads
         log_info "Building binary..."
 
@@ -753,16 +793,15 @@ main() {
     log_error "Installation failed"
     echo ""
     echo "Manual installation:"
-    echo "  1. Download from https://github.com/steveyegge/beads/releases/latest"
+    echo "  1. Download from https://github.com/gastownhall/beads/releases/latest"
     echo "  2. Verify SHA256 checksum against checksums.txt"
     echo "  3. Extract and move 'bd' to your PATH"
     echo ""
     echo "Or install from source:"
     echo "  1. Install Go from https://go.dev/dl/"
-    echo "  2. Run: CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest"
+    echo "  2. Run: CGO_ENABLED=1 go install github.com/gastownhall/beads/cmd/bd@latest"
     echo ""
     exit 1
 }
 
 main "$@"
-
