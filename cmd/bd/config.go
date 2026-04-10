@@ -442,7 +442,7 @@ Checks:
 	Run: func(cmd *cobra.Command, args []string) {
 		repoPath, err := resolvedConfigRepoRoot()
 		if err != nil {
-			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+			FatalErrorWithHintRespectJSON(activeWorkspaceNotFoundError(), diagHint())
 		}
 
 		// Run the existing doctor config values check

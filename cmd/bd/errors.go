@@ -84,6 +84,18 @@ func FatalErrorRespectJSON(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// FatalErrorWithHintRespectJSON writes an error message with a hint and exits.
+// If --json is set, emits structured JSON to stdout so callers can parse it.
+func FatalErrorWithHintRespectJSON(message, hint string) {
+	if jsonOutput {
+		outputJSON(map[string]string{"error": message, "hint": hint})
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
+	}
+	os.Exit(1)
+}
+
 // FatalErrorWithHint writes an error message with a hint to stderr and exits.
 // Use this when you can provide an actionable suggestion to fix the error.
 //

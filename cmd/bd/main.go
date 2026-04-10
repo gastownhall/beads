@@ -251,6 +251,42 @@ func isSelectedNoDBCommand(cmd *cobra.Command) bool {
 	}
 }
 
+// configCommandCanRunWithoutStore returns true for config subcommands whose Run
+// path can execute without an opened Dolt store. This lets no-workspace calls
+// fail or degrade in the command itself instead of tripping low-level DB init.
+func configCommandCanRunWithoutStore(cmd *cobra.Command, args []string) bool {
+	if cmd == nil || cmd.Parent() == nil || cmd.Parent().Name() != "config" {
+		return false
+	}
+
+	switch cmd.Name() {
+	case "show", "validate", "drift", "apply":
+		return true
+	case "set", "get", "unset":
+		if len(args) == 0 {
+			return true
+		}
+		key := args[0]
+		return config.IsYamlOnlyKey(key) || key == "beads.role"
+	case "set-many":
+		if len(args) == 0 {
+			return true
+		}
+		for _, arg := range args {
+			key, _, ok := strings.Cut(arg, "=")
+			if !ok || key == "" {
+				return true
+			}
+			if !config.IsYamlOnlyKey(key) && key != "beads.role" {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func prepareSelectedNoDBContext(beadsDir string) {
 	if beadsDir == "" {
 		return
@@ -627,19 +663,13 @@ var rootCmd = &cobra.Command{
 				// No database found — allow some commands to run without a database
 				// - import: auto-initializes database if missing
 				// - setup: creates editor integration files (no DB needed)
-				// - config set/get for yaml-only keys: writes to config.yaml, not db (GH#536)
-				// - config show/validate/drift/apply: read-only diagnostics, degrade gracefully (bd-934, bd-omc, bd-3rw)
-				isYamlOnlyConfigOp := false
-				if cmd.Parent() != nil && cmd.Parent().Name() == "config" {
-					if (cmd.Name() == "set" || cmd.Name() == "get") && len(args) > 0 && config.IsYamlOnlyKey(args[0]) {
-						isYamlOnlyConfigOp = true
-					}
-					if cmd.Name() == "show" || cmd.Name() == "validate" || cmd.Name() == "drift" || cmd.Name() == "apply" {
-						isYamlOnlyConfigOp = true
-					}
+				// - config subcommands that operate on config.yaml, git config,
+				//   or best-effort diagnostics only (GH#536, bd-934, bd-omc, bd-3rw)
+				if configCommandCanRunWithoutStore(cmd, args) {
+					return
 				}
 
-				if cmd.Name() != "import" && cmd.Name() != "setup" && !isYamlOnlyConfigOp {
+				if cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
