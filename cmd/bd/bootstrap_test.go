@@ -127,8 +127,8 @@ func TestNoWorkspaceBootstrapPayload(t *testing.T) {
 	if got := payload["reason"]; got != activeWorkspaceNotFoundError() {
 		t.Fatalf("reason = %v, want %q", got, activeWorkspaceNotFoundError())
 	}
-	if got := payload["suggestion"]; got != whereDiagHint() {
-		t.Fatalf("suggestion = %v, want %q", got, whereDiagHint())
+	if got := payload["suggestion"]; got != diagHint() {
+		t.Fatalf("suggestion = %v, want %q", got, diagHint())
 	}
 }
 

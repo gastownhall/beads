@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,6 +25,63 @@ func bdBootstrap(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd bootstrap %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+func bdBootstrapAllowError(t *testing.T, bd, dir string, args ...string) (string, error) {
+	t.Helper()
+	fullArgs := append([]string{"bootstrap"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestBootstrapNoWorkspace(t *testing.T) {
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir := t.TempDir()
+
+	t.Run("default_output", func(t *testing.T) {
+		out, err := bdBootstrapAllowError(t, bd, dir)
+		if err == nil {
+			t.Fatal("expected bd bootstrap to exit non-zero without a workspace")
+		}
+		if !strings.Contains(out, activeWorkspaceNotFoundMessage()) {
+			t.Fatalf("expected no-workspace message, got: %s", out)
+		}
+		if !strings.Contains(out, "bd where") {
+			t.Fatalf("expected bootstrap hint to mention bd where, got: %s", out)
+		}
+	})
+
+	t.Run("json_output", func(t *testing.T) {
+		out, err := bdBootstrapAllowError(t, bd, dir, "--json")
+		if err == nil {
+			t.Fatal("expected bd bootstrap --json to exit non-zero without a workspace")
+		}
+
+		s := strings.TrimSpace(out)
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("expected JSON object in output, got: %s", out)
+		}
+
+		var payload map[string]string
+		if err := json.Unmarshal([]byte(s[start:]), &payload); err != nil {
+			t.Fatalf("parse bootstrap JSON: %v\n%s", err, s)
+		}
+		if payload["action"] != "none" {
+			t.Fatalf("action = %q, want %q", payload["action"], "none")
+		}
+		if payload["reason"] != activeWorkspaceNotFoundError() {
+			t.Fatalf("reason = %q, want %q", payload["reason"], activeWorkspaceNotFoundError())
+		}
+		if !strings.Contains(payload["suggestion"], "bd where") {
+			t.Fatalf("suggestion should mention bd where, got: %q", payload["suggestion"])
+		}
+	})
 }
 
 func TestEmbeddedBootstrap(t *testing.T) {

@@ -157,7 +157,7 @@ Examples:
 				outputJSON(noWorkspaceBootstrapPayload())
 			} else {
 				fmt.Fprintf(os.Stderr, "%s\n", activeWorkspaceNotFoundMessage())
-				fmt.Fprintf(os.Stderr, "Hint: %s\n", whereDiagHint())
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
 				fmt.Fprintf(os.Stderr, "Bootstrap is for existing projects that need database setup.\n")
 			}
 			os.Exit(1)
@@ -215,7 +215,7 @@ func noWorkspaceBootstrapPayload() map[string]interface{} {
 	return map[string]interface{}{
 		"action":     "none",
 		"reason":     activeWorkspaceNotFoundError(),
-		"suggestion": whereDiagHint(),
+		"suggestion": diagHint(),
 	}
 }
 
