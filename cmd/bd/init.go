@@ -348,6 +348,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				FatalError("failed to create .beads directory: %v", err)
 			}
 
+			// On Linux btrfs, disable transparent compression on .beads/ so that
+			// dolt's hot append-only write path (under .beads/dolt/ or
+			// .beads/embeddeddolt/) does not trigger kworker thrashing from
+			// read-modify-write-recompress cycles. New files created inside this
+			// directory inherit FS_NOCOW_FL automatically, so setting it here —
+			// before dolt writes anything — covers both server and embedded modes.
+			// No-op on non-Linux and non-btrfs filesystems (GH nocow-beads-dolt-init).
+			if err := applyNoCOW(beadsDir); err != nil && !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: failed to set FS_NOCOW_FL on %s: %v\n", beadsDir, err)
+			}
+
 			// Create/update .gitignore in .beads directory (only if missing or outdated)
 			gitignorePath := filepath.Join(beadsDir, ".gitignore")
 			check := doctor.CheckGitignore(cwd)
@@ -410,6 +421,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if initServerMode {
 			if err := os.MkdirAll(initDBPath, config.BeadsDirPerm); err != nil {
 				FatalError("failed to create storage directory %s: %v", initDBPath, err)
+			}
+			// Linux btrfs: disable compression on the dolt data dir to avoid
+			// kworker thrashing on the append-only write path. Best-effort; a
+			// non-btrfs filesystem returns nil from applyNoCOW.
+			if err := applyNoCOW(initDBPath); err != nil && !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: failed to set FS_NOCOW_FL on %s: %v\n", initDBPath, err)
 			}
 		}
 

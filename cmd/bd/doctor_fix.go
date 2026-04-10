@@ -342,6 +342,19 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.ConfigValues(path)
 		case "Classic Artifacts":
 			err = fix.ClassicArtifacts(path)
+		case "Btrfs NoCOW (dolt)":
+			// Applies FS_NOCOW_FL to .beads/ and any existing dolt data
+			// subdirs. Prints the returned message (which includes the
+			// "relocate existing files" warning) so the user sees why the
+			// fix is incomplete on its own.
+			var msg string
+			msg, err = doctor.FixBtrfsNoCOW(path)
+			if err == nil && msg != "" {
+				fmt.Print(msg)
+				if !strings.HasSuffix(msg, "\n") {
+					fmt.Println()
+				}
+			}
 		case "Project Identity":
 			err = fix.FixProjectIdentity(path)
 		case "Remote Consistency":
