@@ -52,12 +52,17 @@ type circuitState struct {
 	TrippedAt    time.Time `json:"tripped_at,omitempty"`
 }
 
-// circuitBreaker manages the circuit breaker for a specific Dolt server host:port.
+// circuitBreaker manages the circuit breaker for a specific Dolt server
+// host:port:database combination. Using per-database granularity prevents
+// degradation in one project from tripping the breaker for all worktrees
+// sharing the same server (GH#3140).
+//
 // It uses a file in /tmp for cross-process state sharing and an in-process
 // mutex for thread safety within a single process.
 type circuitBreaker struct {
 	host     string
 	port     int
+	database string
 	filePath string
 	mu       sync.Mutex
 }
@@ -68,11 +73,13 @@ var ErrCircuitOpen = fmt.Errorf("dolt circuit breaker is open: server appears do
 // maybeNewCircuitBreaker returns a file-backed circuit breaker only for a
 // concrete port. Port 0 means "not yet resolved" during standalone auto-start,
 // and sharing breaker state on port 0 poisons every fresh init on the machine.
-func maybeNewCircuitBreaker(host string, port int) *circuitBreaker {
+// The database parameter scopes the breaker to a specific project so that
+// degradation in one database doesn't trip the breaker for others (GH#3140).
+func maybeNewCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	if port <= 0 {
 		return nil
 	}
-	return newCircuitBreaker(host, port)
+	return newCircuitBreaker(host, port, database)
 }
 
 // circuitBreakerDir is the dedicated directory for circuit breaker state files.
@@ -80,15 +87,32 @@ func maybeNewCircuitBreaker(host string, port int) *circuitBreaker {
 // of entries) when cleaning up stale breaker files on startup.
 const circuitBreakerDir = "/tmp/beads-circuit"
 
-// newCircuitBreaker creates a circuit breaker for the given Dolt server host:port.
-func newCircuitBreaker(host string, port int) *circuitBreaker {
-	// Sanitize host for use in filename (replace dots/colons with dashes)
-	safeHost := strings.NewReplacer(".", "-", ":", "-").Replace(host)
+// newCircuitBreaker creates a circuit breaker for the given Dolt server
+// host:port:database. The database name is included in the file path so each
+// project gets independent circuit breaker state on shared servers (GH#3140).
+func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
+	// Sanitize host and database for use in filename
+	sanitize := strings.NewReplacer(".", "-", ":", "-", "/", "-")
+	safeHost := sanitize.Replace(host)
+	safeDB := sanitize.Replace(database)
+
+	// Include database in filename when non-empty. This keeps backward
+	// compatibility for callers that don't pass a database name (the old
+	// per-host:port files are still valid and will be cleaned up by
+	// CleanStaleCircuitBreakerFiles).
+	var filename string
+	if safeDB != "" {
+		filename = fmt.Sprintf("beads-dolt-circuit-%s-%d-%s.json", safeHost, port, safeDB)
+	} else {
+		filename = fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)
+	}
+
 	_ = os.MkdirAll(circuitBreakerDir, 0755)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
-		filePath: filepath.Join(circuitBreakerDir, fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)),
+		database: database,
+		filePath: filepath.Join(circuitBreakerDir, filename),
 	}
 }
 
@@ -121,13 +145,13 @@ func (cb *circuitBreaker) Allow() bool {
 				state.Failures = 0
 				state.FirstFailure = time.Time{}
 				cb.writeState(state)
-				log.Printf("[circuit-breaker] %s:%d: open → closed (active probe succeeded)", cb.host, cb.port)
+				log.Printf("[circuit-breaker] %s:%d/%s: open → closed (active probe succeeded)", cb.host, cb.port, cb.database)
 				return true
 			}
 			// Probe failed — stay open, reset the tripped timer
 			state.TrippedAt = time.Now()
 			cb.writeState(state)
-			log.Printf("[circuit-breaker] %s:%d: open → open (active probe failed, cooldown reset)", cb.host, cb.port)
+			log.Printf("[circuit-breaker] %s:%d/%s: open → open (active probe failed, cooldown reset)", cb.host, cb.port, cb.database)
 			return false
 		}
 		return false
@@ -139,13 +163,13 @@ func (cb *circuitBreaker) Allow() bool {
 			state.Failures = 0
 			state.FirstFailure = time.Time{}
 			cb.writeState(state)
-			log.Printf("[circuit-breaker] %s:%d: half-open → closed (active probe succeeded)", cb.host, cb.port)
+			log.Printf("[circuit-breaker] %s:%d/%s: half-open → closed (active probe succeeded)", cb.host, cb.port, cb.database)
 			return true
 		}
 		state.State = circuitOpen
 		state.TrippedAt = time.Now()
 		cb.writeState(state)
-		log.Printf("[circuit-breaker] %s:%d: half-open → open (active probe failed)", cb.host, cb.port)
+		log.Printf("[circuit-breaker] %s:%d/%s: half-open → open (active probe failed)", cb.host, cb.port, cb.database)
 		return false
 	default:
 		return true
@@ -170,7 +194,7 @@ func (cb *circuitBreaker) RecordSuccess() {
 
 	state := cb.readState()
 	if state.State == circuitHalfOpen {
-		log.Printf("[circuit-breaker] %s:%d: half-open → closed (probe succeeded)", cb.host, cb.port)
+		log.Printf("[circuit-breaker] %s:%d/%s: half-open → closed (probe succeeded)", cb.host, cb.port, cb.database)
 	}
 	// Reset to clean closed state
 	cb.writeState(circuitState{State: circuitClosed})
@@ -191,7 +215,7 @@ func (cb *circuitBreaker) RecordFailure() {
 		state.TrippedAt = now
 		state.LastFailure = now
 		cb.writeState(state)
-		log.Printf("[circuit-breaker] %s:%d: half-open → open (probe failed)", cb.host, cb.port)
+		log.Printf("[circuit-breaker] %s:%d/%s: half-open → open (probe failed)", cb.host, cb.port, cb.database)
 		return
 
 	case circuitOpen:
@@ -218,8 +242,8 @@ func (cb *circuitBreaker) RecordFailure() {
 			state.State = circuitOpen
 			state.TrippedAt = now
 			cb.writeState(state)
-			log.Printf("[circuit-breaker] %s:%d: closed → open (tripped after %d failures in %s)",
-				cb.host, cb.port, state.Failures, now.Sub(state.FirstFailure).Round(time.Millisecond))
+			log.Printf("[circuit-breaker] %s:%d/%s: closed → open (tripped after %d failures in %s)",
+				cb.host, cb.port, cb.database, state.Failures, now.Sub(state.FirstFailure).Round(time.Millisecond))
 			return
 		}
 
@@ -268,8 +292,8 @@ func (cb *circuitBreaker) readState() circuitState {
 			ref = state.LastFailure
 		}
 		if !ref.IsZero() && time.Since(ref) > circuitStaleTTL {
-			log.Printf("[circuit-breaker] %s:%d: stale %s state (age %s > TTL %s), auto-resetting to closed",
-				cb.host, cb.port, state.State, time.Since(ref).Round(time.Second), circuitStaleTTL)
+			log.Printf("[circuit-breaker] %s:%d/%s: stale %s state (age %s > TTL %s), auto-resetting to closed",
+				cb.host, cb.port, cb.database, state.State, time.Since(ref).Round(time.Second), circuitStaleTTL)
 			reset := circuitState{State: circuitClosed}
 			cb.writeState(reset)
 			return reset

@@ -18,7 +18,7 @@ func TestCircuitBreaker_InitiallyAllows(t *testing.T) {
 }
 
 func TestMaybeNewCircuitBreaker_PortZeroDisabled(t *testing.T) {
-	if cb := maybeNewCircuitBreaker("127.0.0.1", 0); cb != nil {
+	if cb := maybeNewCircuitBreaker("127.0.0.1", 0, "test"); cb != nil {
 		t.Fatalf("maybeNewCircuitBreaker(0) = %#v, want nil", cb)
 	}
 }
@@ -219,8 +219,8 @@ func TestCircuitBreaker_DifferentHostsSeparateState(t *testing.T) {
 	t.Setenv("BEADS_TEST_MODE", "")
 	// Two breakers for the same port but different hosts should have independent state.
 	// This is the core fix: previously keyed on port only, which caused cross-host blocking.
-	cb1 := newCircuitBreaker("127.0.0.1", 99999)
-	cb2 := newCircuitBreaker("10.0.0.1", 99999)
+	cb1 := newCircuitBreaker("127.0.0.1", 99999, "")
+	cb2 := newCircuitBreaker("10.0.0.1", 99999, "")
 	t.Cleanup(func() {
 		os.Remove(cb1.filePath)
 		os.Remove(cb2.filePath)
@@ -229,6 +229,39 @@ func TestCircuitBreaker_DifferentHostsSeparateState(t *testing.T) {
 	// Verify different file paths
 	if cb1.filePath == cb2.filePath {
 		t.Fatalf("different hosts should have different file paths: %s vs %s", cb1.filePath, cb2.filePath)
+	}
+
+	// Trip cb1
+	for i := 0; i < circuitFailureThreshold; i++ {
+		cb1.RecordFailure()
+	}
+	if cb1.State() != circuitOpen {
+		t.Fatal("cb1 should be open")
+	}
+
+	// cb2 should be unaffected
+	if cb2.State() != circuitClosed {
+		t.Fatalf("cb2 should be closed (independent of cb1), got %q", cb2.State())
+	}
+	if !cb2.Allow() {
+		t.Fatal("cb2 should allow requests (independent of cb1)")
+	}
+}
+
+func TestCircuitBreaker_DifferentDatabasesSeparateState(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
+	// Two breakers for the same host:port but different databases should have
+	// independent state. This prevents one degraded project from tripping the
+	// breaker for all worktrees on a shared server (GH#3140).
+	cb1 := newCircuitBreaker("127.0.0.1", 99999, "project_alpha")
+	cb2 := newCircuitBreaker("127.0.0.1", 99999, "project_beta")
+	t.Cleanup(func() {
+		os.Remove(cb1.filePath)
+		os.Remove(cb2.filePath)
+	})
+
+	if cb1.filePath == cb2.filePath {
+		t.Fatalf("different databases should have different file paths: %s vs %s", cb1.filePath, cb2.filePath)
 	}
 
 	// Trip cb1
@@ -381,7 +414,7 @@ func TestCleanStaleCircuitBreakerFiles(t *testing.T) {
 func TestCircuitBreakerDir_UsesSubdirectory(t *testing.T) {
 	// Verify that circuit breaker files are created in the dedicated
 	// subdirectory, not directly in /tmp (which can have millions of entries).
-	cb := newCircuitBreaker("127.0.0.1", 44444)
+	cb := newCircuitBreaker("127.0.0.1", 44444, "")
 	t.Cleanup(func() { os.Remove(cb.filePath) })
 
 	if filepath.Dir(cb.filePath) != circuitBreakerDir {

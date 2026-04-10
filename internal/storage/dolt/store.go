@@ -924,7 +924,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// state from previous sessions poisoning fresh inits (GH#2598).
 	CleanStaleCircuitBreakerFiles()
 
-	breaker := maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort)
+	breaker := maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
 
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if breaker != nil && !breaker.Allow() {
@@ -972,7 +972,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				}
 				cfg.ServerPort = port
 				addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
-				breaker = maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort)
+				breaker = maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
 			}
 			// Retry connection with longer timeout (server just started)
 			conn, dialErr = net.DialTimeout("tcp", addr, 2*time.Second)
