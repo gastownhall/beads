@@ -490,7 +490,7 @@ func (s *DoltStore) registerPoolGauges() {
 	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
 	db := s.db
 
-	m.Int64ObservableGauge("bd.db.pool_open", //nolint:errcheck
+	m.Int64ObservableGauge("bd.db.pool_open", //nolint:errcheck,gosec
 		metric.WithDescription("Current number of open connections (in-use + idle)"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
@@ -498,7 +498,7 @@ func (s *DoltStore) registerPoolGauges() {
 			return nil
 		}),
 	)
-	m.Int64ObservableGauge("bd.db.pool_in_use", //nolint:errcheck
+	m.Int64ObservableGauge("bd.db.pool_in_use", //nolint:errcheck,gosec
 		metric.WithDescription("Connections currently in use"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
@@ -506,7 +506,7 @@ func (s *DoltStore) registerPoolGauges() {
 			return nil
 		}),
 	)
-	m.Int64ObservableGauge("bd.db.pool_idle", //nolint:errcheck
+	m.Int64ObservableGauge("bd.db.pool_idle", //nolint:errcheck,gosec
 		metric.WithDescription("Idle connections in pool"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
@@ -514,7 +514,7 @@ func (s *DoltStore) registerPoolGauges() {
 			return nil
 		}),
 	)
-	m.Int64ObservableGauge("bd.db.pool_max_open", //nolint:errcheck
+	m.Int64ObservableGauge("bd.db.pool_max_open", //nolint:errcheck,gosec
 		metric.WithDescription("Maximum number of open connections (pool limit)"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
