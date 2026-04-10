@@ -779,6 +779,53 @@ func TestEmbeddedCreateCrossRepoWithParent(t *testing.T) {
 	assertDepExists(t, targetBeadsDir, "tgt", child.ID, parent.ID)
 }
 
+// TestEmbeddedCreateCrossRepoUninit verifies that bd create --repo works when
+// the target directory has NOT been initialized with bd init. This is a
+// regression test for be-sy8 / GH#2988: newDoltStoreFromConfig used to pass
+// an empty database name to the embedded Dolt engine, causing "no database
+// selected" during schema init.
+func TestEmbeddedCreateCrossRepoUninit(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// Set up primary repo (source — initialized)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	// Set up target repo WITHOUT bd init — just a bare git repo
+	targetDir := filepath.Join(dir, "uninit-target")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+
+	// This should succeed: ensureBeadsDirForPath creates .beads,
+	// and newDoltStoreFromConfig defaults to database "beads".
+	issue := bdCreate(t, bd, dir, "Issue in uninit target", "--repo", targetDir)
+	if issue.ID == "" {
+		t.Fatal("expected issue ID")
+	}
+
+	// Verify issue exists in the target store
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	tgtStore, err := newDoltStoreFromConfig(t.Context(), targetBeadsDir)
+	if err != nil {
+		t.Fatalf("failed to open target store: %v", err)
+	}
+	defer tgtStore.Close()
+
+	got, err := tgtStore.GetIssue(t.Context(), issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue in target: %v", err)
+	}
+	if got.Title != "Issue in uninit target" {
+		t.Errorf("title: got %q, want %q", got.Title, "Issue in uninit target")
+	}
+}
+
 // TestEmbeddedCreateWithGitRemote verifies bd create works end-to-end when a
 // git remote exists (which enables auto-backup in PersistentPostRun). This
 // catches panics from unimplemented methods called after the create succeeds.
