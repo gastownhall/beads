@@ -5,6 +5,15 @@ All notable changes to beads-mcp will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `mcp__beads__show()` no longer crashes with `pydantic literal_error` when an
+  issue has dependency types beyond the original four (`blocks`, `related`,
+  `parent-child`, `discovered-from`). `DependencyType` is now `str`, matching
+  the pattern already used for `IssueStatus` and `IssueType`. The bd CLI
+  remains the source of truth for validation. (GH#3133)
+
 ## [0.41.0] - 2024-12-30
 
 ### Changed
