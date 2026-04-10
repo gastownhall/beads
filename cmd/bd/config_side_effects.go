@@ -36,10 +36,10 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 		})
 
 	case key == "routing.mode":
-		validModes := map[string]bool{"maintainer": true, "contributor": true, "auto": true}
+		validModes := map[string]bool{"maintainer": true, "contributor": true, "auto": true, "explicit": true}
 		if !validModes[value] {
 			effects = append(effects, configSideEffect{
-				Message: fmt.Sprintf("Unknown routing mode %q. Valid values: maintainer, contributor, auto", value),
+				Message: fmt.Sprintf("Unknown routing mode %q. Valid values: auto, maintainer, contributor, explicit", value),
 			})
 		}
 

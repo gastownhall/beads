@@ -46,9 +46,11 @@ func TestCheckConfigSetSideEffects_RoutingModeInvalid(t *testing.T) {
 }
 
 func TestCheckConfigSetSideEffects_RoutingModeValid(t *testing.T) {
-	effects := checkConfigSetSideEffects("routing.mode", "maintainer")
-	if len(effects) != 0 {
-		t.Errorf("expected 0 effects for valid routing mode, got %d", len(effects))
+	for _, mode := range []string{"auto", "maintainer", "contributor", "explicit"} {
+		effects := checkConfigSetSideEffects("routing.mode", mode)
+		if len(effects) != 0 {
+			t.Errorf("expected 0 effects for valid routing mode %q, got %d", mode, len(effects))
+		}
 	}
 }
 
@@ -107,8 +109,9 @@ func TestCheckConfigUnsetSideEffects_UnknownKey(t *testing.T) {
 func TestPrintConfigSideEffects(t *testing.T) {
 	// Redirect stderr to avoid test noise
 	old := os.Stderr
-	os.Stderr, _ = os.Open(os.DevNull)
-	defer func() { os.Stderr = old }()
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	defer func() { w.Close(); r.Close(); os.Stderr = old }()
 
 	// Should not panic with empty, single, or multiple effects
 	printConfigSideEffects(nil)
