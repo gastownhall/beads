@@ -266,7 +266,16 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				FatalErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
+				// Cross-prefix deps: if the target has a different prefix than
+				// the source, skip resolution and pass the raw ID through.
+				// The storage layer's isCrossPrefixDep() handles this correctly.
+				srcPrefix := types.ExtractPrefix(fromID)
+				tgtPrefix := types.ExtractPrefix(dependsOnArg)
+				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
+					toID = dependsOnArg
+				} else {
+					FatalErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
+				}
 			} else {
 				defer toCleanup()
 			}
@@ -532,7 +541,15 @@ var depRemoveCmd = &cobra.Command{
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, args[1])
 			if err != nil {
-				FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
+				// Cross-prefix deps: if the target has a different prefix than
+				// the source, skip resolution and pass the raw ID through.
+				srcPrefix := types.ExtractPrefix(fromID)
+				tgtPrefix := types.ExtractPrefix(args[1])
+				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
+					toID = args[1]
+				} else {
+					FatalErrorRespectJSON("resolving dependency ID %s: %v", args[1], err)
+				}
 			} else {
 				defer toCleanup()
 			}
