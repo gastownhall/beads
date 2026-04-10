@@ -261,11 +261,13 @@ func getVarNames(replacements map[string]string) []string {
 
 // subgraphToFormula converts a molecule subgraph to a formula
 func subgraphToFormula(subgraph *TemplateSubgraph, name string, replacements map[string]string) *formula.Formula {
-	// Helper to apply replacements
+	// Helper to apply replacements. Uses word-boundary regex to avoid
+	// substring corruption (e.g., "4" matching inside "404").
 	applyReplacements := func(text string) string {
 		result := text
 		for value, varName := range replacements {
-			result = strings.ReplaceAll(result, value, "{{"+varName+"}}")
+			pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(value) + `\b`)
+			result = pattern.ReplaceAllString(result, "{{"+varName+"}}")
 		}
 		return result
 	}
