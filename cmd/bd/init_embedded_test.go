@@ -606,6 +606,9 @@ func TestEmbeddedInit(t *testing.T) {
 		if cfg.DoltDatabase != want {
 			t.Errorf("DoltDatabase: got %q, want %q (dot must be sanitized)", cfg.DoltDatabase, want)
 		}
+		if val := readBack(t, beadsDir, want, "issue_prefix", false); val != want {
+			t.Errorf("issue_prefix: got %q, want %q", val, want)
+		}
 
 		// Verify bd list succeeds — confirms the database name in metadata.json
 		// matches the actual Dolt database created during init.

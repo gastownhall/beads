@@ -790,11 +790,11 @@ func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
 func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
 	store := &configStore{
 		data: map[string]string{
-			"jira.url":              "https://example.atlassian.net",
-			"jira.project":          "PROJ",
-			"jira.api_token":        "token123",
-			"jira.priority_map.0":   "Critical",
-			"jira.priority_map.2":   "Normal",
+			"jira.url":            "https://example.atlassian.net",
+			"jira.project":        "PROJ",
+			"jira.api_token":      "token123",
+			"jira.priority_map.0": "Critical",
+			"jira.priority_map.2": "Normal",
 		},
 	}
 
@@ -826,11 +826,11 @@ func TestPriorityToTrackerUsesCustomMap(t *testing.T) {
 		priority int
 		want     string
 	}{
-		{0, "Critical"},  // from custom map
-		{1, "High"},      // not in map → default
-		{2, "Normal"},    // from custom map
-		{3, "Low"},       // not in map → default
-		{4, "Lowest"},    // not in map → default
+		{0, "Critical"}, // from custom map
+		{1, "High"},     // not in map → default
+		{2, "Normal"},   // from custom map
+		{3, "Low"},      // not in map → default
+		{4, "Lowest"},   // not in map → default
 	}
 	for _, tt := range tests {
 		got, _ := mapper.PriorityToTracker(tt.priority).(string)
@@ -852,11 +852,11 @@ func TestPriorityToBeadsUsesCustomMap(t *testing.T) {
 		name string
 		want int
 	}{
-		{"Critical", 0},  // from custom map
-		{"Normal", 2},    // from custom map
-		{"High", 1},      // not in map → default
-		{"Low", 3},       // not in map → default
-		{"Lowest", 4},    // not in map → default
+		{"Critical", 0}, // from custom map
+		{"Normal", 2},   // from custom map
+		{"High", 1},     // not in map → default
+		{"Low", 3},      // not in map → default
+		{"Lowest", 4},   // not in map → default
 	}
 	for _, tt := range tests {
 		got := mapper.PriorityToBeads(tt.name)

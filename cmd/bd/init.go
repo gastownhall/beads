@@ -244,11 +244,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			prefix = filepath.Base(cwd)
 		}
 
-		// Normalize prefix: strip leading dots and trailing hyphens.
-		// Leading dots produce invalid Dolt database names (e.g. ".claude" -> "bd_.claude").
-		// The trailing hyphen is added automatically during ID generation.
+		// Normalize prefix before storing it in config or deriving the Dolt
+		// database name. Dots are not valid in issue prefixes and must match the
+		// underscore form used for DoltDatabase/metadata.json.
+		// Leading dots produce invalid names (e.g. ".claude" -> "claude"), and
+		// the trailing hyphen is added automatically during ID generation.
 		prefix = strings.TrimLeft(prefix, ".")
 		prefix = strings.TrimRight(prefix, "-")
+		prefix = strings.ReplaceAll(prefix, ".", "_")
 
 		// Sanitize prefix for use as a MySQL database name.
 		// Directory names like "001" (common in temp dirs) are invalid because
