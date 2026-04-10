@@ -607,6 +607,36 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	return s.Port, true, nil
 }
 
+// doltServerLogLevel is the --loglevel value passed to `dolt sql-server`.
+//
+// Dolt's sql-server logs every new connection and connection close at INFO
+// level (`msg=NewConnection` / `msg=ConnectionClosed`). Because beads opens
+// a fresh MySQL connection for each `bd` invocation, a busy project can
+// produce millions of lines of connection churn noise, which in one field
+// report filled dolt-server.log with ~380 MB of useless entries, generated
+// significant btrfs write pressure, and buried real error signals.
+//
+// Raising the floor to `warning` silences that chatter while still surfacing
+// warnings, errors, and fatal messages. Valid dolt levels are:
+// trace, debug, info, warning, error, fatal.
+const doltServerLogLevel = "warning"
+
+// buildDoltServerArgs returns the argv passed to `dolt sql-server`
+// (excluding argv[0]/the binary itself). It is factored out of Start so it
+// can be asserted on in unit tests without spawning a real server.
+//
+// The `--loglevel` flag MUST be included here — see doltServerLogLevel for
+// the rationale. If you remove or reorder these args, update the tests in
+// doltserver_test.go accordingly.
+func buildDoltServerArgs(host string, port int) []string {
+	return []string{
+		"sql-server",
+		"-H", host,
+		"-P", strconv.Itoa(port),
+		"--loglevel=" + doltServerLogLevel,
+	}
+}
+
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
@@ -719,10 +749,7 @@ func Start(beadsDir string) (*State, error) {
 			actualPort = p
 		}
 
-		cmd := exec.Command(doltBin, "sql-server", //nolint:gosec // doltBin is resolved from PATH, not user input
-			"-H", cfg.Host,
-			"-P", strconv.Itoa(actualPort),
-		)
+		cmd := exec.Command(doltBin, buildDoltServerArgs(cfg.Host, actualPort)...) //nolint:gosec // doltBin is resolved from PATH, not user input
 		cmd.Dir = doltDir
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile

@@ -1572,6 +1572,104 @@ func TestReadyTimeout(t *testing.T) {
 	}
 }
 
+// TestBuildDoltServerArgs verifies the argv constructed for `dolt sql-server`
+// always includes a non-info --loglevel and the expected host/port. This
+// pins the fix for the field report where dolt-server.log ballooned to
+// hundreds of MB with `msg=NewConnection` / `msg=ConnectionClosed` spam
+// because dolt logs connection open/close at INFO by default.
+//
+// If this test fails because someone intentionally lowered verbosity back
+// to info/debug/trace, please instead pick a different mitigation (e.g.
+// dolt YAML config) and update doltServerLogLevel plus this test together.
+func TestBuildDoltServerArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		host     string
+		port     int
+		wantHost string
+		wantPort string
+	}{
+		{
+			name:     "loopback ipv4 with ephemeral-style port",
+			host:     "127.0.0.1",
+			port:     54321,
+			wantHost: "127.0.0.1",
+			wantPort: "54321",
+		},
+		{
+			name:     "localhost hostname with default dolt port",
+			host:     "localhost",
+			port:     3306,
+			wantHost: "localhost",
+			wantPort: "3306",
+		},
+		{
+			name:     "ipv6 loopback with low port",
+			host:     "::1",
+			port:     1024,
+			wantHost: "::1",
+			wantPort: "1024",
+		},
+	}
+
+	// Levels that MUST NOT appear — anything at or below info re-introduces
+	// the NewConnection/ConnectionClosed noise we are trying to suppress.
+	forbiddenLevels := []string{"trace", "debug", "info"}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := buildDoltServerArgs(tc.host, tc.port)
+
+			if len(args) == 0 || args[0] != "sql-server" {
+				t.Fatalf("args[0] = %q, want %q; full args: %v",
+					firstOrEmpty(args), "sql-server", args)
+			}
+
+			// -H <host>
+			hostIdx := indexOf(args, "-H")
+			if hostIdx < 0 || hostIdx+1 >= len(args) {
+				t.Fatalf("missing -H <host> in args: %v", args)
+			}
+			if got := args[hostIdx+1]; got != tc.wantHost {
+				t.Errorf("host = %q, want %q", got, tc.wantHost)
+			}
+
+			// -P <port>
+			portIdx := indexOf(args, "-P")
+			if portIdx < 0 || portIdx+1 >= len(args) {
+				t.Fatalf("missing -P <port> in args: %v", args)
+			}
+			if got := args[portIdx+1]; got != tc.wantPort {
+				t.Errorf("port = %q, want %q", got, tc.wantPort)
+			}
+
+			// --loglevel=<level> — the actual fix.
+			logLevel, ok := findLogLevel(args)
+			if !ok {
+				t.Fatalf("missing --loglevel flag in args; got: %v", args)
+			}
+			for _, bad := range forbiddenLevels {
+				if logLevel == bad {
+					t.Errorf("--loglevel=%s is too verbose; "+
+						"dolt logs NewConnection/ConnectionClosed at INFO, "+
+						"which caused the ~380MB dolt-server.log field report. "+
+						"Use warning/error/fatal instead.", logLevel)
+				}
+			}
+			// Sanity-check we're using a level dolt actually accepts.
+			validLevels := map[string]bool{
+				"trace": true, "debug": true, "info": true,
+				"warning": true, "error": true, "fatal": true,
+			}
+			if !validLevels[logLevel] {
+				t.Errorf("--loglevel=%s is not a valid dolt log level "+
+					"(valid: trace, debug, info, warning, error, fatal)",
+					logLevel)
+			}
+		})
+	}
+}
+
 func TestWaitForReady(t *testing.T) {
 	// Allocate an ephemeral port, then release it so we can re-bind later.
 	tmpListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1622,4 +1720,57 @@ func TestWaitForReady(t *testing.T) {
 			t.Errorf("expected nil error, got: %v", err)
 		}
 	})
+}
+
+// TestDoltServerLogLevelConstant pins doltServerLogLevel to a non-chatty
+// value. It complements TestBuildDoltServerArgs by guarding the constant
+// directly, so a refactor that stops calling buildDoltServerArgs cannot
+// silently regress the fix.
+func TestDoltServerLogLevelConstant(t *testing.T) {
+	switch doltServerLogLevel {
+	case "warning", "error", "fatal":
+		// ok — these all suppress INFO-level NewConnection noise.
+	default:
+		t.Errorf("doltServerLogLevel = %q; must be one of "+
+			"warning/error/fatal to suppress NewConnection/ConnectionClosed "+
+			"log spam (see dolt-connection-log-verbosity field report)",
+			doltServerLogLevel)
+	}
+}
+
+// indexOf returns the index of the first occurrence of needle in haystack,
+// or -1 if not found. Local helper to keep the test self-contained.
+func indexOf(haystack []string, needle string) int {
+	for i, s := range haystack {
+		if s == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+// findLogLevel extracts the value of a --loglevel=<v> or --loglevel <v>
+// flag from argv. Returns the value and true if found.
+func findLogLevel(args []string) (string, bool) {
+	const prefix = "--loglevel="
+	for i, a := range args {
+		if strings.HasPrefix(a, prefix) {
+			return strings.TrimPrefix(a, prefix), true
+		}
+		if a == "--loglevel" && i+1 < len(args) {
+			return args[i+1], true
+		}
+		// Short form -l <level>
+		if a == "-l" && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+func firstOrEmpty(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
 }
