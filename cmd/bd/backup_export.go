@@ -23,7 +23,8 @@ type backupState struct {
 
 // backupDir returns the backup directory path, creating it if needed.
 // When backup.git-repo is set to a valid git repo, returns a backup/ subdirectory
-// inside that repo. Otherwise falls back to .beads/backup/.
+// inside that repo. Otherwise it requires an active beads workspace and uses its
+// backup/ subdirectory.
 func backupDir() (string, error) {
 	gitRepo := config.GetString("backup.git-repo")
 	if gitRepo != "" {
@@ -43,7 +44,7 @@ func backupDir() (string, error) {
 	}
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		beadsDir = ".beads"
+		return "", fmt.Errorf("%s; %s", activeWorkspaceNotFoundError(), diagHint())
 	}
 	dir := filepath.Join(beadsDir, "backup")
 	if err := os.MkdirAll(dir, 0700); err != nil {

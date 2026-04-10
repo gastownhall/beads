@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -22,13 +21,9 @@ func issueIDCompletion(cmd *cobra.Command, args []string, toComplete string) ([]
 	// Get database path - use same logic as in PersistentPreRun
 	currentDBPath := dbPath
 	if currentDBPath == "" {
-		// Try to find database path
-		foundDB := beads.FindDatabasePath()
-		if foundDB != "" {
-			currentDBPath = foundDB
-		} else {
-			// Default path
-			currentDBPath = filepath.Join(".beads", beads.CanonicalDatabaseName)
+		currentDBPath = beads.FindDatabasePath()
+		if currentDBPath == "" {
+			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 	}
 

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -214,6 +215,90 @@ func TestIssueIDCompletion_NoStore(t *testing.T) {
 
 	if directive != cobra.ShellCompDirectiveNoFileComp {
 		t.Errorf("Expected directive NoFileComp (4), got %d", directive)
+	}
+}
+
+func TestIssueIDCompletion_UsesWorktreeFallbackWhenStoreNil(t *testing.T) {
+	originalStore := store
+	originalDBPath := dbPath
+	originalRootCtx := rootCtx
+	defer func() {
+		store = originalStore
+		dbPath = originalDBPath
+		rootCtx = originalRootCtx
+	}()
+
+	ctx := context.Background()
+	rootCtx = ctx
+
+	tmpDir := t.TempDir()
+	mainRepoDir := filepath.Join(tmpDir, "main-repo")
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatalf("mkdir main repo: %v", err)
+	}
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run(mainRepoDir, "init")
+	run(mainRepoDir, "config", "user.email", "test@example.com")
+	run(mainRepoDir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(mainRepoDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	run(mainRepoDir, "add", "README.md")
+	run(mainRepoDir, "commit", "-m", "Initial commit")
+
+	worktreeDir := filepath.Join(tmpDir, "worktree")
+	cmd := exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	cmd.Dir = mainRepoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		cleanupCmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cleanupCmd.Dir = mainRepoDir
+		_ = cleanupCmd.Run()
+	})
+
+	testDB := filepath.Join(mainRepoDir, ".beads", "beads.db")
+	testStore := newTestStoreWithPrefix(t, testDB, "wt")
+	if err := testStore.CreateIssue(ctx, &types.Issue{
+		ID:        "wt-abc1",
+		Title:     "Worktree completion target",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}, "test"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	store = nil
+	dbPath = ""
+
+	t.Chdir(worktreeDir)
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
+
+	completions, directive := issueIDCompletion(&cobra.Command{}, nil, "wt-a")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatalf("directive = %d, want %d", directive, cobra.ShellCompDirectiveNoFileComp)
+	}
+	if len(completions) != 1 {
+		t.Fatalf("len(completions) = %d, want 1 (%v)", len(completions), completions)
+	}
+	if len(completions[0]) < len("wt-abc1") || completions[0][:len("wt-abc1")] != "wt-abc1" {
+		t.Fatalf("completion = %q, want prefix %q", completions[0], "wt-abc1")
 	}
 }
 

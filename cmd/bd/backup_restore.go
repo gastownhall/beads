@@ -127,7 +127,7 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		return fmt.Errorf("cannot find .beads directory")
+		return fmt.Errorf("%s; %s", activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := configfile.Load(beadsDir)
