@@ -652,6 +652,11 @@ func Start(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("initializing dolt database: %w", err)
 	}
 
+	// Rotate the log if it has grown past the configured ceiling. This is a
+	// startup-only check — dolt owns the fd directly once launched, so we can
+	// only intervene between runs. See logrotate.go for the caveat discussion.
+	maybeRotateLog(beadsDir)
+
 	// Open log file
 	logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
 	if err != nil {
