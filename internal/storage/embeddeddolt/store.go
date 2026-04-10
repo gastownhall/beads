@@ -740,7 +740,7 @@ func (s *EmbeddedDoltStore) GetCustomTypes(ctx context.Context) ([]string, error
 		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
 			return yamlTypes, nil
 		}
-		return nil, nil
+		return nil, err
 	}
 	return result, nil
 }
