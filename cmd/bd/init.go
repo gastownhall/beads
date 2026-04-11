@@ -597,7 +597,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// avoid clobbering when multiple rigs share the same Dolt database)
 		existing, _ := store.GetConfig(ctx, "issue_prefix")
 		if existing == "" {
-			if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+			// Sanitize dots to underscores so issue IDs (e.g. "GPUPolynomials_jl-1")
+			// remain valid identifiers. Must match DoltDatabase sanitization above.
+			issuePrefix := strings.ReplaceAll(prefix, ".", "_")
+			if err := store.SetConfig(ctx, "issue_prefix", issuePrefix); err != nil {
 				_ = store.Close()
 				FatalError("failed to set issue prefix: %v", err)
 			}

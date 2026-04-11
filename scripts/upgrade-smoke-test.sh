@@ -199,6 +199,31 @@ new_workspace() {
     echo "$dir"
 }
 
+# Run previous/candidate binary FROM the workspace directory.
+# This is critical: git operations (beads.role, remote detection) must use
+# $WS's git repo, not whichever repo this script is running from.
+prev() { (cd "$WS" && "$PREV_BIN" "$@"); }
+cand() { (cd "$WS" && "$CAND_BIN" "$@"); }
+
+# Create an issue with the previous binary, tolerating missing --silent flag.
+# Older binaries don't have --silent; we just need to know creation succeeded.
+# Sets _CREATED_ID to a non-empty value on success.
+prev_create() {
+    local out
+    # Try --silent first (newer previous binaries)
+    out=$(prev create --silent "$@" 2>/dev/null) && _CREATED_ID="${out:-created}" && return 0
+    # Fallback: run without --silent, parse any ID-like token from output
+    out=$(prev create "$@" 2>/dev/null) || return 1
+    _CREATED_ID=$(printf '%s' "$out" | grep -oE '[a-zA-Z0-9_]+-[0-9]+' | head -1)
+    _CREATED_ID="${_CREATED_ID:-created}"
+}
+
+# Return true when the embedded Dolt database directory (or legacy beads.db)
+# exists inside the workspace .beads directory.
+embedded_db_exists() {
+    [ -d "$WS/.beads/embeddeddolt" ] || [ -f "$WS/.beads/beads.db" ]
+}
+
 # ---------------------------------------------------------------------------
 # Scenario 1: Embedded maintainer upgrade
 # ---------------------------------------------------------------------------
@@ -207,16 +232,18 @@ scenario "Embedded maintainer: init → create → upgrade → verify"
 
 WS=$(new_workspace)
 
-# Init with previous version
-"$PREV_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+# Init with previous version (run from $WS so git ops use $WS's repo)
+prev init --quiet --non-interactive 2>/dev/null || true
 git -C "$WS" config beads.role maintainer
 
-# Create test data
-ID1=$("$PREV_BIN" --db "$WS/.beads/beads.db" create --silent --title "Pre-upgrade issue" --type task --priority 1 2>/dev/null) || true
-ID2=$("$PREV_BIN" --db "$WS/.beads/beads.db" create --silent --title "Another issue" --type bug 2>/dev/null) || true
+# Create test data (prev_create handles missing --silent in older binaries)
+_CREATED_ID=""
+prev_create --title "Pre-upgrade issue" --type task --priority 1 || true
+ID1="${_CREATED_ID}"
+prev_create --title "Another issue" --type bug || true
 
 # Upgrade: run candidate init (simulates upgrade)
-"$CAND_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+cand init --quiet --non-interactive 2>/dev/null || true
 
 # Verify
 ROLE=$(git -C "$WS" config --get beads.role 2>/dev/null || echo "MISSING")
@@ -227,7 +254,7 @@ else
 fi
 
 if [ -n "${ID1:-}" ]; then
-    LIST_OUT=$("$CAND_BIN" --db "$WS/.beads/beads.db" list --json 2>/dev/null || echo "")
+    LIST_OUT=$(cand list --json 2>/dev/null || echo "")
     if echo "$LIST_OUT" | grep -q "Pre-upgrade issue"; then
         pass "Pre-upgrade issues visible after upgrade"
     else
@@ -238,7 +265,7 @@ else
 fi
 
 # Doctor check
-if "$CAND_BIN" --db "$WS/.beads/beads.db" doctor quick 2>/dev/null; then
+if cand doctor quick 2>/dev/null; then
     pass "bd doctor quick passes"
 else
     fail "bd doctor quick fails after upgrade"
@@ -256,11 +283,11 @@ scenario "Contributor: init --contributor → upgrade → verify role preserved"
 WS=$(new_workspace)
 
 # Init as contributor with previous version
-"$PREV_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+prev init --quiet --non-interactive 2>/dev/null || true
 git -C "$WS" config beads.role contributor
 
 # Upgrade
-"$CAND_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+cand init --quiet --non-interactive 2>/dev/null || true
 
 ROLE=$(git -C "$WS" config --get beads.role 2>/dev/null || echo "MISSING")
 if [ "$ROLE" = "contributor" ]; then
@@ -281,32 +308,32 @@ scenario "Mode preservation: embedded init must not switch to shared-server"
 WS=$(new_workspace)
 
 # Init embedded with previous version
-"$PREV_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+prev init --quiet --non-interactive 2>/dev/null || true
 git -C "$WS" config beads.role maintainer
 
-# Check if .beads/beads.db exists (embedded mode indicator)
-if [ -f "$WS/.beads/beads.db" ]; then
+# Check embedded DB exists (.beads/embeddeddolt/ for current, .beads/beads.db for legacy)
+if embedded_db_exists; then
     pass "Embedded DB exists before upgrade"
 else
     fail "Embedded DB missing before upgrade"
 fi
 
 # Upgrade
-"$CAND_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+cand init --quiet --non-interactive 2>/dev/null || true
 
 # Verify still embedded
-if [ -f "$WS/.beads/beads.db" ]; then
+if embedded_db_exists; then
     pass "Embedded DB still exists after upgrade"
 else
     fail "Embedded DB disappeared after upgrade (mode flip?)"
 fi
 
 # Verify the candidate binary still uses the local DB
-SHOW_OUT=$("$CAND_BIN" --db "$WS/.beads/beads.db" config get storage.mode 2>/dev/null || echo "")
+SHOW_OUT=$(cand config get storage.mode 2>/dev/null || echo "")
 if echo "$SHOW_OUT" | grep -qi "embedded\|sqlite\|local"; then
     pass "Storage mode reports embedded/local"
 elif [ -z "$SHOW_OUT" ]; then
-    # Config key may not exist; if DB file is present, that's the check
+    # Config key may not exist; if DB directory is present, that's sufficient
     pass "Storage mode not explicitly set (embedded DB present = OK)"
 else
     fail "Storage mode reports '$SHOW_OUT' (expected embedded)"
@@ -323,8 +350,9 @@ scenario "Non-interactive init: beads.role must be set"
 
 WS=$(new_workspace)
 
-# Fresh init with candidate (no previous version)
-"$CAND_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+# Fresh init with candidate (no previous version; runs from $WS so git
+# config is written to $WS's repo, not the repo this script runs from)
+cand init --quiet --non-interactive 2>/dev/null || true
 
 ROLE=$(git -C "$WS" config --get beads.role 2>/dev/null || echo "MISSING")
 if [ "$ROLE" != "MISSING" ] && [ -n "$ROLE" ]; then
@@ -345,10 +373,12 @@ scenario "MUTATION: init with old → create → upgrade → bd update → verif
 WS=$(new_workspace)
 
 # Init and create an issue with the previous version
-"$PREV_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+prev init --quiet --non-interactive 2>/dev/null || true
 git -C "$WS" config beads.role maintainer
 
-MUT_ID=$("$PREV_BIN" --db "$WS/.beads/beads.db" create --silent --title "Mutation target issue" --type task 2>/dev/null) || true
+_CREATED_ID=""
+prev_create --title "Mutation target issue" --type task || true
+MUT_ID="${_CREATED_ID}"
 
 if [ -z "${MUT_ID:-}" ]; then
     fail "Could not create issue with previous binary (init problem?)"
@@ -358,14 +388,14 @@ else
     pass "Issue created with previous binary (id: $MUT_ID)"
 
     # Upgrade: run candidate init
-    "$CAND_BIN" --db "$WS/.beads/beads.db" init --quiet --non-interactive 2>/dev/null || true
+    cand init --quiet --non-interactive 2>/dev/null || true
 
     # Mutate using the candidate binary
-    UPDATE_OUT=$("$CAND_BIN" --db "$WS/.beads/beads.db" update "$MUT_ID" --notes "smoke test mutation" 2>&1) || true
+    cand update "$MUT_ID" --notes "smoke test mutation" 2>/dev/null || true
     pass "bd update ran without fatal error"
 
     # Read back and verify the mutation persisted
-    SHOW_OUT=$("$CAND_BIN" --db "$WS/.beads/beads.db" show "$MUT_ID" 2>/dev/null || echo "")
+    SHOW_OUT=$(cand show "$MUT_ID" 2>/dev/null || echo "")
     if echo "$SHOW_OUT" | grep -q "smoke test mutation"; then
         pass "Updated notes persisted and visible after mutation"
     else
