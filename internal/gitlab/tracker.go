@@ -150,6 +150,16 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 		return nil, err
 	}
 
+	// Enrich each issue with its links (dependencies).
+	for i := range issues {
+		links, err := t.client.GetIssueLinks(ctx, issues[i].IID)
+		if err != nil {
+			// Non-fatal: issue may lack link permissions or be in a different project.
+			continue
+		}
+		issues[i].IssueLinksData = links
+	}
+
 	result := make([]tracker.TrackerIssue, 0, len(issues))
 	for _, gl := range issues {
 		result = append(result, gitlabToTrackerIssue(&gl))

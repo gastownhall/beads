@@ -82,6 +82,10 @@ type Issue struct {
 
 	// Links contains related URLs (populated in some API responses)
 	Links *IssueLinks `json:"links,omitempty"`
+
+	// IssueLinksData holds related issue links fetched via the /issues/:iid/links API.
+	// Not part of the standard issue response; populated separately during sync.
+	IssueLinksData []IssueLink `json:"-"`
 }
 
 // IssueLinks contains related URLs for an issue.
