@@ -26,7 +26,11 @@ pkg/
 
 # Agent local state (skills, settings, etc.)
 .amp/
-.claude/
+
+# Claude Code - local/runtime state
+.claude/settings.local.json
+.claude/worktrees/
+.claude/*.log
 
 
 # OS
