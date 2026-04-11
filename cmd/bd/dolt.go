@@ -160,6 +160,25 @@ func isDivergedHistoryErr(err error) bool {
 		strings.Contains(msg, "cannot find common ancestor")
 }
 
+// printNoRemoteGuidance prints an informational message (to stdout) when
+// push or pull is attempted but no Dolt remote is configured. Exits 0 because
+// the absence of a remote is a valid configuration — not an error.
+func printNoRemoteGuidance() {
+	fmt.Println("No remote is configured — skipping.")
+	fmt.Println("")
+	fmt.Println("For solo use, pushing is optional — your issues are stored locally")
+	fmt.Println("in .beads/ and versioned by Dolt automatically.")
+	fmt.Println("")
+	fmt.Println("To set up remote sync (for backup or team sharing):")
+	fmt.Println("  bd dolt remote add origin <url>")
+	fmt.Println("  bd dolt push")
+	fmt.Println("")
+	fmt.Println("Supported remote URLs:")
+	fmt.Println("  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
+	fmt.Println("  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
+	fmt.Println("  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
+}
+
 // printDivergedHistoryGuidance prints recovery guidance when push/pull fails
 // due to diverged local and remote histories.
 func printDivergedHistoryGuidance(operation string) {
@@ -205,52 +224,27 @@ uncommitted changes in its working set).`,
 		}
 		force, _ := cmd.Flags().GetBool("force")
 		fmt.Println("Pushing to Dolt remote...")
+
+		var pushErr error
 		if force {
-			if err := st.ForcePush(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				if isRemoteNotFoundErr(err) {
-					fmt.Fprintln(os.Stderr, "")
-					fmt.Fprintln(os.Stderr, "No remote is configured for this database.")
-					fmt.Fprintln(os.Stderr, "")
-					fmt.Fprintln(os.Stderr, "For solo use, pushing is optional — your issues are stored locally")
-					fmt.Fprintln(os.Stderr, "in .beads/ and versioned by Dolt automatically.")
-					fmt.Fprintln(os.Stderr, "")
-					fmt.Fprintln(os.Stderr, "To set up remote sync (for backup or team sharing):")
-					fmt.Fprintln(os.Stderr, "  bd dolt remote add origin <url>")
-					fmt.Fprintln(os.Stderr, "  bd dolt push")
-					fmt.Fprintln(os.Stderr, "")
-					fmt.Fprintln(os.Stderr, "Supported remote URLs:")
-					fmt.Fprintln(os.Stderr, "  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
-					fmt.Fprintln(os.Stderr, "  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
-					fmt.Fprintln(os.Stderr, "  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
-				} else if isDivergedHistoryErr(err) {
-					printDivergedHistoryGuidance("push --force")
-				}
-				os.Exit(1)
-			}
+			pushErr = st.ForcePush(ctx)
 		} else {
-			if err := st.Push(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				if isRemoteNotFoundErr(err) {
-					fmt.Fprintln(os.Stderr, "")
-					fmt.Fprintln(os.Stderr, "No remote is configured for this database.")
-					fmt.Fprintln(os.Stderr, "")
-					fmt.Fprintln(os.Stderr, "For solo use, pushing is optional — your issues are stored locally")
-					fmt.Fprintln(os.Stderr, "in .beads/ and versioned by Dolt automatically.")
-					fmt.Fprintln(os.Stderr, "")
-					fmt.Fprintln(os.Stderr, "To set up remote sync (for backup or team sharing):")
-					fmt.Fprintln(os.Stderr, "  bd dolt remote add origin <url>")
-					fmt.Fprintln(os.Stderr, "  bd dolt push")
-					fmt.Fprintln(os.Stderr, "")
-					fmt.Fprintln(os.Stderr, "Supported remote URLs:")
-					fmt.Fprintln(os.Stderr, "  • GitHub (via git):   git+ssh://git@github.com/org/repo.git")
-					fmt.Fprintln(os.Stderr, "  • DoltHub:            https://doltremoteapi.dolthub.com/org/repo")
-					fmt.Fprintln(os.Stderr, "  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
-				} else if isDivergedHistoryErr(err) {
-					printDivergedHistoryGuidance("push")
-				}
-				os.Exit(1)
+			pushErr = st.Push(ctx)
+		}
+		if pushErr != nil {
+			if isRemoteNotFoundErr(pushErr) {
+				printNoRemoteGuidance()
+				return
 			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", pushErr)
+			if isDivergedHistoryErr(pushErr) {
+				op := "push"
+				if force {
+					op = "push --force"
+				}
+				printDivergedHistoryGuidance(op)
+			}
+			os.Exit(1)
 		}
 		fmt.Println("Push complete.")
 	},
@@ -273,12 +267,12 @@ variables for authentication.`,
 		}
 		fmt.Println("Pulling from Dolt remote...")
 		if err := st.Pull(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if isRemoteNotFoundErr(err) {
-				fmt.Fprintf(os.Stderr, "Hint: use 'bd dolt remote add <name> <url>' (not 'dolt remote add').\n")
-				fmt.Fprintf(os.Stderr, "  Running 'dolt remote add' directly may add the remote to the wrong directory.\n")
-				fmt.Fprintf(os.Stderr, "  Use 'bd dolt remote list' to check for discrepancies.\n")
-			} else if isDivergedHistoryErr(err) {
+				printNoRemoteGuidance()
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("pull")
 			}
 			os.Exit(1)

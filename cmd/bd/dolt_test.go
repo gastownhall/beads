@@ -1038,6 +1038,32 @@ func TestIsRemoteNotFoundErr(t *testing.T) {
 	}
 }
 
+func TestPrintNoRemoteGuidance(t *testing.T) {
+	// Capture stdout output
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printNoRemoteGuidance()
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+
+	if !strings.Contains(output, "No remote is configured") {
+		t.Error("expected guidance to mention 'No remote is configured'")
+	}
+	if !strings.Contains(output, "skipping") {
+		t.Error("expected guidance to indicate the operation was skipped, not failed")
+	}
+	if !strings.Contains(output, "bd dolt remote add") {
+		t.Error("expected guidance to mention how to add a remote")
+	}
+}
+
 func TestPrintDivergedHistoryGuidance(t *testing.T) {
 	// Capture stderr output
 	oldStderr := os.Stderr
