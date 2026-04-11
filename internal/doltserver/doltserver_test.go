@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -1534,4 +1535,83 @@ func TestResolveServerMode_EmbeddedHonoredWithoutServerEnv(t *testing.T) {
 	if got != ServerModeEmbedded {
 		t.Errorf("ResolveServerMode with no server env = %v, want ServerModeEmbedded", got)
 	}
+}
+
+func TestReadyTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		setEnv   bool
+		want     time.Duration
+	}{
+		{"unset defaults to 10s", "", false, 10 * time.Second},
+		{"empty string defaults to 10s", "", true, 10 * time.Second},
+		{"valid integer seconds", "120", true, 120 * time.Second},
+		{"whitespace is trimmed", "  60  ", true, 60 * time.Second},
+		{"invalid string falls back", "notanumber", true, 10 * time.Second},
+		{"zero falls back", "0", true, 10 * time.Second},
+		{"negative falls back", "-5", true, 10 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setEnv {
+				t.Setenv("BEADS_DOLT_READY_TIMEOUT", tt.envValue)
+			} else {
+				_ = os.Unsetenv("BEADS_DOLT_READY_TIMEOUT")
+			}
+			got := readyTimeout()
+			if got != tt.want {
+				t.Errorf("readyTimeout() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWaitForReady(t *testing.T) {
+	// Allocate an ephemeral port, then release it so we can re-bind later.
+	tmpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("could not allocate ephemeral port: %v", err)
+	}
+	addr := tmpListener.Addr().(*net.TCPAddr)
+	host := "127.0.0.1"
+	port := addr.Port
+	if err := tmpListener.Close(); err != nil {
+		t.Fatalf("could not release ephemeral port: %v", err)
+	}
+
+	// Spawn a goroutine that delays binding the port. This simulates a
+	// "slow server" -- the TCP listener is not yet bound when waitForReady
+	// is first called.
+	bindAfter := 200 * time.Millisecond
+	listenerReady := make(chan net.Listener, 1)
+	go func() {
+		time.Sleep(bindAfter)
+		ln, listenErr := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if listenErr != nil {
+			close(listenerReady)
+			return
+		}
+		listenerReady <- ln
+	}()
+	t.Cleanup(func() {
+		ln, ok := <-listenerReady
+		if ok && ln != nil {
+			_ = ln.Close()
+		}
+	})
+
+	t.Run("times out when server not ready in time", func(t *testing.T) {
+		// 50ms is well under the 200ms bind delay, so this MUST time out.
+		if err := waitForReady(host, port, 50*time.Millisecond); err == nil {
+			t.Errorf("expected timeout error, got nil")
+		}
+	})
+
+	t.Run("succeeds when server becomes ready in time", func(t *testing.T) {
+		// 2 seconds is well over the remaining bind delay; gives comfortable margin.
+		if err := waitForReady(host, port, 2*time.Second); err != nil {
+			t.Errorf("expected nil error, got: %v", err)
+		}
+	})
 }

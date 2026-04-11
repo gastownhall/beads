@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`BEADS_DOLT_READY_TIMEOUT` env var** — `bd init --shared-server` now respects `BEADS_DOLT_READY_TIMEOUT` (positive integer seconds, default 10) so that slower hardware, where Dolt's first-run SQL engine bootstrap exceeds the 10-second budget, can opt into a longer `waitForReady` timeout. Default behavior is unchanged. ([GH#3142](https://github.com/gastownhall/beads/issues/3142))
+
 ## [1.0.0] - 2026-04-02
 
 ### 1.0 — Stable Release

@@ -135,6 +135,28 @@ func isFalsyBool(s string) bool {
 	return err == nil && !b
 }
 
+// readyTimeout returns the timeout used by waitForReady when starting the
+// dolt sql-server. Defaults to 10 seconds, but can be overridden via the
+// BEADS_DOLT_READY_TIMEOUT environment variable (positive integer seconds).
+// First-run Dolt SQL engine initialization can take ~60s on slower hardware
+// where the privileges.db, stats subrepo, and other bootstrap work must
+// happen before the MySQL listener accepts queries. See GH#3142.
+func readyTimeout() time.Duration {
+	const defaultTimeout = 10 * time.Second
+	v := strings.TrimSpace(os.Getenv("BEADS_DOLT_READY_TIMEOUT"))
+	if v == "" {
+		return defaultTimeout
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs < 1 {
+		fmt.Fprintf(os.Stderr,
+			"warning: BEADS_DOLT_READY_TIMEOUT=%q is not a positive integer; using default %s\n",
+			v, defaultTimeout)
+		return defaultTimeout
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // SharedServerDir returns the directory for shared server state files.
 // Returns ~/.beads/shared-server/ (created on first use).
 // Override with BEADS_SHARED_SERVER_DIR env var for testing or custom layouts.
@@ -759,7 +781,7 @@ func Start(beadsDir string) (*State, error) {
 	}
 
 	// Wait for server to accept connections
-	if err := waitForReady(cfg.Host, actualPort, 10*time.Second); err != nil {
+	if err := waitForReady(cfg.Host, actualPort, readyTimeout()); err != nil {
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
 			_ = proc.Kill()
 		}
