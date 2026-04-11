@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/templates/agents"
 )
@@ -141,11 +142,19 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 		command = "bd prime --stealth"
 	}
 
-	if addHookCommand(hooks, "SessionStart", command) {
-		_, _ = fmt.Fprintln(env.stdout, "✓ Registered SessionStart hook")
-	}
-	if addHookCommand(hooks, "PreCompact", command) {
-		_, _ = fmt.Fprintln(env.stdout, "✓ Registered PreCompact hook")
+	// GH#3192: Skip writing hooks if the beads plugin is already providing them.
+	// The plugin declares identical SessionStart/PreCompact hooks in plugin.json,
+	// so project-level hooks would fire bd prime twice per session.
+	pluginManaged := hasBeadsPlugin(env)
+	if pluginManaged {
+		_, _ = fmt.Fprintln(env.stdout, "✓ Beads plugin detected — hooks are plugin-managed, skipping")
+	} else {
+		if addHookCommand(hooks, "SessionStart", command) {
+			_, _ = fmt.Fprintln(env.stdout, "✓ Registered SessionStart hook")
+		}
+		if addHookCommand(hooks, "PreCompact", command) {
+			_, _ = fmt.Fprintln(env.stdout, "✓ Registered PreCompact hook")
+		}
 	}
 
 	data, err := json.MarshalIndent(settings, "", "  ")
@@ -221,6 +230,9 @@ func checkClaude(env claudeEnv) error {
 	case hasBeadsHooks(legacySettings):
 		_, _ = fmt.Fprintf(env.stdout, "✓ Project hooks installed (legacy): %s\n", legacySettings)
 		_, _ = fmt.Fprintf(env.stdout, "  Consider running 'bd setup claude' to migrate to .claude/settings.json\n")
+	case hasBeadsPlugin(env):
+		// GH#3192: Plugin provides hooks via plugin.json — no project-level hooks needed
+		_, _ = fmt.Fprintln(env.stdout, "✓ Hooks provided by beads plugin (plugin-managed)")
 	default:
 		_, _ = fmt.Fprintln(env.stdout, "✗ No hooks installed")
 		_, _ = fmt.Fprintln(env.stdout, "  Run: bd setup claude")
@@ -409,6 +421,47 @@ func removeHookCommand(hooks map[string]interface{}, event, command string) {
 	} else {
 		hooks[event] = filtered
 	}
+}
+
+// hasBeadsPlugin checks if the beads Claude Code plugin is enabled in any
+// settings file. The plugin declares its own SessionStart/PreCompact hooks
+// in plugin.json, so project-level hooks from bd setup claude would duplicate them.
+func hasBeadsPlugin(env claudeEnv) bool {
+	paths := []string{
+		projectSettingsPath(env.projectDir),
+		globalSettingsPath(env.homeDir),
+		legacyProjectSettingsPath(env.projectDir),
+	}
+	for _, p := range paths {
+		if checkBeadsPluginInFile(env.readFile, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkBeadsPluginInFile checks if the beads plugin is enabled in a single settings file.
+func checkBeadsPluginInFile(readFile func(string) ([]byte, error), path string) bool {
+	data, err := readFile(path)
+	if err != nil {
+		return false
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+	enabledPlugins, ok := settings["enabledPlugins"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for key, value := range enabledPlugins {
+		if strings.Contains(strings.ToLower(key), "beads") {
+			if enabled, ok := value.(bool); ok && enabled {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasBeadsHooks checks if a settings file has bd prime hooks
