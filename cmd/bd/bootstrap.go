@@ -13,6 +13,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -487,7 +488,65 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	}
 
 	dbName := cfg.GetDoltDatabase()
-	return cloneFromRemote(ctx, plan.BeadsDir, plan.SyncRemote, dbName)
+	if err := cloneFromRemote(ctx, plan.BeadsDir, plan.SyncRemote, dbName); err != nil {
+		return err
+	}
+
+	// Finalize the bootstrapped workspace so subsequent bd commands can open
+	// the cloned database. Without metadata.json and config.yaml,
+	// configfile.Load() returns nil, callers fall back to the default
+	// dolt_database name, and bd loses track of the cloned database —
+	// producing "no beads configuration found" and "Error 1105: no database
+	// selected" on bd status / bd dolt push in fresh clones. Every other
+	// bootstrap action (init, restore, jsonl-import) writes these files via
+	// newDoltStore + createConfigYaml; the sync path historically did not.
+	// (GH#3201)
+	return finalizeSyncedBootstrap(plan.BeadsDir, plan.SyncRemote, cfg, dbName)
+}
+
+// finalizeSyncedBootstrap writes metadata.json and config.yaml after a
+// successful sync clone, matching the on-disk layout that bd init produces.
+// It is idempotent: re-running over an already-finalized workspace leaves
+// existing files intact (createConfigYaml skips if config.yaml exists; the
+// metadata.json write is a full rewrite that preserves caller fields).
+func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config, dbName string) error {
+	// Start from the caller's cfg (which may be DefaultConfig when
+	// metadata.json was absent, or a parent workspace config propagated by
+	// findParentConfig). Preserve whatever upstream fields were already set,
+	// then fill in the bits required by configfile.Load consumers.
+	if cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltDatabase = dbName
+	if isEmbeddedMode() {
+		cfg.DoltMode = configfile.DoltModeEmbedded
+	} else {
+		cfg.DoltMode = configfile.DoltModeServer
+	}
+	// Mirror init's convention: metadata.json database points at the Dolt
+	// directory rather than the legacy "beads.db" placeholder.
+	if cfg.Database == "" || cfg.Database == beads.CanonicalDatabaseName {
+		cfg.Database = "dolt"
+	}
+
+	if err := cfg.Save(beadsDir); err != nil {
+		return fmt.Errorf("write metadata.json: %w", err)
+	}
+
+	if err := createConfigYaml(beadsDir, false, ""); err != nil {
+		return fmt.Errorf("create config.yaml: %w", err)
+	}
+
+	// Persist sync.remote so subsequent fresh clones (and bd bootstrap
+	// retries) can rediscover the remote without re-probing origin refs.
+	if syncRemote != "" {
+		if err := config.SetYamlConfig("sync.remote", syncRemote); err != nil {
+			return fmt.Errorf("persist sync.remote to config.yaml: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // cloneFromRemote clones a Dolt database from a remote URL.

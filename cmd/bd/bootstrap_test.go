@@ -945,3 +945,135 @@ func TestDetectBootstrapAction_SharedServerEnvUsesSharedPath(t *testing.T) {
 		t.Error("HasExisting = false, want true")
 	}
 }
+
+// TestFinalizeSyncedBootstrapWritesConfigFiles verifies that after a sync
+// clone, finalizeSyncedBootstrap writes the metadata.json and config.yaml
+// files bd needs to reopen the cloned database. This is the regression
+// guard for GH#3201: executeSyncAction previously left the workspace
+// without these files, causing "no beads configuration found" and
+// "Error 1105: no database selected" on every subsequent bd command.
+func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a post-clone workspace: cloneFromRemote created the
+	// embeddeddolt directory but no metadata.json / config.yaml exists.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Point findProjectConfigYaml at the test workspace instead of walking
+	// up from CWD, so the sync.remote write lands in the right file even
+	// when the test runs from an unrelated directory.
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	const dbName = "beads_hq"
+	const syncRemote = "file:///tmp/fake-origin.git"
+
+	cfg := configfile.DefaultConfig()
+	if err := finalizeSyncedBootstrap(beadsDir, syncRemote, cfg, dbName); err != nil {
+		t.Fatalf("finalizeSyncedBootstrap failed: %v", err)
+	}
+
+	// metadata.json must exist and record the database name bd needs to
+	// reopen the cloned data. Without this, GetDoltDatabase() falls back to
+	// DefaultDoltDatabase ("beads") and the cloned DB is unreachable.
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("configfile.Load after finalize failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("configfile.Load returned nil; metadata.json was not written")
+	}
+	if loaded.GetDoltDatabase() != dbName {
+		t.Errorf("dolt_database = %q, want %q", loaded.GetDoltDatabase(), dbName)
+	}
+	if loaded.GetDoltMode() != configfile.DoltModeEmbedded {
+		t.Errorf("dolt_mode = %q, want %q", loaded.GetDoltMode(), configfile.DoltModeEmbedded)
+	}
+	if loaded.GetBackend() != configfile.BackendDolt {
+		t.Errorf("backend = %q, want %q", loaded.GetBackend(), configfile.BackendDolt)
+	}
+
+	// config.yaml must exist so GetYamlConfig / SetYamlConfig and other
+	// yaml-backed settings (sync.remote, dolt.shared-server, etc.) work.
+	configYamlPath := filepath.Join(beadsDir, "config.yaml")
+	yamlBytes, err := os.ReadFile(configYamlPath)
+	if err != nil {
+		t.Fatalf("config.yaml missing after finalize: %v", err)
+	}
+	yaml := string(yamlBytes)
+
+	// sync.remote must be persisted so subsequent fresh clones (and
+	// bootstrap retries) can rediscover the remote without re-probing
+	// origin refs.
+	if !strings.Contains(yaml, "sync.remote: ") && !strings.Contains(yaml, "sync-remote: ") {
+		t.Errorf("config.yaml does not contain sync.remote entry:\n%s", yaml)
+	}
+	if !strings.Contains(yaml, syncRemote) {
+		t.Errorf("config.yaml does not contain sync remote URL %q:\n%s", syncRemote, yaml)
+	}
+}
+
+// TestFinalizeSyncedBootstrapIsIdempotent verifies that re-running the
+// finalize step over an already-finalized workspace is a no-op — the
+// clone retry path relies on this.
+func TestFinalizeSyncedBootstrapIsIdempotent(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	cfg := configfile.DefaultConfig()
+	if err := finalizeSyncedBootstrap(beadsDir, "file:///tmp/a.git", cfg, "beads_hq"); err != nil {
+		t.Fatalf("first finalize failed: %v", err)
+	}
+
+	firstYaml, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml after first finalize: %v", err)
+	}
+
+	if err := finalizeSyncedBootstrap(beadsDir, "file:///tmp/a.git", cfg, "beads_hq"); err != nil {
+		t.Fatalf("second finalize failed: %v", err)
+	}
+
+	secondYaml, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml after second finalize: %v", err)
+	}
+
+	// createConfigYaml skips existing files, so the template portion must
+	// be unchanged. SetYamlConfig rewrites in place but should produce the
+	// same output for the same value.
+	if string(firstYaml) != string(secondYaml) {
+		t.Errorf("config.yaml changed on second finalize.\nfirst:\n%s\nsecond:\n%s", firstYaml, secondYaml)
+	}
+
+	// metadata.json must still load cleanly.
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil || loaded == nil {
+		t.Fatalf("metadata.json missing after second finalize: %v", err)
+	}
+	if loaded.GetDoltDatabase() != "beads_hq" {
+		t.Errorf("dolt_database drifted: got %q, want %q", loaded.GetDoltDatabase(), "beads_hq")
+	}
+}
