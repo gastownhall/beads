@@ -189,11 +189,13 @@ func Initialize() error {
 
 	// Auto-export: write git-tracked JSONL after mutations for portability
 	// When no Dolt remote is configured, this is the primary way to share
-	// beads state (issues + memories) across machines via git.
-	v.SetDefault("export.auto", false)
+	// beads state (issues + memories) across machines via git.  Enabled by
+	// default so that viewers (bv) and git-based workflows see fresh data
+	// without extra configuration (GH#2973).
+	v.SetDefault("export.auto", true)
 	v.SetDefault("export.interval", "60s")
-	v.SetDefault("export.path", "export.jsonl") // relative to .beads/
-	v.SetDefault("export.git-add", false)
+	v.SetDefault("export.path", "issues.jsonl") // relative to .beads/; canonical name
+	v.SetDefault("export.git-add", true)
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")

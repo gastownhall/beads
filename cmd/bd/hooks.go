@@ -945,7 +945,7 @@ func exportJSONLForCommit() {
 
 	exportPath := config.GetString("export.path")
 	if exportPath == "" {
-		exportPath = "export.jsonl"
+		exportPath = "issues.jsonl"
 	}
 	fullPath := filepath.Join(beadsDir, exportPath)
 
