@@ -74,11 +74,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           # Tag push and manual dispatch test more versions; PRs test fewer for speed
-          VERSION_COUNT: ${{
-            github.event_name == 'push' && '30' ||
-            github.event_name == 'workflow_dispatch' && inputs.version_count ||
-            '5'
-          }}
+          VERSION_COUNT: ${{ (github.event_name == 'push' && '30') || (github.event_name == 'workflow_dispatch' && inputs.version_count) || '5' }}
         run: |
           VERSIONS=$(gh release list \
             --repo gastownhall/beads \
