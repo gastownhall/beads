@@ -1078,3 +1078,225 @@ func TestHooksNeedUpdate(t *testing.T) {
 		})
 	}
 }
+
+// TestInstallHooksBeads_HuskyV8Helper verifies that the husky v8 _/ helper
+// directory is symlinked when hooks are preserved from a husky-managed directory.
+// GH#3132 Bug 1: without this, hooks that source $(dirname "$0")/_/husky.sh fail.
+func TestInstallHooksBeads_HuskyV8Helper(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(fakeHome, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(fakeHome, ".gitconfig"))
+
+	// Create a husky v8-style hooks directory
+	huskyDir := filepath.Join(fakeHome, "husky-hooks")
+	huskyHelperDir := filepath.Join(huskyDir, "_")
+	if err := os.MkdirAll(huskyHelperDir, 0755); err != nil {
+		t.Fatalf("mkdir husky helper: %v", err)
+	}
+	huskyShContent := "#!/usr/bin/env sh\n# husky v8 helper\n"
+	if err := os.WriteFile(filepath.Join(huskyHelperDir, "husky.sh"), []byte(huskyShContent), 0755); err != nil {
+		t.Fatalf("write husky.sh: %v", err)
+	}
+	// Hook that sources the helper via relative path
+	hookContent := "#!/usr/bin/env sh\n. \"$(dirname -- \"$0\")/_/husky.sh\"\nnpx lint-staged\n"
+	if err := os.WriteFile(filepath.Join(huskyDir, "pre-commit"), []byte(hookContent), 0755); err != nil {
+		t.Fatalf("write pre-commit: %v", err)
+	}
+
+	// Set as global hooks path (simulating husky v8)
+	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", huskyDir)
+	if out, err := setGlobal.CombinedOutput(); err != nil {
+		t.Fatalf("set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	repoDir := t.TempDir()
+	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd.Dir = repoDir
+	if err := initCmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("git config %v: %v", args, err)
+		}
+	}
+
+	runInDir(t, repoDir, func() {
+		beadsDir := setupBeadsDir(t, repoDir)
+
+		if err := installHooksWithOptions(managedHookNames, false, false, false, true); err != nil {
+			t.Fatalf("installHooksWithOptions: %v", err)
+		}
+
+		// Verify the _/ symlink was created
+		tgtHelper := filepath.Join(beadsDir, "hooks", "_")
+		info, err := os.Lstat(tgtHelper)
+		if err != nil {
+			t.Fatalf("expected _/ symlink in .beads/hooks/: %v", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("expected _/ to be a symlink, got mode %v", info.Mode())
+		}
+
+		// Verify the symlink target resolves to the original helper
+		target, err := os.Readlink(tgtHelper)
+		if err != nil {
+			t.Fatalf("readlink: %v", err)
+		}
+		resolved := filepath.Join(filepath.Dir(tgtHelper), target, "husky.sh")
+		if _, err := os.Stat(resolved); err != nil {
+			t.Errorf("symlink does not resolve to husky.sh: %v (target=%s)", err, target)
+		}
+
+		// Verify the hook content was preserved
+		content, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-commit"))
+		if err != nil {
+			t.Fatalf("read pre-commit: %v", err)
+		}
+		if !strings.Contains(string(content), "npx lint-staged") {
+			t.Errorf("hook content not preserved.\nGot:\n%s", string(content))
+		}
+	})
+}
+
+// TestInstallHooksBeads_HuskyV9Shims verifies that husky v9 shims are replaced
+// with actual user hook content when preserved.
+// GH#3132 Bug 2: husky v9's h dispatcher uses dirname(dirname($0)) which breaks
+// when hooks are relocated from .husky/_/ to .beads/hooks/.
+func TestInstallHooksBeads_HuskyV9Shims(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(fakeHome, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(fakeHome, ".gitconfig"))
+
+	// Create husky v9 directory structure:
+	// .husky/
+	//   pre-commit   <- user's actual commands
+	//   _/
+	//     h           <- dispatcher
+	//     pre-commit  <- shim that sources h
+	huskyBase := filepath.Join(fakeHome, "project", ".husky")
+	huskyInner := filepath.Join(huskyBase, "_")
+	if err := os.MkdirAll(huskyInner, 0755); err != nil {
+		t.Fatalf("mkdir .husky/_: %v", err)
+	}
+
+	// User's actual hook commands (in .husky/)
+	userHookContent := "npm run minify-templates\nnpx lint-staged --allow-empty\n"
+	if err := os.WriteFile(filepath.Join(huskyBase, "pre-commit"), []byte(userHookContent), 0644); err != nil {
+		t.Fatalf("write user hook: %v", err)
+	}
+
+	// Husky v9 dispatcher (in .husky/_/)
+	hDispatcher := `#!/usr/bin/env sh
+n=$(basename "$0")
+s=$(dirname "$(dirname "$0")")/$n
+[ ! -f "$s" ] && exit 0
+. "$s"
+`
+	if err := os.WriteFile(filepath.Join(huskyInner, "h"), []byte(hDispatcher), 0755); err != nil {
+		t.Fatalf("write h dispatcher: %v", err)
+	}
+
+	// Husky v9 shim (in .husky/_/)
+	shimContent := "#!/usr/bin/env sh\n. \"$(dirname \"$0\")/h\"\n"
+	if err := os.WriteFile(filepath.Join(huskyInner, "pre-commit"), []byte(shimContent), 0755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+
+	// Set core.hooksPath to .husky/_/ (husky v9 style)
+	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", huskyInner)
+	if out, err := setGlobal.CombinedOutput(); err != nil {
+		t.Fatalf("set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	repoDir := t.TempDir()
+	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd.Dir = repoDir
+	if err := initCmd.Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("git config %v: %v", args, err)
+		}
+	}
+
+	runInDir(t, repoDir, func() {
+		beadsDir := setupBeadsDir(t, repoDir)
+
+		if err := installHooksWithOptions(managedHookNames, false, false, false, true); err != nil {
+			t.Fatalf("installHooksWithOptions: %v", err)
+		}
+
+		// Verify the h dispatcher was removed
+		hTarget := filepath.Join(beadsDir, "hooks", "h")
+		if _, err := os.Stat(hTarget); !os.IsNotExist(err) {
+			t.Error("h dispatcher should have been removed from .beads/hooks/")
+		}
+
+		// Verify the shim was replaced with actual user hook content
+		content, err := os.ReadFile(filepath.Join(beadsDir, "hooks", "pre-commit"))
+		if err != nil {
+			t.Fatalf("read pre-commit: %v", err)
+		}
+		contentStr := string(content)
+
+		// Should contain the user's actual commands, not the shim
+		if strings.Contains(contentStr, `. "$(dirname "$0")/h"`) {
+			t.Error("shim content should have been replaced with user hook content")
+		}
+		if !strings.Contains(contentStr, "npx lint-staged --allow-empty") {
+			t.Errorf("user hook content not found.\nGot:\n%s", contentStr)
+		}
+		if !strings.Contains(contentStr, "npm run minify-templates") {
+			t.Errorf("user hook content not found.\nGot:\n%s", contentStr)
+		}
+
+		// Should have a shebang (added since user hooks in .husky/ often omit it)
+		if !strings.HasPrefix(contentStr, "#!") {
+			t.Error("preserved hook should have a shebang")
+		}
+
+		// Beads section should also be present (injected by installHooksWithOptions)
+		if !strings.Contains(contentStr, hookSectionBeginPrefix) {
+			t.Errorf("beads section marker missing.\nGot:\n%s", contentStr)
+		}
+	})
+}
+
+// TestFixHuskyHookLayout_NoHusky verifies the fix is a no-op for non-husky directories.
+func TestFixHuskyHookLayout_NoHusky(t *testing.T) {
+	sourceDir := t.TempDir()
+	targetDir := t.TempDir()
+
+	// Write a normal hook (no husky)
+	if err := os.WriteFile(filepath.Join(sourceDir, "pre-commit"), []byte("#!/bin/sh\necho hi\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "pre-commit"), []byte("#!/bin/sh\necho hi\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	fixHuskyHookLayout(sourceDir, targetDir)
+
+	// No _/ symlink should be created
+	if _, err := os.Lstat(filepath.Join(targetDir, "_")); !os.IsNotExist(err) {
+		t.Error("_/ should not exist for non-husky directories")
+	}
+	// No h file to remove
+	if _, err := os.Stat(filepath.Join(targetDir, "h")); !os.IsNotExist(err) {
+		t.Error("h should not exist")
+	}
+}
