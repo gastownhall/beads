@@ -68,6 +68,40 @@ func TestDoctorWithBeadsDir(t *testing.T) {
 	}
 }
 
+func TestDoctorIncludesCopilotChecks(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".github", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".github", "copilot-instructions.md"), []byte("<!-- BEGIN BEADS INTEGRATION -->\n<!-- END BEADS INTEGRATION -->\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".github", "hooks", "beads-copilot.json"), []byte(`{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"bd prime"}],"preCompact":[{"type":"command","bash":"bd prime"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runDiagnostics(tmpDir)
+
+	var names []string
+	for _, check := range result.Checks {
+		names = append(names, check.Name)
+	}
+	joined := strings.Join(names, "\n")
+	for _, want := range []string{
+		"Copilot CLI Integration",
+		"Copilot Hooks Health",
+		"Copilot Hooks",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in doctor checks, got:\n%s", want, joined)
+		}
+	}
+}
+
 func TestDoctorWithBeadsDir_DoesNotPolluteCallerBeadsDir(t *testing.T) {
 	// Simulate a caller context that has its own valid .beads directory.
 	callerDir := t.TempDir()
