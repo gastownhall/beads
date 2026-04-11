@@ -910,6 +910,7 @@ bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md (universal stan
 bd setup codex    # Codex CLI - creates/updates AGENTS.md
 bd setup mux      # Mux - creates/updates AGENTS.md
 bd setup claude   # Claude Code - installs hooks + manages CLAUDE.md (minimal profile)
+bd setup copilot  # GitHub Copilot CLI - installs global ~/.copilot/copilot-instructions.md + ~/.copilot/hooks/
 bd setup gemini   # Gemini CLI - installs hooks + manages GEMINI.md (minimal profile)
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
@@ -919,6 +920,8 @@ bd setup factory --check
 bd setup codex --check
 bd setup mux --check
 bd setup claude --check
+bd setup copilot --check
+bd setup copilot --project --check
 bd setup gemini --check
 bd setup cursor --check
 bd setup aider --check
@@ -928,6 +931,8 @@ bd setup factory --remove
 bd setup codex --remove
 bd setup mux --remove
 bd setup claude --remove
+bd setup copilot --remove
+bd setup copilot --project --remove
 bd setup gemini --remove
 bd setup cursor --remove
 bd setup aider --remove
@@ -938,6 +943,10 @@ bd setup aider --remove
 bd setup claude              # Install globally (~/.claude/settings.json)
 bd setup claude --project    # Install for this project only
 bd setup claude --stealth    # Use stealth mode (flush only, no git operations)
+bd setup copilot             # Install global ~/.copilot/copilot-instructions.md + ~/.copilot/hooks/beads-copilot.json
+bd setup copilot --global    # Same as default
+bd setup copilot --project   # Install .github/copilot-instructions.md + .github/hooks/beads-copilot.json
+bd setup copilot --project --stealth  # Use stealth mode for project hooks
 bd setup gemini              # Install globally (~/.gemini/settings.json)
 bd setup gemini --project    # Install for this project only
 bd setup gemini --stealth    # Use stealth mode (flush only, no git operations)
@@ -950,6 +959,7 @@ bd setup mux --global        # Also install ~/.mux/AGENTS.md global layer
 - **Codex CLI** (`bd setup codex`): Creates or updates AGENTS.md with beads workflow instructions for Codex (full profile)
 - **Mux** (`bd setup mux`): Creates or updates AGENTS.md with beads workflow instructions for Mux workspaces (full profile)
 - **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events and manages a minimal-profile beads section in `CLAUDE.md`
+- **GitHub Copilot CLI** (`bd setup copilot`, `bd setup copilot --project`): Default install manages global defaults in `~/.copilot/copilot-instructions.md` and `~/.copilot/hooks/beads-copilot.json`. Project mode manages a minimal-profile beads section in `.github/copilot-instructions.md` and repository-local hooks in `.github/hooks/beads-copilot.json` that run `bd prime` on `sessionStart` and `preCompact`
 - **Gemini CLI** (`bd setup gemini`): Adds hooks to Gemini's settings.json that run `bd prime` on SessionStart and PreCompress events and manages a minimal-profile beads section in `GEMINI.md`
 - **Cursor** (`bd setup cursor`): Creates `.cursor/rules/beads.mdc` with workflow instructions
 - **Aider** (`bd setup aider`): Creates `.aider.conf.yml` with bd workflow instructions
@@ -960,6 +970,7 @@ See also:
 - [INSTALLING.md](INSTALLING.md#ide-and-editor-integrations) - Installation guide
 - [AIDER_INTEGRATION.md](AIDER_INTEGRATION.md) - Detailed Aider guide
 - [CLAUDE_INTEGRATION.md](CLAUDE_INTEGRATION.md) - Claude integration design
+- [COPILOT_CLI_INTEGRATION.md](COPILOT_CLI_INTEGRATION.md) - Copilot CLI integration guide
 
 ## See Also
 
