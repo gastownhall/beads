@@ -21,6 +21,7 @@ func agentDocFiles(repoPath string) []string {
 	files := []string{
 		filepath.Join(repoPath, agentsFile),
 		filepath.Join(repoPath, "CLAUDE.md"),
+		filepath.Join(repoPath, ".github", "copilot-instructions.md"),
 		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
 		// Local-only variants (not committed to repo)
 		filepath.Join(repoPath, "claude.local.md"),

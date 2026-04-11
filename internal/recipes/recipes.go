@@ -78,6 +78,13 @@ var BuiltinRecipes = map[string]Recipe{
 		GlobalPath:  "~/.gemini/settings.json",
 		ProjectPath: ".gemini/settings.json",
 	},
+	"copilot": {
+		Name:        "GitHub Copilot CLI",
+		Type:        TypeHooks,
+		Description: "Copilot CLI global instructions or project hooks + instructions",
+		GlobalPath:  "~/.copilot/copilot-instructions.md",
+		ProjectPath: ".github/copilot-instructions.md",
+	},
 	"factory": {
 		Name:        "Factory.ai (Droid)",
 		Path:        "AGENTS.md",
