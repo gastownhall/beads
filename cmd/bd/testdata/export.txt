@@ -5,6 +5,6 @@ bd export -o export.jsonl
 exists export.jsonl
 
 # Verify the exported file contains the issue
-bd import -i export.jsonl
+bd import export.jsonl
 bd list
 stdout 'Test issue'

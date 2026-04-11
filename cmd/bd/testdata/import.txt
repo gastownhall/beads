@@ -1,6 +1,6 @@
 # Test bd import command
 bd init --prefix test
-bd import -i import.jsonl
+bd import import.jsonl
 bd show test-99
 stdout 'Imported issue'
 

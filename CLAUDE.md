@@ -134,7 +134,7 @@ git commit -m "Your message"
 
 # After pull
 git pull
-bd import -i .beads/issues.jsonl  # Sync SQLite cache
+bd import .beads/issues.jsonl  # Sync Dolt database
 ```
 
 Or use the git hooks in `examples/git-hooks/` for automation.
