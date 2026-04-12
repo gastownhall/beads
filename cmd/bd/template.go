@@ -478,11 +478,90 @@ func getRelativeID(oldID, rootID string) string {
 	return ""
 }
 
+// ensureSubgraphCustomTypes scans the template subgraph for issue types
+// that are not built-in and ensures they are registered as custom types
+// in the database. This is needed because formula cooking can produce
+// issues with types like "gate" (for async coordination beads) that are
+// not in the default type whitelist. Without this, cloneSubgraph fails
+// with "invalid issue type" on the first non-built-in bead. (GH#3213)
+func ensureSubgraphCustomTypes(ctx context.Context, s storage.DoltStorage, subgraph *TemplateSubgraph) error {
+	// Collect non-built-in types used by the subgraph.
+	needed := make(map[string]bool)
+	for _, issue := range subgraph.Issues {
+		t := issue.IssueType
+		if t == "" || t.IsValid() {
+			continue
+		}
+		needed[string(t)] = true
+	}
+	if len(needed) == 0 {
+		return nil
+	}
+
+	// Read the current custom types and check which are missing.
+	existing, err := s.GetConfig(ctx, "types.custom")
+	if err != nil {
+		existing = ""
+	}
+	var current []string
+	if existing != "" {
+		// parseTypesValue handles both JSON arrays and comma-separated.
+		// It's in issueops — but we don't import that package here, so
+		// do a simple comma split (good enough for the merge check).
+		for _, t := range strings.Split(strings.Trim(existing, "[] \""), ",") {
+			t = strings.Trim(t, " \"")
+			if t != "" {
+				current = append(current, t)
+			}
+		}
+	}
+	currentSet := make(map[string]bool, len(current))
+	for _, t := range current {
+		currentSet[t] = true
+	}
+
+	var toAdd []string
+	for t := range needed {
+		if !currentSet[t] {
+			toAdd = append(toAdd, t)
+		}
+	}
+	if len(toAdd) == 0 {
+		return nil
+	}
+
+	// Merge and write back. SetConfig triggers SyncCustomTypesTable
+	// which populates the normalized custom_types table used by
+	// PrepareIssueForInsert → ValidateWithCustom.
+	merged := append(current, toAdd...)
+	// Serialize as JSON array for consistency with bd config set.
+	var buf strings.Builder
+	buf.WriteString("[")
+	for i, t := range merged {
+		if i > 0 {
+			buf.WriteString(",")
+		}
+		buf.WriteString("\"")
+		buf.WriteString(t)
+		buf.WriteString("\"")
+	}
+	buf.WriteString("]")
+	return s.SetConfig(ctx, "types.custom", buf.String())
+}
+
 // cloneSubgraph creates new issues from the template with variable substitution.
 // Uses CloneOptions to control all spawn/bond behavior including dynamic bonding.
 func cloneSubgraph(ctx context.Context, s storage.DoltStorage, subgraph *TemplateSubgraph, opts CloneOptions) (*InstantiateResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
+	}
+
+	// Auto-register any non-built-in issue types used by the subgraph
+	// so that formula-generated beads (e.g., type "gate" for async
+	// coordination) pass type validation without requiring the operator
+	// to run `bd config set types.custom` manually first. See GH#3213.
+	if err := ensureSubgraphCustomTypes(ctx, s, subgraph); err != nil {
+		return nil, fmt.Errorf("registering custom types for subgraph: %w", err)
 	}
 
 	// Generate new IDs and create mapping

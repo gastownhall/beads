@@ -210,6 +210,29 @@ func parseTypesValue(value string) []string {
 	return ParseCommaSeparatedList(value)
 }
 
+// EnsureCustomTypeInTx registers name as a custom type if it is not
+// already a built-in type and not already in the custom_types table.
+// This is used by bd mol pour/wisp to auto-register types that the
+// formula system creates implicitly (e.g. "gate" for async coordination
+// beads) so that operators don't have to run bd config set types.custom
+// manually before pouring a formula with gate steps. See GH#3213.
+func EnsureCustomTypeInTx(ctx context.Context, tx *sql.Tx, name string) error {
+	if types.IssueType(name).IsValid() {
+		return nil
+	}
+	existing, err := ResolveCustomTypesInTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, t := range existing {
+		if t == name {
+			return nil
+		}
+	}
+	_, err = tx.ExecContext(ctx, "INSERT INTO custom_types (name) VALUES (?)", name)
+	return err
+}
+
 // ResolveInfraTypesInTx reads infrastructure types from the database,
 // falling back to config.yaml then to hardcoded defaults.
 // Returns a map[string]bool for O(1) lookups.
