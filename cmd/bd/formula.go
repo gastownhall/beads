@@ -30,7 +30,7 @@ The Rig → Cook → Run lifecycle:
   - Run: Agents execute poured mols or wisps
 
 Search paths (in order):
-  1. .beads/formulas/ (project)
+  1. <resolved-beads-dir>/formulas/ (active project)
   2. ~/.beads/formulas/ (user)
   3. $GT_ROOT/.beads/formulas/ (orchestrator, if GT_ROOT set)
 
@@ -46,7 +46,7 @@ var formulaListCmd = &cobra.Command{
 	Long: `List all formulas from search paths.
 
 Search paths (in order of priority):
-  1. .beads/formulas/ (project - highest priority)
+  1. <resolved-beads-dir>/formulas/ (active project - highest priority)
   2. ~/.beads/formulas/ (user)
   3. $GT_ROOT/.beads/formulas/ (orchestrator, if GT_ROOT set)
 
@@ -349,24 +349,7 @@ func runFormulaShow(cmd *cobra.Command, args []string) {
 
 // getFormulaSearchPaths returns the formula search paths in priority order.
 func getFormulaSearchPaths() []string {
-	var paths []string
-
-	// Project-level formulas
-	if cwd, err := os.Getwd(); err == nil {
-		paths = append(paths, filepath.Join(cwd, ".beads", "formulas"))
-	}
-
-	// User-level formulas
-	if home, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(home, ".beads", "formulas"))
-	}
-
-	// Orchestrator formulas (via GT_ROOT)
-	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-		paths = append(paths, filepath.Join(gtRoot, ".beads", "formulas"))
-	}
-
-	return paths
+	return formula.DefaultSearchPaths()
 }
 
 // scanFormulaDir scans a directory for formula files (both TOML and JSON).
