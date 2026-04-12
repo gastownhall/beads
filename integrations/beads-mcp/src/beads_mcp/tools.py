@@ -65,6 +65,32 @@ def _register_client_for_cleanup(client: BdClientBase) -> None:
         pass
 
 
+def _has_beads_project_files(beads_dir: str) -> bool:
+    """Check if a .beads directory contains actual project files.
+
+    Mirrors hasBeadsProjectFiles in internal/beads/beads.go. Returns True when
+    any of these are present: metadata.json, config.yaml, dolt/, embeddeddolt/,
+    or a non-backup *.db file (excluding vc.db).
+    """
+    import glob
+
+    if os.path.isfile(os.path.join(beads_dir, "metadata.json")):
+        return True
+    if os.path.isfile(os.path.join(beads_dir, "config.yaml")):
+        return True
+    if os.path.isdir(os.path.join(beads_dir, "dolt")):
+        return True
+    if os.path.isdir(os.path.join(beads_dir, "embeddeddolt")):
+        return True
+
+    for match in glob.glob(os.path.join(beads_dir, "*.db")):
+        base = os.path.basename(match)
+        if ".backup" not in base and base != "vc.db":
+            return True
+
+    return False
+
+
 def _resolve_beads_redirect(beads_dir: str, workspace_root: str) -> str | None:
     """Follow a .beads/redirect file to the actual beads directory.
 
@@ -75,8 +101,6 @@ def _resolve_beads_redirect(beads_dir: str, workspace_root: str) -> str | None:
     Returns:
         Resolved workspace root if redirect is valid, None otherwise
     """
-    import glob
-
     redirect_path = os.path.join(beads_dir, "redirect")
     if not os.path.isfile(redirect_path):
         return None
@@ -98,12 +122,10 @@ def _resolve_beads_redirect(beads_dir: str, workspace_root: str) -> str | None:
             logger.debug(f"Redirect target {resolved} does not exist")
             return None
 
-        # Verify the redirected location has a valid database
-        db_files = glob.glob(os.path.join(resolved, "*.db"))
-        valid_dbs = [f for f in db_files if ".backup" not in os.path.basename(f)]
-
-        if not valid_dbs:
-            logger.debug(f"Redirect target {resolved} has no valid .db files")
+        # Verify the redirected location has a valid beads project
+        # (SQLite *.db, embedded Dolt, server Dolt, or just metadata/config)
+        if not _has_beads_project_files(resolved):
+            logger.debug(f"Redirect target {resolved} has no valid beads project files")
             return None
 
         # Return the workspace root of the redirected location (parent of .beads)
@@ -124,10 +146,10 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
         start_dir: Starting directory (default: current working directory)
 
     Returns:
-        Absolute path to workspace root containing .beads/*.db, or None if not found
+        Absolute path to workspace root containing a valid .beads project,
+        or None if not found. Detects SQLite (*.db), embedded Dolt
+        (embeddeddolt/), server Dolt (dolt/), and metadata-only projects.
     """
-    import glob
-
     try:
         current = os.path.abspath(start_dir or os.getcwd())
 
@@ -147,12 +169,9 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
                     logger.debug(f"Followed redirect from {current} to {redirected}")
                     return redirected
 
-                # No redirect, check for local .db files
-                db_files = glob.glob(os.path.join(beads_dir, "*.db"))
-                valid_dbs = [f for f in db_files if ".backup" not in os.path.basename(f)]
-
-                if valid_dbs:
-                    # Return workspace root (parent of .beads), not the db path
+                # No redirect — check for any valid beads project files
+                # (matches Go's hasBeadsProjectFiles)
+                if _has_beads_project_files(beads_dir):
                     return current
 
             parent = os.path.dirname(current)

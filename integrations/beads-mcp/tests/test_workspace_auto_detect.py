@@ -6,7 +6,12 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from beads_mcp.tools import _find_beads_db_in_tree, _get_client, current_workspace
+from beads_mcp.tools import (
+    _find_beads_db_in_tree,
+    _get_client,
+    _has_beads_project_files,
+    current_workspace,
+)
 from beads_mcp.bd_client import BdError
 
 
@@ -272,3 +277,78 @@ def test_find_beads_db_prefers_redirect_over_parent():
         # Should follow redirect (to remote), not walk up to parent
         result = _find_beads_db_in_tree(str(child_dir))
         assert result == os.path.realpath(str(remote_dir))
+
+
+# --- GH#2997: embedded Dolt and other backend detection ---
+
+def test_find_beads_db_embedded_dolt():
+    """Embedded Dolt projects have no *.db file; detect via metadata.json."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        beads_dir = Path(tmpdir) / ".beads"
+        beads_dir.mkdir()
+        (beads_dir / "metadata.json").write_text(
+            '{"backend":"dolt","dolt_mode":"embedded","dolt_database":"therm"}'
+        )
+        (beads_dir / "embeddeddolt").mkdir()
+
+        result = _find_beads_db_in_tree(tmpdir)
+        assert result == os.path.realpath(tmpdir)
+
+
+def test_find_beads_db_dolt_server():
+    """Server-mode Dolt: detect via metadata.json + dolt/ dir."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        beads_dir = Path(tmpdir) / ".beads"
+        beads_dir.mkdir()
+        (beads_dir / "metadata.json").write_text('{"backend":"dolt"}')
+        (beads_dir / "dolt").mkdir()
+
+        result = _find_beads_db_in_tree(tmpdir)
+        assert result == os.path.realpath(tmpdir)
+
+
+def test_find_beads_db_metadata_only():
+    """metadata.json alone is sufficient evidence of a beads project."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        beads_dir = Path(tmpdir) / ".beads"
+        beads_dir.mkdir()
+        (beads_dir / "metadata.json").write_text('{"backend":"sqlite"}')
+
+        result = _find_beads_db_in_tree(tmpdir)
+        assert result == os.path.realpath(tmpdir)
+
+
+def test_find_beads_db_redirect_to_dolt():
+    """Redirect to an embedded Dolt project should be accepted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        main_dir = Path(tmpdir) / "main"
+        main_dir.mkdir()
+        main_beads = main_dir / ".beads"
+        main_beads.mkdir()
+        (main_beads / "metadata.json").write_text(
+            '{"backend":"dolt","dolt_mode":"embedded"}'
+        )
+        (main_beads / "embeddeddolt").mkdir()
+
+        worker = Path(tmpdir) / "worker"
+        worker.mkdir()
+        worker_beads = worker / ".beads"
+        worker_beads.mkdir()
+        (worker_beads / "redirect").write_text("../main/.beads")
+
+        result = _find_beads_db_in_tree(str(worker))
+        assert result == os.path.realpath(str(main_dir))
+
+
+def test_has_beads_project_files_excludes_vc_db():
+    """vc.db alone doesn't count as a beads project."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        beads_dir = Path(tmpdir) / ".beads"
+        beads_dir.mkdir()
+        (beads_dir / "vc.db").touch()
+        (beads_dir / "beads.db.backup").touch()
+
+        assert _has_beads_project_files(str(beads_dir)) is False
+
+        (beads_dir / "beads.db").touch()
+        assert _has_beads_project_files(str(beads_dir)) is True

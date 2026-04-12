@@ -225,17 +225,19 @@ def require_context(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitabl
 
 
 def _find_beads_db(workspace_root: str) -> str | None:
-    """Find .beads/*.db by walking up from workspace_root.
-    
+    """Find a SQLite .beads/*.db by walking up from workspace_root.
+
     Args:
         workspace_root: Starting directory to search from
-        
+
     Returns:
-        Absolute path to first .db file found in .beads/, None otherwise
+        Absolute path to first .db file found in .beads/, None otherwise.
+        Returns None for Dolt-backed projects (which have no single .db file);
+        callers should use _find_beads_project() to detect those.
     """
     import glob
     current = os.path.abspath(workspace_root)
-    
+
     while True:
         beads_dir = os.path.join(current, ".beads")
         if os.path.isdir(beads_dir):
@@ -243,13 +245,71 @@ def _find_beads_db(workspace_root: str) -> str | None:
             db_files = glob.glob(os.path.join(beads_dir, "*.db"))
             if db_files:
                 return db_files[0]  # Return first .db file found
-        
+
         parent = os.path.dirname(current)
         if parent == current:  # Reached root
             break
         current = parent
-    
+
     return None
+
+
+def _find_beads_project(workspace_root: str) -> tuple[str, str] | None:
+    """Find a .beads project by walking up from workspace_root.
+
+    Detects SQLite, embedded Dolt, and server Dolt backends. See
+    `_has_beads_project_files` for the detection rules.
+
+    Returns:
+        (workspace_root, backend) where backend is "sqlite", "dolt-embedded",
+        "dolt-server", or "unknown". None if no .beads project is found.
+    """
+    from beads_mcp.tools import _has_beads_project_files
+
+    current = os.path.abspath(workspace_root)
+    while True:
+        beads_dir = os.path.join(current, ".beads")
+        if os.path.isdir(beads_dir) and _has_beads_project_files(beads_dir):
+            backend = _detect_backend(beads_dir)
+            return (current, backend)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def _detect_backend(beads_dir: str) -> str:
+    """Identify the storage backend in a .beads directory."""
+    import glob
+    import json
+
+    metadata_path = os.path.join(beads_dir, "metadata.json")
+    if os.path.isfile(metadata_path):
+        try:
+            with open(metadata_path) as f:
+                meta = json.load(f)
+            backend = (meta.get("backend") or meta.get("database") or "").lower()
+            if backend == "dolt":
+                if (meta.get("dolt_mode") or "").lower() == "embedded":
+                    return "dolt-embedded"
+                return "dolt-server"
+            if backend == "sqlite":
+                return "sqlite"
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+    if os.path.isdir(os.path.join(beads_dir, "embeddeddolt")):
+        return "dolt-embedded"
+    if os.path.isdir(os.path.join(beads_dir, "dolt")):
+        return "dolt-server"
+
+    for match in glob.glob(os.path.join(beads_dir, "*.db")):
+        base = os.path.basename(match)
+        if ".backup" not in base and base != "vc.db":
+            return "sqlite"
+
+    return "unknown"
 
 
 def _resolve_workspace_root(path: str) -> str:
@@ -623,10 +683,10 @@ async def _context_set(workspace_root: str) -> str:
     os.environ["BEADS_WORKING_DIR"] = resolved_root
     os.environ["BEADS_CONTEXT_SET"] = "1"
 
-    # Find beads database
-    db_path = _find_beads_db(resolved_root)
+    # Locate the beads project (handles SQLite and Dolt backends)
+    project = _find_beads_project(resolved_root)
 
-    if db_path is None:
+    if project is None:
         # Clear any stale DB path
         _workspace_context.pop("BEADS_DB", None)
         os.environ.pop("BEADS_DB", None)
@@ -636,14 +696,28 @@ async def _context_set(workspace_root: str) -> str:
             f"  Database: Not found (run context(action='init') to create)"
         )
 
-    # Set database path in both persistent context and os.environ
-    _workspace_context["BEADS_DB"] = db_path
-    os.environ["BEADS_DB"] = db_path
+    project_root, backend = project
 
+    # BEADS_DB only applies to SQLite. Dolt backends use metadata.json,
+    # which the bd CLI reads directly.
+    if backend == "sqlite":
+        db_path = _find_beads_db(project_root)
+        if db_path:
+            _workspace_context["BEADS_DB"] = db_path
+            os.environ["BEADS_DB"] = db_path
+            return (
+                f"Context set successfully:\n"
+                f"  Workspace root: {resolved_root}\n"
+                f"  Database: {db_path}"
+            )
+
+    # Dolt or unknown — clear any stale BEADS_DB and report the project root.
+    _workspace_context.pop("BEADS_DB", None)
+    os.environ.pop("BEADS_DB", None)
     return (
         f"Context set successfully:\n"
         f"  Workspace root: {resolved_root}\n"
-        f"  Database: {db_path}"
+        f"  Project: {os.path.join(project_root, '.beads')} (backend: {backend})"
     )
 
 
