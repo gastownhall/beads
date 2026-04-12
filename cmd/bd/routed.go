@@ -193,6 +193,10 @@ func openNamedDatabaseStore(ctx context.Context, currentBeadsDir, verificationBe
 	})
 }
 
+// Fork note: after rig recovery we saw towns where routes.jsonl had gone stale
+// while the authoritative routes table still knew which rig owned a prefix.
+// This fallback keeps routed lookups working instead of failing every cross-rig
+// show/update/dep operation until the projection is rebuilt.
 func openRouteTableFallbackStore(ctx context.Context, localStore storage.DoltStorage, currentBeadsDir, id string) (storage.DoltStorage, bool) {
 	prefix := types.ExtractPrefix(id)
 	if prefix == "" {

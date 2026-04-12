@@ -37,6 +37,9 @@ func OrphanedDependencies(path string, verbose bool) error {
 	defer db.Close()
 
 	// Find orphaned dependencies.
+	// Fork note: GT towns intentionally create cross-store tracks deps and
+	// wisp-backed molecule deps; treating them as ordinary orphans made doctor
+	// --fix delete valid orchestration edges.
 	// Exclude:
 	// - external: cross-rig tracking refs (#1593)
 	// - tracks deps, which intentionally point at work in other stores

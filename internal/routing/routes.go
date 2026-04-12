@@ -55,9 +55,15 @@ func LoadRoutes(beadsDir string) ([]Route, error) {
 	return routes, scanner.Err()
 }
 
-// ResolveBeadsDirForID resolves the authoritative .beads directory for an issue ID
-// by consulting town-level prefix routes. When no route matches, it returns the
-// current beads dir with routed=false so callers can use their existing store.
+// ResolveBeadsDirForID resolves the authoritative .beads directory for an issue
+// ID by consulting town-level prefix routes.
+//
+// Fork note: multi-database GT towns can recover into a state where the nearest
+// local .beads directory is not the owning store for a prefix. Canonicalizing
+// redirects and walking back to the town routing table keeps cross-rig lookups
+// pointed at the authoritative rig database instead of the caller's local one.
+// When no route matches, it returns the current beads dir with routed=false so
+// callers can use their existing store.
 func ResolveBeadsDirForID(ctx context.Context, id, currentBeadsDir string) (string, bool, error) {
 	_ = ctx
 

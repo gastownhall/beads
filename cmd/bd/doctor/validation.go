@@ -55,6 +55,9 @@ func CheckOrphanedDependencies(path string) DoctorCheck {
 // checkOrphanedDependenciesDB is the core logic for CheckOrphanedDependencies.
 func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for orphaned dependencies.
+	// Fork note: GT towns intentionally create cross-store tracks deps and
+	// wisp-backed molecule deps; treating them as ordinary orphans made doctor
+	// report false positives and suggest unsafe cleanup.
 	// Exclude:
 	// - external: refs, which are synthetic cross-rig tracking deps
 	// - tracks deps, which intentionally point at work tracked in other stores
