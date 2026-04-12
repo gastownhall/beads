@@ -36,13 +36,20 @@ func OrphanedDependencies(path string, verbose bool) error {
 	}
 	defer db.Close()
 
-	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
+	// Find orphaned dependencies.
+	// Exclude:
+	// - external: cross-rig tracking refs (#1593)
+	// - tracks deps, which intentionally point at work in other stores
+	// - wisp-backed deps, since formula molecules live in wisps, not issues
 	query := `
 		SELECT d.issue_id, d.depends_on_id
 		FROM dependencies d
 		LEFT JOIN issues i ON d.depends_on_id = i.id
+		LEFT JOIN wisps w ON d.depends_on_id = w.id
 		WHERE i.id IS NULL
+		  AND w.id IS NULL
 		  AND d.depends_on_id NOT LIKE 'external:%'
+		  AND d.type != 'tracks'
 	`
 	rows, err := db.Query(query)
 	if err != nil {

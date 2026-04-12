@@ -55,15 +55,19 @@ func CheckOrphanedDependencies(path string) DoctorCheck {
 // checkOrphanedDependenciesDB is the core logic for CheckOrphanedDependencies.
 func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for orphaned dependencies.
-	// Exclude external: refs — these are synthetic cross-rig tracking deps
-	// injected by the JSONL exporter and intentionally reference issues not
-	// present in the local database (#1593).
+	// Exclude:
+	// - external: refs, which are synthetic cross-rig tracking deps
+	// - tracks deps, which intentionally point at work tracked in other stores
+	// - wisp-backed deps, since formula molecules live in wisps, not issues
 	query := `
 		SELECT d.issue_id, d.depends_on_id, d.type
 		FROM dependencies d
 		LEFT JOIN issues i ON d.depends_on_id = i.id
+		LEFT JOIN wisps w ON d.depends_on_id = w.id
 		WHERE i.id IS NULL
+		  AND w.id IS NULL
 		  AND d.depends_on_id NOT LIKE 'external:%'
+		  AND d.type != 'tracks'
 	`
 	rows, err := db.Query(query)
 	if err != nil {

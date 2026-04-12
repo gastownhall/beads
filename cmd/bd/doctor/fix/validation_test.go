@@ -224,6 +224,58 @@ func TestChildParentDependencies_FixesBadDeps(t *testing.T) {
 	}
 }
 
+func TestOrphanedDependencies_IgnoresTracksAndWispDeps(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	issue := &types.Issue{
+		ID:        "bd-123",
+		Title:     "Issue bd-123",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	db := store.UnderlyingDB()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tx.Exec("INSERT INTO wisps (id, title) VALUES (?, ?)", "bd-wisp-1", "molecule")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tx.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
+		issue.ID, "foreign-456", "tracks", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tx.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
+		issue.ID, "bd-wisp-1", "blocks", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := OrphanedDependencies(dir, false); err != nil {
+		t.Fatalf("OrphanedDependencies failed: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dependencies").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("expected both intentional deps to remain, got %d", count)
+	}
+}
+
 // TestChildParentDependencies_PreservesParentChildType verifies that legitimate
 // parent-child type dependencies are NOT removed (only blocking types are removed).
 func TestChildParentDependencies_PreservesParentChildType(t *testing.T) {

@@ -138,6 +138,57 @@ func TestValidateCheck_DetectsOrphanedDeps(t *testing.T) {
 	t.Error("Orphaned Dependencies check not found")
 }
 
+func TestValidateCheck_IgnoresTracksAndWispDeps(t *testing.T) {
+	tmpDir, store := setupValidateTestDB(t, "test")
+	ctx := context.Background()
+
+	issue := &types.Issue{
+		Title:     "Tracked issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	db := store.UnderlyingDB()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
+	_, err = tx.Exec("INSERT INTO wisps (id, title) VALUES (?, ?)", "test-wisp-1", "molecule")
+	if err != nil {
+		t.Fatalf("Failed to insert wisp: %v", err)
+	}
+	_, err = tx.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
+		issue.ID, "foreign-123", "tracks", "test")
+	if err != nil {
+		t.Fatalf("Failed to insert tracks dep: %v", err)
+	}
+	_, err = tx.Exec("INSERT INTO dependencies (issue_id, depends_on_id, type, created_by) VALUES (?, ?, ?, ?)",
+		issue.ID, "test-wisp-1", "blocks", "test")
+	if err != nil {
+		t.Fatalf("Failed to insert wisp dep: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Failed to commit deps: %v", err)
+	}
+	store.Close()
+
+	checks := collectValidateChecks(tmpDir)
+
+	for _, cr := range checks {
+		if cr.check.Name == "Orphaned Dependencies" {
+			if cr.check.Status != statusOK {
+				t.Fatalf("Orphaned Dependencies status = %q, want %q (message: %s, detail: %s)", cr.check.Status, statusOK, cr.check.Message, cr.check.Detail)
+			}
+			return
+		}
+	}
+	t.Error("Orphaned Dependencies check not found")
+}
+
 func TestValidateCheck_GitConflicts_DoltClean(t *testing.T) {
 	// Since GetBackend() always returns "dolt" (SQLite removed in 87493ce9),
 	// the Git Conflicts check now queries dolt_conflicts (GH-2249).
