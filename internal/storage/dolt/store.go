@@ -1501,6 +1501,9 @@ func (s *DoltStore) Path() string {
 // Use this instead of Path() when running dolt CLI commands that target the
 // actual database (e.g., remote add/remove, push, pull).
 func (s *DoltStore) CLIDir() string {
+	if s.serverMode && doltserver.IsSharedServerMode() && s.beadsDir != "" {
+		return filepath.Join(doltserver.ResolveDoltDir(s.beadsDir), s.database)
+	}
 	if s.dbPath == "" {
 		return ""
 	}

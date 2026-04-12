@@ -400,6 +400,89 @@ func TestCredentialCLIRoutingNoRemote(t *testing.T) {
 	}
 }
 
+func TestCredentialCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping shared-server credential routing test")
+	}
+
+	sharedRoot := t.TempDir()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
+
+	database := "shared_credentials_db"
+	cliDir := filepath.Join(sharedRoot, "dolt", database)
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("dolt", "init")
+	cmd.Dir = cliDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt init failed: %s: %v", out, err)
+	}
+
+	cmd = exec.Command("dolt", "remote", "add", "origin", "https://example.com/repo")
+	cmd.Dir = cliDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt remote add failed: %s: %v", out, err)
+	}
+
+	store := &DoltStore{
+		remoteUser:     "user",
+		remotePassword: "pass",
+		serverMode:     true,
+		beadsDir:       filepath.Join(t.TempDir(), ".beads"),
+		dbPath:         filepath.Join(t.TempDir(), ".beads", "dolt"),
+		database:       database,
+		remote:         "origin",
+	}
+
+	if !store.shouldUseCLIForCredentials(context.Background()) {
+		t.Fatalf("expected shared-server credential routing to resolve CLI remote via %q, got CLIDir %q", cliDir, store.CLIDir())
+	}
+}
+
+func TestCloudAuthCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed, skipping shared-server cloud-auth routing test")
+	}
+
+	sharedRoot := t.TempDir()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
+	t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
+
+	database := "shared_cloud_auth_db"
+	cliDir := filepath.Join(sharedRoot, "dolt", database)
+	if err := os.MkdirAll(cliDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("dolt", "init")
+	cmd.Dir = cliDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt init failed: %s: %v", out, err)
+	}
+
+	cmd = exec.Command("dolt", "remote", "add", "origin", "https://example.com/repo")
+	cmd.Dir = cliDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dolt remote add failed: %s: %v", out, err)
+	}
+
+	store := &DoltStore{
+		serverMode: true,
+		beadsDir:   filepath.Join(t.TempDir(), ".beads"),
+		dbPath:     filepath.Join(t.TempDir(), ".beads", "dolt"),
+		database:   database,
+		remote:     "origin",
+	}
+
+	if !store.shouldUseCLIForCloudAuth() {
+		t.Fatalf("expected shared-server cloud-auth routing to resolve CLI remote via %q, got CLIDir %q", cliDir, store.CLIDir())
+	}
+}
+
 // TestFederationCredentialCLIRouting verifies the shouldUseCLIForPeerCredentials guard
 // that controls CLI subprocess routing for federation PushTo, PullFrom, and Fetch
 // when peer credentials are resolved from the federation_peers table.
