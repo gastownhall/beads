@@ -510,13 +510,10 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 // existing files intact (createConfigYaml skips if config.yaml exists; the
 // metadata.json write is a full rewrite that preserves caller fields).
 func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config, dbName string) error {
-	// Start from the caller's cfg (which may be DefaultConfig when
-	// metadata.json was absent, or a parent workspace config propagated by
-	// findParentConfig). Preserve whatever upstream fields were already set,
-	// then fill in the bits required by configfile.Load consumers.
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
+	// Preserve whatever upstream fields were already set in cfg (which may
+	// be DefaultConfig when metadata.json was absent, or a parent workspace
+	// config propagated by findParentConfig), then fill in the bits
+	// required by configfile.Load consumers.
 	cfg.Backend = configfile.BackendDolt
 	cfg.DoltDatabase = dbName
 	if isEmbeddedMode() {
