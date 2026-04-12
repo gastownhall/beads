@@ -219,7 +219,16 @@ This is useful for agents executing molecules to see which steps can run next.`,
 					Parent:          parent,
 				}
 			}
-			outputJSON(issuesWithCounts)
+			// Check inbox for pending items (best effort)
+			inboxPending, _ := activeStore.CountPendingInbox(ctx)
+			if inboxPending > 0 {
+				outputJSON(map[string]interface{}{
+					"ready":         issuesWithCounts,
+					"inbox_pending": inboxPending,
+				})
+			} else {
+				outputJSON(issuesWithCounts)
+			}
 			return
 		}
 		// Show upgrade notification if needed
@@ -286,6 +295,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		// Show tip after successful ready (direct mode only)
 		maybeShowTip(store)
+
+		// Show inbox notification if pending items exist (best effort)
+		if inboxCount, err := activeStore.CountPendingInbox(ctx); err == nil && inboxCount > 0 {
+			fmt.Printf("%s %d issue(s) pending in inbox (use %s to review, %s to accept)\n\n",
+				ui.RenderAccent("📬"), inboxCount,
+				ui.RenderID("bd inbox list"), ui.RenderID("bd inbox import"))
+		}
 	},
 }
 var blockedCmd = &cobra.Command{
