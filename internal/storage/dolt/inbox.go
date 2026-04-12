@@ -13,11 +13,20 @@ import (
 // AddInboxItem inserts an item into the inbox table.
 // Uses ON DUPLICATE KEY UPDATE so resends with updated content succeed.
 func (s *DoltStore) AddInboxItem(ctx context.Context, item *types.InboxItem) error {
+	// Default JSON columns to valid JSON if empty
+	labels := item.Labels
+	if labels == "" {
+		labels = "[]"
+	}
+	metadata := item.Metadata
+	if metadata == "" {
+		metadata = "{}"
+	}
 	query := `
 		INSERT INTO beads_inbox (
-			sender_project_id, sender_issue_id, title, description,
+			inbox_id, sender_project_id, sender_issue_id, title, description,
 			priority, issue_type, status, labels, metadata, sender_ref, expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			title = VALUES(title),
 			description = VALUES(description),
@@ -30,6 +39,7 @@ func (s *DoltStore) AddInboxItem(ctx context.Context, item *types.InboxItem) err
 			expires_at = VALUES(expires_at)
 	`
 	_, err := s.execContext(ctx, query,
+		item.InboxID,
 		item.SenderProjectID,
 		item.SenderIssueID,
 		item.Title,
@@ -37,8 +47,8 @@ func (s *DoltStore) AddInboxItem(ctx context.Context, item *types.InboxItem) err
 		item.Priority,
 		item.IssueType,
 		item.Status,
-		item.Labels,
-		item.Metadata,
+		labels,
+		metadata,
 		item.SenderRef,
 		item.ExpiresAt,
 	)

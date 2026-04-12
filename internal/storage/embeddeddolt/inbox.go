@@ -12,12 +12,21 @@ import (
 )
 
 func (s *EmbeddedDoltStore) AddInboxItem(ctx context.Context, item *types.InboxItem) error {
+	// Default JSON columns to valid JSON if empty
+	labels := item.Labels
+	if labels == "" {
+		labels = "[]"
+	}
+	metadata := item.Metadata
+	if metadata == "" {
+		metadata = "{}"
+	}
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO beads_inbox (
-				sender_project_id, sender_issue_id, title, description,
+				inbox_id, sender_project_id, sender_issue_id, title, description,
 				priority, issue_type, status, labels, metadata, sender_ref, expires_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON DUPLICATE KEY UPDATE
 				title = VALUES(title),
 				description = VALUES(description),
@@ -29,6 +38,7 @@ func (s *EmbeddedDoltStore) AddInboxItem(ctx context.Context, item *types.InboxI
 				sender_ref = VALUES(sender_ref),
 				expires_at = VALUES(expires_at)
 		`,
+			item.InboxID,
 			item.SenderProjectID,
 			item.SenderIssueID,
 			item.Title,
@@ -36,8 +46,8 @@ func (s *EmbeddedDoltStore) AddInboxItem(ctx context.Context, item *types.InboxI
 			item.Priority,
 			item.IssueType,
 			item.Status,
-			item.Labels,
-			item.Metadata,
+			labels,
+			metadata,
 			item.SenderRef,
 			item.ExpiresAt,
 		)
