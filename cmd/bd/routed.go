@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
+	doltstorage "github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -63,14 +65,194 @@ func sameBeadsDir(a, b string) bool {
 	return utils.NormalizePathForComparison(a) == utils.NormalizePathForComparison(b)
 }
 
+func findTownRootFromBeadsDir(beadsDir string) string {
+	current := filepath.Dir(beadsDir)
+	for {
+		if _, err := os.Stat(filepath.Join(current, "mayor", "town.json")); err == nil {
+			return current
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Dir(beadsDir)
+		}
+		current = parent
+	}
+}
+
+func loadRoutePathFromStore(ctx context.Context, localStore storage.DoltStorage, prefix string) (string, bool) {
+	rawStore := storage.UnwrapStore(localStore)
+	rawDB, ok := rawStore.(storage.RawDBAccessor)
+	if !ok {
+		if os.Getenv("BD_DEBUG_ROUTING") != "" {
+			fmt.Fprintf(os.Stderr, "[routing] store %T does not expose RawDBAccessor after unwrap (%T)\n", localStore, rawStore)
+		}
+		return "", false
+	}
+
+	db := rawDB.UnderlyingDB()
+	if db == nil {
+		db = rawDB.DB()
+	}
+	if db == nil {
+		return "", false
+	}
+
+	var routePath string
+	if err := db.QueryRowContext(ctx, "SELECT path FROM routes WHERE prefix = ?", prefix).Scan(&routePath); err != nil {
+		if os.Getenv("BD_DEBUG_ROUTING") != "" {
+			fmt.Fprintf(os.Stderr, "[routing] routes table lookup for %q failed: %v\n", prefix, err)
+		}
+		return "", false
+	}
+	if os.Getenv("BD_DEBUG_ROUTING") != "" {
+		fmt.Fprintf(os.Stderr, "[routing] routes table matched %q -> %q\n", prefix, routePath)
+	}
+	return routePath, routePath != ""
+}
+
+func resolveRouteBeadsDirPath(townRoot, routePath string) string {
+	if routePath == "" {
+		return ""
+	}
+	if routePath == "." {
+		if townRoot == "" {
+			return ""
+		}
+		return filepath.Join(townRoot, ".beads")
+	}
+
+	resolved := routePath
+	if !filepath.IsAbs(resolved) {
+		if townRoot == "" {
+			return ""
+		}
+		resolved = filepath.Join(townRoot, resolved)
+	}
+	if filepath.Base(resolved) == ".beads" {
+		return resolved
+	}
+	return filepath.Join(resolved, ".beads")
+}
+
+func databaseCandidatesFromRoutePath(townRoot, routePath string) []string {
+	addCandidate := func(seen map[string]struct{}, candidates []string, candidate string) []string {
+		candidate = strings.TrimSpace(candidate)
+		switch candidate {
+		case "", ".", "..", ".beads", "mayor", "rig":
+			return candidates
+		}
+		if _, exists := seen[candidate]; exists {
+			return candidates
+		}
+		seen[candidate] = struct{}{}
+		return append(candidates, candidate)
+	}
+
+	cleaned := filepath.Clean(routePath)
+	seen := make(map[string]struct{})
+	candidates := make([]string, 0, 2)
+
+	if filepath.IsAbs(cleaned) && townRoot != "" {
+		if rel, err := filepath.Rel(townRoot, cleaned); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+			parts := strings.Split(filepath.ToSlash(rel), "/")
+			if len(parts) > 0 {
+				candidates = addCandidate(seen, candidates, parts[0])
+			}
+		}
+	}
+
+	if !filepath.IsAbs(cleaned) {
+		parts := strings.Split(filepath.ToSlash(cleaned), "/")
+		if len(parts) > 0 {
+			candidates = addCandidate(seen, candidates, parts[0])
+		}
+	}
+
+	base := filepath.Base(cleaned)
+	if base == ".beads" {
+		base = filepath.Base(filepath.Dir(cleaned))
+	}
+	candidates = addCandidate(seen, candidates, base)
+
+	return candidates
+}
+
+func openNamedDatabaseStore(ctx context.Context, currentBeadsDir, verificationBeadsDir, database string) (storage.DoltStorage, error) {
+	cfg, err := configfile.Load(currentBeadsDir)
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil || !cfg.IsDoltServerMode() {
+		return nil, fmt.Errorf("current workspace is not in dolt server mode")
+	}
+
+	return doltstorage.NewFromConfigWithOptions(ctx, currentBeadsDir, &doltstorage.Config{
+		Database: database,
+		BeadsDir: verificationBeadsDir,
+	})
+}
+
+func openRouteTableFallbackStore(ctx context.Context, localStore storage.DoltStorage, currentBeadsDir, id string) (storage.DoltStorage, bool) {
+	prefix := types.ExtractPrefix(id)
+	if prefix == "" {
+		return nil, false
+	}
+
+	routePath, ok := loadRoutePathFromStore(ctx, localStore, prefix)
+	if !ok {
+		return nil, false
+	}
+
+	townRoot := findTownRootFromBeadsDir(currentBeadsDir)
+	targetBeadsDir := resolveRouteBeadsDirPath(townRoot, routePath)
+	if targetBeadsDir != "" && !sameBeadsDir(targetBeadsDir, currentBeadsDir) {
+		if info, err := os.Stat(targetBeadsDir); err == nil && info.IsDir() {
+			cfg, cfgErr := configfile.Load(targetBeadsDir)
+			if cfgErr == nil && cfg != nil {
+				routedStore, err := newDoltStoreFromConfig(ctx, targetBeadsDir)
+				if err == nil {
+					return routedStore, true
+				}
+				if os.Getenv("BD_DEBUG_ROUTING") != "" {
+					fmt.Fprintf(os.Stderr, "[routing] routes table matched %q -> %q but open failed: %v\n", prefix, targetBeadsDir, err)
+				}
+			} else if os.Getenv("BD_DEBUG_ROUTING") != "" {
+				fmt.Fprintf(os.Stderr, "[routing] routes table matched %q -> %q but metadata is unavailable (cfg=%v err=%v); trying database fallback\n", prefix, targetBeadsDir, cfg != nil, cfgErr)
+			}
+		}
+	}
+
+	for _, database := range databaseCandidatesFromRoutePath(townRoot, routePath) {
+		routedStore, err := openNamedDatabaseStore(ctx, currentBeadsDir, targetBeadsDir, database)
+		if err == nil {
+			if os.Getenv("BD_DEBUG_ROUTING") != "" {
+				fmt.Fprintf(os.Stderr, "[routing] routes table matched %q -> database %q via %q\n", prefix, database, routePath)
+			}
+			return routedStore, true
+		}
+		if os.Getenv("BD_DEBUG_ROUTING") != "" {
+			fmt.Fprintf(os.Stderr, "[routing] routes table matched %q but database %q failed: %v\n", prefix, database, err)
+		}
+	}
+
+	return nil, false
+}
+
 // openPrefixRoutedStore reopens the authoritative store for a routed issue ID when
 // routes.jsonl says the bead lives in a different rig database.
-func openPrefixRoutedStore(ctx context.Context, id string) (storage.DoltStorage, bool, error) {
+func openPrefixRoutedStore(ctx context.Context, localStore storage.DoltStorage, id string) (storage.DoltStorage, bool, error) {
+	if os.Getenv("BD_DEBUG_ROUTING") != "" {
+		fmt.Fprintf(os.Stderr, "[routing] openPrefixRoutedStore id=%q dbPath=%q beadsDirOverride=%v store=%T\n", id, dbPath, beadsDirOverride(), localStore)
+	}
 	if dbPath == "" || beadsDirOverride() {
 		return nil, false, nil
 	}
 
 	currentBeadsDir := currentCommandBeadsDir()
+	if os.Getenv("BD_DEBUG_ROUTING") != "" {
+		fmt.Fprintf(os.Stderr, "[routing] current command beads dir=%q\n", currentBeadsDir)
+	}
 	if currentBeadsDir == "" {
 		return nil, false, nil
 	}
@@ -79,15 +261,19 @@ func openPrefixRoutedStore(ctx context.Context, id string) (storage.DoltStorage,
 	targetBeadsDir, routed, err := routing.ResolveBeadsDirForID(ctx, id, currentBeadsDir)
 	redirectedDatabase := os.Getenv("BEADS_DOLT_SERVER_DATABASE") != "" &&
 		os.Getenv("BEADS_DOLT_SERVER_DATABASE") != beforeDatabase
-	if err != nil || !routed || (!redirectedDatabase && sameBeadsDir(targetBeadsDir, currentBeadsDir)) {
-		return nil, false, err
+	if err == nil && routed && (redirectedDatabase || !sameBeadsDir(targetBeadsDir, currentBeadsDir)) {
+		routedStore, err := newDoltStoreFromConfig(ctx, targetBeadsDir)
+		if err != nil {
+			return nil, false, fmt.Errorf("opening routed store at %s: %w", targetBeadsDir, err)
+		}
+		return routedStore, true, nil
 	}
 
-	routedStore, err := newDoltStoreFromConfig(ctx, targetBeadsDir)
-	if err != nil {
-		return nil, false, fmt.Errorf("opening routed store at %s: %w", targetBeadsDir, err)
+	if fallbackStore, fallbackRouted := openRouteTableFallbackStore(ctx, localStore, currentBeadsDir, id); fallbackRouted {
+		return fallbackStore, true, nil
 	}
-	return routedStore, true, nil
+
+	return nil, false, err
 }
 
 // resolveAndGetIssueWithRouting resolves a partial ID and gets the issue.
@@ -97,7 +283,7 @@ func openPrefixRoutedStore(ctx context.Context, id string) (storage.DoltStorage,
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
 func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
-	if routedStore, routed, err := openPrefixRoutedStore(ctx, id); err != nil {
+	if routedStore, routed, err := openPrefixRoutedStore(ctx, localStore, id); err != nil {
 		return nil, err
 	} else if routed {
 		result, resolveErr := resolveAndGetFromStore(ctx, routedStore, id, true)
@@ -172,7 +358,7 @@ func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, 
 // Returns a RoutedResult containing the issue and the store to use for related queries.
 // The caller MUST call result.Close() when done to release any routed storage.
 func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
-	if routedStore, routed, err := openPrefixRoutedStore(ctx, id); err != nil {
+	if routedStore, routed, err := openPrefixRoutedStore(ctx, localStore, id); err != nil {
 		return nil, err
 	} else if routed {
 		issue, getErr := routedStore.GetIssue(ctx, id)
