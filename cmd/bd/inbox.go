@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -66,12 +67,32 @@ var inboxCleanCmd = &cobra.Command{
 	Run:   runInboxClean,
 }
 
+var inboxWatchInterval int
+
+var inboxWatchCmd = &cobra.Command{
+	Use:   "watch",
+	Short: "Poll inbox for new items and log notifications",
+	Long: `Run a persistent polling loop that checks for pending inbox items
+and logs when new items arrive. Useful for long-running server deployments
+where agents may not call bd ready frequently.
+
+The loop runs until interrupted (Ctrl-C). Use --interval to control the
+polling frequency in seconds (default 60).
+
+Examples:
+  bd inbox watch                  # poll every 60s
+  bd inbox watch --interval 30    # poll every 30s`,
+	Run: runInboxWatch,
+}
+
 func init() {
 	inboxCmd.AddCommand(inboxListCmd)
 	inboxCmd.AddCommand(inboxImportCmd)
 	inboxCmd.AddCommand(inboxRejectCmd)
 	inboxCmd.AddCommand(inboxCleanCmd)
+	inboxCmd.AddCommand(inboxWatchCmd)
 	inboxCleanCmd.Flags().BoolVar(&inboxDryRun, "dry-run", false, "preview what would be cleaned")
+	inboxWatchCmd.Flags().IntVar(&inboxWatchInterval, "interval", 60, "polling interval in seconds")
 	rootCmd.AddCommand(inboxCmd)
 }
 
@@ -310,4 +331,51 @@ func joinParts(parts []string) string {
 		result += ", " + p
 	}
 	return result
+}
+
+func runInboxWatch(cmd *cobra.Command, args []string) {
+	ctx := rootCtx
+	s := getStore()
+
+	if inboxWatchInterval < 1 {
+		FatalErrorRespectJSON("interval must be at least 1 second")
+	}
+
+	interval := time.Duration(inboxWatchInterval) * time.Second
+	fmt.Printf("%s Watching inbox (polling every %s, Ctrl-C to stop)\n",
+		ui.RenderAccent("📬"), interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var lastCount int64
+
+	// Check immediately on start
+	checkInbox(ctx, s, &lastCount)
+
+	for {
+		select {
+		case <-ticker.C:
+			checkInbox(ctx, s, &lastCount)
+		case <-ctx.Done():
+			fmt.Println("\nInbox watch stopped.")
+			return
+		}
+	}
+}
+
+func checkInbox(ctx context.Context, s storage.DoltStorage, lastCount *int64) {
+	count, err := s.CountPendingInbox(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s inbox poll error: %v\n",
+			ui.RenderWarn("⚠"), err)
+		return
+	}
+
+	if count > 0 && count != *lastCount {
+		now := time.Now().Format("15:04:05")
+		fmt.Printf("[%s] %s %d issue(s) pending in inbox\n",
+			ui.RenderMuted(now), ui.RenderAccent("📬"), count)
+	}
+	*lastCount = count
 }
