@@ -1,0 +1,192 @@
+//go:build cgo
+
+package embeddeddolt
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+func (s *EmbeddedDoltStore) AddInboxItem(ctx context.Context, item *types.InboxItem) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO beads_inbox (
+				sender_project_id, sender_issue_id, title, description,
+				priority, issue_type, status, labels, metadata, sender_ref, expires_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+				title = VALUES(title),
+				description = VALUES(description),
+				priority = VALUES(priority),
+				issue_type = VALUES(issue_type),
+				status = VALUES(status),
+				labels = VALUES(labels),
+				metadata = VALUES(metadata),
+				sender_ref = VALUES(sender_ref),
+				expires_at = VALUES(expires_at)
+		`,
+			item.SenderProjectID,
+			item.SenderIssueID,
+			item.Title,
+			item.Description,
+			item.Priority,
+			item.IssueType,
+			item.Status,
+			item.Labels,
+			item.Metadata,
+			item.SenderRef,
+			item.ExpiresAt,
+		)
+		return err
+	})
+}
+
+func (s *EmbeddedDoltStore) GetInboxItem(ctx context.Context, inboxID string) (*types.InboxItem, error) {
+	var item types.InboxItem
+	var description, labels, metadata, senderRef sql.NullString
+	var importedIssueID, rejectionReason sql.NullString
+	var importedAt, rejectedAt, expiresAt sql.NullTime
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT inbox_id, sender_project_id, sender_issue_id, title, description,
+				priority, issue_type, status, labels, metadata, sender_ref,
+				imported_issue_id, rejection_reason,
+				created_at, imported_at, rejected_at, expires_at
+			FROM beads_inbox WHERE inbox_id = ?
+		`, inboxID).Scan(
+			&item.InboxID, &item.SenderProjectID, &item.SenderIssueID,
+			&item.Title, &description, &item.Priority, &item.IssueType,
+			&item.Status, &labels, &metadata, &senderRef,
+			&importedIssueID, &rejectionReason,
+			&item.CreatedAt, &importedAt, &rejectedAt, &expiresAt,
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get inbox item: %w", err)
+	}
+	item.Description = description.String
+	item.Labels = labels.String
+	item.Metadata = metadata.String
+	item.SenderRef = senderRef.String
+	item.ImportedIssueID = importedIssueID.String
+	item.RejectionReason = rejectionReason.String
+	if importedAt.Valid {
+		item.ImportedAt = &importedAt.Time
+	}
+	if rejectedAt.Valid {
+		item.RejectedAt = &rejectedAt.Time
+	}
+	if expiresAt.Valid {
+		item.ExpiresAt = &expiresAt.Time
+	}
+	return &item, nil
+}
+
+func (s *EmbeddedDoltStore) GetPendingInboxItems(ctx context.Context) ([]*types.InboxItem, error) {
+	var items []*types.InboxItem
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT inbox_id, sender_project_id, sender_issue_id, title, description,
+				priority, issue_type, status, labels, metadata, sender_ref,
+				imported_issue_id, rejection_reason,
+				created_at, imported_at, rejected_at, expires_at
+			FROM beads_inbox
+			WHERE imported_at IS NULL
+			  AND rejected_at IS NULL
+			  AND (expires_at IS NULL OR expires_at > NOW())
+			ORDER BY created_at ASC
+		`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item types.InboxItem
+			var description, labels, metadata, senderRef sql.NullString
+			var importedIssueID, rejectionReason sql.NullString
+			var importedAt, rejectedAt, expiresAt sql.NullTime
+			if err := rows.Scan(
+				&item.InboxID, &item.SenderProjectID, &item.SenderIssueID,
+				&item.Title, &description, &item.Priority, &item.IssueType,
+				&item.Status, &labels, &metadata, &senderRef,
+				&importedIssueID, &rejectionReason,
+				&item.CreatedAt, &importedAt, &rejectedAt, &expiresAt,
+			); err != nil {
+				return fmt.Errorf("scan inbox item: %w", err)
+			}
+			item.Description = description.String
+			item.Labels = labels.String
+			item.Metadata = metadata.String
+			item.SenderRef = senderRef.String
+			item.ImportedIssueID = importedIssueID.String
+			item.RejectionReason = rejectionReason.String
+			if importedAt.Valid {
+				item.ImportedAt = &importedAt.Time
+			}
+			if rejectedAt.Valid {
+				item.RejectedAt = &rejectedAt.Time
+			}
+			if expiresAt.Valid {
+				item.ExpiresAt = &expiresAt.Time
+			}
+			items = append(items, &item)
+		}
+		return rows.Err()
+	})
+	return items, err
+}
+
+func (s *EmbeddedDoltStore) MarkInboxItemImported(ctx context.Context, inboxID string, importedIssueID string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE beads_inbox SET imported_at = ?, imported_issue_id = ? WHERE inbox_id = ?",
+			time.Now(), importedIssueID, inboxID,
+		)
+		return err
+	})
+}
+
+func (s *EmbeddedDoltStore) MarkInboxItemRejected(ctx context.Context, inboxID string, reason string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE beads_inbox SET rejected_at = ?, rejection_reason = ? WHERE inbox_id = ?",
+			time.Now(), reason, inboxID,
+		)
+		return err
+	})
+}
+
+func (s *EmbeddedDoltStore) CleanInbox(ctx context.Context) (int64, error) {
+	var affected int64
+	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `
+			DELETE FROM beads_inbox
+			WHERE imported_at IS NOT NULL
+			   OR rejected_at IS NOT NULL
+			   OR (expires_at IS NOT NULL AND expires_at <= ?)
+		`, time.Now())
+		if err != nil {
+			return err
+		}
+		affected, err = result.RowsAffected()
+		return err
+	})
+	return affected, err
+}
+
+func (s *EmbeddedDoltStore) CountPendingInbox(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM beads_inbox
+			WHERE imported_at IS NULL
+			  AND rejected_at IS NULL
+			  AND (expires_at IS NULL OR expires_at > ?)
+		`, time.Now()).Scan(&count)
+	})
+	return count, err
+}

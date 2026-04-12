@@ -146,6 +146,7 @@ type DoltStorage interface {
 	ConfigMetadataStore
 	CompactionStore
 	AdvancedQueryStore
+	InboxStore
 }
 
 // RawDBAccessor provides raw *sql.DB access for diagnostics and migrations.

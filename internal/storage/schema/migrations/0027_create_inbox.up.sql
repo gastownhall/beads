@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS beads_inbox (
+    inbox_id CHAR(36) NOT NULL PRIMARY KEY DEFAULT (UUID()),
+    sender_project_id VARCHAR(255) NOT NULL,
+    sender_issue_id VARCHAR(255) NOT NULL,
+    title VARCHAR(500) NOT NULL,
+    description TEXT,
+    priority INT NOT NULL DEFAULT 2,
+    issue_type VARCHAR(32) NOT NULL DEFAULT 'task',
+    status VARCHAR(32) NOT NULL DEFAULT 'open',
+    labels JSON DEFAULT (JSON_ARRAY()),
+    metadata JSON DEFAULT (JSON_OBJECT()),
+    sender_ref VARCHAR(1024),
+    imported_issue_id VARCHAR(255),
+    rejection_reason TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    imported_at DATETIME,
+    rejected_at DATETIME,
+    expires_at DATETIME,
+    UNIQUE KEY idx_inbox_sender_dedup (sender_project_id, sender_issue_id),
+    INDEX idx_inbox_imported (imported_at),
+    INDEX idx_inbox_rejected (rejected_at),
+    INDEX idx_inbox_expires (expires_at)
+);

@@ -1415,3 +1415,25 @@ func (i *Issue) IsCompound() bool {
 func (i *Issue) GetConstituents() []BondRef {
 	return i.BondedFrom
 }
+
+// InboxItem represents an issue sent from another project's inbox.
+// Receivers import these into real issues via bd inbox import.
+type InboxItem struct {
+	InboxID         string     `json:"inbox_id"`
+	SenderProjectID string     `json:"sender_project_id"`
+	SenderIssueID   string     `json:"sender_issue_id"`
+	Title           string     `json:"title"`
+	Description     string     `json:"description,omitempty"`
+	Priority        int        `json:"priority"`
+	IssueType       string     `json:"issue_type"`
+	Status          string     `json:"status"`
+	Labels          string     `json:"labels,omitempty"`
+	Metadata        string     `json:"metadata,omitempty"`
+	SenderRef       string     `json:"sender_ref,omitempty"`
+	ImportedIssueID string     `json:"imported_issue_id,omitempty"`
+	RejectionReason string     `json:"rejection_reason,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	ImportedAt      *time.Time `json:"imported_at,omitempty"`
+	RejectedAt      *time.Time `json:"rejected_at,omitempty"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+}
