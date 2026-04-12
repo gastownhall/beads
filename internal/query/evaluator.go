@@ -180,6 +180,8 @@ func (e *Evaluator) applyComparison(comp *ComparisonNode, filter *types.IssueFil
 		return e.applyUpdatedFilter(comp, filter)
 	case "closed", "closed_at":
 		return e.applyClosedFilter(comp, filter)
+	case "started", "started_at":
+		return e.applyStartedFilter(comp, filter)
 	case "id":
 		return e.applyIDFilter(comp, filter)
 	case "spec", "spec_id":
@@ -397,6 +399,27 @@ func (e *Evaluator) applyClosedFilter(comp *ComparisonNode, filter *types.IssueF
 		filter.ClosedBefore = &endOfDay
 	default:
 		return fmt.Errorf("closed does not support %s operator", comp.Op.String())
+	}
+	return nil
+}
+
+func (e *Evaluator) applyStartedFilter(comp *ComparisonNode, filter *types.IssueFilter) error {
+	t, err := e.parseTimeValue(comp)
+	if err != nil {
+		return fmt.Errorf("invalid started time: %w", err)
+	}
+	switch comp.Op {
+	case OpGreater:
+		filter.StartedAfter = &t
+	case OpGreaterEq:
+		filter.StartedAfter = &t
+	case OpLess:
+		filter.StartedBefore = &t
+	case OpLessEq:
+		endOfDay := time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, t.Location())
+		filter.StartedBefore = &endOfDay
+	default:
+		return fmt.Errorf("started does not support %s operator", comp.Op.String())
 	}
 	return nil
 }
@@ -690,6 +713,8 @@ func (e *Evaluator) buildComparisonPredicate(comp *ComparisonNode) (func(*types.
 		return e.buildUpdatedPredicate(comp)
 	case "closed", "closed_at":
 		return e.buildClosedPredicate(comp)
+	case "started", "started_at":
+		return e.buildStartedPredicate(comp)
 	case "id":
 		return e.buildIDPredicate(comp)
 	case "spec", "spec_id":
@@ -902,6 +927,19 @@ func (e *Evaluator) buildClosedPredicate(comp *ComparisonNode) (func(*types.Issu
 			return false
 		}
 		return e.compareTime(comp.Op, *i.ClosedAt, t)
+	}, nil
+}
+
+func (e *Evaluator) buildStartedPredicate(comp *ComparisonNode) (func(*types.Issue) bool, error) {
+	t, err := e.parseTimeValue(comp)
+	if err != nil {
+		return nil, fmt.Errorf("invalid started time: %w", err)
+	}
+	return func(i *types.Issue) bool {
+		if i.StartedAt == nil {
+			return false
+		}
+		return e.compareTime(comp.Op, *i.StartedAt, t)
 	}, nil
 }
 
