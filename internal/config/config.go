@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"gopkg.in/yaml.v3"
 )
 
@@ -752,18 +754,263 @@ func GetIdentity(flagValue string) string {
 	return "unknown"
 }
 
+// RemoteRole represents the role of a federation remote.
+type RemoteRole string
+
+const (
+	// RemoteRolePrimary is the authoritative remote for pull operations.
+	RemoteRolePrimary RemoteRole = "primary"
+	// RemoteRoleBackup is a push-only mirror (never pulled from).
+	RemoteRoleBackup RemoteRole = "backup"
+	// RemoteRoleArchive is a long-term storage remote (push-only, low frequency).
+	RemoteRoleArchive RemoteRole = "archive"
+)
+
+// validRemoteRoles is the set of allowed remote role values.
+var validRemoteRoles = map[RemoteRole]bool{
+	RemoteRolePrimary: true,
+	RemoteRoleBackup:  true,
+	RemoteRoleArchive: true,
+}
+
+// RemoteConfig describes a single federation remote.
+type RemoteConfig struct {
+	Name string     // Map key from config (e.g., "primary", "backup")
+	URL  string     // dolthub://org/beads, az://account.blob.core.windows.net/...
+	Role RemoteRole // primary, backup, archive
+}
+
 // FederationConfig holds the federation (Dolt remote) configuration.
 type FederationConfig struct {
-	Remote      string      // dolthub://org/beads, gs://bucket/beads, s3://bucket/beads
-	Sovereignty Sovereignty // T1, T2, T3, T4
+	Remote      string         // Effective primary remote URL (populated from legacy or remotes)
+	Remotes     []RemoteConfig // Multi-remote configuration (sorted by name for determinism)
+	Sovereignty Sovereignty    // T1, T2, T3, T4
+}
+
+// PrimaryRemote returns the primary remote, or nil if none is configured.
+func (fc *FederationConfig) PrimaryRemote() *RemoteConfig {
+	for i := range fc.Remotes {
+		if fc.Remotes[i].Role == RemoteRolePrimary {
+			return &fc.Remotes[i]
+		}
+	}
+	return nil
+}
+
+// BackupRemotes returns all non-primary remotes.
+func (fc *FederationConfig) BackupRemotes() []RemoteConfig {
+	var backups []RemoteConfig
+	for _, r := range fc.Remotes {
+		if r.Role != RemoteRolePrimary {
+			backups = append(backups, r)
+		}
+	}
+	return backups
+}
+
+// RemoteByName returns the remote with the given name, or nil if not found.
+func (fc *FederationConfig) RemoteByName(name string) *RemoteConfig {
+	for i := range fc.Remotes {
+		if fc.Remotes[i].Name == name {
+			return &fc.Remotes[i]
+		}
+	}
+	return nil
 }
 
 // GetFederationConfig returns the current federation configuration.
+// For validation errors, use ParseFederationConfig instead.
 func GetFederationConfig() FederationConfig {
-	return FederationConfig{
-		Remote:      GetString("federation.remote"),
-		Sovereignty: GetSovereignty(),
+	cfg, err := ParseFederationConfig()
+	if err != nil {
+		// Fall back to legacy behavior on parse error
+		logConfigWarning("warning: federation config parse error: %v\n", err)
+		return FederationConfig{
+			Remote:      GetString("federation.remote"),
+			Sovereignty: GetSovereignty(),
+		}
 	}
+	return cfg
+}
+
+// ParseFederationConfig parses and validates the federation configuration.
+// It supports both legacy (federation.remote) and new (federation.remotes) formats.
+// When only federation.remotes is set, the primary remote URL is synthesized
+// into the Remote field for backward compatibility with existing consumers.
+func ParseFederationConfig() (FederationConfig, error) {
+	sovereignty := GetSovereignty()
+	legacyRemote := GetString("federation.remote")
+	hasRemotesInConfig := v != nil && v.InConfig("federation.remotes")
+
+	// Case 1: Neither configured — empty config
+	if legacyRemote == "" && !hasRemotesInConfig {
+		return FederationConfig{Sovereignty: sovereignty}, nil
+	}
+
+	// Case 2: New-style federation.remotes is configured
+	if hasRemotesInConfig {
+		remotes, err := parseRemotesMap()
+		if err != nil {
+			return FederationConfig{}, fmt.Errorf("federation.remotes: %w", err)
+		}
+
+		// Validate remotes
+		if err := validateRemotes(remotes); err != nil {
+			return FederationConfig{}, err
+		}
+
+		// Synthesize effective primary URL
+		effectiveRemote := ""
+		for _, r := range remotes {
+			if r.Role == RemoteRolePrimary {
+				effectiveRemote = r.URL
+				break
+			}
+		}
+
+		// Warn if legacy federation.remote conflicts with remotes primary
+		if legacyRemote != "" && effectiveRemote != "" && legacyRemote != effectiveRemote {
+			logConfigWarning("warning: federation.remote (%s) differs from federation.remotes primary (%s); using remotes\n", legacyRemote, effectiveRemote)
+		}
+
+		// Synthesize federation.remote at runtime so drift/apply consumers see it
+		if effectiveRemote != "" && v != nil {
+			v.Set("federation.remote", effectiveRemote)
+		}
+
+		return FederationConfig{
+			Remote:      effectiveRemote,
+			Remotes:     remotes,
+			Sovereignty: sovereignty,
+		}, nil
+	}
+
+	// Case 3: Legacy federation.remote only — convert to single RemoteConfig
+	return FederationConfig{
+		Remote: legacyRemote,
+		Remotes: []RemoteConfig{{
+			Name: "origin",
+			URL:  legacyRemote,
+			Role: RemoteRolePrimary,
+		}},
+		Sovereignty: sovereignty,
+	}, nil
+}
+
+// parseRemotesMap reads federation.remotes from viper and converts to []RemoteConfig.
+// The map keys become the Name field; entries are sorted by name for determinism.
+func parseRemotesMap() ([]RemoteConfig, error) {
+	if v == nil {
+		return nil, nil
+	}
+
+	raw := v.Get("federation.remotes")
+	if raw == nil {
+		return nil, nil
+	}
+
+	// Viper returns map[string]interface{} for nested YAML maps
+	remotesMap, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("expected map, got %T", raw)
+	}
+
+	if len(remotesMap) == 0 {
+		return nil, nil
+	}
+
+	// Collect and sort keys for deterministic output
+	names := make([]string, 0, len(remotesMap))
+	for name := range remotesMap {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	allowedPatterns := GetStringSlice("federation.allowed-remote-patterns")
+
+	remotes := make([]RemoteConfig, 0, len(names))
+	for _, name := range names {
+		if err := validateRemoteName(name); err != nil {
+			return nil, fmt.Errorf("remote %q: %w", name, err)
+		}
+
+		entry, ok := remotesMap[name].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("remote %q: expected map with url and role fields, got %T", name, remotesMap[name])
+		}
+
+		urlStr, _ := entry["url"].(string)
+		if urlStr == "" {
+			return nil, fmt.Errorf("remote %q: url is required", name)
+		}
+
+		// Validate URL via the existing security boundary
+		if err := remotecache.ValidateRemoteURL(urlStr); err != nil {
+			return nil, fmt.Errorf("remote %q: invalid url: %w", name, err)
+		}
+		if len(allowedPatterns) > 0 {
+			if err := remotecache.ValidateRemoteURLWithPatterns(urlStr, allowedPatterns); err != nil {
+				return nil, fmt.Errorf("remote %q: %w", name, err)
+			}
+		}
+
+		roleStr, _ := entry["role"].(string)
+		if roleStr == "" {
+			return nil, fmt.Errorf("remote %q: role is required (primary, backup, or archive)", name)
+		}
+
+		role := RemoteRole(roleStr)
+		if !validRemoteRoles[role] {
+			return nil, fmt.Errorf("remote %q: invalid role %q (valid: primary, backup, archive)", name, roleStr)
+		}
+
+		remotes = append(remotes, RemoteConfig{
+			Name: name,
+			URL:  urlStr,
+			Role: role,
+		})
+	}
+
+	return remotes, nil
+}
+
+// validateRemotes checks cross-remote constraints (e.g., exactly one primary).
+func validateRemotes(remotes []RemoteConfig) error {
+	if len(remotes) == 0 {
+		return nil
+	}
+
+	primaryCount := 0
+	for _, r := range remotes {
+		if r.Role == RemoteRolePrimary {
+			primaryCount++
+		}
+	}
+
+	if primaryCount == 0 {
+		return fmt.Errorf("federation.remotes: exactly one remote must have role \"primary\", found none")
+	}
+	if primaryCount > 1 {
+		return fmt.Errorf("federation.remotes: exactly one remote must have role \"primary\", found %d", primaryCount)
+	}
+
+	return nil
+}
+
+// validateRemoteName checks that a remote name is a valid identifier.
+func validateRemoteName(name string) error {
+	if name == "" {
+		return fmt.Errorf("remote name cannot be empty")
+	}
+	if len(name) > 64 {
+		return fmt.Errorf("remote name too long (max 64 characters)")
+	}
+	for i, c := range name {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return fmt.Errorf("invalid character %q at position %d (allowed: a-z, A-Z, 0-9, -, _)", c, i)
+		}
+	}
+	return nil
 }
 
 // GetCustomTypesFromYAML retrieves custom issue types from config.yaml.
