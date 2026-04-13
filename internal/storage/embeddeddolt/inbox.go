@@ -8,10 +8,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func (s *EmbeddedDoltStore) AddInboxItem(ctx context.Context, item *types.InboxItem) error {
+	if err := storage.ValidateInboxItem(item); err != nil {
+		return err
+	}
 	// Default JSON columns to valid JSON if empty
 	labels := item.Labels
 	if labels == "" {
@@ -158,6 +162,7 @@ func (s *EmbeddedDoltStore) GetInboxItemByPrefix(ctx context.Context, prefix str
 
 func (s *EmbeddedDoltStore) GetPendingInboxItems(ctx context.Context) ([]*types.InboxItem, error) {
 	var items []*types.InboxItem
+	now := time.Now().UTC()
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT inbox_id, sender_project_id, sender_issue_id, title, description,
@@ -167,9 +172,9 @@ func (s *EmbeddedDoltStore) GetPendingInboxItems(ctx context.Context) ([]*types.
 			FROM beads_inbox
 			WHERE imported_at IS NULL
 			  AND rejected_at IS NULL
-			  AND (expires_at IS NULL OR expires_at > NOW())
+			  AND (expires_at IS NULL OR expires_at > ?)
 			ORDER BY created_at ASC
-		`)
+		`, now)
 		if err != nil {
 			return err
 		}
@@ -214,7 +219,7 @@ func (s *EmbeddedDoltStore) MarkInboxItemImported(ctx context.Context, inboxID s
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"UPDATE beads_inbox SET imported_at = ?, imported_issue_id = ? WHERE inbox_id = ?",
-			time.Now(), importedIssueID, inboxID,
+			time.Now().UTC(), importedIssueID, inboxID,
 		)
 		return err
 	})
@@ -224,7 +229,7 @@ func (s *EmbeddedDoltStore) MarkInboxItemRejected(ctx context.Context, inboxID s
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"UPDATE beads_inbox SET rejected_at = ?, rejection_reason = ? WHERE inbox_id = ?",
-			time.Now(), reason, inboxID,
+			time.Now().UTC(), reason, inboxID,
 		)
 		return err
 	})
@@ -238,7 +243,7 @@ func (s *EmbeddedDoltStore) CleanInbox(ctx context.Context) (int64, error) {
 			WHERE imported_at IS NOT NULL
 			   OR rejected_at IS NOT NULL
 			   OR (expires_at IS NOT NULL AND expires_at <= ?)
-		`, time.Now())
+		`, time.Now().UTC())
 		if err != nil {
 			return err
 		}
@@ -256,7 +261,12 @@ func (s *EmbeddedDoltStore) CountPendingInbox(ctx context.Context) (int64, error
 			WHERE imported_at IS NULL
 			  AND rejected_at IS NULL
 			  AND (expires_at IS NULL OR expires_at > ?)
-		`, time.Now()).Scan(&count)
+		`, time.Now().UTC()).Scan(&count)
 	})
 	return count, err
+}
+
+// SendToInbox is not supported in embedded mode (no cross-database access).
+func (s *EmbeddedDoltStore) SendToInbox(ctx context.Context, target string, items []*types.InboxItem) (int, error) {
+	return 0, fmt.Errorf("send requires shared server mode; embedded mode does not support cross-database access")
 }

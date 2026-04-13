@@ -2,9 +2,33 @@ package storage
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+const (
+	// MaxInboxTitleLen is the maximum allowed length for inbox item titles.
+	MaxInboxTitleLen = 500
+	// MaxInboxDescriptionLen is the maximum allowed length for inbox item descriptions.
+	MaxInboxDescriptionLen = 100_000
+	// MaxInboxMetadataLen is the maximum allowed length for inbox metadata JSON.
+	MaxInboxMetadataLen = 50_000
+)
+
+// ValidateInboxItem checks size constraints on inbox item fields.
+func ValidateInboxItem(item *types.InboxItem) error {
+	if len(item.Title) > MaxInboxTitleLen {
+		return fmt.Errorf("inbox item title too long (%d chars, max %d)", len(item.Title), MaxInboxTitleLen)
+	}
+	if len(item.Description) > MaxInboxDescriptionLen {
+		return fmt.Errorf("inbox item description too long (%d chars, max %d)", len(item.Description), MaxInboxDescriptionLen)
+	}
+	if len(item.Metadata) > MaxInboxMetadataLen {
+		return fmt.Errorf("inbox item metadata too long (%d chars, max %d)", len(item.Metadata), MaxInboxMetadataLen)
+	}
+	return nil
+}
 
 // InboxStore provides cross-project inbox operations.
 // Each project has an inbox table where other projects can deposit issues.
@@ -18,4 +42,7 @@ type InboxStore interface {
 	MarkInboxItemRejected(ctx context.Context, inboxID string, reason string) error
 	CleanInbox(ctx context.Context) (int64, error)
 	CountPendingInbox(ctx context.Context) (int64, error)
+	// SendToInbox delivers inbox items to a target project's database.
+	// Requires shared-server mode (cross-database access).
+	SendToInbox(ctx context.Context, target string, items []*types.InboxItem) (int, error)
 }

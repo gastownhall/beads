@@ -314,6 +314,44 @@ func TestInboxExpiryFiltering(t *testing.T) {
 	}
 }
 
+func TestInboxSizeValidation(t *testing.T) {
+	env := newTestEnv(t, "inbsz")
+	ctx := t.Context()
+
+	// Title exceeding max should fail
+	item := &types.InboxItem{
+		InboxID:         "test-size-001",
+		SenderProjectID: "proj-a",
+		SenderIssueID:   "a-1",
+		Title:           string(make([]byte, 501)),
+		Priority:        2,
+		IssueType:       "task",
+	}
+	if err := env.store.AddInboxItem(ctx, item); err == nil {
+		t.Fatal("expected error for oversized title")
+	}
+
+	// Description exceeding max should fail
+	item.Title = "Normal title"
+	item.Description = string(make([]byte, 100_001))
+	if err := env.store.AddInboxItem(ctx, item); err == nil {
+		t.Fatal("expected error for oversized description")
+	}
+
+	// Metadata exceeding max should fail
+	item.Description = "Normal desc"
+	item.Metadata = string(make([]byte, 50_001))
+	if err := env.store.AddInboxItem(ctx, item); err == nil {
+		t.Fatal("expected error for oversized metadata")
+	}
+
+	// Valid sizes should succeed
+	item.Metadata = "{}"
+	if err := env.store.AddInboxItem(ctx, item); err != nil {
+		t.Fatalf("valid item should succeed: %v", err)
+	}
+}
+
 func timePtr(t time.Time) *time.Time {
 	return &t
 }
