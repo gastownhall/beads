@@ -4,11 +4,22 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"text/template"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// printTruncationHint emits a one-line notice to stderr when the list output
+// was truncated by --limit, so users and agents can't mistake a partial view
+// for a complete one (GH#3212, GH#788).
+func printTruncationHint(truncated bool, effectiveLimit int) {
+	if !truncated || effectiveLimit <= 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\nShowing %d issues; more results matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", effectiveLimit)
+}
 
 // outputDotFormat outputs issues in Graphviz DOT format
 func outputDotFormat(ctx context.Context, store storage.DoltStorage, issues []*types.Issue) error {
