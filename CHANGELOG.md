@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Auto-export enabled by default** — `export.auto` defaults to `true` and the default `export.path` is now `issues.jsonl` (previously `export.jsonl`), with `export.git-add` on by default. `bd init` prompts interactively (default: keep enabled) and `--non-interactive` keeps it enabled. All `export.*` keys are now listed in `bd config --help`. ([GH#2973](https://github.com/steveyegge/beads/issues/2973))
+
 ### Fixed
 
 - **`BEADS_DOLT_READY_TIMEOUT` env var** — `bd init --shared-server` now respects `BEADS_DOLT_READY_TIMEOUT` (positive integer seconds, default 10) so that slower hardware, where Dolt's first-run SQL engine bootstrap exceeds the 10-second budget, can opt into a longer `waitForReady` timeout. Default behavior is unchanged. ([GH#3142](https://github.com/gastownhall/beads/issues/3142))
