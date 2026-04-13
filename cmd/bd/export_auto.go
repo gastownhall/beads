@@ -92,8 +92,19 @@ func maybeAutoExport(ctx context.Context) {
 	debug.Logf("auto-export: wrote %d issues and %d memories to %s\n",
 		issueCount, memoryCount, fullPath)
 
-	// Optional git add
-	if config.GetBool("export.git-add") {
+	// Don't prime the throttle on an empty export (e.g. immediately after
+	// `bd init`). Saving state here would block the first real `bd create`
+	// from exporting for up to export.interval seconds even though the data
+	// has changed. Remove the empty file too so users don't see a stale 0-byte
+	// issues.jsonl before any issues exist.
+	if issueCount == 0 && memoryCount == 0 {
+		_ = os.Remove(fullPath)
+		return
+	}
+
+	// Optional git add — skip silently when not in a git repo (standalone
+	// BEADS_DIR flow) to avoid noisy "exit status 128" warnings on every write.
+	if config.GetBool("export.git-add") && isGitRepo() {
 		if err := gitAddFile(fullPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export: git add failed: %v\n", err)
 		}

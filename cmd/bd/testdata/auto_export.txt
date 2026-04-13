@@ -1,0 +1,14 @@
+# Test auto-export: init must not prime throttle before any issues exist.
+# Regression guard for GH#2973: bd init used to write an empty issues.jsonl
+# and save export-state.json timestamp, causing the first real `bd create`
+# to be throttled for up to export.interval seconds (GH#3204 review).
+bd init --prefix test
+stdout 'initialized successfully'
+! exists .beads/issues.jsonl
+! exists .beads/export-state.json
+
+# First real write must export immediately, not wait for throttle to expire.
+bd create 'First issue'
+exists .beads/issues.jsonl
+grep 'First issue' .beads/issues.jsonl
+exists .beads/export-state.json
