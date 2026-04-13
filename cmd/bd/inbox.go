@@ -237,21 +237,30 @@ func importInboxItems(ctx context.Context, s storage.DoltStorage, items []*types
 	return imported
 }
 
+// inboxItemKey returns a composite key that uniquely identifies an inbox item
+// across projects, preventing collisions when different senders use the same issue IDs.
+func inboxItemKey(item *types.InboxItem) string {
+	return item.SenderProjectID + "/" + item.SenderIssueID
+}
+
 // topoSortInboxItems sorts inbox items so that dependencies come before dependents.
-// Uses metadata.blocking_deps to determine ordering.
+// Uses metadata.blocking_deps to determine ordering. Items are keyed by
+// SenderProjectID/SenderIssueID to avoid collisions across projects.
 func topoSortInboxItems(items []*types.InboxItem) []*types.InboxItem {
 	if len(items) <= 1 {
 		return items
 	}
 
-	// Build index: sender_issue_id → item
-	byIssueID := make(map[string]*types.InboxItem, len(items))
+	// Build index: "project/issue_id" → item
+	byKey := make(map[string]*types.InboxItem, len(items))
 	for _, item := range items {
-		byIssueID[item.SenderIssueID] = item
+		byKey[inboxItemKey(item)] = item
 	}
 
-	// Parse dependency edges from metadata
-	depEdges := make(map[string][]string) // issue_id → [dep_issue_ids in this batch]
+	// Parse dependency edges from metadata. Dep IDs in metadata are raw
+	// SenderIssueIDs from the same sender project, so qualify them with
+	// the item's own SenderProjectID for lookup.
+	depEdges := make(map[string][]string) // key → [dep keys in this batch]
 	for _, item := range items {
 		if item.Metadata == "" || item.Metadata == "{}" {
 			continue
@@ -262,9 +271,11 @@ func topoSortInboxItems(items []*types.InboxItem) []*types.InboxItem {
 		if err := json.Unmarshal([]byte(item.Metadata), &meta); err != nil {
 			continue
 		}
+		key := inboxItemKey(item)
 		for _, depID := range meta.BlockingDeps {
-			if _, inBatch := byIssueID[depID]; inBatch {
-				depEdges[item.SenderIssueID] = append(depEdges[item.SenderIssueID], depID)
+			depKey := item.SenderProjectID + "/" + depID
+			if _, inBatch := byKey[depKey]; inBatch {
+				depEdges[key] = append(depEdges[key], depKey)
 			}
 		}
 	}
@@ -272,32 +283,33 @@ func topoSortInboxItems(items []*types.InboxItem) []*types.InboxItem {
 	// Kahn's algorithm for topological sort
 	inDegree := make(map[string]int, len(items))
 	for _, item := range items {
-		inDegree[item.SenderIssueID] = 0
+		inDegree[inboxItemKey(item)] = 0
 	}
-	for id, deps := range depEdges {
-		inDegree[id] = len(deps)
+	for key, deps := range depEdges {
+		inDegree[key] = len(deps)
 	}
 
 	var queue []string
 	for _, item := range items {
-		if inDegree[item.SenderIssueID] == 0 {
-			queue = append(queue, item.SenderIssueID)
+		key := inboxItemKey(item)
+		if inDegree[key] == 0 {
+			queue = append(queue, key)
 		}
 	}
 
 	var sorted []*types.InboxItem
 	for len(queue) > 0 {
-		id := queue[0]
+		key := queue[0]
 		queue = queue[1:]
-		sorted = append(sorted, byIssueID[id])
+		sorted = append(sorted, byKey[key])
 
 		// Find items that depend on this one
-		for depID, deps := range depEdges {
+		for depKey, deps := range depEdges {
 			for _, d := range deps {
-				if d == id {
-					inDegree[depID]--
-					if inDegree[depID] == 0 {
-						queue = append(queue, depID)
+				if d == key {
+					inDegree[depKey]--
+					if inDegree[depKey] == 0 {
+						queue = append(queue, depKey)
 					}
 				}
 			}
@@ -307,10 +319,10 @@ func topoSortInboxItems(items []*types.InboxItem) []*types.InboxItem {
 	// Append any items not reached (circular deps) in original order
 	inSorted := make(map[string]bool, len(sorted))
 	for _, item := range sorted {
-		inSorted[item.SenderIssueID] = true
+		inSorted[inboxItemKey(item)] = true
 	}
 	for _, item := range items {
-		if !inSorted[item.SenderIssueID] {
+		if !inSorted[inboxItemKey(item)] {
 			sorted = append(sorted, item)
 		}
 	}

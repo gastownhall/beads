@@ -161,19 +161,35 @@ func TestTopoSortInboxItems(t *testing.T) {
 			name: "cross-project ID collision",
 			items: []*types.InboxItem{
 				// Two different projects both have an issue called "bd-1".
-				// The topo sort keys by SenderIssueID only, so the second
-				// item overwrites the first in the index. Both items should
-				// still appear in the output (no drops).
+				// Composite keys (project/id) prevent collisions.
 				{InboxID: "i1", SenderProjectID: "proj-a", SenderIssueID: "bd-1", Title: "A's issue"},
 				{InboxID: "i2", SenderProjectID: "proj-b", SenderIssueID: "bd-1", Title: "B's issue"},
 			},
 			wantFunc: func(got []string) bool {
-				// At minimum we should not drop items. The current code
-				// will overwrite one in the map, so we may only get 1.
-				// This test documents the behavior.
-				return len(got) >= 1
+				return len(got) == 2
 			},
-			desc: "colliding SenderIssueIDs from different projects",
+			desc: "colliding SenderIssueIDs from different projects: both preserved",
+		},
+		{
+			name: "cross-project deps only resolve within same project",
+			items: []*types.InboxItem{
+				// proj-a/child depends on proj-a/parent (same project → resolved)
+				// proj-b has its own "parent" which is unrelated
+				func() *types.InboxItem {
+					meta, _ := json.Marshal(map[string]interface{}{"blocking_deps": []string{"parent"}})
+					return &types.InboxItem{
+						InboxID: "i1", SenderProjectID: "proj-a", SenderIssueID: "child",
+						Title: "A child", Metadata: string(meta),
+					}
+				}(),
+				{InboxID: "i2", SenderProjectID: "proj-a", SenderIssueID: "parent", Title: "A parent"},
+				{InboxID: "i3", SenderProjectID: "proj-b", SenderIssueID: "parent", Title: "B unrelated"},
+			},
+			wantFunc: func(got []string) bool {
+				// All 3 items present
+				return len(got) == 3
+			},
+			desc: "3 items from mixed projects all present",
 		},
 	}
 
@@ -186,6 +202,38 @@ func TestTopoSortInboxItems(t *testing.T) {
 			}
 		})
 	}
+
+	// Dedicated test: cross-project dep ordering uses item references
+	t.Run("cross-project dep ordering is project-scoped", func(t *testing.T) {
+		meta, _ := json.Marshal(map[string]interface{}{"blocking_deps": []string{"parent"}})
+		child := &types.InboxItem{
+			InboxID: "i1", SenderProjectID: "proj-a", SenderIssueID: "child",
+			Title: "A child", Metadata: string(meta),
+		}
+		parent := &types.InboxItem{
+			InboxID: "i2", SenderProjectID: "proj-a", SenderIssueID: "parent",
+			Title: "A parent",
+		}
+		unrelated := &types.InboxItem{
+			InboxID: "i3", SenderProjectID: "proj-b", SenderIssueID: "parent",
+			Title: "B unrelated",
+		}
+
+		got := topoSortInboxItems([]*types.InboxItem{child, parent, unrelated})
+		if len(got) != 3 {
+			t.Fatalf("got %d items, want 3", len(got))
+		}
+
+		// Find positions by InboxID (unique across projects)
+		posOf := map[string]int{}
+		for i, item := range got {
+			posOf[item.InboxID] = i
+		}
+		if posOf["i2"] > posOf["i1"] {
+			t.Errorf("proj-a/parent (i2) should come before proj-a/child (i1), got positions parent=%d child=%d",
+				posOf["i2"], posOf["i1"])
+		}
+	})
 }
 
 func TestInboxItemToIssue(t *testing.T) {
