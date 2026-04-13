@@ -32,6 +32,21 @@ func (t *doltTransaction) isActiveWisp(ctx context.Context, id string) bool {
 	return err == nil
 }
 
+// classifyBondSides reports whether each side of a dependency is an active wisp.
+// Both sides are queried within the transaction so uncommitted wisps are seen.
+// Used by AddDependency to detect cross-type bonds before INSERT.
+func (t *doltTransaction) classifyBondSides(ctx context.Context, leftID, rightID string) (leftIsWisp, rightIsWisp bool) {
+	return t.isActiveWisp(ctx, leftID), t.isActiveWisp(ctx, rightID)
+}
+
+// bondKindLabel returns "wisp" or "issue" for use in error messages.
+func bondKindLabel(isWisp bool) string {
+	if isWisp {
+		return "wisp"
+	}
+	return "issue"
+}
+
 // CreateIssueImport is the import-friendly issue creation hook.
 // Dolt does not enforce prefix validation at the storage layer, so this delegates to CreateIssue.
 func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Issue, actor string, skipPrefixValidation bool) error {
@@ -630,9 +645,24 @@ func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
 
 // AddDependency adds a dependency within the transaction.
 // Checks for existing pairs to prevent silent type overwrites.
+//
+// Cross-type bonds are rejected: both sides must be the same kind (both
+// active wisps or both non-wisp issues). Mixed bonds return
+// storage.ErrCrossTypeBond because the dependencies and wisp_dependencies
+// tables are routed by left-side type, and a wisp↔issue pair would either
+// trip the dependencies.issue_id foreign key or insert a row that points
+// out of the wisp_dependencies graph.
 func (t *doltTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	leftIsWisp, rightIsWisp := t.classifyBondSides(ctx, dep.IssueID, dep.DependsOnID)
+	if leftIsWisp != rightIsWisp {
+		return fmt.Errorf("%w: %s (%s) -> %s (%s)",
+			storage.ErrCrossTypeBond,
+			dep.IssueID, bondKindLabel(leftIsWisp),
+			dep.DependsOnID, bondKindLabel(rightIsWisp))
+	}
+
 	table := "dependencies"
-	if t.isActiveWisp(ctx, dep.IssueID) {
+	if leftIsWisp {
 		table = "wisp_dependencies"
 	}
 

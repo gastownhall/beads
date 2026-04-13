@@ -28,6 +28,16 @@ var ErrNotInitialized = errors.New("database not initialized")
 // ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
 var ErrPrefixMismatch = errors.New("prefix mismatch")
 
+// ErrCrossTypeBond is returned when AddDependency is called with a Dependency
+// whose IssueID and DependsOnID are not the same kind: one is an active wisp
+// and the other is a non-wisp issue. The dependencies and wisp_dependencies
+// tables are routed by the left-side type, so cross-type bonds either trip
+// fk_dep_issue (when the left side is a non-wisp issue and the right side is
+// a wisp not present in the issues table) or insert orphan-pointing rows into
+// wisp_dependencies. Callers that need cross-kind references should use a
+// non-storage edge (e.g. metadata pointer) or promote/demote first.
+var ErrCrossTypeBond = errors.New("cross-type bond rejected: wisp and issue cannot be bonded directly")
+
 // Storage is the interface satisfied by *dolt.DoltStore.
 // Consumers depend on this interface rather than on the concrete type so that
 // alternative implementations (mocks, proxies, etc.) can be substituted.
