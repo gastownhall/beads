@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -85,7 +86,7 @@ func runApply(dryRun bool) []ApplyResult {
 
 	var results []ApplyResult
 	results = append(results, applyHooks(hasDrift["hooks"], dryRun))
-	results = append(results, applyRemote(hasDrift["remote"], dryRun))
+	results = append(results, applyRemotes(hasDrift, dryRun)...)
 	results = append(results, applyServer(hasDrift["server"], dryRun))
 	return results
 }
@@ -138,8 +139,31 @@ func applyHooks(drifted bool, dryRun bool) ApplyResult {
 	}
 }
 
-// applyRemote ensures the Dolt origin remote matches federation.remote config.
-func applyRemote(drifted bool, dryRun bool) ApplyResult {
+// applyRemotes ensures Dolt remotes match federation config.
+// Handles both legacy single-remote and multi-remote configurations.
+func applyRemotes(hasDrift map[string]bool, dryRun bool) []ApplyResult {
+	// Check if multi-remote is configured
+	fedCfg, parseErr := config.ParseFederationConfig()
+	if parseErr != nil {
+		return []ApplyResult{{
+			Check:   "remote",
+			Action:  "configure",
+			Status:  applyStatusError,
+			Message: "federation config parse error",
+			Error:   parseErr.Error(),
+		}}
+	}
+
+	if len(fedCfg.Remotes) > 1 {
+		return applyMultiRemotes(fedCfg, hasDrift, dryRun)
+	}
+
+	// Legacy single-remote path
+	return []ApplyResult{applyLegacyRemote(hasDrift["remote"], dryRun)}
+}
+
+// applyLegacyRemote is the original single-remote apply logic.
+func applyLegacyRemote(drifted bool, dryRun bool) ApplyResult {
 	if !drifted {
 		return ApplyResult{
 			Check:   "remote",
@@ -239,6 +263,119 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 		Status:  applyStatusApplied,
 		Message: fmt.Sprintf("Updated Dolt origin remote from %s to %s", oldURL, federationRemote),
 	}
+}
+
+// applyMultiRemotes reconciles all configured federation.remotes with Dolt.
+func applyMultiRemotes(fedCfg config.FederationConfig, hasDrift map[string]bool, dryRun bool) []ApplyResult {
+	// Check if any remote has drift
+	anyDrift := false
+	for key, drifted := range hasDrift {
+		if drifted && strings.HasPrefix(key, "remote.") {
+			anyDrift = true
+			break
+		}
+	}
+
+	if !anyDrift {
+		return []ApplyResult{{
+			Check:   "remote",
+			Action:  "none",
+			Status:  applyStatusOK,
+			Message: "All federation remotes are consistent",
+		}}
+	}
+
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return []ApplyResult{{
+			Check:   "remote",
+			Action:  "configure",
+			Status:  applyStatusSkipped,
+			Message: "No active beads workspace found",
+		}}
+	}
+
+	doltDir := doltserver.ResolveDoltDir(beadsDir)
+
+	var results []ApplyResult
+	for _, cfgRemote := range fedCfg.Remotes {
+		checkName := "remote." + cfgRemote.Name
+		if !hasDrift[checkName] {
+			continue
+		}
+
+		currentURL := doltutil.FindCLIRemote(doltDir, cfgRemote.Name)
+
+		if dryRun {
+			if currentURL == "" {
+				results = append(results, ApplyResult{
+					Check:   checkName,
+					Action:  "add_remote",
+					Status:  applyStatusDryRun,
+					Message: fmt.Sprintf("Would add Dolt remote %q: %s", cfgRemote.Name, cfgRemote.URL),
+				})
+			} else {
+				results = append(results, ApplyResult{
+					Check:   checkName,
+					Action:  "update_remote",
+					Status:  applyStatusDryRun,
+					Message: fmt.Sprintf("Would update Dolt remote %q from %s to %s", cfgRemote.Name, currentURL, cfgRemote.URL),
+				})
+			}
+			continue
+		}
+
+		if currentURL == "" {
+			if err := doltutil.AddCLIRemote(doltDir, cfgRemote.Name, cfgRemote.URL); err != nil {
+				results = append(results, ApplyResult{
+					Check:   checkName,
+					Action:  "add_remote",
+					Status:  applyStatusError,
+					Message: fmt.Sprintf("Failed to add remote %q", cfgRemote.Name),
+					Error:   err.Error(),
+				})
+			} else {
+				results = append(results, ApplyResult{
+					Check:   checkName,
+					Action:  "add_remote",
+					Status:  applyStatusApplied,
+					Message: fmt.Sprintf("Added Dolt remote %q: %s", cfgRemote.Name, cfgRemote.URL),
+				})
+			}
+		} else {
+			// URL mismatch — remove and re-add
+			oldURL := currentURL
+			if err := doltutil.RemoveCLIRemote(doltDir, cfgRemote.Name); err != nil {
+				results = append(results, ApplyResult{
+					Check:   checkName,
+					Action:  "update_remote",
+					Status:  applyStatusError,
+					Message: fmt.Sprintf("Failed to remove old remote %q", cfgRemote.Name),
+					Error:   err.Error(),
+				})
+				continue
+			}
+			if err := doltutil.AddCLIRemote(doltDir, cfgRemote.Name, cfgRemote.URL); err != nil {
+				_ = doltutil.AddCLIRemote(doltDir, cfgRemote.Name, oldURL) // rollback
+				results = append(results, ApplyResult{
+					Check:   checkName,
+					Action:  "update_remote",
+					Status:  applyStatusError,
+					Message: fmt.Sprintf("Failed to update remote %q (old URL restored)", cfgRemote.Name),
+					Error:   err.Error(),
+				})
+			} else {
+				results = append(results, ApplyResult{
+					Check:   checkName,
+					Action:  "update_remote",
+					Status:  applyStatusApplied,
+					Message: fmt.Sprintf("Updated Dolt remote %q from %s to %s", cfgRemote.Name, oldURL, cfgRemote.URL),
+				})
+			}
+		}
+	}
+
+	return results
 }
 
 // applyServer starts the Dolt server if config says it should be running but it isn't.

@@ -139,8 +139,30 @@ func checkHooksDrift() []DriftItem {
 	return items
 }
 
-// checkRemoteDrift compares federation.remote config against actual Dolt remotes.
+// checkRemoteDrift compares federation remote config against actual Dolt remotes.
+// Supports both legacy (federation.remote) and multi-remote (federation.remotes) configs.
 func checkRemoteDrift() []DriftItem {
+	// Parse the federation config to determine which mode we're in
+	fedCfg, parseErr := config.ParseFederationConfig()
+	if parseErr != nil {
+		return []DriftItem{{
+			Check:   "remote",
+			Status:  driftStatusDrift,
+			Message: fmt.Sprintf("federation config parse error: %v", parseErr),
+		}}
+	}
+
+	// If multi-remote is configured, use multi-remote drift detection
+	if len(fedCfg.Remotes) > 1 {
+		return checkMultiRemoteDrift(fedCfg)
+	}
+
+	// Otherwise use legacy single-remote drift detection
+	return checkLegacyRemoteDrift()
+}
+
+// checkLegacyRemoteDrift is the original single-remote drift check.
+func checkLegacyRemoteDrift() []DriftItem {
 	federationRemote := config.GetString("federation.remote")
 
 	// Find the dolt data directory for CLI remote listing
@@ -223,6 +245,90 @@ func checkRemoteDrift() []DriftItem {
 		Status:  driftStatusInfo,
 		Message: "No federation.remote configured and no Dolt remotes found",
 	}}
+}
+
+// checkMultiRemoteDrift checks each configured remote against actual Dolt remotes.
+func checkMultiRemoteDrift(fedCfg config.FederationConfig) []DriftItem {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return []DriftItem{{
+			Check:   "remote",
+			Status:  driftStatusSkipped,
+			Message: "No active beads workspace found",
+		}}
+	}
+
+	doltDir := doltserver.ResolveDoltDir(beadsDir)
+
+	cliRemotes, err := doltutil.ListCLIRemotes(doltDir)
+	if err != nil {
+		return []DriftItem{{
+			Check:   "remote",
+			Status:  driftStatusSkipped,
+			Message: fmt.Sprintf("Cannot list remotes: %v", err),
+		}}
+	}
+
+	// Build lookup map of actual Dolt remotes
+	actualRemotes := make(map[string]string, len(cliRemotes))
+	for _, r := range cliRemotes {
+		actualRemotes[r.Name] = r.URL
+	}
+
+	var items []DriftItem
+
+	// Check each configured remote
+	for _, cfgRemote := range fedCfg.Remotes {
+		checkName := "remote." + cfgRemote.Name
+		actualURL, exists := actualRemotes[cfgRemote.Name]
+
+		if !exists {
+			items = append(items, DriftItem{
+				Check:    checkName,
+				Status:   driftStatusDrift,
+				Message:  fmt.Sprintf("Configured remote %q (%s) does not exist in Dolt", cfgRemote.Name, cfgRemote.Role),
+				Expected: cfgRemote.URL,
+				Actual:   "(not found)",
+			})
+		} else if actualURL != cfgRemote.URL {
+			items = append(items, DriftItem{
+				Check:    checkName,
+				Status:   driftStatusDrift,
+				Message:  fmt.Sprintf("Remote %q URL mismatch", cfgRemote.Name),
+				Expected: cfgRemote.URL,
+				Actual:   actualURL,
+			})
+		} else {
+			items = append(items, DriftItem{
+				Check:   checkName,
+				Status:  driftStatusOK,
+				Message: fmt.Sprintf("Remote %q (%s) matches config", cfgRemote.Name, cfgRemote.Role),
+			})
+		}
+	}
+
+	// Detect unmanaged remotes (exist in Dolt but not in config)
+	configuredNames := make(map[string]bool, len(fedCfg.Remotes))
+	for _, r := range fedCfg.Remotes {
+		configuredNames[r.Name] = true
+	}
+
+	var unmanaged []string
+	for _, r := range cliRemotes {
+		if !configuredNames[r.Name] {
+			unmanaged = append(unmanaged, r.Name)
+		}
+	}
+
+	if len(unmanaged) > 0 {
+		items = append(items, DriftItem{
+			Check:   "remote.unmanaged",
+			Status:  driftStatusInfo,
+			Message: fmt.Sprintf("Unmanaged Dolt remotes not in federation.remotes config: %s", strings.Join(unmanaged, ", ")),
+		})
+	}
+
+	return items
 }
 
 // checkServerDrift compares dolt.shared-server config against running server state.

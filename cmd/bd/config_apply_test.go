@@ -26,7 +26,7 @@ func TestApplyHooksDryRun(t *testing.T) {
 }
 
 func TestApplyRemoteNoDrift(t *testing.T) {
-	result := applyRemote(false, false)
+	result := applyLegacyRemote(false, false)
 	if result.Status != applyStatusOK {
 		t.Errorf("expected status %q, got %q", applyStatusOK, result.Status)
 	}
@@ -37,7 +37,7 @@ func TestApplyRemoteNoDrift(t *testing.T) {
 
 func TestApplyRemoteDryRun(t *testing.T) {
 	// When drifted but no beads dir, should skip
-	result := applyRemote(true, true)
+	result := applyLegacyRemote(true, true)
 	if result.Status != applyStatusSkipped && result.Status != applyStatusDryRun {
 		t.Errorf("expected status %q or %q, got %q", applyStatusSkipped, applyStatusDryRun, result.Status)
 	}
