@@ -56,6 +56,11 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 		fileCfg = configfile.DefaultConfig()
 	}
 
+	// Apply central server config as defaults for any server fields not
+	// set in the per-project metadata.json. This eliminates the need to
+	// duplicate host/port/user across 30+ project configs.
+	applyCentralConfigDefaults(fileCfg)
+
 	if cfg == nil {
 		cfg = &Config{}
 	}
@@ -75,6 +80,10 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
+
+	// Apply central server config as defaults for any server fields not
+	// set in the per-project metadata.json.
+	applyCentralConfigDefaults(fileCfg)
 
 	// Build config from metadata.json, allowing overrides from caller
 	if cfg == nil {
@@ -226,4 +235,20 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 // applies its server fields as defaults to the per-project config.
 // A missing central config file is silently ignored.
 func applyCentralConfigDefaults(fileCfg *configfile.Config) {
+	centralPath := os.Getenv("BEADS_CENTRAL_CONFIG")
+	if centralPath == "" {
+		centralPath = configfile.DefaultCentralConfigPath()
+	}
+	if centralPath == "" {
+		return
+	}
+
+	centralCfg, err := configfile.LoadCentralConfig(centralPath)
+	if err != nil {
+		// Log but don't fail — a broken central config shouldn't block operations.
+		fmt.Fprintf(os.Stderr, "Warning: failed to load central config %s: %v\n", centralPath, err)
+		return
+	}
+
+	configfile.ApplyCentralDefaults(fileCfg, centralCfg)
 }
