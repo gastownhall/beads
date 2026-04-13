@@ -174,7 +174,7 @@ func (o *SyncOrchestrator) PushAll(ctx context.Context) (*PushAllResult, error) 
 	var backupFailed bool
 	for _, backup := range backups {
 		if ctx.Err() != nil {
-			// Context cancelled — skip remaining
+			// Context canceled — skip remaining
 			results = append(results, PushResult{
 				Remote: backup,
 				Status: PushStatusSkipped,
@@ -284,13 +284,13 @@ func (o *SyncOrchestrator) sortedRemotes() (*config.RemoteConfig, []config.Remot
 // acquireLock acquires a non-blocking advisory lock for the push sequence.
 func (o *SyncOrchestrator) acquireLock() (*os.File, error) {
 	lockPath := filepath.Join(o.beadsDir, "federation.lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // lockPath is constructed from trusted beadsDir
 	if err != nil {
 		return nil, fmt.Errorf("cannot open federation lock file: %w", err)
 	}
 
 	if err := lockfile.FlockExclusiveNonBlocking(f); err != nil {
-		f.Close()
+		_ = f.Close()
 		if lockfile.IsLocked(err) {
 			return nil, ErrLockHeld
 		}
