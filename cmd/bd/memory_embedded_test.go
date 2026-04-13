@@ -216,6 +216,17 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "mx")
 
+	// Disable auto-export: this test exercises concurrent memory
+	// flock contention, not export behavior. With export.auto=true
+	// (the default since GH#2973), 8 concurrent writers also trigger
+	// post-write read paths that race with in-flight commits.
+	disableAutoExport := exec.Command(bd, "config", "set", "export.auto", "false")
+	disableAutoExport.Dir = dir
+	disableAutoExport.Env = bdEnv(dir)
+	if out, err := disableAutoExport.CombinedOutput(); err != nil {
+		t.Fatalf("disable export.auto: %v\n%s", err, out)
+	}
+
 	const numWorkers = 8
 
 	type workerResult struct {
