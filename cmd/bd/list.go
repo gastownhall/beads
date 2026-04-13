@@ -120,6 +120,26 @@ type watchListDependencyStore interface {
 	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 }
 
+func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, parentID string, sortBy string, reverse bool) ([]*types.Issue, error) {
+	if parentID != "" {
+		issues, err := getHierarchicalChildren(ctx, store, "", parentID)
+		if err != nil {
+			return nil, err
+		}
+		// getHierarchicalChildren builds its result from a map, so normalize the
+		// slice before snapshot comparison to avoid spurious redraws.
+		sortIssues(issues, "id", false)
+		return issues, nil
+	}
+
+	issues, err := store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return nil, err
+	}
+	sortIssues(issues, sortBy, reverse)
+	return issues, nil
+}
+
 func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue) {
 	var allDeps map[string][]*types.Dependency
 	if store != nil {
@@ -131,14 +151,13 @@ func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore
 	displayPrettyListWithDeps(issues, true, allDeps)
 }
 
-func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, sortBy string, reverse bool) {
+func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, parentID string, sortBy string, reverse bool) {
 	// Initial display
-	issues, err := store.SearchIssues(ctx, "", filter)
+	issues, err := loadWatchedIssues(ctx, store, filter, parentID, sortBy, reverse)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error querying issues: %v\n", err)
 		return
 	}
-	sortIssues(issues, sortBy, reverse)
 	displayWatchedIssueList(ctx, store, issues)
 	lastSnapshot := issueSnapshot(issues)
 
@@ -159,12 +178,11 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
 			return
 		case <-ticker.C:
-			issues, err := store.SearchIssues(ctx, "", filter)
+			issues, err := loadWatchedIssues(ctx, store, filter, parentID, sortBy, reverse)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error refreshing issues: %v\n", err)
 				continue
 			}
-			sortIssues(issues, sortBy, reverse)
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
@@ -823,7 +841,7 @@ var listCmd = &cobra.Command{
 
 		// Handle watch mode (GH#654) - must be before other output modes
 		if watchMode {
-			watchIssues(ctx, activeStore, filter, sortBy, reverse)
+			watchIssues(ctx, activeStore, filter, parentID, sortBy, reverse)
 			return
 		}
 
