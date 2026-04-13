@@ -52,19 +52,19 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 | Release builds | `.goreleaser.yml` (all build targets) |
 | Install script | `scripts/install.sh` |
 | Windows installer | `install.ps1` |
-| CI (Windows) | `.github/workflows/ci.yml` |
+| CI test matrix | `.github/workflows/ci.yml` (Linux, macOS, Windows) |
 | macOS release | `.github/workflows/release.yml` |
 | Migration tests | `.github/workflows/migration-test.yml` |
+| Nightly tests | `.github/workflows/nightly.yml` |
+| Cross-version smoke | `.github/workflows/cross-version-smoke.yml` |
 
 ## Where `gms_pure_go` Is Intentionally Omitted
 
-The CI test matrix and `scripts/test-cgo.sh` omit `gms_pure_go` to exercise
-the ICU code path in `go-mysql-server`. This ensures we don't ship bugs
-in the upstream ICU integration even though our release binaries don't use it.
-
-These test environments install ICU headers explicitly:
-- Linux CI: `sudo apt-get install -y libicu-dev`
-- macOS CI: `brew install icu4c` + CGO flag exports
+`scripts/test-cgo.sh` omits `gms_pure_go` as a local developer tool for
+exercising the ICU code path in `go-mysql-server` on demand. CI no longer
+does this: upstream confirmed (dolthub/go-mysql-server#3506) that
+`-tags=gms_pure_go` is the sanctioned escape hatch, so we test the
+configuration we ship.
 
 ## Post-Build Verification
 

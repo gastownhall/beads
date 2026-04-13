@@ -34,14 +34,8 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install ICU4C
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y libicu-dev
-
       - name: Build bd
-        run: go build -o bd ./cmd/bd/
+        run: go build -tags gms_pure_go -o bd ./cmd/bd/
 
       - name: Validate docs against CLI
         run: ./scripts/check-doc-flags.sh ./bd
@@ -97,22 +91,6 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install ICU4C (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y libicu-dev
-
-      - name: Install ICU4C (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          brew install icu4c
-          dir="$(brew --prefix icu4c)"
-          echo "CGO_CPPFLAGS=-I$dir/include" >> "$GITHUB_ENV"
-          echo "CGO_LDFLAGS=-L$dir/lib -Wl,-rpath,$dir/lib" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$dir/lib/pkgconfig" >> "$GITHUB_ENV"
-
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"
@@ -123,7 +101,7 @@ jobs:
         run: go install gotest.tools/gotestsum@latest
 
       - name: Build
-        run: go build -v ./cmd/bd
+        run: go build -v -tags gms_pure_go ./cmd/bd
 
       - name: Test (with coverage + JUnit XML)
         if: matrix.coverage
@@ -131,11 +109,11 @@ jobs:
           gotestsum \
             --junitfile junit.xml \
             --format testdox \
-            -- -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...
+            -- -tags gms_pure_go -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...
 
       - name: Test
         if: ${{ !matrix.coverage }}
-        run: go test ${{ matrix.test-flags }} -skip '^TestEmbedded' ./...
+        run: go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./...
 
       - name: Upload coverage to Codecov
         if: matrix.coverage && !cancelled()
@@ -170,20 +148,14 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install ICU4C
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y libicu-dev
-
       - name: Build embedded bd binary
-        run: go build -race -o /tmp/bd-embedded-test ./cmd/bd/
+        run: go build -tags gms_pure_go -race -o /tmp/bd-embedded-test ./cmd/bd/
 
       - name: Build embedded storage test binary
-        run: go test -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
+        run: go test -tags gms_pure_go -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
 
       - name: Build embedded cmd test binary
-        run: go test -race -c -o /tmp/bd-cmd-test ./cmd/bd/
+        run: go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7
@@ -201,12 +173,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install ICU4C
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y libicu-dev
 
       - name: Download binaries
         uses: actions/download-artifact@v8
@@ -238,12 +204,6 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install ICU4C
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y libicu-dev
 
       - name: Download binaries
         uses: actions/download-artifact@v8
@@ -321,17 +281,11 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install ICU4C (Linux)
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y libicu-dev
-
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
-          args: --timeout=5m
+          args: --timeout=5m --build-tags=gms_pure_go
 
   test-nix:
     name: Test Nix Flake

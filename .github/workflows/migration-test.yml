@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libicu-dev jq sqlite3
+          sudo apt-get install -y jq sqlite3
 
       - name: Install Dolt
         run: |
