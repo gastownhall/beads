@@ -116,6 +116,21 @@ func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath s
 // watchIssues polls for changes and re-displays (GH#654)
 // Uses polling instead of fsnotify because Dolt stores data in a server-side
 // database, not files — file watchers never fire.
+type watchListDependencyStore interface {
+	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
+}
+
+func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue) {
+	var allDeps map[string][]*types.Dependency
+	if store != nil {
+		deps, err := store.GetAllDependencyRecords(ctx)
+		if err == nil {
+			allDeps = deps
+		}
+	}
+	displayPrettyListWithDeps(issues, true, allDeps)
+}
+
 func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, sortBy string, reverse bool) {
 	// Initial display
 	issues, err := store.SearchIssues(ctx, "", filter)
@@ -124,7 +139,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 		return
 	}
 	sortIssues(issues, sortBy, reverse)
-	displayPrettyList(issues, true)
+	displayWatchedIssueList(ctx, store, issues)
 	lastSnapshot := issueSnapshot(issues)
 
 	fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
@@ -153,7 +168,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayPrettyList(issues, true)
+				displayWatchedIssueList(ctx, store, issues)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
 		}

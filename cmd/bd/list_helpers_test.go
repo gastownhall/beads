@@ -3,12 +3,22 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type watchListDependencyStoreStub struct {
+	allDeps map[string][]*types.Dependency
+	err     error
+}
+
+func (s watchListDependencyStoreStub) GetAllDependencyRecords(_ context.Context) (map[string][]*types.Dependency, error) {
+	return s.allDeps, s.err
+}
 
 func TestListParseTimeFlag(t *testing.T) {
 	cases := []string{
@@ -213,5 +223,34 @@ func TestListDisplayPrettyList(t *testing.T) {
 	})
 	if !strings.Contains(out, "bd-1") || !strings.Contains(out, "bd-1.1") || !strings.Contains(out, "Total:") {
 		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestDisplayWatchedIssueList_UsesDependencyHierarchy(t *testing.T) {
+	parent := &types.Issue{ID: "bd-zparent", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	child := &types.Issue{ID: "bd-achild", Title: "Child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	store := watchListDependencyStoreStub{
+		allDeps: map[string][]*types.Dependency{
+			child.ID: {
+				{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild},
+			},
+		},
+	}
+
+	out := captureStdout(t, func() error {
+		displayWatchedIssueList(context.Background(), store, []*types.Issue{child, parent})
+		return nil
+	})
+
+	parentLine := strings.Index(out, "bd-zparent")
+	childLine := strings.Index(out, "└──")
+	if parentLine == -1 || childLine == -1 {
+		t.Fatalf("expected parent root and child connector in output, got:\n%s", out)
+	}
+	if childLine < parentLine {
+		t.Fatalf("expected child to render under parent in watch output, got:\n%s", out)
+	}
+	if strings.Contains(out, "\nbd-achild ") || strings.HasPrefix(out, "bd-achild ") {
+		t.Fatalf("expected child not to render as a root in watch output, got:\n%s", out)
 	}
 }
