@@ -25,6 +25,9 @@ func filteredEnvForContextBinding(keys ...string) []string {
 	env := os.Environ()
 	filtered := make([]string, 0, len(env))
 	for _, entry := range env {
+		if strings.HasPrefix(entry, "BEADS_") || strings.HasPrefix(entry, "BD_") {
+			continue
+		}
 		trim := false
 		for prefix := range strip {
 			if strings.HasPrefix(entry, prefix) {
@@ -115,6 +118,8 @@ func TestListExplicitDBPathRebindsTargetContext(t *testing.T) {
 	listCmd := exec.Command(binPath, "list", "--db", filepath.Join(targetBeadsDir, "dolt"), "--json")
 	listCmd.Dir = callerRepo
 	listCmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE"),
+		"HOME="+t.TempDir(),
+		"XDG_CONFIG_HOME="+t.TempDir(),
 		"BEADS_TEST_MODE=1",
 		"BEADS_DIR="+callerBeadsDir,
 		"BEADS_DB=",

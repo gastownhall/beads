@@ -589,17 +589,6 @@ var rootCmd = &cobra.Command{
 
 		selectedNoDBCommand := isSelectedNoDBCommand(cmd)
 
-		// Commands that skip store initialization still need their config/env
-		// rebound to the selected workspace before they inspect server mode or
-		// other startup settings.
-		if selectedNoDBCommand {
-			prepareSelectedNoDBContext(selectedNoDBBeadsDir(cmd))
-			refreshBoundCommandConfig(cmd)
-			if _, err := getDoltAutoCommitMode(); err != nil {
-				FatalError("%v", err)
-			}
-		}
-
 		// GH#1093: Check noDbCommands BEFORE expensive operations
 		// to avoid spawning git subprocesses for simple commands
 		// like "bd version" that don't need database access.
@@ -642,6 +631,7 @@ var rootCmd = &cobra.Command{
 		// Check both the command name and parent command name for subcommands
 		cmdName := cmd.Name()
 		isSubcommand := cmd.Parent() != nil && cmd.Parent().Name() != "bd"
+		skipsStoreInit := false
 		if cmd.Parent() != nil {
 			parentName := cmd.Parent().Name()
 			if parentName == "dolt" && slices.Contains(needsStoreDoltSubcommands, cmdName) {
@@ -649,22 +639,45 @@ var rootCmd = &cobra.Command{
 			} else if slices.Contains(needsStoreDoltGrandchildren, parentName) {
 				// GH#2224: dolt remote add/list/remove need the store — fall through to init
 			} else if slices.Contains(noDbCommands, parentName) {
-				return
+				skipsStoreInit = true
 			}
 		}
 		// Only skip for top-level commands in noDbCommands, not subcommands
 		// that happen to share names (e.g., "bd backup init" vs "bd init").
 		if slices.Contains(noDbCommands, cmdName) && !isSubcommand {
-			return
+			skipsStoreInit = true
 		}
 
 		// Skip for root command with no subcommand (just shows help)
 		if cmd.Parent() == nil && cmdName == cmd.Use {
-			return
+			skipsStoreInit = true
 		}
 
 		// Also skip for --version flag on root command (cmdName would be "bd")
 		if v, _ := cmd.Flags().GetBool("version"); v {
+			skipsStoreInit = true
+		}
+
+		// Commands that skip store initialization still need early config/env
+		// setup before they inspect server mode or per-project Dolt settings.
+		// Explicit-target no-DB commands must bind to the selected workspace,
+		// while all other no-store commands preserve the historical ambient
+		// load-from-current-workspace behavior.
+		if selectedNoDBCommand {
+			prepareSelectedNoDBContext(selectedNoDBBeadsDir(cmd))
+			refreshBoundCommandConfig(cmd)
+			if _, err := getDoltAutoCommitMode(); err != nil {
+				FatalError("%v", err)
+			}
+		} else if skipsStoreInit {
+			loadEnvironment()
+			loadServerModeFromConfig()
+			if _, err := getDoltAutoCommitMode(); err != nil {
+				FatalError("%v", err)
+			}
+		}
+
+		if skipsStoreInit {
 			return
 		}
 

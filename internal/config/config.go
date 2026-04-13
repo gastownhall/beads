@@ -57,6 +57,11 @@ func Initialize() error {
 	}
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
+	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	beadsEnvConfigPath := ""
+	if beadsDirEnv != "" {
+		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
+	}
 	cwd, err := os.Getwd()
 	if err == nil {
 		// In the beads repo, `.beads/config.yaml` is tracked and may set non-default config values.
@@ -82,6 +87,12 @@ func Initialize() error {
 			beadsDir := filepath.Join(dir, ".beads")
 			p := filepath.Join(beadsDir, "config.yaml")
 			if _, err := os.Stat(p); err == nil {
+				// When BEADS_DIR points at a different runtime workspace, do not
+				// merge the caller repo's config underneath it. That leaks caller
+				// settings like readonly/json/actor into explicit-target commands.
+				if beadsEnvConfigPath != "" && filepath.Clean(p) != beadsEnvConfigPath {
+					break
+				}
 				if ignoreRepoConfig && moduleRoot != "" {
 					// Only ignore the repo-local config (moduleRoot/.beads/config.yaml).
 					wantIgnore := filepath.Clean(p) == filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))

@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/spf13/pflag"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -18,6 +17,37 @@ func writeTestConfigYAML(t *testing.T, beadsDir, contents string) {
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(contents), 0o600); err != nil {
 		t.Fatalf("write config.yaml: %v", err)
+	}
+}
+
+type flagSnapshot struct {
+	value   string
+	changed bool
+}
+
+func snapshotRootFlagState() map[string]flagSnapshot {
+	state := map[string]flagSnapshot{}
+	for _, name := range []string{"json", "format", "readonly", "actor", "dolt-auto-commit"} {
+		flag := rootCmd.PersistentFlags().Lookup(name)
+		if flag == nil {
+			continue
+		}
+		state[name] = flagSnapshot{value: flag.Value.String(), changed: flag.Changed}
+	}
+	return state
+}
+
+func restoreRootFlagState(t *testing.T, state map[string]flagSnapshot) {
+	t.Helper()
+	for name, snapshot := range state {
+		flag := rootCmd.PersistentFlags().Lookup(name)
+		if flag == nil {
+			continue
+		}
+		if err := flag.Value.Set(snapshot.value); err != nil {
+			t.Fatalf("restore %s flag: %v", name, err)
+		}
+		flag.Changed = snapshot.changed
 	}
 }
 
@@ -51,45 +81,14 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	oldReadonlyMode := readonlyMode
 	oldActor := actor
 	oldDoltAutoCommit := doltAutoCommit
-	type flagSnapshot struct {
-		value   string
-		changed bool
-	}
-	flagState := map[string]flagSnapshot{}
-	for _, name := range []string{"json", "format", "readonly", "actor", "dolt-auto-commit"} {
-		flag := rootCmd.PersistentFlags().Lookup(name)
-		if flag == nil {
-			continue
-		}
-		flagState[name] = flagSnapshot{value: flag.Value.String(), changed: flag.Changed}
-	}
+	flagState := snapshotRootFlagState()
 	t.Cleanup(func() {
 		serverMode = oldServerMode
 		jsonOutput = oldJSONOutput
 		readonlyMode = oldReadonlyMode
 		actor = oldActor
 		doltAutoCommit = oldDoltAutoCommit
-		for name, snapshot := range flagState {
-			flag := rootCmd.PersistentFlags().Lookup(name)
-			if flag == nil {
-				continue
-			}
-			if err := flag.Value.Set(snapshot.value); err != nil {
-				t.Fatalf("restore %s flag: %v", name, err)
-			}
-			flag.Changed = snapshot.changed
-		}
-		for _, f := range []*pflag.Flag{
-			rootCmd.PersistentFlags().Lookup("json"),
-			rootCmd.PersistentFlags().Lookup("format"),
-			rootCmd.PersistentFlags().Lookup("readonly"),
-			rootCmd.PersistentFlags().Lookup("actor"),
-			rootCmd.PersistentFlags().Lookup("dolt-auto-commit"),
-		} {
-			if f != nil && !f.Changed && f.DefValue != f.Value.String() {
-				f.DefValue = f.Value.String()
-			}
-		}
+		restoreRootFlagState(t, flagState)
 	})
 
 	serverMode = false
@@ -129,5 +128,60 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	}
 	if got := doltserver.DefaultConfig(targetBeadsDir).Port; got != 4242 {
 		t.Fatalf("DefaultConfig(target).Port = %d, want %d", got, 4242)
+	}
+}
+
+func TestPrepareSelectedCommandContext_DoesNotMergeCallerConfigForUnsetKeys(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	root := t.TempDir()
+	callerDir := filepath.Join(root, "caller")
+	callerBeadsDir := filepath.Join(callerDir, ".beads")
+	writeTestConfigYAML(t, callerBeadsDir, "readonly: true\njson: true\n")
+
+	targetDir := filepath.Join(root, "target")
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "actor: target-actor\n")
+
+	t.Chdir(callerDir)
+	t.Setenv("BEADS_DIR", callerBeadsDir)
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	oldJSONOutput := jsonOutput
+	oldReadonlyMode := readonlyMode
+	oldActor := actor
+	flagState := snapshotRootFlagState()
+	t.Cleanup(func() {
+		jsonOutput = oldJSONOutput
+		readonlyMode = oldReadonlyMode
+		actor = oldActor
+		restoreRootFlagState(t, flagState)
+	})
+
+	jsonOutput = false
+	readonlyMode = false
+	actor = ""
+	for _, name := range []string{"json", "format", "readonly", "actor"} {
+		if flag := rootCmd.PersistentFlags().Lookup(name); flag != nil {
+			flag.Changed = false
+		}
+	}
+
+	prepareSelectedCommandContext(targetBeadsDir, false)
+	refreshBoundCommandConfig(rootCmd)
+
+	if readonlyMode {
+		t.Fatal("readonlyMode should stay false when target config leaves readonly unset")
+	}
+	if jsonOutput {
+		t.Fatal("jsonOutput should stay false when target config leaves json unset")
+	}
+	if actor != "target-actor" {
+		t.Fatalf("actor = %q, want %q", actor, "target-actor")
 	}
 }
