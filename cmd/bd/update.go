@@ -218,6 +218,11 @@ create, update, show, or close operation).`,
 					fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --defer=+1h or --defer=tomorrow\n")
 				}
 				updates["defer_until"] = t
+				// Also set status=deferred for consistency with `bd defer`
+				// (GH#3233). Skip if user explicitly set --status to something else.
+				if _, ok := updates["status"]; !ok {
+					updates["status"] = string(types.StatusDeferred)
+				}
 			}
 		}
 		// Ephemeral/persistent flags

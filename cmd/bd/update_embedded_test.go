@@ -283,6 +283,20 @@ func TestEmbeddedUpdate(t *testing.T) {
 		if got.DeferUntil == nil {
 			t.Error("expected defer_until to be set")
 		}
+		// GH#3233: --defer should also set status=deferred for consistency with `bd defer`
+		if string(got.Status) != "deferred" {
+			t.Errorf("expected status=deferred, got %q", got.Status)
+		}
+	})
+
+	t.Run("update_defer_respects_explicit_status", func(t *testing.T) {
+		// GH#3233: explicit --status should win over the implicit deferred set by --defer
+		issue := bdCreate(t, bd, dir, "Defer+status test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--defer", "2099-01-15", "--status", "in_progress")
+		got := bdShow(t, bd, dir, issue.ID)
+		if string(got.Status) != "in_progress" {
+			t.Errorf("expected explicit status=in_progress to win, got %q", got.Status)
+		}
 	})
 
 	t.Run("update_defer_clear", func(t *testing.T) {
