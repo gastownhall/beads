@@ -83,7 +83,7 @@ func buildBD(t *testing.T) string {
 		bdPath = filepath.Join(dir, bin)
 
 		modRoot := findModuleRoot(t)
-		cmd := exec.Command("go", "build", "-o", bdPath, "./cmd/bd")
+		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", bdPath, "./cmd/bd")
 		cmd.Dir = modRoot
 		cmd.Env = buildEnv()
 

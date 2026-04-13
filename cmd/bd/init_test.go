@@ -1708,7 +1708,7 @@ func buildBDForInitTests(t *testing.T) string {
 			return
 		}
 		initTestBD = filepath.Join(tmpDir, bdBinary)
-		cmd := exec.Command("go", "build", "-o", initTestBD, ".")
+		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", initTestBD, ".")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			initTestBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}

@@ -619,7 +619,7 @@ func buildSharedServerTestBinary(t *testing.T) string {
 			return
 		}
 		bdBin := filepath.Join(buildDir, "bd")
-		cmd := exec.Command("go", "build", "-o", bdBin, ".")
+		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", bdBin, ".")
 		cmd.Dir = pkgDir
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 		out, err := cmd.CombinedOutput()

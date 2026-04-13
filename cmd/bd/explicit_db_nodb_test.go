@@ -23,7 +23,7 @@ func buildBDUnderTest(t *testing.T) string {
 		binName = "bd.exe"
 	}
 	binPath := filepath.Join(t.TempDir(), binName)
-	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	buildCmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", binPath, ".")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build failed: %v\n%s", err, out)
 	}

@@ -55,7 +55,7 @@ func TestMain(m *testing.M) {
 	modRoot := strings.TrimSpace(string(modRootOut))
 
 	testBDBinary = filepath.Join(tmpDir, binName)
-	cmd := exec.Command("go", "build", "-o", testBDBinary, "./cmd/bd")
+	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", testBDBinary, "./cmd/bd")
 	cmd.Dir = modRoot // Build from module root where ./cmd/bd exists
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to build bd binary: %v\n%s\n", err, out)

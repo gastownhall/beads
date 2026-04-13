@@ -95,8 +95,10 @@ Once the upstream PR merges, remove the `replace` directive from `go.mod`.
 2. **Removing `gms_pure_go` from a build target** -- this re-introduces
    ICU linkage. The post-build checks will catch it, but don't do it.
 
-3. **Installing `libicu-dev` in release workflows** -- only needed in test
-   workflows. Release builds must not depend on ICU being installed.
+3. **Installing `libicu-dev` in release or CI test workflows** -- only
+   needed for local, on-demand developer testing via `scripts/test-cgo.sh`.
+   Neither release builds nor the CI test matrix link ICU; both must not
+   depend on ICU being installed.
 
 4. **Confusing CGO with ICU** -- CGO is required (for Dolt). ICU is not.
    They are independent. `CGO_ENABLED=1` does not imply ICU.
