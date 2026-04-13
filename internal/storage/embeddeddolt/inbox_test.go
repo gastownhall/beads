@@ -69,20 +69,29 @@ func TestInboxIdempotentResend(t *testing.T) {
 		t.Fatalf("AddInboxItem (first): %v", err)
 	}
 
-	// Resend with updated title — should update, not duplicate
+	// Resend with updated title — should update via UNIQUE(sender_project_id, sender_issue_id)
 	item.InboxID = "resend-002"
 	item.Title = "Updated title"
 	if err := env.store.AddInboxItem(ctx, item); err != nil {
 		t.Fatalf("AddInboxItem (resend): %v", err)
 	}
 
-	// Count pending — should be 1, not 2
+	// Count pending — should be 1, not 2 (dedup by sender_project_id + sender_issue_id)
 	count, err := env.store.CountPendingInbox(ctx)
 	if err != nil {
 		t.Fatalf("CountPendingInbox: %v", err)
 	}
 	if count != 1 {
 		t.Errorf("CountPendingInbox = %d, want 1 (idempotent resend should not duplicate)", count)
+	}
+
+	// Verify the title was updated (ON DUPLICATE KEY UPDATE worked)
+	got, err := env.store.GetInboxItem(ctx, "resend-001")
+	if err != nil {
+		t.Fatalf("GetInboxItem after resend: %v", err)
+	}
+	if got.Title != "Updated title" {
+		t.Errorf("Title after resend = %q, want %q", got.Title, "Updated title")
 	}
 }
 

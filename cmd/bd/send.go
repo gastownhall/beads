@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
+
+// validDBName matches safe Dolt database identifiers.
+var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$`)
 
 var (
 	sendTo          string
@@ -77,10 +83,24 @@ func runSend(cmd *cobra.Command, args []string) {
 		issues = deduplicateIssues(append(depIssues, issues...))
 	}
 
+	// Build dependency map for metadata (sender_issue_id → [blocking dep sender_issue_ids])
+	depMap := make(map[string][]string)
+	for _, issue := range issues {
+		records, err := s.GetDependencyRecords(ctx, issue.ID)
+		if err != nil {
+			continue
+		}
+		for _, dep := range records {
+			if dep.Type == types.DepBlocks || dep.Type == types.DepParentChild {
+				depMap[issue.ID] = append(depMap[issue.ID], dep.DependsOnID)
+			}
+		}
+	}
+
 	// Build inbox items
 	items := make([]*types.InboxItem, 0, len(issues))
 	for _, issue := range issues {
-		items = append(items, issueToInboxItem(issue, senderProjectID))
+		items = append(items, issueToInboxItem(issue, senderProjectID, depMap))
 	}
 
 	if sendDryRun {
@@ -98,8 +118,9 @@ func runSend(cmd *cobra.Command, args []string) {
 }
 
 // issueToInboxItem converts a local issue to an inbox item for sending.
-func issueToInboxItem(issue *types.Issue, senderProjectID string) *types.InboxItem {
-	return &types.InboxItem{
+func issueToInboxItem(issue *types.Issue, senderProjectID string, depMap map[string][]string) *types.InboxItem {
+	item := &types.InboxItem{
+		InboxID:         uuid.New().String(),
 		SenderProjectID: senderProjectID,
 		SenderIssueID:   issue.ID,
 		Title:           issue.Title,
@@ -109,39 +130,80 @@ func issueToInboxItem(issue *types.Issue, senderProjectID string) *types.InboxIt
 		Status:          string(issue.Status),
 		SenderRef:       fmt.Sprintf("beads://%s/%s", senderProjectID, issue.ID),
 	}
+	// Encode blocking dependencies in metadata for dependency-aware import
+	if deps, ok := depMap[issue.ID]; ok && len(deps) > 0 {
+		depsJSON, _ := json.Marshal(map[string]interface{}{
+			"blocking_deps": deps,
+		})
+		item.Metadata = string(depsJSON)
+	}
+	return item
 }
 
 // sendToTarget writes inbox items to the target project.
-// Currently supports shared-server mode (USE target_db).
+// Currently supports shared-server mode via fully-qualified cross-database INSERT.
 func sendToTarget(ctx context.Context, s storage.DoltStorage, target string, items []*types.InboxItem) (int, error) {
-	// Try shared-server mode: connect to target database directly
-	rawDB, ok := s.(storage.RawDBAccessor)
-	if !ok {
-		return 0, fmt.Errorf("send requires shared server mode or federation peer; raw DB access unavailable")
+	// Validate target database name to prevent SQL injection
+	if !validDBName.MatchString(target) {
+		return 0, fmt.Errorf("invalid target database name %q: must match [a-zA-Z0-9_-]", target)
 	}
 
-	db := rawDB.UnderlyingDB()
+	rawDB, ok := s.(storage.RawDBAccessor)
+	if !ok {
+		return 0, fmt.Errorf("send requires shared server mode; raw DB access unavailable")
+	}
+
+	// Acquire a dedicated connection to avoid polluting the connection pool
+	conn, err := rawDB.UnderlyingDB().Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Close()
+
+	// Remember original database and ensure we restore it on all exit paths
+	origDB := getCurrentDatabase(ctx, s)
+	if !validDBName.MatchString(origDB) {
+		return 0, fmt.Errorf("invalid current database name %q", origDB)
+	}
+
+	// Switch to target database on this connection
+	if _, err := conn.ExecContext(ctx, "USE `"+target+"`"); err != nil {
+		return 0, fmt.Errorf("cannot access target database %q: %w (is the Dolt server shared?)", target, err)
+	}
+	defer func() {
+		// Always restore original database context
+		_, _ = conn.ExecContext(ctx, "USE `"+origDB+"`")
+	}()
+
+	// Insert all items, then commit once
 	sent := 0
 	for _, item := range items {
-		// USE the target database, insert, then switch back
-		_, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", target))
-		if err != nil {
-			return sent, fmt.Errorf("cannot access target database %q: %w (is the Dolt server shared?)", target, err)
+		// Default JSON columns to valid JSON
+		labels := item.Labels
+		if labels == "" {
+			labels = "[]"
+		}
+		metadata := item.Metadata
+		if metadata == "" {
+			metadata = "{}"
 		}
 
-		_, err = db.ExecContext(ctx, `
+		_, err = conn.ExecContext(ctx, `
 			INSERT INTO beads_inbox (
-				sender_project_id, sender_issue_id, title, description,
-				priority, issue_type, status, sender_ref
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				inbox_id, sender_project_id, sender_issue_id, title, description,
+				priority, issue_type, status, labels, metadata, sender_ref
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON DUPLICATE KEY UPDATE
 				title = VALUES(title),
 				description = VALUES(description),
 				priority = VALUES(priority),
 				issue_type = VALUES(issue_type),
 				status = VALUES(status),
+				labels = VALUES(labels),
+				metadata = VALUES(metadata),
 				sender_ref = VALUES(sender_ref)
 		`,
+			item.InboxID,
 			item.SenderProjectID,
 			item.SenderIssueID,
 			item.Title,
@@ -149,27 +211,25 @@ func sendToTarget(ctx context.Context, s storage.DoltStorage, target string, ite
 			item.Priority,
 			item.IssueType,
 			item.Status,
+			labels,
+			metadata,
 			item.SenderRef,
 		)
 		if err != nil {
-			// Switch back to our database before returning
-			_, _ = db.ExecContext(ctx, fmt.Sprintf("USE `%s`", getCurrentDatabase(ctx, s)))
 			return sent, fmt.Errorf("failed to send %s: %w", item.SenderIssueID, err)
 		}
-
-		// Commit in the target database
-		_, err = db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)",
-			fmt.Sprintf("inbox: received %s from %s", item.SenderIssueID, item.SenderProjectID))
-		if err != nil {
-			// Non-fatal: the insert succeeded, commit is best-effort
-			fmt.Fprintf(os.Stderr, "warning: auto-commit in target failed: %v\n", err)
-		}
-
 		sent++
 	}
 
-	// Switch back to our database
-	_, _ = db.ExecContext(ctx, fmt.Sprintf("USE `%s`", getCurrentDatabase(ctx, s)))
+	// Single commit for all items in the target database
+	if sent > 0 {
+		_, err = conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)",
+			fmt.Sprintf("inbox: received %d issue(s) from %s", sent, items[0].SenderProjectID))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: auto-commit in target failed: %v\n", err)
+		}
+	}
+
 	return sent, nil
 }
 
@@ -184,7 +244,7 @@ func getCurrentDatabase(ctx context.Context, s storage.DoltStorage) string {
 	if err == nil && prefix != "" {
 		return prefix
 	}
-	return "beads"
+	return ""
 }
 
 // collectBlockingDeps gathers all issues that block the given issues.

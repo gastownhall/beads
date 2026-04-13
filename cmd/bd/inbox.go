@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
@@ -189,9 +190,29 @@ func runInboxImport(cmd *cobra.Command, args []string) {
 }
 
 // importInboxItems creates real issues from inbox items and marks them imported.
+// Items are topologically sorted so dependencies are imported before dependents.
+// Duplicate imports are prevented by checking for existing issues with matching sender ref.
 func importInboxItems(ctx context.Context, s storage.DoltStorage, items []*types.InboxItem, actor string) []*types.InboxItem {
+	// Topological sort: items whose blocking deps are satisfied first
+	sorted := topoSortInboxItems(items)
+
 	var imported []*types.InboxItem
-	for _, item := range items {
+	for _, item := range sorted {
+		// Duplicate prevention: skip if an issue with this sender ref already exists
+		senderRef := fmt.Sprintf("beads://%s/%s", item.SenderProjectID, item.SenderIssueID)
+		if existing, err := s.GetIssueByExternalRef(ctx, senderRef); err == nil && existing != nil {
+			// Already imported — just mark the inbox item
+			if err := s.MarkInboxItemImported(ctx, item.InboxID, existing.ID); err != nil {
+				fmt.Fprintf(os.Stderr, "  %s warning: failed to mark duplicate %s: %v\n",
+					ui.RenderWarn("⚠"), item.SenderIssueID, err)
+			}
+			if !jsonOutput {
+				fmt.Printf("  %s %s already imported as %s (skipped)\n",
+					ui.RenderMuted("–"), item.SenderIssueID, existing.ID)
+			}
+			continue
+		}
+
 		issue := inboxItemToIssue(item)
 		if err := s.CreateIssue(ctx, issue, actor); err != nil {
 			fmt.Printf("  %s Failed to import %s: %v\n", ui.RenderFail("✗"), item.SenderIssueID, err)
@@ -210,6 +231,87 @@ func importInboxItems(ctx context.Context, s storage.DoltStorage, items []*types
 		}
 	}
 	return imported
+}
+
+// topoSortInboxItems sorts inbox items so that dependencies come before dependents.
+// Uses metadata.blocking_deps to determine ordering.
+func topoSortInboxItems(items []*types.InboxItem) []*types.InboxItem {
+	if len(items) <= 1 {
+		return items
+	}
+
+	// Build index: sender_issue_id → item
+	byIssueID := make(map[string]*types.InboxItem, len(items))
+	for _, item := range items {
+		byIssueID[item.SenderIssueID] = item
+	}
+
+	// Parse dependency edges from metadata
+	depEdges := make(map[string][]string) // issue_id → [dep_issue_ids in this batch]
+	for _, item := range items {
+		if item.Metadata == "" || item.Metadata == "{}" {
+			continue
+		}
+		var meta struct {
+			BlockingDeps []string `json:"blocking_deps"`
+		}
+		if err := json.Unmarshal([]byte(item.Metadata), &meta); err != nil {
+			continue
+		}
+		for _, depID := range meta.BlockingDeps {
+			if _, inBatch := byIssueID[depID]; inBatch {
+				depEdges[item.SenderIssueID] = append(depEdges[item.SenderIssueID], depID)
+			}
+		}
+	}
+
+	// Kahn's algorithm for topological sort
+	inDegree := make(map[string]int, len(items))
+	for _, item := range items {
+		inDegree[item.SenderIssueID] = 0
+	}
+	for id, deps := range depEdges {
+		inDegree[id] = len(deps)
+	}
+
+	var queue []string
+	for _, item := range items {
+		if inDegree[item.SenderIssueID] == 0 {
+			queue = append(queue, item.SenderIssueID)
+		}
+	}
+
+	var sorted []*types.InboxItem
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		sorted = append(sorted, byIssueID[id])
+
+		// Find items that depend on this one
+		for depID, deps := range depEdges {
+			for _, d := range deps {
+				if d == id {
+					inDegree[depID]--
+					if inDegree[depID] == 0 {
+						queue = append(queue, depID)
+					}
+				}
+			}
+		}
+	}
+
+	// Append any items not reached (circular deps) in original order
+	inSorted := make(map[string]bool, len(sorted))
+	for _, item := range sorted {
+		inSorted[item.SenderIssueID] = true
+	}
+	for _, item := range items {
+		if !inSorted[item.SenderIssueID] {
+			sorted = append(sorted, item)
+		}
+	}
+
+	return sorted
 }
 
 // inboxItemToIssue converts an inbox item into a new local issue.
