@@ -1,7 +1,7 @@
 package audit
 
 import (
-	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -112,14 +112,17 @@ func Append(e *Entry) (string, error) {
 	}
 	defer func() { _ = f.Close() }() // Best effort: file close in defer after flush
 
-	bw := bufio.NewWriter(f)
-	enc := json.NewEncoder(bw)
+	// Marshal to a single byte slice and write atomically.
+	// Using bufio.NewWriter could split into multiple write() syscalls,
+	// which interleave under concurrent O_APPEND and corrupt lines.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(e); err != nil {
-		return "", fmt.Errorf("failed to write interactions log entry: %w", err)
+		return "", fmt.Errorf("failed to marshal interactions log entry: %w", err)
 	}
-	if err := bw.Flush(); err != nil {
-		return "", fmt.Errorf("failed to flush interactions log: %w", err)
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		return "", fmt.Errorf("failed to write interactions log entry: %w", err)
 	}
 
 	return e.ID, nil
