@@ -324,9 +324,12 @@ bd create "Test issue" -p 1
 bd ready
 ```
 
-> **WARNING**: Do NOT use `go build -o bd ./cmd/bd` or `go install ./cmd/bd`.
-> These create stale binaries in the working directory or `~/go/bin/` that
-> shadow the canonical install at `~/.local/bin/bd`. Always use `make install`.
+> **WARNING**: Do NOT use `go build -o bd ./cmd/bd`, `go install ./cmd/bd`,
+> or raw `go run ./cmd/bd ...`.
+> These bypass the canonical build path, can create stale binaries in the
+> working directory or `~/go/bin/`, and raw `go run` may miss the required
+> `gms_pure_go` build tag. Always use `make install`, `./bd`, or
+> `go run -tags gms_pure_go ./cmd/bd ...` when you explicitly need `go run`.
 
 ## Version Management
 
