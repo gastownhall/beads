@@ -1348,9 +1348,10 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 	// Check for existing Dolt database
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendDolt {
 		// Embedded mode stores databases under `.beads/embeddeddolt/<db>/`.
-		// Treat any present embedded DB as "already initialized" (guard against
-		// accidental re-init / data loss).
-		if isEmbeddedMode() {
+		// Use the target workspace metadata rather than ambient process state so
+		// init guards remain deterministic even when another test or earlier
+		// command has rebound global server-mode state.
+		if !cfg.IsDoltServerMode() {
 			embeddedRoot := filepath.Join(beadsDir, "embeddeddolt")
 			entries, err := os.ReadDir(embeddedRoot)
 			if err != nil {

@@ -177,11 +177,10 @@ func repairSharedServerEmbeddedMismatch(beadsDir string, cfg *configfile.Config)
 	}
 }
 
-// loadServerModeFromConfig loads the storage mode (embedded vs server) from
-// metadata.json so that isEmbeddedMode() returns the correct value. Called
-// for commands that skip full DB init but still need to know the mode.
-func loadServerModeFromConfig() {
-	beadsDir := beads.FindBeadsDir()
+// loadServerModeFromBeadsDir loads the storage mode (embedded vs server) from
+// the given beads directory's metadata.json so that isEmbeddedMode() returns
+// the correct value.
+func loadServerModeFromBeadsDir(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
@@ -201,6 +200,13 @@ func loadServerModeFromConfig() {
 	}
 }
 
+// loadServerModeFromConfig loads the storage mode (embedded vs server) from
+// metadata.json so that isEmbeddedMode() returns the correct value. Called
+// for commands that skip full DB init but still need to know the mode.
+func loadServerModeFromConfig() {
+	loadServerModeFromBeadsDir(beads.FindBeadsDir())
+}
+
 func preserveRedirectSourceDatabase(beadsDir string) {
 	if beadsDir == "" || os.Getenv("BEADS_DOLT_SERVER_DATABASE") != "" {
 		return
@@ -215,9 +221,11 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 	}
 }
 
-func selectedNoDBBeadsDir() string {
+func selectedNoDBBeadsDir(cmd *cobra.Command) string {
 	selectedDBPath := ""
-	if rootCmd.PersistentFlags().Changed("db") && dbPath != "" {
+	if cmd != nil && cmd.Root() != nil && cmd.Root().PersistentFlags().Changed("db") && dbPath != "" {
+		selectedDBPath = dbPath
+	} else if cmd != nil && cmd.PersistentFlags().Changed("db") && dbPath != "" {
 		selectedDBPath = dbPath
 	} else if envDB := os.Getenv("BEADS_DB"); envDB != "" {
 		selectedDBPath = envDB
@@ -288,15 +296,49 @@ func configCommandCanRunWithoutStore(cmd *cobra.Command, args []string) bool {
 	}
 }
 
-func prepareSelectedNoDBContext(beadsDir string) {
+func prepareSelectedCommandContext(beadsDir string, loadEnv bool) {
 	if beadsDir == "" {
 		return
 	}
 	_ = os.Setenv("BEADS_DIR", beadsDir)
-	loadBeadsEnvFile(beadsDir)
+	if loadEnv {
+		loadBeadsEnvFile(beadsDir)
+	}
 	preserveRedirectSourceDatabase(beadsDir)
 	if err := config.Initialize(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reinitialize config for selected beads dir: %v\n", err)
+	}
+	config.CheckBeadsDirPermissions(beadsDir)
+	loadServerModeFromBeadsDir(beadsDir)
+}
+
+func prepareSelectedNoDBContext(beadsDir string) {
+	prepareSelectedCommandContext(beadsDir, true)
+}
+
+// refreshBoundCommandConfig reapplies config-backed defaults after the command
+// context has been rebound to a resolved target beads directory. This keeps
+// explicit flags authoritative while letting rerouted/explicit-db commands use
+// the target repo's config rather than the caller's config.
+func refreshBoundCommandConfig(cmd *cobra.Command) {
+	if cmd == nil {
+		return
+	}
+	root := cmd.Root()
+	if root == nil {
+		root = cmd
+	}
+	if !root.PersistentFlags().Changed("json") && !root.PersistentFlags().Changed("format") {
+		jsonOutput = config.GetBool("json")
+	}
+	if !root.PersistentFlags().Changed("readonly") {
+		readonlyMode = config.GetBool("readonly")
+	}
+	if !root.PersistentFlags().Changed("actor") {
+		actor = config.GetString("actor")
+	}
+	if !root.PersistentFlags().Changed("dolt-auto-commit") {
+		doltAutoCommit = config.GetString("dolt.auto-commit")
 	}
 }
 
@@ -545,21 +587,18 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Validate Dolt auto-commit mode early so all commands fail fast on invalid config.
-		if _, err := getDoltAutoCommitMode(); err != nil {
-			FatalError("%v", err)
-		}
+		selectedNoDBCommand := isSelectedNoDBCommand(cmd)
 
-		// GH#2677: Load .beads/.env before the noDbCommands early return so that
-		// commands like "bd doctor --server" pick up per-project Dolt credentials.
-		if !isSelectedNoDBCommand(cmd) {
-			loadEnvironment()
+		// Commands that skip store initialization still need their config/env
+		// rebound to the selected workspace before they inspect server mode or
+		// other startup settings.
+		if selectedNoDBCommand {
+			prepareSelectedNoDBContext(selectedNoDBBeadsDir(cmd))
+			refreshBoundCommandConfig(cmd)
+			if _, err := getDoltAutoCommitMode(); err != nil {
+				FatalError("%v", err)
+			}
 		}
-
-		// Load storage mode (embedded vs server) early so that isEmbeddedMode()
-		// returns the correct value for all commands, including those that skip
-		// full DB initialization (e.g., bd dolt status, bd doctor, bd bootstrap).
-		loadServerModeFromConfig()
 
 		// GH#1093: Check noDbCommands BEFORE expensive operations
 		// to avoid spawning git subprocesses for simple commands
@@ -654,7 +693,9 @@ var rootCmd = &cobra.Command{
 		// When .beads/redirect points to a shared directory with a different
 		// dolt_database, the source's database name would be lost. Capture it
 		// early and set BEADS_DOLT_SERVER_DATABASE so all store opens use it.
-		preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+		if dbPath == "" {
+			preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+		}
 
 		// Initialize database path
 		if dbPath == "" {
@@ -694,6 +735,13 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		beadsDir := resolveCommandBeadsDir(dbPath)
+		prepareSelectedCommandContext(beadsDir, true)
+		refreshBoundCommandConfig(cmd)
+		if _, err := getDoltAutoCommitMode(); err != nil {
+			FatalError("%v", err)
+		}
+
 		// Set actor for audit trail
 		actor = getActorWithGit()
 		// Attach actor to the command span now that we have it.
@@ -715,7 +763,6 @@ var rootCmd = &cobra.Command{
 		// opens its own store connection, writes the version metadata, commits it,
 		// and closes BEFORE the main store is opened. This ensures bd doctor and
 		// read-only commands see the correct version after a CLI upgrade.
-		beadsDir := resolveCommandBeadsDir(dbPath)
 
 		autoMigrateOnVersionBump(beadsDir)
 

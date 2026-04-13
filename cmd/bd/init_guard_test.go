@@ -279,6 +279,39 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 		}
 	})
 
+	t.Run("embedded_metadata_ignores_ambient_shared_server_mode", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		metadata := map[string]interface{}{
+			"database":  "dolt",
+			"backend":   "dolt",
+			"dolt_mode": "embedded",
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		dbDir := filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt")
+		if err := os.MkdirAll(dbDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Error("existing embedded database should still block init when shared server mode is enabled elsewhere")
+		}
+		if err != nil && !strings.Contains(err.Error(), "already initialized") {
+			t.Errorf("expected 'already initialized' message, got: %v", err)
+		}
+	})
+
 	t.Run("no_metadata_json_allows_init", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")

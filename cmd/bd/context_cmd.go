@@ -51,7 +51,7 @@ Examples:
 		}
 
 		// Resolve repo context (works without DB open)
-		if selected := selectedNoDBBeadsDir(); selected != "" {
+		if selected := selectedNoDBBeadsDir(cmd); selected != "" {
 			prepareSelectedNoDBContext(selected)
 		}
 
