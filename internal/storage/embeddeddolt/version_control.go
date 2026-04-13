@@ -48,6 +48,13 @@ func (s *EmbeddedDoltStore) Commit(ctx context.Context, message string) error {
 	})
 }
 
+// CommitWithConfig commits all working set changes including config.
+// EmbeddedDoltStore.Commit already includes config via DOLT_ADD('-A'),
+// so this is just an alias to satisfy the VersionControl interface (GH#3216).
+func (s *EmbeddedDoltStore) CommitWithConfig(ctx context.Context, message string) error {
+	return s.Commit(ctx, message)
+}
+
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)

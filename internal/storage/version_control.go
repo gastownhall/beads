@@ -34,6 +34,10 @@ type VersionControl interface {
 	DeleteBranch(ctx context.Context, branch string) error
 	ListBranches(ctx context.Context) ([]string, error)
 	Commit(ctx context.Context, message string) error
+	// CommitWithConfig is like Commit but includes the config table.
+	// Use after intentional config writes (bd init, bd config set, bd rename-prefix).
+	// GH#3216: bootstrap paths must use this to commit issue_prefix.
+	CommitWithConfig(ctx context.Context, message string) error
 	CommitPending(ctx context.Context, actor string) (bool, error)
 	CommitExists(ctx context.Context, commitHash string) (bool, error)
 	GetCurrentCommit(ctx context.Context) (string, error)

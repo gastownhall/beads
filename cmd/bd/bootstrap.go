@@ -404,7 +404,7 @@ func executeInitAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := s.Commit(ctx, "bd bootstrap"); err != nil {
+	if err := s.CommitWithConfig(ctx, "bd bootstrap"); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 
@@ -431,7 +431,7 @@ func executeRestoreAction(ctx context.Context, plan BootstrapPlan, cfg *configfi
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := s.Commit(ctx, "bd bootstrap: init"); err != nil {
+	if err := s.CommitWithConfig(ctx, "bd bootstrap: init"); err != nil {
 		return fmt.Errorf("commit init: %w", err)
 	}
 
@@ -462,7 +462,7 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		return fmt.Errorf("set issue prefix: %w", err)
 	}
-	if err := s.Commit(ctx, "bd bootstrap: init"); err != nil {
+	if err := s.CommitWithConfig(ctx, "bd bootstrap: init"); err != nil {
 		return fmt.Errorf("commit init: %w", err)
 	}
 
