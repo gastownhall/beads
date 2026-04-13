@@ -27,7 +27,7 @@ type flagSnapshot struct {
 
 func snapshotRootFlagState() map[string]flagSnapshot {
 	state := map[string]flagSnapshot{}
-	for _, name := range []string{"json", "format", "readonly", "actor", "dolt-auto-commit"} {
+	for _, name := range []string{"db", "json", "format", "readonly", "actor", "dolt-auto-commit"} {
 		flag := rootCmd.PersistentFlags().Lookup(name)
 		if flag == nil {
 			continue
