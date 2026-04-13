@@ -750,16 +750,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// naming to avoid cross-rig contamination (bd-u8rda). Only set prefix-based
 				// name if not already configured — overwriting a user-renamed database
 				// creates phantom catalog entries that crash information_schema (GH#2051).
-			if database != "" {
-				cfg.DoltDatabase = database
-			} else if cfg.DoltDatabase == "" && prefix != "" {
-				// Sanitize hyphens and dots to underscores for SQL-idiomatic names (GH#2142).
-				// Must match the sanitization applied to dbName above (lines 430-431),
-				// otherwise init creates a database with one name but metadata.json
-				// records a different name, causing reopens to fail.
-				cfg.DoltDatabase = strings.ReplaceAll(prefix, "-", "_")
-				cfg.DoltDatabase = strings.ReplaceAll(cfg.DoltDatabase, ".", "_")
-			}
+				if database != "" {
+					cfg.DoltDatabase = database
+				} else if cfg.DoltDatabase == "" && prefix != "" {
+					// Sanitize hyphens and dots to underscores for SQL-idiomatic names (GH#2142).
+					// Must match the sanitization applied to dbName above (lines 430-431),
+					// otherwise init creates a database with one name but metadata.json
+					// records a different name, causing reopens to fail.
+					cfg.DoltDatabase = strings.ReplaceAll(prefix, "-", "_")
+					cfg.DoltDatabase = strings.ReplaceAll(cfg.DoltDatabase, ".", "_")
+				}
 
 				// Set global database name for shared-server mode projects.
 				// This gives each project the connection info to reach beads_global.
