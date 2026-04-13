@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func runGitForFormulaTest(t *testing.T, dir string, args ...string) {
@@ -108,6 +109,9 @@ func TestDefaultSearchPaths_UsesResolvedBeadsDirForWorktree(t *testing.T) {
 	}
 
 	runGitForFormulaTest(t, mainRepo, "init")
+	if err := testutil.ForceRepoLocalHooksPath(mainRepo); err != nil {
+		t.Fatalf("force repo-local hooks path: %v", err)
+	}
 	runGitForFormulaTest(t, mainRepo, "config", "user.email", "test@example.com")
 	runGitForFormulaTest(t, mainRepo, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(mainRepo, "README.md"), []byte("# Test\n"), 0o644); err != nil {
