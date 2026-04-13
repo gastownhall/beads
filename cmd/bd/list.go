@@ -151,14 +151,19 @@ func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore
 	displayPrettyListWithDeps(issues, true, allDeps)
 }
 
-func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, parentID string, sortBy string, reverse bool) {
+func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, parentID string, sortBy string, reverse bool, effectiveLimit int) {
 	// Initial display
 	issues, err := loadWatchedIssues(ctx, store, filter, parentID, sortBy, reverse)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error querying issues: %v\n", err)
 		return
 	}
+	truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
+	if truncated {
+		issues = issues[:effectiveLimit]
+	}
 	displayWatchedIssueList(ctx, store, issues)
+	printTruncationHint(truncated, effectiveLimit)
 	lastSnapshot := issueSnapshot(issues)
 
 	fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
@@ -183,10 +188,15 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 				fmt.Fprintf(os.Stderr, "Error refreshing issues: %v\n", err)
 				continue
 			}
+			truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
+			if truncated {
+				issues = issues[:effectiveLimit]
+			}
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
 				displayWatchedIssueList(ctx, store, issues)
+				printTruncationHint(truncated, effectiveLimit)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
 		}
@@ -849,7 +859,7 @@ var listCmd = &cobra.Command{
 
 		// Handle watch mode (GH#654) - must be before other output modes
 		if watchMode {
-			watchIssues(ctx, activeStore, filter, parentID, sortBy, reverse)
+			watchIssues(ctx, activeStore, filter, parentID, sortBy, reverse, effectiveLimit)
 			return
 		}
 
