@@ -16,6 +16,10 @@ We will respond within 48 hours and work with you to address the issue.
 
 ## Security Considerations
 
+### Federation Security
+
+For multi-remote federation deployments, see [docs/FEDERATION-SECURITY.md](docs/FEDERATION-SECURITY.md) — covers credential isolation, pull trust ordering, partial push failure states, and log sanitization.
+
 ### Database Security
 
 bd stores issue data locally in a Dolt database (`.beads/dolt/`), which is gitignored.
