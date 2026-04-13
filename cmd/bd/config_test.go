@@ -391,7 +391,7 @@ federation:
 		issues := validateSyncConfig(tmpDir)
 		found := false
 		for _, issue := range issues {
-			if strings.Contains(issue, "federation.remote") && strings.Contains(issue, "not a valid remote URL") {
+			if strings.Contains(issue, "federation.remote") && (strings.Contains(issue, "not a valid remote URL") || strings.Contains(issue, "no scheme") || strings.Contains(issue, "not allowed")) {
 				found = true
 				break
 			}
@@ -418,6 +418,66 @@ federation:
 		issues := validateSyncConfig(tmpDir)
 		if len(issues) != 0 {
 			t.Errorf("Expected no issues for valid config, got: %v", issues)
+		}
+	})
+
+	t.Run("remote URL with null byte", func(t *testing.T) {
+		configContent := "prefix: test\nfederation:\n  remote: \"dolthub://org/repo\\x00evil\"\n"
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configContent), 0644); err != nil {
+			t.Fatalf("Failed to write config.yaml: %v", err)
+		}
+
+		issues := validateSyncConfig(tmpDir)
+		found := false
+		for _, issue := range issues {
+			if strings.Contains(issue, "federation.remote") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected issue about invalid remote URL with null byte, got: %v", issues)
+		}
+	})
+
+	t.Run("allowed-remote-patterns enforcement", func(t *testing.T) {
+		configContent := `prefix: test
+federation:
+  remote: "https://github.com/user/repo"
+  allowed-remote-patterns:
+    - "dolthub://myorg/*"
+`
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configContent), 0644); err != nil {
+			t.Fatalf("Failed to write config.yaml: %v", err)
+		}
+
+		issues := validateSyncConfig(tmpDir)
+		found := false
+		for _, issue := range issues {
+			if strings.Contains(issue, "does not match") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected issue about remote not matching allowed patterns, got: %v", issues)
+		}
+	})
+
+	t.Run("allowed-remote-patterns passes when matching", func(t *testing.T) {
+		configContent := `prefix: test
+federation:
+  remote: "dolthub://myorg/myrepo"
+  allowed-remote-patterns:
+    - "dolthub://myorg/*"
+`
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configContent), 0644); err != nil {
+			t.Fatalf("Failed to write config.yaml: %v", err)
+		}
+
+		issues := validateSyncConfig(tmpDir)
+		if len(issues) != 0 {
+			t.Errorf("Expected no issues when remote matches allowed pattern, got: %v", issues)
 		}
 	})
 }

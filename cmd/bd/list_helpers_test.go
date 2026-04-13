@@ -3,12 +3,24 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type watchListDependencyStoreStub struct {
+	allDeps map[string][]*types.Dependency
+	err     error
+}
+
+func (s watchListDependencyStoreStub) GetAllDependencyRecords(_ context.Context) (map[string][]*types.Dependency, error) {
+	return s.allDeps, s.err
+}
 
 func TestListParseTimeFlag(t *testing.T) {
 	cases := []string{
@@ -213,5 +225,99 @@ func TestListDisplayPrettyList(t *testing.T) {
 	})
 	if !strings.Contains(out, "bd-1") || !strings.Contains(out, "bd-1.1") || !strings.Contains(out, "Total:") {
 		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestDisplayWatchedIssueList_UsesDependencyHierarchy(t *testing.T) {
+	parent := &types.Issue{ID: "bd-zparent", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	child := &types.Issue{ID: "bd-achild", Title: "Child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	store := watchListDependencyStoreStub{
+		allDeps: map[string][]*types.Dependency{
+			child.ID: {
+				{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild},
+			},
+		},
+	}
+
+	out := captureStdout(t, func() error {
+		displayWatchedIssueList(context.Background(), store, []*types.Issue{child, parent})
+		return nil
+	})
+
+	parentLine := strings.Index(out, "bd-zparent")
+	childLine := strings.Index(out, "└──")
+	if parentLine == -1 || childLine == -1 {
+		t.Fatalf("expected parent root and child connector in output, got:\n%s", out)
+	}
+	if childLine < parentLine {
+		t.Fatalf("expected child to render under parent in watch output, got:\n%s", out)
+	}
+	if strings.Contains(out, "\nbd-achild ") || strings.HasPrefix(out, "bd-achild ") {
+		t.Fatalf("expected child not to render as a root in watch output, got:\n%s", out)
+	}
+}
+
+func TestLoadWatchedIssues_WithParentIncludesHierarchyAndStableOrder(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	store := newTestStore(t, testDB)
+
+	createIssue := func(title string, issueType types.IssueType) *types.Issue {
+		issue := &types.Issue{
+			Title:     title,
+			Priority:  2,
+			IssueType: issueType,
+			Status:    types.StatusOpen,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("Failed to create issue %s: %v", title, err)
+		}
+		return issue
+	}
+
+	addParentChild := func(child, parent *types.Issue) {
+		dep := &types.Dependency{
+			IssueID:     child.ID,
+			DependsOnID: parent.ID,
+			Type:        types.DepParentChild,
+			CreatedAt:   time.Now(),
+			CreatedBy:   "test-user",
+		}
+		if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+			t.Fatalf("Failed to add dependency %s -> %s: %v", child.ID, parent.ID, err)
+		}
+	}
+
+	parent := createIssue("Parent epic", types.TypeEpic)
+	child := createIssue("Child task", types.TypeTask)
+	grandchild := createIssue("Grandchild task", types.TypeTask)
+	addParentChild(child, parent)
+	addParentChild(grandchild, child)
+
+	filter := types.IssueFilter{ParentID: &parent.ID}
+	first, err := loadWatchedIssues(ctx, store, filter, parent.ID, "", false)
+	if err != nil {
+		t.Fatalf("loadWatchedIssues first call failed: %v", err)
+	}
+	second, err := loadWatchedIssues(ctx, store, filter, parent.ID, "", false)
+	if err != nil {
+		t.Fatalf("loadWatchedIssues second call failed: %v", err)
+	}
+
+	if len(first) != 3 {
+		t.Fatalf("expected parent path to include parent and descendants, got %d issues", len(first))
+	}
+
+	firstIDs := []string{first[0].ID, first[1].ID, first[2].ID}
+	secondIDs := []string{second[0].ID, second[1].ID, second[2].ID}
+	if !slices.Equal(firstIDs, secondIDs) {
+		t.Fatalf("expected stable watched issue ordering, got %v then %v", firstIDs, secondIDs)
+	}
+
+	wantIDs := []string{parent.ID, child.ID, grandchild.ID}
+	slices.Sort(wantIDs)
+	if !slices.Equal(firstIDs, wantIDs) {
+		t.Fatalf("expected watched issues to be normalized by id for snapshot stability, got %v want %v", firstIDs, wantIDs)
 	}
 }

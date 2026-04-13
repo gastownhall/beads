@@ -40,6 +40,10 @@ create, update, show, or close operation).`,
 		}
 
 		updates := make(map[string]interface{})
+		// clearDeferStatus: set per-issue in the update loop when --defer=""
+		// was given without an explicit --status, to flip status=deferred back
+		// to open (matches the help text's "show in bd ready immediately").
+		var clearDeferStatus bool
 
 		if cmd.Flags().Changed("status") {
 			status, _ := cmd.Flags().GetString("status")
@@ -204,20 +208,32 @@ create, update, show, or close operation).`,
 		if cmd.Flags().Changed("defer") {
 			deferStr, _ := cmd.Flags().GetString("defer")
 			if deferStr == "" {
-				// Empty string clears the defer_until
+				// Empty string clears the defer_until and restores ready-work
+				// visibility (GH#3233). Explicit --status still wins.
 				updates["defer_until"] = nil
+				if _, ok := updates["status"]; !ok {
+					clearDeferStatus = true
+				}
 			} else {
 				t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 				if err != nil {
 					FatalErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
 				}
 				// Warn if defer date is in the past (user probably meant future)
-				if t.Before(time.Now()) && !jsonOutput {
+				inPast := t.Before(time.Now())
+				if inPast && !jsonOutput {
 					fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
 						ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
 					fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --defer=+1h or --defer=tomorrow\n")
 				}
 				updates["defer_until"] = t
+				// Align with `bd defer`: set status=deferred so the ❄ icon
+				// shows and the issue leaves the ready queue (GH#3233).
+				// Skip for past dates so the "appears in bd ready immediately"
+				// warning stays truthful, and skip if --status was set explicitly.
+				if _, ok := updates["status"]; !ok && !inPast {
+					updates["status"] = string(types.StatusDeferred)
+				}
 			}
 		}
 		// Ephemeral/persistent flags
@@ -335,6 +351,12 @@ create, update, show, or close operation).`,
 					k != "_set_metadata" && k != "_unset_metadata" {
 					regularUpdates[k] = v
 				}
+			}
+			// GH#3233: --defer="" restores ready visibility only if the issue
+			// was actually deferred. Other statuses (blocked, in_progress, …)
+			// shouldn't be clobbered just because defer_until was stale.
+			if clearDeferStatus && issue.Status == types.StatusDeferred {
+				regularUpdates["status"] = string(types.StatusOpen)
 			}
 
 			// Handle --metadata: merge with existing metadata instead of replacing

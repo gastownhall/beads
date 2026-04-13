@@ -283,6 +283,20 @@ func TestEmbeddedUpdate(t *testing.T) {
 		if got.DeferUntil == nil {
 			t.Error("expected defer_until to be set")
 		}
+		// GH#3233: --defer should also set status=deferred for consistency with `bd defer`
+		if string(got.Status) != "deferred" {
+			t.Errorf("expected status=deferred, got %q", got.Status)
+		}
+	})
+
+	t.Run("update_defer_respects_explicit_status", func(t *testing.T) {
+		// GH#3233: explicit --status should win over the implicit deferred set by --defer
+		issue := bdCreate(t, bd, dir, "Defer+status test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--defer", "2099-01-15", "--status", "in_progress")
+		got := bdShow(t, bd, dir, issue.ID)
+		if string(got.Status) != "in_progress" {
+			t.Errorf("expected explicit status=in_progress to win, got %q", got.Status)
+		}
 	})
 
 	t.Run("update_defer_clear", func(t *testing.T) {
@@ -292,6 +306,33 @@ func TestEmbeddedUpdate(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.DeferUntil != nil {
 			t.Error("expected defer_until to be cleared")
+		}
+		// GH#3233: clearing defer on a deferred issue must restore ready visibility
+		if string(got.Status) != "open" {
+			t.Errorf("expected status=open after clearing defer, got %q", got.Status)
+		}
+	})
+
+	t.Run("update_defer_past_date_keeps_status_open", func(t *testing.T) {
+		// GH#3233: past-date --defer shouldn't flip status to deferred, because
+		// the warning promises the issue "will appear in bd ready immediately".
+		issue := bdCreate(t, bd, dir, "Past defer test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--defer", "2000-01-01")
+		got := bdShow(t, bd, dir, issue.ID)
+		if string(got.Status) == "deferred" {
+			t.Errorf("past --defer should not set status=deferred, got %q", got.Status)
+		}
+	})
+
+	t.Run("update_defer_clear_preserves_non_deferred_status", func(t *testing.T) {
+		// GH#3233: clearing defer_until shouldn't clobber a non-deferred status
+		// that was set independently (e.g. in_progress).
+		issue := bdCreate(t, bd, dir, "Defer clear keep status test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--status", "in_progress")
+		bdUpdate(t, bd, dir, issue.ID, "--defer", "")
+		got := bdShow(t, bd, dir, issue.ID)
+		if string(got.Status) != "in_progress" {
+			t.Errorf("expected status=in_progress to be preserved, got %q", got.Status)
 		}
 	})
 

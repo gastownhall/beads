@@ -3,10 +3,83 @@ package formula
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/testutil"
 )
+
+func resetFormulaSearchCaches() {
+	beads.ResetCaches()
+	git.ResetCaches()
+}
+
+func resetFormulaSearchTestContext(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("GT_ROOT", "")
+	resetFormulaSearchCaches()
+	t.Cleanup(resetFormulaSearchCaches)
+}
+
+func runGitForFormulaTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+}
+
+func initFormulaTestRepo(t *testing.T, repoDir string) {
+	t.Helper()
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runGitForFormulaTest(t, repoDir, "init")
+	if err := testutil.ForceRepoLocalHooksPath(repoDir); err != nil {
+		t.Fatalf("force repo-local hooks path: %v", err)
+	}
+	runGitForFormulaTest(t, repoDir, "config", "user.email", "test@example.com")
+	runGitForFormulaTest(t, repoDir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForFormulaTest(t, repoDir, "add", "README.md")
+	runGitForFormulaTest(t, repoDir, "commit", "-m", "init")
+}
+
+func writeFormulaFixture(t *testing.T, dir, formulaName, description string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	formulaPath := filepath.Join(dir, formulaName+FormulaExtTOML)
+	content := fmt.Sprintf(
+		"formula = %q\ndescription = %q\n[[steps]]\nid = \"step1\"\ntitle = \"Step 1\"\n",
+		formulaName,
+		description,
+	)
+	if err := os.WriteFile(formulaPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return formulaPath
+}
+
+func canonicalTestPath(path string) string {
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return resolved
+}
 
 func TestParse_BasicFormula(t *testing.T) {
 	jsonData := `{
@@ -74,6 +147,76 @@ func TestParse_BasicFormula(t *testing.T) {
 	}
 	if formula.Steps[1].DependsOn[0] != "design" {
 		t.Errorf("Steps[1].DependsOn = %v, want [design]", formula.Steps[1].DependsOn)
+	}
+}
+
+func TestDefaultSearchPaths_UsesResolvedBeadsDirForWorktree(t *testing.T) {
+	resetFormulaSearchTestContext(t)
+
+	root := t.TempDir()
+	mainRepo := filepath.Join(root, "main-repo")
+	initFormulaTestRepo(t, mainRepo)
+
+	worktreeDir := filepath.Join(root, "worktree")
+	runGitForFormulaTest(t, mainRepo, "worktree", "add", worktreeDir, "HEAD")
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd.Dir = mainRepo
+		_ = cmd.Run()
+	})
+
+	mainFormulaDir := filepath.Join(mainRepo, ".beads", "formulas")
+	if err := os.MkdirAll(filepath.Join(mainRepo, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFormulaFixture(t, mainFormulaDir, "shared", "shared formula")
+
+	t.Chdir(worktreeDir)
+	resetFormulaSearchCaches()
+
+	paths := DefaultSearchPaths()
+	if len(paths) == 0 {
+		t.Fatal("DefaultSearchPaths() returned no paths")
+	}
+
+	gotResolved := canonicalTestPath(paths[0])
+	wantResolved := canonicalTestPath(filepath.Join(mainRepo, ".beads", "formulas"))
+	if gotResolved != wantResolved {
+		t.Fatalf("DefaultSearchPaths()[0] = %q, want %q", gotResolved, wantResolved)
+	}
+
+	parser := NewParser()
+	f, err := parser.LoadByName("shared")
+	if err != nil {
+		t.Fatalf("LoadByName(shared) failed: %v", err)
+	}
+	if !strings.HasPrefix(f.Source, wantResolved) {
+		t.Fatalf("formula source = %q, want prefix %q", f.Source, wantResolved)
+	}
+}
+
+func TestDefaultSearchPaths_FallsBackToCwdFormulaDirWithoutBeadsProject(t *testing.T) {
+	resetFormulaSearchTestContext(t)
+
+	root := t.TempDir()
+	formulaDir := filepath.Join(root, ".beads", "formulas")
+	writeFormulaFixture(t, formulaDir, "local-only", "cwd fallback")
+
+	t.Chdir(root)
+	resetFormulaSearchCaches()
+
+	paths := DefaultSearchPaths()
+	if len(paths) == 0 {
+		t.Fatal("DefaultSearchPaths() returned no paths")
+	}
+	want := filepath.Join(root, ".beads", "formulas")
+	if filepath.Clean(paths[0]) != filepath.Clean(want) {
+		t.Fatalf("DefaultSearchPaths()[0] = %q, want %q", paths[0], want)
+	}
+
+	parser := NewParser()
+	if _, err := parser.LoadByName("local-only"); err != nil {
+		t.Fatalf("LoadByName(local-only) failed: %v", err)
 	}
 }
 
