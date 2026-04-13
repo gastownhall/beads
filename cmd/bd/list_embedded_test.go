@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -36,12 +37,14 @@ func bdListJSON(t *testing.T, bd, dir string, args ...string) []*types.IssueWith
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd list --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	// Find the JSON array in the output (skip any non-JSON preamble)
-	s := string(out)
+	// Parse stdout only; hints/warnings (e.g. truncation) go to stderr (GH#3212).
+	s := stdout.String()
 	start := strings.Index(s, "[")
 	if start < 0 {
 		// Empty list returns "[]" or possibly "null"
@@ -55,6 +58,22 @@ func bdListJSON(t *testing.T, bd, dir string, args ...string) []*types.IssueWith
 		t.Fatalf("failed to parse JSON list output: %v\nraw: %s", err, s[start:])
 	}
 	return issues
+}
+
+// bdListCapture runs "bd list" and returns (stdout, stderr) separately.
+func bdListCapture(t *testing.T, bd, dir string, args ...string) (string, string) {
+	t.Helper()
+	fullArgs := append([]string{"list"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String(), stderr.String()
 }
 
 // bdListFail runs "bd list" expecting failure.
@@ -181,6 +200,31 @@ func TestEmbeddedList(t *testing.T) {
 		issues := bdListJSON(t, bd, dir, "--limit", "2")
 		if len(issues) != 2 {
 			t.Errorf("expected 2 issues with --limit 2, got %d", len(issues))
+		}
+	})
+
+	t.Run("limit_truncation_hint", func(t *testing.T) {
+		// Truncated: --limit < seeded count should emit stderr hint (GH#3212).
+		stdout, stderr := bdListCapture(t, bd, dir, "--limit", "2")
+		if !strings.Contains(stderr, "more results matched") {
+			t.Errorf("expected truncation hint on stderr, got:\nstderr: %q\nstdout: %q", stderr, stdout)
+		}
+		// The hint must go to stderr only, not stdout, so JSON consumers can parse stdout cleanly.
+		if strings.Contains(stdout, "more results matched") {
+			t.Errorf("truncation hint leaked into stdout:\n%s", stdout)
+		}
+
+		// Not truncated: --limit 0 (unlimited) must not emit the hint.
+		_, stderrAll := bdListCapture(t, bd, dir, "--limit", "0")
+		if strings.Contains(stderrAll, "more results matched") {
+			t.Errorf("unexpected truncation hint with --limit 0:\n%s", stderrAll)
+		}
+
+		// Not truncated: exact count match (we seed 12 issues, closed ones excluded by default).
+		// Use a generous --limit that exceeds any default view.
+		_, stderrHigh := bdListCapture(t, bd, dir, "--limit", "1000")
+		if strings.Contains(stderrHigh, "more results matched") {
+			t.Errorf("false-positive truncation hint when under limit:\n%s", stderrHigh)
 		}
 	})
 
