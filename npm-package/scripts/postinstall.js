@@ -64,14 +64,37 @@ function downloadFile(url, dest) {
       if (response.statusCode === 301 || response.statusCode === 302) {
         const redirectUrl = response.headers.location;
         console.log(`Following redirect to: ${redirectUrl}`);
-        downloadFile(redirectUrl, dest).then(resolve).catch(reject);
+        response.destroy();
+        request.destroy();
+        file.close((closeErr) => {
+          if (closeErr) {
+            fs.unlink(dest, () => {});
+            reject(closeErr);
+            return;
+          }
+          fs.unlink(dest, () => {});
+          downloadFile(redirectUrl, dest).then(resolve).catch(reject);
+        });
         return;
       }
 
       if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
+        const error = new Error(`Failed to download: HTTP ${response.statusCode}`);
+        response.destroy();
+        request.destroy();
+        file.close(() => {
+          fs.unlink(dest, () => {});
+          reject(error);
+        });
         return;
       }
+
+      response.on('error', (err) => {
+        file.close(() => {
+          fs.unlink(dest, () => {});
+          reject(err);
+        });
+      });
 
       response.pipe(file);
 
@@ -80,7 +103,10 @@ function downloadFile(url, dest) {
         // This is critical on Windows where the file may still be locked
         file.close((err) => {
           if (err) reject(err);
-          else resolve();
+          else {
+            response.destroy();
+            resolve();
+          }
         });
       });
     });
@@ -137,7 +163,7 @@ async function waitForFileAccess(filePath, timeoutMs = 30000) {
 
   while (Date.now() - startTime < timeoutMs) {
     try {
-      const fd = fs.openSync(filePath, 'r');
+      const fd = fs.openSync(filePath, 'r+');
       fs.closeSync(fd);
       return; // File is accessible
     } catch (err) {
