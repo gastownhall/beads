@@ -181,3 +181,25 @@ func TestLoadSelectionEnvironmentUsesAmbientEnvFileForBEADSDB(t *testing.T) {
 		t.Fatalf("FindDatabasePath() = %q, want %q", got, targetDBPath)
 	}
 }
+
+func TestSelectedDoltBeadsDirUsesReboundBEADSDir(t *testing.T) {
+	callerRepo := filepath.Join(t.TempDir(), "caller")
+	callerBeadsDir := filepath.Join(callerRepo, ".beads")
+	writeTestConfigYAML(t, callerBeadsDir, "")
+
+	targetRepo := filepath.Join(t.TempDir(), "target")
+	targetBeadsDir := filepath.Join(targetRepo, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "")
+	targetDBPath := filepath.Join(targetBeadsDir, "dolt")
+	if err := os.MkdirAll(targetDBPath, 0o700); err != nil {
+		t.Fatalf("mkdir target db dir: %v", err)
+	}
+
+	t.Chdir(callerRepo)
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+	t.Setenv("BEADS_DB", filepath.Join(callerBeadsDir, "dolt"))
+
+	if got := selectedDoltBeadsDir(); utils.CanonicalizePath(got) != utils.CanonicalizePath(targetBeadsDir) {
+		t.Fatalf("selectedDoltBeadsDir() = %q, want %q", got, targetBeadsDir)
+	}
+}

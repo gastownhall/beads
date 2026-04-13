@@ -258,20 +258,30 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 }
 
 func selectedNoDBBeadsDir(cmd *cobra.Command) string {
-	selectedDBPath := ""
 	if cmd != nil && cmd.Root() != nil && cmd.Root().PersistentFlags().Changed("db") && dbPath != "" {
-		selectedDBPath = dbPath
+		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
 	} else if cmd != nil && cmd.PersistentFlags().Changed("db") && dbPath != "" {
-		selectedDBPath = dbPath
+		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
 	} else if envDB := os.Getenv("BEADS_DB"); envDB != "" {
-		selectedDBPath = envDB
+		if selectedBeadsDir := resolveCommandBeadsDir(envDB); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
 	} else if envDB := os.Getenv("BD_DB"); envDB != "" {
-		selectedDBPath = envDB
-	} else {
-		selectedDBPath = dbPath
+		if selectedBeadsDir := resolveCommandBeadsDir(envDB); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
 	}
-	if selectedDBPath != "" {
-		if selectedBeadsDir := resolveCommandBeadsDir(selectedDBPath); selectedBeadsDir != "" {
+	if os.Getenv("BEADS_DIR") != "" {
+		if selectedBeadsDir := beads.FindBeadsDir(); selectedBeadsDir != "" {
+			return selectedBeadsDir
+		}
+	}
+	if dbPath != "" {
+		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
 			return selectedBeadsDir
 		}
 	}
