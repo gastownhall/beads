@@ -96,6 +96,66 @@ func (s *EmbeddedDoltStore) GetInboxItem(ctx context.Context, inboxID string) (*
 	return &item, nil
 }
 
+func (s *EmbeddedDoltStore) GetInboxItemByPrefix(ctx context.Context, prefix string) (*types.InboxItem, error) {
+	var items []*types.InboxItem
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT inbox_id, sender_project_id, sender_issue_id, title, description,
+				priority, issue_type, status, labels, metadata, sender_ref,
+				imported_issue_id, rejection_reason,
+				created_at, imported_at, rejected_at, expires_at
+			FROM beads_inbox WHERE inbox_id LIKE ?
+			LIMIT 2
+		`, prefix+"%")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item types.InboxItem
+			var description, labels, metadata, senderRef sql.NullString
+			var importedIssueID, rejectionReason sql.NullString
+			var importedAt, rejectedAt, expiresAt sql.NullTime
+			if err := rows.Scan(
+				&item.InboxID, &item.SenderProjectID, &item.SenderIssueID,
+				&item.Title, &description, &item.Priority, &item.IssueType,
+				&item.Status, &labels, &metadata, &senderRef,
+				&importedIssueID, &rejectionReason,
+				&item.CreatedAt, &importedAt, &rejectedAt, &expiresAt,
+			); err != nil {
+				return err
+			}
+			item.Description = description.String
+			item.Labels = labels.String
+			item.Metadata = metadata.String
+			item.SenderRef = senderRef.String
+			item.ImportedIssueID = importedIssueID.String
+			item.RejectionReason = rejectionReason.String
+			if importedAt.Valid {
+				item.ImportedAt = &importedAt.Time
+			}
+			if rejectedAt.Valid {
+				item.RejectedAt = &rejectedAt.Time
+			}
+			if expiresAt.Valid {
+				item.ExpiresAt = &expiresAt.Time
+			}
+			items = append(items, &item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get inbox item by prefix: %w", err)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("no inbox item matching prefix %q", prefix)
+	}
+	if len(items) > 1 {
+		return nil, fmt.Errorf("ambiguous prefix %q matches %d items", prefix, len(items))
+	}
+	return items[0], nil
+}
+
 func (s *EmbeddedDoltStore) GetPendingInboxItems(ctx context.Context) ([]*types.InboxItem, error) {
 	var items []*types.InboxItem
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {

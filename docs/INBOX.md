@@ -118,7 +118,9 @@ When you run `bd inbox import`:
 
 ## Configuration
 
-The inbox feature requires **shared server mode** where multiple beads projects connect to the same Dolt SQL server. See [SYNC_SETUP.md](SYNC_SETUP.md) for server configuration.
+The inbox feature currently requires **shared server mode** where multiple beads projects connect to the same Dolt SQL server. See [SYNC_SETUP.md](SYNC_SETUP.md) for server configuration.
+
+> **Note:** Federation/remote topology support (sending across separate Dolt servers) is planned but not yet implemented. The current implementation uses cross-database SQL on a shared server.
 
 ## Example Workflow
 

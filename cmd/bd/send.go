@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -19,6 +21,7 @@ var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$`)
 
 var (
 	sendTo          string
+	sendExpires     string
 	sendDryRun      bool
 	sendIncludeDeps bool
 )
@@ -32,20 +35,22 @@ var sendCmd = &cobra.Command{
 The receiving project can review and import inbox items using 'bd inbox'.
 Sends are idempotent: resending the same issue updates the inbox entry.
 
-The --to flag specifies the target project. On a shared Dolt server, this is
-a database name. For federation peers, this is a configured peer name.
+The --to flag specifies the target project's database name on the shared Dolt server.
+Federation peer support is planned but not yet implemented.
 
 Examples:
   bd send bd-123 --to upstream
   bd send bd-123 bd-456 --to sibling-project
   bd send bd-123 --to upstream --dry-run
-  bd send bd-123 --to upstream --include-deps`,
+  bd send bd-123 --to upstream --include-deps
+  bd send bd-123 --to upstream --expires 7d`,
 	Args: cobra.MinimumNArgs(1),
 	Run:  runSend,
 }
 
 func init() {
 	sendCmd.Flags().StringVar(&sendTo, "to", "", "target project (database name or peer name)")
+	sendCmd.Flags().StringVar(&sendExpires, "expires", "", "expiry duration (e.g., 7d, +1w, 2026-12-31)")
 	sendCmd.Flags().BoolVar(&sendDryRun, "dry-run", false, "preview what would be sent without writing")
 	sendCmd.Flags().BoolVar(&sendIncludeDeps, "include-deps", false, "also send blocking dependencies")
 	_ = sendCmd.MarkFlagRequired("to")
@@ -83,6 +88,13 @@ func runSend(cmd *cobra.Command, args []string) {
 		issues = deduplicateIssues(append(depIssues, issues...))
 	}
 
+	// Hydrate labels for each issue
+	for _, issue := range issues {
+		if labels, err := s.GetLabels(ctx, issue.ID); err == nil {
+			issue.Labels = labels
+		}
+	}
+
 	// Build dependency map for metadata (sender_issue_id → [blocking dep sender_issue_ids])
 	depMap := make(map[string][]string)
 	for _, issue := range issues {
@@ -97,10 +109,22 @@ func runSend(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	// Parse expiry if specified
+	var expiresAt *time.Time
+	if sendExpires != "" {
+		t, err := timeparsing.ParseRelativeTime(sendExpires, time.Now())
+		if err != nil {
+			FatalErrorRespectJSON("invalid --expires value %q: %v", sendExpires, err)
+		}
+		expiresAt = &t
+	}
+
 	// Build inbox items
 	items := make([]*types.InboxItem, 0, len(issues))
 	for _, issue := range issues {
-		items = append(items, issueToInboxItem(issue, senderProjectID, depMap))
+		item := issueToInboxItem(issue, senderProjectID, depMap)
+		item.ExpiresAt = expiresAt
+		items = append(items, item)
 	}
 
 	if sendDryRun {
@@ -119,6 +143,14 @@ func runSend(cmd *cobra.Command, args []string) {
 
 // issueToInboxItem converts a local issue to an inbox item for sending.
 func issueToInboxItem(issue *types.Issue, senderProjectID string, depMap map[string][]string) *types.InboxItem {
+	// Serialize labels to JSON
+	var labelsJSON string
+	if len(issue.Labels) > 0 {
+		if b, err := json.Marshal(issue.Labels); err == nil {
+			labelsJSON = string(b)
+		}
+	}
+
 	item := &types.InboxItem{
 		InboxID:         uuid.New().String(),
 		SenderProjectID: senderProjectID,
@@ -128,6 +160,7 @@ func issueToInboxItem(issue *types.Issue, senderProjectID string, depMap map[str
 		Priority:        issue.Priority,
 		IssueType:       string(issue.IssueType),
 		Status:          string(issue.Status),
+		Labels:          labelsJSON,
 		SenderRef:       fmt.Sprintf("beads://%s/%s", senderProjectID, issue.ID),
 	}
 	// Encode blocking dependencies in metadata for dependency-aware import

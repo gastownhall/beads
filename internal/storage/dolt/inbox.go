@@ -72,6 +72,35 @@ func (s *DoltStore) GetInboxItem(ctx context.Context, inboxID string) (*types.In
 	return item, nil
 }
 
+// GetInboxItemByPrefix retrieves an inbox item by ID prefix.
+// Returns an error if the prefix matches zero or more than one item.
+func (s *DoltStore) GetInboxItemByPrefix(ctx context.Context, prefix string) (*types.InboxItem, error) {
+	query := `
+		SELECT inbox_id, sender_project_id, sender_issue_id, title, description,
+			priority, issue_type, status, labels, metadata, sender_ref,
+			imported_issue_id, rejection_reason,
+			created_at, imported_at, rejected_at, expires_at
+		FROM beads_inbox WHERE inbox_id LIKE ?
+		LIMIT 2
+	`
+	rows, err := s.db.QueryContext(ctx, query, prefix+"%")
+	if err != nil {
+		return nil, wrapQueryError("get inbox item by prefix", err)
+	}
+	defer rows.Close()
+	items, err := scanInboxItems(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("no inbox item matching prefix %q", prefix)
+	}
+	if len(items) > 1 {
+		return nil, fmt.Errorf("ambiguous prefix %q matches %d items", prefix, len(items))
+	}
+	return items[0], nil
+}
+
 // GetPendingInboxItems returns all items not yet imported or rejected.
 func (s *DoltStore) GetPendingInboxItems(ctx context.Context) ([]*types.InboxItem, error) {
 	query := `

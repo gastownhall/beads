@@ -12,6 +12,7 @@ import (
 type InboxStore interface {
 	AddInboxItem(ctx context.Context, item *types.InboxItem) error
 	GetInboxItem(ctx context.Context, inboxID string) (*types.InboxItem, error)
+	GetInboxItemByPrefix(ctx context.Context, prefix string) (*types.InboxItem, error)
 	GetPendingInboxItems(ctx context.Context) ([]*types.InboxItem, error)
 	MarkInboxItemImported(ctx context.Context, inboxID string, importedIssueID string) error
 	MarkInboxItemRejected(ctx context.Context, inboxID string, reason string) error

@@ -138,8 +138,8 @@ func runInboxImport(cmd *cobra.Command, args []string) {
 	var err error
 
 	if len(args) > 0 {
-		// Import specific item
-		item, err := s.GetInboxItem(ctx, args[0])
+		// Import specific item — try exact match, then prefix
+		item, err := resolveInboxItem(ctx, s, args[0])
 		if err != nil {
 			FatalErrorRespectJSON("inbox item %s: %v", args[0], err)
 		}
@@ -217,6 +217,10 @@ func importInboxItems(ctx context.Context, s storage.DoltStorage, items []*types
 		if err := s.CreateIssue(ctx, issue, actor); err != nil {
 			fmt.Printf("  %s Failed to import %s: %v\n", ui.RenderFail("✗"), item.SenderIssueID, err)
 			continue
+		}
+		// Add labels from the inbox item (best-effort)
+		for _, label := range issue.Labels {
+			_ = s.AddLabel(ctx, issue.ID, label, actor)
 		}
 		if err := s.MarkInboxItemImported(ctx, item.InboxID, issue.ID); err != nil {
 			fmt.Printf("  %s Imported %s as %s but failed to update inbox: %v\n",
@@ -316,6 +320,12 @@ func topoSortInboxItems(items []*types.InboxItem) []*types.InboxItem {
 
 // inboxItemToIssue converts an inbox item into a new local issue.
 func inboxItemToIssue(item *types.InboxItem) *types.Issue {
+	// Parse labels from JSON
+	var labels []string
+	if item.Labels != "" && item.Labels != "[]" {
+		_ = json.Unmarshal([]byte(item.Labels), &labels)
+	}
+
 	return &types.Issue{
 		Title:       item.Title,
 		Description: item.Description,
@@ -324,6 +334,7 @@ func inboxItemToIssue(item *types.InboxItem) *types.Issue {
 		Status:      types.StatusOpen,
 		ExternalRef: func() *string { s := item.SenderRef; return &s }(),
 		SourceRepo:  item.SenderProjectID,
+		Labels:      labels,
 	}
 }
 
@@ -332,16 +343,16 @@ func runInboxReject(cmd *cobra.Command, args []string) {
 	ctx := rootCtx
 	s := getStore()
 
-	inboxID := args[0]
 	reason := "rejected"
 	if len(args) > 1 {
 		reason = args[1]
 	}
 
-	item, err := s.GetInboxItem(ctx, inboxID)
+	item, err := resolveInboxItem(ctx, s, args[0])
 	if err != nil {
-		FatalErrorRespectJSON("inbox item %s: %v", inboxID, err)
+		FatalErrorRespectJSON("inbox item %s: %v", args[0], err)
 	}
+	inboxID := item.InboxID
 	if item.ImportedAt != nil {
 		FatalErrorRespectJSON("inbox item %s already imported as %s", inboxID, item.ImportedIssueID)
 	}
@@ -433,6 +444,17 @@ func joinParts(parts []string) string {
 		result += ", " + p
 	}
 	return result
+}
+
+// resolveInboxItem resolves an inbox item by exact ID or prefix match.
+func resolveInboxItem(ctx context.Context, s storage.DoltStorage, idOrPrefix string) (*types.InboxItem, error) {
+	// Try exact match first
+	item, err := s.GetInboxItem(ctx, idOrPrefix)
+	if err == nil {
+		return item, nil
+	}
+	// Fall back to prefix match
+	return s.GetInboxItemByPrefix(ctx, idOrPrefix)
 }
 
 func runInboxWatch(cmd *cobra.Command, args []string) {
