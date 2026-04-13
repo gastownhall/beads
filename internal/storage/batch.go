@@ -22,4 +22,10 @@ type BatchCreateOptions struct {
 	OrphanHandling OrphanHandling
 	// SkipPrefixValidation skips prefix validation for existing IDs (used during import)
 	SkipPrefixValidation bool
+	// MergeByTimestamp enables last-writer-wins conflict resolution during import.
+	// When true, existing issues are only updated if the incoming record has a
+	// newer updated_at timestamp than the local record. This prevents stale
+	// snapshots from overwriting locally-modified issues (e.g. reopening a
+	// locally-closed issue).
+	MergeByTimestamp bool
 }

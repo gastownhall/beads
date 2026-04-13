@@ -378,6 +378,180 @@ func TestImportFromLocalJSONL(t *testing.T) {
 	})
 }
 
+func TestImportMergeByTimestamp(t *testing.T) {
+	skipIfNoDolt(t)
+
+	t.Run("merge skips update when local record is newer", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+		ctx := context.Background()
+
+		// Step 1: Import an issue that is open, updated at T2.
+		initial := `{"id":"test-merge1","title":"Original","status":"open","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-06-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(initial), 0644); err != nil {
+			t.Fatalf("write initial JSONL: %v", err)
+		}
+		if _, err := importFromLocalJSONLFull(ctx, store, jsonlPath, false); err != nil {
+			t.Fatalf("initial import: %v", err)
+		}
+
+		// Step 2: Simulate local close — re-import with status=closed at a newer T3.
+		closed := `{"id":"test-merge1","title":"Original","status":"closed","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-09-01T00:00:00Z","closed_at":"2025-09-01T00:00:00Z","close_reason":"done"}
+`
+		if err := os.WriteFile(jsonlPath, []byte(closed), 0644); err != nil {
+			t.Fatalf("write closed JSONL: %v", err)
+		}
+		if _, err := importFromLocalJSONLFull(ctx, store, jsonlPath, false); err != nil {
+			t.Fatalf("close import: %v", err)
+		}
+
+		// Verify issue is closed.
+		issue, err := store.GetIssue(ctx, "test-merge1")
+		if err != nil {
+			t.Fatalf("get issue after close: %v", err)
+		}
+		if issue.Status != "closed" {
+			t.Fatalf("expected status 'closed', got %q", issue.Status)
+		}
+
+		// Step 3: Import a STALE snapshot (T2, status=open) with --merge.
+		// This simulates pulling a backup from another machine that predates
+		// the local close.
+		stale := `{"id":"test-merge1","title":"Stale title","status":"open","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-06-01T00:00:00Z"}
+`
+		if err := os.WriteFile(jsonlPath, []byte(stale), 0644); err != nil {
+			t.Fatalf("write stale JSONL: %v", err)
+		}
+		result, err := importFromLocalJSONLFull(ctx, store, jsonlPath, true)
+		if err != nil {
+			t.Fatalf("merge import: %v", err)
+		}
+		if result.Issues != 1 {
+			t.Errorf("expected 1 issue processed, got %d", result.Issues)
+		}
+
+		// Verify the issue is STILL closed — the stale snapshot was skipped.
+		issue, err = store.GetIssue(ctx, "test-merge1")
+		if err != nil {
+			t.Fatalf("get issue after merge: %v", err)
+		}
+		if issue.Status != "closed" {
+			t.Errorf("merge allowed stale snapshot to reopen issue: status=%q, want 'closed'", issue.Status)
+		}
+		if issue.Title != "Original" {
+			t.Errorf("merge allowed stale snapshot to overwrite title: got %q, want 'Original'", issue.Title)
+		}
+	})
+
+	t.Run("merge allows update when incoming record is newer", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+		ctx := context.Background()
+
+		// Step 1: Import an issue at T1.
+		initial := `{"id":"test-merge2","title":"Old title","status":"open","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(initial), 0644); err != nil {
+			t.Fatalf("write initial JSONL: %v", err)
+		}
+		if _, err := importFromLocalJSONLFull(ctx, store, jsonlPath, false); err != nil {
+			t.Fatalf("initial import: %v", err)
+		}
+
+		// Step 2: Import a NEWER snapshot with --merge. This should update.
+		newer := `{"id":"test-merge2","title":"New title","status":"closed","priority":1,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-12-01T00:00:00Z","closed_at":"2025-12-01T00:00:00Z"}
+`
+		if err := os.WriteFile(jsonlPath, []byte(newer), 0644); err != nil {
+			t.Fatalf("write newer JSONL: %v", err)
+		}
+		if _, err := importFromLocalJSONLFull(ctx, store, jsonlPath, true); err != nil {
+			t.Fatalf("merge import: %v", err)
+		}
+
+		issue, err := store.GetIssue(ctx, "test-merge2")
+		if err != nil {
+			t.Fatalf("get issue after merge: %v", err)
+		}
+		if issue.Status != "closed" {
+			t.Errorf("merge should have applied newer update: status=%q, want 'closed'", issue.Status)
+		}
+		if issue.Title != "New title" {
+			t.Errorf("merge should have applied newer title: got %q, want 'New title'", issue.Title)
+		}
+	})
+
+	t.Run("without merge flag stale snapshot overwrites", func(t *testing.T) {
+		// Control test: without --merge, the old behaviour applies.
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+		ctx := context.Background()
+
+		// Import at T2 as closed.
+		closed := `{"id":"test-merge3","title":"Closed issue","status":"closed","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-09-01T00:00:00Z","closed_at":"2025-09-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(closed), 0644); err != nil {
+			t.Fatalf("write JSONL: %v", err)
+		}
+		if _, err := importFromLocalJSONLFull(ctx, store, jsonlPath, false); err != nil {
+			t.Fatalf("initial import: %v", err)
+		}
+
+		// Import stale (T1, open) WITHOUT merge — should overwrite.
+		stale := `{"id":"test-merge3","title":"Stale","status":"open","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		if err := os.WriteFile(jsonlPath, []byte(stale), 0644); err != nil {
+			t.Fatalf("write stale JSONL: %v", err)
+		}
+		if _, err := importFromLocalJSONLFull(ctx, store, jsonlPath, false); err != nil {
+			t.Fatalf("stale import: %v", err)
+		}
+
+		issue, err := store.GetIssue(ctx, "test-merge3")
+		if err != nil {
+			t.Fatalf("get issue: %v", err)
+		}
+		if issue.Status != "open" {
+			t.Errorf("without merge, stale import should overwrite: status=%q, want 'open'", issue.Status)
+		}
+	})
+
+	t.Run("merge creates new issues normally", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+		ctx := context.Background()
+
+		jsonl := `{"id":"test-merge4","title":"Brand new","status":"open","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonl), 0644); err != nil {
+			t.Fatalf("write JSONL: %v", err)
+		}
+		result, err := importFromLocalJSONLFull(ctx, store, jsonlPath, true)
+		if err != nil {
+			t.Fatalf("merge import of new issue: %v", err)
+		}
+		if result.Issues != 1 {
+			t.Errorf("expected 1 issue, got %d", result.Issues)
+		}
+
+		issue, err := store.GetIssue(ctx, "test-merge4")
+		if err != nil {
+			t.Fatalf("get issue: %v", err)
+		}
+		if issue.Title != "Brand new" {
+			t.Errorf("expected title 'Brand new', got %q", issue.Title)
+		}
+	})
+}
+
 func TestImportFromLocalJSONL_LegacyFormats(t *testing.T) {
 	skipIfNoDolt(t)
 

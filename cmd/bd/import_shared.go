@@ -25,6 +25,7 @@ type ImportOptions struct {
 	DeletionIDs                []string
 	SkipPrefixValidation       bool
 	ProtectLocalExportIDs      map[string]time.Time
+	MergeByTimestamp           bool
 }
 
 // ImportResult describes what an import operation did.
@@ -53,6 +54,7 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	err := store.CreateIssuesWithFullOptions(ctx, issues, getActorWithGit(), storage.BatchCreateOptions{
 		OrphanHandling:       storage.OrphanAllow,
 		SkipPrefixValidation: opts.SkipPrefixValidation,
+		MergeByTimestamp:     opts.MergeByTimestamp,
 	})
 	if err != nil {
 		return nil, err
@@ -78,7 +80,7 @@ type memoryRecord struct {
 // into the Dolt store. Returns the number of issues imported and any error.
 // This is a convenience wrapper around importFromLocalJSONLFull.
 func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localPath string) (int, error) {
-	result, err := importFromLocalJSONLFull(ctx, store, localPath)
+	result, err := importFromLocalJSONLFull(ctx, store, localPath, false)
 	if err != nil {
 		return 0, err
 	}
@@ -88,7 +90,9 @@ func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localP
 // importFromLocalJSONLFull imports issues and memories from a local JSONL file.
 // It detects memory records (lines with "_type":"memory") and imports them
 // via SetConfig, while routing regular issue records through the normal path.
-func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, localPath string) (*importLocalResult, error) {
+// When merge is true, existing issues are only updated if the incoming record
+// has a strictly newer updated_at timestamp (last-writer-wins).
+func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, localPath string, merge bool) (*importLocalResult, error) {
 	//nolint:gosec // G304: path from user-provided CLI argument
 	data, err := os.ReadFile(localPath)
 	if err != nil {
@@ -182,6 +186,7 @@ func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, lo
 
 		opts := ImportOptions{
 			SkipPrefixValidation: true,
+			MergeByTimestamp:     merge,
 		}
 		_, err = importIssuesCore(ctx, "", store, issues, opts)
 		if err != nil {

@@ -84,7 +84,7 @@ func CreateIssueInTx(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *t
 		return nil
 	}
 
-	isNew, err := InsertIssueIfNew(ctx, tx, issueTable, issue)
+	isNew, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts.MergeByTimestamp)
 	if err != nil {
 		return err
 	}
@@ -237,19 +237,39 @@ func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable
 }
 
 // InsertIssueIfNew inserts the issue and returns whether it was genuinely new.
+// When mergeByTimestamp is true, existing issues are only updated if the
+// incoming record's updated_at is strictly newer than the local record's.
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue *types.Issue) (isNew bool, err error) {
-	var existingCount int
+func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue *types.Issue, mergeByTimestamp bool) (isNew bool, err error) {
 	if issue.ID != "" {
+		var existingCount int
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, issueTable), issue.ID).Scan(&existingCount); err != nil {
 			return false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
 		}
+		if existingCount > 0 {
+			if mergeByTimestamp {
+				var localUpdatedAt time.Time
+				if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT updated_at FROM %s WHERE id = ?`, issueTable), issue.ID).Scan(&localUpdatedAt); err != nil {
+					return false, fmt.Errorf("failed to read updated_at for %s: %w", issue.ID, err)
+				}
+				if !issue.UpdatedAt.After(localUpdatedAt) {
+					// Local record is same age or newer — skip update.
+					return false, nil
+				}
+			}
+			// Existing issue, proceed with upsert.
+			if err := InsertIssueIntoTable(ctx, tx, issueTable, issue); err != nil {
+				return false, fmt.Errorf("failed to update issue %s: %w", issue.ID, err)
+			}
+			return false, nil
+		}
 	}
+	// New issue — insert.
 	if err := InsertIssueIntoTable(ctx, tx, issueTable, issue); err != nil {
 		return false, fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
 	}
-	return existingCount == 0, nil
+	return true, nil
 }
 
 // PersistLabels writes issue.Labels into the appropriate labels table.

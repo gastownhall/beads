@@ -38,7 +38,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	// Database is empty but JSONL has data — auto-import.
 	fmt.Fprintf(os.Stderr, "auto-importing %d bytes from %s into empty database...\n", info.Size(), jsonlPath)
 
-	result, err := importFromLocalJSONLFull(ctx, s, jsonlPath)
+	result, err := importFromLocalJSONLFull(ctx, s, jsonlPath, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
 		fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)

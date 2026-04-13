@@ -41,6 +41,7 @@ EXAMPLES:
   cat issues.jsonl | bd import -   # Pipe JSONL from another tool
   bd import --dry-run              # Show what would be imported
   bd import --dedup                # Skip issues with duplicate titles
+  bd import --merge                # Import, but skip issues where local is newer
   bd import --json                 # Structured output with created IDs`,
 	GroupID: "sync",
 	RunE:    runImport,
@@ -50,12 +51,14 @@ var (
 	importDryRun bool
 	importDedup  bool
 	importInput  string
+	importMerge  bool
 )
 
 func init() {
 	importCmd.Flags().StringVarP(&importInput, "input", "i", "", "Read JSONL from a specific file")
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
+	importCmd.Flags().BoolVar(&importMerge, "merge", false, "Use last-writer-wins: skip updates where the local record is newer (by updated_at)")
 	rootCmd.AddCommand(importCmd)
 }
 
@@ -216,7 +219,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 
 	// Import issues
 	if len(issues) > 0 {
-		opts := ImportOptions{SkipPrefixValidation: true}
+		opts := ImportOptions{SkipPrefixValidation: true, MergeByTimestamp: importMerge}
 		importResult, err := importIssuesCore(ctx, "", store, issues, opts)
 		if err != nil {
 			return fmt.Errorf("import failed: %w", err)
