@@ -223,8 +223,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			inboxPending, _ := activeStore.CountPendingInbox(ctx)
 			if inboxPending > 0 {
 				outputJSON(map[string]interface{}{
-					"ready":            issuesWithCounts,
-					"handoff_pending":  inboxPending,
+					"ready":           issuesWithCounts,
+					"handoff_pending": inboxPending,
 				})
 			} else {
 				outputJSON(issuesWithCounts)

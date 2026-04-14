@@ -189,7 +189,10 @@ func runInboxImport(cmd *cobra.Command, args []string) {
 
 // importInboxItems creates real issues from inbox items and marks them imported.
 // Items are topologically sorted so dependencies are imported before dependents.
-// Duplicate imports are prevented by checking for existing issues with matching sender ref.
+// Duplicate imports are prevented by:
+//  1. Checking for existing issues with matching sender ref (dedup on retry)
+//  2. Optimistic locking via MarkInboxItemImported (WHERE imported_at IS NULL)
+//     so concurrent imports cannot both claim the same inbox item
 func importInboxItems(ctx context.Context, s storage.DoltStorage, items []*types.InboxItem, actor string) []*types.InboxItem {
 	// Topological sort: items whose blocking deps are satisfied first
 	sorted := topoSortInboxItems(items)
@@ -199,11 +202,8 @@ func importInboxItems(ctx context.Context, s storage.DoltStorage, items []*types
 		// Duplicate prevention: skip if an issue with this sender ref already exists
 		senderRef := fmt.Sprintf("beads://%s/%s", item.SenderProjectID, item.SenderIssueID)
 		if existing, err := s.GetIssueByExternalRef(ctx, senderRef); err == nil && existing != nil {
-			// Already imported — just mark the inbox item
-			if err := s.MarkInboxItemImported(ctx, item.InboxID, existing.ID); err != nil {
-				fmt.Fprintf(os.Stderr, "  %s warning: failed to mark duplicate %s: %v\n",
-					ui.RenderWarn("⚠"), item.SenderIssueID, err)
-			}
+			// Already imported — just mark the inbox item (best-effort, may already be marked)
+			_ = s.MarkInboxItemImported(ctx, item.InboxID, existing.ID)
 			if !jsonOutput {
 				fmt.Printf("  %s %s already imported as %s (skipped)\n",
 					ui.RenderMuted("–"), item.SenderIssueID, existing.ID)
@@ -220,9 +220,16 @@ func importInboxItems(ctx context.Context, s storage.DoltStorage, items []*types
 		for _, label := range issue.Labels {
 			_ = s.AddLabel(ctx, issue.ID, label, actor)
 		}
+
+		// Optimistic lock: only succeeds if imported_at IS NULL.
+		// If a concurrent import already claimed this item, we created a
+		// redundant issue but the inbox item correctly points to the winner's issue.
 		if err := s.MarkInboxItemImported(ctx, item.InboxID, issue.ID); err != nil {
-			fmt.Printf("  %s Imported %s as %s but failed to update inbox: %v\n",
-				ui.RenderWarn("⚠"), item.SenderIssueID, issue.ID, err)
+			if !jsonOutput {
+				fmt.Printf("  %s %s claimed by concurrent import (skipped)\n",
+					ui.RenderMuted("–"), item.SenderIssueID)
+			}
+			continue
 		}
 		item.ImportedIssueID = issue.ID
 		imported = append(imported, item)

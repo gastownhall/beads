@@ -221,11 +221,18 @@ func (s *EmbeddedDoltStore) GetPendingInboxItems(ctx context.Context) ([]*types.
 
 func (s *EmbeddedDoltStore) MarkInboxItemImported(ctx context.Context, inboxID string, importedIssueID string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			"UPDATE beads_inbox SET imported_at = ?, imported_issue_id = ? WHERE inbox_id = ?",
+		result, err := tx.ExecContext(ctx,
+			"UPDATE beads_inbox SET imported_at = ?, imported_issue_id = ? WHERE inbox_id = ? AND imported_at IS NULL",
 			time.Now().UTC(), importedIssueID, inboxID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		rows, _ := result.RowsAffected()
+		if rows == 0 {
+			return fmt.Errorf("inbox item %s already imported", inboxID)
+		}
+		return nil
 	})
 }
 

@@ -133,12 +133,21 @@ func (s *DoltStore) GetPendingInboxItems(ctx context.Context) ([]*types.InboxIte
 }
 
 // MarkInboxItemImported marks an inbox item as imported and records the local issue ID.
+// Only succeeds if the item has not already been imported (imported_at IS NULL),
+// providing optimistic locking against concurrent imports.
 func (s *DoltStore) MarkInboxItemImported(ctx context.Context, inboxID string, importedIssueID string) error {
-	_, err := s.execContext(ctx,
-		"UPDATE beads_inbox SET imported_at = ?, imported_issue_id = ? WHERE inbox_id = ?",
+	result, err := s.execContext(ctx,
+		"UPDATE beads_inbox SET imported_at = ?, imported_issue_id = ? WHERE inbox_id = ? AND imported_at IS NULL",
 		time.Now().UTC(), importedIssueID, inboxID,
 	)
-	return wrapExecError("mark inbox item imported", err)
+	if err != nil {
+		return wrapExecError("mark inbox item imported", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("inbox item %s already imported", inboxID)
+	}
+	return nil
 }
 
 // MarkInboxItemRejected marks an inbox item as rejected with a reason.

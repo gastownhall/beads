@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/transfer"
+	"github.com/steveyegge/beads/internal/transfer/handoffauth"
 	"github.com/steveyegge/beads/internal/transfer/sharedserver"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -125,6 +126,11 @@ func runSend(cmd *cobra.Command, args []string) {
 	if sendDryRun {
 		printSendDryRun(items)
 		return
+	}
+
+	// Check outbound authorization policy
+	if err := handoffauth.CheckSendAllowed(ctx, s, sendTo); err != nil {
+		FatalErrorRespectJSON("%v", err)
 	}
 
 	// Build transport and destination
