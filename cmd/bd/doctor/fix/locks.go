@@ -13,8 +13,8 @@ import (
 // - Bootstrap/sync/startup locks use flock, which is released on process exit
 // - If the flock is released but the file remains, the file is just clutter
 func StaleLockFiles(path string) error {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return nil
 	}
 

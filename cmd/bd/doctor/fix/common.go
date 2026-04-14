@@ -54,20 +54,30 @@ func getBdBinary() (string, error) {
 // validateBeadsWorkspace ensures the path is a valid beads workspace before
 // attempting any fix operations. This prevents path traversal attacks.
 func validateBeadsWorkspace(path string) error {
-	// Convert to absolute path
+	_, err := resolvedWorkspaceBeadsDir(path)
+	return err
+}
+
+func resolvedWorkspaceBeadsDir(path string) (string, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
+		return "", fmt.Errorf("invalid path: %w", err)
 	}
 
-	// Check for a local .beads directory first, then fall back to the shared
-	// worktree location derived from git-common-dir.
 	beadsDir := beads.ResolveBeadsDirForRepo(absPath)
 	if info, err := os.Stat(beadsDir); err != nil || !info.IsDir() {
-		return fmt.Errorf("not a beads workspace: .beads directory not found for %s", absPath)
+		return "", fmt.Errorf("not a beads workspace: .beads directory not found for %s", absPath)
 	}
 
-	return nil
+	return beadsDir, nil
+}
+
+func localWorkspaceBeadsDir(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	return filepath.Join(absPath, ".beads"), nil
 }
 
 // safeWorkspacePath resolves relPath within the workspace root and ensures it

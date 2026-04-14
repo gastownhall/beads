@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -18,11 +17,10 @@ import (
 // in package main, since this package cannot import it directly).
 // Returns nil if all fields are present or successfully repaired.
 func FixMissingMetadata(path string, bdVersion string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -95,11 +93,10 @@ func FixMissingMetadata(path string, bdVersion string) error {
 // metadata.json and the database metadata table. For pre-GH#2372 projects that
 // lack cross-project identity verification.
 func FixProjectIdentity(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -167,11 +164,10 @@ func FixProjectIdentity(path string) error {
 // database. This fix probes the server for a database with beads tables and backfills
 // the config. (GH#2160)
 func FixMissingDoltDatabase(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {

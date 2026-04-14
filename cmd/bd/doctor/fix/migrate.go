@@ -30,12 +30,10 @@ func DatabaseVersion(path string) error {
 // DatabaseVersionWithBdVersion is like DatabaseVersion but accepts an explicit
 // bd version string for setting the bd_version metadata field.
 func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
-	// Validate workspace
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Load or create config
 	cfg, err := configfile.Load(beadsDir)
@@ -137,11 +135,10 @@ func SchemaCompatibility(path string) error {
 // existing (possibly empty) Dolt store. This covers the case where the Database
 // fix already created the store but a prior version didn't import.
 func FreshCloneImport(path string, bdVersion string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Check for JSONL file
 	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")

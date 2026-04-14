@@ -23,11 +23,10 @@ func getDatabasePath(beadsDir string) string {
 // OrphanedDependencies removes dependencies pointing to non-existent issues.
 // If verbose is true, prints each removed dependency; otherwise shows only summary.
 func OrphanedDependencies(path string, verbose bool) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	db, err := openDoltDB(beadsDir)
 	if err != nil {
@@ -108,11 +107,10 @@ func OrphanedDependencies(path string, verbose bool) error {
 // Requires explicit opt-in via --fix-child-parent flag since some workflows may use these intentionally.
 // If verbose is true, prints each removed dependency; otherwise shows only summary.
 func ChildParentDependencies(path string, verbose bool) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	db, err := openDoltDB(beadsDir)
 	if err != nil {

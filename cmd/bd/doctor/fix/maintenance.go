@@ -3,7 +3,6 @@ package fix
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,11 +17,10 @@ import (
 // This fix is DISABLED by default (stale_closed_issues_days=0). Users must
 // explicitly set a positive threshold in metadata.json to enable cleanup.
 func StaleClosedIssues(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Load config and check if cleanup is enabled
 	cfg, err := configfile.Load(beadsDir)
@@ -100,11 +98,10 @@ func StaleClosedIssues(path string) error {
 //
 // After deletion, cleans up any orphaned data.
 func PatrolPollution(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// Open database using factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 	ctx := context.Background()

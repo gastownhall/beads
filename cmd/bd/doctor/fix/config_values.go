@@ -2,7 +2,6 @@ package fix
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -11,11 +10,10 @@ import (
 // ConfigValues fixes invalid configuration values in metadata.json.
 // Currently handles: database field pointing to SQLite name when backend is Dolt.
 func ConfigValues(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := filepath.Join(path, ".beads")
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
