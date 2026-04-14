@@ -1,9 +1,21 @@
 package fix
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func resolvePathForTest(t *testing.T, path string) string {
+	t.Helper()
+
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) failed: %v", path, err)
+	}
+
+	return resolved
+}
 
 func TestSafeWorkspacePath(t *testing.T) {
 	root := t.TempDir()
@@ -52,4 +64,60 @@ func TestSafeWorkspacePath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolvedWorkspaceBeadsDir(t *testing.T) {
+	t.Run("local workspace returns local beads dir", func(t *testing.T) {
+		dir := setupTestWorkspace(t)
+
+		got, err := resolvedWorkspaceBeadsDir(dir)
+		if err != nil {
+			t.Fatalf("resolvedWorkspaceBeadsDir() error = %v", err)
+		}
+
+		want := resolvePathForTest(t, filepath.Join(dir, ".beads"))
+		if got != want {
+			t.Fatalf("resolvedWorkspaceBeadsDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("shared worktree falls back to main repo beads dir", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupSharedWorktreeWorkspace(t)
+		mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+			t.Fatalf("failed to create main .beads dir: %v", err)
+		}
+
+		got, err := resolvedWorkspaceBeadsDir(worktreeDir)
+		if err != nil {
+			t.Fatalf("resolvedWorkspaceBeadsDir() error = %v", err)
+		}
+
+		want := resolvePathForTest(t, mainBeadsDir)
+		if got != want {
+			t.Fatalf("resolvedWorkspaceBeadsDir() = %q, want %q", got, mainBeadsDir)
+		}
+	})
+
+	t.Run("worktree local beads dir takes precedence over shared fallback", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupSharedWorktreeWorkspace(t)
+		mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+		worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+		if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+			t.Fatalf("failed to create main .beads dir: %v", err)
+		}
+		if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+			t.Fatalf("failed to create worktree .beads dir: %v", err)
+		}
+
+		got, err := resolvedWorkspaceBeadsDir(worktreeDir)
+		if err != nil {
+			t.Fatalf("resolvedWorkspaceBeadsDir() error = %v", err)
+		}
+
+		want := resolvePathForTest(t, worktreeBeadsDir)
+		if got != want {
+			t.Fatalf("resolvedWorkspaceBeadsDir() = %q, want %q", got, worktreeBeadsDir)
+		}
+	})
 }
