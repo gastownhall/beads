@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"path/filepath"
 	"sync"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -35,6 +36,10 @@ func ResolveBeadsDirForRepo(repoPath string) string {
 
 func resolveBeadsDirForRepoUncached(repoPath string) string {
 	return beads.ResolveBeadsDirForRepo(repoPath)
+}
+
+func resolvedBeadsRepoRoot(repoPath string) string {
+	return filepath.Dir(ResolveBeadsDirForRepo(repoPath))
 }
 
 func clearResolveBeadsDirCache() {

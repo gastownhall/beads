@@ -3,7 +3,6 @@ package doctor
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -20,8 +19,7 @@ const SuppressConfigPrefix = "doctor.suppress."
 func GetSuppressedChecks(path string) map[string]bool {
 	suppressed := make(map[string]bool)
 
-	beadsDir := filepath.Join(path, ".beads")
-	beadsDir = resolveBeadsDir(beadsDir)
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return suppressed

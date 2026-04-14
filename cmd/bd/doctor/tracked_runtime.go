@@ -78,11 +78,12 @@ const corruptBackupDirFragment = ".corrupt.backup/"
 // current .beads/.gitignore patterns existed.
 // repoPath is the project root directory.
 func CheckTrackedRuntimeFiles(repoPath string) DoctorCheck {
-	beadsDir := filepath.Join(repoPath, ".beads")
+	beadsDir := ResolveBeadsDirForRepo(repoPath)
+	repoRoot := resolvedBeadsRepoRoot(repoPath)
 
 	// Get all files tracked by git under .beads/
-	cmd := exec.Command("git", "ls-files", beadsDir) // #nosec G204 - args are constructed from known parts
-	cmd.Dir = repoPath
+	cmd := exec.Command("git", "ls-files", ".beads") // #nosec G204 - args are constructed from known parts
+	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
 		return DoctorCheck{
@@ -113,7 +114,7 @@ func CheckTrackedRuntimeFiles(repoPath string) DoctorCheck {
 		}
 
 		// Get the path relative to .beads/
-		rel, err := filepath.Rel(beadsDir, filepath.Join(repoPath, line))
+		rel, err := filepath.Rel(beadsDir, filepath.Join(repoRoot, line))
 		if err != nil {
 			continue
 		}
@@ -204,11 +205,12 @@ func shouldFlagTrackedFile(rel string) bool {
 // FixTrackedRuntimeFiles untracks runtime/sensitive files from git.
 // repoPath is the project root directory.
 func FixTrackedRuntimeFiles(repoPath string) error {
-	beadsDir := filepath.Join(repoPath, ".beads")
+	beadsDir := ResolveBeadsDirForRepo(repoPath)
+	repoRoot := resolvedBeadsRepoRoot(repoPath)
 
 	// Get all files tracked by git under .beads/
-	cmd := exec.Command("git", "ls-files", beadsDir) // #nosec G204 - args are constructed from known parts
-	cmd.Dir = repoPath
+	cmd := exec.Command("git", "ls-files", ".beads") // #nosec G204 - args are constructed from known parts
+	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
 		return nil // Not a git repo, nothing to do
@@ -226,7 +228,7 @@ func FixTrackedRuntimeFiles(repoPath string) error {
 			continue
 		}
 
-		rel, err := filepath.Rel(beadsDir, filepath.Join(repoPath, line))
+		rel, err := filepath.Rel(beadsDir, filepath.Join(repoRoot, line))
 		if err != nil {
 			continue
 		}
@@ -243,7 +245,7 @@ func FixTrackedRuntimeFiles(repoPath string) error {
 	// Untrack files (keeps local copies)
 	args := append([]string{"rm", "--cached", "--"}, toUntrack...)
 	cmd = exec.Command("git", args...) // #nosec G204 - args are constructed from known parts
-	cmd.Dir = repoPath
+	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to untrack files: %w\n%s", err, string(out))
 	}

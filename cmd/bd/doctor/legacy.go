@@ -194,7 +194,7 @@ func CheckAgentDocumentation(repoPath string) DoctorCheck {
 // actually exists on disk. For Dolt backends, data is on the server. For legacy
 // backends, this checks that .db files match the configuration.
 func CheckDatabaseConfig(repoPath string) DoctorCheck {
-	beadsDir := filepath.Join(repoPath, ".beads")
+	beadsDir := ResolveBeadsDirForRepo(repoPath)
 
 	// Load config
 	cfg, err := configfile.Load(beadsDir)

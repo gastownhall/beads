@@ -201,6 +201,30 @@ func TestCheckMetadataConfigValues(t *testing.T) {
 	})
 }
 
+func TestCheckMetadataConfigValues_WorktreeFallbackUsesSharedMetadata(t *testing.T) {
+	mainRepoDir, worktreeDir := setupDoctorSharedWorktree(t)
+	mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create main .beads dir: %v", err)
+	}
+	metadataContent := `{
+  "database": "/path/to/beads.db"
+}`
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "metadata.json"), []byte(metadataContent), 0o644); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+
+	clearResolveBeadsDirCache()
+
+	issues := checkMetadataConfigValues(worktreeDir)
+	if len(issues) == 0 {
+		t.Fatal("expected metadata validation issues from shared worktree metadata")
+	}
+	if !contains(issues[0], "should be a filename") {
+		t.Fatalf("expected shared metadata issue, got: %v", issues)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
 }
