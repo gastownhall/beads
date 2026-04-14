@@ -163,11 +163,14 @@ func runExport(cmd *cobra.Command, args []string) error {
 		// MarshalJSON to fail with "year outside of range [0,9999]". (GH#2488)
 		sanitizeZeroTime(issue)
 
-		record := &types.IssueWithCounts{
-			Issue:           issue,
-			DependencyCount: counts.DependencyCount,
-			DependentCount:  counts.DependentCount,
-			CommentCount:    commentCounts[issue.ID],
+		record := &exportIssueRecord{
+			RecordType: "issue",
+			IssueWithCounts: &types.IssueWithCounts{
+				Issue:           issue,
+				DependencyCount: counts.DependencyCount,
+				DependentCount:  counts.DependentCount,
+				CommentCount:    commentCounts[issue.ID],
+			},
 		}
 
 		data, err := json.Marshal(record)
@@ -232,6 +235,14 @@ func runExport(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// exportIssueRecord wraps IssueWithCounts with a _type discriminator so that
+// every line in the JSONL export is self-describing. Memory lines already
+// carry "_type":"memory"; this gives issue lines "_type":"issue". (GH#3271)
+type exportIssueRecord struct {
+	RecordType string `json:"_type"`
+	*types.IssueWithCounts
 }
 
 // sanitizeZeroTime replaces Go zero-value time.Time fields with Unix epoch.

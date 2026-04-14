@@ -194,11 +194,14 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 				counts = &types.DependencyCounts{}
 			}
 			sanitizeZeroTime(issue)
-			record := &types.IssueWithCounts{
-				Issue:           issue,
-				DependencyCount: counts.DependencyCount,
-				DependentCount:  counts.DependentCount,
-				CommentCount:    commentCounts[issue.ID],
+			record := &exportIssueRecord{
+				RecordType: "issue",
+				IssueWithCounts: &types.IssueWithCounts{
+					Issue:           issue,
+					DependencyCount: counts.DependencyCount,
+					DependentCount:  counts.DependentCount,
+					CommentCount:    commentCounts[issue.ID],
+				},
 			}
 			if err := enc.Encode(record); err != nil {
 				return 0, 0, fmt.Errorf("failed to write issue %s: %w", issue.ID, err)
