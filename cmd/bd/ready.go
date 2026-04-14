@@ -219,12 +219,12 @@ This is useful for agents executing molecules to see which steps can run next.`,
 					Parent:          parent,
 				}
 			}
-			// Check inbox for pending items (best effort)
+			// Check handoff inbox for pending items (best effort)
 			inboxPending, _ := activeStore.CountPendingInbox(ctx)
 			if inboxPending > 0 {
 				outputJSON(map[string]interface{}{
-					"ready":         issuesWithCounts,
-					"inbox_pending": inboxPending,
+					"ready":            issuesWithCounts,
+					"handoff_pending":  inboxPending,
 				})
 			} else {
 				outputJSON(issuesWithCounts)
@@ -296,11 +296,11 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		// Show tip after successful ready (direct mode only)
 		maybeShowTip(store)
 
-		// Show inbox notification if pending items exist (best effort)
+		// Show handoff notification if pending items exist (best effort)
 		if inboxCount, err := activeStore.CountPendingInbox(ctx); err == nil && inboxCount > 0 {
-			fmt.Printf("%s %d issue(s) pending in inbox (use %s to review, %s to accept)\n\n",
+			fmt.Printf("%s %d issue(s) pending in handoff inbox (use %s to review, %s to accept)\n\n",
 				ui.RenderAccent("📬"), inboxCount,
-				ui.RenderID("bd inbox list"), ui.RenderID("bd inbox import"))
+				ui.RenderID("bd handoff inbox list"), ui.RenderID("bd handoff inbox import"))
 		}
 	},
 }

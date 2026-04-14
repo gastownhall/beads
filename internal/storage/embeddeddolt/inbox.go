@@ -40,7 +40,11 @@ func (s *EmbeddedDoltStore) AddInboxItem(ctx context.Context, item *types.InboxI
 				labels = VALUES(labels),
 				metadata = VALUES(metadata),
 				sender_ref = VALUES(sender_ref),
-				expires_at = VALUES(expires_at)
+				expires_at = VALUES(expires_at),
+				rejected_at = NULL,
+				rejection_reason = NULL,
+				imported_at = NULL,
+				imported_issue_id = NULL
 		`,
 			item.InboxID,
 			item.SenderProjectID,

@@ -23,36 +23,34 @@ var (
 	sendIncludeDeps bool
 )
 
-var sendCmd = &cobra.Command{
-	Use:     "send <issue-id> [issue-id...]",
-	GroupID: "sync",
-	Short:   "Send issues to another project's inbox",
+var handoffSendCmd = &cobra.Command{
+	Use:   "send <issue-id> [issue-id...]",
+	Short: "Send issues to another project's inbox",
 	Long: `Send one or more issues to another project's inbox for cross-project tracking.
 
-The receiving project can review and import inbox items using 'bd inbox'.
+The receiving project can review and import items using 'bd handoff inbox'.
 Sends are idempotent: resending the same issue updates the inbox entry.
 
 The --to flag specifies the target project's database name on the shared Dolt server.
 Federation peer support is planned but not yet implemented.
 
 Examples:
-  bd send bd-123 --to upstream
-  bd send bd-123 bd-456 --to sibling-project
-  bd send bd-123 --to upstream --dry-run
-  bd send bd-123 --to upstream --include-deps
-  bd send bd-123 --to upstream --expires 7d`,
+  bd handoff send bd-123 --to upstream
+  bd handoff send bd-123 bd-456 --to sibling-project
+  bd handoff send bd-123 --to upstream --dry-run
+  bd handoff send bd-123 --to upstream --include-deps
+  bd handoff send bd-123 --to upstream --expires 7d`,
 	Args: cobra.MinimumNArgs(1),
 	Run:  runSend,
 }
 
 func init() {
-	sendCmd.Flags().StringVar(&sendTo, "to", "", "target project (database name or peer name)")
-	sendCmd.Flags().StringVar(&sendExpires, "expires", "", "expiry duration (e.g., 7d, +1w, 2026-12-31)")
-	sendCmd.Flags().BoolVar(&sendDryRun, "dry-run", false, "preview what would be sent without writing")
-	sendCmd.Flags().BoolVar(&sendIncludeDeps, "include-deps", false, "also send blocking dependencies")
-	_ = sendCmd.MarkFlagRequired("to")
-	sendCmd.ValidArgsFunction = issueIDCompletion
-	rootCmd.AddCommand(sendCmd)
+	handoffSendCmd.Flags().StringVar(&sendTo, "to", "", "target project name (or database name if no alias configured)")
+	handoffSendCmd.Flags().StringVar(&sendExpires, "expires", "", "expiry duration (e.g., 7d, +1w, 2026-12-31)")
+	handoffSendCmd.Flags().BoolVar(&sendDryRun, "dry-run", false, "preview what would be sent without writing")
+	handoffSendCmd.Flags().BoolVar(&sendIncludeDeps, "include-deps", false, "also send blocking dependencies")
+	_ = handoffSendCmd.MarkFlagRequired("to")
+	handoffSendCmd.ValidArgsFunction = issueIDCompletion
 }
 
 func runSend(cmd *cobra.Command, args []string) {
@@ -176,9 +174,9 @@ func issueToInboxItem(issue *types.Issue, senderProjectID string, depMap map[str
 }
 
 // buildTransport creates an InboxTransport and Destination for the given target.
-// Currently only shared-server transport is supported; the target string is
-// treated as a database name. Future transports (federation peers) will be
-// resolved via project config.
+// The target is first resolved as a project alias (handoff.target.<name>) from
+// config. If no alias exists, the target is treated as a raw database name
+// for backward compatibility.
 func buildTransport(ctx context.Context, s storage.DoltStorage, target string) (transfer.InboxTransport, transfer.Destination, error) {
 	// Type-assert to get raw DB access for shared-server transport
 	type rawStore interface {
@@ -195,12 +193,28 @@ func buildTransport(ctx context.Context, s storage.DoltStorage, target string) (
 		return nil, transfer.Destination{}, err
 	}
 
-	dest := transfer.Destination{
-		ProjectName: target, // For now, project name == db name; PR2 adds config-based resolution
-		Address:     target,
-	}
+	// Resolve project name → database address via config alias
+	dest := resolveHandoffTarget(ctx, s, target)
 
 	return t, dest, nil
+}
+
+// resolveHandoffTarget resolves a project name to a Destination.
+// Checks config key "handoff.target.<name>" first; falls back to treating
+// the target as a raw database name.
+func resolveHandoffTarget(ctx context.Context, s storage.DoltStorage, target string) transfer.Destination {
+	configKey := "handoff.target." + target
+	if addr, err := s.GetConfig(ctx, configKey); err == nil && addr != "" {
+		return transfer.Destination{
+			ProjectName: target,
+			Address:     addr,
+		}
+	}
+	// No alias configured — treat target as raw DB name
+	return transfer.Destination{
+		ProjectName: target,
+		Address:     target,
+	}
 }
 
 // getCurrentDatabase returns the current database name from store metadata.

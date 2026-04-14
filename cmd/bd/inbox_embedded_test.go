@@ -54,7 +54,7 @@ func TestInboxImportIntegration(t *testing.T) {
 	store.Close()
 
 	// Run bd inbox list --json
-	listOut := bdRun(t, bd, dir, "inbox", "list", "--json")
+	listOut := bdRun(t, bd, dir, "handoff", "inbox", "list", "--json")
 	var pending []*types.InboxItem
 	if err := json.Unmarshal([]byte(listOut), &pending); err != nil {
 		t.Fatalf("parse inbox list JSON: %v\n%s", err, listOut)
@@ -64,7 +64,7 @@ func TestInboxImportIntegration(t *testing.T) {
 	}
 
 	// Import all pending items
-	importOut := bdRun(t, bd, dir, "inbox", "import", "--json")
+	importOut := bdRun(t, bd, dir, "handoff", "inbox", "import", "--json")
 	var importResult map[string]interface{}
 	if err := json.Unmarshal([]byte(importOut), &importResult); err != nil {
 		t.Fatalf("parse import JSON: %v\n%s", err, importOut)
@@ -74,7 +74,7 @@ func TestInboxImportIntegration(t *testing.T) {
 	}
 
 	// Verify inbox is now empty
-	listOut2 := bdRun(t, bd, dir, "inbox", "list", "--json")
+	listOut2 := bdRun(t, bd, dir, "handoff", "inbox", "list", "--json")
 	var pending2 []*types.InboxItem
 	if err := json.Unmarshal([]byte(listOut2), &pending2); err != nil {
 		t.Fatalf("parse inbox list JSON: %v\n%s", err, listOut2)
@@ -120,7 +120,7 @@ func TestInboxImportSpecificItem(t *testing.T) {
 	store.Close()
 
 	// Import only the first item by prefix
-	importOut := bdRun(t, bd, dir, "inbox", "import", "aaa", "--json")
+	importOut := bdRun(t, bd, dir, "handoff", "inbox", "import", "aaa", "--json")
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(importOut), &result); err != nil {
 		t.Fatalf("parse import JSON: %v\n%s", err, importOut)
@@ -130,7 +130,7 @@ func TestInboxImportSpecificItem(t *testing.T) {
 	}
 
 	// Second item should still be pending
-	listOut := bdRun(t, bd, dir, "inbox", "list", "--json")
+	listOut := bdRun(t, bd, dir, "handoff", "inbox", "list", "--json")
 	var pending []*types.InboxItem
 	if err := json.Unmarshal([]byte(listOut), &pending); err != nil {
 		t.Fatalf("parse list JSON: %v\n%s", err, listOut)
@@ -165,7 +165,7 @@ func TestInboxRejectIntegration(t *testing.T) {
 	store.Close()
 
 	// Reject with reason
-	rejectOut := bdRun(t, bd, dir, "inbox", "reject", "reject-me-001", "not relevant", "--json")
+	rejectOut := bdRun(t, bd, dir, "handoff", "inbox", "reject", "reject-me-001", "not relevant", "--json")
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(rejectOut), &result); err != nil {
 		t.Fatalf("parse reject JSON: %v\n%s", err, rejectOut)
@@ -175,7 +175,7 @@ func TestInboxRejectIntegration(t *testing.T) {
 	}
 
 	// Inbox should be empty
-	listOut := bdRun(t, bd, dir, "inbox", "list", "--json")
+	listOut := bdRun(t, bd, dir, "handoff", "inbox", "list", "--json")
 	var pending []*types.InboxItem
 	if err := json.Unmarshal([]byte(listOut), &pending); err != nil {
 		t.Fatalf("parse list JSON: %v\n%s", err, listOut)
@@ -215,7 +215,7 @@ func TestInboxCleanIntegration(t *testing.T) {
 	store.Close()
 
 	// Clean processed items (dry-run requires RawDBAccessor, skip it)
-	cleanOut := bdRun(t, bd, dir, "inbox", "clean", "--json")
+	cleanOut := bdRun(t, bd, dir, "handoff", "inbox", "clean", "--json")
 	var cleanResult map[string]interface{}
 	if err := json.Unmarshal([]byte(cleanOut), &cleanResult); err != nil {
 		t.Fatalf("parse clean JSON: %v\n%s", err, cleanOut)
@@ -225,7 +225,7 @@ func TestInboxCleanIntegration(t *testing.T) {
 	}
 
 	// Only pending item should remain
-	listOut := bdRun(t, bd, dir, "inbox", "list", "--json")
+	listOut := bdRun(t, bd, dir, "handoff", "inbox", "list", "--json")
 	var pending []*types.InboxItem
 	if err := json.Unmarshal([]byte(listOut), &pending); err != nil {
 		t.Fatalf("parse list JSON: %v\n%s", err, listOut)
@@ -260,7 +260,7 @@ func TestInboxImportDedup(t *testing.T) {
 	store.Close()
 
 	// First import
-	bdRun(t, bd, dir, "inbox", "import", "--json")
+	bdRun(t, bd, dir, "handoff", "inbox", "import", "--json")
 
 	// Add a second inbox item with same sender ref (simulating resend)
 	store2 := openStore(t, beadsDir, "dup")
@@ -278,7 +278,7 @@ func TestInboxImportDedup(t *testing.T) {
 	store2.Close()
 
 	// Second import should skip the duplicate
-	importOut := bdRun(t, bd, dir, "inbox", "import", "--json")
+	importOut := bdRun(t, bd, dir, "handoff", "inbox", "import", "--json")
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(importOut), &result); err != nil {
 		t.Fatalf("parse import JSON: %v\n%s", err, importOut)
@@ -315,7 +315,7 @@ func TestInboxRejectAlreadyImported(t *testing.T) {
 	store.Close()
 
 	// Reject should fail
-	out := bdRunExpectFail(t, bd, dir, "inbox", "reject", "already-imported-001")
+	out := bdRunExpectFail(t, bd, dir, "handoff", "inbox", "reject", "already-imported-001")
 	if !strings.Contains(out, "already imported") {
 		t.Errorf("expected 'already imported' error, got: %s", out)
 	}

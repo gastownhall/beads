@@ -7,7 +7,7 @@ The **inbox** feature enables cross-project issue delivery between beads project
 ```
 Project A                  Shared Dolt Server              Project B
 ┌──────────┐              ┌──────────────────┐            ┌──────────┐
-│ bd send   │ ──────────→ │  beads_inbox     │ ←───────── │ bd inbox  │
+│ bd handoff send   │ ──────────→ │  beads_inbox     │ ←───────── │ bd handoff inbox  │
 │ bd-42 →   │   INSERT    │  (in Project B)  │   SELECT   │ import    │
 │ project-b │              └──────────────────┘            └──────────┘
 └──────────┘                                               bd ready
@@ -16,17 +16,17 @@ Project A                  Shared Dolt Server              Project B
 
 ## Commands
 
-### `bd send` — Send an issue to another project
+### `bd handoff send` — Send an issue to another project
 
 ```bash
 # Send issue bd-42 to project "api-service"
-bd send bd-42 --to api-service
+bd handoff send bd-42 --to api-service
 
 # Send with an expiry (auto-removed if not imported)
-bd send bd-42 --to api-service --expires 7d
+bd handoff send bd-42 --to api-service --expires 7d
 
 # JSON output for automation
-bd send bd-42 --to api-service --json
+bd handoff send bd-42 --to api-service --json
 ```
 
 **Requirements:**
@@ -39,25 +39,25 @@ bd send bd-42 --to api-service --json
 - Blocking dependency context (issue IDs the sent issue blocks)
 - A sender reference link back to the original issue
 
-### `bd inbox` — Manage received issues
+### `bd handoff inbox` — Manage received issues
 
 ```bash
 # List pending inbox items
-bd inbox
-bd inbox list
+bd handoff inbox
+bd handoff inbox list
 
 # Import all pending items as real issues
-bd inbox import
+bd handoff inbox import
 
 # Import a specific item
-bd inbox import <inbox-id>
+bd handoff inbox import <inbox-id>
 
 # Reject an item
-bd inbox reject <inbox-id> "not relevant to this project"
+bd handoff inbox reject <inbox-id> "not relevant to this project"
 
 # Clean up imported/rejected/expired items
-bd inbox clean
-bd inbox clean --dry-run
+bd handoff inbox clean
+bd handoff inbox clean --dry-run
 ```
 
 ### `bd ready` — Automatic inbox notifications
@@ -65,7 +65,7 @@ bd inbox clean --dry-run
 When `bd ready` runs, it automatically checks for pending inbox items:
 
 ```
-📬 3 issue(s) pending in inbox (use bd inbox list to review, bd inbox import to accept)
+📬 3 issue(s) pending in inbox (use bd handoff inbox list to review, bd handoff inbox import to accept)
 ```
 
 In `--json` mode, the response includes an `inbox_pending` count:
@@ -102,7 +102,7 @@ If the sender resends an issue (same `sender_project_id` + `sender_issue_id`), t
 
 ### Import Process
 
-When you run `bd inbox import`:
+When you run `bd handoff inbox import`:
 
 1. Each pending inbox item becomes a new local issue
 2. The issue gets a new local ID (receiver-owned)
@@ -111,7 +111,7 @@ When you run `bd inbox import`:
 
 ### Cleanup
 
-`bd inbox clean` removes:
+`bd handoff inbox clean` removes:
 - Items that have been imported
 - Items that have been rejected
 - Items past their `expires_at` timestamp
@@ -130,22 +130,22 @@ bd create "Auth token expiry not handled" -t bug -p 1 --json
 # → created bd-abc
 
 # Project A: Send it to the API service project
-bd send bd-abc --to api-service
+bd handoff send bd-abc --to api-service
 
 # Project B: Check for work (sees inbox notification)
 bd ready
-# 📬 1 issue(s) pending in inbox (use bd inbox list to review, bd inbox import to accept)
+# 📬 1 issue(s) pending in inbox (use bd handoff inbox list to review, bd handoff inbox import to accept)
 
 # Project B: Review what was sent
-bd inbox list
+bd handoff inbox list
 #   abc12345  Auth token expiry not handled
 #        From: project-a/bd-abc  P1 bug  2m ago
 
 # Project B: Import it
-bd inbox import
+bd handoff inbox import
 # ✓ bd-abc → bd-xyz (Auth token expiry not handled)
 
 # Project B: Clean up
-bd inbox clean
+bd handoff inbox clean
 # ✓ Cleaned 1 inbox item(s)
 ```

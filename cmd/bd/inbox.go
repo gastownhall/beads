@@ -15,22 +15,21 @@ import (
 
 var inboxDryRun bool
 
-var inboxCmd = &cobra.Command{
-	Use:     "inbox",
-	GroupID: "sync",
-	Short:   "Manage cross-project inbox items",
+var handoffInboxCmd = &cobra.Command{
+	Use:   "inbox",
+	Short: "Manage cross-project inbox items",
 	Long: `View and manage issues sent from other projects.
 
-Other projects can send issues to your inbox using 'bd send'. Use this
+Other projects can send issues to your inbox using 'bd handoff send'. Use this
 command to list, import, reject, or clean up inbox items.
 
 Examples:
-  bd inbox                        # list pending inbox items
-  bd inbox list                   # same as above
-  bd inbox import                 # import all pending items as real issues
-  bd inbox import <inbox-id>      # import specific item
-  bd inbox reject <inbox-id>      # reject an item with reason
-  bd inbox clean                  # remove processed items`,
+  bd handoff inbox                        # list pending inbox items
+  bd handoff inbox list                   # same as above
+  bd handoff inbox import                 # import all pending items as real issues
+  bd handoff inbox import <inbox-id>      # import specific item
+  bd handoff inbox reject <inbox-id>      # reject an item with reason
+  bd handoff inbox clean                  # remove processed items`,
 	Run: runInboxList,
 }
 
@@ -50,8 +49,8 @@ imports only that specific item. Parent issues are imported first when
 dependencies are present.
 
 Examples:
-  bd inbox import                 # import all pending
-  bd inbox import abc-123         # import specific item`,
+  bd handoff inbox import                 # import all pending
+  bd handoff inbox import abc-123         # import specific item`,
 	Run: runInboxImport,
 }
 
@@ -81,20 +80,19 @@ The loop runs until interrupted (Ctrl-C). Use --interval to control the
 polling frequency in seconds (default 60).
 
 Examples:
-  bd inbox watch                  # poll every 60s
-  bd inbox watch --interval 30    # poll every 30s`,
+  bd handoff inbox watch                  # poll every 60s
+  bd handoff inbox watch --interval 30    # poll every 30s`,
 	Run: runInboxWatch,
 }
 
 func init() {
-	inboxCmd.AddCommand(inboxListCmd)
-	inboxCmd.AddCommand(inboxImportCmd)
-	inboxCmd.AddCommand(inboxRejectCmd)
-	inboxCmd.AddCommand(inboxCleanCmd)
-	inboxCmd.AddCommand(inboxWatchCmd)
+	handoffInboxCmd.AddCommand(inboxListCmd)
+	handoffInboxCmd.AddCommand(inboxImportCmd)
+	handoffInboxCmd.AddCommand(inboxRejectCmd)
+	handoffInboxCmd.AddCommand(inboxCleanCmd)
+	handoffInboxCmd.AddCommand(inboxWatchCmd)
 	inboxCleanCmd.Flags().BoolVar(&inboxDryRun, "dry-run", false, "preview what would be cleaned")
 	inboxWatchCmd.Flags().IntVar(&inboxWatchInterval, "interval", 60, "polling interval in seconds")
-	rootCmd.AddCommand(inboxCmd)
 }
 
 func runInboxList(cmd *cobra.Command, args []string) {

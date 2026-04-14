@@ -101,7 +101,11 @@ func (t *Transport) Send(ctx context.Context, dest transfer.Destination, items [
 				status = VALUES(status),
 				labels = VALUES(labels),
 				metadata = VALUES(metadata),
-				sender_ref = VALUES(sender_ref)
+				sender_ref = VALUES(sender_ref),
+				rejected_at = NULL,
+				rejection_reason = NULL,
+				imported_at = NULL,
+				imported_issue_id = NULL
 		`,
 			item.InboxID,
 			item.SenderProjectID,
