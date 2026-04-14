@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/steveyegge/beads/internal/beads"
 )
 
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
@@ -191,7 +189,7 @@ func UnsetYamlConfig(key string) error {
 // This keeps YAML-only config behavior aligned with runtime resolution when
 // BEADS_DIR points to an external runtime directory.
 func findProjectConfigYaml() (string, error) {
-	return findProjectConfigYamlWithFinder(beads.FindBeadsDir)
+	return findProjectConfigYamlWithFinder(findProjectBeadsDir)
 }
 
 func findProjectConfigYamlWithFinder(findBeadsDir func() string) (string, error) {
@@ -214,6 +212,27 @@ func findProjectConfigYamlWithFinder(findBeadsDir func() string) (string, error)
 	}
 
 	return "", fmt.Errorf("no .beads/config.yaml found (run 'bd init' first)")
+}
+
+func findProjectBeadsDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		beadsDir := filepath.Join(dir, ".beads")
+		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+			return beadsDir
+		}
+	}
+
+	configPath := worktreeFallbackConfigPath(cwd)
+	if configPath == "" {
+		return ""
+	}
+
+	return filepath.Dir(configPath)
 }
 
 // updateYamlKey updates a key in yaml content, handling commented-out keys.

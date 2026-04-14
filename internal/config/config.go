@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/debug"
 	"gopkg.in/yaml.v3"
 )
@@ -108,7 +107,7 @@ func Initialize() error {
 		// Worktree/shared fallback: the active workspace may live outside the
 		// worktree tree, so the parent walk above won't find it.
 		if primaryConfigPath == "" {
-			p := filepath.Join(beads.ResolveBeadsDirForRepo(cwd), "config.yaml")
+			p := worktreeFallbackConfigPath(cwd)
 			_ = tryProjectConfig(p)
 		}
 	}
@@ -273,6 +272,63 @@ func Initialize() error {
 func ResetForTesting() {
 	v = nil
 	overriddenKeys = map[string]bool{}
+}
+
+func worktreeFallbackConfigPath(repoPath string) string {
+	gitDir, commonDir, ok := gitDirsForRepo(repoPath)
+	if !ok || samePath(gitDir, commonDir) {
+		return ""
+	}
+
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Join(filepath.Dir(commonDir), ".beads", "config.yaml")
+	}
+
+	return filepath.Join(commonDir, ".beads", "config.yaml")
+}
+
+func gitDirsForRepo(repoPath string) (gitDir, commonDir string, ok bool) {
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", false
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) < 2 {
+		return "", "", false
+	}
+
+	gitDir = gitPathForRepo(repoPath, strings.TrimSpace(lines[0]))
+	commonDir = gitPathForRepo(repoPath, strings.TrimSpace(lines[1]))
+	if gitDir == "" || commonDir == "" {
+		return "", "", false
+	}
+
+	return gitDir, commonDir, true
+}
+
+func gitPathForRepo(repoPath, path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(repoPath, path)
+	}
+
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+
+	return path
+}
+
+func samePath(left, right string) bool {
+	if left == "" || right == "" {
+		return left == right
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 // ConfigSource represents where a configuration value came from
