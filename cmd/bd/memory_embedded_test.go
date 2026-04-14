@@ -224,11 +224,11 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	const numWorkers = 8
 
 	type workerResult struct {
-		worker     int
-		err        error
+		worker      int
+		err         error
 		rememberOut []string
-		forgetOut  string
-		memOut     string
+		forgetOut   string
+		memOut      string
 	}
 
 	results := make([]workerResult, numWorkers)
