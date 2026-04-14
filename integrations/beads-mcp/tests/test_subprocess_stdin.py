@@ -23,6 +23,7 @@ class TestBdClientSubprocessStdin:
     def bd_client(self):
         """Create a BdClient instance for testing."""
         from beads_mcp.bd_client import BdClient
+
         return BdClient(bd_path="/usr/bin/bd", beads_db="/tmp/test.db")
 
     @pytest.fixture
@@ -111,7 +112,7 @@ class TestServerSubprocessStdin:
         """Test that _resolve_workspace_root passes stdin=DEVNULL to git subprocess."""
         from beads_mcp.server import _resolve_workspace_root
 
-        with patch("subprocess.run") as mock_run:
+        with patch("beads_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="/repo/root\n")
 
             _resolve_workspace_root("/some/path")
@@ -130,7 +131,7 @@ class TestToolsSubprocessStdin:
         """Test that tools._resolve_workspace_root passes stdin=DEVNULL to git subprocess."""
         from beads_mcp.tools import _resolve_workspace_root
 
-        with patch("beads_mcp.tools.subprocess.run") as mock_run:
+        with patch("beads_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="/repo/root\n")
 
             _resolve_workspace_root("/some/path")
