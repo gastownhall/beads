@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bd dream` — memory consolidation** — A new subcommand that asks an LLM to identify duplicate, stale, or low-signal entries in the memory store (`bd remember` / `bd memories`) and applies merge / forget / update operations. Includes an eligibility gate (`--check`) so external schedulers (cron, launchd, editor hooks) can fire frequently without doing real work most of the time. Mirrors Claude Code's AutoDream feature without depending on it. See [docs/DREAM.md](docs/DREAM.md). Reuses the existing `ai.api_key` / `ai.model` configuration. Anthropic only for now.
+
 ### Changed
 
 - **Auto-export enabled by default** — `export.auto` defaults to `true` and the default `export.path` is now `issues.jsonl` (previously `export.jsonl`), with `export.git-add` on by default. `bd init` prompts interactively (default: keep enabled) and `--non-interactive` keeps it enabled. All `export.*` keys are now listed in `bd config --help`. ([GH#2973](https://github.com/steveyegge/beads/issues/2973))
