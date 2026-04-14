@@ -19,7 +19,7 @@ func IsAllowedUpdateField(key string) bool {
 		"description": true, "design": true, "acceptance_criteria": true, "notes": true,
 		"issue_type": true, "estimated_minutes": true, "external_ref": true, "spec_id": true,
 		"started_at": true,
-		"closed_at": true, "close_reason": true, "closed_by_session": true,
+		"closed_at":  true, "close_reason": true, "closed_by_session": true,
 		"source_repo": true,
 		"sender":      true, "wisp": true, "wisp_type": true, "no_history": true, "pinned": true,
 		"mol_type":       true,
