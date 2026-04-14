@@ -60,10 +60,11 @@ func validateBeadsWorkspace(path string) error {
 		return fmt.Errorf("invalid path: %w", err)
 	}
 
-	// Check for .beads directory
-	beadsDir := filepath.Join(absPath, ".beads")
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		return fmt.Errorf("not a beads workspace: .beads directory not found at %s", absPath)
+	// Check for a local .beads directory first, then fall back to the shared
+	// worktree location derived from git-common-dir.
+	beadsDir := beads.ResolveBeadsDirForRepo(absPath)
+	if info, err := os.Stat(beadsDir); err != nil || !info.IsDir() {
+		return fmt.Errorf("not a beads workspace: .beads directory not found for %s", absPath)
 	}
 
 	return nil

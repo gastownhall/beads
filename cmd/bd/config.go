@@ -502,8 +502,9 @@ Checks:
 func validateSyncConfig(repoPath string) []string {
 	var issues []string
 
-	// Load config.yaml directly from the repo path
-	configPath := filepath.Join(repoPath, ".beads", "config.yaml")
+	// Load config.yaml from the resolved workspace so shared worktrees validate
+	// the same config file they actually run with.
+	configPath := filepath.Join(doctor.ResolveBeadsDirForRepo(repoPath), "config.yaml")
 	v := viper.New()
 	v.SetConfigType("yaml")
 	v.SetConfigFile(configPath)

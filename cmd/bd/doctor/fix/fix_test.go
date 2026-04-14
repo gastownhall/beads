@@ -35,6 +35,50 @@ func setupTestGitRepo(t *testing.T) string {
 	return dir
 }
 
+func setupSharedWorktreeWorkspace(t *testing.T) (mainRepoDir, worktreeDir string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	mainRepoDir = filepath.Join(tmpDir, "main-repo")
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatalf("failed to create main repo dir: %v", err)
+	}
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run(mainRepoDir, "init")
+	run(mainRepoDir, "config", "user.email", "test@example.com")
+	run(mainRepoDir, "config", "user.name", "Test User")
+
+	readmePath := filepath.Join(mainRepoDir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("# Test\n"), 0o644); err != nil {
+		t.Fatalf("failed to write README.md: %v", err)
+	}
+	run(mainRepoDir, "add", "README.md")
+	run(mainRepoDir, "commit", "-m", "Initial commit")
+
+	worktreeDir = filepath.Join(tmpDir, "worktree")
+	addWorktree := exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	addWorktree.Dir = mainRepoDir
+	if out, err := addWorktree.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		removeWorktree := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		removeWorktree.Dir = mainRepoDir
+		_ = removeWorktree.Run()
+	})
+
+	return mainRepoDir, worktreeDir
+}
+
 // runGit runs a git command and returns output
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()

@@ -93,7 +93,7 @@ func formatConfigValuesResult(issues []string) DoctorCheck {
 
 // findConfigPath locates config.yaml in standard locations.
 func findConfigPath(repoPath string) string {
-	configPath := filepath.Join(repoPath, ".beads", "config.yaml")
+	configPath := filepath.Join(ResolveBeadsDirForRepo(repoPath), "config.yaml")
 	if _, err := os.Stat(configPath); err == nil {
 		return configPath
 	}

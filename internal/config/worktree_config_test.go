@@ -113,3 +113,25 @@ func TestFindConfigYAMLPath_WorktreeFallbackUsesMainRepoConfig(t *testing.T) {
 		t.Fatalf("FindConfigYAMLPath() = %q, want %q", gotResolved, wantResolved)
 	}
 }
+
+func TestInitialize_WorktreeFallbackUsesMainRepoConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	_, _, mainConfigPath := setupConfigWorktree(t)
+	if err := os.WriteFile(mainConfigPath, []byte("json: true\nactor: shared-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write main config.yaml: %v", err)
+	}
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetBool("json"); !got {
+		t.Fatalf("GetBool(json) = %v, want true", got)
+	}
+	if got := GetString("actor"); got != "shared-user" {
+		t.Fatalf("GetString(actor) = %q, want %q", got, "shared-user")
+	}
+}

@@ -172,6 +172,21 @@ func TestValidateBeadsWorkspace_EdgeCases(t *testing.T) {
 			t.Errorf("expected relative path to be valid, got: %v", err)
 		}
 	})
+
+	t.Run("shared worktree fallback", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupSharedWorktreeWorkspace(t)
+		mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+			t.Fatalf("failed to create main .beads dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(mainBeadsDir, "config.yaml"), []byte("json: true\n"), 0o644); err != nil {
+			t.Fatalf("failed to write config.yaml: %v", err)
+		}
+
+		if err := validateBeadsWorkspace(worktreeDir); err != nil {
+			t.Errorf("expected shared-worktree workspace to be valid, got: %v", err)
+		}
+	})
 }
 
 // TestGitHooks_EdgeCases tests GitHooks with edge cases

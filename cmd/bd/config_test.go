@@ -480,6 +480,28 @@ federation:
 			t.Errorf("Expected no issues when remote matches allowed pattern, got: %v", issues)
 		}
 	})
+
+	t.Run("uses shared worktree config when local .beads is absent", func(t *testing.T) {
+		bareDir, worktreeDir := setupBareParentInitWorktree(t)
+		bareBeadsDir := filepath.Join(bareDir, ".beads")
+		if err := os.MkdirAll(bareBeadsDir, 0o755); err != nil {
+			t.Fatalf("Failed to create bare .beads dir: %v", err)
+		}
+
+		configContent := `federation:
+  remote: "dolthub://myorg/myrepo"
+  allowed-remote-patterns:
+    - "dolthub://myorg/*"
+`
+		if err := os.WriteFile(filepath.Join(bareBeadsDir, "config.yaml"), []byte(configContent), 0o644); err != nil {
+			t.Fatalf("Failed to write config.yaml: %v", err)
+		}
+
+		issues := validateSyncConfig(worktreeDir)
+		if len(issues) != 0 {
+			t.Errorf("Expected no issues when shared worktree config is valid, got: %v", issues)
+		}
+	})
 }
 
 func TestResolvedConfigRepoRoot(t *testing.T) {

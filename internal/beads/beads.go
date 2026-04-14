@@ -748,6 +748,62 @@ func GetWorktreeFallbackBeadsDir() string {
 	return filepath.Join(commonDir, ".beads")
 }
 
+// ResolveBeadsDirForRepo returns the effective .beads directory for a repo path.
+// It prefers a local .beads directory and otherwise falls back to the shared
+// worktree location derived from git-common-dir.
+//
+// Unlike FindBeadsDir, this helper does not use BEADS_DIR and does not walk up
+// from CWD. Callers that care about nested rig directories should resolve those
+// before falling back to this repo-scoped helper.
+func ResolveBeadsDirForRepo(repoPath string) string {
+	repoPath = utils.CanonicalizePath(repoPath)
+	localBeadsDir := filepath.Join(repoPath, ".beads")
+	if info, err := os.Stat(localBeadsDir); err == nil && info.IsDir() {
+		return FollowRedirect(localBeadsDir)
+	}
+
+	if fallback := worktreeFallbackBeadsDirForRepo(repoPath); fallback != "" {
+		return FollowRedirect(fallback)
+	}
+
+	return FollowRedirect(localBeadsDir)
+}
+
+func worktreeFallbackBeadsDirForRepo(repoPath string) string {
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) < 2 {
+		return ""
+	}
+
+	gitDir := gitPathForRepo(repoPath, strings.TrimSpace(lines[0]))
+	commonDir := gitPathForRepo(repoPath, strings.TrimSpace(lines[1]))
+	if gitDir == "" || commonDir == "" || utils.PathsEqual(gitDir, commonDir) {
+		return ""
+	}
+
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Join(filepath.Dir(commonDir), ".beads")
+	}
+
+	return filepath.Join(commonDir, ".beads")
+}
+
+func gitPathForRepo(repoPath, path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(repoPath, path)
+	}
+	return utils.CanonicalizePath(path)
+}
+
 // worktreeRedirectTarget returns the resolved redirect target for the current
 // worktree's .beads/redirect file, or empty string if not in a worktree or no
 // redirect exists. This centralizes the per-worktree redirect override logic

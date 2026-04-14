@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/debug"
 	"gopkg.in/yaml.v3"
 )
@@ -77,22 +78,38 @@ func Initialize() error {
 			}
 		}
 
+		tryProjectConfig := func(path string) bool {
+			if path == "" {
+				return false
+			}
+			if _, err := os.Stat(path); err != nil {
+				return false
+			}
+			if ignoreRepoConfig && moduleRoot != "" {
+				// Only ignore the repo-local config (moduleRoot/.beads/config.yaml).
+				wantIgnore := filepath.Clean(path) == filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))
+				if wantIgnore {
+					return false
+				}
+			}
+			configPaths = append(configPaths, path)
+			primaryConfigPath = path
+			return true
+		}
+
 		// Walk up parent directories to find .beads/config.yaml
 		for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-			beadsDir := filepath.Join(dir, ".beads")
-			p := filepath.Join(beadsDir, "config.yaml")
-			if _, err := os.Stat(p); err == nil {
-				if ignoreRepoConfig && moduleRoot != "" {
-					// Only ignore the repo-local config (moduleRoot/.beads/config.yaml).
-					wantIgnore := filepath.Clean(p) == filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))
-					if wantIgnore {
-						continue
-					}
-				}
-				configPaths = append(configPaths, p)
-				primaryConfigPath = p
+			p := filepath.Join(dir, ".beads", "config.yaml")
+			if tryProjectConfig(p) {
 				break
 			}
+		}
+
+		// Worktree/shared fallback: the active workspace may live outside the
+		// worktree tree, so the parent walk above won't find it.
+		if primaryConfigPath == "" {
+			p := filepath.Join(beads.ResolveBeadsDirForRepo(cwd), "config.yaml")
+			_ = tryProjectConfig(p)
 		}
 	}
 

@@ -2,9 +2,54 @@ package doctor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+func setupDoctorSharedWorktree(t *testing.T) (mainRepoDir, worktreeDir string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	mainRepoDir = filepath.Join(tmpDir, "main-repo")
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatalf("failed to create main repo dir: %v", err)
+	}
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run(mainRepoDir, "init")
+	run(mainRepoDir, "config", "user.email", "test@example.com")
+	run(mainRepoDir, "config", "user.name", "Test User")
+
+	readmePath := filepath.Join(mainRepoDir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("# Test\n"), 0o644); err != nil {
+		t.Fatalf("failed to write README.md: %v", err)
+	}
+	run(mainRepoDir, "add", "README.md")
+	run(mainRepoDir, "commit", "-m", "Initial commit")
+
+	worktreeDir = filepath.Join(tmpDir, "worktree")
+	addWorktree := exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	addWorktree.Dir = mainRepoDir
+	if out, err := addWorktree.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		removeWorktree := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		removeWorktree.Dir = mainRepoDir
+		_ = removeWorktree.Run()
+	})
+
+	return mainRepoDir, worktreeDir
+}
 
 func TestCheckConfigValues(t *testing.T) {
 	// Create a temporary directory for testing
@@ -79,6 +124,27 @@ func TestCheckConfigValues(t *testing.T) {
 			t.Errorf("expected detail to mention too long, got: %s", check.Detail)
 		}
 	})
+}
+
+func TestCheckConfigValues_WorktreeFallbackUsesSharedConfig(t *testing.T) {
+	mainRepoDir, worktreeDir := setupDoctorSharedWorktree(t)
+	mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create main .beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "config.yaml"), []byte("issue-prefix: \"123-invalid\"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+
+	clearResolveBeadsDirCache()
+
+	check := CheckConfigValues(worktreeDir)
+	if check.Status != "warning" {
+		t.Fatalf("expected warning status, got %s: %s", check.Status, check.Detail)
+	}
+	if check.Detail == "" || !contains(check.Detail, "issue-prefix") {
+		t.Fatalf("expected detail to mention issue-prefix, got: %s", check.Detail)
+	}
 }
 
 func TestCheckMetadataConfigValues(t *testing.T) {
