@@ -155,6 +155,7 @@ var createCmd = &cobra.Command{
 		waitsForGate, _ := cmd.Flags().GetString("waits-for-gate")
 		forceCreate, _ := cmd.Flags().GetBool("force")
 		repoOverride, _ := cmd.Flags().GetString("repo")
+		rigOverride, _ := cmd.Flags().GetString("rig")
 		wisp, _ := cmd.Flags().GetBool("ephemeral")
 		noHistory, _ := cmd.Flags().GetBool("no-history")
 		if wisp && noHistory {
@@ -345,7 +346,16 @@ var createCmd = &cobra.Command{
 
 		// Determine target repository using routing logic
 		repoPath := "." // default to current directory
-		if cmd.Flags().Changed("repo") {
+		if cmd.Flags().Changed("rig") {
+			// --rig=<name> resolves a Gas Town rig name to its beads directory path.
+			// Uses GT_ROOT env var (set by Gas Town shell integration) to find the town root.
+			// Maps: hq → $GT_ROOT, <rig> → $GT_ROOT/<rig>/mayor/rig
+			resolved, err := resolveRigName(rigOverride)
+			if err != nil {
+				FatalError("cannot resolve --rig=%q: %v", rigOverride, err)
+			}
+			repoPath = resolved
+		} else if cmd.Flags().Changed("repo") {
 			// Explicit --repo flag overrides auto-routing
 			repoPath = repoOverride
 		} else {
@@ -770,6 +780,7 @@ func init() {
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")
+	createCmd.Flags().String("rig", "", "Target Gas Town rig name (e.g. 'mycp', 'beads', 'gastown', 'hq'); resolves to rig beads directory via GT_ROOT")
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (short-lived, subject to TTL compaction)")
 	createCmd.Flags().Bool("no-history", false, "Skip Dolt commit history without making GC-eligible (for permanent agent beads)")
@@ -794,6 +805,23 @@ func init() {
 	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
+}
+
+// resolveRigName maps a Gas Town rig name to its beads directory path.
+// Uses GT_ROOT (or GT_TOWN_ROOT as fallback) to locate the town root.
+// "hq" maps to the town root itself; all other names map to <town>/<rig>/mayor/rig.
+func resolveRigName(rigName string) (string, error) {
+	townRoot := os.Getenv("GT_ROOT")
+	if townRoot == "" {
+		townRoot = os.Getenv("GT_TOWN_ROOT")
+	}
+	if townRoot == "" {
+		return "", fmt.Errorf("GT_ROOT is not set; cannot resolve rig %q (run inside a Gas Town session)", rigName)
+	}
+	if rigName == "hq" || rigName == "" {
+		return townRoot, nil
+	}
+	return filepath.Join(townRoot, rigName, "mayor", "rig"), nil
 }
 
 // formatTimeForRPC converts a *time.Time to RFC3339 string for RPC calls.
