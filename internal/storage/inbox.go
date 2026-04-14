@@ -30,9 +30,12 @@ func ValidateInboxItem(item *types.InboxItem) error {
 	return nil
 }
 
-// InboxStore provides cross-project inbox operations.
+// InboxStore provides local inbox CRUD operations.
 // Each project has an inbox table where other projects can deposit issues.
 // The receiving project controls when and whether to import them.
+//
+// Delivery to remote projects is handled separately by the transfer.InboxTransport
+// interface, which decouples the transport mechanism from local storage.
 type InboxStore interface {
 	AddInboxItem(ctx context.Context, item *types.InboxItem) error
 	GetInboxItem(ctx context.Context, inboxID string) (*types.InboxItem, error)
@@ -42,7 +45,4 @@ type InboxStore interface {
 	MarkInboxItemRejected(ctx context.Context, inboxID string, reason string) error
 	CleanInbox(ctx context.Context) (int64, error)
 	CountPendingInbox(ctx context.Context) (int64, error)
-	// SendToInbox delivers inbox items to a target project's database.
-	// Requires shared-server mode (cross-database access).
-	SendToInbox(ctx context.Context, target string, items []*types.InboxItem) (int, error)
 }

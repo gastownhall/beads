@@ -10,6 +10,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/timeparsing"
+	"github.com/steveyegge/beads/internal/transfer"
+	"github.com/steveyegge/beads/internal/transfer/sharedserver"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -127,8 +129,13 @@ func runSend(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	// Send to target
-	sent, err := sendToTarget(ctx, s, sendTo, items)
+	// Build transport and destination
+	transport, dest, err := buildTransport(ctx, s, sendTo)
+	if err != nil {
+		FatalErrorRespectJSON("transport setup: %v", err)
+	}
+
+	sent, err := transport.Send(ctx, dest, items)
 	if err != nil {
 		FatalErrorRespectJSON("send failed: %v", err)
 	}
@@ -168,9 +175,32 @@ func issueToInboxItem(issue *types.Issue, senderProjectID string, depMap map[str
 	return item
 }
 
-// sendToTarget delegates to the store's SendToInbox method.
-func sendToTarget(ctx context.Context, s storage.DoltStorage, target string, items []*types.InboxItem) (int, error) {
-	return s.SendToInbox(ctx, target, items)
+// buildTransport creates an InboxTransport and Destination for the given target.
+// Currently only shared-server transport is supported; the target string is
+// treated as a database name. Future transports (federation peers) will be
+// resolved via project config.
+func buildTransport(ctx context.Context, s storage.DoltStorage, target string) (transfer.InboxTransport, transfer.Destination, error) {
+	// Type-assert to get raw DB access for shared-server transport
+	type rawStore interface {
+		storage.RawDBAccessor
+		DatabaseName() string
+	}
+	rs, ok := s.(rawStore)
+	if !ok {
+		return nil, transfer.Destination{}, fmt.Errorf("store does not support shared-server transport (try running with a Dolt server)")
+	}
+
+	t, err := sharedserver.NewTransport(rs.DB(), rs.DatabaseName())
+	if err != nil {
+		return nil, transfer.Destination{}, err
+	}
+
+	dest := transfer.Destination{
+		ProjectName: target, // For now, project name == db name; PR2 adds config-based resolution
+		Address:     target,
+	}
+
+	return t, dest, nil
 }
 
 // getCurrentDatabase returns the current database name from store metadata.

@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"regexp"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -274,94 +272,4 @@ func scanInboxItems(rows *sql.Rows) ([]*types.InboxItem, error) {
 		items = append(items, &item)
 	}
 	return items, rows.Err()
-}
-
-// validDBName matches safe Dolt database identifiers.
-var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_\-]*$`)
-
-// SendToInbox delivers inbox items to a target project's database via cross-database INSERT.
-// Requires shared-server mode where both databases are accessible on the same Dolt SQL server.
-func (s *DoltStore) SendToInbox(ctx context.Context, target string, items []*types.InboxItem) (int, error) {
-	if !validDBName.MatchString(target) {
-		return 0, fmt.Errorf("invalid target database name %q: must match [a-zA-Z0-9_-]", target)
-	}
-
-	for _, item := range items {
-		if err := storage.ValidateInboxItem(item); err != nil {
-			return 0, err
-		}
-	}
-
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("acquiring connection: %w", err)
-	}
-	defer conn.Close()
-
-	// Remember and restore original database on all exit paths
-	origDB := s.database
-	if !validDBName.MatchString(origDB) {
-		return 0, fmt.Errorf("invalid current database name %q", origDB)
-	}
-
-	if _, err := conn.ExecContext(ctx, "USE `"+target+"`"); err != nil {
-		return 0, fmt.Errorf("cannot access target database %q: %w (is the Dolt server shared?)", target, err)
-	}
-	defer func() {
-		_, _ = conn.ExecContext(ctx, "USE `"+origDB+"`")
-	}()
-
-	sent := 0
-	for _, item := range items {
-		labels := item.Labels
-		if labels == "" {
-			labels = "[]"
-		}
-		metadata := item.Metadata
-		if metadata == "" {
-			metadata = "{}"
-		}
-
-		_, err = conn.ExecContext(ctx, `
-			INSERT INTO beads_inbox (
-				inbox_id, sender_project_id, sender_issue_id, title, description,
-				priority, issue_type, status, labels, metadata, sender_ref
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE
-				title = VALUES(title),
-				description = VALUES(description),
-				priority = VALUES(priority),
-				issue_type = VALUES(issue_type),
-				status = VALUES(status),
-				labels = VALUES(labels),
-				metadata = VALUES(metadata),
-				sender_ref = VALUES(sender_ref)
-		`,
-			item.InboxID,
-			item.SenderProjectID,
-			item.SenderIssueID,
-			item.Title,
-			item.Description,
-			item.Priority,
-			item.IssueType,
-			item.Status,
-			labels,
-			metadata,
-			item.SenderRef,
-		)
-		if err != nil {
-			return sent, fmt.Errorf("failed to send %s: %w", item.SenderIssueID, err)
-		}
-		sent++
-	}
-
-	if sent > 0 {
-		_, err = conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)",
-			fmt.Sprintf("inbox: received %d issue(s) from %s", sent, items[0].SenderProjectID))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: auto-commit in target failed: %v\n", err)
-		}
-	}
-
-	return sent, nil
 }

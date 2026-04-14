@@ -685,6 +685,11 @@ func (s *DoltStore) DB() *sql.DB {
 	return s.db
 }
 
+// DatabaseName returns the Dolt database name for this store.
+func (s *DoltStore) DatabaseName() string {
+	return s.database
+}
+
 // BackupAdd registers a Dolt backup destination.
 func (s *DoltStore) BackupAdd(ctx context.Context, name, url string) error {
 	return versioncontrolops.BackupAdd(ctx, s.db, name, url)

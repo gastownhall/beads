@@ -265,8 +265,3 @@ func (s *EmbeddedDoltStore) CountPendingInbox(ctx context.Context) (int64, error
 	})
 	return count, err
 }
-
-// SendToInbox is not supported in embedded mode (no cross-database access).
-func (s *EmbeddedDoltStore) SendToInbox(ctx context.Context, target string, items []*types.InboxItem) (int, error) {
-	return 0, fmt.Errorf("send requires shared server mode; embedded mode does not support cross-database access")
-}
