@@ -10,15 +10,12 @@ import (
 
 // Permissions fixes file permission issues in the .beads directory
 func Permissions(path string) error {
-	beadsDirResolved, err := resolvedWorkspaceBeadsDir(path)
+	dirs, err := resolveWorkspaceBeadsDirs(path)
 	if err != nil {
 		return err
 	}
-	localBeadsDir, err := localWorkspaceBeadsDir(path)
-	if err != nil {
-		return err
-	}
-	beadsDir := localBeadsDir
+	beadsDirResolved := dirs.resolved
+	beadsDir := dirs.local
 
 	// Check if .beads/ directory exists
 	// Use Lstat to detect symlinks - we shouldn't chmod symlinked directories

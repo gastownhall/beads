@@ -17,6 +17,17 @@ func resolvePathForTest(t *testing.T, path string) string {
 	return resolved
 }
 
+func absPathForTest(t *testing.T, path string) string {
+	t.Helper()
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("Abs(%q) failed: %v", path, err)
+	}
+
+	return absPath
+}
+
 func TestSafeWorkspacePath(t *testing.T) {
 	root := t.TempDir()
 	absEscape, _ := filepath.Abs(filepath.Join(root, "..", "escape"))
@@ -118,6 +129,36 @@ func TestResolvedWorkspaceBeadsDir(t *testing.T) {
 		want := resolvePathForTest(t, worktreeBeadsDir)
 		if got != want {
 			t.Fatalf("resolvedWorkspaceBeadsDir() = %q, want %q", got, worktreeBeadsDir)
+		}
+	})
+}
+
+func TestLocalWorkspaceBeadsDir(t *testing.T) {
+	t.Run("returns local beads path for local workspace", func(t *testing.T) {
+		dir := setupTestWorkspace(t)
+
+		got, err := localWorkspaceBeadsDir(dir)
+		if err != nil {
+			t.Fatalf("localWorkspaceBeadsDir() error = %v", err)
+		}
+
+		want := filepath.Join(absPathForTest(t, dir), ".beads")
+		if got != want {
+			t.Fatalf("localWorkspaceBeadsDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("shared worktree still returns worktree local path", func(t *testing.T) {
+		_, worktreeDir := setupSharedWorktreeWorkspace(t)
+
+		got, err := localWorkspaceBeadsDir(worktreeDir)
+		if err != nil {
+			t.Fatalf("localWorkspaceBeadsDir() error = %v", err)
+		}
+
+		want := filepath.Join(absPathForTest(t, worktreeDir), ".beads")
+		if got != want {
+			t.Fatalf("localWorkspaceBeadsDir() = %q, want %q", got, want)
 		}
 	})
 }
