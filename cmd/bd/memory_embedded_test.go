@@ -216,22 +216,19 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "mx")
 
-	// Disable auto-export: this test exercises concurrent memory
-	// flock contention, not export behavior. With export.auto=true
-	// (the default since GH#2973), 8 concurrent writers also trigger
-	// post-write read paths that race with in-flight commits.
-	disableAutoExport := exec.Command(bd, "config", "set", "export.auto", "false")
-	disableAutoExport.Dir = dir
-	disableAutoExport.Env = bdEnv(dir)
-	if out, err := disableAutoExport.CombinedOutput(); err != nil {
-		t.Fatalf("disable export.auto: %v\n%s", err, out)
-	}
+	// PROBE GH#3260: keep auto-export enabled (default) so the race
+	// against post-write read paths is exercised in CI. Targeted debug
+	// output is gated by BD_PROBE_3260=1 in each worker's env and
+	// captured into workerResult for dumping on failure.
 
 	const numWorkers = 8
 
 	type workerResult struct {
-		worker int
-		err    error
+		worker     int
+		err        error
+		rememberOut []string
+		forgetOut  string
+		memOut     string
 	}
 
 	results := make([]workerResult, numWorkers)
@@ -243,6 +240,8 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 			defer wg.Done()
 			r := workerResult{worker: worker}
 
+			probeEnv := append(bdEnv(dir), "BD_PROBE_3260=1")
+
 			// Each worker stores memories with unique keys
 			for i := 0; i < 3; i++ {
 				key := fmt.Sprintf("w%d-mem%d", worker, i)
@@ -250,8 +249,9 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 
 				cmd := exec.Command(bd, "remember", content, "--key", key)
 				cmd.Dir = dir
-				cmd.Env = bdEnv(dir)
+				cmd.Env = probeEnv
 				out, err := cmd.CombinedOutput()
+				r.rememberOut = append(r.rememberOut, string(out))
 				if err != nil {
 					r.err = fmt.Errorf("remember %s: %v\n%s", key, err, out)
 					results[worker] = r
@@ -266,7 +266,7 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 
 				cmd := exec.Command(bd, "recall", key)
 				cmd.Dir = dir
-				cmd.Env = bdEnv(dir)
+				cmd.Env = probeEnv
 				out, err := cmd.CombinedOutput()
 				if err != nil {
 					r.err = fmt.Errorf("recall %s: %v\n%s", key, err, out)
@@ -284,8 +284,9 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 			forgetKey := fmt.Sprintf("w%d-mem0", worker)
 			cmd := exec.Command(bd, "forget", forgetKey)
 			cmd.Dir = dir
-			cmd.Env = bdEnv(dir)
+			cmd.Env = probeEnv
 			out, err := cmd.CombinedOutput()
+			r.forgetOut = string(out)
 			if err != nil {
 				r.err = fmt.Errorf("forget %s: %v\n%s", forgetKey, err, out)
 				results[worker] = r
@@ -295,8 +296,9 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 			// List memories
 			cmd = exec.Command(bd, "memories")
 			cmd.Dir = dir
-			cmd.Env = bdEnv(dir)
+			cmd.Env = probeEnv
 			out, err = cmd.CombinedOutput()
+			r.memOut = string(out)
 			if err != nil {
 				r.err = fmt.Errorf("memories: %v\n%s", err, out)
 				results[worker] = r
@@ -316,7 +318,14 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 
 	// Verify memories only for workers that succeeded (err==nil).
 	// With exclusive flock, some workers may fail with "one writer at a time".
-	out := bdMemories(t, bd, dir)
+	finalCmd := exec.Command(bd, "memories")
+	finalCmd.Dir = dir
+	finalCmd.Env = append(bdEnv(dir), "BD_PROBE_3260=1")
+	finalOut, finalErr := finalCmd.CombinedOutput()
+	if finalErr != nil {
+		t.Fatalf("final bd memories failed: %v\n%s", finalErr, finalOut)
+	}
+	out := string(finalOut)
 	var successCount int
 	for _, r := range results {
 		if r.err != nil {
@@ -326,7 +335,8 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 		w := r.worker
 		forgottenKey := fmt.Sprintf("w%d-mem0", w)
 		if strings.Contains(out, forgottenKey) {
-			t.Errorf("expected %s to be forgotten", forgottenKey)
+			t.Errorf("expected %s to be forgotten\n--- worker %d remembers ---\n%s\n--- forget ---\n%s\n--- worker own memories ---\n%s\n--- final memories ---\n%s",
+				forgottenKey, w, strings.Join(r.rememberOut, "---\n"), r.forgetOut, r.memOut, out)
 		}
 		for i := 1; i < 3; i++ {
 			key := fmt.Sprintf("w%d-mem%d", w, i)

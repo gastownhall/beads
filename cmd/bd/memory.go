@@ -88,11 +88,22 @@ Examples:
 			verb = "Updated"
 		}
 
+		probe := os.Getenv("BD_PROBE_3260") == "1"
+		var hashBefore string
+		if probe {
+			hashBefore, _ = store.GetCurrentCommit(ctx)
+		}
 		if err := store.SetConfig(ctx, storageKey, insight); err != nil {
 			FatalErrorRespectJSON("storing memory: %v", err)
 		}
-		if _, err := store.CommitPending(ctx, getActor()); err != nil {
+		committed, err := store.CommitPending(ctx, getActor())
+		if err != nil {
 			WarnError("failed to commit memory: %v", err)
+		}
+		if probe {
+			hashAfter, _ := store.GetCurrentCommit(ctx)
+			fmt.Fprintf(os.Stderr, "PROBE3260 remember=%s pid=%d committed=%v parent=%s hash=%s\n",
+				key, os.Getpid(), committed, hashBefore, hashAfter)
 		}
 
 		if jsonOutput {
@@ -138,6 +149,16 @@ Examples:
 				userKey := strings.TrimPrefix(k, fullPrefix)
 				memories[userKey] = v
 			}
+		}
+		if os.Getenv("BD_PROBE_3260") == "1" {
+			hash, _ := store.GetCurrentCommit(ctx)
+			keys := make([]string, 0, len(memories))
+			for k := range memories {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			fmt.Fprintf(os.Stderr, "PROBE3260 memories pid=%d hash=%s count=%d keys=%v\n",
+				os.Getpid(), hash, len(memories), keys)
 		}
 
 		// Apply search filter if provided
@@ -230,11 +251,30 @@ Examples:
 			os.Exit(1)
 		}
 
+		// PROBE GH#3260
+		probe := os.Getenv("BD_PROBE_3260") == "1"
+		if probe {
+			hashBefore, _ := store.GetCurrentCommit(ctx)
+			fmt.Fprintf(os.Stderr, "PROBE3260 forget=%s pid=%d step=pre-delete hash=%s existing_len=%d\n",
+				key, os.Getpid(), hashBefore, len(existing))
+		}
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
 			FatalErrorRespectJSON("forgetting memory: %v", err)
 		}
-		if _, err := store.CommitPending(ctx, getActor()); err != nil {
+		if probe {
+			v, _ := store.GetConfig(ctx, storageKey)
+			fmt.Fprintf(os.Stderr, "PROBE3260 forget=%s pid=%d step=post-delete-pre-commit getconfig_len=%d\n",
+				key, os.Getpid(), len(v))
+		}
+		committed, err := store.CommitPending(ctx, getActor())
+		if err != nil {
 			WarnError("failed to commit forget: %v", err)
+		}
+		if probe {
+			hashAfter, _ := store.GetCurrentCommit(ctx)
+			v, _ := store.GetConfig(ctx, storageKey)
+			fmt.Fprintf(os.Stderr, "PROBE3260 forget=%s pid=%d step=post-commit committed=%v hash=%s getconfig_len=%d\n",
+				key, os.Getpid(), committed, hashAfter, len(v))
 		}
 
 		if jsonOutput {

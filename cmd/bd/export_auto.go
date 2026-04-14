@@ -70,7 +70,15 @@ func maybeAutoExport(ctx context.Context) {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
 		return
 	}
+	probe := os.Getenv("BD_PROBE_3260") == "1"
+	if probe {
+		fmt.Fprintf(os.Stderr, "PROBE3260 autoexport pid=%d step=begin currentCommit=%s lastCommit=%s\n",
+			os.Getpid(), currentCommit, state.LastDoltCommit)
+	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
+		if probe {
+			fmt.Fprintf(os.Stderr, "PROBE3260 autoexport pid=%d step=skip-nochange\n", os.Getpid())
+		}
 		debug.Logf("auto-export: no changes since last export\n")
 		return
 	}
@@ -91,6 +99,10 @@ func maybeAutoExport(ctx context.Context) {
 
 	debug.Logf("auto-export: wrote %d issues and %d memories to %s\n",
 		issueCount, memoryCount, fullPath)
+	if probe {
+		fmt.Fprintf(os.Stderr, "PROBE3260 autoexport pid=%d step=wrote issues=%d memories=%d\n",
+			os.Getpid(), issueCount, memoryCount)
+	}
 
 	// Don't prime the throttle on an empty export (e.g. immediately after
 	// `bd init`). Saving state here would block the first real `bd create`
