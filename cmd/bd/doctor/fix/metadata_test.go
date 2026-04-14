@@ -147,6 +147,30 @@ func TestFixMissingMetadataJSON_NoOpWhenPresent(t *testing.T) {
 	}
 }
 
+func TestFixMissingMetadataJSON_SharedWorktreeFallback(t *testing.T) {
+	mainRepoDir, worktreeDir := setupSharedWorktreeWorkspace(t)
+	sharedBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(sharedBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create shared .beads dir: %v", err)
+	}
+
+	configPath := filepath.Join(sharedBeadsDir, "metadata.json")
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatal("metadata.json should not exist before fix")
+	}
+
+	if err := FixMissingMetadataJSON(worktreeDir); err != nil {
+		t.Fatalf("FixMissingMetadataJSON failed: %v", err)
+	}
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		t.Fatal("metadata.json should exist in shared .beads after fix")
+	}
+	if _, err := os.Stat(filepath.Join(worktreeDir, ".beads", "metadata.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no worktree-local metadata.json, got err=%v", err)
+	}
+}
+
 // TestFixMissingMetadataJSON_NotBeadsWorkspace verifies that FixMissingMetadataJSON
 // returns an error for paths without a .beads directory.
 func TestFixMissingMetadataJSON_NotBeadsWorkspace(t *testing.T) {

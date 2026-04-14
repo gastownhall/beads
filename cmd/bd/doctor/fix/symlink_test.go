@@ -175,3 +175,27 @@ func TestPermissions_FixesRegularFiles(t *testing.T) {
 		t.Errorf("Expected database to have at least 0600 permissions, got %o", dbInfo.Mode().Perm())
 	}
 }
+
+func TestPermissions_FixesSharedWorktreeBeadsDir(t *testing.T) {
+	skipOnWindows(t)
+	mainRepoDir, worktreeDir := setupSharedWorktreeWorkspace(t)
+	sharedBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(sharedBeadsDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Permissions(worktreeDir); err != nil {
+		t.Fatalf("Permissions() failed for shared worktree: %v", err)
+	}
+
+	sharedInfo, err := os.Stat(sharedBeadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sharedInfo.Mode().Perm() != 0700 {
+		t.Errorf("Expected shared .beads to have 0700 permissions, got %o", sharedInfo.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(worktreeDir, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("expected no worktree-local .beads directory, got err=%v", err)
+	}
+}
