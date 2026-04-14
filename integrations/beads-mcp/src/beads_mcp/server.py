@@ -309,17 +309,17 @@ def _detect_backend(beads_dir: str) -> str:
 
 
 def _resolve_workspace_root(path: str) -> str:
-    """Resolve workspace root to git repo root if inside a git repo.
+    """Resolve workspace root to the repo that owns the active beads workspace.
     
     Args:
         path: Directory path to resolve
         
     Returns:
-        Git repo root if inside git repo, otherwise the original path
+        Active beads repo root if inside git repo, otherwise the original path
     """
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
             cwd=path,
             capture_output=True,
             text=True,
@@ -328,7 +328,35 @@ def _resolve_workspace_root(path: str) -> str:
             stdin=subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if len(lines) >= 2:
+                worktree_root = lines[0]
+                common_dir = lines[1]
+
+                if not os.path.isabs(common_dir):
+                    common_dir = os.path.join(worktree_root, common_dir)
+                common_dir = os.path.realpath(common_dir)
+
+                main_repo_root = (
+                    os.path.dirname(common_dir)
+                    if os.path.basename(common_dir) == ".git"
+                    else common_dir
+                )
+                worktree_root = os.path.realpath(worktree_root)
+
+                local_beads = os.path.join(worktree_root, ".beads")
+                main_beads = os.path.join(main_repo_root, ".beads")
+                if (
+                    worktree_root != main_repo_root
+                    and not os.path.isdir(local_beads)
+                    and os.path.isdir(main_beads)
+                ):
+                    return main_repo_root
+
+                return worktree_root
+
+            if lines:
+                return os.path.realpath(lines[0])
     except Exception as e:
         logger.debug(f"Git detection failed for {path}: {e}")
         pass
