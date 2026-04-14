@@ -264,6 +264,19 @@ func TestEmbeddedClose(t *testing.T) {
 		_ = child
 	})
 
+	t.Run("close_last_child_keeps_regular_epic_open", func(t *testing.T) {
+		epic := bdCreate(t, bd, dir, "Epic stays open", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Epic closing child", "--type", "task")
+		bdDepAdd(t, bd, dir, child.ID, epic.ID, "--type", "parent-child")
+
+		bdClose(t, bd, dir, child.ID)
+
+		got := bdShow(t, bd, dir, epic.ID)
+		if got.Status != types.StatusOpen {
+			t.Errorf("expected regular epic to stay open after its last child closes, got %s", got.Status)
+		}
+	})
+
 	// ===== Blocker and Suggest-Next Behavior =====
 
 	t.Run("close_unblocks_dependent", func(t *testing.T) {
