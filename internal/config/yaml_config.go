@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/beads"
 )
 
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
@@ -189,6 +191,10 @@ func UnsetYamlConfig(key string) error {
 // This keeps YAML-only config behavior aligned with runtime resolution when
 // BEADS_DIR points to an external runtime directory.
 func findProjectConfigYaml() (string, error) {
+	return findProjectConfigYamlWithFinder(beads.FindBeadsDir)
+}
+
+func findProjectConfigYamlWithFinder(findBeadsDir func() string) (string, error) {
 	// Respect BEADS_DIR first when set.
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		configPath := filepath.Join(beadsDir, "config.yaml")
@@ -198,16 +204,12 @@ func findProjectConfigYaml() (string, error) {
 		return "", fmt.Errorf("no config.yaml found in BEADS_DIR (%s) (run 'bd init' first)", beadsDir)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("failed to get working directory: %w", err)
-	}
-
-	// Walk up parent directories to find .beads/config.yaml
-	for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		configPath := filepath.Join(dir, ".beads", "config.yaml")
-		if _, err := os.Stat(configPath); err == nil {
-			return configPath, nil
+	if findBeadsDir != nil {
+		if beadsDir := findBeadsDir(); beadsDir != "" {
+			configPath := filepath.Join(beadsDir, "config.yaml")
+			if _, err := os.Stat(configPath); err == nil {
+				return configPath, nil
+			}
 		}
 	}
 
