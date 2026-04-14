@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -845,6 +847,15 @@ func runInitDiagnostics(path string) doctorResult {
 		OverallOK:  true,
 	}
 
+	var embeddedReadOnlyStore storeHolder
+	if isEmbeddedMode() {
+		store, err := newReadOnlyStoreFromConfig(context.Background(), doctor.ResolveBeadsDirForRepo(path))
+		if err == nil {
+			embeddedReadOnlyStore = store
+			defer embeddedReadOnlyStore.Close()
+		}
+	}
+
 	// Check 1: Installation (.beads/ directory)
 	installCheck := convertWithCategory(doctor.CheckInstallation(path), doctor.CategoryCore)
 	result.Checks = append(result.Checks, installCheck)
@@ -862,6 +873,9 @@ func runInitDiagnostics(path string) doctorResult {
 
 	// Check 2: Database version
 	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	if embeddedReadOnlyStore != nil {
+		dbCheck = initEmbeddedDatabaseVersionCheck(embeddedReadOnlyStore)
+	}
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
 		result.OverallOK = false
@@ -869,6 +883,9 @@ func runInitDiagnostics(path string) doctorResult {
 
 	// Check 3: Schema compatibility
 	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	if embeddedReadOnlyStore != nil {
+		schemaCheck = initEmbeddedSchemaCompatibilityCheck(embeddedReadOnlyStore)
+	}
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
 		result.OverallOK = false
@@ -883,6 +900,9 @@ func runInitDiagnostics(path string) doctorResult {
 
 	// Check 5: Dolt connection — validates init actually created a working DB
 	doltConnCheck := convertDoctorCheck(doctor.CheckDoltConnection(path))
+	if embeddedReadOnlyStore != nil {
+		doltConnCheck = initEmbeddedConnectionCheck(embeddedReadOnlyStore)
+	}
 	result.Checks = append(result.Checks, doltConnCheck)
 	if doltConnCheck.Status == statusError {
 		result.OverallOK = false
@@ -890,12 +910,127 @@ func runInitDiagnostics(path string) doctorResult {
 
 	// Check 6: Dolt schema — validates tables were created
 	doltSchemaCheck := convertDoctorCheck(doctor.CheckDoltSchema(path))
+	if embeddedReadOnlyStore != nil {
+		doltSchemaCheck = initEmbeddedDoltSchemaCheck(embeddedReadOnlyStore)
+	}
 	result.Checks = append(result.Checks, doltSchemaCheck)
 	if doltSchemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	return result
+}
+
+type storeHolder interface {
+	Close() error
+	GetStatistics(ctx context.Context) (*types.Statistics, error)
+	GetMetadata(ctx context.Context, key string) (string, error)
+}
+
+func initEmbeddedDatabaseVersionCheck(store storeHolder) doctorCheck {
+	ctx := context.Background()
+	dbVersion, err := store.GetMetadata(ctx, "bd_version")
+	if err != nil {
+		return doctorCheck{
+			Name:     "Database",
+			Status:   statusError,
+			Message:  "Unable to read database version",
+			Detail:   fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
+			Fix:      "Database may be corrupted. Run 'bd doctor --fix' to recover",
+			Category: doctor.CategoryCore,
+		}
+	}
+	if dbVersion == "" {
+		return doctorCheck{
+			Name:     "Database",
+			Status:   statusWarning,
+			Message:  "Database missing version metadata",
+			Detail:   "Storage: Dolt",
+			Fix:      "Run 'bd doctor --fix' to repair metadata",
+			Category: doctor.CategoryCore,
+		}
+	}
+	if dbVersion != Version {
+		return doctorCheck{
+			Name:     "Database",
+			Status:   statusWarning,
+			Message:  fmt.Sprintf("version %s (CLI: %s)", dbVersion, Version),
+			Detail:   "Storage: Dolt",
+			Fix:      "Update bd CLI and re-run (dolt metadata will be updated automatically)",
+			Category: doctor.CategoryCore,
+		}
+	}
+
+	return doctorCheck{
+		Name:     "Database",
+		Status:   statusOK,
+		Message:  fmt.Sprintf("version %s", dbVersion),
+		Detail:   "Storage: Dolt",
+		Category: doctor.CategoryCore,
+	}
+}
+
+func initEmbeddedSchemaCompatibilityCheck(store storeHolder) doctorCheck {
+	ctx := context.Background()
+	if _, err := store.GetStatistics(ctx); err != nil {
+		return doctorCheck{
+			Name:     "Schema Compatibility",
+			Status:   statusError,
+			Message:  "Database schema is incomplete or incompatible",
+			Detail:   fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
+			Fix:      "Run 'bd doctor --fix' to attempt repair. If schema is incompatible, export data first with 'bd export'",
+			Category: doctor.CategoryCore,
+		}
+	}
+
+	return doctorCheck{
+		Name:     "Schema Compatibility",
+		Status:   statusOK,
+		Message:  "Basic queries succeeded",
+		Detail:   "Storage: Dolt",
+		Category: doctor.CategoryCore,
+	}
+}
+
+func initEmbeddedConnectionCheck(store storeHolder) doctorCheck {
+	if store == nil {
+		return doctorCheck{
+			Name:     "Dolt Connection",
+			Status:   statusError,
+			Message:  "Failed to open database",
+			Detail:   "Unable to open Dolt database",
+			Category: doctor.CategoryCore,
+		}
+	}
+
+	return doctorCheck{
+		Name:     "Dolt Connection",
+		Status:   statusOK,
+		Message:  "Connected successfully",
+		Detail:   "Storage: Dolt (embedded mode)",
+		Category: doctor.CategoryCore,
+	}
+}
+
+func initEmbeddedDoltSchemaCheck(store storeHolder) doctorCheck {
+	schemaCheck := initEmbeddedSchemaCompatibilityCheck(store)
+	if schemaCheck.Status != statusOK {
+		return doctorCheck{
+			Name:     "Dolt Schema",
+			Status:   schemaCheck.Status,
+			Message:  schemaCheck.Message,
+			Detail:   schemaCheck.Detail,
+			Fix:      schemaCheck.Fix,
+			Category: doctor.CategoryCore,
+		}
+	}
+
+	return doctorCheck{
+		Name:     "Dolt Schema",
+		Status:   statusOK,
+		Message:  "All required tables present",
+		Category: doctor.CategoryCore,
+	}
 }
 
 // convertDoctorCheck converts doctor package check to main package check
