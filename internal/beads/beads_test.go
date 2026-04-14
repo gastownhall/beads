@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 func TestFindDatabasePathEnvVar(t *testing.T) {
@@ -567,6 +568,31 @@ func setupDetachedCommitBeadsWorktree(t *testing.T) (string, string, string) {
 	runGitInDir(t, tmpDir, "--git-dir", bareDir, "worktree", "add", "--detach", detachedWorktreeDir, head)
 
 	return filepath.Join(detachedWorktreeDir, ".beads"), mainBeadsDir, mainDoltDir
+}
+
+func setupRegularWorktreeRepo(t *testing.T) (string, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	mainRepoDir := filepath.Join(tmpDir, "main-repo")
+	worktreeDir := filepath.Join(tmpDir, "worktree")
+
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runGitInDir(t, mainRepoDir, "init")
+	runGitInDir(t, mainRepoDir, "config", "user.email", "test@example.com")
+	runGitInDir(t, mainRepoDir, "config", "user.name", "Test User")
+
+	if err := os.WriteFile(filepath.Join(mainRepoDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, mainRepoDir, "add", "README.md")
+	runGitInDir(t, mainRepoDir, "commit", "-m", "Initial commit")
+	runGitInDir(t, mainRepoDir, "worktree", "add", worktreeDir, "HEAD")
+
+	return mainRepoDir, worktreeDir
 }
 
 func runGitInDir(t *testing.T, dir string, args ...string) string {
@@ -2135,4 +2161,141 @@ func TestFindDatabasePath_BareParentWorktreeFallback(t *testing.T) {
 	if resultResolved != bareDoltResolved {
 		t.Errorf("FindDatabasePath() = %q, want bare parent db %q", result, bareDoltDir)
 	}
+}
+
+func TestResolveBeadsDirForRepo(t *testing.T) {
+	t.Run("local beads dir preferred for plain repo path", func(t *testing.T) {
+		repoDir := t.TempDir()
+		localBeadsDir := filepath.Join(repoDir, ".beads")
+		if err := os.MkdirAll(localBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got := ResolveBeadsDirForRepo(repoDir)
+		want := utils.CanonicalizePath(localBeadsDir)
+		if got != want {
+			t.Fatalf("ResolveBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("regular worktree falls back to main repo beads dir", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupRegularWorktreeRepo(t)
+		mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got := ResolveBeadsDirForRepo(worktreeDir)
+		want := utils.CanonicalizePath(mainBeadsDir)
+		if got != want {
+			t.Fatalf("ResolveBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("worktree local beads dir overrides shared fallback", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupRegularWorktreeRepo(t)
+		mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+		if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got := ResolveBeadsDirForRepo(worktreeDir)
+		want := utils.CanonicalizePath(worktreeBeadsDir)
+		if got != want {
+			t.Fatalf("ResolveBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no beads anywhere falls back to local repo path", func(t *testing.T) {
+		repoDir := filepath.Join(t.TempDir(), "repo")
+		if err := os.MkdirAll(repoDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGitInDir(t, repoDir, "init")
+		runGitInDir(t, repoDir, "config", "user.email", "test@example.com")
+		runGitInDir(t, repoDir, "config", "user.name", "Test User")
+
+		got := ResolveBeadsDirForRepo(repoDir)
+		want := filepath.Join(utils.CanonicalizePath(repoDir), ".beads")
+		if got != want {
+			t.Fatalf("ResolveBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestWorktreeFallbackBeadsDirForRepo(t *testing.T) {
+	t.Run("plain repo returns empty string", func(t *testing.T) {
+		repoDir := filepath.Join(t.TempDir(), "repo")
+		if err := os.MkdirAll(repoDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGitInDir(t, repoDir, "init")
+		runGitInDir(t, repoDir, "config", "user.email", "test@example.com")
+		runGitInDir(t, repoDir, "config", "user.name", "Test User")
+
+		got := worktreeFallbackBeadsDirForRepo(repoDir)
+		if got != "" {
+			t.Fatalf("worktreeFallbackBeadsDirForRepo() = %q, want empty string", got)
+		}
+	})
+
+	t.Run("regular worktree uses parent repo beads dir", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupRegularWorktreeRepo(t)
+
+		got := worktreeFallbackBeadsDirForRepo(worktreeDir)
+		mainRepoResolved, err := filepath.EvalSymlinks(mainRepoDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(mainRepoResolved, ".beads")
+		if got != want {
+			t.Fatalf("worktreeFallbackBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("bare-parent worktree uses common-dir beads dir", func(t *testing.T) {
+		bareDir, worktreeDir := setupBareParentWorktree(t)
+
+		got := worktreeFallbackBeadsDirForRepo(worktreeDir)
+		bareDirResolved, err := filepath.EvalSymlinks(bareDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(bareDirResolved, ".beads")
+		if got != want {
+			t.Fatalf("worktreeFallbackBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestGitPathForRepo(t *testing.T) {
+	repoDir := t.TempDir()
+
+	t.Run("empty path returns empty", func(t *testing.T) {
+		if got := gitPathForRepo(repoDir, ""); got != "" {
+			t.Fatalf("gitPathForRepo() = %q, want empty string", got)
+		}
+	})
+
+	t.Run("relative path is resolved under repo", func(t *testing.T) {
+		got := gitPathForRepo(repoDir, ".git/worktrees/feature")
+		want := utils.CanonicalizePath(filepath.Join(repoDir, ".git/worktrees/feature"))
+		if got != want {
+			t.Fatalf("gitPathForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("absolute path is canonicalized unchanged", func(t *testing.T) {
+		absPath := filepath.Join(repoDir, ".git")
+		got := gitPathForRepo(repoDir, absPath)
+		want := utils.CanonicalizePath(absPath)
+		if got != want {
+			t.Fatalf("gitPathForRepo() = %q, want %q", got, want)
+		}
+	})
 }
