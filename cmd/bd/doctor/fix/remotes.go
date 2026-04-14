@@ -11,22 +11,23 @@ import (
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
+type remoteConsistencyContext struct {
+	beadsDir string
+	dbDir    string
+	cfg      *configfile.Config
+}
+
 // RemoteConsistency fixes remote discrepancies between SQL server and CLI.
 // For one-side-only remotes, it adds the missing side.
 // Conflicts (different URLs) are skipped — they require manual resolution.
 func RemoteConsistency(repoPath string) error {
-	beadsDir := resolveBeadsDir(filepath.Join(repoPath, ".beads"))
-	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil {
-		return fmt.Errorf("failed to load config: %w", err)
+	ctx, err := resolveRemoteConsistencyContext(repoPath)
+	if err != nil {
+		return err
 	}
 
-	doltDir := doltserver.ResolveDoltDir(beadsDir)
-	dbName := cfg.GetDoltDatabase()
-	dbDir := filepath.Join(doltDir, dbName)
-
 	// Get SQL remotes
-	db, err := openFixDB(beadsDir, cfg)
+	db, err := openFixDB(ctx.beadsDir, ctx.cfg)
 	if err != nil {
 		return fmt.Errorf("cannot connect to Dolt server: %w", err)
 	}
@@ -38,7 +39,7 @@ func RemoteConsistency(repoPath string) error {
 	}
 
 	// Get CLI remotes
-	cliRemotes, err := doltutil.ListCLIRemotes(dbDir)
+	cliRemotes, err := doltutil.ListCLIRemotes(ctx.dbDir)
 	if err != nil {
 		return fmt.Errorf("failed to query CLI remotes: %w", err)
 	}
@@ -51,7 +52,7 @@ func RemoteConsistency(repoPath string) error {
 	// SQL-only: add to CLI
 	for name, url := range sqlMap {
 		if _, inCLI := cliMap[name]; !inCLI {
-			if err := doltutil.AddCLIRemote(dbDir, name, url); err != nil {
+			if err := doltutil.AddCLIRemote(ctx.dbDir, name, url); err != nil {
 				fmt.Printf("  Warning: could not add CLI remote %s: %v\n", name, err)
 			} else {
 				fmt.Printf("  Added CLI remote: %s → %s\n", name, url)
@@ -83,6 +84,27 @@ func RemoteConsistency(repoPath string) error {
 		fmt.Printf("  No fixable discrepancies found\n")
 	}
 	return nil
+}
+
+func resolveRemoteConsistencyContext(repoPath string) (remoteConsistencyContext, error) {
+	beadsDir, err := resolvedWorkspaceBeadsDir(repoPath)
+	if err != nil {
+		return remoteConsistencyContext{}, err
+	}
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return remoteConsistencyContext{}, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	doltDir := doltserver.ResolveDoltDir(beadsDir)
+	dbName := cfg.GetDoltDatabase()
+
+	return remoteConsistencyContext{
+		beadsDir: beadsDir,
+		dbDir:    filepath.Join(doltDir, dbName),
+		cfg:      cfg,
+	}, nil
 }
 
 func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
