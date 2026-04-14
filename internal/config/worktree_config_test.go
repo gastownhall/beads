@@ -92,6 +92,39 @@ func TestSetYamlConfig_WorktreeFallbackUsesMainRepoConfig(t *testing.T) {
 	}
 }
 
+func TestSetYamlConfig_PrefersWorktreeLocalConfigWhenPresent(t *testing.T) {
+	_, worktreeDir, mainConfigPath := setupConfigWorktree(t)
+
+	worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+	if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create worktree .beads dir: %v", err)
+	}
+	worktreeConfigPath := filepath.Join(worktreeBeadsDir, "config.yaml")
+	if err := os.WriteFile(worktreeConfigPath, []byte("no-git-ops: false\nactor: worktree-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write worktree config.yaml: %v", err)
+	}
+
+	if err := SetYamlConfig("no-git-ops", "true"); err != nil {
+		t.Fatalf("SetYamlConfig() error = %v", err)
+	}
+
+	worktreeContent, err := os.ReadFile(worktreeConfigPath)
+	if err != nil {
+		t.Fatalf("failed to read worktree config.yaml: %v", err)
+	}
+	if !strings.Contains(string(worktreeContent), "no-git-ops: true") {
+		t.Fatalf("expected worktree config.yaml to be updated, got:\n%s", string(worktreeContent))
+	}
+
+	mainContent, err := os.ReadFile(mainConfigPath)
+	if err != nil {
+		t.Fatalf("failed to read main config.yaml: %v", err)
+	}
+	if strings.Contains(string(mainContent), "no-git-ops: true") {
+		t.Fatalf("expected shared config.yaml to remain unchanged, got:\n%s", string(mainContent))
+	}
+}
+
 func TestFindConfigYAMLPath_WorktreeFallbackUsesMainRepoConfig(t *testing.T) {
 	_, _, mainConfigPath := setupConfigWorktree(t)
 
@@ -133,5 +166,32 @@ func TestInitialize_WorktreeFallbackUsesMainRepoConfig(t *testing.T) {
 	}
 	if got := GetString("actor"); got != "shared-user" {
 		t.Fatalf("GetString(actor) = %q, want %q", got, "shared-user")
+	}
+}
+
+func TestInitialize_WorktreeFallbackMergesSharedLocalOverride(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	_, _, mainConfigPath := setupConfigWorktree(t)
+	if err := os.WriteFile(mainConfigPath, []byte("json: false\nactor: project-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write main config.yaml: %v", err)
+	}
+
+	localConfigPath := filepath.Join(filepath.Dir(mainConfigPath), "config.local.yaml")
+	if err := os.WriteFile(localConfigPath, []byte("actor: local-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config.local.yaml: %v", err)
+	}
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetBool("json"); got {
+		t.Fatalf("GetBool(json) = %v, want false", got)
+	}
+	if got := GetString("actor"); got != "local-user" {
+		t.Fatalf("GetString(actor) = %q, want %q", got, "local-user")
 	}
 }
