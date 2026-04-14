@@ -258,11 +258,28 @@ class TestPathCanonicalization:
             
             with patch("beads_mcp.tools.subprocess.run") as mock_run:
                 mock_run.return_value.returncode = 0
-                mock_run.return_value.stdout = str(project)
+                mock_run.return_value.stdout = f"{project}\n{project / '.git'}\n"
                 
                 resolved = _resolve_workspace_root(str(project))
                 
-                assert resolved == str(project)
+                assert os.path.realpath(resolved) == os.path.realpath(str(project))
+
+    def test_resolve_workspace_root_shared_worktree_prefers_main_repo_with_beads(self):
+        """Test shared worktrees resolve to the main repo when only it owns .beads."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            main_repo = Path(tmpdir) / "main-repo"
+            worktree = Path(tmpdir) / "feature-worktree"
+            main_repo.mkdir()
+            worktree.mkdir()
+            (main_repo / ".beads").mkdir()
+
+            with patch("beads_mcp.tools.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                mock_run.return_value.stdout = f"{worktree}\n{main_repo / '.git'}\n"
+
+                resolved = _resolve_workspace_root(str(worktree))
+
+                assert resolved == os.path.realpath(str(main_repo))
     
     def test_resolve_workspace_root_not_git(self):
         """Test _resolve_workspace_root falls back to abspath if not git repo."""
