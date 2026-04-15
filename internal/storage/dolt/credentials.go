@@ -104,6 +104,25 @@ func (s *DoltStore) initCredentialKey(ctx context.Context) error {
 	return nil
 }
 
+// ensureCredentialKey lazily initializes the credential key when federation
+// operations actually need password encryption or decryption.
+func (s *DoltStore) ensureCredentialKey(ctx context.Context) error {
+	s.mu.RLock()
+	if s.credentialKey != nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	s.mu.RUnlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.credentialKey != nil {
+		return nil
+	}
+	return s.initCredentialKey(ctx)
+}
+
 // legacyEncryptionKey derives the old predictable key from dbPath.
 // Used only during migration from the old key derivation scheme.
 func (s *DoltStore) legacyEncryptionKey() []byte {
@@ -216,7 +235,9 @@ func (s *DoltStore) encryptPassword(password string) ([]byte, error) {
 	if password == "" {
 		return nil, nil
 	}
+	s.mu.RLock()
 	key := s.credentialKey
+	s.mu.RUnlock()
 	if key == nil {
 		return nil, fmt.Errorf("credential encryption key not initialized")
 	}
@@ -228,7 +249,9 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 	if len(encrypted) == 0 {
 		return "", nil
 	}
+	s.mu.RLock()
 	key := s.credentialKey
+	s.mu.RUnlock()
 	if key == nil {
 		return "", fmt.Errorf("credential encryption key not initialized")
 	}
@@ -247,6 +270,9 @@ func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.Federat
 	var encryptedPwd []byte
 	var err error
 	if peer.Password != "" {
+		if err := s.ensureCredentialKey(ctx); err != nil {
+			return fmt.Errorf("failed to initialize credential key: %w", err)
+		}
 		encryptedPwd, err = s.encryptPassword(peer.Password)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt password: %w", err)
@@ -309,6 +335,9 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 
 	// Decrypt password
 	if len(encryptedPwd) > 0 {
+		if err := s.ensureCredentialKey(ctx); err != nil {
+			return nil, fmt.Errorf("failed to initialize credential key: %w", err)
+		}
 		peer.Password, err = s.decryptPassword(encryptedPwd)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt password: %w", err)
@@ -349,6 +378,9 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 
 		// Decrypt password
 		if len(encryptedPwd) > 0 {
+			if err := s.ensureCredentialKey(ctx); err != nil {
+				return nil, fmt.Errorf("failed to initialize credential key: %w", err)
+			}
 			peer.Password, err = s.decryptPassword(encryptedPwd)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt password: %w", err)

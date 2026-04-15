@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -212,6 +214,48 @@ func TestCreateGuard_ExistingDB_NoFlag(t *testing.T) {
 		t.Fatalf("expected success opening existing database, got: %v", err)
 	}
 	defer store.Close()
+}
+
+// TestCreateGuard_ExistingDB_DoesNotCreateMissingBeadsDir verifies that a
+// normal write-capable store open does not materialize a missing .beads/
+// directory as a side effect. Only explicit init/bootstrap-style flows should
+// create local filesystem state.
+func TestCreateGuard_ExistingDB_DoesNotCreateMissingBeadsDir(t *testing.T) {
+	skipIfNoServer(t)
+
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	beadsDir := filepath.Join(baseDir, ".beads")
+	dbPath := filepath.Join(beadsDir, "dolt")
+	dbName := fmt.Sprintf("test_guard_missing_beads_%d", testServerPort)
+
+	createTestDatabase(t, testServerPort, dbName)
+	t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
+
+	cfg := &Config{
+		Path:         dbPath,
+		BeadsDir:     beadsDir,
+		ServerHost:   "127.0.0.1",
+		ServerPort:   testServerPort,
+		Database:     dbName,
+		MaxOpenConns: 1,
+	}
+
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("expected success opening existing database, got: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		t.Fatalf("expected missing beadsDir to stay absent, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, credentialKeyFile)); !os.IsNotExist(err) {
+		t.Fatalf("expected no credential key side effect, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("expected no port-file side effect, got err=%v", err)
+	}
 }
 
 // TestCreateGuard_ExistingDB_WithData verifies that data is preserved when

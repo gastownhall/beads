@@ -1099,14 +1099,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 	}
 
-	// Initialize credential encryption key (loads from file or generates new random key).
-	// This must run after schema init so federation_peers table exists for migration.
-	if !cfg.ReadOnly {
-		if err := store.initCredentialKey(ctx); err != nil {
-			return nil, fmt.Errorf("failed to initialize credential key: %w", err)
-		}
-	}
-
 	// Project identity verification: detect cross-project data leakage (GH#2372).
 	// If the local metadata.json has a project_id and the database has one too,
 	// they must match. A mismatch means this client is connected to the wrong
