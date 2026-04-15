@@ -1,8 +1,10 @@
-# Zero-Dependency Migration Plan for Beads
+# Near-Zero-Dependency Migration Plan for Beads
 
-**Goal.** Reduce `go.mod` to a single `module` line + `go 1.25.x`. No `require` block, no `go.sum`. The `bd` binary should build from stdlib-only Go source. Tests should pass without spinning up containers or external servers.
+**Goal.** Reduce `go.mod` to a `module` line + `go 1.25.x` + a minimal `require` block containing only `github.com/olebedev/when` and its single transitive `github.com/AlekSi/pointer`. Every other direct dep is either replaced, deleted, or pruned. The resulting `go.sum` should have on the order of 2 entries, not 2000. The `bd` binary should build from stdlib + that one NLP time-parser, CGO-free. Tests should pass without spinning up containers or external servers.
 
-**Scope.** This is the roadmap. Each phase below lands as an independent set of PRs on `claude/remove-external-dependencies-UEIXe`. The target is a CGO-free, stdlib-only build whose on-disk storage is JSONL files.
+**Why the one exception.** `olebedev/when` is pure Go, MIT-licensed, zero CGO, and its only transitive (`AlekSi/pointer`) is a ~50-LOC pure-Go helper, also MIT. Reimplementing the full natural-language time grammar (`"next tuesday at 3pm"`, `"in 2 weeks"`, `"end of month"`, …) faithfully would be several hundred LOC of locale-aware parsing that's easy to get subtly wrong, and the `bd create --defer=…` / `--due=…` surface is a load-bearing user feature. Keeping this dep is a pragmatic carve-out, not a slippery slope — every *other* direct dep still gets replaced, deleted, or pruned.
+
+**Scope.** This is the roadmap. Each phase below lands as an independent set of PRs on `claude/remove-external-dependencies-UEIXe`. The target is a CGO-free build whose on-disk storage is JSONL files and whose only external code is the time-parser carve-out above.
 
 **Branch.** All work goes on `claude/remove-external-dependencies-UEIXe`.
 
@@ -15,7 +17,7 @@
 3. [CLI framework replacement](#3-cli-framework-replacement)
 4. [Config layer replacement](#4-config-layer-replacement)
 5. [UI / TUI / markdown replacement](#5-ui--tui--markdown-replacement)
-6. [Time parsing replacement](#6-time-parsing-replacement)
+6. [Time parsing: keep `olebedev/when`](#6-time-parsing-keep-olebedevwhen)
 7. [Telemetry removal](#7-telemetry-removal)
 8. [AI / LLM features removal](#8-ai--llm-features-removal)
 9. [Integration adapters](#9-integration-adapters)
@@ -31,7 +33,7 @@
 
 ### 1.1 Direct dependencies currently in `go.mod`
 
-Every direct dep is classified: **REPLACE** (write a local equivalent), **DELETE** (remove the feature that uses it), **ALREADY GONE** (in `go.mod` but not actually imported — just prune it), or **STDLIB** (trivial swap).
+Every direct dep is classified: **REPLACE** (write a local equivalent), **DELETE** (remove the feature that uses it), **ALREADY GONE** (in `go.mod` but not actually imported — just prune it), **STDLIB** (trivial swap), or **KEEP** (retain as-is — only one dep gets this verdict).
 
 | Dep | Usage | Verdict | Notes |
 |---|---|---|---|
@@ -54,7 +56,8 @@ Every direct dep is classified: **REPLACE** (write a local equivalent), **DELETE
 | `github.com/microcosm-cc/bluemonday` | HTML sanitizer for ADO | **DELETE** (with ADO) | Same. |
 | `github.com/JohannesKaufmann/html-to-markdown/v2` | HTML → markdown for ADO | **DELETE** (with ADO) | Same. |
 | `github.com/anthropics/anthropic-sdk-go` | AI duplicates (`cmd/bd/find_duplicates.go`) + compaction (`internal/compact/haiku.go`) | **DELETE** | Remove AI features. The mechanical Jaccard duplicate detector already exists as the default. See §8. |
-| `github.com/olebedev/when` | NLP time parser (`internal/timeparsing/parser.go`) | **REPLACE** | Hand-rolled matcher for a finite vocabulary. See §6. |
+| `github.com/olebedev/when` | NLP time parser (`internal/timeparsing/parser.go`) | **KEEP** | Pure Go, MIT, zero CGO. Only transitive is `AlekSi/pointer` (also pure Go, MIT). Reimplementing faithfully is not worth the risk. See §6. |
+| `github.com/AlekSi/pointer` | transitive of `olebedev/when` | **KEEP** | Rides along with `when`. |
 | `go.opentelemetry.io/otel/*` (9 packages) | telemetry | **DELETE** | Replace with a tiny no-op shim that satisfies the handful of call sites. See §7. |
 | `github.com/cenkalti/backoff/v4` | Dolt connect retry + tracker client retry | **REPLACE** | ~30 LOC exponential backoff helper. Dolt usage dies anyway. |
 | `github.com/google/uuid` | ID generation, widely used | **STDLIB** | ~20 LOC `crypto/rand` RFC 4122 v4 generator. |
@@ -68,11 +71,12 @@ Every direct dep is classified: **REPLACE** (write a local equivalent), **DELETE
 
 ### 1.2 Indirect dependencies (the big win)
 
-~250 indirect deps in `go.mod` come from **Dolt + testcontainers + OpenTelemetry + Anthropic SDK**. Once those four direct deps are gone, the cascade prunes AWS SDK, Azure SDK, Google Cloud SDK, Docker client, Apache Arrow/Parquet/Thrift, grpc, envoy, spiffe, zap, and the entire charmbracelet/bubbletea stack. Expected final state: **zero `require` entries**.
+~250 indirect deps in `go.mod` come from **Dolt + testcontainers + OpenTelemetry + Anthropic SDK**. Once those four direct deps are gone, the cascade prunes AWS SDK, Azure SDK, Google Cloud SDK, Docker client, Apache Arrow/Parquet/Thrift, grpc, envoy, spiffe, zap, and the entire charmbracelet/bubbletea stack. Expected final state: **2 `require` entries** (`olebedev/when` + `AlekSi/pointer`), both pure Go.
 
 ### 1.3 Verdict summary
 
 - **5 direct deps are already vestigial** (`go-github`, `machineid`) or trivially swapped (`testify`, `uuid`, `rsc.io/script`).
 - **8 deps die by deleting optional features** (OpenTelemetry, Anthropic SDK, `rsc.io/script`, the three markdown/HTML libs, `glamour`, `huh`).
 - **6 deps die with the Dolt replacement** (the five Dolt libs + testcontainers).
-- **~7 deps require an actual local reimplementation** (cobra, viper, gotenv, toml, yaml, lipgloss, when, backoff — where "implementation" is 30–400 LOC each, except cobra which is ~500 LOC for the subset we use).
+- **~6 deps require an actual local reimplementation** (cobra, viper, gotenv, toml, yaml, lipgloss, backoff — where "implementation" is 30–400 LOC each, except cobra which is ~500 LOC for the subset we use).
+- **1 dep is kept**: `olebedev/when` (+ its single pure-Go transitive `AlekSi/pointer`).
