@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -32,8 +31,7 @@ func RunDeepValidation(path string) DeepValidationResult {
 		OverallOK: true,
 	}
 
-	// Follow redirect to resolve actual beads directory
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Check backend
 	backend := configfile.BackendDolt

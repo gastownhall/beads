@@ -237,8 +237,7 @@ func checkDependencyCyclesWithStore(store *dolt.DoltStore) DoctorCheck {
 
 // CheckDeletionsManifest checks the status of the legacy deletions.jsonl file
 func CheckDeletionsManifest(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Skip if .beads doesn't exist
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {

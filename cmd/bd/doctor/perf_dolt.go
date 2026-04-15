@@ -45,7 +45,7 @@ type DoltPerfMetrics struct {
 
 // RunDoltPerformanceDiagnostics runs performance diagnostics for Dolt backend
 func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerfMetrics, error) {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Verify this is a Dolt backend
 	if !IsDoltBackend(beadsDir) {
@@ -382,7 +382,7 @@ func assessDoltPerformance(metrics *DoltPerfMetrics) {
 
 // CheckDoltPerformance runs a quick performance check as a doctor check
 func CheckDoltPerformance(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Only run for Dolt backend
 	if !IsDoltBackend(beadsDir) {

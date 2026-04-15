@@ -36,8 +36,7 @@ func openStoreDB(beadsDir string) (*sql.DB, storage.DoltStorage, error) {
 
 // CheckOrphanedDependencies detects dependencies pointing to non-existent issues.
 func CheckOrphanedDependencies(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
@@ -117,8 +116,7 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 // When orchestratorMode is true, the threshold parameter defines how many duplicates
 // are acceptable before warning (default 1000 for orchestrator's ephemeral wisps).
 func CheckDuplicateIssues(path string, orchestratorMode bool, orchestratorThreshold int) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
@@ -202,8 +200,7 @@ func checkDuplicateIssuesDB(db *sql.DB, orchestratorMode bool, orchestratorThres
 
 // CheckTestPollution detects test issues that may have leaked into the database.
 func CheckTestPollution(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
@@ -326,8 +323,7 @@ func CheckGitConflicts(path string) DoctorCheck {
 // These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
 // However, they may be intentional in some workflows, so removal requires explicit opt-in.
 func CheckChildParentDependencies(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {

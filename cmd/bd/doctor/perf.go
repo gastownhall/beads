@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 )
@@ -11,7 +10,7 @@ import (
 // RunPerformanceDiagnostics runs performance diagnostics.
 // Delegates to Dolt backend diagnostics.
 func RunPerformanceDiagnostics(path string) error {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return fmt.Errorf("no .beads/ directory found at %s; run 'bd init' to initialize beads", path)
 	}
@@ -30,7 +29,7 @@ func CollectPlatformInfo(path string) map[string]string {
 	info["os_arch"] = fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
 	info["go_version"] = runtime.Version()
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 	if IsDoltBackend(beadsDir) {
 		info["backend"] = "dolt"
 	} else {

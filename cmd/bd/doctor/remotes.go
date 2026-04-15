@@ -15,7 +15,7 @@ import (
 // vs the filesystem CLI config and reports discrepancies.
 // Returns a check with Fix set for cases where --fix can resolve it.
 func CheckRemoteConsistency(repoPath string) DoctorCheck {
-	beadsDir := resolveBeadsDir(repoPath)
+	beadsDir := ResolveBeadsDirForRepo(repoPath)
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt {

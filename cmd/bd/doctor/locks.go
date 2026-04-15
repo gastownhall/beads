@@ -18,7 +18,7 @@ var staleLockThresholds = map[string]time.Duration{
 // CheckStaleLockFiles detects leftover lock files from crashed processes.
 // Stale lock files can block bootstrap and sync operations.
 func CheckStaleLockFiles(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return DoctorCheck{

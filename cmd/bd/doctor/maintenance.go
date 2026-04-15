@@ -260,7 +260,7 @@ func checkPersistentMolIssuesForIssues(issues []*types.Issue) DoctorCheck {
 // entries from the old mrqueue implementation. They are safe to delete since
 // gt done already creates merge-request wisps in beads.
 func CheckStaleMQFiles(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 	mqDir := filepath.Join(beadsDir, "mq")
 
 	if _, err := os.Stat(mqDir); os.IsNotExist(err) {
@@ -294,7 +294,7 @@ func CheckStaleMQFiles(path string) DoctorCheck {
 
 // FixStaleMQFiles removes the legacy .beads/mq/ directory and all its contents.
 func FixStaleMQFiles(path string) error {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 	mqDir := filepath.Join(beadsDir, "mq")
 
 	if _, err := os.Stat(mqDir); os.IsNotExist(err) {
@@ -507,7 +507,7 @@ func getPatrolPollutionIDs(path string) ([]string, error) {
 // It prefers Dolt (source of truth) and falls back to legacy JSONL for
 // backwards compatibility with non-Dolt installations.
 func loadMaintenanceIssues(path string) ([]*types.Issue, error) {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	issues, err := loadMaintenanceIssuesFromDatabase(beadsDir)
 	if err == nil {
@@ -559,7 +559,7 @@ func loadMaintenanceIssuesFromJSONL(beadsDir string) ([]*types.Issue, error) {
 }
 
 func loadMisclassifiedWispIssues(path string) ([]*types.Issue, error) {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	issues, err := loadMisclassifiedWispIssuesFromDatabase(beadsDir)
 	if err == nil {
