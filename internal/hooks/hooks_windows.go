@@ -8,11 +8,6 @@ import (
 	"encoding/json"
 	"os/exec"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -23,24 +18,6 @@ import (
 func (r *Runner) runHook(hookPath, event string, issue *types.Issue) (retErr error) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
-
-	// Hooks are fire-and-forget so they have no parent span; we create a root span
-	// to track execution time and errors for observability.
-	tracer := otel.Tracer("github.com/steveyegge/beads/hooks")
-	ctx, span := tracer.Start(ctx, "hook.exec",
-		trace.WithAttributes(
-			attribute.String("hook.event", event),
-			attribute.String("hook.path", hookPath),
-			attribute.String("bd.issue_id", issue.ID),
-		),
-	)
-	defer func() {
-		if retErr != nil {
-			span.RecordError(retErr)
-			span.SetStatus(codes.Error, retErr.Error())
-		}
-		span.End()
-	}()
 
 	issueJSON, err := json.Marshal(issue)
 	if err != nil {
@@ -69,10 +46,8 @@ func (r *Runner) runHook(hookPath, event string, issue *types.Issue) (retErr err
 			_ = cmd.Process.Kill()
 		}
 		<-done
-		addHookOutputEvents(span, &stdout, &stderr)
 		return ctx.Err()
 	case err := <-done:
-		addHookOutputEvents(span, &stdout, &stderr)
 		return err
 	}
 }

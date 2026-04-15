@@ -30,11 +30,6 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	mysql "github.com/go-sql-driver/mysql"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -174,10 +169,6 @@ type DoltStore struct {
 	blockedIDsCached             bool // true once blockedIDsCache has been populated
 	blockedIDsCacheIncludesWisps bool // true if cache was computed with wisps
 	cacheMu                      sync.Mutex
-
-	// OTel span attribute cache (avoids per-call allocation)
-	spanAttrsOnce  sync.Once
-	spanAttrsCache []attribute.KeyValue
 
 	// Circuit breaker for Dolt server connections
 	breaker *circuitBreaker
@@ -414,14 +405,11 @@ func lockProcessHint() string {
 func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if s.breaker != nil && !s.breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1)
 		return ErrCircuitOpen
 	}
 
-	attempts := 0
 	bo := newServerRetryBackoff()
-	err := backoff.Retry(func() error {
-		attempts++
+	return backoff.Retry(func() error {
 		err := op()
 		if err != nil && isRetryableError(err) {
 			// Record connection-level failures to the circuit breaker
@@ -429,7 +417,6 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 				s.breaker.RecordFailure()
 				// Check if the breaker just tripped — if so, stop retrying
 				if s.breaker.State() == circuitOpen {
-					doltMetrics.circuitTrips.Add(ctx, 1)
 					return backoff.Permanent(fmt.Errorf("%w (circuit breaker tripped)", err))
 				}
 			}
@@ -444,136 +431,6 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 		}
 		return nil
 	}, backoff.WithContext(bo, ctx))
-	if attempts > 1 {
-		doltMetrics.retryCount.Add(ctx, int64(attempts-1))
-	}
-	return err
-}
-
-// doltTracer is the OTel tracer for SQL-level spans.
-// It uses the global provider, which is a no-op until telemetry.Init() is called.
-var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
-
-// doltMetrics holds OTel metric instruments for the dolt storage backend.
-// Instruments are registered against the global delegating provider at init time,
-// so they automatically forward to the real provider once telemetry.Init() runs.
-var doltMetrics struct {
-	retryCount          metric.Int64Counter
-	lockWaitMs          metric.Float64Histogram
-	circuitTrips        metric.Int64Counter
-	circuitRejected     metric.Int64Counter
-	serializationErrors metric.Int64Counter
-	connAcquireMs       metric.Float64Histogram
-	poolWaitCount       metric.Int64Counter
-	poolWaitMs          metric.Float64Histogram
-}
-
-func init() {
-	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
-	doltMetrics.retryCount, _ = m.Int64Counter("bd.db.retry_count",
-		metric.WithDescription("SQL operations retried due to server-mode transient errors"),
-		metric.WithUnit("{retry}"),
-	)
-	doltMetrics.lockWaitMs, _ = m.Float64Histogram("bd.db.lock_wait_ms",
-		metric.WithDescription("Time spent waiting to acquire database locks"),
-		metric.WithUnit("ms"),
-	)
-	doltMetrics.circuitTrips, _ = m.Int64Counter("bd.db.circuit_trips",
-		metric.WithDescription("Number of times the Dolt circuit breaker tripped open"),
-		metric.WithUnit("{trip}"),
-	)
-	doltMetrics.circuitRejected, _ = m.Int64Counter("bd.db.circuit_rejected",
-		metric.WithDescription("Requests rejected by open circuit breaker (fail-fast)"),
-		metric.WithUnit("{request}"),
-	)
-	doltMetrics.serializationErrors, _ = m.Int64Counter("bd.db.serialization_errors",
-		metric.WithDescription("Serialization failures (MySQL 1213/1205) before retry"),
-		metric.WithUnit("{error}"),
-	)
-	doltMetrics.connAcquireMs, _ = m.Float64Histogram("bd.db.conn_acquire_ms",
-		metric.WithDescription("Time to acquire a pooled connection for a Dolt transaction"),
-		metric.WithUnit("ms"),
-	)
-	doltMetrics.poolWaitCount, _ = m.Int64Counter("bd.db.pool_wait_count",
-		metric.WithDescription("Number of times a connection acquisition had to wait for the pool"),
-		metric.WithUnit("{wait}"),
-	)
-	doltMetrics.poolWaitMs, _ = m.Float64Histogram("bd.db.pool_wait_ms",
-		metric.WithDescription("Total time connections spent waiting due to pool exhaustion"),
-		metric.WithUnit("ms"),
-	)
-}
-
-// registerPoolGauges registers observable gauges that report sql.DB pool stats
-// on each OTel collection cycle. These are essential for diagnosing shared-server
-// degradation under multi-worktree load (GH#3140).
-func (s *DoltStore) registerPoolGauges() {
-	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
-	db := s.db
-
-	m.Int64ObservableGauge("bd.db.pool_open", //nolint:errcheck,gosec
-		metric.WithDescription("Current number of open connections (in-use + idle)"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().OpenConnections))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_in_use", //nolint:errcheck,gosec
-		metric.WithDescription("Connections currently in use"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().InUse))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_idle", //nolint:errcheck,gosec
-		metric.WithDescription("Idle connections in pool"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().Idle))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_max_open", //nolint:errcheck,gosec
-		metric.WithDescription("Maximum number of open connections (pool limit)"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().MaxOpenConnections))
-			return nil
-		}),
-	)
-}
-
-// doltSpanAttrs returns the fixed attributes shared by all SQL spans.
-// Cached to avoid allocating on every call (hot path when telemetry is disabled
-// still flows through no-op tracers).
-func (s *DoltStore) doltSpanAttrs() []attribute.KeyValue {
-	s.spanAttrsOnce.Do(func() {
-		s.spanAttrsCache = []attribute.KeyValue{
-			attribute.String("db.system", "dolt"),
-			attribute.Bool("db.readonly", s.readOnly),
-			attribute.Bool("db.server_mode", true), // TODO: update when embedded mode returns
-		}
-	})
-	return s.spanAttrsCache
-}
-
-// spanSQL truncates a SQL string to keep spans readable.
-func spanSQL(q string) string {
-	if len(q) > 300 {
-		return q[:300] + "…"
-	}
-	return q
-}
-
-// endSpan records an error (if any) and ends the span.
-func endSpan(span trace.Span, err error) {
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-	}
-	span.End()
 }
 
 // execContext wraps a write statement in an explicit BEGIN/COMMIT to ensure
@@ -619,7 +476,6 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	return backoff.Retry(func() error {
 		err := s.withWriteTx(ctx, fn)
 		if err != nil && isSerializationError(err) {
-			doltMetrics.serializationErrors.Add(ctx, 1)
 			return err // retryable
 		}
 		if err != nil {
@@ -653,13 +509,6 @@ func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) 
 	if s.closed.Load() {
 		return nil, ErrStoreClosed
 	}
-	ctx, span := doltTracer.Start(ctx, "dolt.exec",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("db.operation", "exec"),
-			attribute.String("db.statement", spanSQL(query)),
-		)...),
-	)
 	var result sql.Result
 	err := s.withRetry(ctx, func() error {
 		tx, txErr := s.db.BeginTx(ctx, nil)
@@ -674,9 +523,7 @@ func (s *DoltStore) execContext(ctx context.Context, query string, args ...any) 
 		}
 		return tx.Commit()
 	})
-	finalErr := wrapLockError(err)
-	endSpan(span, finalErr)
-	return result, finalErr
+	return result, wrapLockError(err)
 }
 
 // DB returns the underlying sql.DB connection for direct queries.
@@ -767,13 +614,6 @@ func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any)
 	if s.closed.Load() {
 		return nil, ErrStoreClosed
 	}
-	ctx, span := doltTracer.Start(ctx, "dolt.query",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("db.operation", "query"),
-			attribute.String("db.statement", spanSQL(query)),
-		)...),
-	)
 	var rows *sql.Rows
 	err := s.withRetry(ctx, func() error {
 		// Close any Rows from a previous failed attempt to avoid leaking connections.
@@ -785,9 +625,7 @@ func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any)
 		rows, queryErr = s.db.QueryContext(ctx, query, args...)
 		return queryErr
 	})
-	finalErr := wrapLockError(err)
-	endSpan(span, finalErr)
-	return rows, finalErr
+	return rows, wrapLockError(err)
 }
 
 // queryRowContext wraps s.db.QueryRowContext with retry for transient errors.
@@ -796,19 +634,10 @@ func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) err
 	if s.closed.Load() {
 		return ErrStoreClosed
 	}
-	ctx, span := doltTracer.Start(ctx, "dolt.query_row",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("db.operation", "query_row"),
-			attribute.String("db.statement", spanSQL(query)),
-		)...),
-	)
-	finalErr := wrapLockError(s.withRetry(ctx, func() error {
+	return wrapLockError(s.withRetry(ctx, func() error {
 		row := s.db.QueryRowContext(ctx, query, args...)
 		return scan(row)
 	}))
-	endSpan(span, finalErr)
-	return finalErr
 }
 
 // applyConfigDefaults fills in default values for unset Config fields.
@@ -949,7 +778,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if breaker != nil && !breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1)
 		return nil, ErrCircuitOpen
 	}
 
@@ -1136,10 +964,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if !cfg.ReadOnly {
 		store.syncCLIRemotesToSQL(ctx)
 	}
-
-	// Register observable pool gauges for diagnosing shared-server degradation (GH#3140).
-	// These report sql.DB.Stats() on each OTel scrape — no-op when telemetry is off.
-	store.registerPoolGauges()
 
 	return store, nil
 }
@@ -1565,11 +1389,6 @@ func (s *DoltStore) commitAuthorString() string {
 // Callers that intentionally modify config (e.g., CommitPending after
 // 'bd config set') must call CommitWithConfig instead.
 func (s *DoltStore) Commit(ctx context.Context, message string) (retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.commit",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(s.doltSpanAttrs()...),
-	)
-	defer func() { endSpan(span, retErr) }()
 
 	// Pin a single connection so all operations run on the same Dolt session.
 	conn, err := s.db.Conn(ctx)
@@ -1878,14 +1697,6 @@ func (s *DoltStore) doltCLIPull(ctx context.Context, creds *remoteCredentials) e
 // For non-SSH Hosted Dolt (remoteUser set), uses CALL DOLT_PUSH with --user authentication.
 // For other remotes (DoltHub, S3, GCS, file), uses CALL DOLT_PUSH via SQL.
 func (s *DoltStore) Push(ctx context.Context) (retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.push",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.remote", s.remote),
-			attribute.String("dolt.branch", s.branch),
-		)...),
-	)
-	defer func() { endSpan(span, retErr) }()
 	creds := s.mainRemoteCredentials()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
@@ -1927,14 +1738,6 @@ func (s *DoltStore) Push(ctx context.Context) (retErr error) {
 // Use when the remote has uncommitted changes in its working set.
 // For git-protocol remotes (SSH, git+https://, git://), uses CLI `dolt push --force` to avoid MySQL connection timeouts.
 func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.force_push",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.remote", s.remote),
-			attribute.String("dolt.branch", s.branch),
-		)...),
-	)
-	defer func() { endSpan(span, retErr) }()
 	creds := s.mainRemoteCredentials()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
@@ -1977,15 +1780,6 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 // stale dolt_auto_push_* rows on multi-machine setups), the conflicts are
 // automatically resolved using "theirs" strategy (GH#2466).
 func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.pull",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.remote", s.remote),
-			attribute.String("dolt.branch", s.branch),
-		)...),
-	)
-	defer func() { endSpan(span, retErr) }()
-
 	// GH#2474: Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors. Store initialization
 	// (schema init, molecule loading, metadata writes) can dirty the working
@@ -2149,13 +1943,6 @@ func (s *DoltStore) tryAutoResolveMetadataConflicts(ctx context.Context, tx *sql
 
 // Branch creates a new branch
 func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.branch",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.branch", name),
-		)...),
-	)
-	defer func() { endSpan(span, retErr) }()
 	// Pin a single connection so DOLT_BRANCH and EnsureIgnoredTables run on
 	// the same session. Using s.db (pool) could dispatch them to different
 	// connections where the branch context differs.
@@ -2174,13 +1961,6 @@ func (s *DoltStore) Branch(ctx context.Context, name string) (retErr error) {
 
 // Checkout switches to the specified branch
 func (s *DoltStore) Checkout(ctx context.Context, branch string) (retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.checkout",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.branch", branch),
-		)...),
-	)
-	defer func() { endSpan(span, retErr) }()
 	// Pin a single connection so DOLT_CHECKOUT and EnsureIgnoredTables run on
 	// the same session. DOLT_CHECKOUT is session-scoped — using s.db (pool)
 	// could dispatch EnsureIgnoredTables to a connection still on the old branch.
@@ -2201,19 +1981,7 @@ func (s *DoltStore) Checkout(ctx context.Context, branch string) (retErr error) 
 // Merge merges the specified branch into the current branch.
 // Returns any merge conflicts if present. Implements storage.VersionedStorage.
 func (s *DoltStore) Merge(ctx context.Context, branch string) (conflicts []storage.Conflict, retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.merge",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.merge_branch", branch),
-		)...),
-	)
-	defer func() { endSpan(span, retErr) }()
-
-	conflicts, err := versioncontrolops.Merge(ctx, s.db, branch, s.commitAuthorString())
-	if len(conflicts) > 0 {
-		span.SetAttributes(attribute.Int("dolt.conflicts", len(conflicts)))
-	}
-	return conflicts, err
+	return versioncontrolops.Merge(ctx, s.db, branch, s.commitAuthorString())
 }
 
 // CurrentBranch returns the current branch name

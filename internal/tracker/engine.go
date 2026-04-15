@@ -8,18 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
-
-// syncTracer is the OTel tracer for tracker sync spans.
-var syncTracer = otel.Tracer("github.com/steveyegge/beads/tracker")
 
 // PullHooks contains optional callbacks that customize pull (import) behavior.
 // Trackers opt into behaviors by setting the hooks they need.
@@ -100,16 +92,6 @@ func NewEngine(tracker IssueTracker, store storage.Storage, actor string) *Engin
 
 // Sync performs a complete synchronization operation based on the given options.
 func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error) {
-	ctx, span := syncTracer.Start(ctx, "tracker.sync",
-		trace.WithAttributes(
-			attribute.String("sync.tracker", e.Tracker.DisplayName()),
-			attribute.Bool("sync.pull", opts.Pull || (!opts.Pull && !opts.Push)),
-			attribute.Bool("sync.push", opts.Push || (!opts.Pull && !opts.Push)),
-			attribute.Bool("sync.dry_run", opts.DryRun),
-		),
-	)
-	defer span.End()
-
 	result := &SyncResult{Success: true}
 	e.warnings = nil
 
@@ -142,8 +124,6 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		if err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("pull failed: %v", err)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, result.Error)
 			return result, err
 		}
 		result.PullStats = *pullStats
@@ -160,8 +140,6 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		if err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("push failed: %v", err)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, result.Error)
 			return result, err
 		}
 		result.PushStats = *pushStats
@@ -172,17 +150,6 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Errors += pushStats.Errors
 		result.Warnings = append(result.Warnings, pushStats.Warnings...)
 	}
-
-	// Record final stats as span attributes.
-	span.SetAttributes(
-		attribute.Int("sync.pulled", result.Stats.Pulled),
-		attribute.Int("sync.pushed", result.Stats.Pushed),
-		attribute.Int("sync.conflicts", result.Stats.Conflicts),
-		attribute.Int("sync.created", result.Stats.Created),
-		attribute.Int("sync.updated", result.Stats.Updated),
-		attribute.Int("sync.skipped", result.Stats.Skipped),
-		attribute.Int("sync.errors", result.Stats.Errors),
-	)
 
 	// Update last_sync timestamp
 	if !opts.DryRun {
@@ -201,11 +168,6 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 // DetectConflicts identifies issues that were modified both locally and externally
 // since the last sync.
 func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
-	ctx, span := syncTracer.Start(ctx, "tracker.detect_conflicts",
-		trace.WithAttributes(attribute.String("sync.tracker", e.Tracker.DisplayName())),
-	)
-	defer span.End()
-
 	// Get last sync time
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	lastSyncStr, err := e.Store.GetConfig(ctx, key)
@@ -260,20 +222,11 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 		}
 	}
 
-	span.SetAttributes(attribute.Int("sync.conflicts", len(conflicts)))
 	return conflicts, nil
 }
 
 // doPull imports issues from the external tracker into beads.
 func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs map[string]bool) (*PullStats, error) {
-	ctx, span := syncTracer.Start(ctx, "tracker.pull",
-		trace.WithAttributes(
-			attribute.String("sync.tracker", e.Tracker.DisplayName()),
-			attribute.Bool("sync.dry_run", opts.DryRun),
-		),
-	)
-	defer span.End()
-
 	stats := &PullStats{}
 
 	// Determine if incremental sync is possible
@@ -471,11 +424,6 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	depErrors := e.createDependencies(ctx, pendingDeps)
 	stats.Skipped += depErrors
 
-	span.SetAttributes(
-		attribute.Int("sync.created", stats.Created),
-		attribute.Int("sync.updated", stats.Updated),
-		attribute.Int("sync.skipped", stats.Skipped),
-	)
 	return stats, nil
 }
 
@@ -603,14 +551,6 @@ func parseSyncTime(value string) (time.Time, error) {
 
 // doPush exports beads issues to the external tracker.
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {
-	ctx, span := syncTracer.Start(ctx, "tracker.push",
-		trace.WithAttributes(
-			attribute.String("sync.tracker", e.Tracker.DisplayName()),
-			attribute.Bool("sync.dry_run", opts.DryRun),
-		),
-	)
-	defer span.End()
-
 	stats := &PushStats{}
 
 	// BuildStateCache hook: pre-cache workflow states once before the loop.
@@ -803,12 +743,6 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		}
 	}
 
-	span.SetAttributes(
-		attribute.Int("sync.created", stats.Created),
-		attribute.Int("sync.updated", stats.Updated),
-		attribute.Int("sync.skipped", stats.Skipped),
-		attribute.Int("sync.errors", stats.Errors),
-	)
 	return stats, nil
 }
 
