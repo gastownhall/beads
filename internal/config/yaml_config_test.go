@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func TestIsYamlOnlyKey(t *testing.T) {
@@ -244,6 +246,100 @@ other-setting: value
 	if !strings.Contains(contentStr, "other-setting: value") {
 		t.Errorf("config.yaml should preserve other settings, got:\n%s", contentStr)
 	}
+}
+
+func TestFindProjectConfigYamlWithFinder_BEADS_DIRMissingConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create beads dir: %v", err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	got, err := findProjectConfigYamlWithFinder(nil)
+	if err == nil {
+		t.Fatal("expected error when BEADS_DIR has no config.yaml")
+	}
+	if got != "" {
+		t.Fatalf("findProjectConfigYamlWithFinder() = %q, want empty path on error", got)
+	}
+	if !strings.Contains(err.Error(), "no config.yaml found in BEADS_DIR") {
+		t.Fatalf("expected BEADS_DIR-specific error, got: %v", err)
+	}
+}
+
+func TestFindProjectConfigYamlWithFinder_UsesFinderResult(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	previousV := v
+	previousOverrides := overriddenKeys
+	v = nil
+	overriddenKeys = map[string]bool{}
+	defer func() {
+		v = previousV
+		overriddenKeys = previousOverrides
+	}()
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create beads dir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("json: true\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+
+	got, err := findProjectConfigYamlWithFinder(func() string { return beadsDir })
+	if err != nil {
+		t.Fatalf("findProjectConfigYamlWithFinder() error = %v", err)
+	}
+	if got != configPath {
+		t.Fatalf("findProjectConfigYamlWithFinder() = %q, want %q", got, configPath)
+	}
+}
+
+func TestProjectConfigPathFromLoadedState(t *testing.T) {
+	previousV := v
+	defer func() {
+		v = previousV
+	}()
+
+	t.Run("rejects non config yaml", func(t *testing.T) {
+		v = viper.New()
+		v.SetConfigFile(filepath.Join(t.TempDir(), ".beads", "config.local.yaml"))
+		if got := projectConfigPathFromLoadedState(); got != "" {
+			t.Fatalf("projectConfigPathFromLoadedState() = %q, want empty for config.local.yaml", got)
+		}
+	})
+
+	t.Run("rejects missing file", func(t *testing.T) {
+		v = viper.New()
+		v.SetConfigFile(filepath.Join(t.TempDir(), ".beads", "config.yaml"))
+		if got := projectConfigPathFromLoadedState(); got != "" {
+			t.Fatalf("projectConfigPathFromLoadedState() = %q, want empty for missing config", got)
+		}
+	})
+
+	t.Run("accepts valid config yaml", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatalf("failed to create beads dir: %v", err)
+		}
+		configPath := filepath.Join(beadsDir, "config.yaml")
+		if err := os.WriteFile(configPath, []byte("json: true\n"), 0o644); err != nil {
+			t.Fatalf("failed to write config.yaml: %v", err)
+		}
+
+		v = viper.New()
+		v.SetConfigFile(configPath)
+
+		if got := projectConfigPathFromLoadedState(); got != configPath {
+			t.Fatalf("projectConfigPathFromLoadedState() = %q, want %q", got, configPath)
+		}
+	})
 }
 
 // TestValidateYamlConfigValue_HierarchyMaxDepth tests validation of hierarchy.max-depth (GH#995)

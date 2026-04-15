@@ -196,6 +196,43 @@ func TestInitialize_WorktreeFallbackMergesSharedLocalOverride(t *testing.T) {
 	}
 }
 
+func TestWorktreeFallbackConfigPath(t *testing.T) {
+	mainRepoDir, worktreeDir, mainConfigPath := setupConfigWorktree(t)
+
+	t.Run("shared worktree resolves main repo config", func(t *testing.T) {
+		got := worktreeFallbackConfigPath(worktreeDir)
+		gotResolved, err := filepath.EvalSymlinks(filepath.Clean(got))
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q) failed: %v", got, err)
+		}
+		wantResolved, err := filepath.EvalSymlinks(filepath.Clean(mainConfigPath))
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q) failed: %v", mainConfigPath, err)
+		}
+		if gotResolved != wantResolved {
+			t.Fatalf("worktreeFallbackConfigPath() = %q, want %q", gotResolved, wantResolved)
+		}
+	})
+
+	t.Run("primary repo returns empty", func(t *testing.T) {
+		if got := worktreeFallbackConfigPath(mainRepoDir); got != "" {
+			t.Fatalf("worktreeFallbackConfigPath(mainRepoDir) = %q, want empty", got)
+		}
+	})
+
+	t.Run("non git repo returns empty", func(t *testing.T) {
+		if got := worktreeFallbackConfigPath(t.TempDir()); got != "" {
+			t.Fatalf("worktreeFallbackConfigPath(non-git) = %q, want empty", got)
+		}
+	})
+}
+
+func TestGitDirsForRepo_NonGitRepo(t *testing.T) {
+	if gitDir, commonDir, ok := gitDirsForRepo(t.TempDir()); ok || gitDir != "" || commonDir != "" {
+		t.Fatalf("gitDirsForRepo(non-git) = (%q, %q, %v), want empty paths and false", gitDir, commonDir, ok)
+	}
+}
+
 func TestFindProjectConfigYamlWithFinder_UsesLoadedWorktreeConfig(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()

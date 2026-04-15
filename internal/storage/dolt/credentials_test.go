@@ -2,10 +2,13 @@ package dolt
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestEncryptDecryptWithKey(t *testing.T) {
@@ -200,6 +203,80 @@ func TestInitCredentialKeyEmptyDbPath(t *testing.T) {
 	}
 }
 
+func TestEnsureCredentialKeyAlreadyInitialized(t *testing.T) {
+	tmpDir := t.TempDir()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	store := &DoltStore{
+		dbPath:        filepath.Join(tmpDir, "dolt"),
+		beadsDir:      tmpDir,
+		credentialKey: append([]byte(nil), key...),
+	}
+
+	if err := store.ensureCredentialKey(t.Context()); err != nil {
+		t.Fatalf("ensureCredentialKey() error = %v", err)
+	}
+	if string(store.credentialKey) != string(key) {
+		t.Fatalf("credentialKey changed unexpectedly: got %q want %q", string(store.credentialKey), string(key))
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, credentialKeyFile)); !os.IsNotExist(err) {
+		t.Fatalf("expected no key file write when key already initialized, got err=%v", err)
+	}
+}
+
+func TestEnsureCredentialKeyInitializesWhenMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := &DoltStore{
+		dbPath:   filepath.Join(tmpDir, "dolt"),
+		beadsDir: tmpDir,
+	}
+
+	if err := store.ensureCredentialKey(t.Context()); err != nil {
+		t.Fatalf("ensureCredentialKey() error = %v", err)
+	}
+	if len(store.credentialKey) != 32 {
+		t.Fatalf("credentialKey length = %d, want 32", len(store.credentialKey))
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, credentialKeyFile)); err != nil {
+		t.Fatalf("expected key file after lazy init: %v", err)
+	}
+}
+
+func TestDecryptWithKeyShortCiphertext(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := decryptWithKey([]byte("short"), key); err == nil || err.Error() != "ciphertext too short" {
+		t.Fatalf("decryptWithKey(short) error = %v, want ciphertext too short", err)
+	}
+}
+
+func TestValidatePeerName(t *testing.T) {
+	tests := []struct {
+		name    string
+		peer    string
+		wantErr string
+	}{
+		{name: "valid", peer: "peer_one-2"},
+		{name: "empty", peer: "", wantErr: "peer name cannot be empty"},
+		{name: "must start with letter", peer: "1peer", wantErr: "peer name must start with a letter and contain only alphanumeric characters, hyphens, and underscores"},
+		{name: "invalid character", peer: "peer.one", wantErr: "peer name must start with a letter and contain only alphanumeric characters, hyphens, and underscores"},
+		{name: "too long", peer: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_extra", wantErr: "peer name too long (max 64 characters)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePeerName(tt.peer)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validatePeerName(%q) unexpected error: %v", tt.peer, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("validatePeerName(%q) error = %v, want %q", tt.peer, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCredentialKeyMigrationFromDbPath(t *testing.T) {
 	// Simulate old layout: key file in .beads/dolt/ (dbPath)
 	beadsDir := t.TempDir()
@@ -295,6 +372,68 @@ func TestCredentialKeyCreatesBeadsDir(t *testing.T) {
 	keyPath := filepath.Join(beadsDir, credentialKeyFile)
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("key file should exist in newly created .beads/: %v", err)
+	}
+}
+
+func TestFederationPeerCredentialLifecycleLazyKeyInit(t *testing.T) {
+	skipIfNoServer(t)
+
+	ctx := context.Background()
+	baseDir := t.TempDir()
+	beadsDir := filepath.Join(baseDir, ".beads")
+	dbName := fmt.Sprintf("test_federation_credentials_%d", testServerPort)
+
+	assertDatabaseNotExists(t, testServerPort, dbName)
+	t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
+
+	store, err := New(ctx, &Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testServerPort,
+		Database:        dbName,
+		MaxOpenConns:    1,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer store.Close()
+
+	peer := &storage.FederationPeer{
+		Name:        "peerone",
+		RemoteURL:   "file:///tmp/nonexistent-peer",
+		Username:    "alice",
+		Password:    "s3cret",
+		Sovereignty: "T2",
+	}
+
+	if err := store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("AddFederationPeer() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, credentialKeyFile)); err != nil {
+		t.Fatalf("expected credential key file after adding peer with password: %v", err)
+	}
+
+	store.credentialKey = nil
+	got, err := store.GetFederationPeer(ctx, peer.Name)
+	if err != nil {
+		t.Fatalf("GetFederationPeer() error = %v", err)
+	}
+	if got.Password != peer.Password {
+		t.Fatalf("GetFederationPeer().Password = %q, want %q", got.Password, peer.Password)
+	}
+
+	store.credentialKey = nil
+	peers, err := store.ListFederationPeers(ctx)
+	if err != nil {
+		t.Fatalf("ListFederationPeers() error = %v", err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("ListFederationPeers() length = %d, want 1", len(peers))
+	}
+	if peers[0].Password != peer.Password {
+		t.Fatalf("ListFederationPeers()[0].Password = %q, want %q", peers[0].Password, peer.Password)
 	}
 }
 

@@ -163,6 +163,51 @@ actor: configuser
 	}
 }
 
+func TestInitialize_IgnoresModuleRootConfigWhenRequested(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	configDir := filepath.Join(tmpDir, "xdg-config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	beadsDir := filepath.Join(repoDir, ".beads")
+
+	for _, dir := range []string{homeDir, configDir, beadsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("failed to create %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/test\n\ngo 1.24.0\n"), 0o644); err != nil {
+		t.Fatalf("failed to write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("json: true\nactor: repo-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Chdir(repoDir)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetBool("json"); got {
+		t.Fatalf("GetBool(json) = %v, want false when repo config is ignored", got)
+	}
+	if got := GetString("actor"); got != "" {
+		t.Fatalf("GetString(actor) = %q, want empty default when repo config is ignored", got)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Fatalf("ConfigFileUsed() = %q, want empty when repo config is ignored", got)
+	}
+}
+
 func TestLocalConfigOverride(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)
