@@ -228,3 +228,52 @@ func TestFindProjectConfigYamlWithFinder_UsesLoadedWorktreeConfig(t *testing.T) 
 		t.Fatalf("findProjectConfigYamlWithFinder() = %q, want %q", gotResolved, wantResolved)
 	}
 }
+
+func TestFindProjectConfigYamlWithFinder_UsesSharedConfigAfterLocalOverrideMerge(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	_, _, mainConfigPath := setupConfigWorktree(t)
+	if err := os.WriteFile(mainConfigPath, []byte("json: false\nactor: shared-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write main config.yaml: %v", err)
+	}
+
+	localConfigPath := filepath.Join(filepath.Dir(mainConfigPath), "config.local.yaml")
+	if err := os.WriteFile(localConfigPath, []byte("actor: local-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config.local.yaml: %v", err)
+	}
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	usedConfig := ConfigFileUsed()
+	usedResolved, err := filepath.EvalSymlinks(filepath.Clean(usedConfig))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) failed: %v", usedConfig, err)
+	}
+
+	wantResolved, err := filepath.EvalSymlinks(filepath.Clean(mainConfigPath))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) failed: %v", mainConfigPath, err)
+	}
+
+	if usedResolved != wantResolved {
+		t.Fatalf("ConfigFileUsed() = %q, want %q", usedResolved, wantResolved)
+	}
+
+	got, err := findProjectConfigYamlWithFinder(func() string { return "" })
+	if err != nil {
+		t.Fatalf("findProjectConfigYamlWithFinder() error = %v", err)
+	}
+
+	gotResolved, err := filepath.EvalSymlinks(filepath.Clean(got))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) failed: %v", got, err)
+	}
+
+	if gotResolved != wantResolved {
+		t.Fatalf("findProjectConfigYamlWithFinder() = %q, want %q", gotResolved, wantResolved)
+	}
+}
