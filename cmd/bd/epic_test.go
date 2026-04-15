@@ -16,7 +16,6 @@ import (
 type epicTestHelper struct {
 	s   *dolt.DoltStore
 	ctx context.Context
-	t   *testing.T
 }
 
 func newEpicTestHelper(t *testing.T) *epicTestHelper {
@@ -25,26 +24,28 @@ func newEpicTestHelper(t *testing.T) *epicTestHelper {
 	return &epicTestHelper{
 		s:   newTestStore(t, testDB),
 		ctx: context.Background(),
-		t:   t,
 	}
 }
 
-func (h *epicTestHelper) createIssue(issue *types.Issue) {
+func (h *epicTestHelper) createIssue(t *testing.T, issue *types.Issue) {
+	t.Helper()
 	if err := h.s.CreateIssue(h.ctx, issue, "test"); err != nil {
-		h.t.Fatal(err)
+		t.Fatal(err)
 	}
 }
 
-func (h *epicTestHelper) addDependency(dep *types.Dependency) {
+func (h *epicTestHelper) addDependency(t *testing.T, dep *types.Dependency) {
+	t.Helper()
 	if err := h.s.AddDependency(h.ctx, dep, "test"); err != nil {
-		h.t.Fatal(err)
+		t.Fatal(err)
 	}
 }
 
-func (h *epicTestHelper) getEpicStatus(epicID string) *types.EpicStatus {
+func (h *epicTestHelper) getEpicStatus(t *testing.T, epicID string) *types.EpicStatus {
+	t.Helper()
 	epics, err := h.s.GetEpicsEligibleForClosure(h.ctx)
 	if err != nil {
-		h.t.Fatalf("GetEpicsEligibleForClosure failed: %v", err)
+		t.Fatalf("GetEpicsEligibleForClosure failed: %v", err)
 	}
 
 	for _, epic := range epics {
@@ -59,8 +60,6 @@ func TestEpicSuite(t *testing.T) {
 	h := newEpicTestHelper(t)
 
 	t.Run("MixedChildrenNotEligible", func(t *testing.T) {
-		h.t = t
-
 		epic := &types.Issue{
 			ID:          "test-epic-1",
 			Title:       "Test Epic",
@@ -70,7 +69,7 @@ func TestEpicSuite(t *testing.T) {
 			IssueType:   types.TypeEpic,
 			CreatedAt:   time.Now(),
 		}
-		h.createIssue(epic)
+		h.createIssue(t, epic)
 
 		child1 := &types.Issue{
 			Title:     "Child Task 1",
@@ -87,22 +86,22 @@ func TestEpicSuite(t *testing.T) {
 			IssueType: types.TypeTask,
 			CreatedAt: time.Now(),
 		}
-		h.createIssue(child1)
-		h.createIssue(child2)
+		h.createIssue(t, child1)
+		h.createIssue(t, child2)
 
-		h.addDependency(&types.Dependency{
+		h.addDependency(t, &types.Dependency{
 			IssueID:     child1.ID,
 			DependsOnID: epic.ID,
 			Type:        types.DepParentChild,
 		})
-		h.addDependency(&types.Dependency{
+		h.addDependency(t, &types.Dependency{
 			IssueID:     child2.ID,
 			DependsOnID: epic.ID,
 			Type:        types.DepParentChild,
 		})
 
 		store = h.s
-		epicStatus := h.getEpicStatus("test-epic-1")
+		epicStatus := h.getEpicStatus(t, "test-epic-1")
 		if epicStatus == nil {
 			t.Fatal("Epic test-epic-1 not found in results")
 		}
@@ -118,8 +117,6 @@ func TestEpicSuite(t *testing.T) {
 	})
 
 	t.Run("OpenWispChildNotEligible", func(t *testing.T) {
-		h.t = t
-
 		epic := &types.Issue{
 			ID:          "test-epic-wisp",
 			Title:       "Epic with wisp child",
@@ -129,7 +126,7 @@ func TestEpicSuite(t *testing.T) {
 			IssueType:   types.TypeEpic,
 			CreatedAt:   time.Now(),
 		}
-		h.createIssue(epic)
+		h.createIssue(t, epic)
 
 		regularChild := &types.Issue{
 			Title:     "Regular child",
@@ -147,21 +144,21 @@ func TestEpicSuite(t *testing.T) {
 			Ephemeral: true,
 			CreatedAt: time.Now(),
 		}
-		h.createIssue(regularChild)
-		h.createIssue(wispChild)
+		h.createIssue(t, regularChild)
+		h.createIssue(t, wispChild)
 
-		h.addDependency(&types.Dependency{
+		h.addDependency(t, &types.Dependency{
 			IssueID:     regularChild.ID,
 			DependsOnID: epic.ID,
 			Type:        types.DepParentChild,
 		})
-		h.addDependency(&types.Dependency{
+		h.addDependency(t, &types.Dependency{
 			IssueID:     wispChild.ID,
 			DependsOnID: epic.ID,
 			Type:        types.DepParentChild,
 		})
 
-		epicStatus := h.getEpicStatus("test-epic-wisp")
+		epicStatus := h.getEpicStatus(t, "test-epic-wisp")
 		if epicStatus == nil {
 			t.Fatal("Epic test-epic-wisp not found in results")
 		}
@@ -177,8 +174,6 @@ func TestEpicSuite(t *testing.T) {
 	})
 
 	t.Run("AllChildrenClosedEligible", func(t *testing.T) {
-		h.t = t
-
 		epic := &types.Issue{
 			ID:          "test-epic-2",
 			Title:       "Fully Completed Epic",
@@ -188,7 +183,7 @@ func TestEpicSuite(t *testing.T) {
 			IssueType:   types.TypeEpic,
 			CreatedAt:   time.Now(),
 		}
-		h.createIssue(epic)
+		h.createIssue(t, epic)
 
 		for i := 1; i <= 3; i++ {
 			child := &types.Issue{
@@ -199,15 +194,15 @@ func TestEpicSuite(t *testing.T) {
 				CreatedAt: time.Now(),
 				ClosedAt:  ptrTime(time.Now()),
 			}
-			h.createIssue(child)
-			h.addDependency(&types.Dependency{
+			h.createIssue(t, child)
+			h.addDependency(t, &types.Dependency{
 				IssueID:     child.ID,
 				DependsOnID: epic.ID,
 				Type:        types.DepParentChild,
 			})
 		}
 
-		epicStatus := h.getEpicStatus("test-epic-2")
+		epicStatus := h.getEpicStatus(t, "test-epic-2")
 		if epicStatus == nil {
 			t.Fatal("Epic test-epic-2 not found in results")
 		}
