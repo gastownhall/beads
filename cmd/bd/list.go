@@ -944,7 +944,18 @@ var listCmd = &cobra.Command{
 					Parent:          parent,
 				}
 			}
-			outputJSON(issuesWithCounts)
+			if truncated {
+				outputJSON(map[string]interface{}{
+					"issues": issuesWithCounts,
+					"_meta": map[string]interface{}{
+						"truncated": true,
+						"limit":     effectiveLimit,
+						"hint":      "use --limit 0 for all results",
+					},
+				})
+			} else {
+				outputJSON(issuesWithCounts)
+			}
 			printTruncationHint(truncated, effectiveLimit)
 			return
 		}
