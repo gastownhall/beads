@@ -14,7 +14,6 @@ func TestPushPullSubcommandsRegistered(t *testing.T) {
 		name string
 		cmd  *cobra.Command
 	}{
-		{"ado", adoCmd},
 		{"jira", jiraCmd},
 		{"linear", linearCmd},
 		{"github", githubCmd},
@@ -57,14 +56,8 @@ func TestPushPullSubcommandsRegistered(t *testing.T) {
 func TestPushSubcommandRequiresArgs(t *testing.T) {
 	// Not parallel: accesses shared cobra command tree.
 
-	// Test ADO push (uses RunE, so we can test it directly)
-	err := adoPushCmd.RunE(adoPushCmd, []string{})
-	if err == nil {
-		t.Error("ado push with no args should return error")
-	}
-
 	// Test GitHub push (uses RunE)
-	err = githubPushCmd.RunE(githubPushCmd, []string{})
+	err := githubPushCmd.RunE(githubPushCmd, []string{})
 	if err == nil {
 		t.Error("github push with no args should return error")
 	}
@@ -80,14 +73,8 @@ func TestPushSubcommandRequiresArgs(t *testing.T) {
 func TestPullSubcommandRequiresArgs(t *testing.T) {
 	// Not parallel: accesses shared cobra command tree.
 
-	// Test ADO pull (uses RunE)
-	err := adoPullCmd.RunE(adoPullCmd, []string{})
-	if err == nil {
-		t.Error("ado pull with no args should return error")
-	}
-
 	// Test GitHub pull (uses RunE)
-	err = githubPullCmd.RunE(githubPullCmd, []string{})
+	err := githubPullCmd.RunE(githubPullCmd, []string{})
 	if err == nil {
 		t.Error("github pull with no args should return error")
 	}

@@ -18,7 +18,7 @@ func TestConfigSetManyArgParsing(t *testing.T) {
 		wantErr bool
 	}{
 		{"simple", "key=value", "key", "value", false},
-		{"dotted key", "ado.state_map.open=New", "ado.state_map.open", "New", false},
+		{"dotted key", "jira.state_map.open=To Do", "jira.state_map.open", "To Do", false},
 		{"value with equals", "key=val=ue", "key", "val=ue", false},
 		{"empty value", "key=", "key", "", false},
 		{"no equals", "keyvalue", "", "", true},
@@ -60,7 +60,7 @@ func TestConfigSetManyYamlKeyDetection(t *testing.T) {
 		}
 	}
 
-	dbKeys := []string{"ado.state_map.open", "jira.url", "status.custom", "test.key"}
+	dbKeys := []string{"jira.state_map.open", "jira.url", "status.custom", "test.key"}
 	for _, key := range dbKeys {
 		if config.IsYamlOnlyKey(key) {
 			t.Errorf("expected %q to NOT be yaml-only", key)
@@ -77,12 +77,12 @@ func TestConfigSetManyMixedKeyRouting(t *testing.T) {
 	}
 
 	args := []string{
-		"no-db=true",                  // yaml-only
-		"routing.mode=direct",         // yaml-only
-		"beads.role=maintainer",       // git config
-		"jira.url=https://j.test",     // database
-		"ado.state_map.open=New",      // database
-		"ado.state_map.closed=Closed", // database
+		"no-db=true",                      // yaml-only
+		"routing.mode=direct",             // yaml-only
+		"beads.role=maintainer",           // git config
+		"jira.url=https://j.test",         // database
+		"jira.state_map.open=To Do",       // database
+		"jira.state_map.closed=Done",      // database
 	}
 
 	// Phase 1: Parse
@@ -136,7 +136,7 @@ func TestConfigSetManyMixedKeyRouting(t *testing.T) {
 	for _, p := range dbPairs {
 		dbKeySet[p.key] = true
 	}
-	for _, expected := range []string{"jira.url", "ado.state_map.open", "ado.state_map.closed"} {
+	for _, expected := range []string{"jira.url", "jira.state_map.open", "jira.state_map.closed"} {
 		if !dbKeySet[expected] {
 			t.Errorf("db pairs missing expected key %q", expected)
 		}
@@ -153,9 +153,9 @@ func TestConfigSetManyValidationBeforeWrite(t *testing.T) {
 			key, value string
 		}
 		pairs := []kvPair{
-			{"jira.url", "https://j.test"}, // valid DB key (would succeed)
-			{"beads.role", "superadmin"},   // invalid role (should fail validation)
-			{"ado.state_map.open", "New"},  // valid DB key (would succeed)
+			{"jira.url", "https://j.test"},        // valid DB key (would succeed)
+			{"beads.role", "superadmin"},          // invalid role (should fail validation)
+			{"jira.state_map.open", "To Do"},      // valid DB key (would succeed)
 		}
 
 		validRoles := map[string]bool{"maintainer": true, "contributor": true}
@@ -247,15 +247,15 @@ func TestConfigSetManyOutputLocationMapping(t *testing.T) {
 		{"routing.mode", "direct"},
 		{"beads.role", "maintainer"},
 		{"jira.url", "https://j.test"},
-		{"ado.state_map.open", "New"},
+		{"jira.state_map.open", "To Do"},
 	}
 
 	expectedLocations := map[string]string{
-		"no-db":              "config.yaml",
-		"routing.mode":       "config.yaml",
-		"beads.role":         "git config",
-		"jira.url":           "database",
-		"ado.state_map.open": "database",
+		"no-db":               "config.yaml",
+		"routing.mode":        "config.yaml",
+		"beads.role":          "git config",
+		"jira.url":            "database",
+		"jira.state_map.open": "database",
 	}
 
 	for _, p := range pairs {
@@ -280,8 +280,8 @@ func TestConfigSetManyParseMultipleArgs(t *testing.T) {
 	args := []string{
 		"jira.url=https://example.atlassian.net",
 		"jira.project=PROJ",
-		"ado.state_map.open=New",
-		"ado.state_map.closed=Closed",
+		"jira.state_map.open=To Do",
+		"jira.state_map.closed=Done",
 		"custom.filter=status=open&label=bug", // value contains '='
 		"custom.empty=",                       // empty value
 	}
@@ -292,8 +292,8 @@ func TestConfigSetManyParseMultipleArgs(t *testing.T) {
 	expected := []kvPair{
 		{"jira.url", "https://example.atlassian.net"},
 		{"jira.project", "PROJ"},
-		{"ado.state_map.open", "New"},
-		{"ado.state_map.closed", "Closed"},
+		{"jira.state_map.open", "To Do"},
+		{"jira.state_map.closed", "Done"},
 		{"custom.filter", "status=open&label=bug"},
 		{"custom.empty", ""},
 	}

@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/ado"
 	"github.com/steveyegge/beads/internal/github"
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/jira"
@@ -18,28 +17,6 @@ import (
 // trackerPushPullFlags holds shared flags for push/pull subcommands.
 type trackerPushPullFlags struct {
 	dryRun bool
-}
-
-// --- ADO push/pull ---
-
-var adoPushCmd = &cobra.Command{
-	Use:   "push [bead-ids...]",
-	Short: "Push specific beads to Azure DevOps",
-	Long: `Push one or more beads issues to Azure DevOps.
-
-Accepts bead IDs as positional arguments.
-Equivalent to: bd ado sync --push-only --issues <ids>`,
-	RunE: runADOPush,
-}
-
-var adoPullCmd = &cobra.Command{
-	Use:   "pull [refs...]",
-	Short: "Pull specific items from Azure DevOps",
-	Long: `Pull one or more items from Azure DevOps.
-
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd ado sync --pull-only --issues <refs>`,
-	RunE: runADOPull,
 }
 
 // --- Jira push/pull ---
@@ -153,12 +130,6 @@ Equivalent to: bd notion sync --pull --issues <refs>`,
 }
 
 func init() {
-	// ADO push/pull
-	adoPushCmd.Flags().Bool("dry-run", false, "Preview push without making changes")
-	adoPullCmd.Flags().Bool("dry-run", false, "Preview pull without making changes")
-	adoCmd.AddCommand(adoPushCmd)
-	adoCmd.AddCommand(adoPullCmd)
-
 	// Jira push/pull
 	jiraPushCmd.Flags().Bool("dry-run", false, "Preview push without making changes")
 	jiraPullCmd.Flags().Bool("dry-run", false, "Preview pull without making changes")
@@ -211,89 +182,6 @@ func outputSyncResult(result *tracker.SyncResult, dryRun bool) {
 	if dryRun {
 		fmt.Println("\nRun without --dry-run to apply changes")
 	}
-}
-
-// --- ADO implementations ---
-
-func runADOPush(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("at least one bead ID is required")
-	}
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	if !dryRun {
-		CheckReadonly("ado push")
-	}
-
-	cfg := getADOConfig()
-	if err := validateADOConfig(cfg); err != nil {
-		return err
-	}
-	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("database not available: %w", err)
-	}
-
-	ctx := cmd.Context()
-	at := &ado.Tracker{}
-	if err := at.Init(ctx, store); err != nil {
-		return fmt.Errorf("initializing Azure DevOps tracker: %w", err)
-	}
-
-	engine := tracker.NewEngine(at, store, actor)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
-	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-
-	result, err := engine.Sync(ctx, tracker.SyncOptions{
-		Push:     true,
-		Pull:     false,
-		DryRun:   dryRun,
-		IssueIDs: args,
-	})
-	if err != nil {
-		return err
-	}
-	outputSyncResult(result, dryRun)
-	return nil
-}
-
-func runADOPull(cmd *cobra.Command, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("at least one bead ID or external reference is required")
-	}
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	if !dryRun {
-		CheckReadonly("ado pull")
-	}
-
-	cfg := getADOConfig()
-	if err := validateADOConfig(cfg); err != nil {
-		return err
-	}
-	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("database not available: %w", err)
-	}
-
-	ctx := cmd.Context()
-	at := &ado.Tracker{}
-	if err := at.Init(ctx, store); err != nil {
-		return fmt.Errorf("initializing Azure DevOps tracker: %w", err)
-	}
-
-	engine := tracker.NewEngine(at, store, actor)
-	engine.PullHooks = buildADOPullHooks(ctx, at, false, false, new(int), engine.OnWarning)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
-	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-
-	result, err := engine.Sync(ctx, tracker.SyncOptions{
-		Pull:     true,
-		Push:     false,
-		DryRun:   dryRun,
-		IssueIDs: args,
-	})
-	if err != nil {
-		return err
-	}
-	outputSyncResult(result, dryRun)
-	return nil
 }
 
 // --- Jira implementations ---

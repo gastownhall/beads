@@ -15,7 +15,6 @@ func TestParentFlagRegistered(t *testing.T) {
 		name    string
 		syncCmd *cobra.Command
 	}{
-		{"ado", adoSyncCmd},
 		{"jira", jiraSyncCmd},
 		{"linear", linearSyncCmd},
 		{"github", githubSyncCmd},

@@ -706,9 +706,9 @@ func TestConfigSetMany(t *testing.T) {
 
 	t.Run("batch set multiple DB keys", func(t *testing.T) {
 		pairs := map[string]string{
-			"ado.state_map.open":        "New",
-			"ado.state_map.in_progress": "Active",
-			"ado.state_map.closed":      "Closed",
+			"jira.state_map.open":        "To Do",
+			"jira.state_map.in_progress": "In Progress",
+			"jira.state_map.closed":      "Done",
 		}
 		for k, v := range pairs {
 			if err := store.SetConfig(ctx, k, v); err != nil {
@@ -788,12 +788,12 @@ func TestConfigSetMany(t *testing.T) {
 		// Simulates what set-many does: multiple keys from different
 		// namespaces all written to the DB in one logical batch.
 		mixed := map[string]string{
-			"jira.url":             "https://jira.example.com",
-			"jira.project":         "BEADS",
-			"ado.state_map.open":   "New",
-			"ado.state_map.closed": "Done",
-			"custom.pipeline":      "review,qa,deploy",
-			"status.custom":        "awaiting_review,awaiting_testing",
+			"jira.url":              "https://jira.example.com",
+			"jira.project":          "BEADS",
+			"github.owner":          "myorg",
+			"github.repo":           "myrepo",
+			"custom.pipeline":       "review,qa,deploy",
+			"status.custom":         "awaiting_review,awaiting_testing",
 		}
 		for k, v := range mixed {
 			if err := store.SetConfig(ctx, k, v); err != nil {

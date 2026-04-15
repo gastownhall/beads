@@ -587,8 +587,8 @@ any writes occur. This is faster and less noisy than separate 'bd config set'
 calls, especially in CI.
 
 Examples:
-  bd config set-many ado.state_map.open=New ado.state_map.closed=Closed
-  bd config set-many jira.url=https://example.atlassian.net jira.project=PROJ`,
+  bd config set-many jira.url=https://example.atlassian.net jira.project=PROJ
+  bd config set-many github.owner=myorg github.repo=myrepo`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(_ *cobra.Command, args []string) {
 		// Phase 1: Parse all key=value pairs
