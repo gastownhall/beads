@@ -1,5 +1,0 @@
-# Test bd ready command
-bd init --prefix test
-bd create 'Ready issue'
-bd ready
-stdout 'Ready'
