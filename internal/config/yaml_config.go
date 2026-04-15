@@ -202,6 +202,10 @@ func findProjectConfigYamlWithFinder(findBeadsDir func() string) (string, error)
 		return "", fmt.Errorf("no config.yaml found in BEADS_DIR (%s) (run 'bd init' first)", beadsDir)
 	}
 
+	if configPath := projectConfigPathFromLoadedState(); configPath != "" {
+		return configPath, nil
+	}
+
 	if findBeadsDir != nil {
 		if beadsDir := findBeadsDir(); beadsDir != "" {
 			configPath := filepath.Join(beadsDir, "config.yaml")
@@ -212,6 +216,23 @@ func findProjectConfigYamlWithFinder(findBeadsDir func() string) (string, error)
 	}
 
 	return "", fmt.Errorf("no .beads/config.yaml found (run 'bd init' first)")
+}
+
+func projectConfigPathFromLoadedState() string {
+	configPath := ConfigFileUsed()
+	if configPath == "" {
+		return ""
+	}
+	if filepath.Base(configPath) != "config.yaml" {
+		return ""
+	}
+	if filepath.Base(filepath.Dir(configPath)) != ".beads" {
+		return ""
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		return ""
+	}
+	return configPath
 }
 
 func findProjectBeadsDir() string {
