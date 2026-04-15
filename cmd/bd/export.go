@@ -174,6 +174,9 @@ func runExport(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to marshal issue %s: %w", issue.ID, err)
 		}
+		// Prepend _type discriminator so every JSONL line is self-describing (GH#3271).
+		// Memory lines already have _type; this makes issue lines consistent.
+		data = append([]byte(`{"_type":"issue",`), data[1:]...)
 		if _, err := w.Write(data); err != nil {
 			return fmt.Errorf("failed to write: %w", err)
 		}
