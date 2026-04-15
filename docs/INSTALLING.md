@@ -239,8 +239,9 @@ Linux (Fedora/RHEL):
 sudo dnf install -y libzstd-devel
 ```
 
-> **For CI / test contributors only:** If you need to run `scripts/test-cgo.sh`
-> (which exercises the ICU code path), install ICU headers:
+> **For maintainers only:** If you intentionally need to run
+> `scripts/test-icu-path.sh` (which exercises the leftover ICU code path),
+> install ICU headers:
 > `brew install icu4c` (macOS) or `sudo apt-get install -y libicu-dev` (Linux).
 > This is not needed for normal development.
 

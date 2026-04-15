@@ -60,11 +60,14 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 
 ## Where `gms_pure_go` Is Intentionally Omitted
 
-`scripts/test-cgo.sh` omits `gms_pure_go` as a local developer tool for
-exercising the ICU code path in `go-mysql-server` on demand. CI no longer
-does this: upstream confirmed (dolthub/go-mysql-server#3506) that
-`-tags=gms_pure_go` is the sanctioned escape hatch, so we test the
-configuration we ship.
+`scripts/test-icu-path.sh` omits `gms_pure_go` as an explicit, opt-in local
+developer tool for exercising the ICU code path in `go-mysql-server` on
+demand. CI no longer does this: upstream confirmed
+(dolthub/go-mysql-server#3506) that `-tags=gms_pure_go` is the sanctioned
+escape hatch, so we test the configuration we ship.
+
+The older name `scripts/test-cgo.sh` is retained only as a deprecated shim
+that warns and forwards to `scripts/test-icu-path.sh`.
 
 ## Post-Build Verification
 
@@ -96,7 +99,8 @@ Once the upstream PR merges, remove the `replace` directive from `go.mod`.
    ICU linkage. The post-build checks will catch it, but don't do it.
 
 3. **Installing `libicu-dev` in release or CI test workflows** -- only
-   needed for local, on-demand developer testing via `scripts/test-cgo.sh`.
+   needed for local, on-demand developer testing via
+   `scripts/test-icu-path.sh`.
    Neither release builds nor the CI test matrix link ICU; both must not
    depend on ICU being installed.
 
