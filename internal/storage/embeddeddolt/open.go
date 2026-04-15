@@ -13,8 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	doltembed "github.com/dolthub/driver"
+
+	"github.com/steveyegge/beads/internal/retry"
 )
 
 // validIdentifier matches safe SQL identifiers (letters, digits, underscores).
@@ -37,9 +38,12 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 		return nil, nil, err
 	}
 
-	bo := backoff.NewExponentialBackOff()
+	bo := retry.NewExponentialBackOff()
 	bo.MaxElapsedTime = 0 // wait until ctx cancellation
 	bo.MaxInterval = 5 * time.Second
+	// *retry.ExponentialBackOff structurally satisfies the dolt driver's
+	// backoff.BackOff interface (Reset + NextBackOff), so it can be passed
+	// directly without importing cenkalti/backoff here.
 	cfg.BackOff = bo
 
 	connector, err := doltembed.NewConnector(cfg)

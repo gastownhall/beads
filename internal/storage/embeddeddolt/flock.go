@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
-	backoff "github.com/cenkalti/backoff/v4"
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/retry"
 )
 
 // Unlocker is the interface for releasing an acquired lock.
@@ -67,12 +67,12 @@ func WaitLock(ctx context.Context, dataDir string) (*Lock, error) {
 		return nil, fmt.Errorf("embeddeddolt: opening lock file: %w", err)
 	}
 
-	bo := backoff.NewExponentialBackOff()
+	bo := retry.NewExponentialBackOff()
 	bo.InitialInterval = 50 * time.Millisecond
 	bo.MaxInterval = 2 * time.Second
 	bo.MaxElapsedTime = 0 // wait until context cancellation
 
-	err = backoff.Retry(func() error {
+	err = retry.Retry(ctx, func() error {
 		lockErr := lockfile.FlockExclusiveNonBlocking(f)
 		if lockErr == nil {
 			return nil // acquired
@@ -81,8 +81,8 @@ func WaitLock(ctx context.Context, dataDir string) (*Lock, error) {
 			return lockErr // retryable
 		}
 		// Filesystem error — not retryable.
-		return backoff.Permanent(lockErr)
-	}, backoff.WithContext(bo, ctx))
+		return retry.Permanent(lockErr)
+	}, bo)
 
 	if err != nil {
 		_ = f.Close()

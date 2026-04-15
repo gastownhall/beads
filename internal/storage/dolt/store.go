@@ -28,11 +28,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/retry"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -266,8 +266,8 @@ const cliExecTimeout = 5 * time.Minute
 // brief network issues, server restarts).
 const serverRetryMaxElapsed = 30 * time.Second
 
-func newServerRetryBackoff() backoff.BackOff {
-	bo := backoff.NewExponentialBackOff()
+func newServerRetryBackoff() *retry.ExponentialBackOff {
+	bo := retry.NewExponentialBackOff()
 	bo.MaxElapsedTime = serverRetryMaxElapsed
 	return bo
 }
@@ -409,7 +409,7 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 	}
 
 	bo := newServerRetryBackoff()
-	return backoff.Retry(func() error {
+	return retry.Retry(ctx, func() error {
 		err := op()
 		if err != nil && isRetryableError(err) {
 			// Record connection-level failures to the circuit breaker
@@ -417,20 +417,20 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 				s.breaker.RecordFailure()
 				// Check if the breaker just tripped — if so, stop retrying
 				if s.breaker.State() == circuitOpen {
-					return backoff.Permanent(fmt.Errorf("%w (circuit breaker tripped)", err))
+					return retry.Permanent(fmt.Errorf("%w (circuit breaker tripped)", err))
 				}
 			}
 			return err // Retryable - backoff will retry
 		}
 		if err != nil {
-			return backoff.Permanent(err) // Non-retryable - stop immediately
+			return retry.Permanent(err) // Non-retryable - stop immediately
 		}
 		// Success — reset the circuit breaker
 		if s.breaker != nil {
 			s.breaker.RecordSuccess()
 		}
 		return nil
-	}, backoff.WithContext(bo, ctx))
+	}, bo)
 }
 
 // execContext wraps a write statement in an explicit BEGIN/COMMIT to ensure
@@ -467,22 +467,22 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 // non-idempotent operations. Callers that need connection-level retry should
 // use withRetry at a higher layer.
 func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	bo := backoff.NewExponentialBackOff()
+	bo := retry.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
 	bo.MaxElapsedTime = 5 * time.Second
 	if s.serverMode {
 		bo.MaxElapsedTime = 15 * time.Second
 	}
-	return backoff.Retry(func() error {
+	return retry.Retry(ctx, func() error {
 		err := s.withWriteTx(ctx, fn)
 		if err != nil && isSerializationError(err) {
 			return err // retryable
 		}
 		if err != nil {
-			return backoff.Permanent(err)
+			return retry.Permanent(err)
 		}
 		return nil
-	}, backoff.WithContext(bo, ctx))
+	}, bo)
 }
 
 // withWriteTx runs fn inside a transaction, committing on success.
@@ -903,19 +903,19 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// CREATE DATABASE, information_schema queries may fail transiently
 	// even though Ping succeeded. This resolves within ~1s.
 	if !cfg.ReadOnly {
-		schemaBO := backoff.NewExponentialBackOff()
+		schemaBO := retry.NewExponentialBackOff()
 		schemaBO.InitialInterval = 100 * time.Millisecond
 		schemaBO.MaxElapsedTime = 5 * time.Second
-		if err := backoff.Retry(func() error {
+		if err := retry.Retry(ctx, func() error {
 			schemaErr := store.initSchema(ctx)
 			if schemaErr != nil && isRetryableError(schemaErr) {
 				return schemaErr
 			}
 			if schemaErr != nil {
-				return backoff.Permanent(schemaErr)
+				return retry.Permanent(schemaErr)
 			}
 			return nil
-		}, backoff.WithContext(schemaBO, ctx)); err != nil {
+		}, schemaBO); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
 
@@ -1189,19 +1189,19 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// database on disk but hasn't updated its catalog yet. Pinging db (which
 	// has the database in the DSN) will fail with "Unknown database" until the
 	// catalog catches up. We retry with exponential backoff. (GH-1851)
-	bo := backoff.NewExponentialBackOff()
+	bo := retry.NewExponentialBackOff()
 	bo.InitialInterval = 100 * time.Millisecond
 	bo.MaxElapsedTime = 10 * time.Second
-	if err := backoff.Retry(func() error {
+	if err := retry.Retry(ctx, func() error {
 		pingErr := db.PingContext(ctx)
 		if pingErr != nil && isRetryableError(pingErr) {
 			return pingErr // retryable — backoff will retry
 		}
 		if pingErr != nil {
-			return backoff.Permanent(pingErr)
+			return retry.Permanent(pingErr)
 		}
 		return nil
-	}, backoff.WithContext(bo, ctx)); err != nil {
+	}, bo); err != nil {
 		_ = db.Close()
 		return nil, "", fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
 	}
