@@ -45,11 +45,11 @@ func FixMissingMetadata(path string, bdVersion string) error {
 
 	var repaired []string
 
-	// Check and repair bd_version
-	if val, err := store.GetMetadata(ctx, "bd_version"); err == nil && val == "" {
+	// Check and repair bd_version (clone-local, dolt-ignored)
+	if val, err := store.GetLocalMetadata(ctx, "bd_version"); err == nil && val == "" {
 		if bdVersion != "" {
-			if err := store.SetMetadata(ctx, "bd_version", bdVersion); err != nil {
-				return fmt.Errorf("failed to set bd_version metadata: %w", err)
+			if err := store.SetLocalMetadata(ctx, "bd_version", bdVersion); err != nil {
+				return fmt.Errorf("failed to set bd_version local metadata: %w", err)
 			}
 			repaired = append(repaired, "bd_version")
 		}

@@ -82,7 +82,7 @@ Examples:
 			ctx := rootCtx
 
 			// Get schema version
-			schemaVersion, err := store.GetMetadata(ctx, "bd_version")
+			schemaVersion, err := store.GetLocalMetadata(ctx, "bd_version")
 			if err != nil {
 				schemaVersion = "unknown"
 			}
@@ -209,6 +209,42 @@ type VersionChange struct {
 
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
+	{
+		Version: "1.0.2",
+		Date:    "2026-04-15",
+		Changes: []string{
+			"FIX: npm publish — updated npm-package/package.json URLs (repository, bugs, homepage) from steveyegge/beads to gastownhall/beads so sigstore provenance validation accepts the artifact (v1.0.0 and v1.0.1 npm publishes failed E422 on provenance verification)",
+		},
+	},
+	{
+		Version: "1.0.1",
+		Date:    "2026-04-15",
+		Changes: []string{
+			"NEW: bd batch — atomic multi-operation transactions across create/update/close/dep",
+			"NEW: bd config drift / bd config apply — detect and reconcile config drift across yaml, git, and database",
+			"NEW: bd config show — unified provenance view for effective config values",
+			"NEW: started_at timestamp on issues (recorded when first entering in_progress)",
+			"NEW: Selective sync — --issues flag, push/pull subcommands, --parent port across trackers",
+			"NEW: Pool metrics telemetry for shared-server connection pool diagnosis",
+			"NEW: OpenBestAvailable public API for library consumers",
+			"NEW: az:// (Azure Blob Storage) recognized as Dolt remote URL scheme",
+			"NEW: BEADS_DOLT_READY_TIMEOUT env var to override 10s waitForReady timeout on slow hardware",
+			"CHANGE: Auto-export enabled by default — export.path defaults to issues.jsonl, git-add on",
+			"CHANGE: gms_pure_go by default — ICU linkage dropped from test/install helpers and release binaries",
+			"FIX: Worktree-aware path resolution across hooks, doctor, config validate, bootstrap, reset, rename-prefix, formula search",
+			"FIX: Schema migration conflict and wisp-tables-missing-after-bootstrap-clone",
+			"FIX: bd mol bond now detects transitive dependency cycles",
+			"FIX: bd dep add/remove allows cross-prefix dependency targets",
+			"FIX: bd dolt pull nil-pointer panic in embedded mode",
+			"FIX: bd list truncation hint shown in all output modes; --watch hierarchy ordering stable",
+			"FIX: bd update --defer correctly sets status=deferred",
+			"FIX: Remote URL validation hardened at config parse time (security)",
+			"FIX: GitLab issue link dependencies now imported during sync pull",
+			"FIX: SQLite-era JSONL migration preserves dependencies and labels",
+			"FIX: MCP workspace discovery detects Dolt-backed projects",
+			"FIX: go install on Windows (ICU header dependency removed)",
+		},
+	},
 	{
 		Version: "0.63.3",
 		Date:    "2026-03-29",

@@ -491,9 +491,19 @@ func TestEmbeddedInit(t *testing.T) {
 
 	t.Run("metadata_written", func(t *testing.T) {
 		_, beadsDir, _ := bdInit(t, bd, "--prefix", "meta")
-		if val := readBack(t, beadsDir, "meta", "bd_version", true); val == "" {
-			t.Error("bd_version metadata not set")
-		}
+		// bd_version is in local_metadata (dolt-ignored), not metadata
+		func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			store, err := embeddeddolt.New(ctx, beadsDir, "meta", "main")
+			if err != nil {
+				t.Fatalf("failed to open store for bd_version check: %v", err)
+			}
+			defer store.Close()
+			if val, err := store.GetLocalMetadata(ctx, "bd_version"); err != nil || val == "" {
+				t.Error("bd_version local metadata not set")
+			}
+		}()
 		importTime := readBack(t, beadsDir, "meta", "last_import_time", true)
 		if importTime == "" {
 			t.Error("last_import_time metadata not set")

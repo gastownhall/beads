@@ -69,6 +69,22 @@ func (s *EmbeddedDoltStore) SetMetadata(ctx context.Context, key, value string) 
 	})
 }
 
+func (s *EmbeddedDoltStore) SetLocalMetadata(ctx context.Context, key, value string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.SetLocalMetadataInTx(ctx, tx, key, value)
+	})
+}
+
+func (s *EmbeddedDoltStore) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		value, err = issueops.GetLocalMetadataInTx(ctx, tx, key)
+		return err
+	})
+	return value, err
+}
+
 // GetInfraTypes returns the set of infrastructure types that should be routed
 // to the wisps table. Reads from DB config "types.infra", falls back to YAML,
 // then to hardcoded defaults (agent, rig, role, message).

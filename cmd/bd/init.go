@@ -587,12 +587,40 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					}
 				}
 			}
+
+			// Ensure the global beads_global database exists on the shared server.
+			// This is idempotent — safe to run on every init.
+			globalHost := configfile.DefaultDoltServerHost
+			if serverHost != "" {
+				globalHost = serverHost
+			}
+			globalPort := initPort
+			if globalPort == 0 {
+				globalPort = doltserver.DefaultSharedServerPort
+			}
+			globalUser := configfile.DefaultDoltServerUser
+			if serverUser != "" {
+				globalUser = serverUser
+			}
+			if err := doltserver.EnsureGlobalDatabase(globalHost, globalPort, globalUser, ""); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to create global database: %v\n", err)
+				// Non-fatal — project init should succeed even if global DB creation fails
+			} else if !quiet {
+				fmt.Printf("  %s Global database %s available\n", ui.RenderPass("✓"), doltserver.GlobalDatabaseName)
+			}
 		}
 
 		store, err := newDoltStore(ctx, doltCfg, embeddeddolt.WithLock(initLock))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %v\n", err)
 			os.Exit(1)
+		}
+
+		// Initialize global database schema and config in shared-server mode.
+		// Opens a separate store connection to beads_global with CreateIfMissing
+		// to trigger schema migration, then seeds the issue prefix and project ID.
+		if sharedServer || doltserver.IsSharedServerMode() {
+			initGlobalDatabaseConfig(ctx, doltCfg, quiet)
 		}
 
 		// Configure the remote in the Dolt store so bd dolt push/pull
@@ -634,8 +662,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// but the system works without it. Failures here degrade gracefully - we warn but continue.
 		// Belt-and-suspenders: write then verify read-back for each field.
 
-		// Store and verify the bd version (for version mismatch detection)
-		verifyMetadata(ctx, store, "bd_version", Version)
+		// Store bd version in clone-local metadata (dolt-ignored, no merge conflicts)
+		if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write bd_version local metadata: %v\n", err)
+		}
 
 		// Compute and store repository fingerprint (FR-015)
 		repoID, err := beads.ComputeRepoID()
@@ -721,6 +751,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					// records a different name, causing reopens to fail.
 					cfg.DoltDatabase = strings.ReplaceAll(prefix, "-", "_")
 					cfg.DoltDatabase = strings.ReplaceAll(cfg.DoltDatabase, ".", "_")
+				}
+
+				// Set global database name for shared-server mode projects.
+				// This gives each project the connection info to reach beads_global.
+				if sharedServer || doltserver.IsSharedServerMode() {
+					cfg.GlobalDoltDatabase = doltserver.GlobalDatabaseName
 				}
 
 				// Persist the connection mode matching this build.
@@ -1676,4 +1712,50 @@ func verifyMetadata(ctx context.Context, store storage.DoltStorage, key, value s
 		return false
 	}
 	return true
+}
+
+// initGlobalDatabaseConfig opens a store connection to the beads_global database
+// and seeds its configuration (issue prefix, project ID). The database must already
+// exist (created by EnsureGlobalDatabase). This function is idempotent — it only
+// sets config values that are not already present.
+func initGlobalDatabaseConfig(ctx context.Context, projectCfg *dolt.Config, quiet bool) {
+	globalCfg := &dolt.Config{
+		Path:            projectCfg.Path,
+		BeadsDir:        projectCfg.BeadsDir,
+		Database:        doltserver.GlobalDatabaseName,
+		ServerHost:      projectCfg.ServerHost,
+		ServerPort:      projectCfg.ServerPort,
+		ServerUser:      projectCfg.ServerUser,
+		ServerPassword:  projectCfg.ServerPassword,
+		ServerMode:      true,
+		CreateIfMissing: true,
+		AutoStart:       false, // server is already running
+	}
+
+	globalStore, err := newDoltStore(ctx, globalCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to open global database: %v\n", err)
+		return
+	}
+	defer func() { _ = globalStore.Close() }()
+
+	// Set issue prefix (only if not already configured)
+	existing, _ := globalStore.GetConfig(ctx, "issue_prefix")
+	if existing == "" {
+		if err := globalStore.SetConfig(ctx, "issue_prefix", doltserver.GlobalIssuePrefix); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to set global issue prefix: %v\n", err)
+		}
+	}
+
+	// Set well-known project ID for the global database
+	existingID, _ := globalStore.GetMetadata(ctx, "_project_id")
+	if existingID == "" {
+		if err := globalStore.SetMetadata(ctx, "_project_id", doltserver.GlobalProjectID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to set global project ID: %v\n", err)
+		}
+	}
+
+	if !quiet {
+		fmt.Printf("  %s Global database schema initialized\n", ui.RenderPass("✓"))
+	}
 }

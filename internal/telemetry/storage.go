@@ -411,6 +411,22 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 	return v, err
 }
 
+func (s *InstrumentedStorage) SetLocalMetadata(ctx context.Context, key, value string) error {
+	attrs := []attribute.KeyValue{attribute.String("bd.local_metadata.key", key)}
+	ctx, span, t := s.op(ctx, "SetLocalMetadata", attrs...)
+	err := s.inner.SetLocalMetadata(ctx, key, value)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
+func (s *InstrumentedStorage) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.local_metadata.key", key)}
+	ctx, span, t := s.op(ctx, "GetLocalMetadata", attrs...)
+	v, err := s.inner.GetLocalMetadata(ctx, key)
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
 // ── Transactions ─────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {

@@ -220,6 +220,15 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	// flock contention, not export behavior. With export.auto=true
 	// (the default since GH#2973), 8 concurrent writers also trigger
 	// post-write read paths that race with in-flight commits.
+	//
+	// The underlying race is not flock-level (flock already serializes
+	// bd subprocesses) but engine-shutdown-level: Dolt's working-set
+	// persistence can lag behind flock release, so the next subprocess
+	// sometimes commits with a stale view and overwrites a prior forget.
+	// See GH#3260 for the investigation (PR #3269 was the CI probe).
+	// Fix would require synchronous flush on engine close or a long-lived
+	// engine per store; both are substantial work. Until then, this
+	// workaround keeps the test deterministic.
 	disableAutoExport := exec.Command(bd, "config", "set", "export.auto", "false")
 	disableAutoExport.Dir = dir
 	disableAutoExport.Env = bdEnv(dir)

@@ -88,6 +88,18 @@ const maxEphemeralPortAttempts = 10
 // Uses 3308 to avoid conflict with the orchestrator which uses 3307.
 const DefaultSharedServerPort = 3308
 
+// GlobalDatabaseName is the SQL database name for the project-agnostic
+// global issue database in shared-server mode.
+const GlobalDatabaseName = "beads_global"
+
+// GlobalIssuePrefix is the issue prefix used in the global database.
+const GlobalIssuePrefix = "global"
+
+// GlobalProjectID is the well-known sentinel UUID for the global database.
+// Used for project identity verification — the global DB doesn't belong to
+// any single project, so it uses this fixed value instead of a random UUID.
+const GlobalProjectID = "00000000-0000-0000-0000-000000000000"
+
 // IsSharedServerMode returns true if shared server mode is enabled.
 // Checks (in priority order):
 //  1. BEADS_DOLT_SHARED_SERVER env var ("1" or "true")
@@ -829,6 +841,48 @@ func Start(beadsDir string) (*State, error) {
 		Port:    actualPort,
 		DataDir: doltDir,
 	}, nil
+}
+
+// EnsureGlobalDatabase connects to the shared Dolt server and creates the
+// beads_global database if it doesn't already exist. This is idempotent and
+// safe to call on every shared server init. Schema initialization and config
+// seeding (issue prefix, project ID) are handled by the store layer when the
+// global database is first opened with CreateIfMissing=true.
+//
+// Returns nil if the database already exists or was successfully created.
+func EnsureGlobalDatabase(host string, port int, user, password string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dsn := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+	}.String()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("ensure global db: failed to open connection: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetConnMaxLifetime(10 * time.Second)
+
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ensure global db: server not reachable: %w", err)
+	}
+
+	// CREATE DATABASE IF NOT EXISTS is idempotent — safe on every call.
+	// GlobalDatabaseName is a constant ("beads_global"), not user input.
+	_, err = db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", GlobalDatabaseName)) //nolint:gosec // G201: constant database name
+	if err != nil {
+		errLower := strings.ToLower(err.Error())
+		if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
+			return fmt.Errorf("ensure global db: failed to create %s: %w", GlobalDatabaseName, err)
+		}
+	}
+
+	return nil
 }
 
 // FlushWorkingSet connects to the running Dolt server and commits any uncommitted

@@ -75,3 +75,28 @@ func GetMetadataInTx(ctx context.Context, tx *sql.Tx, key string) (string, error
 	}
 	return value, nil
 }
+
+// SetLocalMetadataInTx sets a value in the dolt-ignored local_metadata table
+// within an existing transaction. Used for clone-local state that should not
+// generate merge conflicts (tip timestamps, version stamps, sync cursors).
+func SetLocalMetadataInTx(ctx context.Context, tx *sql.Tx, key, value string) error {
+	_, err := tx.ExecContext(ctx, "REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)", key, value)
+	if err != nil {
+		return fmt.Errorf("set local metadata %s: %w", key, err)
+	}
+	return nil
+}
+
+// GetLocalMetadataInTx retrieves a value from the dolt-ignored local_metadata
+// table within an existing transaction. Returns ("", nil) if the key does not exist.
+func GetLocalMetadataInTx(ctx context.Context, tx *sql.Tx, key string) (string, error) {
+	var value string
+	err := tx.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get local metadata %s: %w", key, err)
+	}
+	return value, nil
+}

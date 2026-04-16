@@ -58,7 +58,7 @@ func TestDoctorCheckHealthReportsVersionMismatchOnRepoLocalPort(t *testing.T) {
 		t.Skip("derived repo-local port unexpectedly matched 3307; not exercising regression")
 	}
 
-	sqlOut, sqlErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "sql", "UPDATE metadata SET value = '0.0.0' WHERE `key` = 'bd_version'")
+	sqlOut, sqlErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "sql", "UPDATE local_metadata SET value = '0.0.0' WHERE `key` = 'bd_version'")
 	if sqlErr != nil {
 		t.Fatalf("bd sql UPDATE failed: %v\n%s", sqlErr, sqlOut)
 	}

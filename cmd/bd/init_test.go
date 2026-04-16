@@ -1557,12 +1557,12 @@ func TestInitDoltMetadata(t *testing.T) {
 	defer doltStore.Close()
 
 	// FR-001: bd_version must be written
-	bdVersion, err := doltStore.GetMetadata(ctx, "bd_version")
+	bdVersion, err := doltStore.GetLocalMetadata(ctx, "bd_version")
 	if err != nil {
-		t.Fatalf("GetMetadata(bd_version) failed: %v", err)
+		t.Fatalf("GetLocalMetadata(bd_version) failed: %v", err)
 	}
 	if bdVersion == "" {
-		t.Error("bd_version metadata was not written")
+		t.Error("bd_version local metadata was not written")
 	}
 
 	// FR-002: repo_id must be written (git repo with remote configured)

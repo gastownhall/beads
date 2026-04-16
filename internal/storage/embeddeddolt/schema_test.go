@@ -53,6 +53,7 @@ func TestSchemaAfterInit(t *testing.T) {
 		"issue_counter",
 		"interactions",
 		"federation_peers",
+		"local_metadata",
 		"wisps",
 		"wisp_labels",
 		"wisp_dependencies",

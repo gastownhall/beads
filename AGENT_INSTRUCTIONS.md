@@ -101,15 +101,17 @@ bd hooks install
 
 **Merge conflicts**: Rare with hash IDs. Dolt uses cell-level 3-way merge for conflict resolution.
 
-## Git Workflow: Push to Main, Never PR
+## Git Workflow: PR by Default
 
-Crew workers push directly to main. **Never create pull requests.**
+Crew workers use a PR-based workflow. Beads is a dependency of Gas City, so we
+defer to the standard PR flow to keep changes reviewable.
 
-- `git push` to main is the only way to land work
-- `gh pr create` is forbidden — PRs are for external contributors, not crew
-- Do not create feature branches for your own work — commit and push to main
-- When handling external PRs, use fix-merge: checkout the PR branch locally,
-  fix/rebase onto main, merge locally, `git push`, then close the PR
+- Work on a feature branch, push the branch, open a PR against `main`
+- `gh pr create` is the normal path to land work
+- Direct push to main is reserved for releases (tag + release commit) and
+  narrow operational fixes; prefer a PR when unsure
+- When handling external contributor PRs, use fix-merge: checkout the PR
+  branch locally, fix/rebase onto main, merge via PR, then close the PR
 
 ### External Contributor PRs: Check Before You Build
 

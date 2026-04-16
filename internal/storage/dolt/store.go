@@ -1075,6 +1075,14 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// CREATE DATABASE, information_schema queries may fail transiently
 	// even though Ping succeeded. This resolves within ~1s.
 	if !cfg.ReadOnly {
+		// Ensure dolt_ignore'd tables exist BEFORE running migrations.
+		// Migrations may reference these tables (e.g. 0027 alters wisps,
+		// 0030 inserts into local_metadata). After a clone or server restart
+		// these tables don't exist yet since they're not in committed data.
+		if err := versioncontrolops.EnsureIgnoredTables(ctx, db); err != nil {
+			return nil, fmt.Errorf("failed to ensure ignored tables: %w", err)
+		}
+
 		schemaBO := backoff.NewExponentialBackOff()
 		schemaBO.InitialInterval = 100 * time.Millisecond
 		schemaBO.MaxElapsedTime = 5 * time.Second
@@ -1089,13 +1097,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			return nil
 		}, backoff.WithContext(schemaBO, ctx)); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
-		}
-
-		// Ensure dolt_ignore'd tables (wisps, wisp_*) exist in the working set.
-		// These tables are not persisted in commits, so they need recreation
-		// after a server restart. Short-circuits if they already exist (1 query).
-		if err := versioncontrolops.EnsureIgnoredTables(ctx, db); err != nil {
-			return nil, fmt.Errorf("failed to ensure ignored tables: %w", err)
 		}
 	}
 
@@ -1423,7 +1424,7 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 			"issues", "dependencies", "labels", "comments", "events",
 			"config", "metadata", "child_counters",
 			"issue_snapshots", "compaction_snapshots",
-			"repo_mtimes", "routes", "issue_counter",
+			"routes", "issue_counter",
 			"interactions", "federation_peers",
 			"custom_statuses", "custom_types",
 			"dolt_ignore", "schema_migrations",

@@ -78,7 +78,11 @@ func maybeAutoExport(ctx context.Context) {
 	// Determine output path
 	exportPath := config.GetString("export.path")
 	if exportPath == "" {
-		exportPath = "issues.jsonl"
+		if globalFlag {
+			exportPath = "global-issues.jsonl"
+		} else {
+			exportPath = "issues.jsonl"
+		}
 	}
 	fullPath := filepath.Join(beadsDir, exportPath)
 

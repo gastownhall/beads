@@ -523,7 +523,11 @@ func (s *configStore) GetAllConfig(_ context.Context) (map[string]string, error)
 }
 
 // Storage interface stubs — not exercised by Init().
-func (s *configStore) SetConfig(_ context.Context, _, _ string) error { return nil }
+func (s *configStore) SetConfig(_ context.Context, _, _ string) error        { return nil }
+func (s *configStore) SetLocalMetadata(_ context.Context, _, _ string) error { return nil }
+func (s *configStore) GetLocalMetadata(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
 func (s *configStore) CreateIssue(_ context.Context, _ *types.Issue, _ string) error {
 	return nil
 }

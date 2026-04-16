@@ -106,6 +106,8 @@ func parseVersion(name string) (int, error) {
 // *sql.DB — the caller controls transaction boundaries.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// Bootstrap the tracking table.
+	// Bootstrap with applied_at so migration 0032 can unconditionally drop it.
+	// After 0032 runs, the table has only the version column.
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INT PRIMARY KEY,
 		applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
