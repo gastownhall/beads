@@ -16,8 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"bufio"
+
 	"github.com/spf13/cobra"
-	"github.com/subosito/gotenv"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
@@ -115,18 +116,43 @@ func isReadOnlyCommand(cmdName string) bool {
 }
 
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
-// Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
-// existing shell env vars always take precedence.
-// Safe to call with an empty beadsDir (no-op).
+// Dolt credentials (GH#2520). Non-overriding — existing shell env vars always
+// take precedence. Safe to call with an empty beadsDir (no-op).
 func loadBeadsEnvFile(beadsDir string) {
 	if beadsDir == "" {
 		return
 	}
 	envFile := filepath.Join(beadsDir, ".env")
-	if _, err := os.Stat(envFile); err != nil {
+	f, err := os.Open(envFile)
+	if err != nil {
 		return
 	}
-	_ = gotenv.Load(envFile)
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		// Strip optional "export " prefix.
+		line = strings.TrimPrefix(line, "export ")
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		// Remove surrounding quotes (single or double).
+		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+			v = v[1 : len(v)-1]
+		}
+		// Non-overriding: skip if already set.
+		if _, exists := os.LookupEnv(k); exists {
+			continue
+		}
+		os.Setenv(k, v)
+	}
 }
 
 // loadEnvironment runs the lightweight, always-needed environment setup that
