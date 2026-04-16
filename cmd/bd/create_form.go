@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -299,129 +299,62 @@ The form uses keyboard navigation:
 func runCreateForm(cmd *cobra.Command) {
 	parentID, _ := cmd.Flags().GetString("parent")
 
-	// Raw form input - will be populated by the form
-	raw := &createFormRawInput{}
-
-	// Issue type options
-	typeOptions := []huh.Option[string]{
-		huh.NewOption("Task", "task"),
-		huh.NewOption("Bug", "bug"),
-		huh.NewOption("Feature", "feature"),
-		huh.NewOption("Epic", "epic"),
-		huh.NewOption("Chore", "chore"),
-	}
-
-	// Priority options
-	priorityOptions := []huh.Option[string]{
-		huh.NewOption("P0 - Critical", "0"),
-		huh.NewOption("P1 - High", "1"),
-		huh.NewOption("P2 - Medium (default)", "2"),
-		huh.NewOption("P3 - Low", "3"),
-		huh.NewOption("P4 - Backlog", "4"),
-	}
-
-	// Build the form
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Title").
-				Description("Brief summary of the issue (required)").
-				Placeholder("e.g., Fix authentication bug in login handler").
-				Value(&raw.Title).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("title is required")
-					}
-					if len(s) > 500 {
-						return fmt.Errorf("title must be 500 characters or less")
-					}
-					return nil
-				}),
-
-			huh.NewText().
-				Title("Description").
-				Description("Detailed context about the issue").
-				Placeholder("Explain why this issue exists and what needs to be done...").
-				CharLimit(5000).
-				Value(&raw.Description),
-
-			huh.NewSelect[string]().
-				Title("Type").
-				Description("Categorize the kind of work").
-				Options(typeOptions...).
-				Value(&raw.IssueType),
-
-			huh.NewSelect[string]().
-				Title("Priority").
-				Description("Set urgency level").
-				Options(priorityOptions...).
-				Value(&raw.Priority),
-		),
-
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Assignee").
-				Description("Who should work on this? (optional)").
-				Placeholder("username or email").
-				Value(&raw.Assignee),
-
-			huh.NewInput().
-				Title("Labels").
-				Description("Comma-separated tags (optional)").
-				Placeholder("e.g., urgent, backend, needs-review").
-				Value(&raw.Labels),
-
-			huh.NewInput().
-				Title("External Reference").
-				Description("Link to external tracker (optional)").
-				Placeholder("e.g., gh-123, jira-ABC-456").
-				Value(&raw.ExternalRef),
-		),
-
-		huh.NewGroup(
-			huh.NewText().
-				Title("Design Notes").
-				Description("Technical approach or design details (optional)").
-				Placeholder("Describe the implementation approach...").
-				CharLimit(5000).
-				Value(&raw.Design),
-
-			huh.NewText().
-				Title("Acceptance Criteria").
-				Description("How do we know this is done? (optional)").
-				Placeholder("List the criteria for completion...").
-				CharLimit(5000).
-				Value(&raw.Acceptance),
-		),
-
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Dependencies").
-				Description("Format: type:id or just id (optional)").
-				Placeholder("e.g., discovered-from:bd-20, blocks:bd-15").
-				Value(&raw.Deps),
-
-			huh.NewConfirm().
-				Title("Create this issue?").
-				Affirmative("Create").
-				Negative("Cancel"),
-		),
-	).WithTheme(huh.ThemeFunc(huh.ThemeDracula))
-
-	err := form.Run()
-	if err != nil {
-		if err == huh.ErrUserAborted {
-			fmt.Fprintln(os.Stderr, "Issue creation canceled.")
+	sc := bufio.NewScanner(os.Stdin)
+	prompt := func(label, fallback string) string {
+		fmt.Fprintf(os.Stderr, "%s [%s]: ", label, fallback)
+		if !sc.Scan() {
+			fmt.Fprintln(os.Stderr, "\nAborted.")
 			os.Exit(0)
 		}
-		FatalError("form error: %v", err)
+		v := strings.TrimSpace(sc.Text())
+		if v == "" {
+			return fallback
+		}
+		return v
+	}
+	promptRequired := func(label string) string {
+		for {
+			fmt.Fprintf(os.Stderr, "%s: ", label)
+			if !sc.Scan() {
+				fmt.Fprintln(os.Stderr, "\nAborted.")
+				os.Exit(0)
+			}
+			v := strings.TrimSpace(sc.Text())
+			if v != "" {
+				return v
+			}
+			fmt.Fprintln(os.Stderr, "  (required, try again)")
+		}
+	}
+	promptOpt := func(label string) string {
+		fmt.Fprintf(os.Stderr, "%s: ", label)
+		if !sc.Scan() {
+			return ""
+		}
+		return strings.TrimSpace(sc.Text())
 	}
 
-	// Parse the form input
+	raw := &createFormRawInput{}
+	raw.Title = promptRequired("Title")
+	raw.Description = promptOpt("Description")
+	raw.IssueType = prompt("Type (task/bug/feature/epic/chore)", "task")
+	raw.Priority = prompt("Priority (0-4)", "2")
+	raw.Assignee = promptOpt("Assignee")
+	raw.Labels = promptOpt("Labels (comma-separated)")
+	raw.ExternalRef = promptOpt("External reference")
+	raw.Design = promptOpt("Design notes")
+	raw.Acceptance = promptOpt("Acceptance criteria")
+	raw.Deps = promptOpt("Dependencies (type:id, comma-separated)")
+
+	confirm := prompt("Create this issue? (y/n)", "y")
+	if !strings.HasPrefix(strings.ToLower(confirm), "y") {
+		fmt.Fprintln(os.Stderr, "Issue creation canceled.")
+		os.Exit(0)
+	}
+
 	fv := parseCreateFormInput(raw)
 	fv.ParentID = parentID
 
-	// Direct mode - use the extracted creation function
 	issue, err := CreateIssueFromFormValues(rootCtx, store, fv, actor)
 	if err != nil {
 		FatalError("%v", err)

@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
@@ -1092,7 +1090,9 @@ func TestGitRemoteExternalServerRouting(t *testing.T) {
 
 	// SQL sees git+https:// remote in testdb; CLI directory (clientDataDir) has none.
 	// isGitProtocolRemote should return false to route through SQL.
-	require.False(t, store.isGitProtocolRemote(ctx))
+	if store.isGitProtocolRemote(ctx) {
+		t.Fatal("isGitProtocolRemote should return false")
+	}
 }
 
 // TestCredentialCLIRoutingE2E verifies that Push succeeds via CLI subprocess
@@ -1218,14 +1218,22 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 	t.Cleanup(func() { store.Close() })
 
 	// Verify preconditions: not a git-protocol remote, but credentials trigger CLI routing
-	require.False(t, store.isGitProtocolRemote(ctx), "file:// is not git-protocol")
-	require.True(t, store.shouldUseCLIForCredentials(ctx), "should route through CLI for credentials")
-	require.True(t, store.serverMode, "store should be in server mode")
+	if store.isGitProtocolRemote(ctx) {
+		t.Fatal("file:// is not git-protocol")
+	}
+	if !store.shouldUseCLIForCredentials(ctx) {
+		t.Fatal("should route through CLI for credentials")
+	}
+	if !store.serverMode {
+		t.Fatal("store should be in server mode")
+	}
 
 	// 7. Push should succeed via CLI credential routing
 	// If the guard works: doltCLIPush uses CLI dir's file:// remote → success
 	// If guard fails: withEnvCredentials + SQL CALL DOLT_PUSH('--user',...) → fails
 	// (external server can't see env vars set on bd client process)
 	err = store.Push(ctx)
-	require.NoError(t, err, "Push should succeed via CLI credential routing (SC-001)")
+	if err != nil {
+		t.Fatalf("Push should succeed via CLI credential routing (SC-001): %v", err)
+	}
 }
