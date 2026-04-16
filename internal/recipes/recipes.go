@@ -3,12 +3,11 @@
 package recipes
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/BurntSushi/toml"
 )
 
 // RecipeType indicates how the recipe is installed.
@@ -118,23 +117,29 @@ var BuiltinRecipes = map[string]Recipe{
 
 // UserRecipes holds recipes loaded from user config file.
 type UserRecipes struct {
-	Recipes map[string]Recipe `toml:"recipes"`
+	Recipes map[string]Recipe `json:"recipes"`
 }
 
-// LoadUserRecipes loads recipes from .beads/recipes.toml if it exists.
+// LoadUserRecipes loads recipes from .beads/recipes.json (or legacy .toml) if it exists.
 func LoadUserRecipes(beadsDir string) (map[string]Recipe, error) {
-	path := filepath.Join(beadsDir, "recipes.toml")
+	// Try JSON first, then legacy TOML location for migration
+	path := filepath.Join(beadsDir, "recipes.json")
 	data, err := os.ReadFile(path) // #nosec G304 -- path is constructed from validated beadsDir
+	if os.IsNotExist(err) {
+		// Try legacy .toml path
+		path = filepath.Join(beadsDir, "recipes.toml")
+		data, err = os.ReadFile(path) // #nosec G304
+	}
 	if os.IsNotExist(err) {
 		return nil, nil // No user recipes, that's fine
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read recipes.toml: %w", err)
+		return nil, fmt.Errorf("read recipes: %w", err)
 	}
 
 	var userRecipes UserRecipes
-	if err := toml.Unmarshal(data, &userRecipes); err != nil {
-		return nil, fmt.Errorf("parse recipes.toml: %w", err)
+	if err := json.Unmarshal(data, &userRecipes); err != nil {
+		return nil, fmt.Errorf("parse recipes: %w", err)
 	}
 
 	// Set defaults for user recipes
@@ -191,47 +196,42 @@ func GetRecipe(name string, beadsDir string) (*Recipe, error) {
 	return &recipe, nil
 }
 
-// SaveUserRecipe adds or updates a recipe in .beads/recipes.toml.
+// SaveUserRecipe adds or updates a recipe in .beads/recipes.json.
 func SaveUserRecipe(beadsDir, name, path string) error {
-	recipesPath := filepath.Join(beadsDir, "recipes.toml")
+	recipesPath := filepath.Join(beadsDir, "recipes.json")
 
 	// Load existing user recipes
 	var userRecipes UserRecipes
 	data, err := os.ReadFile(recipesPath) // #nosec G304 -- path is constructed from validated beadsDir
 	if err == nil {
-		if err := toml.Unmarshal(data, &userRecipes); err != nil {
-			return fmt.Errorf("parse recipes.toml: %w", err)
+		if err := json.Unmarshal(data, &userRecipes); err != nil {
+			return fmt.Errorf("parse recipes.json: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("read recipes.toml: %w", err)
+		return fmt.Errorf("read recipes.json: %w", err)
 	}
 
 	if userRecipes.Recipes == nil {
 		userRecipes.Recipes = make(map[string]Recipe)
 	}
 
-	// Add/update the recipe
 	userRecipes.Recipes[name] = Recipe{
 		Name: name,
 		Path: path,
 		Type: TypeFile,
 	}
 
-	// Ensure directory exists
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		return fmt.Errorf("create beads dir: %w", err)
 	}
 
-	// Write back
-	f, err := os.Create(recipesPath) // #nosec G304 -- path is constructed from validated beadsDir
+	out, err := json.MarshalIndent(userRecipes, "", "  ")
 	if err != nil {
-		return fmt.Errorf("create recipes.toml: %w", err)
+		return fmt.Errorf("encode recipes.json: %w", err)
 	}
-	defer f.Close()
 
-	encoder := toml.NewEncoder(f)
-	if err := encoder.Encode(userRecipes); err != nil {
-		return fmt.Errorf("encode recipes.toml: %w", err)
+	if err := os.WriteFile(recipesPath, append(out, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write recipes.json: %w", err)
 	}
 
 	return nil

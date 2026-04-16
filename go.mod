@@ -3,7 +3,6 @@ module github.com/steveyegge/beads
 go 1.25.8
 
 require (
-	github.com/BurntSushi/toml v1.6.0
 	github.com/dolthub/driver v1.84.1
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/olebedev/when v1.1.0

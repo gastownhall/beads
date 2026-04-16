@@ -8,15 +8,13 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/steveyegge/beads/internal/beads"
 )
 
-// Formula file extensions. TOML is preferred, JSON is legacy fallback.
+// Formula file extension.
 const (
-	FormulaExtTOML = ".formula.toml"
 	FormulaExtJSON = ".formula.json"
-	FormulaExt     = FormulaExtJSON // Legacy alias for backwards compatibility
+	FormulaExt     = FormulaExtJSON
 )
 
 // Parser handles loading and resolving formulas.
@@ -116,13 +114,8 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	// Detect format from extension
 	var formula *Formula
-	if strings.HasSuffix(path, FormulaExtTOML) {
-		formula, err = p.ParseTOML(data)
-	} else {
-		formula, err = p.Parse(data)
-	}
+	formula, err = p.Parse(data)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -145,24 +138,6 @@ func (p *Parser) Parse(data []byte) (*Formula, error) {
 	var formula Formula
 	if err := json.Unmarshal(data, &formula); err != nil {
 		return nil, fmt.Errorf("json: %w", err)
-	}
-
-	// Set defaults
-	if formula.Version == 0 {
-		formula.Version = 1
-	}
-	if formula.Type == "" {
-		formula.Type = TypeWorkflow
-	}
-
-	return &formula, nil
-}
-
-// ParseTOML parses a formula from TOML bytes.
-func (p *Parser) ParseTOML(data []byte) (*Formula, error) {
-	var formula Formula
-	if err := toml.Unmarshal(data, &formula); err != nil {
-		return nil, fmt.Errorf("toml: %w", err)
 	}
 
 	// Set defaults
@@ -263,21 +238,15 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 }
 
 // loadFormula loads a formula by name from search paths.
-// Tries TOML first (.formula.toml), then falls back to JSON (.formula.json).
 func (p *Parser) loadFormula(name string) (*Formula, error) {
-	// Check cache first
 	if cached, ok := p.cache[name]; ok {
 		return cached, nil
 	}
 
-	// Search for the formula file - try TOML first, then JSON
-	extensions := []string{FormulaExtTOML, FormulaExtJSON}
 	for _, dir := range p.searchPaths {
-		for _, ext := range extensions {
-			path := filepath.Join(dir, name+ext)
-			if _, err := os.Stat(path); err == nil {
-				return p.ParseFile(path)
-			}
+		path := filepath.Join(dir, name+FormulaExtJSON)
+		if _, err := os.Stat(path); err == nil {
+			return p.ParseFile(path)
 		}
 	}
 

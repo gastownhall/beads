@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,8 +33,6 @@ var hookManagerConfigs = []hookManagerConfig{
 		// YAML variants
 		"lefthook.yml", ".lefthook.yml", ".config/lefthook.yml",
 		"lefthook.yaml", ".lefthook.yaml", ".config/lefthook.yaml",
-		// TOML variants
-		"lefthook.toml", ".lefthook.toml", ".config/lefthook.toml",
 		// JSON variants
 		"lefthook.json", ".lefthook.json", ".config/lefthook.json",
 	}},
@@ -192,9 +189,7 @@ func CheckLefthookBdIntegration(path string) *HookIntegrationStatus {
 	ext := filepath.Ext(configPath)
 	switch ext {
 	case ".toml":
-		if _, err := toml.Decode(string(content), &config); err != nil {
-			return nil
-		}
+		return nil // TOML lefthook configs not supported; use .yml or .json
 	case ".json":
 		if err := json.Unmarshal(content, &config); err != nil {
 			return nil
