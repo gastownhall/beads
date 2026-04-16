@@ -105,7 +105,8 @@ Bumps the version number across all beads components in a single command.
 
 Updates version in all these files:
 - `cmd/bd/version.go` - bd CLI version constant
-- `claude-plugin/.claude-plugin/plugin.json` - Plugin version
+- `plugins/beads/.claude-plugin/plugin.json` - Claude plugin version
+- `plugins/beads/.codex-plugin/plugin.json` - Codex plugin version
 - `.claude-plugin/marketplace.json` - Marketplace plugin version
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
 - `README.md` - Alpha status version

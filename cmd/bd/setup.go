@@ -19,6 +19,8 @@ var (
 	setupCheck   bool
 	setupRemove  bool
 	setupStealth bool
+	setupHooks   bool
+	setupAgents  bool
 	setupPrint   bool
 	setupOutput  string
 	setupList    bool
@@ -36,6 +38,8 @@ include cursor, claude, gemini, aider, factory, codex, mux, opencode, junie, win
 
 Examples:
   bd setup cursor          # Install Cursor IDE integration
+  bd setup codex           # Install Beads agent skill
+  bd setup codex --hooks   # Install Beads agent skill + project-local Codex hooks
   bd setup mux --project   # Install Mux workspace layer (.mux/AGENTS.md)
   bd setup mux --global    # Install Mux global layer (~/.mux/AGENTS.md)
   bd setup mux --project --global  # Install both Mux layers
@@ -335,14 +339,14 @@ func runFactoryRecipe() {
 
 func runCodexRecipe() {
 	if setupCheck {
-		setup.CheckCodex()
+		setup.CheckCodex(setupHooks, setupAgents)
 		return
 	}
 	if setupRemove {
-		setup.RemoveCodex()
+		setup.RemoveCodex(setupHooks, setupAgents)
 		return
 	}
-	setup.InstallCodex()
+	setup.InstallCodex(setupHooks, setupStealth, setupAgents)
 }
 
 func runOpenCodeRecipe() {
@@ -405,7 +409,9 @@ func init() {
 	setupCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove the integration")
 	setupCmd.Flags().BoolVar(&setupProject, "project", false, "Install for this project only (gemini/mux)")
 	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (claude/mux; writes to ~/.claude/settings.json or ~/.mux/AGENTS.md)")
-	setupCmd.Flags().BoolVar(&setupStealth, "stealth", false, "Use stealth mode (claude/gemini)")
+	setupCmd.Flags().BoolVar(&setupStealth, "stealth", false, "Use stealth mode (claude/gemini/codex hooks)")
+	setupCmd.Flags().BoolVar(&setupHooks, "hooks", false, "Install or manage hook configuration when supported (codex)")
+	setupCmd.Flags().BoolVar(&setupAgents, "agents", false, "Also install or manage AGENTS.md fallback when supported (codex)")
 
 	rootCmd.AddCommand(setupCmd)
 }

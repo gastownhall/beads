@@ -382,6 +382,17 @@ func TestEmbeddedInit(t *testing.T) {
 	t.Run("stealth", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "st", "--stealth")
 		requireNoFile(t, filepath.Join(dir, "AGENTS.md"))
+		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "SKILL.md"))
+	})
+
+	t.Run("skip_agents_keeps_skills_and_hooks", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sa", "--skip-agents")
+		requireNoFile(t, filepath.Join(dir, "AGENTS.md"))
+		requireNoFile(t, filepath.Join(dir, "CLAUDE.md"))
+		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "SKILL.md"))
+		requireFile(t, filepath.Join(dir, ".codex", "hooks.json"))
+		requireFile(t, filepath.Join(dir, ".codex", "config.toml"))
+		requireFile(t, filepath.Join(dir, ".claude", "settings.json"))
 	})
 
 	t.Run("force_reinit", func(t *testing.T) {
@@ -608,6 +619,9 @@ func TestEmbeddedInit(t *testing.T) {
 		requireFile(t, filepath.Join(beadsDir, "config.yaml"))
 		requireFile(t, filepath.Join(beadsDir, "interactions.jsonl"))
 		requireFile(t, filepath.Join(dir, "AGENTS.md"))
+		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "SKILL.md"))
+		requireFile(t, filepath.Join(dir, ".codex", "hooks.json"))
+		requireFile(t, filepath.Join(dir, ".codex", "config.toml"))
 
 		content, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
 		if err != nil {

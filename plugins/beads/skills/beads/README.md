@@ -1,0 +1,127 @@
+# Beads Skill
+
+A comprehensive skill for using [beads](https://github.com/gastownhall/beads) (bd) issue tracking with AI agents.
+
+## What This Skill Does
+
+This skill teaches agents how to use bd effectively for:
+- **Multi-session work tracking** - Persistent memory across conversation compactions
+- **Dependency management** - Graph-based issue relationships
+- **Session handoff** - Writing notes that survive context resets
+- **Molecules and wisps** (v0.34.0+) - Reusable work templates and ephemeral workflows
+
+## Installation
+
+Install the `beads/` directory through your agent's plugin or skill mechanism. For manual installs, copy it to the relevant skills directory:
+
+```bash
+# Claude global installation
+cp -r beads ~/.claude/skills/
+
+# Claude project-local installation
+cp -r beads .claude/skills/
+
+# Codex global installation
+cp -r beads ~/.codex/skills/
+```
+
+## When Agents Use This Skill
+
+The skill activates when conversations involve:
+- "multi-session", "complex dependencies", "resume after weeks"
+- "project memory", "persistent context", "side quest tracking"
+- Work that spans multiple days or compaction cycles
+- Tasks too complex for simple TodoWrite lists
+
+## File Structure
+
+```
+beads/
+├── SKILL.md                 # Main skill file (agents read this first)
+├── CLAUDE.md                # Maintenance guide for updating the skill
+├── README.md                # This file (for humans)
+├── adr/                     # Architectural Decision Records
+│   └── 0001-bd-prime-as-source-of-truth.md
+└── resources/               # Detailed documentation (loaded on demand)
+    ├── BOUNDARIES.md        # When to use bd vs TodoWrite
+    ├── CLI_REFERENCE.md     # CLI command reference
+    ├── DEPENDENCIES.md      # Dependency semantics (A blocks B vs B blocks A)
+    ├── INTEGRATION_PATTERNS.md # TodoWrite and other tool integration
+    ├── ISSUE_CREATION.md    # When and how to create issues
+    ├── MOLECULES.md         # Protos, mols, wisps (v0.34.0+)
+    ├── PATTERNS.md          # Common usage patterns
+    ├── RESUMABILITY.md      # Writing notes for post-compaction recovery
+    ├── STATIC_DATA.md       # Using bd for reference databases
+    ├── TROUBLESHOOTING.md   # Common issues and fixes
+    ├── WORKFLOWS.md         # Step-by-step workflow guides
+    ├── AGENTS.md            # Agent bead tracking (v0.40+)
+    ├── ASYNC_GATES.md       # Human-in-the-loop gates
+    ├── CHEMISTRY_PATTERNS.md # Mol vs Wisp decision tree
+    └── WORKTREES.md         # Parallel development patterns
+```
+
+## Key Concepts
+
+### bd vs TodoWrite
+
+| Use bd when... | Use TodoWrite when... |
+|----------------|----------------------|
+| Work spans multiple sessions | Single-session tasks |
+| Complex dependencies exist | Linear step-by-step work |
+| Need to resume after weeks | Just need a quick checklist |
+| Knowledge work with fuzzy boundaries | Clear, immediate tasks |
+
+### The Dependency Direction Trap
+
+`bd dep add A B` means **"A depends on B"** (B must complete before A can start).
+
+```bash
+# Want: "Setup must complete before Implementation"
+bd dep add implementation setup  # ✓ CORRECT
+# NOT: bd dep add setup implementation  # ✗ WRONG
+```
+
+### Surviving Compaction
+
+When the agent context gets compacted, conversation history is lost but bd state survives. Write notes as if explaining to a future agent with zero context:
+
+```bash
+bd update issue-123 --notes "COMPLETED: JWT auth with RS256
+KEY DECISION: RS256 over HS256 for key rotation
+IN PROGRESS: Password reset flow
+NEXT: Implement rate limiting"
+```
+
+## Requirements
+
+- [bd CLI](https://github.com/gastownhall/beads) installed (`brew install beads`)
+- A git repository (bd requires git for sync)
+- Initialized database (`bd init` in project root)
+
+## Version Compatibility
+
+| Version | Features |
+|---------|----------|
+| v0.60.0+ | CLI credential pass-through for Dolt server push/pull |
+| v0.58.0+ | `bd prime --claim`, `bd show --long`, `--stdin` flag |
+| v0.54.0+ | `bd doctor` detects committed runtime/sensitive files, `BD_BACKUP_ENABLED=false` |
+| v0.52.0+ | `bd sync` deprecated (use `bd dolt push`), `--claim` for atomic start-work |
+| v0.47.0+ | Pull-first sync, resolve-conflicts, dry-run create, gate auto-discovery |
+| v0.43.0+ | Full support: agents, gates, worktrees, chemistry patterns |
+| v0.40.0+ | Agent beads, async gates, worktree management |
+| v0.34.0+ | Molecules, wisps, cross-project dependencies |
+| v0.15.0+ | Core: dependencies, notes, status tracking |
+
+## Contributing
+
+This skill is maintained at [github.com/gastownhall/beads](https://github.com/gastownhall/beads) in the `plugins/beads/skills/beads/` directory.
+
+Issues and PRs welcome for:
+- Documentation improvements
+- New workflow patterns
+- Bug fixes in examples
+- Additional troubleshooting scenarios
+
+## License
+
+MIT (same as beads)

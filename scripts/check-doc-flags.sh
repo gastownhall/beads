@@ -44,8 +44,8 @@ SYNC_REFS=$(grep -rn 'bd sync\b' \
     "$PROJECT_ROOT"/npm-package/*.md \
     "$PROJECT_ROOT"/integrations/*/README.md \
     "$PROJECT_ROOT"/website/docs/**/*.md \
-    "$PROJECT_ROOT"/claude-plugin/commands/*.md \
-    "$PROJECT_ROOT"/claude-plugin/skills/beads/resources/*.md \
+    "$PROJECT_ROOT"/plugins/beads/skills/beads/commands/*.md \
+    "$PROJECT_ROOT"/plugins/beads/skills/beads/resources/*.md \
     2>/dev/null \
     | grep -v 'CHANGELOG\|audit-sync-mode\|deprecated\|no-op\|removed\|was removed\|has been removed' \
     || true)
@@ -67,8 +67,8 @@ IMPORT_REFS=$(grep -rn 'bd import\b' \
     "$PROJECT_ROOT"/npm-package/*.md \
     "$PROJECT_ROOT"/integrations/*/README.md \
     "$PROJECT_ROOT"/website/docs/**/*.md \
-    "$PROJECT_ROOT"/claude-plugin/commands/*.md \
-    "$PROJECT_ROOT"/claude-plugin/skills/beads/resources/*.md \
+    "$PROJECT_ROOT"/plugins/beads/skills/beads/commands/*.md \
+    "$PROJECT_ROOT"/plugins/beads/skills/beads/resources/*.md \
     2>/dev/null \
     | grep -v 'CHANGELOG\|removed\|was removed\|has been removed\|no longer\|deprecated\|REMOVED\|DISCOVERY' \
     || true)

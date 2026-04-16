@@ -40,7 +40,7 @@ func setupStealthMode(verbose bool) error {
 	return nil
 }
 
-// setupGitExclude configures .git/info/exclude to ignore beads and claude files
+// setupGitExclude configures .git/info/exclude to ignore local beads and agent files.
 // This is the correct approach for per-repository user-specific ignores (GitHub #704).
 // Unlike global gitignore, patterns here are relative to the repo root.
 func setupGitExclude(verbose bool) error {
@@ -68,14 +68,20 @@ func setupGitExclude(verbose bool) error {
 		existingContent = string(content)
 	}
 
-	// Use relative patterns (these work correctly in .git/info/exclude)
-	beadsPattern := ".beads/"
-	claudePattern := ".claude/settings.local.json"
+	patterns := []string{
+		".beads/",
+		".agents/",
+		".claude/settings.local.json",
+	}
 
-	hasBeads := strings.Contains(existingContent, beadsPattern)
-	hasClaude := strings.Contains(existingContent, claudePattern)
+	var missing []string
+	for _, pattern := range patterns {
+		if !containsExactPattern(existingContent, pattern) {
+			missing = append(missing, pattern)
+		}
+	}
 
-	if hasBeads && hasClaude {
+	if len(missing) == 0 {
 		if verbose {
 			fmt.Printf("Git exclude already configured for stealth mode\n")
 		}
@@ -88,15 +94,11 @@ func setupGitExclude(verbose bool) error {
 		newContent += "\n"
 	}
 
-	if !hasBeads || !hasClaude {
+	if len(missing) > 0 {
 		newContent += "\n# Beads stealth mode (added by bd init --stealth)\n"
 	}
-
-	if !hasBeads {
-		newContent += beadsPattern + "\n"
-	}
-	if !hasClaude {
-		newContent += claudePattern + "\n"
+	for _, pattern := range missing {
+		newContent += pattern + "\n"
 	}
 
 	// Write the updated exclude file
