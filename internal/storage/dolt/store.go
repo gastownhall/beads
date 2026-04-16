@@ -208,6 +208,7 @@ type Config struct {
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
 
 	// Server connection options
+	ServerSocket   string // Unix domain socket path (overrides Host/Port when set)
 	ServerHost     string // Server host (default: 127.0.0.1)
 	ServerPort     int    // Server port (default: 3307)
 	ServerUser     string // MySQL user (default: root)
@@ -847,6 +848,9 @@ func applyConfigDefaults(cfg *Config) {
 	}
 
 	// Server connection defaults (applied in server mode; embedded mode bypasses TCP)
+	if cfg.ServerSocket == "" {
+		cfg.ServerSocket = os.Getenv("BEADS_DOLT_SERVER_SOCKET")
+	}
 	if cfg.ServerHost == "" {
 		// Host resolution: BEADS_DOLT_SERVER_HOST env > default 127.0.0.1.
 		if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
@@ -962,14 +966,27 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 	serverDir := doltserver.ResolveServerDir(resolvedBeadsDir)
 
-	// Fail-fast TCP check before MySQL protocol initialization.
+	// Fail-fast connectivity check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
 	// rather than waiting for MySQL driver timeouts.
-	addr := net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
-	conn, dialErr := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	var addr string
+	var conn net.Conn
+	var dialErr error
+	if cfg.ServerSocket != "" {
+		addr = cfg.ServerSocket
+		conn, dialErr = net.DialTimeout("unix", cfg.ServerSocket, 500*time.Millisecond)
+	} else {
+		addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
+		conn, dialErr = net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	}
 	if dialErr != nil {
-		// Auto-start: if enabled and connecting to localhost, start a server
-		if cfg.AutoStart && isLocalHost(cfg.ServerHost) && cfg.Path != "" {
+		// Auto-start: if enabled and connecting locally via TCP, start a server.
+		// Socket mode is excluded — auto-start creates a TCP listener, not a
+		// unix socket, so the DSN would still fail. Socket users are expected
+		// to manage their own server lifecycle.
+		canAutoStart := cfg.AutoStart && cfg.Path != "" &&
+			cfg.ServerSocket == "" && isLocalHost(cfg.ServerHost)
+		if canAutoStart {
 			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
@@ -1012,10 +1029,18 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			if breaker != nil {
 				breaker.RecordFailure()
 			}
-			hint := "The Dolt server may not be running. Try:\n  bd dolt start"
-			if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
+			var hint string
+			if cfg.ServerSocket != "" {
+				hint = fmt.Sprintf("The Dolt server is not listening on socket %s.\n"+
+					"Ensure the server is started with --socket:\n"+
+					"  dolt sql-server --socket %s\n"+
+					"Auto-start is not supported in socket mode.",
+					cfg.ServerSocket, cfg.ServerSocket)
+			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
 				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
 					"Start the server manually:\n  bd dolt start"
+			} else {
+				hint = "The Dolt server may not be running. Try:\n  bd dolt start"
 			}
 			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
 				addr, dialErr, hint)
@@ -1199,6 +1224,7 @@ func isLocalHost(host string) bool {
 // Adds ReadTimeout/WriteTimeout for long-lived connection pools.
 func buildServerDSN(cfg *Config, database string) string {
 	base := doltutil.ServerDSN{
+		Socket:   cfg.ServerSocket,
 		Host:     cfg.ServerHost,
 		Port:     cfg.ServerPort,
 		User:     cfg.ServerUser,

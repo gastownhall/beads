@@ -1349,6 +1349,11 @@ func setDoltConfig(key, value string, updateConfig bool) {
 		cfg.DoltServerPort = port
 		yamlKey = "dolt.port"
 
+	case "socket":
+		// Empty value clears the socket (reverts to TCP host/port).
+		cfg.DoltServerSocket = value
+		yamlKey = "dolt.socket"
+
 	case "user":
 		if value == "" {
 			fmt.Fprintf(os.Stderr, "Error: user cannot be empty\n")
@@ -1419,7 +1424,7 @@ func setDoltConfig(key, value string, updateConfig bool) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown key '%s'\n", key)
-		fmt.Fprintf(os.Stderr, "Valid keys: database, host, port, user, data-dir, shared-server\n")
+		fmt.Fprintf(os.Stderr, "Valid keys: database, host, port, socket, user, data-dir, shared-server\n")
 		os.Exit(1)
 	}
 
