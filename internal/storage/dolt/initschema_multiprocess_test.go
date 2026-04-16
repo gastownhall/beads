@@ -19,7 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/integration"
-	"golang.org/x/sync/errgroup"
+	"github.com/steveyegge/beads/internal/errgroup"
 )
 
 // TestHelperSchemaInit is the subprocess entry point for multi-process schema

@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 // PagerOptions controls pager behavior
@@ -31,7 +31,7 @@ func shouldUsePager(opts PagerOptions) bool {
 	}
 
 	// Check if stdout is a terminal
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
+	if !termutil.IsTerminal(int(os.Stdout.Fd())) {
 		return false
 	}
 
@@ -54,11 +54,11 @@ func getPagerCommand() string {
 // Returns 0 if unable to determine (not a TTY).
 func getTerminalHeight() int {
 	fd := int(os.Stdout.Fd())
-	if !term.IsTerminal(fd) {
+	if !termutil.IsTerminal(fd) {
 		return 0
 	}
 
-	_, height, err := term.GetSize(fd)
+	_, height, err := termutil.GetSize(fd)
 	if err != nil {
 		return 0
 	}

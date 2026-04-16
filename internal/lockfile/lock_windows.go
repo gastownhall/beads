@@ -6,23 +6,24 @@ import (
 	"errors"
 	"os"
 	"syscall"
-
-	"golang.org/x/sys/windows"
 )
 
 var errProcessLocked = errors.New("lock already held by another process")
 
+// errLockViolation is ERROR_LOCK_VIOLATION (Windows error code 33).
+var errLockViolation = syscall.Errno(33)
+
 // flockExclusive acquires an exclusive non-blocking lock on the file using LockFileEx
 func flockExclusive(f *os.File) error {
 	// LOCKFILE_EXCLUSIVE_LOCK (2) | LOCKFILE_FAIL_IMMEDIATELY (1) = 3
-	const flags = windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY
+	const flags = syscall.LOCKFILE_EXCLUSIVE_LOCK | syscall.LOCKFILE_FAIL_IMMEDIATELY
 
 	// Create overlapped structure for the entire file
-	ol := &windows.Overlapped{}
+	ol := &syscall.Overlapped{}
 
 	// Lock entire file (0xFFFFFFFF, 0xFFFFFFFF = maximum range)
-	err := windows.LockFileEx(
-		windows.Handle(f.Fd()),
+	err := syscall.LockFileEx(
+		syscall.Handle(f.Fd()),
 		flags,
 		0,          // reserved
 		0xFFFFFFFF, // number of bytes to lock (low)
@@ -30,7 +31,7 @@ func flockExclusive(f *os.File) error {
 		ol,
 	)
 
-	if err == windows.ERROR_LOCK_VIOLATION || err == syscall.EWOULDBLOCK {
+	if err == errLockViolation || err == syscall.EWOULDBLOCK {
 		return errProcessLocked
 	}
 
@@ -47,12 +48,12 @@ func FlockExclusiveNonBlocking(f *os.File) error {
 // This will wait until the lock is available.
 func FlockExclusiveBlocking(f *os.File) error {
 	// LOCKFILE_EXCLUSIVE_LOCK only (no FAIL_IMMEDIATELY = blocking)
-	const flags = windows.LOCKFILE_EXCLUSIVE_LOCK
+	const flags = syscall.LOCKFILE_EXCLUSIVE_LOCK
 
-	ol := &windows.Overlapped{}
+	ol := &syscall.Overlapped{}
 
-	return windows.LockFileEx(
-		windows.Handle(f.Fd()),
+	return syscall.LockFileEx(
+		syscall.Handle(f.Fd()),
 		flags,
 		0,
 		0xFFFFFFFF,
@@ -63,10 +64,10 @@ func FlockExclusiveBlocking(f *os.File) error {
 
 // FlockUnlock releases a lock on the file.
 func FlockUnlock(f *os.File) error {
-	ol := &windows.Overlapped{}
+	ol := &syscall.Overlapped{}
 
-	return windows.UnlockFileEx(
-		windows.Handle(f.Fd()),
+	return syscall.UnlockFileEx(
+		syscall.Handle(f.Fd()),
 		0,
 		0xFFFFFFFF,
 		0xFFFFFFFF,

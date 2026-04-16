@@ -4,12 +4,12 @@ package ui
 import (
 	"os"
 
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 // IsTerminal returns true if stdout is connected to a terminal (TTY).
 func IsTerminal() bool {
-	return term.IsTerminal(int(os.Stdout.Fd()))
+	return termutil.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // ShouldUseColor determines if ANSI color codes should be used.

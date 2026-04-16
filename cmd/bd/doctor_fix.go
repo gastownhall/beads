@@ -11,7 +11,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 // previewFixes shows what would be fixed without applying changes
@@ -81,7 +81,7 @@ func applyFixes(result doctorResult) {
 	// Ask for confirmation (skip if --yes flag is set or stdin is non-interactive)
 	if !doctorYes {
 		// Detect non-interactive stdin (e.g., piped input in CI/automation)
-		isInteractive := term.IsTerminal(int(os.Stdin.Fd()))
+		isInteractive := termutil.IsTerminal(int(os.Stdin.Fd()))
 		if !isInteractive {
 			// In non-interactive mode without --yes, skip with helpful message
 			fmt.Fprintf(os.Stderr, "\n%s Running in non-interactive mode\n", ui.RenderWarn("⚠"))
@@ -112,7 +112,7 @@ func applyFixes(result doctorResult) {
 // applyFixesInteractive prompts for each fix individually
 func applyFixesInteractive(path string, issues []doctorCheck) {
 	// Detect non-interactive stdin before attempting to prompt
-	isInteractive := term.IsTerminal(int(os.Stdin.Fd()))
+	isInteractive := termutil.IsTerminal(int(os.Stdin.Fd()))
 	if !isInteractive {
 		fmt.Fprintf(os.Stderr, "\n%s Interactive mode requires a terminal\n", ui.RenderWarn("⚠"))
 		fmt.Fprintf(os.Stderr, "  Use 'bd doctor --fix --yes' for non-interactive mode\n\n")

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	"golang.org/x/sync/errgroup"
+	"github.com/steveyegge/beads/internal/errgroup"
 )
 
 func TestConcurrencyMultiProcess(t *testing.T) {

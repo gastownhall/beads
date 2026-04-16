@@ -26,7 +26,7 @@ import (
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 var initCmd = &cobra.Command{
@@ -185,7 +185,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				fmt.Fprintf(os.Stderr, "  Before proceeding, consider:\n")
 				fmt.Fprintf(os.Stderr, "    bd export > backup.jsonl    # Export issues to JSONL\n")
 				fmt.Fprintf(os.Stderr, "    bd dolt status              # Check if this is a server config issue\n\n")
-				if term.IsTerminal(int(os.Stdin.Fd())) {
+				if termutil.IsTerminal(int(os.Stdin.Fd())) {
 					fmt.Fprintf(os.Stderr, "Type 'destroy %d issues' to confirm: ", count)
 					scanner := bufio.NewScanner(os.Stdin)
 					scanner.Scan()
@@ -1525,13 +1525,13 @@ func isNonInteractiveInit(flagValue bool) bool {
 	if v := os.Getenv("CI"); v == "true" || v == "1" {
 		return true
 	}
-	return !term.IsTerminal(int(os.Stdin.Fd()))
+	return !termutil.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // shouldPromptForRole returns true if we should prompt the user for their role.
 // Skips prompt in non-interactive contexts (CI, scripts, piped input).
 func shouldPromptForRole() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
+	return termutil.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // getBeadsRole reads the beads.role git config value.

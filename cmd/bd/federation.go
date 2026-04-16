@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 var (
@@ -363,7 +363,7 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) {
 	password := federationPassword
 	if federationUser != "" && password == "" {
 		fmt.Fprint(os.Stderr, "Password: ")
-		pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		pwBytes, err := termutil.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Fprintln(os.Stderr) // newline after password
 		if err != nil {
 			FatalErrorRespectJSON("failed to read password: %v", err)

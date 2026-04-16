@@ -5,16 +5,15 @@ package lockfile
 import (
 	"errors"
 	"os"
-
-	"golang.org/x/sys/unix"
+	"syscall"
 )
 
 var errProcessLocked = errors.New("lock already held by another process")
 
 // flockExclusive acquires an exclusive non-blocking lock on the file
 func flockExclusive(f *os.File) error {
-	err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-	if err == unix.EWOULDBLOCK {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == syscall.EWOULDBLOCK {
 		return errProcessLocked
 	}
 	return err
@@ -29,10 +28,10 @@ func FlockExclusiveNonBlocking(f *os.File) error {
 // FlockExclusiveBlocking acquires an exclusive blocking lock on the file.
 // This will wait until the lock is available.
 func FlockExclusiveBlocking(f *os.File) error {
-	return unix.Flock(int(f.Fd()), unix.LOCK_EX)
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
 }
 
 // FlockUnlock releases a lock on the file.
 func FlockUnlock(f *os.File) error {
-	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 }

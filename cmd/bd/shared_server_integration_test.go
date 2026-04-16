@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/testutil"
-	"golang.org/x/sync/errgroup"
+	"github.com/steveyegge/beads/internal/errgroup"
 )
 
 // ---------------------------------------------------------------------------

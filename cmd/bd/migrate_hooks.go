@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 var migrateHooksCmd = &cobra.Command{
@@ -62,7 +62,7 @@ Examples:
 				FatalErrorRespectJSON("hook migration is blocked:\n- %s", strings.Join(execPlan.BlockingErrors, "\n- "))
 			}
 			if execPlan.operationCount() > 0 {
-				if err := validateHookMigrationApplyConsent(mode.RequestedYes, term.IsTerminal(int(os.Stdin.Fd())), jsonOutput); err != nil {
+				if err := validateHookMigrationApplyConsent(mode.RequestedYes, termutil.IsTerminal(int(os.Stdin.Fd())), jsonOutput); err != nil {
 					FatalErrorRespectJSON("%v", err)
 				}
 			}

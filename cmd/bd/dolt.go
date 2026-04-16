@@ -20,7 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/ui"
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 var doltCmd = &cobra.Command{
@@ -625,7 +625,7 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 // Returns true if the user confirms. Returns true without prompting if stdin is
 // not a terminal (non-interactive/CI contexts).
 func confirmOverwrite(surface, name, existingURL, newURL string) bool {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !termutil.IsTerminal(int(os.Stdin.Fd())) {
 		return true
 	}
 	fmt.Printf("  Remote %q already exists on %s: %s\n", name, surface, existingURL)

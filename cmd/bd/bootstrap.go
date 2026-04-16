@@ -20,7 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 type bootstrapServerProbeConfig struct {
@@ -354,7 +354,7 @@ func confirmPrompt(message string, nonInteractive bool) bool {
 	if nonInteractive {
 		return true
 	}
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !termutil.IsTerminal(int(os.Stdin.Fd())) {
 		return true
 	}
 	fmt.Fprintf(os.Stderr, "%s [Y/n] ", message)
@@ -601,7 +601,7 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 	if v := os.Getenv("CI"); v == "true" || v == "1" {
 		return true
 	}
-	return !term.IsTerminal(int(os.Stdin.Fd()))
+	return !termutil.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // findParentConfig walks up from beadsDir's parent looking for a

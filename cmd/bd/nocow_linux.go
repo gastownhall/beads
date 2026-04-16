@@ -6,8 +6,13 @@ import (
 	"os"
 	"syscall"
 	"unsafe"
+)
 
-	"golang.org/x/sys/unix"
+// ioctl constants for ext2/btrfs inode flags (FS_IOC_GETFLAGS / FS_IOC_SETFLAGS).
+// Defined here rather than importing golang.org/x/sys/unix.
+const (
+	fsIOCGetFlags = 0x80086601 // _IOR('f', 1, long) on amd64
+	fsIOCSetFlags = 0x40086602 // _IOW('f', 2, long) on amd64
 )
 
 // FS_NOCOW_FL is the "no copy-on-write" inode attribute. This is the flag
@@ -42,7 +47,7 @@ func getInodeFlags(fd int) (int, error) {
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,
 		uintptr(fd),
-		uintptr(unix.FS_IOC_GETFLAGS),
+		uintptr(fsIOCGetFlags),
 		uintptr(unsafe.Pointer(&flags)),
 	)
 	if errno != 0 {
@@ -58,7 +63,7 @@ func setInodeFlags(fd int, flags int) error {
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,
 		uintptr(fd),
-		uintptr(unix.FS_IOC_SETFLAGS),
+		uintptr(fsIOCSetFlags),
 		uintptr(unsafe.Pointer(&flags)),
 	)
 	if errno != 0 {
@@ -138,8 +143,8 @@ func hasNoCOW(path string) (bool, error) {
 // helper so the init path can skip doing work that would be pointless, and
 // so doctor checks can report accurate guidance.
 func isBtrfs(path string) (bool, error) {
-	var st unix.Statfs_t
-	if err := unix.Statfs(path, &st); err != nil {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
 		return false, err
 	}
 	// BTRFS_SUPER_MAGIC

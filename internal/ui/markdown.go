@@ -5,7 +5,8 @@ import (
 	"os"
 
 	"charm.land/glamour/v2"
-	"golang.org/x/term"
+
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 // RenderMarkdown renders markdown text using glamour with beads theme colors.
@@ -27,7 +28,7 @@ func RenderMarkdown(markdown string) string {
 	// Typography research suggests 50-75 chars optimal, 80-100 comfortable max
 	const maxReadableWidth = 100
 	wrapWidth := 80 // default if terminal size unavailable
-	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+	if w, _, err := termutil.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
 		wrapWidth = w
 	}
 	if wrapWidth > maxReadableWidth {

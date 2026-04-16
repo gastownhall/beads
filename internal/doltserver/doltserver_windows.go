@@ -10,8 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/windows"
 )
 
 // portConflictHint is the platform-specific command to diagnose port conflicts.
@@ -102,11 +100,12 @@ func isProcessInDir(pid int, dir string) bool {
 // Uses OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION — returns error if
 // the process doesn't exist.
 func isProcessAlive(pid int) bool {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	const processQueryLimitedInformation = 0x1000
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	windows.CloseHandle(h)
+	syscall.CloseHandle(h)
 	return true
 }
 

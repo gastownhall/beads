@@ -8,7 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/ui"
-	"golang.org/x/term"
+	"github.com/steveyegge/beads/internal/termutil"
 )
 
 // validateCheckResult pairs a doctor check with whether it can be auto-fixed.
@@ -150,7 +150,7 @@ func applyValidateFixes(path string, checks []validateCheckResult) {
 	// Confirm unless --yes (matching doctor's applyFixes pattern)
 	if !doctorYes {
 		// Detect non-interactive stdin (e.g., piped input in CI/automation)
-		isInteractive := term.IsTerminal(int(os.Stdin.Fd()))
+		isInteractive := termutil.IsTerminal(int(os.Stdin.Fd()))
 		if !isInteractive {
 			// In non-interactive mode without --yes, skip with helpful message
 			fmt.Fprintf(os.Stderr, "\n%s Running in non-interactive mode\n", ui.RenderWarn("⚠"))
