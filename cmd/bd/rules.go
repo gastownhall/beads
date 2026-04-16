@@ -96,7 +96,6 @@ var (
 
 // ParseRuleFile reads a .md file and extracts structured rule data.
 func ParseRuleFile(path string) (RuleFile, error) {
-	// #nosec G304 -- path comes from controlled filepath.Join of user-specified rules directory
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return RuleFile{}, fmt.Errorf("read rule file %s: %w", path, err)
@@ -706,7 +705,7 @@ func runRulesAudit(cmd *cobra.Command, args []string) {
 		for _, c := range result.Contradictions {
 			fmt.Fprintf(tw, "  %s\t%s\t%s\n", c.RuleA, c.RuleB, c.Tension)
 		}
-		_ = tw.Flush()
+		_ = tw.Flush() //nolint:errcheck // tabwriter writing to stdout; error is not actionable
 		fmt.Println()
 	}
 
@@ -784,7 +783,7 @@ func runRulesCompact(cmd *cobra.Command, args []string) {
 			if !dryRun {
 				outName := strings.ReplaceAll(mc.GroupLabel, " ", "-") + ".md"
 				outPath := filepath.Join(rulesPath, outName)
-				if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
+				if err := os.WriteFile(outPath, []byte(merged), 0644); err != nil { //nolint:gosec // rule files are user-readable markdown, not credentials
 					fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", outPath, err)
 					continue
 				}
@@ -868,7 +867,7 @@ func runRulesCompact(cmd *cobra.Command, args []string) {
 
 	if !dryRun {
 		outPath := filepath.Join(rulesPath, outName)
-		if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
+		if err := os.WriteFile(outPath, []byte(merged), 0644); err != nil { //nolint:gosec // rule files are user-readable markdown, not credentials
 			FatalErrorRespectJSON("write merged file: %v", err)
 		}
 		for _, rf := range groupRules {
