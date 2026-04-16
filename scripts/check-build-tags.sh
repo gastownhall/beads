@@ -67,8 +67,14 @@ for f in "${candidates[@]}"; do
 
         # Skip string literals that happen to mention `go <verb>`, e.g.
         # log_error "go install failed" or echo "Run: go install ...".
-        # Heuristic: `go <verb>` directly preceded by a quote character.
+        # Heuristics:
+        #   (a) `go <verb>` immediately preceded by a quote (unlikely edge case)
+        #   (b) line is a log/echo/printf call with a quoted argument. Any
+        #       `go <verb>` inside such a line is message text, not a command.
         if [[ "$stripped" =~ [\"\']\ *go[[:space:]]+(build|test|run|install|generate) ]]; then
+            continue
+        fi
+        if [[ "$stripped" =~ (log_[a-z_]+|echo|printf)[[:space:]]+[\"\'] ]]; then
             continue
         fi
 
