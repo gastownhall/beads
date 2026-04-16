@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -812,7 +812,7 @@ func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, autho
 	}
 
 	createdAt = createdAt.UTC()
-	id := uuid.Must(uuid.NewV7()).String()
+	id := idgen.UUIDv7()
 	//nolint:gosec // G201: table is hardcoded
 	_, err = t.tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, author, text, created_at)

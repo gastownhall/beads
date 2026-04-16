@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -140,7 +140,7 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 	}
 
 	createdAt = createdAt.UTC()
-	id := uuid.Must(uuid.NewV7()).String()
+	id := idgen.UUIDv7()
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, author, text, created_at)
 		VALUES (?, ?, ?, ?, ?)
