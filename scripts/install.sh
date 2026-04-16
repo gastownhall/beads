@@ -465,49 +465,59 @@ verify_binary_has_cgo() {
     return 0
 }
 
-# Install using go install (fallback)
+# Install using go install (fallback).
+#
+# Tries CGO_ENABLED=1 first for an embedded-capable binary. If that fails
+# (host lacks C toolchain or transitive Dolt deps' headers), falls back to
+# CGO_ENABLED=0 which yields a server-mode-only binary that still works on
+# any Go-capable box. See docs/ICU-POLICY.md and docs/INSTALLING.md.
 install_with_go() {
     log_info "Installing bd using 'go install'..."
 
-    if CGO_ENABLED=1 GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=gms_pure_go" go install github.com/gastownhall/beads/cmd/bd@latest; then
-        log_success "bd installed successfully via go install"
+    local gobin bin_dir
+    gobin=$(go env GOBIN 2>/dev/null || true)
+    if [ -n "$gobin" ]; then
+        bin_dir="$gobin"
+    else
+        bin_dir="$(go env GOPATH)/bin"
+    fi
 
-        # Record where we expect the binary to have been installed
-        # Prefer GOBIN if set, otherwise GOPATH/bin
-        local gobin
-        gobin=$(go env GOBIN 2>/dev/null || true)
-        if [ -n "$gobin" ]; then
-            bin_dir="$gobin"
-        else
-            bin_dir="$(go env GOPATH)/bin"
-        fi
+    if CGO_ENABLED=1 GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=gms_pure_go" go install github.com/gastownhall/beads/cmd/bd@latest; then
+        log_success "bd installed via go install (embedded-capable)"
         LAST_INSTALL_PATH="$bin_dir/bd"
 
         if ! verify_binary_has_cgo "$LAST_INSTALL_PATH" "go install"; then
             return 1
         fi
-
-        # Optional local ad-hoc re-sign for macOS (off by default)
-        resign_for_macos "$bin_dir/bd"
-
-        # Create 'beads' alias symlink
-        create_beads_alias "$bin_dir"
-
-        # Check if GOPATH/bin (or GOBIN) is in PATH
-        if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
-            log_warning "$bin_dir is not in your PATH"
-            echo ""
-            echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-            echo "  export PATH=\"\$PATH:$bin_dir\""
-            echo ""
-        fi
-
-        return 0
     else
-        log_error "go install failed"
-        print_missing_build_deps_help
-        return 1
+        log_warning "go install with CGO failed; retrying without CGO (server-mode-only binary)"
+        if CGO_ENABLED=0 go install github.com/gastownhall/beads/cmd/bd@latest; then
+            log_success "bd installed via go install (CGO_ENABLED=0, server mode only)"
+            log_warning "This bd cannot use embedded Dolt. Run 'bd init --server' to use an external dolt sql-server, or reinstall with a C toolchain for embedded mode."
+            LAST_INSTALL_PATH="$bin_dir/bd"
+        else
+            log_error "go install failed both with and without CGO"
+            print_missing_build_deps_help
+            return 1
+        fi
     fi
+
+    # Optional local ad-hoc re-sign for macOS (off by default)
+    resign_for_macos "$bin_dir/bd"
+
+    # Create 'beads' alias symlink
+    create_beads_alias "$bin_dir"
+
+    # Check if GOPATH/bin (or GOBIN) is in PATH
+    if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
+        log_warning "$bin_dir is not in your PATH"
+        echo ""
+        echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+        echo "  export PATH=\"\$PATH:$bin_dir\""
+        echo ""
+    fi
+
+    return 0
 }
 
 # Build from source (last resort)

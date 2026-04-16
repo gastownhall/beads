@@ -22,7 +22,7 @@ func isEmbeddedMode() bool {
 // available without CGO.
 func newDoltStore(ctx context.Context, cfg *dolt.Config, _ ...embeddeddolt.Option) (storage.DoltStorage, error) {
 	if !cfg.ServerMode {
-		return nil, fmt.Errorf("embedded Dolt requires CGO; use server mode (bd init --server)")
+		return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 	}
 	return dolt.New(ctx, cfg)
 }
@@ -38,7 +38,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
-	return nil, fmt.Errorf("embedded Dolt requires CGO; use server mode (bd init --server)")
+	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 }
 
 // newReadOnlyStoreFromConfig creates a read-only server-mode storage backend.
@@ -47,5 +47,23 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
-	return nil, fmt.Errorf("embedded Dolt requires CGO; use server mode (bd init --server)")
+	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 }
+
+// nocgoEmbeddedErrMsg guides the user either to server mode (no rebuild
+// needed) or to an embedded-capable install path. It intentionally enumerates
+// the canonical install paths so users don't have to hunt through docs.
+const nocgoEmbeddedErrMsg = `embedded Dolt requires a CGO build, but this bd binary was built with CGO_ENABLED=0.
+
+Two options:
+
+  1. Use server mode (no reinstall needed):
+       bd init --server
+     Requires a running 'dolt sql-server'. See docs/DOLT.md.
+
+  2. Reinstall with embedded-mode support:
+       brew install beads                              # macOS / Linux
+       npm install -g @beads/bd                        # any platform with Node
+       curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+
+See docs/INSTALLING.md for the full comparison.`

@@ -76,16 +76,24 @@ Release builds are verified to be ICU-free:
 
 If ICU linkage is detected, the release build fails.
 
-## The Upstream Fork
+## The Upstream Fork (historical)
 
-`go.mod` has a `replace` directive pointing `go-mysql-server` to a fork
-(`maphew/go-mysql-server`) that adds `!windows` to the CGO regex build
-constraint. This ensures `go install` works on Windows without ICU headers.
+Beads used to carry a `replace github.com/dolthub/go-mysql-server => github.com/maphew/go-mysql-server ...` directive in `go.mod`, added in PR #3112 to try to make `go install` work on Windows without ICU headers. It was removed in PR #3306 (see GH#3303) after empirical testing confirmed that **`replace` directives are not honored by `go install pkg@version`** — the mechanism never worked for its stated purpose, and having the directive actively broke `go install` on every platform with a confusing error.
 
-Upstream PR: https://github.com/dolthub/go-mysql-server/pull/3504
-Tracking issue: https://github.com/dolthub/go-mysql-server/issues/3506
+Upstream PR (closed, declined): https://github.com/dolthub/go-mysql-server/pull/3504
+Upstream issue (closed, declined): https://github.com/dolthub/go-mysql-server/issues/3506
 
-Once the upstream PR merges, remove the `replace` directive from `go.mod`.
+The dolthub maintainers have made clear the upstream default will not flip: *"We want our software to work as intended with the default settings. If users want to circumvent certain features with build tags or other build-time or run-time configuration, that's fine. Changing the default is not aligned with what we are actually trying to do."*
+
+### How `go install` is handled now
+
+Two supported modes, documented in [INSTALLING.md](INSTALLING.md):
+
+1. **`CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest`** produces a **server-mode-only** binary. Works on any Go-capable box with no C compiler. Users must run an external `dolt sql-server` and use `bd init --server`.
+
+2. **`CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install ...`** produces an embedded-capable binary. Requires a C compiler but NOT libicu.
+
+No fork, no replace directive, no upstream patch required. The tradeoff is that `go install` users who want embedded mode have to pass an explicit `GOFLAGS`; those who don't care can use the shorter nocgo form.
 
 ## Common Mistakes to Avoid
 
@@ -100,8 +108,12 @@ Once the upstream PR merges, remove the `replace` directive from `go.mod`.
    Neither release builds nor the CI test matrix link ICU; both must not
    depend on ICU being installed.
 
-4. **Confusing CGO with ICU** -- CGO is required (for Dolt). ICU is not.
-   They are independent. `CGO_ENABLED=1` does not imply ICU.
+4. **Confusing CGO with ICU** -- CGO is required for embedded Dolt mode
+   (NBS chunk compression via `gozstd`). ICU is independent. `CGO_ENABLED=1`
+   does not imply ICU linkage as long as `-tags gms_pure_go` is present.
+   beads also supports `CGO_ENABLED=0` builds via nocgo stubs: the binary
+   runs in server-mode only (no embedded Dolt backend), which is the
+   blessed `go install` path for users without a C toolchain.
 
 ## Trade-offs
 
