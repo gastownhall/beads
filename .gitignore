@@ -31,6 +31,10 @@ pkg/
 .claude/settings.local.json
 .claude/worktrees/
 .claude/*.log
+.claude/*.lock
+
+# Codex CLI - local marker
+.codex
 
 
 # OS
