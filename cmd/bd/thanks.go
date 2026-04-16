@@ -4,47 +4,22 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strings"
 
-	lipgloss "charm.land/lipgloss/v2"
+	"github.com/steveyegge/beads/internal/ansi"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-// lipgloss styles for the thanks page using Ayu theme
+// styles for the thanks page using Ayu theme
 var (
-	thanksTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(ui.ColorWarn)
-
-	thanksSubtitleStyle = lipgloss.NewStyle().
-				Foreground(ui.ColorMuted)
-
-	thanksSectionStyle = lipgloss.NewStyle().
-				Foreground(ui.ColorAccent).
-				Bold(true)
-
-	thanksNameStyle = lipgloss.NewStyle().
-			Foreground(ui.ColorPass)
-
-	thanksLabelStyle = lipgloss.NewStyle().
-				Foreground(ui.ColorWarn)
-
-	thanksDimStyle = lipgloss.NewStyle().
-			Foreground(ui.ColorMuted)
+	thanksTitleStyle    = ansi.NewStyle().Bold(true).Foreground(ansi.Color(ui.ColorWarn))
+	thanksSubtitleStyle = ansi.NewStyle().Foreground(ansi.Color(ui.ColorMuted))
+	thanksSectionStyle  = ansi.NewStyle().Foreground(ansi.Color(ui.ColorAccent)).Bold(true)
+	thanksNameStyle     = ansi.NewStyle().Foreground(ansi.Color(ui.ColorPass))
+	thanksDimStyle      = ansi.NewStyle().Foreground(ansi.Color(ui.ColorMuted))
 )
 
-// thanksBoxStyle returns a box style with dynamic width
-func thanksBoxStyle(width int) lipgloss.Style {
-	return lipgloss.NewStyle().
-		BorderStyle(lipgloss.DoubleBorder()).
-		BorderForeground(ui.ColorMuted).
-		Padding(1, 4).
-		Width(width - 4).
-		Align(lipgloss.Center)
-}
-
 // Static list of human contributors to the beads project.
-// To update: run `git shortlog -sn --all` in the beads repo.
-// Map of contributor name -> commit count, sorted by contribution count descending.
 var beadsContributors = map[string]int{
 	"Steve Yegge":            2959,
 	"matt wilkie":            64,
@@ -107,7 +82,6 @@ var beadsContributors = map[string]int{
 	"Zachary Rosen":          1,
 }
 
-// getContributorsSorted returns contributors sorted by commit count descending
 func getContributorsSorted() []string {
 	type kv struct {
 		name    string
@@ -118,7 +92,7 @@ func getContributorsSorted() []string {
 		sorted = append(sorted, kv{name, commits})
 	}
 	slices.SortFunc(sorted, func(a, b kv) int {
-		return cmp.Compare(b.commits, a.commits) // descending order
+		return cmp.Compare(b.commits, a.commits)
 	})
 	names := make([]string, len(sorted))
 	for i, kv := range sorted {
@@ -127,11 +101,9 @@ func getContributorsSorted() []string {
 	return names
 }
 
-// printThanksPage displays the thank you page
 func printThanksPage() {
 	fmt.Println()
 
-	// get sorted contributors and split into top 20 and rest
 	allContributors := getContributorsSorted()
 	topN := 20
 	if topN > len(allContributors) {
@@ -141,24 +113,22 @@ func printThanksPage() {
 	topContributors := allContributors[:topN]
 	additionalContributors := allContributors[topN:]
 
-	// calculate content width based on featured contributors columns
-	contentWidth := calculateColumnsWidth(topContributors, 4) + 4 // +4 for indent
+	contentWidth := calculateColumnsWidth(topContributors, 4) + 4
 
-	// build header content with styled text
+	// Simple bordered header
+	border := strings.Repeat("═", contentWidth-2)
+	fmt.Printf("╔%s╗\n", border)
 	title := thanksTitleStyle.Render("THANK YOU!")
 	subtitle := thanksSubtitleStyle.Render("To all the humans who contributed to beads")
-	header := title + "\n\n" + subtitle
-
-	// render header in a bordered box matching content width
-	fmt.Println(thanksBoxStyle(contentWidth).Render(header))
+	fmt.Printf("║ %-*s║\n", contentWidth+20, title) // extra width for ANSI codes
+	fmt.Printf("║ %-*s║\n", contentWidth+20, subtitle)
+	fmt.Printf("╚%s╝\n", border)
 	fmt.Println()
 
-	// print featured contributors section
 	fmt.Println(thanksSectionStyle.Render("  Featured Contributors"))
 	fmt.Println()
 	printThanksColumns(topContributors, 4)
 
-	// print additional contributors with line wrapping
 	if len(additionalContributors) > 0 {
 		fmt.Println()
 		fmt.Println(thanksSectionStyle.Render("  Additional Contributors"))
@@ -168,12 +138,10 @@ func printThanksPage() {
 	fmt.Println()
 }
 
-// calculateColumnsWidth returns the total width needed for displaying names in columns
 func calculateColumnsWidth(names []string, cols int) int {
 	if len(names) == 0 {
 		return 0
 	}
-
 	maxWidth := 0
 	for _, name := range names {
 		if len(name) > maxWidth {
@@ -184,17 +152,13 @@ func calculateColumnsWidth(names []string, cols int) int {
 		maxWidth = 20
 	}
 	colWidth := maxWidth + 2
-
 	return colWidth * cols
 }
 
-// printThanksColumns prints names in n columns, sorted horizontally by input order
 func printThanksColumns(names []string, cols int) {
 	if len(names) == 0 {
 		return
 	}
-
-	// find max width for alignment
 	maxWidth := 0
 	for _, name := range names {
 		if len(name) > maxWidth {
@@ -206,7 +170,6 @@ func printThanksColumns(names []string, cols int) {
 	}
 	colWidth := maxWidth + 2
 
-	// print in rows, reading left to right
 	for i := 0; i < len(names); i += cols {
 		fmt.Print("  ")
 		for j := 0; j < cols && i+j < len(names); j++ {
@@ -221,15 +184,14 @@ func printThanksColumns(names []string, cols int) {
 	}
 }
 
-// printThanksWrappedList prints a list with word wrapping at name boundaries
 func printThanksWrappedList(label string, names []string, maxWidth int) {
 	indent := "  "
-
 	fmt.Print(indent)
 	lineLen := len(indent)
 
 	if label != "" {
-		fmt.Print(thanksLabelStyle.Render(label) + " ")
+		styled := ansi.NewStyle().Foreground(ansi.Color(ui.ColorWarn)).Render(label)
+		fmt.Print(styled + " ")
 		lineLen += len(label) + 1
 	}
 
