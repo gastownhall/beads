@@ -7,9 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKIP_FILE="$REPO_ROOT/.test-skip"
 
-# Default test path uses the same pure-Go regex build as user-facing binaries.
+# Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).
 # Opt-in ICU-path coverage remains available via scripts/test-icu-path.sh.
-export GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=gms_pure_go"
+# shellcheck source=../.buildflags
+source "$REPO_ROOT/.buildflags"
 
 # Build skip pattern from .test-skip file
 build_skip_pattern() {

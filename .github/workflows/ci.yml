@@ -12,6 +12,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fast check: every `go build|test|run|generate|install` invocation in
+  # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
+  # regressions from re-entering the build (see docs/ICU-POLICY.md).
+  check-build-tags:
+    name: Check build-tag policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: ./scripts/check-build-tags.sh
+
   # Fast check to ensure all version files are in sync
   check-version-consistency:
     name: Check version consistency

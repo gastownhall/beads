@@ -61,7 +61,7 @@ if [ -x "$CMD_BINARY" ]; then
     "$@"
 else
   echo "Warning: pre-built test binary not found at $CMD_BINARY, falling back to go test"
-  exec go test -v -race -count=1 -timeout 20m \
+  exec go test -tags=gms_pure_go -v -race -count=1 -timeout 20m \
     -run "$RUN_REGEX" \
     "$@" \
     ./cmd/bd/

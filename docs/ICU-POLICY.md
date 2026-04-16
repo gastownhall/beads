@@ -57,6 +57,49 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 | Migration tests | `.github/workflows/migration-test.yml` |
 | Nightly tests | `.github/workflows/nightly.yml` |
 | Cross-version smoke | `.github/workflows/cross-version-smoke.yml` |
+| Regression tests | `.github/workflows/regression.yml` |
+
+### Canonical pattern: source `.buildflags`
+
+The preferred way for a shell script to comply is to source `.buildflags`
+at the top. That sets `CGO_ENABLED=1` **and** puts `-tags=gms_pure_go`
+into `GOFLAGS`, so every subsequent bare `go` invocation in the script
+picks it up automatically:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../.buildflags
+source "$REPO_ROOT/.buildflags"
+
+go build -o bd ./cmd/bd     # -tags=gms_pure_go applied via GOFLAGS
+```
+
+Makefile targets use `-tags "$(BUILD_TAGS)"` directly, since make already
+defines `BUILD_TAGS := gms_pure_go` at the top of the file. Workflow YAML
+passes the tag inline (`-tags gms_pure_go`).
+
+### Source-time guard: `scripts/check-build-tags.sh`
+
+CI runs `scripts/check-build-tags.sh` on every PR (see `check-build-tags`
+job in `.github/workflows/ci.yml`). It fails if any tracked shell script,
+CI workflow, git hook, or the Makefile contains a
+`go build|test|run|generate|install` invocation that:
+
+- does not carry `-tags=...gms_pure_go`, AND
+- is not in a file that sources `.buildflags`, AND
+- does not reference a file-level variable (e.g. `$(BUILD_TAGS)`) whose
+  value contains `gms_pure_go`, AND
+- is not a third-party tool install (`go install X@version` / `go run X@version`).
+
+This is the source-time companion to `scripts/verify-cgo.sh` (runtime).
+Between the two, an ICU regression cannot reach a release binary.
+
+To intentionally opt a file out (e.g. because it tests the ICU path),
+add `# build-tags: allow-bare` within the first five lines of the file.
+`scripts/test-cgo.sh` and `scripts/test-icu-path.sh` are exempt by name.
 
 ## Where `gms_pure_go` Is Intentionally Omitted
 

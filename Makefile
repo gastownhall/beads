@@ -83,7 +83,7 @@ test-full-cgo:
 # Override baseline: BD_REGRESSION_BASELINE_BIN=/path/to/bd make test-regression
 test-regression:
 	@echo "Running regression tests (baseline vs candidate)..."
-	go test -tags=regression -timeout=10m -v ./tests/regression/...
+	go test -tags=regression,$(BUILD_TAGS) -timeout=10m -v ./tests/regression/...
 
 # Run upgrade smoke tests (release stability gate).
 # Tests that upgrading from previous release preserves data, role, and mode.
@@ -116,14 +116,14 @@ test-migration: build
 bench:
 	@echo "Running performance benchmarks (Dolt backend)..."
 	@echo ""
-	go test -bench=. -benchtime=1s -benchmem -run=^$$ ./internal/storage/dolt/ -timeout=30m
+	go test -tags "$(BUILD_TAGS)" -bench=. -benchtime=1s -benchmem -run=^$$ ./internal/storage/dolt/ -timeout=30m
 	@echo ""
 	@echo "Benchmark complete."
 
 # Run quick benchmarks (shorter benchtime for faster feedback)
 bench-quick:
 	@echo "Running quick performance benchmarks..."
-	go test -bench=. -benchtime=100ms -benchmem -run=^$$ ./internal/storage/dolt/ -timeout=15m
+	go test -tags "$(BUILD_TAGS)" -bench=. -benchtime=100ms -benchmem -run=^$$ ./internal/storage/dolt/ -timeout=15m
 
 # Check that local branch is up to date with origin/main
 check-up-to-date:
