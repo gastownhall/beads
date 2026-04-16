@@ -256,5 +256,3 @@ require (
 	gopkg.in/src-d/go-errors.v1 v1.0.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
-
-replace github.com/dolthub/go-mysql-server => github.com/maphew/go-mysql-server v0.20.1-0.20260407202153-02d922453d4a
