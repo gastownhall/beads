@@ -19,12 +19,6 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install ICU4C
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y libicu-dev
-
       - name: Install Dolt
         run: |
           curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
@@ -37,7 +31,7 @@ jobs:
           dolt config --global --add user.email "ci@beads.test"
 
       - name: Build
-        run: go build -v ./cmd/bd
+        run: go build -v -tags gms_pure_go ./cmd/bd
 
       - name: Full Test Suite (including integration tests)
         env:
@@ -45,7 +39,7 @@ jobs:
           # GitHub Actions (known issue, see scripts/repro-dolt-hang/).
           # Non-Docker integration tests still run via the installed dolt binary.
           BEADS_TEST_SKIP: dolt
-        run: go test -v -race -tags=integration -coverprofile=coverage.out -timeout=30m ./...
+        run: go test -v -race -tags=integration,gms_pure_go -coverprofile=coverage.out -timeout=30m ./...
 
       - name: Check coverage threshold
         run: |

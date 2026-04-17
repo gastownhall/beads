@@ -48,6 +48,7 @@ Supported fields:
   notes             Search in notes (contains)
   created           Creation date/time
   updated           Last update date/time
+  started           Date/time issue first transitioned to in_progress
   closed            Close date/time
   id                Issue ID (supports wildcards: bd-*)
   spec              Spec ID (supports wildcards)

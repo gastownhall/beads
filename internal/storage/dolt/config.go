@@ -107,6 +107,26 @@ func (s *DoltStore) GetMetadata(ctx context.Context, key string) (string, error)
 	return value, err
 }
 
+// SetLocalMetadata sets a value in the dolt-ignored local_metadata table.
+// Used for clone-local state that should not generate merge conflicts.
+func (s *DoltStore) SetLocalMetadata(ctx context.Context, key, value string) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		return issueops.SetLocalMetadataInTx(ctx, tx, key, value)
+	})
+}
+
+// GetLocalMetadata retrieves a value from the dolt-ignored local_metadata table.
+// Returns ("", nil) if the key does not exist.
+func (s *DoltStore) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		value, err = issueops.GetLocalMetadataInTx(ctx, tx, key)
+		return err
+	})
+	return value, err
+}
+
 // GetCustomStatuses returns custom status name strings from config (backward-compatible API).
 // Callers that need category information should use GetCustomStatusesDetailed instead.
 func (s *DoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {

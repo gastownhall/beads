@@ -131,7 +131,7 @@ func buildLifecycleTestBinary(t *testing.T) string {
 		t.Fatalf("getwd: %v", err)
 	}
 	bdBinary := filepath.Join(t.TempDir(), "bd")
-	cmd := exec.Command("go", "build", "-o", bdBinary, ".")
+	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", bdBinary, ".")
 	cmd.Dir = pkgDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {

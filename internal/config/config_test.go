@@ -1369,3 +1369,43 @@ func TestGetStringFromDir(t *testing.T) {
 		}
 	})
 }
+
+func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	callerRepo := filepath.Join(t.TempDir(), "caller")
+	callerBeadsDir := filepath.Join(callerRepo, ".beads")
+	if err := os.MkdirAll(callerBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create caller .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(callerBeadsDir, "config.yaml"), []byte("readonly: true\njson: true\n"), 0o600); err != nil {
+		t.Fatalf("failed to write caller config: %v", err)
+	}
+
+	targetBeadsDir := filepath.Join(t.TempDir(), "target", ".beads")
+	if err := os.MkdirAll(targetBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create target .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetBeadsDir, "config.yaml"), []byte("actor: target-user\n"), 0o600); err != nil {
+		t.Fatalf("failed to write target config: %v", err)
+	}
+
+	t.Chdir(callerRepo)
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetString("actor"); got != "target-user" {
+		t.Fatalf("GetString(actor) = %q, want %q", got, "target-user")
+	}
+	if got := GetBool("readonly"); got {
+		t.Fatalf("GetBool(readonly) = %v, want false", got)
+	}
+	if got := GetBool("json"); got {
+		t.Fatalf("GetBool(json) = %v, want false", got)
+	}
+}

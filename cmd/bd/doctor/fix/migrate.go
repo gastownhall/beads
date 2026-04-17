@@ -69,7 +69,7 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 
 		// Set version metadata if provided
 		if bdVersion != "" {
-			if err := store.SetMetadata(ctx, "bd_version", bdVersion); err != nil {
+			if err := store.SetLocalMetadata(ctx, "bd_version", bdVersion); err != nil {
 				fmt.Printf("  Warning: failed to set bd_version: %v\n", err)
 			}
 		}
@@ -101,9 +101,9 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Update bd_version if provided
+	// Update bd_version if provided (clone-local, dolt-ignored)
 	if bdVersion != "" {
-		if err := store.SetMetadata(ctx, "bd_version", bdVersion); err != nil {
+		if err := store.SetLocalMetadata(ctx, "bd_version", bdVersion); err != nil {
 			return fmt.Errorf("failed to set bd_version: %w", err)
 		}
 	}

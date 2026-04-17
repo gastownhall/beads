@@ -88,9 +88,9 @@ func TestFixMissingMetadata_DoltRepair(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	// Check bd_version
-	bdVersion, err := store.GetMetadata(ctx, "bd_version")
+	bdVersion, err := store.GetLocalMetadata(ctx, "bd_version")
 	if err != nil {
-		t.Fatalf("GetMetadata(bd_version) error: %v", err)
+		t.Fatalf("GetLocalMetadata(bd_version) error: %v", err)
 	}
 	if bdVersion != "0.49.6" {
 		t.Errorf("bd_version = %q, want %q", bdVersion, "0.49.6")
@@ -133,7 +133,7 @@ func TestFixMissingMetadata_DoltIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open store: %v", err)
 	}
-	origVersion, _ := store.GetMetadata(ctx, "bd_version")
+	origVersion, _ := store.GetLocalMetadata(ctx, "bd_version")
 	origRepoID, _ := store.GetMetadata(ctx, "repo_id")
 	origCloneID, _ := store.GetMetadata(ctx, "clone_id")
 	_ = store.Close()
@@ -150,7 +150,7 @@ func TestFixMissingMetadata_DoltIdempotent(t *testing.T) {
 	}
 	defer func() { _ = store2.Close() }()
 
-	newVersion, _ := store2.GetMetadata(ctx, "bd_version")
+	newVersion, _ := store2.GetLocalMetadata(ctx, "bd_version")
 	if newVersion != origVersion {
 		t.Errorf("bd_version changed from %q to %q (should be idempotent)", origVersion, newVersion)
 	}
@@ -178,7 +178,7 @@ func TestFixMissingMetadata_DoltPartialRepair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open store: %v", err)
 	}
-	if err := store.SetMetadata(ctx, "bd_version", "0.48.0"); err != nil {
+	if err := store.SetLocalMetadata(ctx, "bd_version", "0.48.0"); err != nil {
 		t.Fatalf("failed to pre-set bd_version: %v", err)
 	}
 	_ = store.Close()
@@ -195,7 +195,7 @@ func TestFixMissingMetadata_DoltPartialRepair(t *testing.T) {
 	}
 	defer func() { _ = store2.Close() }()
 
-	bdVersion, _ := store2.GetMetadata(ctx, "bd_version")
+	bdVersion, _ := store2.GetLocalMetadata(ctx, "bd_version")
 	if bdVersion != "0.48.0" {
 		t.Errorf("bd_version = %q, want %q (should not overwrite existing)", bdVersion, "0.48.0")
 	}

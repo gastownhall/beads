@@ -39,7 +39,7 @@ func TestMigrateRespectsConfigJSON(t *testing.T) {
 		t.Skipf("skipping: Dolt server not available: %v", err)
 	}
 	ctx := context.Background()
-	if err := store.SetMetadata(ctx, "bd_version", "0.21.1"); err != nil {
+	if err := store.SetLocalMetadata(ctx, "bd_version", "0.21.1"); err != nil {
 		t.Fatalf("Failed to set version: %v", err)
 	}
 	_ = store.Close()

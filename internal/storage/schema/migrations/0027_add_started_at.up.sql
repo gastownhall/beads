@@ -1,0 +1,2 @@
+ALTER TABLE issues ADD COLUMN started_at DATETIME;
+ALTER TABLE wisps ADD COLUMN started_at DATETIME;

@@ -108,6 +108,9 @@ func formatIssueMetadata(issue *types.Issue) string {
 	// Line 2: Created · Updated · Due/Defer
 	timeParts := []string{}
 	timeParts = append(timeParts, fmt.Sprintf("Created: %s", issue.CreatedAt.Format("2006-01-02")))
+	if issue.StartedAt != nil {
+		timeParts = append(timeParts, fmt.Sprintf("Started: %s", issue.StartedAt.Format("2006-01-02")))
+	}
 	timeParts = append(timeParts, fmt.Sprintf("Updated: %s", issue.UpdatedAt.Format("2006-01-02")))
 
 	if issue.DueAt != nil {

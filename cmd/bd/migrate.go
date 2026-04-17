@@ -99,7 +99,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 	}
 
 	// Check current state of all metadata fields
-	currentVersion, _ := store.GetMetadata(ctx, "bd_version")
+	currentVersion, _ := store.GetLocalMetadata(ctx, "bd_version")
 	currentRepoID, _ := store.GetMetadata(ctx, "repo_id")
 	currentCloneID, _ := store.GetMetadata(ctx, "clone_id")
 
@@ -179,7 +179,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 		}
 
 		// Update version metadata (fatal on failure — version is critical)
-		if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
+		if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
 					"error":   "version_update_failed",
@@ -448,7 +448,7 @@ func handleInspect() {
 	ctx := rootCtx
 
 	// Get current schema version
-	schemaVersion, err := store.GetMetadata(ctx, "bd_version")
+	schemaVersion, err := store.GetLocalMetadata(ctx, "bd_version")
 	if err != nil {
 		schemaVersion = "unknown"
 	}

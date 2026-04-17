@@ -39,11 +39,24 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 	now := time.Now().UTC()
 
 	// Conditional UPDATE: only succeeds if assignee is currently empty.
-	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s
-		SET assignee = ?, status = 'in_progress', updated_at = ?
-		WHERE id = ? AND (assignee = '' OR assignee IS NULL)
-	`, issueTable), actor, now, id)
+	// Also set started_at on first transition to in_progress (GH#2796); preserve
+	// any existing value so re-claims don't overwrite the original start time.
+	var (
+		result sql.Result
+	)
+	if oldIssue.StartedAt == nil {
+		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE %s
+			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?
+			WHERE id = ? AND (assignee = '' OR assignee IS NULL)
+		`, issueTable), actor, now, now, id)
+	} else {
+		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE %s
+			SET assignee = ?, status = 'in_progress', updated_at = ?
+			WHERE id = ? AND (assignee = '' OR assignee IS NULL)
+		`, issueTable), actor, now, id)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to claim issue: %w", err)
 	}

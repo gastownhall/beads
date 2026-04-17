@@ -34,8 +34,8 @@ func TestCheckVersionMismatchDB_UsesQuotedMetadataKey(t *testing.T) {
 	store := newTestStoreIsolatedDB(t, dbPath, "test")
 
 	ctx := context.Background()
-	if err := store.SetMetadata(ctx, "bd_version", "0.0.0"); err != nil {
-		t.Fatalf("SetMetadata(bd_version): %v", err)
+	if err := store.SetLocalMetadata(ctx, "bd_version", "0.0.0"); err != nil {
+		t.Fatalf("SetLocalMetadata(bd_version): %v", err)
 	}
 
 	issue := checkVersionMismatchDB(store.DB())

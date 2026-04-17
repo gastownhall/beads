@@ -84,6 +84,12 @@ type Storage interface {
 	GetConfig(ctx context.Context, key string) (string, error)
 	GetAllConfig(ctx context.Context) (map[string]string, error)
 
+	// Local metadata operations (dolt-ignored, clone-local state).
+	// Used for tip timestamps, version stamps, tracker sync cursors, etc.
+	// Data is ephemeral — callers must handle ("", nil) as the normal case.
+	SetLocalMetadata(ctx context.Context, key, value string) error
+	GetLocalMetadata(ctx context.Context, key string) (string, error)
+
 	// Transactions
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 
@@ -264,6 +270,12 @@ type Transaction interface {
 	// Metadata operations (for internal state like import hashes)
 	SetMetadata(ctx context.Context, key, value string) error
 	GetMetadata(ctx context.Context, key string) (string, error)
+
+	// Local metadata operations (dolt-ignored, clone-local state).
+	// Used for tip timestamps, version stamps, tracker sync cursors, etc.
+	// Data is ephemeral — callers must handle ("", nil) as the normal case.
+	SetLocalMetadata(ctx context.Context, key, value string) error
+	GetLocalMetadata(ctx context.Context, key string) (string, error)
 
 	// Comment operations
 	AddComment(ctx context.Context, issueID, actor, comment string) error

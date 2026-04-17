@@ -50,12 +50,16 @@ func runImport(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		jsonlPath = args[0]
 	} else {
-		// Default: .beads/issues.jsonl
+		// Default: .beads/issues.jsonl (or .beads/global-issues.jsonl with --global)
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			return fmt.Errorf("%s — %s", activeWorkspaceNotFoundError(), diagHint())
 		}
-		jsonlPath = filepath.Join(beadsDir, "issues.jsonl")
+		if globalFlag {
+			jsonlPath = filepath.Join(beadsDir, "global-issues.jsonl")
+		} else {
+			jsonlPath = filepath.Join(beadsDir, "issues.jsonl")
+		}
 	}
 
 	// Check file exists

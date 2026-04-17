@@ -357,9 +357,10 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
 }
 
-// autoCloseCompletedMolecule checks if closing a step completed a parent molecule,
-// and if so, auto-closes the molecule root. This prevents stale wisps that are
-// complete but never explicitly closed (e.g., deacon patrol wisps).
+// autoCloseCompletedMolecule checks if closing a step completed an auto-closing
+// parent molecule, and if so, closes the molecule root. Ordinary epics remain
+// open when all children finish so they can become explicitly close-eligible
+// instead of being closed as a side effect of the final child close.
 func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) {
 	moleculeID := findParentMolecule(ctx, s, closedStepID)
 	if moleculeID == "" {
@@ -368,7 +369,7 @@ func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, clos
 
 	// Check if molecule root is already closed
 	root, err := s.GetIssue(ctx, moleculeID)
-	if err != nil || root == nil || root.Status == types.StatusClosed {
+	if err != nil || root == nil || root.Status == types.StatusClosed || !shouldAutoCloseCompletedRoot(root) {
 		return
 	}
 
@@ -391,6 +392,32 @@ func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, clos
 	if !jsonOutput {
 		fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
 	}
+}
+
+// shouldAutoCloseCompletedRoot returns true for molecule roots that should
+// auto-close when their final step closes. Regular epics stay open and become
+// explicit close-eligible work, while ephemeral wisps, template-driven
+// molecules, and molecule-type coordination roots keep their cleanup behavior.
+func shouldAutoCloseCompletedRoot(root *types.Issue) bool {
+	if root == nil {
+		return false
+	}
+
+	if root.IssueType == types.TypeMolecule || root.Ephemeral {
+		return true
+	}
+
+	if root.IssueType != types.TypeEpic {
+		return false
+	}
+
+	for _, label := range root.Labels {
+		if label == BeadsTemplateLabel {
+			return true
+		}
+	}
+
+	return false
 }
 
 // countEpicOpenChildren returns the number of open (non-closed) children for an epic.

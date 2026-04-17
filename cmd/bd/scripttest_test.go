@@ -26,7 +26,7 @@ func TestScripts(t *testing.T) {
 	exeName := "bd"
 	binDir := t.TempDir()
 	exe := filepath.Join(binDir, exeName)
-	if err := exec.Command("go", "build", "-o", exe, ".").Run(); err != nil {
+	if err := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", exe, ".").Run(); err != nil {
 		t.Fatal(err)
 	}
 

@@ -98,11 +98,21 @@ BEADS_INSTALL_RESIGN_MACOS=1 curl -fsSL https://raw.githubusercontent.com/stevey
 | **npm** | JS/Node.js projects | `npm update -g @beads/bd` | Node.js | Convenient if npm is your ecosystem |
 | **bun** | JS/Bun.js projects | `bun install -g --trust @beads/bd` | Bun.js | Convenient if bun is your ecosystem |
 | **Install script** | Quick setup, CI/CD | Re-run script | curl, bash | Good for automation and one-liners |
-| **go install** | Contributors / Go developers | Re-run command | Go 1.24+ | Builds from source, always latest |
+| **go install (nocgo)** | Go developers, simplest install | Re-run command | Go 1.24+ | **Server-mode only** (no embedded Dolt) |
+| **go install (cgo)** | Go developers wanting embedded mode | Re-run command | Go 1.24+, C compiler | Full embedded-Dolt support |
 | **From source** | Contributors only | `git pull && go build` | Go, git | Full control, can modify code |
 | **AUR (Arch)** | Arch Linux users | `yay -Syu` | yay/paru | Community-maintained |
 
 **TL;DR:** Use Homebrew if available. Use npm if you're in a Node.js environment. Use the script for quick one-off installs or CI.
+
+### A note on `go install` capability
+
+`go install` supports **two build modes** that give different capabilities:
+
+- **Nocgo (simplest, default in this doc):** `CGO_ENABLED=0 go install ...`. Works on any machine with a Go toolchain, no C compiler needed. Produces a **server-mode-only** binary — you must run an external `dolt sql-server` and use `bd init --server`. See [DOLT.md](DOLT.md) for server-mode setup.
+- **Cgo (embedded-capable):** `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install ...`. Requires a C compiler (gcc/clang on Unix, MinGW on Windows). Produces a binary with the default embedded-Dolt backend — `bd init` Just Works.
+
+If you don't have a preference, `brew install beads` / `install.sh` give you the embedded-capable build with no fuss.
 
 ## Platform-Specific Installation
 
@@ -113,16 +123,22 @@ BEADS_INSTALL_RESIGN_MACOS=1 curl -fsSL https://raw.githubusercontent.com/stevey
 brew install beads
 ```
 
-**Via go install**:
+**Via go install** (server-mode only, simplest):
 ```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
+# Then: bd init --server   (requires a running dolt sql-server)
+```
+
+**Via go install** (embedded-capable, needs Xcode CLI tools):
+```bash
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 **From source**:
 ```bash
 git clone https://github.com/steveyegge/beads
 cd beads
-go build -o bd ./cmd/bd
+make build   # uses gms_pure_go tag and CGO
 sudo mv bd /usr/local/bin/
 ```
 
@@ -143,16 +159,22 @@ paru -S beads-git
 
 Thanks to [@v4rgas](https://github.com/v4rgas) for maintaining the AUR package!
 
-**Via go install**:
+**Via go install** (server-mode only, simplest):
 ```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
+# Then: bd init --server   (requires a running dolt sql-server)
+```
+
+**Via go install** (embedded-capable, needs gcc):
+```bash
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 **From source**:
 ```bash
 git clone https://github.com/steveyegge/beads
 cd beads
-go build -o bd ./cmd/bd
+make build   # uses gms_pure_go tag and CGO
 sudo mv bd /usr/local/bin/
 ```
 
@@ -163,9 +185,9 @@ sudo mv bd /usr/local/bin/
 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
 ```
 
-**Via go install**:
+**Via go install** (server-mode only, simplest):
 ```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ### Windows 11
@@ -183,28 +205,33 @@ irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
 
 The script installs a prebuilt Windows release if available and verifies the downloaded ZIP checksum against release `checksums.txt`. Go is only required for `go install` or building from source.
 
-**Dolt backend on Windows:** Supported via pure-Go regex backend. Windows builds automatically use Go's stdlib `regexp` instead of ICU regex to avoid CGO/header dependencies. If you need full ICU regex semantics, use Linux/macOS (or WSL) with ICU installed.
-
-**Via go install**:
+**Via go install** (server-mode only, simplest):
 ```pwsh
+$env:CGO_ENABLED=0
+go install github.com/steveyegge/beads/cmd/bd@latest
+# Then: bd init --server   (requires a running dolt sql-server)
+```
+
+This produces a server-mode-only binary with no C compiler requirement — the fastest path to a working `bd` on Windows.
+
+**Via go install** (embedded-capable, needs MinGW):
+```pwsh
+$env:CGO_ENABLED=1
+$env:GOFLAGS="-tags=gms_pure_go"
 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-ICU is **not required** on Windows. The regex backend uses pure Go automatically.
+Requires MinGW-w64 gcc on your PATH. ICU is **not** required — `gms_pure_go` selects Go's stdlib `regexp`.
 
 **From source**:
 ```pwsh
 git clone https://github.com/steveyegge/beads
 cd beads
-make build
-# Or without Make:
-go build -tags gms_pure_go -o bd.exe ./cmd/bd
+make build   # uses gms_pure_go tag and CGO
 Move-Item bd.exe $env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\
 ```
 
 The `-tags gms_pure_go` flag tells go-mysql-server to use Go's stdlib regexp instead of ICU.
-Additionally, the vendored go-icu-regex library has a Windows-specific pure-Go implementation
-(`regex_windows.go`) that avoids ICU entirely. No C compiler or ICU libraries are needed.
 
 **Verify installation**:
 ```pwsh
@@ -239,8 +266,9 @@ Linux (Fedora/RHEL):
 sudo dnf install -y libzstd-devel
 ```
 
-> **For CI / test contributors only:** If you need to run `scripts/test-cgo.sh`
-> (which exercises the ICU code path), install ICU headers:
+> **For maintainers only:** If you intentionally need to run
+> `scripts/test-icu-path.sh` (which exercises the leftover ICU code path),
+> install ICU headers:
 > `brew install icu4c` (macOS) or `sudo apt-get install -y libicu-dev` (Linux).
 > This is not needed for normal development.
 
@@ -422,8 +450,8 @@ go list -f {{.Target}} github.com/steveyegge/beads/cmd/bd
 # Add Go bin to PATH (add to ~/.bashrc or ~/.zshrc)
 export PATH="$PATH:$(go env GOPATH)/bin"
 
-# Or reinstall
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Or reinstall (server-mode only, no C compiler needed)
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ### `zsh: killed bd` or crashes on macOS
@@ -514,8 +542,14 @@ bun install -g --trust @beads/bd
 
 ### go install
 
+Use whichever mode you installed with originally:
+
 ```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Server-mode only
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
+
+# Embedded-capable
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ### From source

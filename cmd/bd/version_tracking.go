@@ -199,8 +199,8 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		return
 	}
 
-	// Get current database version
-	dbVersion, err := store.GetMetadata(ctx, "bd_version")
+	// Get current database version (clone-local, dolt-ignored)
+	dbVersion, err := store.GetLocalMetadata(ctx, "bd_version")
 	if err != nil {
 		// Failed to read version - skip migration
 		debug.Logf("auto-migrate: failed to read database version: %v", err)
@@ -217,7 +217,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	}
 
 	// Check for downgrade: refuse to overwrite a newer version with an older one (gt-e3uiy)
-	maxVersion, _ := store.GetMetadata(ctx, "bd_version_max")
+	maxVersion, _ := store.GetLocalMetadata(ctx, "bd_version_max")
 	if dbVersion != "" && doctor.CompareVersions(Version, dbVersion) < 0 {
 		debug.Logf("auto-migrate: refusing downgrade from %s to %s", dbVersion, Version)
 		_ = store.Close() // Best effort cleanup on error path
@@ -231,7 +231,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 
 	// Perform migration: update database version
 	debug.Logf("auto-migrate: migrating database from %s to %s", dbVersion, Version)
-	if err := store.SetMetadata(ctx, "bd_version", Version); err != nil {
+	if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
 		// Migration failed - log and continue
 		debug.Logf("auto-migrate: failed to update database version: %v", err)
 		_ = store.Close() // Best effort cleanup on error path
@@ -240,20 +240,13 @@ func autoMigrateOnVersionBump(beadsDir string) {
 
 	// Update max version tracking
 	if maxVersion == "" || doctor.CompareVersions(Version, maxVersion) > 0 {
-		if err := store.SetMetadata(ctx, "bd_version_max", Version); err != nil {
+		if err := store.SetLocalMetadata(ctx, "bd_version_max", Version); err != nil {
 			debug.Logf("auto-migrate: failed to update max version: %v", err)
 		}
 	}
 
-	// Commit the version metadata update to Dolt (bd-jgxi).
-	// Without an explicit commit, the working set change is lost when the
-	// Dolt server restarts (common for standalone/embedded users). This
-	// ensures bd doctor and subsequent commands see the correct version.
-	commitMsg := fmt.Sprintf("auto-migrate: update bd_version %s → %s", dbVersion, Version)
-	if err := store.Commit(ctx, commitMsg); err != nil {
-		debug.Logf("auto-migrate: failed to commit version update: %v", err)
-		// Non-fatal: the working set still has the update for this session
-	}
+	// No Dolt commit needed — local_metadata is dolt-ignored and persists
+	// in the working set for the lifetime of the server session.
 
 	// Close database
 	if err := store.Close(); err != nil {
