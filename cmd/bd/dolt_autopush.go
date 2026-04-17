@@ -137,9 +137,17 @@ func maybeAutoPush(ctx context.Context) {
 		return
 	}
 
-	// Push
-	debug.Logf("dolt auto-push: pushing to origin...\n")
-	if err := st.Push(ctx); err != nil {
+	// Push. Bound with a short timeout so a hanging remote (e.g. unreachable
+	// host, corrupted chunk store) doesn't block bd from exiting. The write is
+	// already committed locally; auto-push is best-effort sync.
+	pushTimeout := config.GetDuration("dolt.auto-push-timeout")
+	if pushTimeout == 0 {
+		pushTimeout = 30 * time.Second
+	}
+	pushCtx, pushCancel := context.WithTimeout(ctx, pushTimeout)
+	defer pushCancel()
+	debug.Logf("dolt auto-push: pushing to origin (timeout %s)...\n", pushTimeout)
+	if err := st.Push(pushCtx); err != nil {
 		if !isQuiet() && !jsonOutput {
 			fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
 			if isDivergedHistoryErr(err) {
@@ -147,6 +155,17 @@ func maybeAutoPush(ctx context.Context) {
 			}
 		}
 		debug.Logf("dolt auto-push: push error: %v\n", err)
+		// Throttle retries after failure so a hanging remote doesn't make every
+		// subsequent bd command pay the push timeout. We record the attempt
+		// timestamp but NOT a new LastCommit, so when the remote recovers the
+		// change-detection check (currentCommit != LastCommit) still triggers.
+		if ps == nil {
+			ps = &pushState{}
+		}
+		ps.LastPush = time.Now().UTC().Format(time.RFC3339)
+		if saveErr := savePushState(ps); saveErr != nil {
+			debug.Logf("dolt auto-push: failed to save push state after error: %v\n", saveErr)
+		}
 		return
 	}
 
