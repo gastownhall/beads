@@ -10,11 +10,8 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
-
-	"github.com/olebedev/when"
-	"github.com/olebedev/when/rules/common"
-	"github.com/olebedev/when/rules/en"
 )
 
 // compactDurationRe matches compact duration patterns: [+-]?(\d+)([hdwmy])
@@ -88,45 +85,103 @@ func isCompactDuration(s string) bool {
 	return compactDurationRe.MatchString(s)
 }
 
-// nlpParser is the singleton natural language parser (olebedev/when).
-// Initialized lazily on first use.
-var nlpParser *when.Parser
+var (
+	nlpInDaysRe  = regexp.MustCompile(`(?i)^in\s+(\d+)\s+(hour|day|week|month|year)s?$`)
+	nlpAgoRe     = regexp.MustCompile(`(?i)^(\d+)\s+(hour|day|week|month|year)s?\s+ago$`)
+	nlpNextDayRe = regexp.MustCompile(`(?i)^next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at\s+(\d{1,2})(am|pm))?$`)
+	nlpAtTimeRe  = regexp.MustCompile(`(?i)\s+at\s+(\d{1,2})(am|pm)$`)
 
-// getNLPParser returns the singleton NLP parser, initializing it if needed.
-func getNLPParser() *when.Parser {
-	if nlpParser == nil {
-		nlpParser = when.New(nil)
-		nlpParser.Add(en.All...)
-		nlpParser.Add(common.All...)
+	weekdayMap = map[string]time.Weekday{
+		"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday,
+		"wednesday": time.Wednesday, "thursday": time.Thursday,
+		"friday": time.Friday, "saturday": time.Saturday,
 	}
-	return nlpParser
-}
+)
 
-// parseNaturalLanguage parses natural language time expressions using olebedev/when.
-//
-// Examples:
-//   - "tomorrow" -> tomorrow at current time
-//   - "next monday" -> next Monday at current time
-//   - "next monday at 9am" -> next Monday at 9:00
-//   - "in 3 days" -> now + 3 days
-//   - "3 days ago" -> now - 3 days
-//
-// Known Issues (olebedev/when):
-//   - Month name "September" may not parse correctly in some contexts.
-//     Workaround: Use date format "2025-09-15" instead of "September 15" or "Sep 15".
-//     This is a known issue in the olebedev/when library.
-//
-// Returns error if input cannot be parsed as natural language.
 func parseNaturalLanguage(s string, now time.Time) (time.Time, error) {
-	parser := getNLPParser()
-	result, err := parser.Parse(s, now)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("NLP parse error: %w", err)
-	}
-	if result == nil {
+	lower := strings.TrimSpace(strings.ToLower(s))
+	if lower == "" {
 		return time.Time{}, fmt.Errorf("not a natural language time expression: %q", s)
 	}
-	return result.Time, nil
+
+	base := now
+	atHour := -1
+
+	// Strip trailing "at Xam/pm" for compound expressions like "tomorrow at 9am"
+	if m := nlpAtTimeRe.FindStringSubmatch(lower); m != nil {
+		h, _ := strconv.Atoi(m[1])
+		if strings.ToLower(m[2]) == "pm" && h != 12 {
+			h += 12
+		} else if strings.ToLower(m[2]) == "am" && h == 12 {
+			h = 0
+		}
+		atHour = h
+		lower = strings.TrimSpace(lower[:len(lower)-len(m[0])])
+	}
+
+	switch lower {
+	case "tomorrow":
+		base = now.AddDate(0, 0, 1)
+	case "yesterday":
+		base = now.AddDate(0, 0, -1)
+	case "today":
+		// base stays as now
+	default:
+		// "next <weekday>"
+		if m := nlpNextDayRe.FindStringSubmatch(s); m != nil {
+			wd := weekdayMap[strings.ToLower(m[1])]
+			diff := int(wd) - int(now.Weekday())
+			if diff <= 0 {
+				diff += 7
+			}
+			base = now.AddDate(0, 0, diff)
+			if m[2] != "" {
+				h, _ := strconv.Atoi(m[2])
+				if strings.EqualFold(m[3], "pm") && h != 12 {
+					h += 12
+				} else if strings.EqualFold(m[3], "am") && h == 12 {
+					h = 0
+				}
+				atHour = h
+			}
+			if atHour >= 0 {
+				base = time.Date(base.Year(), base.Month(), base.Day(), atHour, 0, 0, 0, base.Location())
+			}
+			return base, nil
+		}
+		// "in N units"
+		if m := nlpInDaysRe.FindStringSubmatch(s); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			return applyNLPUnit(now, n, strings.ToLower(m[2])), nil
+		}
+		// "N units ago"
+		if m := nlpAgoRe.FindStringSubmatch(s); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			return applyNLPUnit(now, -n, strings.ToLower(m[2])), nil
+		}
+		return time.Time{}, fmt.Errorf("not a natural language time expression: %q", s)
+	}
+
+	if atHour >= 0 {
+		base = time.Date(base.Year(), base.Month(), base.Day(), atHour, 0, 0, 0, base.Location())
+	}
+	return base, nil
+}
+
+func applyNLPUnit(base time.Time, n int, unit string) time.Time {
+	switch unit {
+	case "hour":
+		return base.Add(time.Duration(n) * time.Hour)
+	case "day":
+		return base.AddDate(0, 0, n)
+	case "week":
+		return base.AddDate(0, 0, n*7)
+	case "month":
+		return base.AddDate(0, n, 0)
+	case "year":
+		return base.AddDate(n, 0, 0)
+	}
+	return base
 }
 
 // dateOnlyRe matches date-only format YYYY-MM-DD to avoid NLP misinterpretation.
