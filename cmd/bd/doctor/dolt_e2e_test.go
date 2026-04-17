@@ -145,7 +145,7 @@ func buildTestBD(t *testing.T) string {
 
 		// Build from cmd/bd relative to the module root.
 		// The test runs from cmd/bd/doctor/, so module root is ../../../
-		cmd := exec.Command("go", "build", "-o", testBDPath, "./cmd/bd")
+		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", testBDPath, "./cmd/bd")
 
 		// Find the module root by looking for go.mod
 		modRoot := findModuleRoot(t)

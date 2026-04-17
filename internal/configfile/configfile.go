@@ -38,6 +38,11 @@ type Config struct {
 	// to the wrong Dolt server (GH#2372).
 	ProjectID string `json:"project_id,omitempty"`
 
+	// GlobalDoltDatabase is the SQL database name for the project-agnostic
+	// global issue database in shared-server mode. Set during bd init when
+	// shared-server mode is active. Empty means no global database available.
+	GlobalDoltDatabase string `json:"global_dolt_database,omitempty"`
+
 	// Stale closed issues check configuration
 	// 0 = disabled (default), positive = threshold in days
 	StaleClosedIssuesDays int `json:"stale_closed_issues_days,omitempty"`
@@ -315,6 +320,12 @@ func (c *Config) GetDoltDatabase() string {
 		return c.DoltDatabase
 	}
 	return DefaultDoltDatabase
+}
+
+// GetGlobalDoltDatabase returns the global database name for shared-server mode.
+// Returns empty string if no global database is configured.
+func (c *Config) GetGlobalDoltDatabase() string {
+	return c.GlobalDoltDatabase
 }
 
 // GetDoltServerPassword returns the Dolt server password.

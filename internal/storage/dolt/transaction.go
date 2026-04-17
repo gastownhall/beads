@@ -818,6 +818,22 @@ func (t *doltTransaction) GetMetadata(ctx context.Context, key string) (string, 
 	return value, wrapQueryError("get metadata in tx", err)
 }
 
+// SetLocalMetadata sets a value in the dolt-ignored local_metadata table within the transaction.
+func (t *doltTransaction) SetLocalMetadata(ctx context.Context, key, value string) error {
+	_, err := t.tx.ExecContext(ctx, "REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)", key, value)
+	return wrapExecError("set local metadata in tx", err)
+}
+
+// GetLocalMetadata gets a value from the dolt-ignored local_metadata table within the transaction.
+func (t *doltTransaction) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	var value string
+	err := t.tx.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return value, wrapQueryError("get local metadata in tx", err)
+}
+
 func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	_, err := t.GetIssue(ctx, issueID)
 	if err != nil {

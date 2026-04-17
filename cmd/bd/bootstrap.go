@@ -501,7 +501,25 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	// bootstrap action (init, restore, jsonl-import) writes these files via
 	// newDoltStore + createConfigYaml; the sync path historically did not.
 	// (GH#3201)
-	return finalizeSyncedBootstrap(plan.BeadsDir, plan.SyncRemote, cfg, dbName)
+	if err := finalizeSyncedBootstrap(plan.BeadsDir, plan.SyncRemote, cfg, dbName); err != nil {
+		return err
+	}
+
+	// Open and close the store to ensure dolt_ignore'd wisp tables are
+	// created in the working set. Clone does not include these tables
+	// (they are never committed), so they must be recreated after clone.
+	// Both embedded and server mode handle this in their store init paths.
+	warmupStore, err := newDoltStoreFromConfig(ctx, plan.BeadsDir)
+	if err != nil {
+		// Non-fatal: wisp tables will be created on the next command that
+		// opens the store. Warn so the user knows to retry if they hit
+		// "table not found: wisp_*" errors.
+		fmt.Fprintf(os.Stderr, "Warning: post-clone store init failed (wisp tables may be missing): %v\n", err)
+		return nil
+	}
+	_ = warmupStore.Close()
+
+	return nil
 }
 
 // finalizeSyncedBootstrap writes metadata.json and config.yaml after a

@@ -8,7 +8,7 @@
 }:
 buildGoModule {
   pname = "beads";
-  version = "1.0.0";
+  version = "1.0.2";
 
   src = self;
 
@@ -17,7 +17,7 @@ buildGoModule {
   doCheck = false;
 
   # Go module dependencies hash - if build fails with hash mismatch, update with the "got:" value
-  vendorHash = "sha256-7eb7u47f4/OCnK/T56Zd6b5XUyV6vkBmissryBxANBU=";
+  vendorHash = "sha256-7DJgqJX2HDa9gcGD8fLNHLIXvGAEivYeDYx3snCUyCE=";
 
   # Relax go.mod version for Nix: nixpkgs Go may lag behind the latest
   # patch release, and GOTOOLCHAIN=auto can't download in the Nix sandbox.

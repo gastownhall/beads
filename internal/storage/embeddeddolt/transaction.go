@@ -158,6 +158,14 @@ func (t *embeddedTransaction) GetMetadata(ctx context.Context, key string) (stri
 	return issueops.GetMetadataInTx(ctx, t.tx, key)
 }
 
+func (t *embeddedTransaction) SetLocalMetadata(ctx context.Context, key, value string) error {
+	return issueops.SetLocalMetadataInTx(ctx, t.tx, key, value)
+}
+
+func (t *embeddedTransaction) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	return issueops.GetLocalMetadataInTx(ctx, t.tx, key)
+}
+
 func (t *embeddedTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return fmt.Errorf("embeddedTransaction: AddComment not implemented")
 }

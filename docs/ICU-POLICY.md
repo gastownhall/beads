@@ -52,19 +52,65 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 | Release builds | `.goreleaser.yml` (all build targets) |
 | Install script | `scripts/install.sh` |
 | Windows installer | `install.ps1` |
-| CI (Windows) | `.github/workflows/ci.yml` |
+| CI test matrix | `.github/workflows/ci.yml` (Linux, macOS, Windows) |
 | macOS release | `.github/workflows/release.yml` |
 | Migration tests | `.github/workflows/migration-test.yml` |
+| Nightly tests | `.github/workflows/nightly.yml` |
+| Cross-version smoke | `.github/workflows/cross-version-smoke.yml` |
+| Regression tests | `.github/workflows/regression.yml` |
+
+### Canonical pattern: source `.buildflags`
+
+The preferred way for a shell script to comply is to source `.buildflags`
+at the top. That sets `CGO_ENABLED=1` **and** puts `-tags=gms_pure_go`
+into `GOFLAGS`, so every subsequent bare `go` invocation in the script
+picks it up automatically:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../.buildflags
+source "$REPO_ROOT/.buildflags"
+
+go build -o bd ./cmd/bd     # -tags=gms_pure_go applied via GOFLAGS
+```
+
+Makefile targets use `-tags "$(BUILD_TAGS)"` directly, since make already
+defines `BUILD_TAGS := gms_pure_go` at the top of the file. Workflow YAML
+passes the tag inline (`-tags gms_pure_go`).
+
+### Source-time guard: `scripts/check-build-tags.sh`
+
+CI runs `scripts/check-build-tags.sh` on every PR (see `check-build-tags`
+job in `.github/workflows/ci.yml`). It fails if any tracked shell script,
+CI workflow, git hook, or the Makefile contains a
+`go build|test|run|generate|install` invocation that:
+
+- does not carry `-tags=...gms_pure_go`, AND
+- is not in a file that sources `.buildflags`, AND
+- does not reference a file-level variable (e.g. `$(BUILD_TAGS)`) whose
+  value contains `gms_pure_go`, AND
+- is not a third-party tool install (`go install X@version` / `go run X@version`).
+
+This is the source-time companion to `scripts/verify-cgo.sh` (runtime).
+Between the two, an ICU regression cannot reach a release binary.
+
+To intentionally opt a file out (e.g. because it tests the ICU path),
+add `# build-tags: allow-bare` within the first five lines of the file.
+`scripts/test-cgo.sh` and `scripts/test-icu-path.sh` are exempt by name.
 
 ## Where `gms_pure_go` Is Intentionally Omitted
 
-The CI test matrix and `scripts/test-cgo.sh` omit `gms_pure_go` to exercise
-the ICU code path in `go-mysql-server`. This ensures we don't ship bugs
-in the upstream ICU integration even though our release binaries don't use it.
+`scripts/test-icu-path.sh` omits `gms_pure_go` as an explicit, opt-in local
+developer tool for exercising the ICU code path in `go-mysql-server` on
+demand. CI no longer does this: upstream confirmed
+(dolthub/go-mysql-server#3506) that `-tags=gms_pure_go` is the sanctioned
+escape hatch, so we test the configuration we ship.
 
-These test environments install ICU headers explicitly:
-- Linux CI: `sudo apt-get install -y libicu-dev`
-- macOS CI: `brew install icu4c` + CGO flag exports
+The older name `scripts/test-cgo.sh` is retained only as a deprecated shim
+that warns and forwards to `scripts/test-icu-path.sh`.
 
 ## Post-Build Verification
 
@@ -76,16 +122,24 @@ Release builds are verified to be ICU-free:
 
 If ICU linkage is detected, the release build fails.
 
-## The Upstream Fork
+## The Upstream Fork (historical)
 
-`go.mod` has a `replace` directive pointing `go-mysql-server` to a fork
-(`maphew/go-mysql-server`) that adds `!windows` to the CGO regex build
-constraint. This ensures `go install` works on Windows without ICU headers.
+Beads used to carry a `replace github.com/dolthub/go-mysql-server => github.com/maphew/go-mysql-server ...` directive in `go.mod`, added in PR #3112 to try to make `go install` work on Windows without ICU headers. It was removed in PR #3306 (see GH#3303) after empirical testing confirmed that **`replace` directives are not honored by `go install pkg@version`** — the mechanism never worked for its stated purpose, and having the directive actively broke `go install` on every platform with a confusing error.
 
-Upstream PR: https://github.com/dolthub/go-mysql-server/pull/3504
-Tracking issue: https://github.com/dolthub/go-mysql-server/issues/3506
+Upstream PR (closed, declined): https://github.com/dolthub/go-mysql-server/pull/3504
+Upstream issue (closed, declined): https://github.com/dolthub/go-mysql-server/issues/3506
 
-Once the upstream PR merges, remove the `replace` directive from `go.mod`.
+The dolthub maintainers have made clear the upstream default will not flip: *"We want our software to work as intended with the default settings. If users want to circumvent certain features with build tags or other build-time or run-time configuration, that's fine. Changing the default is not aligned with what we are actually trying to do."*
+
+### How `go install` is handled now
+
+Two supported modes, documented in [INSTALLING.md](INSTALLING.md):
+
+1. **`CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest`** produces a **server-mode-only** binary. Works on any Go-capable box with no C compiler. Users must run an external `dolt sql-server` and use `bd init --server`.
+
+2. **`CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install ...`** produces an embedded-capable binary. Requires a C compiler but NOT libicu.
+
+No fork, no replace directive, no upstream patch required. The tradeoff is that `go install` users who want embedded mode have to pass an explicit `GOFLAGS`; those who don't care can use the shorter nocgo form.
 
 ## Common Mistakes to Avoid
 
@@ -95,11 +149,18 @@ Once the upstream PR merges, remove the `replace` directive from `go.mod`.
 2. **Removing `gms_pure_go` from a build target** -- this re-introduces
    ICU linkage. The post-build checks will catch it, but don't do it.
 
-3. **Installing `libicu-dev` in release workflows** -- only needed in test
-   workflows. Release builds must not depend on ICU being installed.
+3. **Installing `libicu-dev` in release or CI test workflows** -- only
+   needed for local, on-demand developer testing via
+   `scripts/test-icu-path.sh`.
+   Neither release builds nor the CI test matrix link ICU; both must not
+   depend on ICU being installed.
 
-4. **Confusing CGO with ICU** -- CGO is required (for Dolt). ICU is not.
-   They are independent. `CGO_ENABLED=1` does not imply ICU.
+4. **Confusing CGO with ICU** -- CGO is required for embedded Dolt mode
+   (NBS chunk compression via `gozstd`). ICU is independent. `CGO_ENABLED=1`
+   does not imply ICU linkage as long as `-tags gms_pure_go` is present.
+   beads also supports `CGO_ENABLED=0` builds via nocgo stubs: the binary
+   runs in server-mode only (no embedded Dolt backend), which is the
+   blessed `go install` path for users without a C toolchain.
 
 ## Trade-offs
 

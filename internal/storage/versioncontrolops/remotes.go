@@ -36,8 +36,17 @@ func RemoveRemote(ctx context.Context, db DBConn, name string) error {
 }
 
 // Fetch fetches refs from a remote without merging.
+//
+// On failure, a best-effort GC is run to clean up any orphaned tmp_pack_*
+// files that DOLT_FETCH may have left in the git-remote-cache. These files
+// accumulate unboundedly across repeated failures and can consume hundreds of
+// gigabytes over time.
 func Fetch(ctx context.Context, db DBConn, peer string) error {
 	if _, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
+		// Best-effort: ignore GC errors — the original fetch error is what matters.
+		// DoltGC requires a non-transactional connection; if db is a tx it will
+		// fail silently here, which is acceptable.
+		_ = DoltGC(ctx, db)
 		return fmt.Errorf("fetch from %s: %w", peer, err)
 	}
 	return nil

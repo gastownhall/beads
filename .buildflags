@@ -1,9 +1,24 @@
-# This file is sourced by scripts to provide standard build flags.
-# Mirrors Makefile CGO configuration for consistency.
+# Canonical build flags for beads. Source this in any script that invokes
+# `go` to get the project-wide build settings. Scripts that intentionally
+# exercise the ICU path (e.g. scripts/test-cgo.sh) do NOT source this.
 #
-# NOTE: ICU flags are NOT set here. The gms_pure_go build tag (used by
-# goreleaser and `make build`) tells go-mysql-server to use Go's stdlib
-# regex, eliminating the ICU runtime dependency. Only test scripts that
-# explicitly need ICU (test-cgo.sh) should set ICU flags.
+# Rationale: go-mysql-server links ICU by default under cgo. beads never
+# uses SQL REGEXP, so we always build with -tags=gms_pure_go. See
+# docs/ICU-POLICY.md for the full policy.
 
-export CGO_ENABLED=1
+# Embedded Dolt requires CGO; server mode and nocgo builds do not. Default
+# to 1 for the embedded-capable build paths that sourced this, but respect
+# a caller who explicitly set CGO_ENABLED=0 (e.g. a static/nocgo build).
+: "${CGO_ENABLED:=1}"
+export CGO_ENABLED
+
+# Build tag that tells go-mysql-server to use Go's stdlib regex instead of
+# the ICU-backed go-icu-regex. Exported so callers can compose with extra
+# tags: `go test -tags=regression,$BEADS_BUILD_TAGS ...`
+export BEADS_BUILD_TAGS="gms_pure_go"
+
+# Propagate the tag via GOFLAGS so every subsequent bare `go` invocation
+# picks it up automatically. Idempotent: re-sourcing is a no-op.
+if [[ "${GOFLAGS:-}" != *gms_pure_go* ]]; then
+    export GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=${BEADS_BUILD_TAGS}"
+fi

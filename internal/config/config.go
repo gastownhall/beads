@@ -57,6 +57,11 @@ func Initialize() error {
 	}
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
+	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	beadsEnvConfigPath := ""
+	if beadsDirEnv != "" {
+		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
+	}
 	cwd, err := os.Getwd()
 	if err == nil {
 		// In the beads repo, `.beads/config.yaml` is tracked and may set non-default config values.
@@ -96,11 +101,19 @@ func Initialize() error {
 			return true
 		}
 
-		// Walk up parent directories to find .beads/config.yaml
+		// Walk up parent directories to find .beads/config.yaml.
 		for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
 			p := filepath.Join(dir, ".beads", "config.yaml")
-			if tryProjectConfig(p) {
-				break
+			if _, err := os.Stat(p); err == nil {
+				// When BEADS_DIR points at a different runtime workspace, do not
+				// merge the caller repo's config underneath it. That leaks caller
+				// settings like readonly/json/actor into explicit-target commands.
+				if beadsEnvConfigPath != "" && filepath.Clean(p) != beadsEnvConfigPath {
+					break
+				}
+				if tryProjectConfig(p) {
+					break
+				}
 			}
 		}
 

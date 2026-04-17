@@ -188,7 +188,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	if !opts.DryRun {
 		lastSync := time.Now().UTC().Format(time.RFC3339Nano)
 		key := e.Tracker.ConfigPrefix() + ".last_sync"
-		if err := e.Store.SetConfig(ctx, key, lastSync); err != nil {
+		if err := e.Store.SetLocalMetadata(ctx, key, lastSync); err != nil {
 			e.warn("Failed to update last_sync: %v", err)
 		}
 		result.LastSync = lastSync
@@ -208,7 +208,7 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 
 	// Get last sync time
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
-	lastSyncStr, err := e.Store.GetConfig(ctx, key)
+	lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key)
 	if err != nil || lastSyncStr == "" {
 		return nil, nil // No previous sync, no conflicts possible
 	}
@@ -280,7 +280,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	fetchOpts := FetchOptions{State: opts.State}
 	var lastSync *time.Time
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
-	if lastSyncStr, err := e.Store.GetConfig(ctx, key); err == nil && lastSyncStr != "" {
+	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" {
 		if t, err := parseSyncTime(lastSyncStr); err == nil {
 			fetchOpts.Since = &t
 			lastSync = &t

@@ -225,6 +225,14 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		whereClauses = append(whereClauses, "closed_at < ?")
 		args = append(args, filter.ClosedBefore.Format(time.RFC3339))
 	}
+	if filter.StartedAfter != nil {
+		whereClauses = append(whereClauses, "started_at > ?")
+		args = append(args, filter.StartedAfter.Format(time.RFC3339))
+	}
+	if filter.StartedBefore != nil {
+		whereClauses = append(whereClauses, "started_at < ?")
+		args = append(args, filter.StartedBefore.Format(time.RFC3339))
+	}
 	if filter.DeferAfter != nil {
 		whereClauses = append(whereClauses, "defer_until > ?")
 		args = append(args, filter.DeferAfter.Format(time.RFC3339))

@@ -3,6 +3,7 @@ package configfile
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -575,5 +576,60 @@ func TestIsDoltServerMode_NoEnvRespectsMetadata(t *testing.T) {
 	cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded}
 	if cfg.IsDoltServerMode() {
 		t.Error("IsDoltServerMode() = true with no env overrides + embedded metadata, want false")
+	}
+}
+
+func TestGlobalDoltDatabase_RoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.GlobalDoltDatabase = "beads_global"
+
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	loaded, err := Load(beadsDir)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if loaded.GlobalDoltDatabase != "beads_global" {
+		t.Errorf("GlobalDoltDatabase = %q, want %q", loaded.GlobalDoltDatabase, "beads_global")
+	}
+	if loaded.GetGlobalDoltDatabase() != "beads_global" {
+		t.Errorf("GetGlobalDoltDatabase() = %q, want %q", loaded.GetGlobalDoltDatabase(), "beads_global")
+	}
+}
+
+func TestGlobalDoltDatabase_EmptyByDefault(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.GetGlobalDoltDatabase() != "" {
+		t.Errorf("GetGlobalDoltDatabase() = %q, want empty string for default config", cfg.GetGlobalDoltDatabase())
+	}
+}
+
+func TestGlobalDoltDatabase_OmittedFromJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, ConfigFileName))
+	if err != nil {
+		t.Fatalf("ReadFile() failed: %v", err)
+	}
+
+	if strings.Contains(string(data), "global_dolt_database") {
+		t.Error("global_dolt_database should be omitted from JSON when empty")
 	}
 }

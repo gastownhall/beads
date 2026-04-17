@@ -360,7 +360,7 @@ blocks: Shows they must be done in order
 Epic with no ordering between children:
 All children show in bd ready immediately.
 Work on any child in any order.
-Close epic when all children complete.
+Close the epic explicitly once all children complete and the parent outcome is done.
 ```
 
 **Pattern: Epic with Sequential Subtasks**

@@ -519,7 +519,7 @@ func checkSchemaCompatible(db *sql.DB, database string) DoctorCheck {
 
 	// Query metadata table for bd_version
 	var bdVersion string
-	err = db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = 'bd_version'").Scan(&bdVersion)
+	err = db.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&bdVersion)
 	if err != nil && err != sql.ErrNoRows {
 		if strings.Contains(err.Error(), "doesn't exist") || strings.Contains(err.Error(), "Unknown table") {
 			return DoctorCheck{

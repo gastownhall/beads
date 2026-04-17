@@ -13,7 +13,7 @@ import (
 // use this constant to avoid column-list drift between scan sites.
 const IssueSelectColumns = `id, content_hash, title, description, design, acceptance_criteria, notes,
 	       status, priority, issue_type, assignee, estimated_minutes,
-	       created_at, created_by, owner, updated_at, closed_at, external_ref, spec_id,
+	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
 	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
 	       await_type, await_id, timeout_ns, waiters,
@@ -34,7 +34,7 @@ type IssueScanner interface {
 func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	var issue types.Issue
 	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
-	var closedAt, compactedAt, dueAt, deferUntil sql.NullTime
+	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
@@ -49,7 +49,7 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&createdAtStr, &createdBy, &owner, &updatedAtStr, &closedAt, &externalRef, &specID,
+		&createdAtStr, &createdBy, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
@@ -72,6 +72,9 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	// Map nullable fields
 	if contentHash.Valid {
 		issue.ContentHash = contentHash.String
+	}
+	if startedAt.Valid {
+		issue.StartedAt = &startedAt.Time
 	}
 	if closedAt.Valid {
 		issue.ClosedAt = &closedAt.Time

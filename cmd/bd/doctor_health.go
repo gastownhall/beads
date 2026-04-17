@@ -228,7 +228,7 @@ func hintsDisabledDB(db *sql.DB) bool {
 // Uses an existing DB connection.
 func checkVersionMismatchDB(db *sql.DB) string {
 	var dbVersion string
-	err := db.QueryRow("SELECT value FROM metadata WHERE `key` = 'bd_version'").Scan(&dbVersion)
+	err := db.QueryRow("SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&dbVersion)
 	if err != nil {
 		return "" // Can't read version, skip
 	}

@@ -12,18 +12,10 @@ import (
 // tables but reference the wisps table instead of issues. They are covered
 // by the dolt_ignore pattern "wisp_%" added in migration 004.
 func MigrateWispAuxiliaryTables(db *sql.DB) error {
-	auxiliaryDDL := []string{
-		schema.WispLabelsSchema,
-		schema.WispDependenciesSchema,
-		schema.WispEventsSchema,
-		schema.WispCommentsSchema,
+	// Migration 0021 is a multi-statement file that creates all four
+	// auxiliary tables. The Dolt/MySQL driver has multiStatements=true.
+	if _, err := db.Exec(schema.ReadMigrationSQL(21)); err != nil {
+		return fmt.Errorf("failed to create wisp auxiliary tables: %w", err)
 	}
-
-	for _, ddl := range auxiliaryDDL {
-		if _, err := db.Exec(ddl); err != nil {
-			return fmt.Errorf("failed to create wisp auxiliary table: %w", err)
-		}
-	}
-
 	return nil
 }

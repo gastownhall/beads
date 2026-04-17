@@ -115,7 +115,7 @@ func findModuleRoot() string {
 
 func buildCandidate(outPath string) error {
 	modRoot := findModuleRoot()
-	cmd := exec.Command("go", "build", "-o", outPath, "./cmd/bd")
+	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", outPath, "./cmd/bd")
 	cmd.Dir = modRoot
 	cmd.Env = buildEnv()
 

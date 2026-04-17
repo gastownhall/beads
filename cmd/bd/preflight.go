@@ -83,8 +83,8 @@ func runPreflight(cmd *cobra.Command, args []string) {
 	// Static checklist mode
 	fmt.Println("PR Readiness Checklist:")
 	fmt.Println()
-	fmt.Println("[ ] Tests pass: go test -short ./...")
-	fmt.Println("[ ] Lint passes: golangci-lint run ./...")
+	fmt.Println("[ ] Tests pass: go test -tags gms_pure_go -short ./...")
+	fmt.Println("[ ] Lint passes: golangci-lint run --build-tags=gms_pure_go ./...")
 	fmt.Println("[ ] Formatting: gofmt -l .")
 	fmt.Println("[ ] No beads pollution: check .beads/issues.jsonl diff")
 	fmt.Println("[ ] Nix hash current: go.sum unchanged or vendorHash updated")
@@ -198,8 +198,8 @@ func runChecks(jsonOutput, skipLint bool) {
 
 // runTestCheck runs go test -short ./... and returns the result.
 func runTestCheck() CheckResult {
-	command := "go test -short ./..."
-	cmd := exec.Command("go", "test", "-short", "./...")
+	command := "go test -tags gms_pure_go -short ./..."
+	cmd := exec.Command("go", "test", "-tags", "gms_pure_go", "-short", "./...")
 	output, err := cmd.CombinedOutput()
 
 	return CheckResult{
@@ -212,7 +212,7 @@ func runTestCheck() CheckResult {
 
 // runLintCheck runs golangci-lint and returns the result.
 func runLintCheck(skipLint bool) CheckResult {
-	command := "golangci-lint run ./..."
+	command := "golangci-lint run --build-tags=gms_pure_go ./..."
 	if skipLint {
 		return CheckResult{
 			Name:    "Lint passes",
@@ -234,7 +234,7 @@ func runLintCheck(skipLint bool) CheckResult {
 		}
 	}
 
-	cmd := exec.Command("golangci-lint", "run", "./...")
+	cmd := exec.Command("golangci-lint", "run", "--build-tags=gms_pure_go", "./...")
 	output, err := cmd.CombinedOutput()
 
 	return CheckResult{

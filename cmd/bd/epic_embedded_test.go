@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdEpic runs "bd epic" with the given args and returns raw stdout.
@@ -85,9 +87,7 @@ func TestEmbeddedEpic(t *testing.T) {
 	})
 
 	t.Run("status_eligible_only", func(t *testing.T) {
-		// When all children are closed, the epic is auto-closed by bd close.
-		// So --eligible-only may find nothing if auto-close already happened.
-		// Just verify the flag doesn't crash and filters correctly.
+		// --eligible-only should only show epics with all children complete.
 		out := bdEpic(t, bd, dir, "status", "--eligible-only")
 		// epic1 has open children — should NOT appear
 		if strings.Contains(out, epic1.ID) {
@@ -122,24 +122,28 @@ func TestEmbeddedEpic(t *testing.T) {
 		if strings.Contains(out, epic1.ID) {
 			t.Errorf("epic1 (not eligible) should not appear in dry-run: %s", out)
 		}
-		// Just verify no crash — auto-close may have already closed eligible epics
 	})
 
 	t.Run("close_eligible_closes_epics", func(t *testing.T) {
-		// Note: bd close auto-closes the parent epic when the last child closes.
-		// So by the time we run close-eligible, the epic is already closed.
-		// Verify close-eligible handles this gracefully (no epics to close).
 		dir3, _, _ := bdInit(t, bd, "--prefix", "ep3")
 		e := bdCreate(t, bd, dir3, "Close me epic", "--type", "epic")
 		ch := bdCreate(t, bd, dir3, "Close me child", "--type", "task")
 		bdDep(t, bd, dir3, "add", ch.ID, e.ID, "--type", "parent-child")
-		bdClose(t, bd, dir3, ch.ID) // This auto-closes the epic
+		bdClose(t, bd, dir3, ch.ID)
+
+		got := bdShow(t, bd, dir3, e.ID)
+		if got.Status != types.StatusOpen {
+			t.Fatalf("expected epic to remain open until close-eligible runs, got %s", got.Status)
+		}
 
 		out := bdEpic(t, bd, dir3, "close-eligible")
-		// Epic already auto-closed — close-eligible finds nothing or reports already closed
-		_ = e
 		if strings.Contains(out, "Error") {
 			t.Errorf("unexpected error: %s", out)
+		}
+
+		got = bdShow(t, bd, dir3, e.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected close-eligible to close the epic, got %s", got.Status)
 		}
 	})
 
@@ -148,7 +152,7 @@ func TestEmbeddedEpic(t *testing.T) {
 		e := bdCreate(t, bd, dir4, "JSON close epic", "--type", "epic")
 		ch := bdCreate(t, bd, dir4, "JSON close child", "--type", "task")
 		bdDep(t, bd, dir4, "add", ch.ID, e.ID, "--type", "parent-child")
-		bdClose(t, bd, dir4, ch.ID) // auto-closes epic
+		bdClose(t, bd, dir4, ch.ID)
 		_ = e
 
 		fullArgs := []string{"epic", "close-eligible", "--json"}

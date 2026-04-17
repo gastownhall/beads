@@ -1774,3 +1774,32 @@ func firstOrEmpty(s []string) string {
 	}
 	return s[0]
 }
+
+func TestGlobalDatabaseConstants(t *testing.T) {
+	if GlobalDatabaseName == "" {
+		t.Error("GlobalDatabaseName must not be empty")
+	}
+	if GlobalDatabaseName != "beads_global" {
+		t.Errorf("GlobalDatabaseName = %q, want %q", GlobalDatabaseName, "beads_global")
+	}
+	if GlobalIssuePrefix == "" {
+		t.Error("GlobalIssuePrefix must not be empty")
+	}
+	if GlobalIssuePrefix != "global" {
+		t.Errorf("GlobalIssuePrefix = %q, want %q", GlobalIssuePrefix, "global")
+	}
+	if GlobalProjectID == "" {
+		t.Error("GlobalProjectID must not be empty")
+	}
+	if GlobalProjectID != "00000000-0000-0000-0000-000000000000" {
+		t.Errorf("GlobalProjectID = %q, want sentinel UUID", GlobalProjectID)
+	}
+}
+
+func TestEnsureGlobalDatabase_ServerNotReachable(t *testing.T) {
+	// EnsureGlobalDatabase should return an error when the server is not reachable.
+	err := EnsureGlobalDatabase("127.0.0.1", 19999, "root", "")
+	if err == nil {
+		t.Error("expected error when server is not reachable")
+	}
+}

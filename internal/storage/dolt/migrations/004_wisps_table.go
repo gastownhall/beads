@@ -46,8 +46,8 @@ func MigrateWispsTable(db *sql.DB) error {
 		return fmt.Errorf("failed to commit dolt_ignore changes: %w", err)
 	}
 
-	// Step 2: Create wisps table using shared schema constant.
-	_, err = db.Exec(schema.WispsTableSchema)
+	// Step 2: Create wisps table using the embedded migration file.
+	_, err = db.Exec(schema.ReadMigrationSQL(20))
 	if err != nil {
 		return fmt.Errorf("failed to create wisps table: %w", err)
 	}

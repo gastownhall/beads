@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).
+# shellcheck source=../.buildflags
+source "$(dirname "$0")/../.buildflags"
+
 echo "🔧 Building bd from source..."
 go build -o bd ./cmd/bd
 

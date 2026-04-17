@@ -7,13 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Auto-export enabled by default** — `export.auto` defaults to `true` and the default `export.path` is now `issues.jsonl` (previously `export.jsonl`), with `export.git-add` on by default. `bd init` prompts interactively (default: keep enabled) and `--non-interactive` keeps it enabled. All `export.*` keys are now listed in `bd config --help`. ([GH#2973](https://github.com/steveyegge/beads/issues/2973))
+## [1.0.2] - 2026-04-15
 
 ### Fixed
 
-- **`BEADS_DOLT_READY_TIMEOUT` env var** — `bd init --shared-server` now respects `BEADS_DOLT_READY_TIMEOUT` (positive integer seconds, default 10) so that slower hardware, where Dolt's first-run SQL engine bootstrap exceeds the 10-second budget, can opt into a longer `waitForReady` timeout. Default behavior is unchanged. ([GH#3142](https://github.com/gastownhall/beads/issues/3142))
+- **npm publish: provenance validation** — `npm-package/package.json` `repository.url`, `bugs.url`, and `homepage` updated from `steveyegge/beads` to `gastownhall/beads` so that npm's sigstore provenance validator accepts the published artifact. The repo move in v1.0.0 left these URLs stale, which caused npm publishes for v1.0.0 and v1.0.1 to be rejected after provenance check (E422).
+
+## [1.0.1] - 2026-04-15
+
+### Added
+
+- **`bd batch`** — Atomic multi-operation transactions across create/update/close/dep. All ops commit together or none do. ([PR #3165](https://github.com/gastownhall/beads/pull/3165))
+- **`bd config drift` / `bd config apply`** — Detect and reconcile drift between yaml, git, and database config surfaces. ([PR #3086](https://github.com/gastownhall/beads/pull/3086))
+- **`bd config show`** — Unified provenance view showing where each effective config value comes from. ([PR #3084](https://github.com/gastownhall/beads/pull/3084), [bd-934](https://github.com/gastownhall/beads/issues/934))
+- **`started_at` on issues** — Timestamp recording when an issue first entered `in_progress`. ([PR #3206](https://github.com/gastownhall/beads/pull/3206), [GH#2796](https://github.com/gastownhall/beads/issues/2796))
+- **`beads_global` shared-server database** — Dedicated shared-server database for cross-project state. ([`fa87dd2b`](https://github.com/gastownhall/beads/commit/fa87dd2b))
+- **Pool metrics telemetry** — Shared-server connection pool metrics for diagnosing pool exhaustion. ([PR #3172](https://github.com/gastownhall/beads/pull/3172), [GH#3140](https://github.com/gastownhall/beads/issues/3140))
+- **`OpenBestAvailable` public API** — Library consumers can open the best available backend without hard-coding selection. ([PRs #3143, #3149](https://github.com/gastownhall/beads/pull/3149))
+- **Selective sync: `--issues` flag and `push`/`pull` subcommands** — Tracker sync accepts explicit issue ID lists; `--parent` ported across trackers. ([PR #2975](https://github.com/gastownhall/beads/pull/2975))
+- **`--label` / `--label-any` for `bd orphans`** — Filter orphan detection by label. ([PR #3026](https://github.com/gastownhall/beads/pull/3026))
+- **Cross-version smoke tests** — CI gate for upgrade compatibility across prior releases. ([GH#2968](https://github.com/gastownhall/beads/issues/2968))
+- **Migration test harness** — Cross-era upgrade fidelity tests. ([PR #3067](https://github.com/gastownhall/beads/pull/3067))
+- **Docusaurus versioning** — Site versioned per release; `llms-full.txt` aligned with snapshots. ([PR #3033](https://github.com/gastownhall/beads/pull/3033))
+- **Azure Blob Storage remotes** — `az://` recognized as a valid Dolt remote URL scheme. ([PR #3101](https://github.com/gastownhall/beads/pull/3101))
+- **Side-effect hints for `bd config set`/`unset`** — Shows what else changes when a config value is modified. ([PR #3089](https://github.com/gastownhall/beads/pull/3089))
+- **Dynamic config-list discovery** — `bd config list` auto-discovers yaml keys and env vars. ([PR #3088](https://github.com/gastownhall/beads/pull/3088))
+- **`BEADS_DOLT_READY_TIMEOUT`** — Override the 10s `waitForReady` timeout during `bd init --shared-server` for slower hardware. ([PR #3188](https://github.com/gastownhall/beads/pull/3188), [GH#3142](https://github.com/gastownhall/beads/issues/3142))
+
+### Changed
+
+- **Auto-export enabled by default** — `export.auto` defaults to `true` and the default `export.path` is now `issues.jsonl` (previously `export.jsonl`), with `export.git-add` on by default. `bd init` prompts interactively (default: keep enabled); `--non-interactive` keeps it enabled. All `export.*` keys are listed in `bd config --help`. ([PR #3204](https://github.com/gastownhall/beads/pull/3204), [GH#2973](https://github.com/gastownhall/beads/issues/2973))
+- **`gms_pure_go` by default** — Test and install helpers default to the pure-Go build tag, dropping ICU linkage from CI. ([PRs #3240, #3259](https://github.com/gastownhall/beads/pull/3259))
+- **ICU runtime dependency removed from release binaries** — Release builds no longer link ICU, fixing portability issues. ([PR #3066](https://github.com/gastownhall/beads/pull/3066))
+- **Dolt connection pool lifetime configurable** — Longer default, configurable via env. ([PR #3163](https://github.com/gastownhall/beads/pull/3163))
+- **Dolt connection TLS explicitly disabled** — When TLS is not configured, connections now explicitly opt out rather than depending on driver defaults. ([PR #3107](https://github.com/gastownhall/beads/pull/3107))
+- **Dolt log noise reduced** — `NewConnection` spam silenced; `dolt-server.log` rotates at startup to cap size. ([PRs #3160, #3161](https://github.com/gastownhall/beads/pull/3161))
+
+### Fixed
+
+- **Schema migration conflict** — Removed a conflicting column on the schema migration table; migration issue patched with test coverage. ([commits `f079786b`, `65dbdbf5`, `9aa9b82f`](https://github.com/gastownhall/beads/commits/main))
+- **Wisp tables missing after bootstrap clone** — `bd bootstrap` now ensures wisp tables exist after cloning. ([commit `31d51232`](https://github.com/gastownhall/beads/commit/31d51232))
+- **CI test binary timeout on macOS** — `bd` test binary memoized to avoid 10-minute timeout. ([PR #3273](https://github.com/gastownhall/beads/pull/3273))
+- **Local-only state moved to Dolt-ignored tables** — Prevents local state from polluting shared history. ([commit `50f715b1`](https://github.com/gastownhall/beads/commit/50f715b1))
+- **Worktree awareness across commands** — Hooks path, fingerprint, doctor checks, config validate, preflight, reset, bootstrap path synthesis, `rename-prefix`, `countExistingIssues`, and formula search paths all resolve correctly when run inside a git worktree. ([PRs #3169, #3123, #3235](https://github.com/gastownhall/beads/pull/3169), plus numerous smaller fixes)
+- **`bd bootstrap` hardening** — Commits `issue_prefix` to the config table; writes `metadata.json` and `config.yaml` after sync clone; uses parent workspace db name when local `.beads` missing; rejects empty `--database`; auto-start allowed for migration tests. ([PRs #3203, #3247, #3083, #3076](https://github.com/gastownhall/beads/pull/3247))
+- **Remote URL validation hardened at config parse time** — Security hardening for tracker and backup remotes. ([PR #3210](https://github.com/gastownhall/beads/pull/3210))
+- **`bd list` truncation hint in all output modes** — Truncation now indicated in JSON/compact/long formats. ([PR #3243](https://github.com/gastownhall/beads/pull/3243), [GH#3212](https://github.com/gastownhall/beads/issues/3212))
+- **`bd list --watch` hierarchy consistency** — Parent/child ordering stable across watch refreshes. ([PR #3236](https://github.com/gastownhall/beads/pull/3236))
+- **`bd update --defer` sets status=deferred** — Deferring an issue now transitions status correctly. ([PR #3241](https://github.com/gastownhall/beads/pull/3241), [GH#3233](https://github.com/gastownhall/beads/issues/3233))
+- **`bd mol bond` transitive cycle detection** — Cycles through transitive dependencies now caught. ([PR #3111](https://github.com/gastownhall/beads/pull/3111), [GH#2719](https://github.com/gastownhall/beads/issues/2719))
+- **`bd dep add/remove` allows cross-prefix targets** — No longer rejects dependencies that cross prefix boundaries. ([commit `7b02edda`](https://github.com/gastownhall/beads/commit/7b02edda))
+- **`bd dolt pull` nil-pointer panic in embedded mode** — Embedded backend no longer panics on pull. ([PR #3148](https://github.com/gastownhall/beads/pull/3148))
+- **Diverged-history guidance on auto-push failure** — Actionable recovery steps printed instead of raw error. ([PR #3138](https://github.com/gastownhall/beads/pull/3138))
+- **`bd config` error message hints** — Suggest `bd config set` (not `bd config`) in error messages. ([PR #3141](https://github.com/gastownhall/beads/pull/3141))
+- **JSONL export in pre-commit hook** — Atomic code+issues commits via pre-commit hook. ([PR #3121](https://github.com/gastownhall/beads/pull/3121))
+- **Auto-export / auto-backup errors surfaced to stderr** — Silent failures now visible. ([PR #3122](https://github.com/gastownhall/beads/pull/3122))
+- **`go install` on Windows** — Fixed ICU header dependency that broke `go install` on Windows. ([PR #3112](https://github.com/gastownhall/beads/pull/3112), [GH#3013](https://github.com/gastownhall/beads/issues/3013))
+- **Stepping-stone migration paths removed** — Unsupported intermediate migration versions cleaned up. ([PR #3110](https://github.com/gastownhall/beads/pull/3110))
+- **SQLite-era JSONL migration preserves dependencies and labels** — Migration from pre-Dolt exports no longer drops graph edges or labels. ([PR #3082](https://github.com/gastownhall/beads/pull/3082), [GH#3079](https://github.com/gastownhall/beads/issues/3079))
+- **MCP workspace discovery detects Dolt-backed projects** — MCP server no longer misses Dolt-native repos. ([PR #3207](https://github.com/gastownhall/beads/pull/3207), [GH#2997](https://github.com/gastownhall/beads/issues/2997))
+- **npm postinstall closes download streams** — Resource leak fixed. ([PR #3228](https://github.com/gastownhall/beads/pull/3228))
+- **Husky hooks sanitized when copied** — Husky-managed hooks no longer corrupt beads-managed hook directory. ([PR #3208](https://github.com/gastownhall/beads/pull/3208), [GH#3132](https://github.com/gastownhall/beads/issues/3132))
+- **GitLab issue link dependencies wired into sync pull** — Dependencies via GitLab links now import. ([PR #3202](https://github.com/gastownhall/beads/pull/3202), [GH#2645](https://github.com/gastownhall/beads/issues/2645))
+- **`.beads/` FS_NOCOW_FL on btrfs** — Prevents btrfs kworker thrashing on Dolt files. ([PR #3162](https://github.com/gastownhall/beads/pull/3162))
+- **Auto-commit config table writes** — `bd remember`, `bd forget`, and `bd config` commands now commit their writes. ([PR #3052](https://github.com/gastownhall/beads/pull/3052), [bd-g8p](https://github.com/gastownhall/beads/issues/g8p))
+- **Shared-server CLI dir resolved from shared root** — Corrects path resolution for shared-server layouts. ([PR #3223](https://github.com/gastownhall/beads/pull/3223))
+- **`.claude/` gitignore narrowed** — Blanket ignore replaced with specific patterns so project `.claude/` content is tracked. ([PR #3190](https://github.com/gastownhall/beads/pull/3190), [GH#3182](https://github.com/gastownhall/beads/issues/3182))
+- **Release archives extracting into subdirectory** — Install handles nested archive layouts. ([PR #3167](https://github.com/gastownhall/beads/pull/3167))
+- **`bd import` help text** — Removed references to nonexistent `-i` flag. ([PR #3200](https://github.com/gastownhall/beads/pull/3200))
+
+### Docs
+
+- **ADR-0001: multi-remote approach decision** ([PR #3209](https://github.com/gastownhall/beads/pull/3209))
+- **ICU regex policy / build dependency guidance** ([GH-3126](https://github.com/gastownhall/beads/issues/3126))
+- **Contributor protection policy for AI agents** ([PR #3151](https://github.com/gastownhall/beads/pull/3151))
+- **Cross-era migration instructions** ([PR #3081](https://github.com/gastownhall/beads/pull/3081))
+- **Unified quick-start (site + stub)** ([PR #3032](https://github.com/gastownhall/beads/pull/3032))
+- **Hosted docs link** ([PR #3011](https://github.com/gastownhall/beads/pull/3011))
 
 ## [1.0.0] - 2026-04-02
 

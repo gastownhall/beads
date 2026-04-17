@@ -34,80 +34,24 @@ log_error() {
     echo -e "${RED}Error:${NC} $1" >&2
 }
 
-append_env_flag() {
-    local var_name=$1
-    local flag_value=$2
-    local current_value
-
-    current_value=${!var_name:-}
-    if [ -n "$current_value" ]; then
-        export "$var_name=$current_value $flag_value"
-    else
-        export "$var_name=$flag_value"
-    fi
-}
-
-configure_cgo_build_env() {
+print_missing_build_deps_help() {
     local system
     system=$(uname -s)
 
     case "$system" in
         Darwin)
-            if command -v brew &> /dev/null; then
-                local icu_prefix
-                icu_prefix=$(brew --prefix icu4c 2>/dev/null || true)
-                if [ -n "$icu_prefix" ]; then
-                    append_env_flag CGO_CFLAGS "-I${icu_prefix}/include"
-                    append_env_flag CGO_CPPFLAGS "-I${icu_prefix}/include"
-                    append_env_flag CGO_LDFLAGS "-L${icu_prefix}/lib -Wl,-rpath,${icu_prefix}/lib"
-                    log_info "Configured CGO to use Homebrew icu4c at ${icu_prefix}"
-                fi
-            fi
-            ;;
-        Linux|FreeBSD)
-            if command -v pkg-config &> /dev/null && pkg-config --exists icu-i18n; then
-                local icu_cflags
-                local icu_libs
-                icu_cflags=$(pkg-config --cflags icu-i18n)
-                icu_libs=$(pkg-config --libs icu-i18n)
-                if [ -n "$icu_cflags" ]; then
-                    append_env_flag CGO_CFLAGS "$icu_cflags"
-                    append_env_flag CGO_CPPFLAGS "$icu_cflags"
-                fi
-                if [ -n "$icu_libs" ]; then
-                    append_env_flag CGO_LDFLAGS "$icu_libs"
-                fi
-                log_info "Configured CGO to use pkg-config ICU flags"
-            elif command -v brew &> /dev/null; then
-                local icu_prefix
-                icu_prefix=$(brew --prefix icu4c 2>/dev/null || true)
-                if [ -n "$icu_prefix" ]; then
-                    append_env_flag CGO_CFLAGS "-I${icu_prefix}/include"
-                    append_env_flag CGO_CPPFLAGS "-I${icu_prefix}/include"
-                    append_env_flag CGO_LDFLAGS "-L${icu_prefix}/lib -Wl,-rpath,${icu_prefix}/lib"
-                    log_info "Configured CGO to use Homebrew icu4c at ${icu_prefix}"
-                fi
-            fi
-            ;;
-    esac
-}
-
-print_missing_icu_help() {
-    local system
-    system=$(uname -s)
-
-    case "$system" in
-        Darwin)
-            log_warning "Missing ICU headers. Install them with: brew install icu4c zstd"
-            log_warning "If icu4c is already installed, rerun this installer; it now auto-detects Homebrew's keg-only prefix."
+            log_warning "Build from source requires CGO and a C toolchain."
+            log_warning "Install Xcode Command Line Tools: xcode-select --install"
             ;;
         Linux)
-            log_warning "Missing ICU headers. Install them with your package manager, for example:"
-            log_warning "  Debian/Ubuntu: sudo apt-get install -y libicu-dev libzstd-dev"
-            log_warning "  Fedora/RHEL: sudo dnf install -y libicu-devel libzstd-devel"
+            log_warning "Build from source requires CGO and a C toolchain."
+            log_warning "Install build tools with your package manager, for example:"
+            log_warning "  Debian/Ubuntu: sudo apt-get install -y build-essential pkg-config libzstd-dev"
+            log_warning "  Fedora/RHEL: sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config libzstd-devel"
             ;;
         FreeBSD)
-            log_warning "Missing ICU headers. Install them with: pkg install -y icu zstd"
+            log_warning "Build from source requires CGO and a C toolchain."
+            log_warning "Install them with: pkg install -y gcc gmake pkgconf zstd"
             ;;
     esac
 }
@@ -513,7 +457,7 @@ verify_binary_has_cgo() {
 
     if strings "$binary_path" | awk '/^build[[:space:]]+CGO_ENABLED=0$/ { found=1 } END { exit(found?0:1) }'; then
         log_error "Binary produced by ${install_method} was built without CGO support"
-        log_warning "CGO is required for some features. Install ICU headers and retry."
+        log_warning "CGO is required for some features. Install a working C toolchain and retry."
         return 1
     fi
 
@@ -521,56 +465,64 @@ verify_binary_has_cgo() {
     return 0
 }
 
-# Install using go install (fallback)
+# Install using go install (fallback).
+#
+# Tries CGO_ENABLED=1 first for an embedded-capable binary. If that fails
+# (host lacks C toolchain or transitive Dolt deps' headers), falls back to
+# CGO_ENABLED=0 which yields a server-mode-only binary that still works on
+# any Go-capable box. See docs/ICU-POLICY.md and docs/INSTALLING.md.
 install_with_go() {
     log_info "Installing bd using 'go install'..."
-    configure_cgo_build_env
 
-    if CGO_ENABLED=1 go install github.com/gastownhall/beads/cmd/bd@latest; then
-        log_success "bd installed successfully via go install"
+    local gobin bin_dir
+    gobin=$(go env GOBIN 2>/dev/null || true)
+    if [ -n "$gobin" ]; then
+        bin_dir="$gobin"
+    else
+        bin_dir="$(go env GOPATH)/bin"
+    fi
 
-        # Record where we expect the binary to have been installed
-        # Prefer GOBIN if set, otherwise GOPATH/bin
-        local gobin
-        gobin=$(go env GOBIN 2>/dev/null || true)
-        if [ -n "$gobin" ]; then
-            bin_dir="$gobin"
-        else
-            bin_dir="$(go env GOPATH)/bin"
-        fi
+    if CGO_ENABLED=1 GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=gms_pure_go" go install github.com/gastownhall/beads/cmd/bd@latest; then
+        log_success "bd installed via go install (embedded-capable)"
         LAST_INSTALL_PATH="$bin_dir/bd"
 
         if ! verify_binary_has_cgo "$LAST_INSTALL_PATH" "go install"; then
             return 1
         fi
-
-        # Optional local ad-hoc re-sign for macOS (off by default)
-        resign_for_macos "$bin_dir/bd"
-
-        # Create 'beads' alias symlink
-        create_beads_alias "$bin_dir"
-
-        # Check if GOPATH/bin (or GOBIN) is in PATH
-        if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
-            log_warning "$bin_dir is not in your PATH"
-            echo ""
-            echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-            echo "  export PATH=\"\$PATH:$bin_dir\""
-            echo ""
-        fi
-
-        return 0
     else
-        log_error "go install failed"
-        print_missing_icu_help
-        return 1
+        log_warning "go install with CGO failed; retrying without CGO (server-mode-only binary)"
+        if CGO_ENABLED=0 go install github.com/gastownhall/beads/cmd/bd@latest; then
+            log_success "bd installed via go install (CGO_ENABLED=0, server mode only)"
+            log_warning "This bd cannot use embedded Dolt. Run 'bd init --server' to use an external dolt sql-server, or reinstall with a C toolchain for embedded mode."
+            LAST_INSTALL_PATH="$bin_dir/bd"
+        else
+            log_error "go install failed both with and without CGO"
+            print_missing_build_deps_help
+            return 1
+        fi
     fi
+
+    # Optional local ad-hoc re-sign for macOS (off by default)
+    resign_for_macos "$bin_dir/bd"
+
+    # Create 'beads' alias symlink
+    create_beads_alias "$bin_dir"
+
+    # Check if GOPATH/bin (or GOBIN) is in PATH
+    if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
+        log_warning "$bin_dir is not in your PATH"
+        echo ""
+        echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+        echo "  export PATH=\"\$PATH:$bin_dir\""
+        echo ""
+    fi
+
+    return 0
 }
 
 # Build from source (last resort)
 build_from_source() {
     log_info "Building bd from source..."
-    configure_cgo_build_env
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
@@ -630,8 +582,8 @@ build_from_source() {
             return 0
         else
             log_error "Build failed"
-            print_missing_icu_help
-    cd - > /dev/null || cd "$HOME"
+            print_missing_build_deps_help
+            cd - > /dev/null || cd "$HOME"
             cd - > /dev/null
             rm -rf "$tmp_dir"
             return 1
@@ -805,4 +757,3 @@ main() {
 }
 
 main "$@"
-

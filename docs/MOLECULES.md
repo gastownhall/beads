@@ -115,6 +115,9 @@ bd mol bond A B --type conditional # B runs only if A fails
 
 This is how orchestrators run autonomous workflows - agents follow the dependency graph, handing off between sessions, until all work closes.
 
+Ordinary epics stay open when the last child closes. They become close-eligible
+work that can be closed explicitly once the parent outcome is actually done.
+
 ## Phase Metaphor (Templates)
 
 For reusable workflows, beads uses a chemistry metaphor:

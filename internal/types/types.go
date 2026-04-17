@@ -40,6 +40,7 @@ type Issue struct {
 	CreatedAt       time.Time  `json:"created_at"`
 	CreatedBy       string     `json:"created_by,omitempty"` // Who created this issue (GH#748)
 	UpdatedAt       time.Time  `json:"updated_at"`
+	StartedAt       *time.Time `json:"started_at,omitempty"` // When this issue transitioned to in_progress (GH#2796)
 	ClosedAt        *time.Time `json:"closed_at,omitempty"`
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
@@ -1192,6 +1193,8 @@ type IssueFilter struct {
 	UpdatedBefore *time.Time
 	ClosedAfter   *time.Time
 	ClosedBefore  *time.Time
+	StartedAfter  *time.Time
+	StartedBefore *time.Time
 
 	// Empty/null checks
 	EmptyDescription bool
