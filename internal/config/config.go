@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/viper"
 	"gopkg.in/yaml.v3"
 )
 

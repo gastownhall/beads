@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/spf13/viper"
+	"github.com/steveyegge/beads/internal/viper"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
