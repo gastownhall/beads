@@ -200,7 +200,7 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 				DependentCount:  counts.DependentCount,
 				CommentCount:    commentCounts[issue.ID],
 			}
-			if err := enc.Encode(record); err != nil {
+			if err := enc.Encode(exportIssueRecord{RecordType: "issue", IssueWithCounts: record}); err != nil {
 				return 0, 0, fmt.Errorf("failed to write issue %s: %w", issue.ID, err)
 			}
 			issueCount++

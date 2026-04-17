@@ -50,6 +50,14 @@ var (
 	exportNoMemories   bool
 )
 
+// exportIssueRecord wraps IssueWithCounts with a "_type":"issue" discriminator so every
+// JSONL line in bd export is self-describing (GH#3271). Using an embedded struct lets the
+// encoder handle the field natively rather than splicing bytes into the marshaled output.
+type exportIssueRecord struct {
+	RecordType string `json:"_type"`
+	*types.IssueWithCounts
+}
+
 func init() {
 	exportCmd.Flags().StringVarP(&exportOutput, "output", "o", "", "Output file path (default: stdout)")
 	exportCmd.Flags().BoolVar(&exportAll, "all", false, "Include all records (infra, templates, gates)")
@@ -170,13 +178,10 @@ func runExport(cmd *cobra.Command, args []string) error {
 			CommentCount:    commentCounts[issue.ID],
 		}
 
-		data, err := json.Marshal(record)
+		data, err := json.Marshal(exportIssueRecord{RecordType: "issue", IssueWithCounts: record})
 		if err != nil {
 			return fmt.Errorf("failed to marshal issue %s: %w", issue.ID, err)
 		}
-		// Prepend _type discriminator so every JSONL line is self-describing (GH#3271).
-		// Memory lines already have _type; this makes issue lines consistent.
-		data = append([]byte(`{"_type":"issue",`), data[1:]...)
 		if _, err := w.Write(data); err != nil {
 			return fmt.Errorf("failed to write: %w", err)
 		}
