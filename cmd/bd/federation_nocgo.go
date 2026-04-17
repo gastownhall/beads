@@ -5,7 +5,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 var federationCmd = &cobra.Command{

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 // memoryPrefix is prepended (after kvPrefix) to all memory keys.

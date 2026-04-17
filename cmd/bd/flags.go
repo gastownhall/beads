@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 // registerCommonIssueFlags registers flags common to create and update commands.

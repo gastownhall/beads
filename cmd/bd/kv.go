@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 // kvPrefix is prepended to all user keys to separate them from internal config

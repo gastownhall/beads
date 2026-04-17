@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"

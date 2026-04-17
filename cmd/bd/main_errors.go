@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 // isFreshCloneError checks if the error is due to a fresh clone scenario

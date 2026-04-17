@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 // helpAllFlag is the --all flag for the help command

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/ui"
 )

@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 // TestIssuesFlagRegistered verifies that --issues is registered on all tracker sync commands.

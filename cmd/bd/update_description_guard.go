@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 func descriptionUsesExternalInput(cmd *cobra.Command) bool {

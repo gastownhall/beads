@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 func TestReadBodyFile(t *testing.T) {

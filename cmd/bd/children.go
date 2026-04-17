@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/cobra"
 )
 
 // childrenCmd lists child beads of a parent.
