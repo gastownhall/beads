@@ -1665,6 +1665,51 @@ func TestEnginePushWithParentFilterBasic(t *testing.T) {
 	}
 }
 
+func TestEnginePushWithParentFilterDoesNotUpdateOrphanExternalIssues(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	parent := &types.Issue{ID: "bd-par-orphan", Title: "Parent", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}
+	child := &types.Issue{ID: "bd-child-orphan", Title: "Canceled upstream title", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2}
+	for _, issue := range []*types.Issue{parent, child} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", issue.ID, err)
+		}
+	}
+	dep := &types.Dependency{IssueID: "bd-child-orphan", DependsOnID: "bd-par-orphan", Type: types.DepParentChild}
+	if err := store.AddDependency(ctx, dep, "test-actor"); err != nil {
+		t.Fatalf("AddDependency error: %v", err)
+	}
+
+	// Simulate an orphan external issue with an overlapping title. Current push
+	// must ignore it because no local Linear external_ref claims ownership.
+	tk := newMockTracker("linear")
+	tk.issues = []TrackerIssue{
+		{
+			ID:         "linear-1",
+			Identifier: "LIN-1",
+			Title:      "Canceled upstream title",
+			UpdatedAt:  time.Now().UTC(),
+		},
+	}
+
+	engine := NewEngine(tk, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, ParentID: "bd-par-orphan"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tk.updated) != 0 {
+		t.Fatalf("updated %d external issues, want 0", len(tk.updated))
+	}
+	if len(tk.created) != 2 {
+		t.Fatalf("created %d issues, want 2 (parent + child)", len(tk.created))
+	}
+}
+
 func TestEnginePushWithParentFilterDeep(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
