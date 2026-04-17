@@ -16,6 +16,8 @@ type IDGenerationOptions struct {
 	UsedIDs    map[string]bool // Pre-populated set to avoid collisions (e.g., DB IDs)
 }
 
+const missingExplicitStateMapMessage = "linear.state_map is not configured.\nRun 'bd linear link' to configure status mapping first."
+
 // BuildLinearDescription formats a Beads issue for Linear's description field.
 // This mirrors the payload used during push to keep hash comparisons consistent.
 func BuildLinearDescription(issue *types.Issue) string {
@@ -329,7 +331,7 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 		return "", fmt.Errorf("no workflow states found")
 	}
 	if config == nil || len(config.ExplicitStateMap) == 0 {
-		return "", fmt.Errorf("linear.state_map is not configured.\nRun 'bd linear link' to configure status mapping first.")
+		return "", fmt.Errorf("%s", missingExplicitStateMapMessage)
 	}
 
 	var nameMatches []State
@@ -421,6 +423,24 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) b
 		return false
 	}
 	return StateToBeadsStatus(remote.State, config) == local.Status
+}
+
+// PushFieldsEqualToBeads is a fallback comparator for cases where Linear's raw
+// payload is unavailable and only the normalized beads form remains.
+func PushFieldsEqualToBeads(local, remote *types.Issue) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+	if local.Title != remote.Title {
+		return false
+	}
+	if BuildLinearDescription(local) != remote.Description {
+		return false
+	}
+	if local.Priority != remote.Priority {
+		return false
+	}
+	return local.Status == remote.Status
 }
 
 // LabelToIssueType infers issue type from label names.

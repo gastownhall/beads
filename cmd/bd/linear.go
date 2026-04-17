@@ -191,7 +191,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 	teamIDs := getLinearTeamIDs(ctx, cliTeams)
-	willPush := push || (!pull && !push)
+	willPush := push || !pull
 
 	// Require explicit --team for push when multiple teams are configured.
 	if willPush && len(teamIDs) > 1 && len(cliTeams) == 0 {
@@ -351,10 +351,14 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 		},
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
 			remoteIssue, ok := remote.Raw.(*linear.Issue)
-			if !ok || remoteIssue == nil {
+			if ok && remoteIssue != nil {
+				return linear.PushFieldsEqual(local, remoteIssue, config)
+			}
+			remoteConv := lt.FieldMapper().IssueToBeads(remote)
+			if remoteConv == nil || remoteConv.Issue == nil {
 				return false
 			}
-			return linear.PushFieldsEqual(local, remoteIssue, config)
+			return linear.PushFieldsEqualToBeads(local, remoteConv.Issue)
 		},
 		BuildStateCache: func(ctx context.Context) (interface{}, error) {
 			return linear.BuildStateCacheFromTracker(ctx, lt)

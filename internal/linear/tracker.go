@@ -231,7 +231,7 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 // mappings for every configured team before any mutation occurs.
 func (t *Tracker) ValidatePushStateMappings(ctx context.Context) error {
 	if t.config == nil || len(t.config.ExplicitStateMap) == 0 {
-		return fmt.Errorf("linear.state_map is not configured.\nRun 'bd linear link' to configure status mapping first.")
+		return fmt.Errorf("%s", missingExplicitStateMapMessage)
 	}
 	for _, teamID := range t.teamIDs {
 		client := t.clients[teamID]

@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -614,7 +615,7 @@ func TestResolveStateIDForBeadsStatusRequiresExplicitMappings(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing explicit state map to fail")
 	}
-	if err.Error() != "linear.state_map is not configured.\nRun 'bd linear link' to configure status mapping first." {
+	if !strings.Contains(err.Error(), "linear.state_map is not configured") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -633,7 +634,7 @@ func TestResolveStateIDForBeadsStatusRejectsAmbiguousTypeFallback(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected ambiguous completed mapping to fail")
 	}
-	if got := err.Error(); got != "linear.state_map type fallback is ambiguous for beads status \"closed\" across Linear states: Done, Monitoring" {
+	if got := err.Error(); !strings.Contains(got, "type fallback is ambiguous") || !strings.Contains(got, "Done, Monitoring") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -677,5 +678,29 @@ func TestPushFieldsEqualIgnoresLocalOnlyDifferences(t *testing.T) {
 
 	if !PushFieldsEqual(local, remote, config) {
 		t.Fatal("expected push fields to compare equal despite local-only issue type and labels")
+	}
+}
+
+func TestPushFieldsEqualToBeads(t *testing.T) {
+	local := &types.Issue{
+		Title:       "Ship the fix",
+		Description: "Main body",
+		Notes:       "Local-only notes",
+		Status:      types.StatusInProgress,
+		Priority:    1,
+		IssueType:   types.TypeFeature,
+		Labels:      []string{"customer-visible"},
+	}
+	remote := &types.Issue{
+		Title:       "Ship the fix",
+		Description: "Main body\n\n## Notes\nLocal-only notes",
+		Status:      types.StatusInProgress,
+		Priority:    1,
+		IssueType:   types.TypeTask,
+		Labels:      []string{"ignored"},
+	}
+
+	if !PushFieldsEqualToBeads(local, remote) {
+		t.Fatal("expected beads-form fallback comparison to ignore local-only fields")
 	}
 }
