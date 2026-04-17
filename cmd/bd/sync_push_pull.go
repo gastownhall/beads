@@ -395,17 +395,23 @@ func runLinearPush(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 	teamIDs := getLinearTeamIDs(ctx, nil)
+	if len(teamIDs) > 1 {
+		FatalError("linear push does not support multiple configured teams\nUse: bd linear sync --push --team <TEAM_ID>")
+	}
 
 	lt := &linear.Tracker{}
 	lt.SetTeamIDs(teamIDs)
 	if err := lt.Init(ctx, store); err != nil {
 		FatalError("initializing Linear tracker: %v", err)
 	}
+	if err := lt.ValidatePushStateMappings(ctx); err != nil {
+		FatalError("%v", err)
+	}
 
 	engine := tracker.NewEngine(lt, store, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-	engine.PushHooks = buildLinearPushHooks(ctx, lt)
+	engine.PushHooks = buildLinearPushHooks(ctx, lt, len(args) > 0)
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Push:             true,
