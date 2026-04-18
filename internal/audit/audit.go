@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ const (
 	FileName = "interactions.jsonl"
 	idPrefix = "int-"
 )
+
+var ensureFileBeforeCreateHook func(string)
 
 // Entry is a generic append-only audit event. It is intentionally flexible:
 // use Kind + typed fields for common cases, and Extra for everything else.
@@ -65,15 +68,17 @@ func EnsureFile() (string, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 		return "", fmt.Errorf("failed to create .beads directory: %w", err)
 	}
-	_, statErr := os.Stat(p)
-	if statErr == nil {
+	if ensureFileBeforeCreateHook != nil {
+		ensureFileBeforeCreateHook(p)
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644) // nolint:gosec // JSONL is intended to be shared via git across clones/tools.
+	if err == nil {
+		if closeErr := f.Close(); closeErr != nil {
+			return "", fmt.Errorf("failed to close interactions log: %w", closeErr)
+		}
 		return p, nil
 	}
-	if !os.IsNotExist(statErr) {
-		return "", fmt.Errorf("failed to stat interactions log: %w", statErr)
-	}
-	// nolint:gosec // JSONL is intended to be shared via git across clones/tools.
-	if err := os.WriteFile(p, []byte{}, 0644); err != nil {
+	if !errors.Is(err, os.ErrExist) {
 		return "", fmt.Errorf("failed to create interactions log: %w", err)
 	}
 	return p, nil
