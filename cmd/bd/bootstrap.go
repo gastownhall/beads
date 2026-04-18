@@ -276,6 +276,11 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		if beadsDirExists || dbAction.Action != "none" {
 			return dbAction
 		}
+		// For synthesized paths with no local workspace directory yet, defer the
+		// existing-db no-op until we've ruled out all other recovery paths.
+		// This preserves the sync-precedence fix without downgrading the
+		// legitimate "database already exists" case into a fresh init.
+		plan = dbAction
 	}
 
 	// Check for backup JSONL files (must be non-empty to be useful)
@@ -294,6 +299,10 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		plan.JSONLFile = gitJSONL
 		plan.Action = "jsonl-import"
 		plan.Reason = "Git-tracked issues.jsonl found — will import from " + gitJSONL
+		return plan
+	}
+
+	if plan.Action == "none" {
 		return plan
 	}
 

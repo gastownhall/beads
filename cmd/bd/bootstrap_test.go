@@ -1031,6 +1031,60 @@ func TestDetectBootstrapAction_WorktreeSynthesizedDirPrefersSyncOverDefaultShare
 	}
 }
 
+func TestDetectBootstrapAction_SynthesizedDirWithoutRecoveryStillUsesExistingSharedDB(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	worktreeDir := filepath.Join(t.TempDir(), "worktree")
+	if err := os.MkdirAll(worktreeDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(worktreeDir); err != nil {
+		t.Fatal(err)
+	}
+
+	sharedDoltDir := filepath.Join(homeDir, ".beads", "shared-server", "dolt")
+	if err := os.MkdirAll(filepath.Join(sharedDoltDir, "project_existing"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	synthesizedDir := filepath.Join(worktreeDir, ".beads")
+	cfg := configfile.DefaultConfig()
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltDatabase = "project_existing"
+
+	origCheck := checkBootstrapServerDB
+	checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
+		if probeCfg.database != "project_existing" {
+			t.Fatalf("probeCfg.database = %q, want %q", probeCfg.database, "project_existing")
+		}
+		return bootstrapServerDBCheck{Exists: true, Reachable: true}
+	}
+	defer func() { checkBootstrapServerDB = origCheck }()
+
+	plan := detectBootstrapAction(synthesizedDir, cfg)
+
+	if plan.Action != "none" {
+		t.Fatalf("expected action=%q, got %q: %s", "none", plan.Action, plan.Reason)
+	}
+	if !plan.HasExisting {
+		t.Fatal("expected HasExisting to be true when configured shared-server DB already exists")
+	}
+}
+
 // TestFinalizeSyncedBootstrapWritesConfigFiles verifies that after a sync
 // clone, finalizeSyncedBootstrap writes the metadata.json and config.yaml
 // files bd needs to reopen the cloned database. This is the regression
