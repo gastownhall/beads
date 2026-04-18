@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/steveyegge/beads/internal/yamlshim"
 )
 
 // Viper is a minimal configuration store.
@@ -67,7 +67,7 @@ func (v *Viper) ReadInConfig() error {
 		return fmt.Errorf("error reading config file %s: %w", v.configFile, err)
 	}
 	var m map[string]interface{}
-	if err := yaml.Unmarshal(data, &m); err != nil {
+	if err := yamlshim.Unmarshal(data, &m); err != nil {
 		return fmt.Errorf("error parsing config file %s: %w", v.configFile, err)
 	}
 	if m == nil {
@@ -85,7 +85,7 @@ func (v *Viper) MergeInConfig() error {
 		return fmt.Errorf("error reading config file %s: %w", v.configFile, err)
 	}
 	var m map[string]interface{}
-	if err := yaml.Unmarshal(data, &m); err != nil {
+	if err := yamlshim.Unmarshal(data, &m); err != nil {
 		return fmt.Errorf("error parsing config file %s: %w", v.configFile, err)
 	}
 	if m == nil {

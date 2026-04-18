@@ -10,7 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/viper"
-	"gopkg.in/yaml.v3"
+	"github.com/steveyegge/beads/internal/yamlshim"
 )
 
 var v *viper.Viper
@@ -443,13 +443,13 @@ func SaveConfigValue(key string, value interface{}, beadsDir string) error {
 	// (defaults, env vars, overrides) into the config file.
 	existing := make(map[string]interface{})
 	if data, err := os.ReadFile(filepath.Clean(configPath)); err == nil {
-		_ = yaml.Unmarshal(data, &existing)
+		_ = yamlshim.Unmarshal(data, &existing)
 	}
 
 	// Set the single key using dot-path splitting for nested keys (e.g. "routing.mode").
 	setNestedKey(existing, key, value)
 
-	out, err := yaml.Marshal(existing)
+	out, err := yamlshim.Marshal(existing)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
@@ -494,7 +494,7 @@ func GetStringFromDir(beadsDir, key string) string {
 		return ""
 	}
 	var root map[string]interface{}
-	if err := yaml.Unmarshal(data, &root); err != nil {
+	if err := yamlshim.Unmarshal(data, &root); err != nil {
 		return ""
 	}
 	parts := strings.SplitN(key, ".", 2)

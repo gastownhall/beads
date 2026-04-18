@@ -11,7 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"gopkg.in/yaml.v3"
+	"github.com/steveyegge/beads/internal/yamlshim"
 )
 
 // localConfig represents the config.yaml structure for no-db and prefer-dolt detection
@@ -488,7 +488,7 @@ func isNoDbModeConfigured(beadsDir string) bool {
 	}
 
 	var cfg localConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := yamlshim.Unmarshal(data, &cfg); err != nil {
 		return false
 	}
 

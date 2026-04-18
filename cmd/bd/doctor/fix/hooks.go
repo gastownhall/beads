@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/steveyegge/beads/internal/yamlshim"
 )
 
 // ExternalHookManager represents a detected external hook management tool.
@@ -195,7 +195,7 @@ func CheckLefthookBdIntegration(path string) *HookIntegrationStatus {
 			return nil
 		}
 	default: // .yml, .yaml
-		if err := yaml.Unmarshal(content, &config); err != nil {
+		if err := yamlshim.Unmarshal(content, &config); err != nil {
 			return nil
 		}
 	}
@@ -308,7 +308,7 @@ func CheckPrecommitBdIntegration(path string) *HookIntegrationStatus {
 
 	// Parse YAML config
 	var config map[string]interface{}
-	if err := yaml.Unmarshal(content, &config); err != nil {
+	if err := yamlshim.Unmarshal(content, &config); err != nil {
 		return nil
 	}
 

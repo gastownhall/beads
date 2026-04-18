@@ -7,10 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/yamlshim"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -154,7 +153,7 @@ func readTypesFromYAML(beadsDir string) ([]string, error) {
 	}
 
 	var cfg multiRepoYAMLConfig
-	if err := yaml.Unmarshal(content, &cfg); err != nil {
+	if err := yamlshim.Unmarshal(content, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config.yaml: %w", err)
 	}
 
