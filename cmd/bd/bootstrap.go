@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -228,51 +229,22 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		Database: cfg.GetDoltDatabase(),
 	}
 
+	// When bootstrap synthesized a fallback beadsDir for a fresh clone or
+	// worktree recovery, the path may not exist yet. In that case we must let
+	// sync.remote / refs/dolt/data detection run before treating an existing
+	// shared-server database as "nothing to do", otherwise an unrelated default
+	// "beads" database can mask the real recovery path.
+	beadsDirExists := false
+	if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+		beadsDirExists = true
+	}
+
 	// Check for existing database (path differs between server and embedded mode).
-	// Use cfg.IsDoltServerMode() (which checks metadata.json + env vars) plus
-	// doltserver.IsSharedServerMode() (which also checks config.yaml) so that
-	// shared-server mode configured via dolt.shared-server: true in config.yaml
-	// correctly resolves the database path. (GH#30)
-	isServer := cfg.IsDoltServerMode() || doltserver.IsSharedServerMode()
-	var dbPath string
-	if isServer {
-		dbPath = doltserver.ResolveDoltDir(beadsDir)
-	} else {
-		dbPath = filepath.Join(beadsDir, "embeddeddolt")
-	}
-	if info, err := os.Stat(dbPath); err == nil && info.IsDir() {
-		entries, _ := os.ReadDir(dbPath)
-		if len(entries) > 0 {
-			if isServer {
-				resolved := doltserver.DefaultConfig(beadsDir)
-				probeCfg := bootstrapServerProbeConfig{
-					host:     cfg.GetDoltServerHost(),
-					port:     resolved.Port,
-					user:     cfg.GetDoltServerUser(),
-					pass:     cfg.GetDoltServerPassword(),
-					database: cfg.GetDoltDatabase(),
-					tls:      cfg.GetDoltServerTLS(),
-				}
-				result := checkBootstrapServerDB(probeCfg)
-				if result.Err != nil {
-					plan.Action = "none"
-					plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", cfg.GetDoltDatabase(), result.Err)
-					return plan
-				}
-				if result.Exists {
-					plan.HasExisting = true
-					plan.Action = "none"
-					plan.Reason = fmt.Sprintf("Database %s already exists on server at %s:%d", probeCfg.database, probeCfg.host, probeCfg.port)
-					return plan
-				}
-			} else {
-				plan.HasExisting = true
-				plan.Action = "none"
-				plan.Reason = "Database already exists at " + dbPath
-				return plan
-			}
-		}
-	}
+	// Determine server/shared-server mode from the target workspace itself
+	// (metadata.json, env vars, and the target config.yaml when present) rather
+	// than unrelated global config loaded from the caller's current repo.
+	isSharedServer := bootstrapSharedServerMode(beadsDir)
+	isServer := cfg.IsDoltServerMode() || isSharedServer
 
 	// Check sync.remote (primary) or sync.git-remote (deprecated fallback)
 	syncRemote := resolveSyncRemote()
@@ -294,6 +266,15 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 				plan.Reason = "Found Dolt data on git origin (refs/dolt/data) — will clone from " + originURL
 				return plan
 			}
+		}
+	}
+
+	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
+		// If the local beadsDir does not exist yet, prefer recovering via sync
+		// first. This avoids false "nothing to do" results when the default
+		// shared-server database name happens to exist for another project.
+		if beadsDirExists || dbAction.Action != "none" {
+			return dbAction
 		}
 	}
 
@@ -320,6 +301,114 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	plan.Action = "init"
 	plan.Reason = "No existing database, remote, or backup — will create fresh database"
 	return plan
+}
+
+func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, isSharedServer bool) (BootstrapPlan, bool) {
+	plan := BootstrapPlan{
+		BeadsDir: beadsDir,
+		Database: cfg.GetDoltDatabase(),
+	}
+
+	var dbPath string
+	if isServer {
+		dbPath = bootstrapServerDoltDir(beadsDir, cfg, isSharedServer)
+	} else {
+		dbPath = filepath.Join(beadsDir, "embeddeddolt")
+	}
+	if info, err := os.Stat(dbPath); err != nil || !info.IsDir() {
+		return BootstrapPlan{}, false
+	}
+
+	entries, _ := os.ReadDir(dbPath)
+	if len(entries) == 0 {
+		return BootstrapPlan{}, false
+	}
+
+	if isServer {
+		probeCfg := bootstrapServerProbeConfig{
+			host:     cfg.GetDoltServerHost(),
+			port:     bootstrapServerPort(beadsDir, cfg, isSharedServer),
+			user:     cfg.GetDoltServerUser(),
+			pass:     cfg.GetDoltServerPassword(),
+			database: cfg.GetDoltDatabase(),
+			tls:      cfg.GetDoltServerTLS(),
+		}
+		result := checkBootstrapServerDB(probeCfg)
+		if result.Err != nil {
+			plan.Action = "none"
+			plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", cfg.GetDoltDatabase(), result.Err)
+			return plan, true
+		}
+		if result.Exists {
+			plan.HasExisting = true
+			plan.Action = "none"
+			plan.Reason = fmt.Sprintf("Database %s already exists on server at %s:%d", probeCfg.database, probeCfg.host, probeCfg.port)
+			return plan, true
+		}
+		return BootstrapPlan{}, false
+	}
+
+	plan.HasExisting = true
+	plan.Action = "none"
+	plan.Reason = "Database already exists at " + dbPath
+	return plan, true
+}
+
+func bootstrapSharedServerMode(beadsDir string) bool {
+	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
+		return true
+	}
+	return strings.EqualFold(config.GetStringFromDir(beadsDir, "dolt.shared-server"), "true")
+}
+
+func bootstrapServerDoltDir(beadsDir string, cfg *configfile.Config, isSharedServer bool) string {
+	if isSharedServer {
+		if dir, err := doltserver.SharedDoltDir(); err == nil {
+			return dir
+		}
+	}
+
+	if d := cfg.GetDoltDataDir(); d != "" {
+		if filepath.IsAbs(d) {
+			return d
+		}
+		return filepath.Join(beadsDir, d)
+	}
+
+	return filepath.Join(beadsDir, "dolt")
+}
+
+func bootstrapServerPort(beadsDir string, cfg *configfile.Config, isSharedServer bool) int {
+	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+
+	if isSharedServer {
+		if sharedDir, err := doltserver.SharedServerDir(); err == nil {
+			if port := doltserver.ReadPortFile(sharedDir); port > 0 {
+				return port
+			}
+		}
+		return doltserver.DefaultSharedServerPort
+	}
+
+	if port := doltserver.ReadPortFile(beadsDir); port > 0 {
+		return port
+	}
+
+	if p := config.GetStringFromDir(beadsDir, "dolt.port"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+
+	if cfg.DoltServerPort > 0 {
+		return cfg.DoltServerPort
+	}
+
+	return configfile.DefaultDoltServerPort
 }
 
 func printBootstrapPlan(plan BootstrapPlan) {
