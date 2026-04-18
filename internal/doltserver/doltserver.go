@@ -711,102 +711,128 @@ func Start(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("configuring dolt identity: %w", err)
 	}
 
-	// Ensure dolt database directory is initialized
-	if err := ensureDoltInit(doltDir); err != nil {
-		return nil, fmt.Errorf("initializing dolt database: %w", err)
-	}
-
-	// Rotate the log if it has grown past the configured ceiling. This is a
-	// startup-only check — dolt owns the fd directly once launched, so we can
-	// only intervene between runs. See logrotate.go for the caveat discussion.
-	maybeRotateLog(beadsDir)
-
-	// Open log file
-	logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
-	if err != nil {
-		return nil, fmt.Errorf("opening log file: %w", err)
-	}
-
-	// Resolve the port to use. Explicit ports (env/config) go through
-	// reclaimPort for conflict detection. Port 0 means ephemeral — allocate
-	// a fresh port from the OS with retry for TOCTOU races.
-	actualPort := cfg.Port
-	explicitPort := actualPort > 0
-
-	if explicitPort {
-		// Explicit port: check for conflicts and adopt existing servers.
-		adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
-		if reclaimErr != nil {
-			_ = logFile.Close()
-			return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
+	// Launch dolt sql-server, retrying once after an automatic corrupt-
+	// manifest recovery (GH#3290).
+	var (
+		pid               int
+		actualPort        int
+		lastErr           error
+		attempts          int
+		recoveryAttempted bool
+	)
+startupLoop:
+	for {
+		// Ensure dolt database directory is initialized
+		if err := ensureDoltInit(doltDir); err != nil {
+			return nil, fmt.Errorf("initializing dolt database: %w", err)
 		}
-		if adoptPID > 0 {
-			_ = logFile.Close()
-			_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
-			_ = writePortFile(beadsDir, actualPort)
-			return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
+
+		// Rotate the log if it has grown past the configured ceiling. This is a
+		// startup-only check — dolt owns the fd directly once launched, so we can
+		// only intervene between runs. See logrotate.go for the caveat discussion.
+		maybeRotateLog(beadsDir)
+
+		// Open log file
+		logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
+		if err != nil {
+			return nil, fmt.Errorf("opening log file: %w", err)
 		}
-	}
 
-	// Start dolt sql-server, with retry loop for ephemeral port TOCTOU.
-	var pid int
-	var lastErr error
-	attempts := 1
-	if !explicitPort {
-		attempts = maxEphemeralPortAttempts
-	}
+		// Resolve the port to use. Explicit ports (env/config) go through
+		// reclaimPort for conflict detection. Port 0 means ephemeral — allocate
+		// a fresh port from the OS with retry for TOCTOU races.
+		actualPort = cfg.Port
+		explicitPort := actualPort > 0
 
-	for i := range attempts {
-		if !explicitPort {
-			p, allocErr := allocateEphemeralPort(cfg.Host)
-			if allocErr != nil {
-				lastErr = allocErr
-				continue
+		if explicitPort {
+			// Explicit port: check for conflicts and adopt existing servers.
+			adoptPID, reclaimErr := reclaimPort(cfg.Host, actualPort, beadsDir)
+			if reclaimErr != nil {
+				_ = logFile.Close()
+				return nil, fmt.Errorf("cannot start dolt server on port %d: %w", actualPort, reclaimErr)
 			}
-			actualPort = p
-		}
-
-		cmd := exec.Command(doltBin, buildDoltServerArgs(cfg.Host, actualPort)...) //nolint:gosec // doltBin is resolved from PATH, not user input
-		cmd.Dir = doltDir
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-		cmd.Stdin = nil
-		cmd.SysProcAttr = procAttrDetached()
-		cmd.Env = os.Environ()
-
-		if startErr := cmd.Start(); startErr != nil {
-			lastErr = startErr
-			if !explicitPort {
-				continue // retry with a new ephemeral port
+			if adoptPID > 0 {
+				_ = logFile.Close()
+				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
+				_ = writePortFile(beadsDir, actualPort)
+				return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
 			}
-			_ = logFile.Close()
-			return nil, fmt.Errorf("starting dolt sql-server: %w", startErr)
 		}
 
-		pid = cmd.Process.Pid
-		_ = cmd.Process.Release()
-
-		// Quick check: did the process exit immediately (bind failure)?
-		// Give it a moment to fail on port bind before proceeding.
-		time.Sleep(200 * time.Millisecond)
-		if !isProcessAlive(pid) {
-			lastErr = fmt.Errorf("dolt sql-server exited immediately on port %d (attempt %d/%d)", actualPort, i+1, attempts)
-			pid = 0
-			if !explicitPort {
-				continue
-			}
-			_ = logFile.Close()
-			return nil, lastErr
-		}
-
+		// Start dolt sql-server, with retry loop for ephemeral port TOCTOU.
+		pid = 0
 		lastErr = nil
-		break
-	}
-	_ = logFile.Close()
+		attempts = 1
+		if !explicitPort {
+			attempts = maxEphemeralPortAttempts
+		}
 
-	if lastErr != nil {
-		return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\nCheck logs: %s",
-			attempts, lastErr, logPath(beadsDir))
+		for i := range attempts {
+			if !explicitPort {
+				p, allocErr := allocateEphemeralPort(cfg.Host)
+				if allocErr != nil {
+					lastErr = allocErr
+					continue
+				}
+				actualPort = p
+			}
+
+			cmd := exec.Command(doltBin, buildDoltServerArgs(cfg.Host, actualPort)...) //nolint:gosec // doltBin is resolved from PATH, not user input
+			cmd.Dir = doltDir
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+			cmd.Stdin = nil
+			cmd.SysProcAttr = procAttrDetached()
+			cmd.Env = os.Environ()
+
+			if startErr := cmd.Start(); startErr != nil {
+				lastErr = startErr
+				if !explicitPort {
+					continue // retry with a new ephemeral port
+				}
+				break
+			}
+
+			pid = cmd.Process.Pid
+			_ = cmd.Process.Release()
+
+			// Quick check: did the process exit immediately (bind failure)?
+			// Give it a moment to fail on port bind before proceeding.
+			time.Sleep(200 * time.Millisecond)
+			if !isProcessAlive(pid) {
+				lastErr = fmt.Errorf("dolt sql-server exited immediately on port %d (attempt %d/%d)", actualPort, i+1, attempts)
+				pid = 0
+				if !explicitPort {
+					continue
+				}
+				break
+			}
+
+			lastErr = nil
+			break
+		}
+		_ = logFile.Close()
+
+		if lastErr != nil {
+			// GH#3290: detect unclean-shutdown manifest corruption and auto-
+			// recover when the journal is empty (no data to lose). Recovery
+			// backs up the corrupt .dolt/ with a timestamped suffix and
+			// reinitializes in place, then the outer loop retries startup.
+			if !recoveryAttempted {
+				recoveryAttempted = true
+				if backups, recErr := recoverCorruptManifest(beadsDir, doltDir); recErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: corrupt manifest recovery failed: %v\n", recErr)
+				} else if len(backups) > 0 {
+					for _, b := range backups {
+						fmt.Fprintf(os.Stderr, "Info: backed up corrupt dolt database to %s and reinitialized (GH#3290)\n", filepath.Base(b))
+					}
+					continue startupLoop
+				}
+			}
+			return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\nCheck logs: %s",
+				attempts, lastErr, logPath(beadsDir))
+		}
+		break
 	}
 
 	// Write PID and port files
