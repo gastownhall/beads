@@ -556,7 +556,7 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 	// Persist sync.remote so subsequent fresh clones (and bd bootstrap
 	// retries) can rediscover the remote without re-probing origin refs.
 	if syncRemote != "" {
-		if err := config.SetYamlConfig("sync.remote", syncRemote); err != nil {
+		if err := config.SetYamlConfigInDir(beadsDir, "sync.remote", syncRemote); err != nil {
 			return fmt.Errorf("persist sync.remote to config.yaml: %w", err)
 		}
 	}

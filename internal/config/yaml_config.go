@@ -122,6 +122,32 @@ func SetYamlConfig(key, value string) error {
 		return err
 	}
 
+	return setYamlConfigAtPath(configPath, key, value)
+}
+
+// SetYamlConfigInDir sets a configuration value in the config.yaml located in
+// the provided beadsDir, bypassing CWD/worktree discovery. Use this when the
+// caller has already resolved the authoritative workspace and needs to avoid
+// local worktree stubs shadowing the real shared config location.
+func SetYamlConfigInDir(beadsDir, key, value string) error {
+	// Validate specific keys (GH#995)
+	if err := validateYamlConfigValue(key, value); err != nil {
+		return err
+	}
+
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if _, err := os.Stat(configPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no config.yaml found in %s (run 'bd init' first)", beadsDir)
+		}
+		return fmt.Errorf("failed to stat config.yaml: %w", err)
+	}
+
+	return setYamlConfigAtPath(configPath, key, value)
+}
+
+func setYamlConfigAtPath(configPath, key, value string) error {
+
 	// Normalize key to canonical yaml format
 	normalizedKey := normalizeYamlKey(key)
 

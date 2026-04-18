@@ -248,6 +248,58 @@ other-setting: value
 	}
 }
 
+func TestSetYamlConfigInDir_WritesTargetConfigDespiteLocalStub(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	previousV := v
+	previousOverrides := overriddenKeys
+	v = nil
+	overriddenKeys = map[string]bool{}
+	defer func() {
+		v = previousV
+		overriddenKeys = previousOverrides
+	}()
+
+	tmpDir := t.TempDir()
+	targetBeadsDir := filepath.Join(tmpDir, "shared", ".beads")
+	if err := os.MkdirAll(targetBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create target beads dir: %v", err)
+	}
+	targetConfigPath := filepath.Join(targetBeadsDir, "config.yaml")
+	if err := os.WriteFile(targetConfigPath, []byte("json: false\n"), 0o644); err != nil {
+		t.Fatalf("failed to write target config.yaml: %v", err)
+	}
+
+	worktreeDir := filepath.Join(tmpDir, "worktree")
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".beads"), 0o755); err != nil {
+		t.Fatalf("failed to create worktree stub beads dir: %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(worktreeDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	const remoteURL = "git+ssh://git@example.com/acme/repo.git"
+	if err := SetYamlConfigInDir(targetBeadsDir, "sync.remote", remoteURL); err != nil {
+		t.Fatalf("SetYamlConfigInDir() error = %v", err)
+	}
+
+	targetContent, err := os.ReadFile(targetConfigPath)
+	if err != nil {
+		t.Fatalf("failed to read target config.yaml: %v", err)
+	}
+	if !strings.Contains(string(targetContent), remoteURL) {
+		t.Fatalf("expected target config.yaml to contain %q, got:\n%s", remoteURL, string(targetContent))
+	}
+
+	if _, err := os.Stat(filepath.Join(worktreeDir, ".beads", "config.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree stub to remain untouched, got err=%v", err)
+	}
+}
+
 func TestFindProjectConfigYamlWithFinder_BEADS_DIRMissingConfig(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()

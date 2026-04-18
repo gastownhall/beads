@@ -10,8 +10,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 )
+
+func snapshotBootstrapEnv(t *testing.T) func() {
+	t.Helper()
+	saved := make(map[string]string)
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
+			parts := strings.SplitN(env, "=", 2)
+			key := parts[0]
+			saved[key] = os.Getenv(key)
+			_ = os.Unsetenv(key)
+		}
+	}
+	return func() {
+		for _, env := range os.Environ() {
+			if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
+				parts := strings.SplitN(env, "=", 2)
+				_ = os.Unsetenv(parts[0])
+			}
+		}
+		for key, val := range saved {
+			_ = os.Setenv(key, val)
+		}
+	}
+}
 
 func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
@@ -1021,6 +1046,72 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 	}
 	if !strings.Contains(yaml, syncRemote) {
 		t.Errorf("config.yaml does not contain sync remote URL %q:\n%s", syncRemote, yaml)
+	}
+}
+
+func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {
+	restore := snapshotBootstrapEnv(t)
+	defer restore()
+
+	config.ResetForTesting()
+	defer config.ResetForTesting()
+
+	originBare := filepath.Join(t.TempDir(), "origin.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", "--initial-branch=main", originBare)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", originBare)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+
+	localBare := filepath.Join(t.TempDir(), "local-bare.git")
+	runGitForBootstrapTest(t, "", "clone", "--bare", originBare, localBare)
+
+	worktreeDir := filepath.Join(t.TempDir(), "worktree")
+	runGitForBootstrapTest(t, "", "--git-dir="+localBare, "worktree", "add", worktreeDir, "main")
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(worktreeDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce the failing shape from fix-worktree-config-yaml-resolution:
+	// the worktree has a local .beads stub, but bootstrap is finalizing the
+	// shared config under the bare/common-dir parent.
+	worktreeStubDir := filepath.Join(worktreeDir, ".beads")
+	if err := os.MkdirAll(worktreeStubDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	targetBeadsDir := filepath.Join(localBare, ".beads")
+	if err := os.MkdirAll(filepath.Join(targetBeadsDir, "embeddeddolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	const remoteURL = "git+ssh://git@github.com/gastownhall/gascity.git"
+	cfg := configfile.DefaultConfig()
+	if err := finalizeSyncedBootstrap(targetBeadsDir, remoteURL, cfg, "gascity"); err != nil {
+		t.Fatalf("finalizeSyncedBootstrap failed: %v", err)
+	}
+
+	targetConfigPath := filepath.Join(targetBeadsDir, "config.yaml")
+	targetContent, err := os.ReadFile(targetConfigPath)
+	if err != nil {
+		t.Fatalf("failed to read target config.yaml: %v", err)
+	}
+	if !strings.Contains(string(targetContent), remoteURL) {
+		t.Fatalf("expected target config.yaml to contain %q, got:\n%s", remoteURL, string(targetContent))
+	}
+
+	if _, err := os.Stat(filepath.Join(worktreeStubDir, "config.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree stub config.yaml to remain absent, got err=%v", err)
 	}
 }
 
