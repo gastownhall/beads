@@ -1077,3 +1077,277 @@ func TestFinalizeSyncedBootstrapIsIdempotent(t *testing.T) {
 		t.Errorf("dolt_database drifted: got %q, want %q", loaded.GetDoltDatabase(), "beads_hq")
 	}
 }
+
+// TestFinalizeSyncedBootstrapServerModePreservesMode verifies that when
+// metadata.json already declares dolt_mode=server (tracked in git),
+// finalizeSyncedBootstrap preserves server mode instead of resetting to
+// embedded. This is the root cause of GH#3343.
+func TestFinalizeSyncedBootstrapServerModePreservesMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	// Simulate a workspace where metadata.json (tracked in git) declares
+	// server mode — the scenario from GH#3343.
+	cfg := &configfile.Config{
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3308,
+		DoltDatabase:   "beads_proj",
+	}
+
+	if err := finalizeSyncedBootstrap(beadsDir, "file:///tmp/fake.git", cfg, "beads_proj"); err != nil {
+		t.Fatalf("finalizeSyncedBootstrap failed: %v", err)
+	}
+
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil || loaded == nil {
+		t.Fatalf("metadata.json missing: %v", err)
+	}
+	if loaded.GetDoltMode() != configfile.DoltModeServer {
+		t.Errorf("dolt_mode = %q, want %q — server mode was not preserved", loaded.GetDoltMode(), configfile.DoltModeServer)
+	}
+	if loaded.GetDoltDatabase() != "beads_proj" {
+		t.Errorf("dolt_database = %q, want %q", loaded.GetDoltDatabase(), "beads_proj")
+	}
+}
+
+// TestCloneFromRemoteRoutesToServerMode verifies that cloneFromRemote uses
+// the SQL server path (not filesystem clone) when ResolveServerMode
+// detects external server mode from metadata.json. GH#3343.
+func TestCloneFromRemoteRoutesToServerMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write metadata.json with server mode and explicit port — this makes
+	// ResolveServerMode return ServerModeExternal.
+	cfg := &configfile.Config{
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3308,
+		DoltDatabase:   "beads_proj",
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+
+	// cloneFromRemote should attempt a server connection (not a filesystem
+	// clone). Since no server is running, we expect a connection error —
+	// NOT a "dolt clone failed" error, which would indicate the filesystem
+	// path was taken.
+	err := cloneFromRemote(t.Context(), beadsDir, "file:///tmp/nonexistent.git", "beads_proj", cfg)
+	if err == nil {
+		t.Fatal("expected error (no server running), got nil")
+	}
+	errMsg := err.Error()
+
+	// The error should indicate a server connection attempt, not a CLI clone.
+	if strings.Contains(errMsg, "dolt clone failed") {
+		t.Errorf("cloneFromRemote used filesystem clone path in server mode: %v", err)
+	}
+	if !strings.Contains(errMsg, "server") {
+		t.Errorf("expected server-related error, got: %v", err)
+	}
+
+	// Verify no local dolt directory was created.
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if _, err := os.Stat(doltDir); err == nil {
+		t.Errorf("local .beads/dolt/ directory was created — clone should have gone to server, not filesystem")
+	}
+}
+
+// TestCloneFromRemoteRoutesToServerModeViaEnv verifies that the
+// BEADS_DOLT_SERVER_MODE=1 env var triggers the server clone path,
+// even when metadata.json is absent.
+func TestCloneFromRemoteRoutesToServerModeViaEnv(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3309,
+		DoltDatabase:   "beads_env",
+	}
+
+	err := cloneFromRemote(t.Context(), beadsDir, "file:///tmp/nonexistent.git", "beads_env", cfg)
+	if err == nil {
+		t.Fatal("expected error (no server running), got nil")
+	}
+	if strings.Contains(err.Error(), "dolt clone failed") {
+		t.Errorf("cloneFromRemote used filesystem clone path despite BEADS_DOLT_SERVER_MODE=1: %v", err)
+	}
+	if !strings.Contains(err.Error(), "server") {
+		t.Errorf("expected server-related error, got: %v", err)
+	}
+}
+
+// TestCloneFromRemoteExternalNilCfgLoadsDisk verifies that when cfg is nil
+// in external server mode, cloneFromRemote falls back to loading config
+// from metadata.json on disk.
+func TestCloneFromRemoteExternalNilCfgLoadsDisk(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write metadata.json to disk with server mode — but pass nil cfg.
+	diskCfg := &configfile.Config{
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3310,
+		DoltDatabase:   "beads_disk",
+	}
+	if err := diskCfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+
+	// Pass nil cfg — cloneFromRemote should load from disk and still
+	// take the server path.
+	err := cloneFromRemote(t.Context(), beadsDir, "file:///tmp/nonexistent.git", "beads_disk", nil)
+	if err == nil {
+		t.Fatal("expected error (no server running), got nil")
+	}
+	if strings.Contains(err.Error(), "dolt clone failed") {
+		t.Errorf("nil-cfg path used filesystem clone despite server metadata on disk: %v", err)
+	}
+	if !strings.Contains(err.Error(), "server") {
+		t.Errorf("expected server-related error, got: %v", err)
+	}
+}
+
+// TestCloneFromRemoteOwnedModeUsesCLI verifies that owned-server mode
+// (the default when no metadata.json exists) uses the CLI clone path.
+func TestCloneFromRemoteOwnedModeUsesCLI(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// No metadata.json → ResolveServerMode returns ServerModeOwned → CLI path.
+	// The CLI path calls BootstrapFromRemoteWithDB, which requires dolt CLI.
+	// Since dolt may not be installed in CI, we accept either:
+	// - "dolt CLI not found" (no dolt binary)
+	// - "dolt clone failed" (dolt binary exists but remote is invalid)
+	// Both confirm the CLI path was taken, not the server path.
+	err := cloneFromRemote(t.Context(), beadsDir, "file:///tmp/nonexistent.git", "beads_owned", nil)
+	if err == nil {
+		// BootstrapFromRemoteWithDB returns (false, nil) if doltExists — skip.
+		return
+	}
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "dolt server unreachable") || strings.Contains(errMsg, "connect to dolt server") {
+		t.Errorf("owned-mode clone routed to server path: %v", err)
+	}
+}
+
+// TestCloneFromRemoteSharedServerModeUsesServer verifies that
+// BEADS_DOLT_SHARED_SERVER=1 triggers the server clone path.
+func TestCloneFromRemoteSharedServerModeUsesServer(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3311,
+		DoltDatabase:   "beads_shared",
+	}
+
+	err := cloneFromRemote(t.Context(), beadsDir, "file:///tmp/nonexistent.git", "beads_shared", cfg)
+	if err == nil {
+		t.Fatal("expected error (no server running), got nil")
+	}
+	if strings.Contains(err.Error(), "dolt clone failed") {
+		t.Errorf("shared-server mode used filesystem clone: %v", err)
+	}
+	if !strings.Contains(err.Error(), "server") {
+		t.Errorf("expected server-related error, got: %v", err)
+	}
+}
+
+// TestFinalizeSyncedBootstrapSharedServerSetsServerMode verifies that
+// finalizeSyncedBootstrap writes dolt_mode=server when shared-server
+// mode is active via env var.
+func TestFinalizeSyncedBootstrapSharedServerSetsServerMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	cfg := configfile.DefaultConfig()
+	if err := finalizeSyncedBootstrap(beadsDir, "file:///tmp/fake.git", cfg, "beads_shared"); err != nil {
+		t.Fatalf("finalizeSyncedBootstrap failed: %v", err)
+	}
+
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil || loaded == nil {
+		t.Fatalf("metadata.json missing: %v", err)
+	}
+	if loaded.GetDoltMode() != configfile.DoltModeServer {
+		t.Errorf("dolt_mode = %q, want %q — shared server should set server mode", loaded.GetDoltMode(), configfile.DoltModeServer)
+	}
+}
