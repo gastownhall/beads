@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Batched wisp routing in bulk helpers** — Added `ActiveWispIDsInTx` / `PartitionByWispInTx` in `internal/storage/issueops/wisp_routing.go` and rewrote seven call sites (`dependencies.go`, `labels.go`, `comments.go`, `bulk_ops.go`, `dependency_queries.go`, `delete.go`) to batch wisp-membership probes. Eliminates a per-ID N+1 that issued 2,285 `SELECT 1 FROM wisps WHERE id = ?` probes on a 457-issue `bd export`. Remote wall time on a 15 ms-RTT LAN drops from ~208 s to ~3 s (>60×). Single-ID call sites and embedded mode are unaffected.
+- **`InterpolateParams=true` on server-mode DSN** — Set in `internal/storage/doltutil/dsn.go`. `go-sql-driver/mysql` quotes arguments client-side, collapsing each parameterized query from the 3-RT `PREPARE`+`EXECUTE`+`CLOSE` binary protocol to a single round-trip. Combined with the batched wisp routing, remote `bd export` drops from 208 s to 0.514 s (~405×) and `bd doctor` from 91 s to 3.3 s (~28×). Safety audit (no `Prepare`/`sql.Stmt` reuse in non-test code, no custom `driver.Valuer`, `[]byte` only on already-hex-escaped federation password paths) is documented in the PR body; round-trip parity test covers JSON, DATETIME fractional seconds, and SQL-metacharacter strings. Embedded mode is unaffected.
+
 ## [1.0.2] - 2026-04-15
 
 ### Fixed

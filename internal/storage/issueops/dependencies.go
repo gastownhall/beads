@@ -208,13 +208,9 @@ func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string) ([]*types
 	}
 
 	// Partition IDs by wisp status.
-	var wispIDs, permIDs []string
-	for _, id := range ids {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
-		}
+	wispIDs, permIDs, err := PartitionByWispInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, err
 	}
 
 	var allIssues []*types.Issue
