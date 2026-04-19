@@ -547,13 +547,13 @@ func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context, remote string,
 // reach the dolt binary. The SQL server process may not have them if it was
 // started in a different context (GH#6).
 var cloudAuthSchemeMap = map[string][]string{
-	"az://":      {"AZURE_STORAGE_"},  // Azure Blob Storage
-	"s3://":      {"AWS_"},            // AWS S3
-	"gs://":      {"GOOGLE_", "GCS_"}, // Google Cloud Storage
-	"oci://":     {"OCI_"},            // Oracle Cloud Infrastructure
-	"dolthub://": {"DOLT_REMOTE_"},    // DoltHub
-	"https://":   {"DOLT_REMOTE_"},    // Hosted Dolt / DoltHub HTTPS
-	"http://":    {"DOLT_REMOTE_"},    // Hosted Dolt HTTP
+	"az://":      {"AZURE_STORAGE_"}, // Azure Blob Storage
+	"s3://":      {"AWS_"},           // AWS S3
+	"gs://":      {"GCS_"},           // Google Cloud Storage
+	"oci://":     {"OCI_"},           // Oracle Cloud Infrastructure
+	"dolthub://": {"DOLT_REMOTE_"},   // DoltHub
+	"https://":   {"DOLT_REMOTE_"},   // Hosted Dolt / DoltHub HTTPS
+	"http://":    {"DOLT_REMOTE_"},   // Hosted Dolt HTTP
 }
 
 // envPrefixesForRemoteURL returns the env var prefixes relevant to the
@@ -563,6 +563,26 @@ func envPrefixesForRemoteURL(url string) []string {
 	for scheme, prefixes := range cloudAuthSchemeMap {
 		if strings.HasPrefix(url, scheme) {
 			return prefixes
+		}
+	}
+	return nil
+}
+
+// cloudAuthEnvKeyMap lists exact env vars that imply storage auth but do not
+// have a safely narrow prefix. GOOGLE_APPLICATION_CREDENTIALS should trigger
+// CLI routing for gs:// remotes, but a broad GOOGLE_ prefix would incorrectly
+// match general app env such as GOOGLE_API_KEY.
+var cloudAuthEnvKeyMap = map[string][]string{
+	"gs://": {"GOOGLE_APPLICATION_CREDENTIALS"},
+}
+
+// envKeysForRemoteURL returns exact env var names relevant to the given remote
+// URL based on its scheme. Returns nil when the scheme only uses prefixes or
+// is not recognized.
+func envKeysForRemoteURL(url string) []string {
+	for scheme, keys := range cloudAuthEnvKeyMap {
+		if strings.HasPrefix(url, scheme) {
+			return keys
 		}
 	}
 	return nil
@@ -599,10 +619,16 @@ func (s *DoltStore) shouldUseCLIForCloudAuth(remote string) bool {
 		return false
 	}
 	prefixes := envPrefixesForRemoteURL(cliURL)
-	if len(prefixes) == 0 {
+	keys := envKeysForRemoteURL(cliURL)
+	if len(prefixes) == 0 && len(keys) == 0 {
 		return false // unknown scheme — not a cloud remote
 	}
 	for _, e := range os.Environ() {
+		for _, key := range keys {
+			if e == key || strings.HasPrefix(e, key+"=") {
+				return true
+			}
+		}
 		for _, prefix := range prefixes {
 			if strings.HasPrefix(e, prefix) {
 				return true

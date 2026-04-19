@@ -557,6 +557,8 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		{"azure env + s3:// remote", "s3://my-bucket/path", "AZURE_STORAGE_ACCOUNT", "myaccount", false},
 		{"aws env + az:// remote", "az://account.blob.core.windows.net/container", "AWS_ACCESS_KEY_ID", "AKID", false},
 		{"dolt env + az:// remote", "az://account.blob.core.windows.net/container", "DOLT_REMOTE_USER", "admin", false},
+		{"google creds + dolthub:// remote", "dolthub://org/beads", "GOOGLE_APPLICATION_CREDENTIALS", "/path/to/creds.json", false},
+		{"google api key + gs:// remote", "gs://my-bucket/path", "GOOGLE_API_KEY", "AIza...", false},
 
 		// Structural negative: missing conditions → SQL fallback
 		{"no cloud env", "az://account.blob.core.windows.net/container", "", "", false},
@@ -656,7 +658,7 @@ func TestEnvPrefixesForRemoteURL(t *testing.T) {
 	}{
 		{"az://account.blob.core.windows.net/container", false, "AZURE_STORAGE_"},
 		{"s3://my-bucket/path", false, "AWS_"},
-		{"gs://my-bucket/path", false, "GOOGLE_"},
+		{"gs://my-bucket/path", false, "GCS_"},
 		{"oci://namespace/bucket/path", false, "OCI_"},
 		{"dolthub://org/repo", false, "DOLT_REMOTE_"},
 		{"https://dolthub.com/org/repo", false, "DOLT_REMOTE_"},
@@ -685,6 +687,42 @@ func TestEnvPrefixesForRemoteURL(t *testing.T) {
 				}
 				if !found {
 					t.Errorf("envPrefixesForRemoteURL(%q) = %v, missing %q", tt.url, got, tt.wantHas)
+				}
+			}
+		})
+	}
+}
+
+func TestEnvKeysForRemoteURL(t *testing.T) {
+	tests := []struct {
+		url     string
+		wantNil bool
+		wantHas string
+	}{
+		{"gs://my-bucket/path", false, "GOOGLE_APPLICATION_CREDENTIALS"},
+		{"az://account.blob.core.windows.net/container", true, ""},
+		{"dolthub://org/repo", true, ""},
+		{"file:///path/to/repo", true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got := envKeysForRemoteURL(tt.url)
+			if tt.wantNil && got != nil {
+				t.Errorf("envKeysForRemoteURL(%q) = %v, want nil", tt.url, got)
+			}
+			if !tt.wantNil {
+				if got == nil {
+					t.Fatalf("envKeysForRemoteURL(%q) = nil, want non-nil", tt.url)
+				}
+				found := false
+				for _, key := range got {
+					if key == tt.wantHas {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("envKeysForRemoteURL(%q) = %v, missing %q", tt.url, got, tt.wantHas)
 				}
 			}
 		})
