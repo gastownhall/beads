@@ -14,13 +14,17 @@ import (
 // If SQL commit succeeds but Dolt history finalization fails, it returns
 // PartialWriteError. Callers should not blindly retry that error because
 // comment events are not idempotent and replaying the operation will append a
-// second logical comment.
+// second logical comment. Wisps skip Dolt history finalization because their
+// comment events live in dolt_ignored tables.
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return s.withSerializedWrite(ctx, func() error {
 		if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 			return issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment)
 		}); err != nil {
 			return err
+		}
+		if s.isActiveWisp(ctx, issueID) {
+			return nil
 		}
 		return s.commitVersionedWrite(ctx, "add comment event", []string{"events"}, fmt.Sprintf("bd: event %s", issueID))
 	})

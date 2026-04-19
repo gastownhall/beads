@@ -248,6 +248,55 @@ func TestAddComment_RetryAfterPartialWriteDuplicatesLogicalWrite(t *testing.T) {
 	}
 }
 
+func TestAddComment_WispSkipsVersionedFinalize(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "comment-wisp",
+		Title:     "Wisp comment",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	beforeHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before wisp add: %v", err)
+	}
+	beforeEvents, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents before wisp add: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	if err := store.AddComment(ctx, issue.ID, "tester", "hello wisp"); err != nil {
+		t.Fatalf("AddComment wisp: %v", err)
+	}
+
+	afterHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after wisp add: %v", err)
+	}
+	requireHeadUnchanged(t, beforeHead, afterHead, "wisp AddComment")
+
+	afterEvents, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents after wisp add: %v", err)
+	}
+	if len(afterEvents) != len(beforeEvents)+1 {
+		t.Fatalf("expected wisp comment event to persist without versioned finalize, before=%d after=%d", len(beforeEvents), len(afterEvents))
+	}
+}
+
 func TestImportIssueComment_HistoryBehaviorAndPartialFailure(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
