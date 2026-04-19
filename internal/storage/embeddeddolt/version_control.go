@@ -31,6 +31,9 @@ func (s *EmbeddedDoltStore) withDBConn(ctx context.Context, fn func(db versionco
 	}
 	defer func() {
 		err = errors.Join(err, cleanup())
+		// Best-effort cleanup of orphaned tmp_pack_* files left by git
+		// fetch in the Dolt git-remote-cache. Rate-limited internally.
+		s.cleanGitRemoteCacheGarbage()
 	}()
 
 	return fn(db)

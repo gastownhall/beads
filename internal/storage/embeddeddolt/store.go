@@ -434,14 +434,16 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 
 // RunInTransaction is implemented in transaction.go.
 
-// Close marks the store as closed and releases the exclusive flock on the data
-// directory (if the store owns it). Subsequent method calls will return errClosed.
+// Close marks the store as closed, cleans up orphaned git-remote-cache
+// garbage, and releases the exclusive flock on the data directory (if the
+// store owns it). Subsequent method calls will return errClosed.
 // It is safe to call multiple times. When the lock was supplied by the caller
 // via WithLock, Close does NOT release it — the caller retains ownership.
 func (s *EmbeddedDoltStore) Close() error {
 	// Use CompareAndSwap so we only unlock once even if Close is called
 	// multiple times (the Lock.Unlock method panics on double-unlock).
 	if s.closed.CompareAndSwap(false, true) {
+		s.cleanGitRemoteCacheGarbage()
 		if s.lock != nil && s.ownsLock {
 			s.lock.Unlock()
 		}
