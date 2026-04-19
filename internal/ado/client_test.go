@@ -481,39 +481,39 @@ func TestFormatWIQLDate(t *testing.T) {
 		want string
 	}{
 		{
-			name: "UTC time",
+			name: "UTC time returns date only",
 			time: time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
-			want: "2024-06-01T00:00:00Z",
+			want: "2024-06-01",
 		},
 		{
-			name: "UTC time with seconds",
+			name: "UTC time with time component stripped",
 			time: time.Date(2024, 6, 15, 14, 30, 45, 0, time.UTC),
-			want: "2024-06-15T14:30:45Z",
+			want: "2024-06-15",
 		},
 		{
-			name: "non-UTC positive offset converts to UTC",
+			name: "non-UTC positive offset converts to UTC date",
 			time: time.Date(2024, 6, 1, 12, 0, 0, 0, time.FixedZone("IST", 5*3600+30*60)),
-			want: "2024-06-01T06:30:00Z",
+			want: "2024-06-01",
 		},
 		{
-			name: "non-UTC negative offset converts to UTC",
+			name: "non-UTC negative offset converts to UTC date",
 			time: time.Date(2024, 6, 1, 10, 0, 0, 0, time.FixedZone("EST", -5*3600)),
-			want: "2024-06-01T15:00:00Z",
+			want: "2024-06-01",
 		},
 		{
-			name: "nanoseconds truncated to seconds",
+			name: "nanoseconds irrelevant with date only",
 			time: time.Date(2024, 6, 1, 10, 30, 45, 123456789, time.UTC),
-			want: "2024-06-01T10:30:45Z",
+			want: "2024-06-01",
 		},
 		{
-			name: "midnight boundary from non-UTC",
+			name: "midnight boundary from non-UTC same date",
 			time: time.Date(2024, 6, 2, 2, 0, 0, 0, time.FixedZone("CEST", 2*3600)),
-			want: "2024-06-02T00:00:00Z",
+			want: "2024-06-02",
 		},
 		{
-			name: "date rollback across day boundary",
+			name: "date rollback across day boundary in UTC",
 			time: time.Date(2024, 6, 1, 1, 0, 0, 0, time.FixedZone("JST", 9*3600)),
-			want: "2024-05-31T16:00:00Z",
+			want: "2024-05-31",
 		},
 	}
 	for _, tt := range tests {
@@ -522,9 +522,9 @@ func TestFormatWIQLDate(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("formatWIQLDate() = %q, want %q", got, tt.want)
 			}
-			// Verify output always ends with Z (UTC indicator)
-			if !strings.HasSuffix(got, "Z") {
-				t.Errorf("formatWIQLDate() output %q must end with Z for WIQL compatibility", got)
+			// Verify output contains no time component
+			if strings.Contains(got, "T") || strings.Contains(got, "Z") {
+				t.Errorf("formatWIQLDate() output %q must be date-only (no time component) for ADO date-precision fields", got)
 			}
 		})
 	}
@@ -728,7 +728,7 @@ func TestBuildPullWIQL(t *testing.T) {
 			since:   &since,
 			filters: nil,
 			contains: []string{
-				"[System.ChangedDate] >= '2024-06-01T00:00:00Z'",
+				"[System.ChangedDate] >= '2024-06-01'",
 			},
 		},
 		{
@@ -736,7 +736,7 @@ func TestBuildPullWIQL(t *testing.T) {
 			since:   &sinceNonUTC,
 			filters: nil,
 			contains: []string{
-				"[System.ChangedDate] >= '2024-06-01T06:30:00Z'",
+				"[System.ChangedDate] >= '2024-06-01'",
 			},
 		},
 		{
@@ -775,7 +775,7 @@ func TestBuildPullWIQL(t *testing.T) {
 			contains: []string{
 				"[System.TeamProject] = 'testproject'",
 				"[System.IsDeleted] = false",
-				"[System.ChangedDate] >= '2024-06-01T00:00:00Z'",
+				"[System.ChangedDate] >= '2024-06-01'",
 				`[System.AreaPath] UNDER 'MyProject\\Backend'`,
 				`[System.IterationPath] UNDER 'MyProject\\Sprint 1'`,
 				"[System.WorkItemType] IN ('Bug')",

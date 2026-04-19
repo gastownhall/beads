@@ -307,11 +307,11 @@ func escapeWIQL(s string) string {
 }
 
 // formatWIQLDate formats a time.Time for use in WIQL datetime literals.
-// WIQL expects UTC ISO 8601 dates in single quotes: 'YYYY-MM-DDTHH:MM:SSZ'.
-// The time is converted to UTC and formatted with time.RFC3339, which uses
-// the proper Z07:00 timezone placeholder (outputs "Z" for UTC).
+// Azure DevOps date-precision fields (e.g. System.ChangedDate) reject any
+// time component, so we output date-only format: 'YYYY-MM-DD'.
+// The time is converted to UTC before truncating to date.
 func formatWIQLDate(t time.Time) string {
-	return t.UTC().Format(time.RFC3339)
+	return t.UTC().Format("2006-01-02")
 }
 
 // buildPatchOps converts a field map into sorted JSON Patch operations.
