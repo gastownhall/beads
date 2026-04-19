@@ -159,6 +159,53 @@ func TestCheckRemoteSafety_RefusalTextNoEcho(t *testing.T) {
 	}
 }
 
+func TestShouldWireInitRemote(t *testing.T) {
+	tests := []struct {
+		name              string
+		syncURL           string
+		syncFromRemote    bool
+		syncURLFromConfig bool
+		want              bool
+	}{
+		{
+			name:    "no url",
+			syncURL: "",
+			want:    false,
+		},
+		{
+			name:              "plain git origin without dolt data",
+			syncURL:           "git+https://github.com/org/plain-source.git",
+			syncFromRemote:    false,
+			syncURLFromConfig: false,
+			want:              false,
+		},
+		{
+			name:              "git origin with refs/dolt/data",
+			syncURL:           "git+https://github.com/org/beads-data.git",
+			syncFromRemote:    true,
+			syncURLFromConfig: false,
+			want:              true,
+		},
+		{
+			name:              "explicit sync.remote",
+			syncURL:           "http://myserver:7007/mydb",
+			syncFromRemote:    false,
+			syncURLFromConfig: true,
+			want:              true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldWireInitRemote(tt.syncURL, tt.syncFromRemote, tt.syncURLFromConfig)
+			if got != tt.want {
+				t.Errorf("shouldWireInitRemote(%q, %v, %v) = %v, want %v",
+					tt.syncURL, tt.syncFromRemote, tt.syncURLFromConfig, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestFormatDestroyToken asserts the token format contract that
 // bd help init-safety documents. If this format changes, help text
 // and the ADR must update together.

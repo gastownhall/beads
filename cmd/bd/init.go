@@ -560,6 +560,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// flag that can interact with remote history must route through
 		// it rather than adding another `&& !someFlag` here.
 		syncURL := resolveSyncRemote()
+		syncURLFromConfig := syncURL != "" // true when URL came from explicit user config
 		bootstrappedFromRemote := false
 		syncFromRemote := false
 		remoteHasDoltData := false
@@ -747,10 +748,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 
 		// Configure the remote in the Dolt store so bd dolt push/pull
-		// work immediately after bootstrap. Also add the remote when
-		// sync.remote is configured but bootstrap was skipped (DB already
-		// existed) — ensures the remote is always wired up.
-		if syncURL != "" {
+		// work immediately after bootstrap. Only register the remote when
+		// the URL came from explicit config (sync.remote) or the remote
+		// was confirmed to have Dolt data (refs/dolt/data). Auto-detected
+		// git origin URLs for plain source repos must NOT be registered —
+		// they cause every Dolt fetch to fail and leak tmp_pack_* files
+		// that can consume 100+ GB of disk space (GH#3354, GH#3356).
+		if shouldWireInitRemote(syncURL, syncFromRemote, syncURLFromConfig) {
 			hasRemote, _ := store.HasRemote(ctx, "origin")
 			if !hasRemote {
 				if err := store.AddRemote(ctx, "origin", syncURL); err != nil {
@@ -923,7 +927,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Persist sync.remote to config.yaml so fresh clones can
 			// bootstrap from it (the Dolt database is gitignored).
 			// Must run AFTER createConfigYaml which creates the file.
-			if syncURL != "" {
+			// Only persist when the URL is from explicit config or a
+			// confirmed Dolt remote — not an auto-detected git origin
+			// for a plain source repo (GH#3356).
+			if shouldWireInitRemote(syncURL, syncFromRemote, syncURLFromConfig) {
 				if existing := config.GetYamlConfig("sync.remote"); existing == "" {
 					if err := config.SetYamlConfig("sync.remote", syncURL); err != nil {
 						FatalError("failed to persist sync.remote to config.yaml: %v", err)
@@ -1824,6 +1831,12 @@ func promptAutoExport() (bool, error) {
 
 	// Default to yes (empty or "y" or "yes")
 	return response == "" || response == "y" || response == "yes", nil
+}
+
+func shouldWireInitRemote(syncURL string, syncFromRemote, syncURLFromConfig bool) bool {
+	// Auto-detected plain git origins are not Dolt remotes. Only wire origin
+	// when it was explicitly configured or proven to carry refs/dolt/data.
+	return syncURL != "" && (syncFromRemote || syncURLFromConfig)
 }
 
 // verifyMetadata writes a metadata field and verifies the write succeeded.
