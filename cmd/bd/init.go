@@ -1140,7 +1140,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					giCmd := exec.Command("git", "add", ".gitignore")
 					_ = giCmd.Run()
 				}
-				commitCmd := exec.Command("git", "commit", "-m", "bd init: initialize beads issue tracking")
+				commitArgs := []string{"commit", "-m", "bd init: initialize beads issue tracking"}
+				if fromJSONL {
+					commitArgs = append(commitArgs, "--no-verify")
+				}
+				commitCmd := exec.Command("git", commitArgs...)
 				if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
 					if !quiet && !strings.Contains(string(commitOut), "nothing to commit") {
 						fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", commitErr)
