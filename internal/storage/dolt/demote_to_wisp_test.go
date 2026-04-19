@@ -27,6 +27,11 @@ func TestDemoteToWisp_NoHistory(t *testing.T) {
 	}
 	id := issue.ID
 
+	beforeHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before demotion: %v", err)
+	}
+
 	// Verify it lives in the issues table before demotion.
 	if store.isActiveWisp(ctx, id) {
 		t.Fatalf("issue %s should NOT be in wisps table before demotion", id)
@@ -38,6 +43,12 @@ func TestDemoteToWisp_NoHistory(t *testing.T) {
 	}, "tester"); err != nil {
 		t.Fatalf("UpdateIssue with no_history=true: %v", err)
 	}
+
+	afterHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after demotion: %v", err)
+	}
+	requireHeadChanged(t, beforeHead, afterHead, "DemoteToWisp")
 
 	// The issue must now live in the wisps table.
 	if !store.isActiveWisp(ctx, id) {
@@ -203,6 +214,72 @@ func TestDemoteToWisp_LabelsPreserved(t *testing.T) {
 		if !labelSet[want] {
 			t.Errorf("label %q missing from wisp after demotion; labels=%v", want, wisp.Labels)
 		}
+	}
+}
+
+func TestDemoteToWisp_PartialWriteLeavesCommittedSQLState(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := newVersionedTestIssue("demote-partial", "demote partial write")
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.AddLabel(ctx, issue.ID, "review", "tester"); err != nil {
+		t.Fatalf("AddLabel: %v", err)
+	}
+
+	beforeHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before demotion: %v", err)
+	}
+
+	stubVersionedWriteFailure(t, store)
+
+	err = store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+		"no_history": true,
+		"title":      "demoted title",
+	}, "tester")
+	requirePartialWriteError(t, err)
+
+	afterHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after demotion: %v", err)
+	}
+	requireHeadUnchanged(t, beforeHead, afterHead, "partial DemoteToWisp")
+
+	demoted, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue after partial demotion: %v", err)
+	}
+	if !demoted.NoHistory {
+		t.Fatalf("expected NoHistory=true after partial demotion")
+	}
+	if demoted.Title != "demoted title" {
+		t.Fatalf("expected updated title to persist, got %q", demoted.Title)
+	}
+
+	labelSet := make(map[string]bool, len(demoted.Labels))
+	for _, label := range demoted.Labels {
+		labelSet[label] = true
+	}
+	if !labelSet["review"] {
+		t.Fatalf("expected demoted wisp to retain labels, got %v", demoted.Labels)
+	}
+
+	if !store.isActiveWisp(ctx, issue.ID) {
+		t.Fatalf("issue %s should be in wisps table after partial demotion", issue.ID)
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", issue.ID).Scan(&count); err != nil {
+		t.Fatalf("query issues table after partial demotion: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("issue %s still present in issues table after partial demotion (count=%d)", issue.ID, count)
 	}
 }
 
