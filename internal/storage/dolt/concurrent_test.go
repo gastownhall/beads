@@ -994,6 +994,65 @@ func TestServerWriteLockSerializesAcrossStores(t *testing.T) {
 	}
 }
 
+func TestServerWriteLockRetriesAfterTimeoutAcrossStores(t *testing.T) {
+	storeA, storeB, cleanup := setupConcurrentPeerStores(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	enterFinalize := make(chan struct{})
+	releaseFinalize := make(chan struct{})
+	storeA.commitVersionedWriteFn = func(context.Context, []string, string) error {
+		close(enterFinalize)
+		<-releaseFinalize
+		return nil
+	}
+
+	doneA := make(chan error, 1)
+	go func() {
+		doneA <- storeA.CreateIssue(ctx, &types.Issue{
+			ID:          "peer-lock-retry-a",
+			Title:       "Peer lock retry A",
+			Description: "first peer holds the advisory lock past the initial wait",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}, "peer-a")
+	}()
+
+	<-enterFinalize
+
+	doneB := make(chan error, 1)
+	go func() {
+		doneB <- storeB.CreateIssue(ctx, &types.Issue{
+			ID:          "peer-lock-retry-b",
+			Title:       "Peer lock retry B",
+			Description: "second peer should retry lock acquisition and then succeed",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}, "peer-b")
+	}()
+
+	time.Sleep(serverWriteLockWait + 250*time.Millisecond)
+
+	select {
+	case err := <-doneB:
+		t.Fatalf("expected second store write to keep retrying after lock timeout, got %v", err)
+	default:
+	}
+
+	close(releaseFinalize)
+
+	if err := <-doneA; err != nil {
+		t.Fatalf("storeA CreateIssue: %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("storeB CreateIssue after retry: %v", err)
+	}
+}
+
 func TestServerWriteLockReleasedAfterCanceledCallback(t *testing.T) {
 	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()

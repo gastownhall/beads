@@ -437,6 +437,13 @@ func isRetryableWriteError(err error) bool {
 		strings.Contains(errStr, "database is read only")
 }
 
+func isRetryableWriteLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "failed to acquire write lock")
+}
+
 func writeLockName(database string) string {
 	const prefix = "bd_write_"
 	if database == "" {
@@ -510,24 +517,53 @@ func (s *DoltStore) releaseServerWriteLock(ctx context.Context, conn *sql.Conn, 
 	}
 }
 
-func (s *DoltStore) withServerWriteLock(ctx context.Context, fn func() error) error {
+func (s *DoltStore) acquireServerWriteLock(ctx context.Context) (*sql.Conn, string, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to acquire connection for write lock: %w", err)
+		return nil, "", fmt.Errorf("failed to acquire connection for write lock: %w", err)
 	}
-	defer conn.Close()
 
 	start := time.Now()
 	var locked int
-	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", s.serverWriteLockName(), int(serverWriteLockWait/time.Second)).Scan(&locked); err != nil {
+	lockName := s.serverWriteLockName()
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", lockName, int(serverWriteLockWait/time.Second)).Scan(&locked); err != nil {
 		doltMetrics.lockWaitMs.Record(ctx, float64(time.Since(start).Milliseconds()))
-		return fmt.Errorf("failed to acquire write lock: %w", err)
+		_ = conn.Close()
+		return nil, "", fmt.Errorf("failed to acquire write lock: %w", err)
 	}
 	doltMetrics.lockWaitMs.Record(ctx, float64(time.Since(start).Milliseconds()))
 	if locked != 1 {
-		return fmt.Errorf("failed to acquire write lock: timeout after %s (another process holds it)", serverWriteLockWait)
+		_ = conn.Close()
+		return nil, "", fmt.Errorf("failed to acquire write lock: timeout after %s (another process holds it)", serverWriteLockWait)
 	}
-	lockName := s.serverWriteLockName()
+	return conn, lockName, nil
+}
+
+func (s *DoltStore) withServerWriteLock(ctx context.Context, fn func() error) error {
+	attempts := 0
+	bo := newServerWriteRetryBackoff()
+	var conn *sql.Conn
+	var lockName string
+	err := backoff.Retry(func() error {
+		attempts++
+		c, l, err := s.acquireServerWriteLock(ctx)
+		if err != nil && isRetryableWriteLockError(err) {
+			return err
+		}
+		if err != nil {
+			return backoff.Permanent(err)
+		}
+		conn = c
+		lockName = l
+		return nil
+	}, backoff.WithContext(bo, ctx))
+	if attempts > 1 {
+		doltMetrics.retryCount.Add(ctx, int64(attempts-1))
+	}
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
