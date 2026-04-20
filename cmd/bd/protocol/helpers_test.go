@@ -505,11 +505,32 @@ func assertFieldPrefix(t *testing.T, issue map[string]any, key, prefix string) {
 	}
 }
 
-// parseJSONOutput handles both JSON array and JSONL formats.
+// parseJSONOutput handles schema-versioned envelopes, JSON arrays, and JSONL.
+//
+// Schema-versioned output wraps arrays as {"schema_version": N, "items": [...]}.
+// Object output injects schema_version as a top-level field.
 func parseJSONOutput(t *testing.T, output string) []map[string]any {
 	t.Helper()
 
-	// Try JSON array first
+	// Try schema-versioned envelope first
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(output), &envelope); err == nil {
+		if items, ok := envelope["items"]; ok {
+			if arr, ok := items.([]any); ok {
+				var result []map[string]any
+				for _, item := range arr {
+					if m, ok := item.(map[string]any); ok {
+						result = append(result, m)
+					}
+				}
+				return result
+			}
+		}
+		// Single object (e.g. bd show --json, bd create --json)
+		return []map[string]any{envelope}
+	}
+
+	// Try JSON array (legacy, pre-schema_version)
 	var arr []map[string]any
 	if err := json.Unmarshal([]byte(output), &arr); err == nil {
 		return arr
@@ -527,4 +548,17 @@ func parseJSONOutput(t *testing.T, output string) []map[string]any {
 		arr = append(arr, m)
 	}
 	return arr
+}
+
+// assertSchemaVersion verifies that the output object contains schema_version.
+func assertSchemaVersion(t *testing.T, obj map[string]any, context string) {
+	t.Helper()
+	sv, ok := obj["schema_version"]
+	if !ok {
+		t.Errorf("%s: missing schema_version field", context)
+		return
+	}
+	if v, ok := sv.(float64); !ok || v < 1 {
+		t.Errorf("%s: schema_version = %v, want >= 1", context, sv)
+	}
 }
