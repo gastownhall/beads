@@ -112,6 +112,53 @@ func TestCheckFreshCloneDB_ServerUnreachable(t *testing.T) {
 	}
 }
 
+func TestCheckFreshClone_ServerModeUnreachable(t *testing.T) {
+	// bd-tzo9: When metadata.json declares dolt_mode=server but the server
+	// is unreachable, CheckFreshClone must resolve credentials by the
+	// *resolved runtime port* (not the deprecated metadata port default),
+	// invoke checkFreshCloneDB, observe Reachable=false, and fall through
+	// to the existing JSONL-based warning. This exercises the
+	// GetDoltServerPasswordForPort(port) code path.
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// JSONL with issues so the check proceeds past the fresh-clone gate.
+	jsonl := `{"id":"bd-abc","title":"t"}` + "\n" + `{"id":"bd-def","title":"t"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(jsonl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// metadata.json declaring server mode pointed at an unreachable host:port.
+	// Port 1 is guaranteed-unreachable on loopback; Reachable=false exercises
+	// the FR-030 fall-through branch that contains the fixed password-resolution
+	// line.
+	meta := `{
+  "database": "beads.db",
+  "dolt_mode": "server",
+  "dolt_server_host": "127.0.0.1",
+  "dolt_server_port": 1,
+  "dolt_server_user": "root",
+  "dolt_database": "beads"
+}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckFreshClone(tmpDir)
+
+	// Server unreachable → falls through to legacy JSONL-based warning.
+	if check.Status != StatusWarning {
+		t.Fatalf("expected %q on unreachable server fall-through, got %q (message: %s)",
+			StatusWarning, check.Status, check.Message)
+	}
+	if !strings.Contains(check.Fix, "bd bootstrap") {
+		t.Errorf("expected fall-through fix to mention 'bd bootstrap', got: %s", check.Fix)
+	}
+}
+
 func TestCheckFreshClone_EmbeddedMode(t *testing.T) {
 	// AC-005: Embedded mode (not server mode) uses only filesystem checks.
 	// No server connection should be attempted.
