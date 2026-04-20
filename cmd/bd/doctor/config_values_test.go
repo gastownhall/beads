@@ -128,7 +128,7 @@ func TestCheckMetadataConfigValues(t *testing.T) {
 		}
 	})
 
-	// GH#3231: dotted dolt_database in embedded mode (finding B)
+	// GH#3231: dotted dolt_database in embedded mode
 	t.Run("dotted dolt_database embedded mode", func(t *testing.T) {
 		metadataContent := `{
   "database": "dolt",

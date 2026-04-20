@@ -166,7 +166,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		// Reject hyphens in --database for embedded mode. Must run AFTER
 		// serverMode is set above — otherwise isEmbeddedMode() always returns
-		// true and incorrectly rejects server-mode names (GH#3231 finding D).
+		// true and incorrectly rejects server-mode names (GH#3231).
 		if database != "" && strings.ContainsRune(database, '-') && isEmbeddedMode() {
 			FatalError("database name %q contains hyphens which are invalid in embedded mode; use underscores instead (e.g. %q)",
 				database, sanitizeDBName(database))

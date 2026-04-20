@@ -137,7 +137,7 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 //
 // For embedded mode, invalid characters (hyphens, dots) are sanitized in-memory
 // only — no directory renames or metadata.json writes. This prevents cross-repo
-// hydration from mutating foreign projects (GH#3231 convergence finding F).
+// hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {

@@ -80,7 +80,7 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 			if strings.ContainsRune(database, '-') {
 				msg += "; hyphens are not allowed in embedded mode — replace with underscores in .beads/metadata.json dolt_database field, or run 'bd doctor'"
 			}
-			return nil, nil, errors.Join(fmt.Errorf("%s", msg), cleanup())
+			return nil, nil, errors.Join(errors.New(msg), cleanup())
 		}
 		if _, err := db.ExecContext(ctx, "USE `"+database+"`"); err != nil {
 			return nil, nil, errors.Join(err, cleanup())

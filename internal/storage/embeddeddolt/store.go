@@ -240,7 +240,7 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				if strings.ContainsRune(s.database, '-') {
 					msg += "; hyphens are not allowed in embedded mode — replace with underscores in .beads/metadata.json dolt_database field, or run 'bd doctor'"
 				}
-				return fmt.Errorf("%s", msg)
+				return errors.New(msg)
 			}
 			if _, err := tx.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+s.database+"`"); err != nil {
 				return fmt.Errorf("embeddeddolt: creating database: %w", err)

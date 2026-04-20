@@ -179,7 +179,7 @@ func TestMigrateHyphenatedDB_RenamesDirectory(t *testing.T) {
 }
 
 // TestMigrateHyphenatedDB_CollisionError verifies that migrateHyphenatedDB
-// returns an error when both old and new directories exist (GH#3231 finding A).
+// returns an error when both old and new directories exist (GH#3231).
 func TestMigrateHyphenatedDB_CollisionError(t *testing.T) {
 	beadsDir := t.TempDir()
 
@@ -237,7 +237,7 @@ func TestMigrateHyphenatedDB_NoOldDir(t *testing.T) {
 }
 
 // TestNewDoltStoreFromConfig_DottedDBName verifies that dots are also
-// auto-sanitized, not just hyphens (GH#3231 finding B).
+// auto-sanitized, not just hyphens (GH#3231).
 func TestNewDoltStoreFromConfig_DottedDBName(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
