@@ -83,6 +83,18 @@ var configSetCmd = &cobra.Command{
 		key := args[0]
 		value := args[1]
 
+		// Warn on unrecognized config keys so typos don't silently become
+		// no-ops. The custom.* namespace is exempt (user-extensible). GH#3293.
+		if !isRecognizedConfigKey(key) {
+			suggestion := suggestConfigKey(key)
+			if suggestion != "" {
+				fmt.Fprintf(os.Stderr, "Warning: %q is not a recognized config key. Did you mean %q?\n", key, suggestion)
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: %q is not a recognized config key. Use 'custom.*' for user-defined keys.\n", key)
+			}
+			fmt.Fprintf(os.Stderr, "Run 'bd config --help' for valid namespaces.\n")
+		}
+
 		// Check if this is a yaml-only key (startup settings like no-db, etc.)
 		// These must be written to config.yaml, not SQLite, because they're read
 		// before the database is opened. (GH#536)
@@ -712,6 +724,89 @@ Examples:
 			}
 		}
 	},
+}
+
+// recognizedConfigPrefixes lists valid top-level config namespaces.
+// Keys under custom.* are always accepted (user-extensible).
+var recognizedConfigPrefixes = []string{
+	"export.", "dolt.", "jira.", "linear.", "github.", "custom.",
+	"status.", "doctor.suppress.", "routing.", "sync.", "git.",
+	"directory.", "repos.", "external_projects.", "validation.",
+	"hierarchy.", "ai.", "backup.", "federation.",
+}
+
+// recognizedConfigKeys lists valid non-namespaced config keys.
+var recognizedConfigKeys = map[string]bool{
+	"no-db": true, "json": true, "db": true, "actor": true,
+	"identity": true, "no-push": true, "no-git-ops": true,
+	"create.require-description": true, "beads.role": true,
+	"auto_compact_enabled":       true, "schema_version": true,
+	"output.title-length":        true,
+}
+
+func isRecognizedConfigKey(key string) bool {
+	if recognizedConfigKeys[key] {
+		return true
+	}
+	for _, prefix := range recognizedConfigPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// suggestConfigKey tries to find a close match for a mistyped key by checking
+// if the key's prefix is a known prefix with a typo. Returns empty string if
+// no suggestion can be made.
+func suggestConfigKey(key string) string {
+	parts := strings.SplitN(key, ".", 2)
+	if len(parts) < 2 {
+		return ""
+	}
+	prefix := parts[0] + "."
+
+	bestMatch := ""
+	bestDist := 3 // max edit distance to suggest
+	for _, known := range recognizedConfigPrefixes {
+		knownPrefix := strings.TrimSuffix(known, ".")
+		d := levenshteinDistance(parts[0], knownPrefix)
+		if d > 0 && d < bestDist {
+			bestDist = d
+			bestMatch = known + parts[1]
+		}
+	}
+	_ = prefix
+	return bestMatch
+}
+
+func levenshteinDistance(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+
+	prev := make([]int, lb+1)
+	curr := make([]int, lb+1)
+	for j := range prev {
+		prev[j] = j
+	}
+
+	for i := 1; i <= la; i++ {
+		curr[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			curr[j] = min(curr[j-1]+1, min(prev[j]+1, prev[j-1]+cost))
+		}
+		prev, curr = curr, prev
+	}
+	return prev[lb]
 }
 
 func init() {
