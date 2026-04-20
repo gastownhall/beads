@@ -344,6 +344,8 @@ docker run --rm -v $(pwd):/workspace -w /workspace nixos/nix \
 
 If the build fails with a `vendorHash` mismatch, update `default.nix` with the `got:` hash from the error message and rebuild.
 
+The `nix build` CI job (`.github/workflows/nix-build.yml`) runs on any PR that touches `go.mod`, `go.sum`, `default.nix`, `flake.nix`, or `flake.lock`, so dependabot bumps that invalidate `vendorHash` fail loudly instead of silently breaking Nix users on main.
+
 ### Debugging
 
 Use Go's built-in debugging tools:
