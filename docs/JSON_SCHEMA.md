@@ -100,6 +100,17 @@ items, plus:
 - `dependencies` (object[]): Full dependency records
 - `comments` (object[]): Comment thread
 
+### bd import --json
+
+Returns a summary object when `--json` is active:
+- `source` (string): File path or "stdin"
+- `created` (number): Issues created
+- `skipped` (number): Issues skipped (dedup)
+- `dedup_skipped` (number): Issues skipped by `--dedup` title match
+- `memories` (number): Memory records imported
+- `ids` (string[]): IDs of created issues
+- `dry_run` (boolean): Whether `--dry-run` was active
+
 ### bd export --json
 
 Outputs JSONL (one JSON object per line), not wrapped in an envelope.
