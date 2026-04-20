@@ -1067,3 +1067,30 @@ func TestPrintDivergedHistoryGuidance(t *testing.T) {
 		t.Error("expected guidance to mention manual recovery")
 	}
 }
+
+func TestIsLocalHost(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want bool
+	}{
+		{"empty defaults to local", "", true},
+		{"localhost literal", "localhost", true},
+		{"uppercase Localhost", "Localhost", true},
+		{"IPv4 loopback", "127.0.0.1", true},
+		{"IPv6 loopback", "::1", true},
+		{"all-zeros bind", "0.0.0.0", true},
+		{"surrounding whitespace", "  127.0.0.1  ", true},
+		{"public IPv4", "20.150.139.92", false},
+		{"named remote", "dolt.example.com", false},
+		{"private LAN IPv4", "192.168.1.10", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLocalHost(tc.host); got != tc.want {
+				t.Errorf("isLocalHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}

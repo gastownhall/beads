@@ -414,7 +414,10 @@ var doltStatusCmd = &cobra.Command{
 	Short: "Show Dolt server status",
 	Long: `Show the status of the dolt sql-server for the current project.
 
-Displays whether the server is running, its PID, port, and data directory.`,
+For beads-managed (local) servers, displays PID, port, and data directory
+from the local PID file. For externally-hosted servers (dolt_mode=server
+with a remote dolt_server_host), pings the configured endpoint via SQL and
+reports reachability, server version, and database.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if isEmbeddedMode() {
 			fmt.Fprintln(os.Stderr, "Error: 'bd dolt status' is not supported in embedded mode (no Dolt server)")
@@ -424,6 +427,16 @@ Displays whether the server is running, its PID, port, and data directory.`,
 		if beadsDir == "" {
 			FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
+
+		// For externally-hosted Dolt servers (non-local host with
+		// dolt_mode=server), the local PID file is meaningless — ping the
+		// configured endpoint via SQL instead (bd-q35w).
+		if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && cfg != nil &&
+			cfg.IsDoltServerMode() && !isLocalHost(cfg.GetDoltServerHost()) {
+			runExternalDoltStatus(beadsDir, cfg)
+			return
+		}
+
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
 		state, err := doltserver.IsRunning(serverDir)
@@ -453,6 +466,101 @@ Displays whether the server is running, its PID, port, and data directory.`,
 			fmt.Println("  Mode: shared server")
 		}
 	},
+}
+
+// isLocalHost reports whether host refers to this machine. Used to
+// distinguish beads-managed local servers from externally-hosted ones.
+func isLocalHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return true // empty defaults to local
+	}
+	switch h {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
+		return true
+	}
+	return false
+}
+
+// runExternalDoltStatus queries an externally-hosted Dolt server and prints
+// (or returns, for --json) status. Unlike the local path, there is no PID or
+// log file — reachability, version, host/port/database, and TLS mode are the
+// user-relevant signals.
+func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
+	host := cfg.GetDoltServerHost()
+	port := doltserver.DefaultConfig(beadsDir).Port
+	user := cfg.GetDoltServerUser()
+	database := cfg.GetDoltDatabase()
+	tls := cfg.GetDoltServerTLS()
+	password := cfg.GetDoltServerPasswordForPort(port)
+
+	dsn := doltutil.ServerDSN{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		TLS:      tls,
+		Timeout:  5 * time.Second,
+	}.String()
+
+	result := map[string]interface{}{
+		"mode":     "external",
+		"host":     host,
+		"port":     port,
+		"user":     user,
+		"database": database,
+		"tls":      tls,
+	}
+
+	db, openErr := sql.Open("mysql", dsn)
+	var running bool
+	var version string
+	var connErr error
+
+	if openErr == nil {
+		defer db.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if pingErr := db.PingContext(ctx); pingErr != nil {
+			connErr = pingErr
+		} else {
+			running = true
+			// Best-effort version lookup; don't treat errors as fatal.
+			_ = db.QueryRowContext(ctx, "SELECT @@version").Scan(&version)
+		}
+	} else {
+		connErr = openErr
+	}
+
+	result["running"] = running
+	if version != "" {
+		result["version"] = version
+	}
+	if connErr != nil {
+		result["error"] = connErr.Error()
+	}
+
+	if jsonOutput {
+		outputJSON(result)
+		return
+	}
+
+	if running {
+		fmt.Println("Dolt server: running (external)")
+	} else {
+		fmt.Println("Dolt server: not reachable (external)")
+	}
+	fmt.Printf("  Host:     %s\n", host)
+	fmt.Printf("  Port:     %d\n", port)
+	fmt.Printf("  Database: %s\n", database)
+	fmt.Printf("  User:     %s\n", user)
+	fmt.Printf("  TLS:      %t\n", tls)
+	if version != "" {
+		fmt.Printf("  Version:  %s\n", version)
+	}
+	if connErr != nil {
+		fmt.Printf("  Error:    %v\n", connErr)
+	}
 }
 
 var doltKillallCmd = &cobra.Command{
