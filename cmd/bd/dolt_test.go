@@ -1094,3 +1094,84 @@ func TestIsLocalHost(t *testing.T) {
 		})
 	}
 }
+
+// TestRunExternalDoltStatus_Unreachable exercises the external-server
+// status path (bd-q35w) against an unreachable port. This covers the DSN
+// build, ping failure branch, and both output modes (text + JSON) without
+// needing a running Dolt server.
+func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
+	// Force the resolved port to 1 (guaranteed unreachable on loopback).
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+	beadsDir := t.TempDir()
+	// Use 127.0.0.1 so the OS RSTs the connect() fast (connection refused)
+	// rather than taking the 5s DSN timeout against a routable-but-silent
+	// host. runExternalDoltStatus does not consult isLocalHost itself.
+	cfg := &configfile.Config{
+		DoltMode:       "server",
+		DoltServerHost: "127.0.0.1",
+		DoltServerUser: "root",
+		DoltDatabase:   "beads_ext",
+		DoltServerTLS:  true,
+	}
+
+	t.Run("text output", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = false
+
+		out := captureStdout(t, func() error { runExternalDoltStatus(beadsDir, cfg); return nil })
+
+		for _, want := range []string{
+			"not reachable (external)",
+			"Host:",
+			"127.0.0.1",
+			"Database:",
+			"beads_ext",
+			"User:",
+			"root",
+			"TLS:",
+			"true",
+			"Error:",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected output to contain %q, got:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("json output", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = true
+
+		out := captureStdout(t, func() error { runExternalDoltStatus(beadsDir, cfg); return nil })
+
+		var result map[string]any
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("expected valid JSON output, got error %v, raw: %s", err, out)
+		}
+
+		if result["mode"] != "external" {
+			t.Errorf("mode = %v, want %q", result["mode"], "external")
+		}
+		if result["running"] != false {
+			t.Errorf("running = %v, want false", result["running"])
+		}
+		if result["host"] != "127.0.0.1" {
+			t.Errorf("host = %v, want %q", result["host"], "127.0.0.1")
+		}
+		if result["database"] != "beads_ext" {
+			t.Errorf("database = %v, want %q", result["database"], "beads_ext")
+		}
+		if result["user"] != "root" {
+			t.Errorf("user = %v, want %q", result["user"], "root")
+		}
+		if result["tls"] != true {
+			t.Errorf("tls = %v, want true", result["tls"])
+		}
+		if _, ok := result["error"]; !ok {
+			t.Error("expected 'error' field in JSON output for unreachable server")
+		}
+	})
+}
