@@ -103,20 +103,13 @@ func runExport(cmd *cobra.Command, args []string) error {
 		filter.IsTemplate = &isTemplate
 	}
 
-	// Fetch all matching issues from the issues table
+	// Fetch all issues (persistent + wisps). SearchIssues with Ephemeral=nil
+	// already queries both the issues and wisps tables with ID-based dedup
+	// (see issueops/search.go). A separate Ephemeral=true query would cause
+	// every wisp to appear twice in the output (GH#3352).
 	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return fmt.Errorf("failed to search issues: %w", err)
-	}
-
-	// Also fetch wisps (ephemeral beads) using the store's ephemeral routing.
-	// SearchIssues with Ephemeral=true queries the wisps table directly.
-	ephemeral := true
-	wispFilter := filter
-	wispFilter.Ephemeral = &ephemeral
-	wispIssues, err := store.SearchIssues(ctx, "", wispFilter)
-	if err == nil && len(wispIssues) > 0 {
-		issues = append(issues, wispIssues...)
 	}
 
 	// Scrub test/pollution records if requested

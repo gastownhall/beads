@@ -153,19 +153,11 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 	isTemplate := false
 	filter.IsTemplate = &isTemplate
 
-	// Fetch issues
+	// Fetch all issues (persistent + wisps). SearchIssues with Ephemeral=nil
+	// already includes wisps via ID-based dedup (GH#3352).
 	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to search issues: %w", err)
-	}
-
-	// Also fetch wisps
-	ephemeral := true
-	wispFilter := filter
-	wispFilter.Ephemeral = &ephemeral
-	wispIssues, err := store.SearchIssues(ctx, "", wispFilter)
-	if err == nil && len(wispIssues) > 0 {
-		issues = append(issues, wispIssues...)
 	}
 
 	// Bulk-load relational data
