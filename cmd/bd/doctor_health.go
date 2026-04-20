@@ -57,6 +57,7 @@ func runCheckHealth(path string) {
 		Host:     host,
 		Port:     port,
 		User:     cfg.GetDoltServerUser(),
+		Password: cfg.GetDoltServerPasswordForPort(port),
 		Database: database,
 		Timeout:  2 * time.Second,
 		TLS:      cfg.GetDoltServerTLS(),

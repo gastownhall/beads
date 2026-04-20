@@ -310,7 +310,13 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			// the correct port for standalone server mode (ephemeral).
 			port := doltserver.DefaultConfig(beadsDir).Port
 			user := cfg.GetDoltServerUser()
-			password := cfg.GetDoltServerPassword()
+			// Look up the password by the resolved runtime port — cfg.GetDoltServerPassword
+			// uses cfg.GetDoltServerPort() which falls back to the 3307 default when
+			// metadata.json omits the port, causing credentials lookup to miss when
+			// the actual server runs on a different port (e.g. 3306 for
+			// externally-hosted Dolt). That mismatch produced spurious
+			// "Fresh clone detected" warnings (bd-tzo9).
+			password := cfg.GetDoltServerPasswordForPort(port)
 			dbName := cfg.GetDoltDatabase()
 			result := checkFreshCloneDB(host, port, user, password, dbName, cfg.GetDoltServerTLS())
 			if result.Reachable {

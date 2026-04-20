@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,7 +31,6 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	host := cfg.GetDoltServerHost()
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
-	password := os.Getenv("BEADS_DOLT_PASSWORD")
 
 	// Use doltserver.DefaultConfig for port resolution (env > port file > config.yaml).
 	// Port 0 means no server running yet.
@@ -41,6 +39,14 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	if port == 0 {
 		return nil, nil, fmt.Errorf("no Dolt server port configured and no server running; run any bd command to auto-start")
 	}
+
+	// Resolve the password using the credentials file fallback keyed by the
+	// resolved runtime port — matching the CRUD path. Env var BEADS_DOLT_PASSWORD
+	// still takes precedence inside GetDoltServerPasswordForPort. Without this,
+	// externally-hosted Dolt servers that keep credentials in
+	// ~/.config/beads/credentials fail doctor checks with "Access denied" while
+	// regular CRUD commands succeed (bd-h5k7).
+	password := cfg.GetDoltServerPasswordForPort(port)
 
 	connStr := doltutil.ServerDSN{
 		Host:     host,
