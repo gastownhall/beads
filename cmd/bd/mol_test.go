@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -2985,6 +2986,70 @@ func TestSpawnMoleculeFromFormulaEphemeral(t *testing.T) {
 				t.Errorf("Ephemeral issue %s should not appear in ready work", spawnedID)
 			}
 		}
+	}
+}
+
+// TestSpawnMolecule_PreservesStepMetadata verifies that a cooked formula with
+// per-step metadata results in spawned issues whose Metadata field carries the
+// declared keys through to the database. Regression for gastownhall/beads#3341.
+func TestSpawnMolecule_PreservesStepMetadata(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	f := &formula.Formula{
+		Formula: "meta-test",
+		Version: 1,
+		Type:    formula.TypeWorkflow,
+		Steps: []*formula.Step{
+			{
+				ID:    "work",
+				Title: "Do the work",
+				Metadata: map[string]interface{}{
+					"reminder_list": "brewery",
+					"origin":        "repro",
+				},
+			},
+		},
+	}
+
+	subgraph, err := cookFormulaToSubgraph(f, "meta-test")
+	if err != nil {
+		t.Fatalf("cookFormulaToSubgraph failed: %v", err)
+	}
+
+	result, err := spawnMolecule(ctx, s, subgraph, nil, "", "test", false, types.IDPrefixMol)
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	newWorkID, ok := result.IDMapping["meta-test.work"]
+	if !ok {
+		t.Fatalf("result.IDMapping missing entry for meta-test.work; got %v", result.IDMapping)
+	}
+	spawned, err := s.GetIssue(ctx, newWorkID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s) failed: %v", newWorkID, err)
+	}
+	if len(spawned.Metadata) == 0 {
+		t.Fatalf("spawned issue %s has empty Metadata; want step metadata carried through", newWorkID)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(spawned.Metadata, &decoded); err != nil {
+		t.Fatalf("spawned.Metadata is not valid JSON: %v (raw: %s)", err, string(spawned.Metadata))
+	}
+	if got := decoded["reminder_list"]; got != "brewery" {
+		t.Errorf("spawned.Metadata[reminder_list] = %v, want \"brewery\"", got)
+	}
+	if got := decoded["origin"]; got != "repro" {
+		t.Errorf("spawned.Metadata[origin] = %v, want \"repro\"", got)
 	}
 }
 

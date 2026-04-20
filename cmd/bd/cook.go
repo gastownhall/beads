@@ -560,6 +560,13 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 		issue.Labels = append(issue.Labels, gateLabel)
 	}
 
+	// Carry step metadata through to the issue (GH#3341).
+	if len(step.Metadata) > 0 {
+		if metaJSON, err := json.Marshal(step.Metadata); err == nil {
+			issue.Metadata = metaJSON
+		}
+	}
+
 	return issue
 }
 

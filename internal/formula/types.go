@@ -211,6 +211,11 @@ type Step struct {
 	// Labels are applied to the created issue.
 	Labels []string `json:"labels,omitempty"`
 
+	// Metadata is carried through to the created issue's Metadata field as
+	// JSON. Lets formulas pre-declare keys that downstream tooling can project
+	// without a post-pour compose step.
+	Metadata map[string]interface{} `json:"metadata,omitempty" toml:"metadata,omitempty"`
+
 	// DependsOn lists step IDs this step blocks on (within the formula).
 	DependsOn []string `json:"depends_on,omitempty" toml:"depends_on,omitempty"`
 

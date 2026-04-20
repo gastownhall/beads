@@ -520,6 +520,7 @@ func cloneSubgraph(ctx context.Context, s storage.DoltStorage, subgraph *Templat
 				AwaitType: oldIssue.AwaitType,
 				AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),
 				Timeout:   oldIssue.Timeout,
+				Metadata:  oldIssue.Metadata, // carry formula step metadata (GH#3341)
 				CreatedAt: time.Now(),
 				UpdatedAt: time.Now(),
 			}
