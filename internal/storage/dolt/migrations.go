@@ -32,6 +32,7 @@ var compatMigrationsList = []CompatMigration{
 	{"cleanup_autopush_metadata", migrations.MigrateCleanupAutopushMetadata},
 	{"uuid_primary_keys", migrations.MigrateUUIDPrimaryKeys},
 	{"add_no_history_column", migrations.MigrateAddNoHistoryColumn},
+	{"add_started_at_column", migrations.MigrateAddStartedAtColumn},
 	{"drop_hop_columns", migrations.MigrateDropHOPColumns},
 	{"drop_child_counters_fk", migrations.MigrateDropChildCountersFK},
 	{"wisp_events_created_at_index", migrations.MigrateWispEventsCreatedAtIndex},
