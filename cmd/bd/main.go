@@ -748,6 +748,13 @@ var rootCmd = &cobra.Command{
 				// - config subcommands that operate on config.yaml, git config,
 				//   or best-effort diagnostics only (GH#536, bd-934, bd-omc, bd-3rw)
 				if configCommandCanRunWithoutStore(cmd, args) {
+					// When --db is provided, resolve BEADS_DIR so yaml-only
+					// config writes target the correct directory (GH#3348).
+					if dbPath != "" {
+						if beadsDir := resolveCommandBeadsDir(dbPath); beadsDir != "" {
+							prepareSelectedCommandContext(beadsDir, false)
+						}
+					}
 					return
 				}
 
