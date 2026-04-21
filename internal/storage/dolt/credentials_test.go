@@ -442,7 +442,7 @@ func TestCredentialCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
 		remote:         "origin",
 	}
 
-	if !store.shouldUseCLIForCredentials(context.Background()) {
+	if !store.shouldUseCLIForCredentials(context.Background(), store.remote, store.mainRemoteCredentials()) {
 		t.Fatalf("expected shared-server credential routing to resolve CLI remote via %q, got CLIDir %q", cliDir, store.CLIDir())
 	}
 }
@@ -469,7 +469,7 @@ func TestCloudAuthCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
 		t.Fatalf("dolt init failed: %s: %v", out, err)
 	}
 
-	cmd = exec.Command("dolt", "remote", "add", "origin", "https://example.com/repo")
+	cmd = exec.Command("dolt", "remote", "add", "origin", "az://account.blob.core.windows.net/container")
 	cmd.Dir = cliDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("dolt remote add failed: %s: %v", out, err)
@@ -483,7 +483,7 @@ func TestCloudAuthCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
 		remote:     "origin",
 	}
 
-	if !store.shouldUseCLIForCloudAuth() {
+	if !store.shouldUseCLIForCloudAuth(store.remote) {
 		t.Fatalf("expected shared-server cloud-auth routing to resolve CLI remote via %q, got CLIDir %q", cliDir, store.CLIDir())
 	}
 }
