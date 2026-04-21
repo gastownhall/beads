@@ -310,6 +310,20 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 		return &types.DeleteIssuesResult{DeletedCount: wispDeleteCount}, nil
 	}
 
+	if dryRun {
+		result, err := s.deleteIssuesDryRunSQL(ctx, ids, cascade, force)
+		if result != nil {
+			result.DeletedCount += wispDeleteCount
+		}
+		if err != nil {
+			if result != nil {
+				return result, err
+			}
+			return nil, err
+		}
+		return result, nil
+	}
+
 	var result *types.DeleteIssuesResult
 	err := s.withSerializedWrite(ctx, func() error {
 		var err error
@@ -387,6 +401,16 @@ func (s *DoltStore) deleteIssuesSQL(ctx context.Context, ids []string, cascade b
 	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun)
+		return err
+	})
+	return result, err
+}
+
+func (s *DoltStore) deleteIssuesDryRunSQL(ctx context.Context, ids []string, cascade bool, force bool) (*types.DeleteIssuesResult, error) {
+	var result *types.DeleteIssuesResult
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, true)
 		return err
 	})
 	return result, err

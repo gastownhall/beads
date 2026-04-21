@@ -1144,6 +1144,120 @@ func TestServerWriteLockContentionLogsWaitHint(t *testing.T) {
 	}
 }
 
+func TestDeleteIssuesDryRunSkipsSharedWriteLock(t *testing.T) {
+	storeA, storeB, cleanup := setupConcurrentPeerStores(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	target := &types.Issue{
+		ID:          "peer-lock-dry-run-target",
+		Title:       "Peer lock dry-run target",
+		Description: "dry-run delete preview should stay read-only",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := storeA.CreateIssue(ctx, target, "peer-a"); err != nil {
+		t.Fatalf("CreateIssue(target): %v", err)
+	}
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+	})
+
+	enterFinalize := make(chan struct{})
+	releaseFinalize := make(chan struct{})
+	storeA.commitVersionedWriteFn = func(context.Context, []string, string) error {
+		close(enterFinalize)
+		<-releaseFinalize
+		return nil
+	}
+
+	doneA := make(chan error, 1)
+	go func() {
+		doneA <- storeA.CreateIssue(ctx, &types.Issue{
+			ID:          "peer-lock-dry-run-holder",
+			Title:       "Peer lock dry-run holder",
+			Description: "holds the advisory lock while dry-run preview executes",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}, "peer-a")
+	}()
+
+	<-enterFinalize
+
+	type deleteResult struct {
+		result *types.DeleteIssuesResult
+		err    error
+	}
+	donePreview := make(chan deleteResult, 1)
+	start := time.Now()
+	go func() {
+		result, err := storeB.DeleteIssues(ctx, []string{target.ID}, false, false, true)
+		donePreview <- deleteResult{result: result, err: err}
+	}()
+
+	var preview deleteResult
+	select {
+	case preview = <-donePreview:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("expected dry-run delete to bypass the shared write lock")
+	}
+
+	if preview.err != nil {
+		t.Fatalf("DeleteIssues(dry-run): %v", preview.err)
+	}
+	if preview.result == nil {
+		t.Fatal("expected dry-run delete result")
+	}
+	if preview.result.DeletedCount != 1 {
+		t.Fatalf("expected dry-run delete count 1, got %d", preview.result.DeletedCount)
+	}
+	if elapsed := time.Since(start); elapsed >= serverWriteLockWait {
+		t.Fatalf("expected dry-run delete to return before advisory lock timeout, took %s", elapsed)
+	}
+
+	close(releaseFinalize)
+
+	if err := <-doneA; err != nil {
+		t.Fatalf("storeA CreateIssue: %v", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+	os.Stderr = origStderr
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close read pipe: %v", err)
+	}
+
+	if strings.Contains(buf.String(), "waiting for shared-server write lock") {
+		t.Fatalf("dry-run delete should not log shared write-lock waits, got %q", buf.String())
+	}
+
+	got, err := storeB.GetIssue(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(target): %v", err)
+	}
+	if got == nil {
+		t.Fatal("dry-run delete should not remove the target issue")
+	}
+}
+
 func TestServerWriteLockReleasedAfterCanceledCallback(t *testing.T) {
 	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
