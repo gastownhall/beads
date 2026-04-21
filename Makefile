@@ -148,7 +148,7 @@ endif
 install install-force: build
 	@mkdir -p $(INSTALL_DIR)
 ifeq ($(OS),Windows_NT)
-	@rm -f $(INSTALL_DIR)/bd.exe
+	@rm -f $(INSTALL_DIR)/bd $(INSTALL_DIR)/bd.exe
 	@cp $(BUILD_DIR)/bd.exe $(INSTALL_DIR)/bd.exe
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
