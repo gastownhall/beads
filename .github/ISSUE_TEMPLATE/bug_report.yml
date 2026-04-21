@@ -1,0 +1,90 @@
+name: Bug Report
+description: Report a bug in bd (beads)
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Both human-filed and agent-discovered reports are welcome — just fill in what you can.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: What happened? What did you expect to happen instead?
+      placeholder: Describe the bug clearly. Include error messages if available.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to trigger the bug.
+      placeholder: |
+        1. Run `bd create "test" -p 1`
+        2. Run `bd list --json`
+        3. Observe incorrect output
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: bd version
+      description: Output of `bd version`
+      placeholder: "v0.22.0"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: false
+
+  - type: dropdown
+    id: discovery-method
+    attributes:
+      label: How was this discovered?
+      description: Helps us understand our contributor workflow.
+      options:
+        - Manual testing
+        - During development
+        - Agent-discovered (AI agent found this while working on something else)
+        - Automated testing / CI
+        - Production use
+    validations:
+      required: false
+
+  - type: input
+    id: related-issue
+    attributes:
+      label: Related issue (if agent-discovered)
+      description: If an agent found this while working on another issue, link the parent issue here.
+      placeholder: "bd-42 or #123"
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, configuration, or anything else relevant.
+    validations:
+      required: false
