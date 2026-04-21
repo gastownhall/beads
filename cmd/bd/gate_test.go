@@ -201,6 +201,111 @@ func TestGetWorkflowNameHint(t *testing.T) {
 	}
 }
 
+func TestCheckGHRun_DryRunDoesNotPersistDiscoveredRunID(t *testing.T) {
+	origDiscover := discoverRunIDByWorkflowNameFunc
+	origUpdate := updateGateAwaitIDFunc
+	origStatus := checkGHRunStatusFunc
+	t.Cleanup(func() {
+		discoverRunIDByWorkflowNameFunc = origDiscover
+		updateGateAwaitIDFunc = origUpdate
+		checkGHRunStatusFunc = origStatus
+	})
+
+	updateCalls := 0
+	discoverRunIDByWorkflowNameFunc = func(workflowHint string) (string, error) {
+		if workflowHint != "release.yml" {
+			t.Fatalf("unexpected workflow hint %q", workflowHint)
+		}
+		return "12345", nil
+	}
+	updateGateAwaitIDFunc = func(_ interface{}, gateID, runID string) error {
+		updateCalls++
+		t.Fatalf("unexpected await_id persistence for %s -> %s", gateID, runID)
+		return nil
+	}
+	checkGHRunStatusFunc = func(runID string) (bool, bool, string, error) {
+		if runID != "12345" {
+			t.Fatalf("expected discovered run ID 12345, got %q", runID)
+		}
+		return true, false, "workflow 'release' succeeded", nil
+	}
+
+	resolved, escalated, reason, err := checkGHRun(&types.Issue{
+		ID:      "bd-gate",
+		AwaitID: "release.yml",
+	}, false)
+	if err != nil {
+		t.Fatalf("checkGHRun returned error: %v", err)
+	}
+	if !resolved {
+		t.Fatal("expected dry-run check to resolve using discovered run status")
+	}
+	if escalated {
+		t.Fatal("did not expect escalation for successful workflow")
+	}
+	if reason == "" {
+		t.Fatal("expected resolution reason")
+	}
+	if updateCalls != 0 {
+		t.Fatalf("expected no await_id updates during dry-run, got %d", updateCalls)
+	}
+}
+
+func TestCheckGHRun_PersistsDiscoveredRunIDOutsideDryRun(t *testing.T) {
+	origDiscover := discoverRunIDByWorkflowNameFunc
+	origUpdate := updateGateAwaitIDFunc
+	origStatus := checkGHRunStatusFunc
+	t.Cleanup(func() {
+		discoverRunIDByWorkflowNameFunc = origDiscover
+		updateGateAwaitIDFunc = origUpdate
+		checkGHRunStatusFunc = origStatus
+	})
+
+	updateCalls := 0
+	discoverRunIDByWorkflowNameFunc = func(workflowHint string) (string, error) {
+		if workflowHint != "release.yml" {
+			t.Fatalf("unexpected workflow hint %q", workflowHint)
+		}
+		return "67890", nil
+	}
+	updateGateAwaitIDFunc = func(_ interface{}, gateID, runID string) error {
+		updateCalls++
+		if gateID != "bd-gate" {
+			t.Fatalf("expected gate ID bd-gate, got %q", gateID)
+		}
+		if runID != "67890" {
+			t.Fatalf("expected discovered run ID 67890, got %q", runID)
+		}
+		return nil
+	}
+	checkGHRunStatusFunc = func(runID string) (bool, bool, string, error) {
+		if runID != "67890" {
+			t.Fatalf("expected discovered run ID 67890, got %q", runID)
+		}
+		return false, false, "workflow 'release' is queued", nil
+	}
+
+	resolved, escalated, reason, err := checkGHRun(&types.Issue{
+		ID:      "bd-gate",
+		AwaitID: "release.yml",
+	}, true)
+	if err != nil {
+		t.Fatalf("checkGHRun returned error: %v", err)
+	}
+	if resolved {
+		t.Fatal("did not expect queued workflow to resolve")
+	}
+	if escalated {
+		t.Fatal("did not expect queued workflow to escalate")
+	}
+	if reason == "" {
+		t.Fatal("expected pending reason")
+	}
+	if updateCalls != 1 {
+		t.Fatalf("expected one await_id update outside dry-run, got %d", updateCalls)
+	}
+}
+
 func TestWorkflowNameMatches(t *testing.T) {
 	tests := []struct {
 		name         string

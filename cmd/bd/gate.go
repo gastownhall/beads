@@ -532,7 +532,7 @@ Examples:
 
 			switch {
 			case strings.HasPrefix(gate.AwaitType, "gh:run"):
-				result.resolved, result.escalated, result.reason, result.err = checkGHRun(gate)
+				result.resolved, result.escalated, result.reason, result.err = checkGHRun(gate, !dryRun)
 			case strings.HasPrefix(gate.AwaitType, "gh:pr"):
 				result.resolved, result.escalated, result.reason, result.err = checkGHPR(gate)
 			case gate.AwaitType == "timer":
@@ -640,6 +640,12 @@ type ghPRStatus struct {
 	Title  string `json:"title"`
 }
 
+var (
+	discoverRunIDByWorkflowNameFunc = discoverRunIDByWorkflowName
+	updateGateAwaitIDFunc           = updateGateAwaitID
+	checkGHRunStatusFunc            = checkGHRunStatus
+)
+
 // isNumericID returns true if the string contains only digits (a GitHub run ID)
 func isNumericID(s string) bool {
 	if s == "" {
@@ -702,8 +708,9 @@ func discoverRunIDByWorkflowName(workflowHint string) (string, error) {
 	return fmt.Sprintf("%d", runs[0].DatabaseID), nil
 }
 
-// checkGHRun checks a GitHub Actions workflow run gate
-func checkGHRun(gate *types.Issue) (resolved, escalated bool, reason string, err error) {
+// checkGHRun checks a GitHub Actions workflow run gate.
+// When persistDiscoveredRunID is false, workflow-name discovery stays in-memory only.
+func checkGHRun(gate *types.Issue, persistDiscoveredRunID bool) (resolved, escalated bool, reason string, err error) {
 	if gate.AwaitID == "" {
 		return false, false, "no run ID specified - set await_id or use workflow name hint", nil
 	}
@@ -712,19 +719,25 @@ func checkGHRun(gate *types.Issue) (resolved, escalated bool, reason string, err
 
 	// If await_id is a workflow name hint (non-numeric), auto-discover the run ID
 	if !isNumericID(gate.AwaitID) {
-		discoveredID, discoverErr := discoverRunIDByWorkflowName(gate.AwaitID)
+		discoveredID, discoverErr := discoverRunIDByWorkflowNameFunc(gate.AwaitID)
 		if discoverErr != nil {
 			return false, false, fmt.Sprintf("workflow hint '%s': %v", gate.AwaitID, discoverErr), nil
 		}
 
-		// Update the gate with the discovered run ID
-		if updateErr := updateGateAwaitID(nil, gate.ID, discoveredID); updateErr != nil {
-			return false, false, "", fmt.Errorf("failed to update gate with discovered run ID: %w", updateErr)
+		if persistDiscoveredRunID {
+			// Non-dry-run flows persist the numeric run ID for future checks.
+			if updateErr := updateGateAwaitIDFunc(nil, gate.ID, discoveredID); updateErr != nil {
+				return false, false, "", fmt.Errorf("failed to update gate with discovered run ID: %w", updateErr)
+			}
 		}
 
 		runID = discoveredID
 	}
 
+	return checkGHRunStatusFunc(runID)
+}
+
+func checkGHRunStatus(runID string) (resolved, escalated bool, reason string, err error) {
 	// Run: gh run view <id> --json status,conclusion,name
 	cmd := exec.Command("gh", "run", "view", runID, "--json", "status,conclusion,name") // #nosec G204 -- runID is a validated GitHub run ID
 	var stdout, stderr bytes.Buffer
