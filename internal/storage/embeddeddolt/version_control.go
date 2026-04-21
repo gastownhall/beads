@@ -31,6 +31,9 @@ func (s *EmbeddedDoltStore) withDBConn(ctx context.Context, fn func(db versionco
 	}
 	defer func() {
 		err = errors.Join(err, cleanup())
+		// Best-effort cleanup of orphaned tmp_pack_* files left by git
+		// fetch in the Dolt git-remote-cache. Rate-limited internally.
+		s.cleanGitRemoteCacheGarbage()
 	}()
 
 	return fn(db)
@@ -225,6 +228,21 @@ func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
 func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.ForcePush(ctx, db, defaultRemote, s.branch)
+	})
+}
+
+func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if force {
+			return versioncontrolops.ForcePush(ctx, db, remote, s.branch)
+		}
+		return versioncontrolops.Push(ctx, db, remote, s.branch)
+	})
+}
+
+func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error {
+	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.Pull(ctx, db, remote, s.branch)
 	})
 }
 

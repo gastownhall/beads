@@ -236,7 +236,11 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	return s.withRootConn(ctx, true, func(tx *sql.Tx) error {
 		if s.database != "" {
 			if !validIdentifier.MatchString(s.database) {
-				return fmt.Errorf("embeddeddolt: invalid database name: %q", s.database)
+				msg := fmt.Sprintf("embeddeddolt: invalid database name: %q", s.database)
+				if strings.ContainsRune(s.database, '-') {
+					msg += "; hyphens are not allowed in embedded mode — replace with underscores in .beads/metadata.json dolt_database field, or run 'bd doctor'"
+				}
+				return errors.New(msg)
 			}
 			if _, err := tx.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+s.database+"`"); err != nil {
 				return fmt.Errorf("embeddeddolt: creating database: %w", err)
@@ -434,14 +438,16 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 
 // RunInTransaction is implemented in transaction.go.
 
-// Close marks the store as closed and releases the exclusive flock on the data
-// directory (if the store owns it). Subsequent method calls will return errClosed.
+// Close marks the store as closed, cleans up orphaned git-remote-cache
+// garbage, and releases the exclusive flock on the data directory (if the
+// store owns it). Subsequent method calls will return errClosed.
 // It is safe to call multiple times. When the lock was supplied by the caller
 // via WithLock, Close does NOT release it — the caller retains ownership.
 func (s *EmbeddedDoltStore) Close() error {
 	// Use CompareAndSwap so we only unlock once even if Close is called
 	// multiple times (the Lock.Unlock method panics on double-unlock).
 	if s.closed.CompareAndSwap(false, true) {
+		s.cleanGitRemoteCacheGarbage()
 		if s.lock != nil && s.ownsLock {
 			s.lock.Unlock()
 		}

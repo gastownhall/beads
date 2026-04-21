@@ -4,85 +4,40 @@ title: IDE Setup
 sidebar_position: 3
 ---
 
-# IDE Setup for AI Agents
+# IDE Setup
 
-Configure your IDE for optimal beads integration.
+Configure your editor for beads integration. All integrations use `bd prime` to inject ~1-2k tokens of workflow context on session start.
 
 ## Claude Code
 
-The recommended approach for Claude Code:
-
 ```bash
-# Setup Claude Code integration
 bd setup claude
+bd setup claude --check  # Verify
 ```
 
-This installs:
-- **SessionStart hook** - Runs `bd prime` when Claude Code starts
-- **PreCompact hook** - Ensures `bd dolt push` before context compaction
-
-**How it works:**
-1. SessionStart hook runs `bd prime` automatically
-2. `bd prime` injects ~1-2k tokens of workflow context
-3. You use `bd` CLI commands directly
-4. Git hooks auto-sync the database
-
-**Verify installation:**
-```bash
-bd setup claude --check
-```
-
-### Manual Setup
-
-If you prefer manual configuration, add to your Claude Code hooks:
-
-```json
-{
-  "hooks": {
-    "SessionStart": ["bd prime"],
-    "PreCompact": ["bd dolt push"]
-  }
-}
-```
+Installs SessionStart hook (`bd prime`) and PreCompact hook (`bd dolt push`).
 
 ## Cursor IDE
 
 ```bash
-# Setup Cursor integration
 bd setup cursor
+bd setup cursor --check  # Verify
 ```
 
-This creates `.cursor/rules/beads.mdc` with beads-aware rules.
-
-**Verify:**
-```bash
-bd setup cursor --check
-```
+Creates `.cursor/rules/beads.mdc` with beads-aware rules.
 
 ## Aider
 
 ```bash
-# Setup Aider integration
 bd setup aider
+bd setup aider --check  # Verify
 ```
 
-This creates/updates `.aider.conf.yml` with beads context.
+Creates/updates `.aider.conf.yml` with beads context.
 
-**Verify:**
-```bash
-bd setup aider --check
-```
+## GitHub Copilot (VS Code)
 
-## GitHub Copilot
-
-For VS Code with GitHub Copilot, use the MCP server:
-
-```bash
-# Install MCP server
-uv tool install beads-mcp
-```
-
-Create `.vscode/mcp.json` in your project:
+Use the MCP server. Install with `uv tool install beads-mcp`, then create `.vscode/mcp.json`:
 
 ```json
 {
@@ -94,78 +49,17 @@ Create `.vscode/mcp.json` in your project:
 }
 ```
 
-**For all projects:** Add to VS Code user-level MCP config:
+See [GitHub Copilot Integration](/integrations/github-copilot) for platform-specific paths and detailed setup.
 
-| Platform | Path |
-|----------|------|
-| macOS | `~/Library/Application Support/Code/User/mcp.json` |
-| Linux | `~/.config/Code/User/mcp.json` |
-| Windows | `%APPDATA%\Code\User\mcp.json` |
+## MCP Server (Claude Desktop, no shell)
 
-```json
-{
-  "servers": {
-    "beads": {
-      "command": "beads-mcp",
-      "args": []
-    }
-  }
-}
-```
-
-Initialize beads and reload VS Code:
+For environments without CLI access:
 
 ```bash
-bd init --quiet
-```
-
-See [GitHub Copilot Integration](/integrations/github-copilot) for detailed setup.
-
-## Context Injection with `bd prime`
-
-All integrations use `bd prime` to inject context:
-
-```bash
-bd prime
-```
-
-This outputs a compact (~1-2k tokens) workflow reference including:
-- Available commands
-- Current project status
-- Workflow patterns
-- Best practices
-
-**Why context efficiency matters:**
-- Compute cost scales with tokens
-- Latency increases with context size
-- Models attend better to smaller, focused contexts
-
-## MCP Server (Alternative)
-
-For MCP-only environments (Claude Desktop, no shell access):
-
-```bash
-# Install MCP server
 pip install beads-mcp
 ```
 
-Add to Claude Desktop config:
-```json
-{
-  "mcpServers": {
-    "beads": {
-      "command": "beads-mcp"
-    }
-  }
-}
-```
-
-**Trade-offs:**
-- Works in MCP-only environments
-- Higher context overhead (10-50k tokens for tool schemas)
-- Additional latency from MCP protocol
-
-See [MCP Server](/integrations/mcp-server) for detailed configuration.
+See [MCP Server](/integrations/mcp-server) for configuration.
 
 ## Git Hooks
 
@@ -173,32 +67,14 @@ Ensure git hooks are installed for auto-sync:
 
 ```bash
 bd hooks install
-```
-
-This installs:
-- **pre-commit** - Validates changes before commit
-- **post-merge** - Imports changes after pull
-- **pre-push** - Ensures sync before push
-
-**Check hook status:**
-```bash
 bd info  # Shows warnings if hooks are outdated
 ```
 
-## Verifying Your Setup
-
-Run a complete health check:
+## Verify Setup
 
 ```bash
-# Check version
 bd version
-
-# Check project health
 bd doctor
-
-# Check hooks
 bd hooks status
-
-# Check editor integration
-bd setup claude --check   # or cursor, aider
+bd setup claude --check  # or cursor, aider
 ```

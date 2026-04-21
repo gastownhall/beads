@@ -440,6 +440,16 @@ func TestEmbeddedInit(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
+		preCommitPath := filepath.Join(dir, ".git", "hooks", "pre-commit")
+		preCommit := "#!/bin/sh\necho hook-fired >> .hook-ran\nexit 1\n"
+		if err := os.WriteFile(preCommitPath, []byte(preCommit), 0755); err != nil {
+			t.Fatal(err)
+		}
+		unsetHooksPath := exec.Command("git", "config", "--unset", "core.hooksPath")
+		unsetHooksPath.Dir = dir
+		if out, err := unsetHooksPath.CombinedOutput(); err != nil {
+			t.Fatalf("git config --unset core.hooksPath failed: %v\n%s", err, out)
+		}
 
 		cmd := exec.Command(bd, "init", "--prefix", "jl", "--from-jsonl", "--quiet")
 		cmd.Dir = dir
@@ -447,6 +457,18 @@ func TestEmbeddedInit(t *testing.T) {
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("--from-jsonl should succeed now that CreateIssuesWithFullOptions is implemented: %v\n%s", err, out)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".hook-ran")); err == nil {
+			t.Fatal("expected --from-jsonl auto-commit to bypass git hooks")
+		}
+		logCmd := exec.Command("git", "log", "--oneline", "-n", "1")
+		logCmd.Dir = dir
+		logOut, err := logCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git log failed: %v\n%s", err, logOut)
+		}
+		if !strings.Contains(string(logOut), "bd init: initialize beads issue tracking") {
+			t.Fatalf("expected init commit to succeed, got log: %s", logOut)
 		}
 	})
 

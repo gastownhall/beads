@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,6 +49,38 @@ func TestEmbeddedExport(t *testing.T) {
 		for _, line := range lines {
 			if !strings.Contains(line, `"id"`) {
 				t.Errorf("expected JSON with 'id' field, got: %s", line)
+			}
+		}
+	})
+
+	t.Run("type_discriminator", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "extyp")
+		bdCreateSilent(t, bd, dir, "type discriminator test")
+
+		out := bdExport(t, bd, dir)
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		for _, line := range lines {
+			var record map[string]interface{}
+			if err := json.Unmarshal([]byte(line), &record); err != nil {
+				t.Fatalf("invalid JSON line: %v\n%s", err, line)
+			}
+			typ, ok := record["_type"].(string)
+			if !ok {
+				t.Errorf("line missing _type field: %s", line)
+				continue
+			}
+			if typ != "issue" && typ != "memory" {
+				t.Errorf("unexpected _type=%q (want issue or memory): %s", typ, line)
+			}
+			// Issue lines must have "id"; memory lines must have "key"
+			if typ == "issue" {
+				if _, ok := record["id"]; !ok {
+					t.Errorf("issue line missing id field: %s", line)
+				}
+			} else if typ == "memory" {
+				if _, ok := record["key"]; !ok {
+					t.Errorf("memory line missing key field: %s", line)
+				}
 			}
 		}
 	})

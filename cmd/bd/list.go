@@ -56,20 +56,24 @@ func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbP
 		return nil, fmt.Errorf("parent issue '%s' not found", parentID)
 	}
 
-	// Use recursive search to find all descendants using the same logic as --parent filter
-	// This works around issues with GetDependencyTree not finding all dependents properly
+	// Use recursive search to find all descendants using the same logic as --parent filter.
+	// The parent itself is NOT included in the result set — only actual children and
+	// their descendants. This matches the behavior of --json and --flat (GH#3349).
 	allDescendants := make(map[string]*types.Issue)
 
-	// Always include the parent
-	allDescendants[parentID] = parentIssue
-
-	// Recursively find all descendants
 	err = findAllDescendants(ctx, store, dbPath, parentID, allDescendants, 0, 10) // max depth 10
 	if err != nil {
 		return nil, fmt.Errorf("error finding descendants: %v", err)
 	}
 
-	// Convert map to slice for display
+	if len(allDescendants) == 0 {
+		return nil, nil
+	}
+
+	// Include the parent as the tree root only when descendants exist,
+	// so the tree renderer can draw the hierarchy with the parent at the top.
+	allDescendants[parentID] = parentIssue
+
 	treeIssues := make([]*types.Issue, 0, len(allDescendants))
 	for _, issue := range allDescendants {
 		treeIssues = append(treeIssues, issue)

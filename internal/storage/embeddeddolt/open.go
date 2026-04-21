@@ -76,8 +76,11 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 
 	if strings.TrimSpace(database) != "" {
 		if !validIdentifier.MatchString(database) {
-			return nil, nil, errors.Join(
-				fmt.Errorf("invalid database name: %q", database), cleanup())
+			msg := fmt.Sprintf("invalid database name: %q", database)
+			if strings.ContainsRune(database, '-') {
+				msg += "; hyphens are not allowed in embedded mode — replace with underscores in .beads/metadata.json dolt_database field, or run 'bd doctor'"
+			}
+			return nil, nil, errors.Join(errors.New(msg), cleanup())
 		}
 		if _, err := db.ExecContext(ctx, "USE `"+database+"`"); err != nil {
 			return nil, nil, errors.Join(err, cleanup())

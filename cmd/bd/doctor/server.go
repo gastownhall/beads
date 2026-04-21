@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -292,8 +291,12 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 	port := doltserver.DefaultConfig(beadsDir).Port
 	user := cfg.GetDoltServerUser()
 
-	// Get password from environment (more secure than config file)
-	password := os.Getenv("BEADS_DOLT_PASSWORD")
+	// Resolve password the same way the CRUD path does: BEADS_DOLT_PASSWORD env
+	// takes precedence (checked inside GetDoltServerPasswordForPort), with a
+	// fallback to ~/.config/beads/credentials keyed by [host:port]. Using the
+	// resolved runtime port is required because the port file may differ from
+	// the metadata port (bd-h5k7).
+	password := cfg.GetDoltServerPasswordForPort(port)
 
 	// Build DSN without database (just to test server connectivity)
 	connStr := doltutil.ServerDSN{

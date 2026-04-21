@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -533,6 +534,9 @@ func TestLoadMappingConfig(t *testing.T) {
 	if config.StateMap["custom"] != "in_progress" {
 		t.Errorf("StateMap[custom] = %s, want in_progress", config.StateMap["custom"])
 	}
+	if config.ExplicitStateMap["custom"] != "in_progress" {
+		t.Errorf("ExplicitStateMap[custom] = %s, want in_progress", config.ExplicitStateMap["custom"])
+	}
 
 	// Check custom label type mapping
 	if config.LabelTypeMap["story"] != "feature" {
@@ -597,5 +601,106 @@ func TestBuildLinearDescription(t *testing.T) {
 				t.Errorf("BuildLinearDescription() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveStateIDForBeadsStatusRequiresExplicitMappings(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-1", Name: "Todo", Type: "unstarted"},
+		},
+	}
+
+	_, err := ResolveStateIDForBeadsStatus(cache, types.StatusOpen, DefaultMappingConfig())
+	if err == nil {
+		t.Fatal("expected missing explicit state map to fail")
+	}
+	if !strings.Contains(err.Error(), "linear.state_map is not configured") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusRejectsAmbiguousTypeFallback(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-1", Name: "Done", Type: "completed"},
+			{ID: "state-2", Name: "Monitoring", Type: "completed"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["completed"] = "closed"
+
+	_, err := ResolveStateIDForBeadsStatus(cache, types.StatusClosed, config)
+	if err == nil {
+		t.Fatal("expected ambiguous completed mapping to fail")
+	}
+	if got := err.Error(); !strings.Contains(got, "type fallback is ambiguous") || !strings.Contains(got, "Done, Monitoring") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusPrefersExplicitStateName(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-1", Name: "Done", Type: "completed"},
+			{ID: "state-2", Name: "Monitoring", Type: "completed"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["done"] = "closed"
+
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusClosed, config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus() error = %v", err)
+	}
+	if got != "state-1" {
+		t.Fatalf("ResolveStateIDForBeadsStatus() = %q, want state-1", got)
+	}
+}
+
+func TestPushFieldsEqualIgnoresLocalOnlyDifferences(t *testing.T) {
+	config := DefaultMappingConfig()
+	local := &types.Issue{
+		Title:       "Ship the fix",
+		Description: "Main body",
+		Notes:       "Local-only notes",
+		Status:      types.StatusInProgress,
+		Priority:    1,
+		IssueType:   types.TypeFeature,
+		Labels:      []string{"customer-visible"},
+	}
+	remote := &Issue{
+		Title:       "Ship the fix",
+		Description: "Main body\n\n## Notes\nLocal-only notes",
+		Priority:    2,
+		State:       &State{ID: "state-3", Name: "In Progress", Type: "started"},
+	}
+
+	if !PushFieldsEqual(local, remote, config) {
+		t.Fatal("expected push fields to compare equal despite local-only issue type and labels")
+	}
+}
+
+func TestPushFieldsEqualToBeads(t *testing.T) {
+	local := &types.Issue{
+		Title:       "Ship the fix",
+		Description: "Main body",
+		Notes:       "Local-only notes",
+		Status:      types.StatusInProgress,
+		Priority:    1,
+		IssueType:   types.TypeFeature,
+		Labels:      []string{"customer-visible"},
+	}
+	remote := &types.Issue{
+		Title:       "Ship the fix",
+		Description: "Main body\n\n## Notes\nLocal-only notes",
+		Status:      types.StatusInProgress,
+		Priority:    1,
+		IssueType:   types.TypeTask,
+		Labels:      []string{"ignored"},
+	}
+
+	if !PushFieldsEqualToBeads(local, remote) {
+		t.Fatal("expected beads-form fallback comparison to ignore local-only fields")
 	}
 }

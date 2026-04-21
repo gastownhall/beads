@@ -26,6 +26,15 @@ func TestCursorRulesTemplate(t *testing.T) {
 	}
 }
 
+func TestCursorRulesTemplate_AlwaysApplyFrontmatter(t *testing.T) {
+	// Cursor .mdc files without alwaysApply frontmatter default to Manual mode,
+	// requiring users to @-reference the rule. The template must include
+	// alwaysApply: true so beads context loads automatically every session.
+	if !strings.HasPrefix(cursorRulesTemplate, "---\nalwaysApply: true\n---\n") {
+		t.Error("cursorRulesTemplate must start with alwaysApply: true frontmatter")
+	}
+}
+
 func TestInstallCursor(t *testing.T) {
 	origDir, err := os.Getwd()
 	if err != nil {

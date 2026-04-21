@@ -6,130 +6,34 @@ sidebar_position: 4
 
 # Upgrading bd
 
-How to upgrade bd and keep your projects in sync.
+## Upgrade Commands
 
-## Checking for Updates
+Use the command that matches your install method:
 
-```bash
-# Current version
-bd version
-
-# What's new in recent versions
-bd info --whats-new
-bd info --whats-new --json  # Machine-readable
-```
-
-## Upgrading
-
-Use the command that matches your install method.
-
-| Install method | Platforms | Command |
-|---|---|---|
-| Quick install script | macOS, Linux, FreeBSD | `curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh \| bash` |
-| PowerShell installer | Windows | `irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 \| iex` |
-| Homebrew | macOS, Linux | `brew upgrade beads` |
-| go install | macOS, Linux, FreeBSD, Windows | `go install github.com/steveyegge/beads/cmd/bd@latest` |
-| npm | macOS, Linux, Windows | `npm update -g @beads/bd` |
-| bun | macOS, Linux, Windows | `bun install -g --trust @beads/bd` |
-| From source (Unix shell) | macOS, Linux, FreeBSD | `git pull && go build -o bd ./cmd/bd` |
-
-### Quick install script (macOS/Linux/FreeBSD)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
-```
-
-### PowerShell installer (Windows)
-
-```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
-```
-
-### Homebrew
-
-```bash
-brew upgrade beads
-```
-
-### go install
-
-```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
-```
-
-### From Source
-
-```bash
-cd beads
-git pull
-go build -o bd ./cmd/bd
-sudo mv bd /usr/local/bin/
-```
+| Install method | Command |
+|---|---|
+| Homebrew | `brew upgrade beads` |
+| Install script (macOS/Linux) | `curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh \| bash` |
+| PowerShell (Windows) | `irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 \| iex` |
+| npm | `npm update -g @beads/bd` |
+| go install | `go install github.com/steveyegge/beads/cmd/bd@latest` |
 
 ## After Upgrading
 
-**Important:** After upgrading, update your hooks:
-
 ```bash
-# 1. Check what changed
-bd info --whats-new
-
-# 2. Update git hooks to match new version
-bd hooks install
-
-# 3. Check for any outdated hooks
-bd info  # Shows warnings if hooks are outdated
-
-# 4. If using Dolt backend, restart the server
-bd dolt stop && bd dolt start
+bd info --whats-new     # Check what changed
+bd hooks install        # Update git hooks to match new version
+bd migrate --dry-run    # Check for database migrations
+bd migrate              # Apply if needed
 ```
 
-**Why update hooks?** Git hooks are versioned with bd. Outdated hooks may miss new auto-sync features or bug fixes.
+Git hooks are versioned with bd - outdated hooks may miss auto-sync features. If using Dolt server mode, restart with `bd dolt stop && bd dolt start`.
 
-## Database Migrations
+## Recovery
 
-After major upgrades, check for database migrations:
-
-```bash
-# Inspect migration plan (AI agents)
-bd migrate --inspect --json
-
-# Preview migration changes
-bd migrate --dry-run
-
-# Apply migrations
-bd migrate
-
-# Migrate and clean up old files
-bd migrate --cleanup --yes
-```
-
-## Troubleshooting Upgrades
-
-### Hooks out of date
+If an upgrade causes issues:
 
 ```bash
-bd hooks install
-```
-
-### Database schema changed
-
-```bash
-bd migrate --dry-run
-bd migrate
-```
-
-### Recovery after upgrade
-
-If you need to restore from a backup:
-
-```bash
-bd init
-bd backup restore [path] --force
-```
-
-Or pull from a Dolt remote:
-
-```bash
-bd dolt pull
+bd dolt pull                        # Restore from remote
+bd backup restore [path] --force    # Or restore from backup
 ```

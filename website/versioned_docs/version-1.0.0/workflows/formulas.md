@@ -83,6 +83,32 @@ needs = ["review"]
 | `workflow` | Standard step sequence |
 | `expansion` | Template for expansion operator |
 | `aspect` | Cross-cutting concerns |
+| `convoy` | Multi-agent coordination (parallel workers) |
+
+### Convoy Formulas
+
+Convoy formulas coordinate multiple agents working in parallel. Use them for code review with multiple reviewers, design review sessions, or any workflow requiring parallel human or agent coordination.
+
+```toml
+formula = "multi-reviewer"
+description = "Parallel code review with multiple reviewers"
+version = 1
+type = "convoy"
+
+[vars.reviewers]
+description = "Comma-separated reviewer names"
+required = true
+
+[[steps]]
+id = "review-setup"
+title = "Prepare review artifacts"
+
+[[steps]]
+id = "collect"
+title = "Collect reviews"
+needs = ["review-setup"]
+waits_for = "all-children"
+```
 
 ## Variables
 
@@ -147,6 +173,159 @@ title = "Deploy"
 needs = ["test-unit", "test-integration"]  # Waits for both
 ```
 
+## Conditional Steps
+
+Steps can be made conditional based on a variable:
+
+```toml
+[vars.run_security_scan]
+description = "Whether to run security scan"
+default = "true"
+
+[[steps]]
+id = "security-scan"
+title = "Run security scan"
+condition = "{{run_security_scan}}"
+
+[[steps]]
+id = "deploy"
+title = "Deploy to production"
+condition = "{{environment}} == production"
+```
+
+Condition formats:
+- `"{{var}}"` - truthy (non-empty, non-false)
+- `"!{{var}}"` - negated
+- `"{{var}} == value"` - equality
+- `"{{var}} != value"` - inequality
+
+Conditions are evaluated at cook/pour time. Steps that don't match are removed from the workflow.
+
+## Loops and Iteration
+
+Steps can iterate using the `loop` field:
+
+### Fixed Count
+
+```toml
+[[steps]]
+id = "retry"
+title = "Attempt {{i}}"
+
+[steps.loop]
+count = 3
+var = "i"
+
+[[steps.loop.body]]
+id = "try-{{i}}"
+title = "Attempt {{i}}"
+```
+
+### Range
+
+```toml
+[[steps]]
+id = "phases"
+title = "Phase iteration"
+
+[steps.loop]
+range = "1..5"
+var = "phase_num"
+
+[[steps.loop.body]]
+id = "phase-{{phase_num}}"
+title = "Execute phase {{phase_num}}"
+```
+
+Range supports expressions: `"1..2^{disks}"`, `"{start}..{count}"`.
+
+### Until (Conditional)
+
+```toml
+[steps.loop]
+until = "step.status == 'complete'"
+max = 10
+var = "attempt"
+
+[[steps.loop.body]]
+id = "attempt-{{attempt}}"
+title = "Attempt {{attempt}}"
+```
+
+The `max` field is required for `until` loops to prevent unbounded iteration.
+
+## Runtime Expansion (on_complete)
+
+Steps can trigger dynamic work when they complete using `on_complete` with `for_each`:
+
+```toml
+[[steps]]
+id = "survey"
+title = "Survey available workers"
+
+[steps.on_complete]
+for_each = "output.workers"
+bond = "worker-arm"
+parallel = true
+
+[steps.on_complete.vars]
+worker_name = "{item.name}"
+rig = "{item.rig}"
+```
+
+This creates a new molecule from the `worker-arm` formula for each item in the `output.workers` array. Use `sequential = true` instead of `parallel` to run them one at a time.
+
+## Formula Inheritance
+
+Formulas can inherit from parent formulas using `extends`:
+
+```toml
+formula = "secure-release"
+description = "Release with security audit"
+version = 1
+type = "workflow"
+extends = ["release"]
+
+# Inherits all vars and steps from "release"
+# Add new steps or override existing ones by ID:
+[[steps]]
+id = "security-audit"
+title = "Security audit"
+needs = ["test"]
+
+# Override parent step
+[[steps]]
+id = "publish"
+title = "Publish release (with audit)"
+needs = ["tag", "security-audit"]
+```
+
+Child formulas inherit all vars, steps, and compose rules from parents. Child definitions with the same ID override parent definitions.
+
+## Cooking Formulas
+
+`bd cook` compiles a formula into a resolved proto. Two modes:
+
+### Compile-time (default)
+
+Produces a proto with `{{variable}}` placeholders intact. Useful for modeling, estimation, and planning.
+
+```bash
+bd cook feature-workflow                    # Template with placeholders
+bd cook feature-workflow --dry-run          # Preview steps
+```
+
+### Runtime
+
+Produces a fully-resolved proto with variables substituted. Requires all variables to have values.
+
+```bash
+bd cook feature-workflow --var feature_name=auth      # Substitute vars
+bd cook feature-workflow --mode=runtime --var name=x  # Explicit runtime
+```
+
+For most workflows, prefer using `bd pour` or `bd mol wisp` directly - they cook the formula inline.
+
 ## Gates
 
 Add gates for async coordination:
@@ -167,6 +346,8 @@ title = "Deploy to production"
 needs = ["approval"]
 ```
 
+Gate types: `human`, `timer`, `gh:run` (GitHub Actions), `gh:pr` (pull request).
+
 ## Aspects (Cross-cutting)
 
 Apply transformations to matching steps:
@@ -183,31 +364,43 @@ id = "security-scan-{step.id}"
 title = "Security scan before {step.title}"
 ```
 
+Aspects support `before`, `after`, and `around` advice. Apply aspects to a formula via `compose.aspects`:
+
+```toml
+[compose]
+aspects = ["security-scan", "logging"]
+```
+
 ## Formula Locations
 
 Formulas are searched in order:
 1. `.beads/formulas/` (project-level)
 2. `~/.beads/formulas/` (user-level)
-3. Built-in formulas
 
 ## Using Formulas
 
 ```bash
 # List available formulas
-bd mol list
+bd formula list
 
-# Pour formula into molecule
-bd pour <formula-name> --var key=value
+# Cook (compile) a formula
+bd cook <formula-name> [--var key=value]
+
+# Pour formula into molecule (persistent)
+bd mol pour <formula-name> --var key=value
+
+# Create wisp from formula (ephemeral)
+bd mol wisp <formula-name> --var key=value
 
 # Preview what would be created
-bd pour <formula-name> --dry-run
+bd mol pour <formula-name> --dry-run
 ```
 
 ## Creating Custom Formulas
 
 1. Create file: `.beads/formulas/my-workflow.formula.toml`
 2. Define structure (see examples above)
-3. Use with: `bd pour my-workflow`
+3. Use with: `bd mol pour my-workflow`
 
 ## Example: Release Formula
 

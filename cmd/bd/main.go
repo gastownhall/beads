@@ -110,6 +110,7 @@ var readOnlyCommands = map[string]bool{
 	"duplicates": true,
 	"comments":   true, // list comments (not add)
 	"current":    true, // bd sync mode current
+	"ping":       true,
 	"backup":     true, // reads from Dolt, writes only to .beads/backup/
 	"export":     true, // reads from Dolt, writes JSONL to file/stdout
 }
@@ -748,6 +749,13 @@ var rootCmd = &cobra.Command{
 				// - config subcommands that operate on config.yaml, git config,
 				//   or best-effort diagnostics only (GH#536, bd-934, bd-omc, bd-3rw)
 				if configCommandCanRunWithoutStore(cmd, args) {
+					// When --db is provided, resolve BEADS_DIR so yaml-only
+					// config writes target the correct directory (GH#3348).
+					if dbPath != "" {
+						if beadsDir := resolveCommandBeadsDir(dbPath); beadsDir != "" {
+							prepareSelectedCommandContext(beadsDir, false)
+						}
+					}
 					return
 				}
 
@@ -849,8 +857,20 @@ var rootCmd = &cobra.Command{
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 		} else if cfgErr == nil {
 			// Load returned (nil, nil) — no config file found.
-			// Log so silent fallback to default DB is visible.
-			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; database name may default incorrectly\n", beadsDir)
+			// Fall back to the canonical default database name; matches the
+			// behavior of newDoltStoreFromConfig / newReadOnlyStoreFromConfig
+			// (see store_factory.go). Without this, embeddeddolt.New rejects
+			// the empty database name with "database name must not be empty
+			// (caller should default to \"beads\")".
+			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; using default database name %q\n", beadsDir, configfile.DefaultDoltDatabase)
+			doltCfg.Database = configfile.DefaultDoltDatabase
+		}
+		// If config parse failed (cfgErr != nil), still default the database
+		// name so the store-open error is about the real problem (the parse
+		// failure warning already printed) rather than a confusing "database
+		// name must not be empty" downstream.
+		if doltCfg.Database == "" {
+			doltCfg.Database = configfile.DefaultDoltDatabase
 		}
 		doltCfg.SyncRemote = resolveSyncRemote()
 

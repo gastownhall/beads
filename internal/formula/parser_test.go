@@ -1933,3 +1933,72 @@ title = "Test"
 		}
 	}
 }
+
+// TestParseTOML_StepMetadata verifies that a `metadata = { ... }` table on a
+// step is preserved through TOML parsing. Regression for gastownhall/beads#3341.
+func TestParseTOML_StepMetadata(t *testing.T) {
+	tomlData := `
+formula = "repro"
+description = "Reproduction case"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Do the work"
+labels = ["worker"]
+metadata = { priority_level = "high", origin = "repro" }
+`
+	p := NewParser()
+	formula, err := p.ParseTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("ParseTOML failed: %v", err)
+	}
+
+	if len(formula.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(formula.Steps))
+	}
+	step := formula.Steps[0]
+	if len(step.Metadata) != 2 {
+		t.Fatalf("Steps[0].Metadata has %d entries, want 2 (%v)", len(step.Metadata), step.Metadata)
+	}
+	if got := step.Metadata["priority_level"]; got != "high" {
+		t.Errorf("Steps[0].Metadata[priority_level] = %v, want \"high\"", got)
+	}
+	if got := step.Metadata["origin"]; got != "repro" {
+		t.Errorf("Steps[0].Metadata[origin] = %v, want \"repro\"", got)
+	}
+}
+
+// TestParseJSON_StepMetadata verifies that `"metadata": { ... }` on a step is
+// preserved through JSON parsing. Regression for gastownhall/beads#3341.
+func TestParseJSON_StepMetadata(t *testing.T) {
+	jsonData := `{
+  "formula": "repro",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "work",
+      "title": "Do the work",
+      "metadata": {"priority_level": "high", "origin": "repro"}
+    }
+  ]
+}`
+	p := NewParser()
+	formula, err := p.Parse([]byte(jsonData))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(formula.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(formula.Steps))
+	}
+	step := formula.Steps[0]
+	if len(step.Metadata) != 2 {
+		t.Fatalf("Steps[0].Metadata has %d entries, want 2 (%v)", len(step.Metadata), step.Metadata)
+	}
+	if got := step.Metadata["priority_level"]; got != "high" {
+		t.Errorf("Steps[0].Metadata[priority_level] = %v, want \"high\"", got)
+	}
+}

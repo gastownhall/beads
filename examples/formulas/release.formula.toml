@@ -1,0 +1,45 @@
+formula = "release"
+description = "Standard release workflow: bump version, test, tag, publish."
+version = 1
+type = "workflow"
+
+[vars.version]
+description = "Release version (e.g. 1.2.0)"
+required = true
+pattern = "^\\d+\\.\\d+\\.\\d+$"
+
+[[steps]]
+id = "bump-version"
+title = "Bump version to {{version}}"
+description = "Update version strings in source files and package manifests."
+
+[[steps]]
+id = "changelog"
+title = "Update CHANGELOG"
+needs = ["bump-version"]
+description = "Add release notes for {{version}}. Summarize changes since last release."
+
+[[steps]]
+id = "test"
+title = "Run full test suite"
+needs = ["changelog"]
+description = "Run all tests, linting, and build checks. Release must not proceed with failures."
+
+[[steps]]
+id = "build"
+title = "Build release artifacts"
+needs = ["test"]
+description = "Build binaries, packages, or other release artifacts."
+
+[[steps]]
+id = "tag"
+title = "Create git tag v{{version}}"
+needs = ["build"]
+description = "Tag the release commit. Push tag to origin."
+
+[[steps]]
+id = "publish"
+title = "Publish release"
+needs = ["tag"]
+type = "human"
+description = "Create GitHub release, publish packages, announce to users."

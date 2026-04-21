@@ -16,6 +16,8 @@ type IDGenerationOptions struct {
 	UsedIDs    map[string]bool // Pre-populated set to avoid collisions (e.g., DB IDs)
 }
 
+const missingExplicitStateMapMessage = "linear.state_map is not configured.\nRun 'bd linear link' to configure status mapping first."
+
 // BuildLinearDescription formats a Beads issue for Linear's description field.
 // This mirrors the payload used during push to keep hash comparisons consistent.
 func BuildLinearDescription(issue *types.Issue) string {
@@ -130,6 +132,11 @@ type MappingConfig struct {
 	// Key is lowercase state type or name, value is Beads status string.
 	StateMap map[string]string
 
+	// ExplicitStateMap contains only user-configured linear.state_map.* entries.
+	// Defaults are intentionally excluded so push can distinguish safe explicit
+	// mappings from type-based fallbacks.
+	ExplicitStateMap map[string]string
+
 	// LabelTypeMap maps Linear label names to Beads issue types.
 	// Key is lowercase label name, value is Beads issue type.
 	LabelTypeMap map[string]string
@@ -159,6 +166,7 @@ func DefaultMappingConfig() *MappingConfig {
 			"completed": "closed",
 			"canceled":  "closed",
 		},
+		ExplicitStateMap: make(map[string]string),
 		// Label patterns for issue type inference
 		LabelTypeMap: map[string]string{
 			"bug":         "bug",
@@ -220,6 +228,7 @@ func LoadMappingConfig(loader ConfigLoader) *MappingConfig {
 		if strings.HasPrefix(key, "linear.state_map.") {
 			stateKey := strings.ToLower(strings.TrimPrefix(key, "linear.state_map."))
 			config.StateMap[stateKey] = value
+			config.ExplicitStateMap[stateKey] = value
 		}
 
 		// Parse label-to-type mappings: linear.label_type_map.<label_name>
@@ -301,6 +310,69 @@ func StateToBeadsStatus(state *State, config *MappingConfig) types.Status {
 	return types.StatusOpen
 }
 
+func stateMapMatchesStatus(mapped string, status types.Status) bool {
+	normalizedMapped := strings.ToLower(strings.TrimSpace(mapped))
+	normalizedStatus := strings.ToLower(strings.TrimSpace(string(status)))
+	if normalizedMapped == normalizedStatus {
+		return true
+	}
+	if status.IsValid() && ParseBeadsStatus(mapped) == status {
+		return true
+	}
+	return false
+}
+
+// ResolveStateIDForBeadsStatus returns the unique Linear workflow state ID to
+// use when pushing the given beads status. Push only trusts explicit
+// linear.state_map.* entries; defaults are safe for pull but too ambiguous for
+// mutation.
+func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config *MappingConfig) (string, error) {
+	if cache == nil || len(cache.States) == 0 {
+		return "", fmt.Errorf("no workflow states found")
+	}
+	if config == nil || len(config.ExplicitStateMap) == 0 {
+		return "", fmt.Errorf("%s", missingExplicitStateMapMessage)
+	}
+
+	var nameMatches []State
+	for _, state := range cache.States {
+		mapped, ok := config.ExplicitStateMap[strings.ToLower(strings.TrimSpace(state.Name))]
+		if ok && stateMapMatchesStatus(mapped, status) {
+			nameMatches = append(nameMatches, state)
+		}
+	}
+	if len(nameMatches) == 1 {
+		return nameMatches[0].ID, nil
+	}
+	if len(nameMatches) > 1 {
+		names := make([]string, 0, len(nameMatches))
+		for _, state := range nameMatches {
+			names = append(names, state.Name)
+		}
+		return "", fmt.Errorf("linear.state_map maps beads status %q to multiple Linear states: %s", status, strings.Join(names, ", "))
+	}
+
+	var typeMatches []State
+	for _, state := range cache.States {
+		mapped, ok := config.ExplicitStateMap[strings.ToLower(strings.TrimSpace(state.Type))]
+		if ok && stateMapMatchesStatus(mapped, status) {
+			typeMatches = append(typeMatches, state)
+		}
+	}
+	if len(typeMatches) == 1 {
+		return typeMatches[0].ID, nil
+	}
+	if len(typeMatches) > 1 {
+		names := make([]string, 0, len(typeMatches))
+		for _, state := range typeMatches {
+			names = append(names, state.Name)
+		}
+		return "", fmt.Errorf("linear.state_map type fallback is ambiguous for beads status %q across Linear states: %s", status, strings.Join(names, ", "))
+	}
+
+	return "", fmt.Errorf("linear.state_map has no configured Linear state for beads status %q", status)
+}
+
 // ParseBeadsStatus converts a status string to types.Status.
 func ParseBeadsStatus(s string) types.Status {
 	switch strings.ToLower(s) {
@@ -332,6 +404,43 @@ func StatusToLinearStateType(status types.Status) string {
 	default:
 		return "unstarted"
 	}
+}
+
+// PushFieldsEqual compares only the fields that a Linear push can actually
+// mutate. This avoids repeated updates caused by local-only fields such as
+// issue type, metadata, or labels that are preserved elsewhere.
+func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+	if local.Title != remote.Title {
+		return false
+	}
+	if BuildLinearDescription(local) != remote.Description {
+		return false
+	}
+	if PriorityToLinear(local.Priority, config) != remote.Priority {
+		return false
+	}
+	return StateToBeadsStatus(remote.State, config) == local.Status
+}
+
+// PushFieldsEqualToBeads is a fallback comparator for cases where Linear's raw
+// payload is unavailable and only the normalized beads form remains.
+func PushFieldsEqualToBeads(local, remote *types.Issue) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+	if local.Title != remote.Title {
+		return false
+	}
+	if BuildLinearDescription(local) != remote.Description {
+		return false
+	}
+	if local.Priority != remote.Priority {
+		return false
+	}
+	return local.Status == remote.Status
 }
 
 // LabelToIssueType infers issue type from label names.

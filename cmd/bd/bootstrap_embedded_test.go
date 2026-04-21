@@ -68,18 +68,18 @@ func TestBootstrapNoWorkspace(t *testing.T) {
 			t.Fatalf("expected JSON object in output, got: %s", out)
 		}
 
-		var payload map[string]string
+		var payload map[string]interface{}
 		if err := json.Unmarshal([]byte(s[start:]), &payload); err != nil {
 			t.Fatalf("parse bootstrap JSON: %v\n%s", err, s)
 		}
-		if payload["action"] != "none" {
-			t.Fatalf("action = %q, want %q", payload["action"], "none")
+		if action, _ := payload["action"].(string); action != "none" {
+			t.Fatalf("action = %q, want %q", action, "none")
 		}
-		if payload["reason"] != activeWorkspaceNotFoundError() {
-			t.Fatalf("reason = %q, want %q", payload["reason"], activeWorkspaceNotFoundError())
+		if reason, _ := payload["reason"].(string); reason != activeWorkspaceNotFoundError() {
+			t.Fatalf("reason = %q, want %q", reason, activeWorkspaceNotFoundError())
 		}
-		if !strings.Contains(payload["suggestion"], "bd where") {
-			t.Fatalf("suggestion should mention bd where, got: %q", payload["suggestion"])
+		if suggestion, _ := payload["suggestion"].(string); !strings.Contains(suggestion, "bd where") {
+			t.Fatalf("suggestion should mention bd where, got: %q", suggestion)
 		}
 	})
 }

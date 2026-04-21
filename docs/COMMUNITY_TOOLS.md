@@ -43,6 +43,12 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[stringer](https://github.com/davetashner/stringer)** - Codebase archaeology CLI that mines git repos for TODOs, churn hotspots, lottery-risk files, dependency health, and more. Outputs JSONL compatible with `bd init --from-jsonl`. Install with `brew install davetashner/tap/stringer`. Built by [@davetashner](https://github.com/davetashner). (Go)
 
+## Analytics & Observability
+
+* **[Thread](https://github.com/jklenk/thread)** - Read-only forensics and analytics layer for Beads. Reads local Dolt history and produces fidelity scores, rework cost metrics, session compliance scoring, and a self-contained HTML report. Add `Run 'thread prime --json' at session start` to your `AGENTS.md` to give agents project health context before they claim their first bead. 
+
+Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@jklenk](https://github.com/jklenk). (Python/DuckDB)
+
 ## SDKs & Libraries
 
 - **[beads-sdk](https://github.com/HerbCaudill/beads-sdk)** - Typed TypeScript SDK with zero runtime dependencies. High-level `BeadsClient` for CRUD, filtering, search, labels, dependencies, comments, epics, and sync. Install with `pnpm add @herbcaudill/beads-sdk`. Built by [@HerbCaudill](https://github.com/HerbCaudill). (TypeScript)

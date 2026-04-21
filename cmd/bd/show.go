@@ -204,9 +204,12 @@ var showCmd = &cobra.Command{
 				}
 			}
 
-			// Content sections
+			// Content sections — always show DESCRIPTION header so the user
+			// can distinguish "empty" from "hidden" (GH#3336).
 			if issue.Description != "" {
 				fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), ui.RenderMarkdown(issue.Description))
+			} else {
+				fmt.Printf("\n%s\n  %s\n", ui.RenderBold("DESCRIPTION"), ui.RenderMuted("(none)"))
 			}
 			if issue.Design != "" {
 				fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESIGN"), ui.RenderMarkdown(issue.Design))

@@ -67,21 +67,22 @@ func TestWhereNoWorkspace(t *testing.T) {
 			t.Fatalf("expected JSON object in output, got: %s", out)
 		}
 
-		var payload map[string]string
+		var payload map[string]interface{}
 		if err := json.Unmarshal([]byte(s[start:]), &payload); err != nil {
 			t.Fatalf("parse where JSON: %v\n%s", err, s)
 		}
-		if payload["error"] != "no_beads_directory" {
-			t.Fatalf("error = %q, want %q", payload["error"], "no_beads_directory")
+		if errField, _ := payload["error"].(string); errField != "no_beads_directory" {
+			t.Fatalf("error = %q, want %q", errField, "no_beads_directory")
 		}
-		if payload["message"] != activeWorkspaceNotFoundMessage() {
-			t.Fatalf("message = %q, want %q", payload["message"], activeWorkspaceNotFoundMessage())
+		if message, _ := payload["message"].(string); message != activeWorkspaceNotFoundMessage() {
+			t.Fatalf("message = %q, want %q", message, activeWorkspaceNotFoundMessage())
 		}
-		if !strings.Contains(payload["hint"], "BEADS_DIR/worktree setup") {
-			t.Fatalf("hint should mention workspace diagnostics, got: %q", payload["hint"])
+		hint, _ := payload["hint"].(string)
+		if !strings.Contains(hint, "BEADS_DIR/worktree setup") {
+			t.Fatalf("hint should mention workspace diagnostics, got: %q", hint)
 		}
-		if !strings.Contains(payload["hint"], "bd init") {
-			t.Fatalf("hint should mention bd init, got: %q", payload["hint"])
+		if !strings.Contains(hint, "bd init") {
+			t.Fatalf("hint should mention bd init, got: %q", hint)
 		}
 	})
 }

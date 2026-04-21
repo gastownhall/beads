@@ -32,6 +32,7 @@ var compatMigrationsList = []CompatMigration{
 	{"cleanup_autopush_metadata", migrations.MigrateCleanupAutopushMetadata},
 	{"uuid_primary_keys", migrations.MigrateUUIDPrimaryKeys},
 	{"add_no_history_column", migrations.MigrateAddNoHistoryColumn},
+	{"add_started_at_column", migrations.MigrateAddStartedAtColumn},
 	{"drop_hop_columns", migrations.MigrateDropHOPColumns},
 	{"drop_child_counters_fk", migrations.MigrateDropChildCountersFK},
 	{"wisp_events_created_at_index", migrations.MigrateWispEventsCreatedAtIndex},
@@ -50,6 +51,20 @@ func RunCompatMigrations(db *sql.DB) error {
 		}
 	}
 
+	// Only stage and commit when compat migrations actually produced changes.
+	// Previously, DOLT_COMMIT was called unconditionally, causing a
+	// "nothing to commit" WARNING on the server for every bd invocation
+	// (94% of server log lines in one reported case). GH#3366.
+	var dirtyCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dolt_status").Scan(&dirtyCount); err != nil {
+		// dolt_status might not be available (e.g. older servers); fall through
+		// to the original behavior as a safe fallback.
+		dirtyCount = 1
+	}
+	if dirtyCount == 0 {
+		return nil
+	}
+
 	// GH#2455: Stage only schema tables (not config) to avoid sweeping up
 	// stale issue_prefix changes from concurrent operations.
 	migrationTables := []string{
@@ -65,7 +80,6 @@ func RunCompatMigrations(db *sql.DB) error {
 	}
 	_, err := db.Exec("CALL DOLT_COMMIT('-m', 'schema: auto-migrate')")
 	if err != nil {
-		// "nothing to commit" is expected when migrations were already applied
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 			log.Printf("dolt compat migration commit warning: %v", err)
 		}

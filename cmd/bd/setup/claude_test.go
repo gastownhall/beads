@@ -847,3 +847,131 @@ func TestClaudeWrappersExit(t *testing.T) {
 		}
 	})
 }
+
+// settingsWithPlugin returns settings data with the beads plugin enabled.
+func settingsWithPlugin() map[string]interface{} {
+	return map[string]interface{}{
+		"enabledPlugins": map[string]interface{}{
+			"beads@beads-marketplace": true,
+		},
+	}
+}
+
+func TestHasBeadsPlugin(t *testing.T) {
+	t.Run("plugin in project settings", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), settingsWithPlugin())
+		if !hasBeadsPlugin(env) {
+			t.Error("expected plugin to be detected in project settings")
+		}
+	})
+
+	t.Run("plugin in global settings", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, globalSettingsPath(env.homeDir), settingsWithPlugin())
+		if !hasBeadsPlugin(env) {
+			t.Error("expected plugin to be detected in global settings")
+		}
+	})
+
+	t.Run("plugin disabled", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"enabledPlugins": map[string]interface{}{
+				"beads@beads-marketplace": false,
+			},
+		})
+		if hasBeadsPlugin(env) {
+			t.Error("disabled plugin should not be detected")
+		}
+	})
+
+	t.Run("no plugin", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		if hasBeadsPlugin(env) {
+			t.Error("expected no plugin detected")
+		}
+	})
+}
+
+func TestInstallClaudeSkipsHooksWhenPluginPresent(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Pre-populate project settings with the plugin enabled
+	writeSettings(t, projectSettingsPath(env.projectDir), settingsWithPlugin())
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "plugin-managed") {
+		t.Error("expected plugin-managed message in output")
+	}
+	if strings.Contains(out, "Registered SessionStart hook") {
+		t.Error("should NOT register hooks when plugin is present")
+	}
+
+	// Verify settings file has no hooks written
+	data, err := env.readFile(projectSettingsPath(env.projectDir))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks != nil {
+		if _, hasSession := hooks["SessionStart"]; hasSession {
+			t.Error("SessionStart hooks should not be written when plugin is present")
+		}
+		if _, hasCompact := hooks["PreCompact"]; hasCompact {
+			t.Error("PreCompact hooks should not be written when plugin is present")
+		}
+	}
+
+	// CLAUDE.md should still be installed
+	instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if _, err := os.Stat(instructionsPath); err != nil {
+		t.Errorf("CLAUDE.md should still be installed even with plugin: %v", err)
+	}
+}
+
+func TestInstallClaudeWritesHooksWithoutPlugin(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "plugin-managed") {
+		t.Error("should NOT show plugin-managed when no plugin")
+	}
+	if !strings.Contains(out, "Registered SessionStart hook") {
+		t.Error("expected hooks to be registered without plugin")
+	}
+}
+
+func TestCheckClaudePluginManaged(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Plugin enabled but no hooks in settings files
+	writeSettings(t, globalSettingsPath(env.homeDir), settingsWithPlugin())
+
+	// checkClaude needs CLAUDE.md to exist for the agents check
+	instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(instructionsPath, []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	if err := checkClaude(env); err != nil {
+		t.Fatalf("checkClaude: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "plugin-managed") {
+		t.Errorf("expected plugin-managed message, got: %s", out)
+	}
+}

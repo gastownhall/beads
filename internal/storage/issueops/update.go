@@ -136,6 +136,22 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 		return nil, fmt.Errorf("failed to get issue for update: %w", err)
 	}
 
+	// Validate issue_type against built-in + custom types (GH#3030).
+	// This mirrors the create path (PrepareIssueForInsert → ValidateWithCustom)
+	// and reads custom types from the same transaction, so it works reliably
+	// even in subprocess contexts where the CLI-level store may be unavailable.
+	if rawType, ok := updates["issue_type"]; ok {
+		if issueType, ok := rawType.(string); ok {
+			customTypes, err := ResolveCustomTypesInTx(ctx, tx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get custom types for validation: %w", err)
+			}
+			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+				return nil, fmt.Errorf("invalid issue type: %s", issueType)
+			}
+		}
+	}
+
 	// Build SET clauses.
 	setClauses := []string{"updated_at = ?"}
 	args := []interface{}{time.Now().UTC()}

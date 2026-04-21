@@ -363,6 +363,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			// GH#2160: Pre-#2142 migrations may have wrong database configured.
 			// Probe the server and backfill dolt_database in metadata.json.
 			err = fix.FixMissingDoltDatabase(path)
+		case "Dolt Format":
+			err = fix.DoltFormat(path)
 		default:
 			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
 			fmt.Printf("  Manual fix: %s\n", check.Fix)

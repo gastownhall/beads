@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
@@ -142,32 +141,10 @@ create, update, show, or close operation).`,
 		}
 		if cmd.Flags().Changed("type") {
 			issueType, _ := cmd.Flags().GetString("type")
-			// Normalize aliases (e.g., "enhancement" -> "feature") before validating
+			// Normalize aliases (e.g., "enhancement" -> "feature") before validating.
+			// Type validation (including custom types) is handled by the storage
+			// layer inside the transaction, matching the create path. (GH#3030)
 			issueType = utils.NormalizeIssueType(issueType)
-			var customTypes []string
-			if store != nil {
-				ct, err := store.GetCustomTypes(cmd.Context())
-				if err != nil {
-					// Log DB error but continue with YAML fallback (GH#1499 bd-2ll)
-					if !jsonOutput {
-						fmt.Fprintf(os.Stderr, "%s Failed to get custom types from DB: %v (falling back to config.yaml)\n",
-							ui.RenderWarn("!"), err)
-					}
-				} else {
-					customTypes = ct
-				}
-			}
-			// Fallback to config.yaml when store returns no custom types.
-			if len(customTypes) == 0 {
-				customTypes = config.GetCustomTypesFromYAML()
-			}
-			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
-				validTypes := "bug, feature, task, epic, chore, decision"
-				if len(customTypes) > 0 {
-					validTypes += ", " + joinStrings(customTypes, ", ")
-				}
-				FatalErrorRespectJSON("invalid issue type %q. Valid types: %s", issueType, validTypes)
-			}
 			updates["issue_type"] = issueType
 		}
 		if cmd.Flags().Changed("add-label") {

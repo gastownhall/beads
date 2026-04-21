@@ -1798,25 +1798,25 @@ func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) s
 // server may lack the git credentials, SSH keys, or credential helpers needed for
 // network I/O to external git hosts. Returns false when the remote exists only on
 // an externally-managed server's filesystem and not in the local dbPath.
-func (s *DoltStore) isGitProtocolRemote(ctx context.Context) bool {
+func (s *DoltStore) isGitProtocolRemote(ctx context.Context, remote string) bool {
 	// Check SQL remotes first
 	remotes, err := s.ListRemotes(ctx)
 	if err == nil {
 		for _, r := range remotes {
-			if r.Name == s.remote {
+			if r.Name == remote {
 				if !doltutil.IsGitProtocolURL(r.URL) {
 					return false
 				}
 				// Verify remote exists in CLI directory before routing to CLI push/pull.
 				// When the dolt sql-server is externally managed, remotes may exist only
 				// on the server's filesystem, not in the local dbPath.
-				return s.CLIDir() != "" && doltutil.FindCLIRemote(s.CLIDir(), s.remote) != ""
+				return s.CLIDir() != "" && doltutil.FindCLIRemote(s.CLIDir(), remote) != ""
 			}
 		}
 	}
 	// Fall back to CLI remotes (covers drift where remote exists only in filesystem)
 	if s.CLIDir() != "" {
-		if url := doltutil.FindCLIRemote(s.CLIDir(), s.remote); url != "" {
+		if url := doltutil.FindCLIRemote(s.CLIDir(), remote); url != "" {
 			return doltutil.IsGitProtocolURL(url)
 		}
 	}
@@ -1831,18 +1831,28 @@ func (s *DoltStore) mainRemoteCredentials() *remoteCredentials {
 	return &remoteCredentials{username: s.remoteUser, password: s.remotePassword}
 }
 
+// credentialsForRemote returns credentials only when the target remote is the
+// default remote (s.remote). Non-default remotes get nil creds to avoid sending
+// the wrong credentials to the wrong host.
+func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
+	if remote == s.remote {
+		return s.mainRemoteCredentials()
+	}
+	return nil
+}
+
 // doltCLIPush shells out to `dolt push` from the database directory.
 // Used for git-protocol remotes where CALL DOLT_PUSH times out through the SQL connection.
 // If creds is non-nil, credentials are set on the subprocess environment only,
 // avoiding process-wide env var races with concurrent goroutines.
-func (s *DoltStore) doltCLIPush(ctx context.Context, force bool, creds *remoteCredentials) error {
+func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, creds *remoteCredentials) error {
 	ctx, cancel := context.WithTimeout(ctx, cliExecTimeout)
 	defer cancel()
 	args := []string{"push"}
 	if force {
 		args = append(args, "--force")
 	}
-	args = append(args, s.remote, s.branch)
+	args = append(args, remote, s.branch)
 	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/branch
 	cmd.Dir = s.CLIDir()
 	creds.applyToCmd(cmd)
@@ -1856,10 +1866,10 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, force bool, creds *remoteCr
 // doltCLIPull shells out to `dolt pull` from the database directory.
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // If creds is non-nil, credentials are set on the subprocess environment only.
-func (s *DoltStore) doltCLIPull(ctx context.Context, creds *remoteCredentials) error {
+func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
 	ctx, cancel := context.WithTimeout(ctx, cliExecTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "dolt", "pull", s.remote, s.branch) // #nosec G204 -- fixed command
+	cmd := exec.CommandContext(ctx, "dolt", "pull", remote, s.branch) // #nosec G204 -- fixed command
 	cmd.Dir = s.CLIDir()
 	creds.applyToCmd(cmd)
 	out, err := cmd.CombinedOutput()
@@ -1874,92 +1884,84 @@ func (s *DoltStore) doltCLIPull(ctx context.Context, creds *remoteCredentials) e
 // For non-SSH Hosted Dolt (remoteUser set), uses CALL DOLT_PUSH with --user authentication.
 // For other remotes (DoltHub, S3, GCS, file), uses CALL DOLT_PUSH via SQL.
 func (s *DoltStore) Push(ctx context.Context) (retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.push",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.remote", s.remote),
-			attribute.String("dolt.branch", s.branch),
-		)...),
-	)
-	defer func() { endSpan(span, retErr) }()
-	creds := s.mainRemoteCredentials()
-	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
-	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
-	// but still need CLI to avoid SQL connection timeout.
-	// Credentials are passed directly to the subprocess via cmd.Env, avoiding
-	// process-wide env var races with concurrent goroutines.
-	if s.isGitProtocolRemote(ctx) {
-		return s.doltCLIPush(ctx, false, creds)
-	}
-	// Credential CLI routing: when credentials are set and server is external,
-	// route through CLI subprocess so credentials reach the dolt process via
-	// cmd.Env (applyToCmd). The SQL path's withEnvCredentials sets process-wide
-	// env vars that an external server cannot see.
-	if s.shouldUseCLIForCredentials(ctx) {
-		return s.doltCLIPush(ctx, false, creds)
-	}
-	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
-	// etc.) are set and we're in server mode, route through CLI so the dolt
-	// subprocess inherits the current env. The SQL server may not have these
-	// vars if it was started in a different context (GH#6).
-	if s.shouldUseCLIForCloudAuth() {
-		return s.doltCLIPush(ctx, false, creds)
-	}
-	if s.remoteUser != "" {
-		return withEnvCredentials(creds, func() error {
-			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
-				return fmt.Errorf("failed to push to %s/%s: %w", s.remote, s.branch, err)
-			}
-			return nil
-		})
-	}
-	if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", s.remote, s.branch); err != nil {
-		return fmt.Errorf("failed to push to %s/%s: %w", s.remote, s.branch, err)
-	}
-	return nil
+	return s.pushToRemote(ctx, s.remote, false)
 }
 
 // ForcePush force-pushes commits to the remote, overwriting remote changes.
 // Use when the remote has uncommitted changes in its working set.
 // For git-protocol remotes (SSH, git+https://, git://), uses CLI `dolt push --force` to avoid MySQL connection timeouts.
 func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
-	ctx, span := doltTracer.Start(ctx, "dolt.force_push",
+	return s.pushToRemote(ctx, s.remote, true)
+}
+
+// PushRemote pushes commits to a named remote. Unlike Push(), which always
+// uses the configured default remote (s.remote), PushRemote targets an
+// explicit remote name. Credentials are only applied when the target remote
+// matches the default remote; otherwise nil creds are used.
+func (s *DoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	return s.pushToRemote(ctx, remote, force)
+}
+
+// pushToRemote is the internal implementation for all push operations.
+// It routes through CLI or SQL based on the remote's protocol and credentials.
+func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool) (retErr error) {
+	spanName := "dolt.push"
+	if force {
+		spanName = "dolt.force_push"
+	}
+	ctx, span := doltTracer.Start(ctx, spanName,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.remote", s.remote),
+			attribute.String("dolt.remote", remote),
 			attribute.String("dolt.branch", s.branch),
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	creds := s.mainRemoteCredentials()
+	creds := s.credentialsForRemote(remote)
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
-	// Credentials are passed directly to the subprocess via cmd.Env.
-	if s.isGitProtocolRemote(ctx) {
-		return s.doltCLIPush(ctx, true, creds)
+	// Credentials are passed directly to the subprocess via cmd.Env, avoiding
+	// process-wide env var races with concurrent goroutines.
+	if s.isGitProtocolRemote(ctx, remote) {
+		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Credential CLI routing: when credentials are set and server is external,
 	// route through CLI subprocess so credentials reach the dolt process via
 	// cmd.Env (applyToCmd). The SQL path's withEnvCredentials sets process-wide
 	// env vars that an external server cannot see.
-	if s.shouldUseCLIForCredentials(ctx) {
-		return s.doltCLIPush(ctx, true, creds)
+	if s.shouldUseCLIForCredentials(ctx, remote, creds) {
+		return s.doltCLIPush(ctx, remote, force, creds)
 	}
-	// Cloud auth CLI routing (GH#6).
-	if s.shouldUseCLIForCloudAuth() {
-		return s.doltCLIPush(ctx, true, creds)
+	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
+	// etc.) are set and we're in server mode, route through CLI so the dolt
+	// subprocess inherits the current env. The SQL server may not have these
+	// vars if it was started in a different context (GH#6).
+	if s.shouldUseCLIForCloudAuth(remote) {
+		return s.doltCLIPush(ctx, remote, force, creds)
 	}
-	if s.remoteUser != "" {
+	if s.remoteUser != "" && remote == s.remote {
 		return withEnvCredentials(creds, func() error {
-			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
-				return fmt.Errorf("failed to force push to %s/%s: %w", s.remote, s.branch, err)
+			if force {
+				if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
+					return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
+				}
+			} else {
+				if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
+					return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
+				}
 			}
 			return nil
 		})
 	}
-	if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--force', ?, ?)", s.remote, s.branch); err != nil {
-		return fmt.Errorf("failed to force push to %s/%s: %w", s.remote, s.branch, err)
+	if force {
+		if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH('--force', ?, ?)", remote, s.branch); err != nil {
+			return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
+		}
+	} else {
+		if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", remote, s.branch); err != nil {
+			return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
+		}
 	}
 	return nil
 }
@@ -1973,10 +1975,24 @@ func (s *DoltStore) ForcePush(ctx context.Context) (retErr error) {
 // stale dolt_auto_push_* rows on multi-machine setups), the conflicts are
 // automatically resolved using "theirs" strategy (GH#2466).
 func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
+	return s.pullFromRemote(ctx, s.remote)
+}
+
+// PullRemote pulls changes from a named remote. Unlike Pull(), which always
+// uses the configured default remote (s.remote), PullRemote targets an
+// explicit remote name. Credentials are only applied when the target remote
+// matches the default remote; otherwise nil creds are used.
+func (s *DoltStore) PullRemote(ctx context.Context, remote string) error {
+	return s.pullFromRemote(ctx, remote)
+}
+
+// pullFromRemote is the internal implementation for all pull operations.
+// It routes through CLI or SQL based on the remote's protocol and credentials.
+func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr error) {
 	ctx, span := doltTracer.Start(ctx, "dolt.pull",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(append(s.doltSpanAttrs(),
-			attribute.String("dolt.remote", s.remote),
+			attribute.String("dolt.remote", remote),
 			attribute.String("dolt.branch", s.branch),
 		)...),
 	)
@@ -1995,13 +2011,13 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 		}
 	}
 
-	creds := s.mainRemoteCredentials()
+	creds := s.credentialsForRemote(remote)
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
 	// Credentials are passed directly to the subprocess via cmd.Env.
-	if s.isGitProtocolRemote(ctx) {
-		if err := s.doltCLIPull(ctx, creds); err != nil {
+	if s.isGitProtocolRemote(ctx, remote) {
+		if err := s.doltCLIPull(ctx, remote, creds); err != nil {
 			return err
 		}
 		return nil
@@ -2009,26 +2025,26 @@ func (s *DoltStore) Pull(ctx context.Context) (retErr error) {
 	// Credential CLI routing: mirrors git-protocol path.
 	// Skips pullWithAutoResolve (consistent with git-protocol Pull — CLI manages its
 	// own connections and conflict handling).
-	if s.shouldUseCLIForCredentials(ctx) {
-		if err := s.doltCLIPull(ctx, creds); err != nil {
+	if s.shouldUseCLIForCredentials(ctx, remote, creds) {
+		if err := s.doltCLIPull(ctx, remote, creds); err != nil {
 			return err
 		}
 		return nil
 	}
 	// Cloud auth CLI routing (GH#6).
-	if s.shouldUseCLIForCloudAuth() {
-		return s.doltCLIPull(ctx, creds)
+	if s.shouldUseCLIForCloudAuth(remote) {
+		return s.doltCLIPull(ctx, remote, creds)
 	}
-	if s.remoteUser != "" {
+	if s.remoteUser != "" && remote == s.remote {
 		return withEnvCredentials(creds, func() error {
-			if err := s.pullWithAutoResolve(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, s.remote, s.branch); err != nil {
-				return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
+			if err := s.pullWithAutoResolve(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
+				return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 			}
 			return nil
 		})
 	}
-	if err := s.pullWithAutoResolve(ctx, "CALL DOLT_PULL(?, ?)", s.remote, s.branch); err != nil {
-		return fmt.Errorf("failed to pull from %s/%s: %w", s.remote, s.branch, err)
+	if err := s.pullWithAutoResolve(ctx, "CALL DOLT_PULL(?, ?)", remote, s.branch); err != nil {
+		return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 	}
 	return nil
 }

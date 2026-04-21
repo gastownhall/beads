@@ -12,6 +12,13 @@ func IsTerminal() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
+// IsStderrTerminal returns true if stderr is connected to a terminal (TTY).
+// Used to suppress advisory messages (e.g. deprecation notices) when stderr
+// is captured by test harnesses or piped to another process.
+func IsStderrTerminal() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
+}
+
 // ShouldUseColor determines if ANSI color codes should be used.
 // Respects standard conventions:
 //   - BD_GIT_HOOK=1: disables color in git hook context (prevents OSC 11 queries, GH#1303)

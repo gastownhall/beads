@@ -1,0 +1,25 @@
+formula = "quick-check"
+description = "Fast lint-test-build sanity check. Designed for use as a wisp."
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "lint"
+title = "Run linter"
+description = "Run project linter. Note warnings vs errors - errors block, warnings are informational."
+
+[[steps]]
+id = "test"
+title = "Run tests"
+description = "Run the project test suite. Record pass/fail count."
+
+[[steps]]
+id = "build"
+title = "Build project"
+description = "Run the build step. Verify output artifacts are created."
+
+[[steps]]
+id = "report"
+title = "Report results"
+needs = ["lint", "test", "build"]
+description = "Summarize: lint status, test pass rate, build success. Flag any issues found."

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -203,6 +204,11 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 	return &linearFieldMapper{config: t.config}
 }
 
+// MappingConfig returns the resolved Linear mapping configuration.
+func (t *Tracker) MappingConfig() *MappingConfig {
+	return t.config
+}
+
 func (t *Tracker) IsExternalRef(ref string) bool {
 	return IsLinearExternalRef(ref)
 }
@@ -221,26 +227,44 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 	return fmt.Sprintf("https://linear.app/issue/%s", issue.Identifier)
 }
 
+// ValidatePushStateMappings ensures push has explicit, non-ambiguous status
+// mappings for every configured team before any mutation occurs.
+func (t *Tracker) ValidatePushStateMappings(ctx context.Context) error {
+	if t.config == nil || len(t.config.ExplicitStateMap) == 0 {
+		return fmt.Errorf("%s", missingExplicitStateMapMessage)
+	}
+	for _, teamID := range t.teamIDs {
+		client := t.clients[teamID]
+		if client == nil {
+			continue
+		}
+		cache, err := BuildStateCache(ctx, client)
+		if err != nil {
+			return fmt.Errorf("fetching workflow states for team %s: %w", teamID, err)
+		}
+		for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusClosed} {
+			if _, err := ResolveStateIDForBeadsStatus(cache, status, t.config); err != nil {
+				// Only fail for statuses the config explicitly tries to map or when
+				// mappings are entirely absent. Missing blocked mappings are allowed
+				// until a blocked issue is actually pushed.
+				if status == types.StatusBlocked && strings.Contains(err.Error(), "has no configured Linear state") {
+					continue
+				}
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // findStateID looks up the Linear workflow state ID for a beads status
 // using the given per-team client.
 func (t *Tracker) findStateID(ctx context.Context, client *Client, status types.Status) (string, error) {
-	targetType := StatusToLinearStateType(status)
-
-	states, err := client.GetTeamStates(ctx)
+	cache, err := BuildStateCache(ctx, client)
 	if err != nil {
 		return "", err
 	}
-
-	for _, s := range states {
-		if s.Type == targetType {
-			return s.ID, nil
-		}
-	}
-
-	if len(states) > 0 {
-		return states[0].ID, nil
-	}
-	return "", fmt.Errorf("no workflow states found")
+	return ResolveStateIDForBeadsStatus(cache, status, t.config)
 }
 
 // primaryClient returns the client for the first configured team.

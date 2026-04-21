@@ -143,11 +143,11 @@ func TestShow_NotFoundJSON(t *testing.T) {
 	if stdout == "" {
 		t.Fatal("expected JSON error on stdout, got empty output")
 	}
-	var errResp map[string]string
+	var errResp map[string]interface{}
 	if jsonErr := json.Unmarshal([]byte(stdout), &errResp); jsonErr != nil {
 		t.Fatalf("expected valid JSON error response on stdout, got parse error: %v\nStdout: %s", jsonErr, stdout)
 	}
-	if errResp["error"] == "" {
+	if errField, _ := errResp["error"].(string); errField == "" {
 		t.Errorf("expected non-empty 'error' field in JSON response, got: %s", stdout)
 	}
 }

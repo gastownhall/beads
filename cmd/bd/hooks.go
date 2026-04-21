@@ -1082,6 +1082,16 @@ func exportJSONLForCommit() {
 	// Shell out to `bd export` which initializes its own store.
 	// Clear BD_GIT_HOOK from the subprocess env so that its
 	// PersistentPostRun auto-export path does not also fire.
+	//
+	// NOTE: we intentionally preserve GIT_DIR et al. in the subprocess
+	// env. The subprocess's PostRun eventually routes through the same
+	// gitAddFile as the parent, which relies on the inherited GIT_DIR to
+	// identify the hook's worktree and apply the cross-worktree staging
+	// guard (GH#3311 part 2). Scrubbing here would disable that guard.
+	// The theoretical downside is sync.Once-cached git.GetRepoRoot() in
+	// the subprocess being computed against cwd=.beads/; no current
+	// caller reads it on this path, so it is a latent hazard rather than
+	// a live bug.
 	cmd := exec.Command("bd", "export", "-o", fullPath)
 	cmd.Dir = beadsDir
 	cmd.Env = filterEnv(os.Environ(), "BD_GIT_HOOK")
@@ -1091,11 +1101,13 @@ func exportJSONLForCommit() {
 		return
 	}
 
-	// Stage the exported file if configured.
-	if config.GetBool("export.git-add") {
-		addCmd := exec.Command("git", "add", fullPath)
-		addCmd.Dir = filepath.Dir(fullPath)
-		if err := addCmd.Run(); err != nil {
+	// Stage the exported file if configured. Skip when no-git-ops is set
+	// (GH#3314). gitAddFile scrubs the inherited git hook env vars so git
+	// rediscovers the repo from cwd, and silently skips when fullPath is
+	// outside the hook's worktree (the .beads/redirect case where fullPath
+	// points into the main repo, not this worktree). See GH#3311.
+	if config.GetBool("export.git-add") && !config.GetBool("no-git-ops") {
+		if err := gitAddFile(fullPath); err != nil {
 			debug.Logf("pre-commit: git add failed: %v\n", err)
 		}
 	}

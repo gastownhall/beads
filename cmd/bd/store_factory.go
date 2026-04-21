@@ -4,7 +4,10 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -60,6 +63,9 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (embeddeddolt.Unlocke
 // newDoltStoreFromConfig creates a storage backend from the beads directory's
 // persisted metadata.json configuration. Uses embedded Dolt by default;
 // connects to dolt sql-server when dolt_mode is "server".
+//
+// For embedded mode, legacy hyphenated database names (pre-GH#2142) are
+// auto-sanitized to underscores and the fix is persisted to metadata.json.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
@@ -69,16 +75,80 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
 	}
+	if sanitized := sanitizeDBName(database); sanitized != database {
+		if err := migrateHyphenatedDB(beadsDir, cfg, database, sanitized); err != nil {
+			return nil, fmt.Errorf("auto-sanitize database name %q → %q: %w", database, sanitized, err)
+		}
+		database = sanitized
+	}
 	return embeddeddolt.New(ctx, beadsDir, database, "main")
+}
+
+// sanitizeDBName replaces hyphens and dots with underscores for
+// SQL-idiomatic embedded Dolt database names (GH#2142, GH#3231).
+func sanitizeDBName(name string) string {
+	name = strings.ReplaceAll(name, "-", "_")
+	name = strings.ReplaceAll(name, ".", "_")
+	return name
+}
+
+// migrateHyphenatedDB renames a legacy hyphenated database directory and
+// persists the sanitized name to metadata.json so subsequent opens use it.
+// This handles projects initialized before GH#2142 that upgrade to
+// embedded-mode-default builds (GH#3231).
+func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newName string) error {
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	oldDir := filepath.Join(dataDir, oldName)
+	newDir := filepath.Join(dataDir, newName)
+
+	oldExists := false
+	if info, err := os.Stat(oldDir); err == nil && info.IsDir() {
+		oldExists = true
+	}
+
+	if oldExists {
+		_, newErr := os.Stat(newDir)
+		switch {
+		case newErr == nil:
+			return fmt.Errorf("cannot auto-migrate database: both %q and %q exist under %s; remove one manually and retry",
+				oldName, newName, dataDir)
+		case !os.IsNotExist(newErr):
+			return fmt.Errorf("checking target directory %q: %w", newDir, newErr)
+		default:
+			if err := os.Rename(oldDir, newDir); err != nil {
+				return fmt.Errorf("renaming database directory: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "bd: migrated database directory %q → %q (GH#3231)\n", oldName, newName)
+		}
+	}
+
+	if cfg != nil && cfg.DoltDatabase != newName {
+		cfg.DoltDatabase = newName
+		if err := cfg.Save(beadsDir); err != nil {
+			return fmt.Errorf("persisting sanitized database name to metadata.json: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "bd: updated metadata.json dolt_database %q → %q (GH#3231)\n", oldName, newName)
+	}
+	return nil
 }
 
 // newReadOnlyStoreFromConfig creates a read-only storage backend from the beads
 // directory's persisted metadata.json configuration.
+//
+// For embedded mode, invalid characters (hyphens, dots) are sanitized in-memory
+// only — no directory renames or metadata.json writes. This prevents cross-repo
+// hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
-	// Embedded dolt is single-process so read-only is not enforced at the engine level.
-	return newDoltStoreFromConfig(ctx, beadsDir)
+	database := configfile.DefaultDoltDatabase
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	if sanitized := sanitizeDBName(database); sanitized != database {
+		database = sanitized
+	}
+	return embeddeddolt.New(ctx, beadsDir, database, "main")
 }

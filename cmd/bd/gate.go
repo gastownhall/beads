@@ -219,6 +219,117 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 	},
 }
 
+// gateCreateCmd creates an ad-hoc gate issue that blocks another issue
+var gateCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a gate that blocks an issue",
+	Long: `Create an ad-hoc gate issue that blocks another issue until resolved.
+
+The blocked issue will not appear in 'bd ready' until the gate is resolved
+via 'bd gate resolve'.
+
+Gate types:
+  human   - Requires manual 'bd gate resolve' (default)
+  timer   - Auto-resolves after --timeout duration
+  gh:run  - Waits for GitHub Actions workflow
+  gh:pr   - Waits for PR merge
+
+Examples:
+  bd gate create --blocks bd-abc
+  bd gate create --type=human --blocks bd-abc --reason="Need design review"
+  bd gate create --type=timer --blocks bd-abc --timeout=2h
+  bd gate create --type=gh:pr --blocks bd-abc --await-id=42`,
+	Run: func(cmd *cobra.Command, args []string) {
+		CheckReadonly("gate create")
+
+		blocksID, _ := cmd.Flags().GetString("blocks")
+		gateType, _ := cmd.Flags().GetString("type")
+		reason, _ := cmd.Flags().GetString("reason")
+		awaitID, _ := cmd.Flags().GetString("await-id")
+		timeoutStr, _ := cmd.Flags().GetString("timeout")
+
+		ctx := rootCtx
+
+		// Verify the target issue exists
+		targetIssue, err := store.GetIssue(ctx, blocksID)
+		if err != nil {
+			FatalError("issue not found: %s", blocksID)
+		}
+
+		// Parse timeout if specified
+		var timeout time.Duration
+		if timeoutStr != "" {
+			parsed, err := time.ParseDuration(timeoutStr)
+			if err != nil {
+				FatalError("invalid timeout: %v", err)
+			}
+			timeout = parsed
+		}
+
+		// Build gate title
+		title := fmt.Sprintf("Gate: %s", gateType)
+		if awaitID != "" {
+			title = fmt.Sprintf("Gate: %s %s", gateType, awaitID)
+		}
+
+		// Build description
+		desc := fmt.Sprintf("Ad-hoc gate blocking %s", targetIssue.ID)
+		if reason != "" {
+			desc = fmt.Sprintf("%s\n\nReason: %s", desc, reason)
+		}
+
+		// Create the gate issue
+		gate := &types.Issue{
+			Title:       title,
+			Description: desc,
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.IssueType("gate"),
+			AwaitType:   gateType,
+			AwaitID:     awaitID,
+			Timeout:     timeout,
+			CreatedBy:   getActorWithGit(),
+			Owner:       getOwner(),
+		}
+
+		if err := store.CreateIssue(ctx, gate, actor); err != nil {
+			FatalError("creating gate: %v", err)
+		}
+
+		// Add blocking dependency: target issue depends on gate
+		dep := &types.Dependency{
+			IssueID:     targetIssue.ID,
+			DependsOnID: gate.ID,
+			Type:        types.DepBlocks,
+		}
+		if err := store.AddDependency(ctx, dep, actor); err != nil {
+			FatalError("adding blocking dependency: %v", err)
+		}
+
+		// CreateIssue commits the issue row. AddDependency writes to the
+		// working set and needs a follow-up commit.
+		commitMsg := fmt.Sprintf("bd: create gate %s blocking %s", gate.ID, targetIssue.ID)
+		if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+			FatalError("failed to commit: %v", err)
+		}
+
+		if jsonOutput {
+			outputJSON(gate)
+			return
+		}
+
+		fmt.Printf("%s Created gate %s (type: %s)\n", ui.RenderPass("✓"), ui.RenderID(gate.ID), gateType)
+		fmt.Printf("  Blocks: %s (%s)\n", targetIssue.ID, targetIssue.Title)
+		if reason != "" {
+			fmt.Printf("  Reason: %s\n", reason)
+		}
+		if timeout > 0 {
+			fmt.Printf("  Timeout: %s\n", timeout)
+		}
+		fmt.Printf("\nResolve with: bd gate resolve %s\n", gate.ID)
+	},
+}
+
 // gateShowCmd shows a gate issue
 var gateShowCmd = &cobra.Command{
 	Use:   "show <gate-id>",
@@ -779,13 +890,23 @@ func init() {
 	gateCheckCmd.Flags().BoolP("escalate", "e", false, "Escalate failed/expired gates")
 	gateCheckCmd.Flags().IntP("limit", "l", 100, "Limit results (default 100)")
 
+	// gate create flags
+	gateCreateCmd.Flags().String("blocks", "", "Issue ID to block (required)")
+	gateCreateCmd.Flags().StringP("type", "t", "human", "Gate type (human, timer, gh:run, gh:pr)")
+	gateCreateCmd.Flags().StringP("reason", "r", "", "Reason for the gate")
+	gateCreateCmd.Flags().String("await-id", "", "Condition identifier (run ID, PR number, etc.)")
+	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 2h, 30m)")
+	_ = gateCreateCmd.MarkFlagRequired("blocks")
+
 	// Issue ID completions
 	gateShowCmd.ValidArgsFunction = issueIDCompletion
 	gateResolveCmd.ValidArgsFunction = issueIDCompletion
 	gateAddWaiterCmd.ValidArgsFunction = issueIDCompletion
+	gateCreateCmd.ValidArgsFunction = issueIDCompletion
 
 	// Add subcommands
 	gateCmd.AddCommand(gateListCmd)
+	gateCmd.AddCommand(gateCreateCmd)
 	gateCmd.AddCommand(gateShowCmd)
 	gateCmd.AddCommand(gateResolveCmd)
 	gateCmd.AddCommand(gateCheckCmd)

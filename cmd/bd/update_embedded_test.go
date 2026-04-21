@@ -185,6 +185,35 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("update_type_custom", func(t *testing.T) {
+		// Register "agent" as a custom type via bd config (GH#3030).
+		// This writes to Dolt only, NOT to .beads/config.yaml.
+		cfgCmd := exec.Command(bd, "config", "set", "types.custom", "agent,spike")
+		cfgCmd.Dir = dir
+		cfgCmd.Env = bdEnv(dir)
+		if out, err := cfgCmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd config set types.custom failed: %v\n%s", err, out)
+		}
+
+		issue := bdCreate(t, bd, dir, "Custom type update", "--type", "task")
+		// Before the fix (GH#3030), this would fail with "invalid issue type"
+		// because the CLI-level validation could not read custom types from Dolt.
+		bdUpdate(t, bd, dir, issue.ID, "--type", "agent")
+		got := bdShow(t, bd, dir, issue.ID)
+		if string(got.IssueType) != "agent" {
+			t.Errorf("expected type agent, got %s", got.IssueType)
+		}
+	})
+
+	t.Run("update_type_invalid_rejected", func(t *testing.T) {
+		// Verify that truly invalid types are still rejected by the storage layer.
+		issue := bdCreate(t, bd, dir, "Invalid type test", "--type", "task")
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--type", "banana")
+		if !strings.Contains(out, "invalid issue type") {
+			t.Errorf("expected 'invalid issue type' error, got: %s", out)
+		}
+	})
+
 	t.Run("update_design", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Design test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--design", "Design notes here")

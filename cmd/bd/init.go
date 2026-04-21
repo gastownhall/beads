@@ -104,7 +104,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			FatalError("unknown backend %q: only \"dolt\" is supported", backendFlag)
 		}
 
-		// Validate --database early, before any side effects
+		// Validate --database format early, before any side effects.
 		if database != "" {
 			if err := dolt.ValidateDatabaseName(database); err != nil {
 				FatalError("invalid database name %q: %v", database, err)
@@ -162,6 +162,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// (before config.yaml exists). Safe: init runs once and exits.
 		if sharedServer {
 			_ = os.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		}
+
+		// Reject hyphens in --database for embedded mode. Must run AFTER
+		// serverMode is set above — otherwise isEmbeddedMode() always returns
+		// true and incorrectly rejects server-mode names (GH#3231).
+		if database != "" && strings.ContainsRune(database, '-') && isEmbeddedMode() {
+			FatalError("database name %q contains hyphens which are invalid in embedded mode; use underscores instead (e.g. %q)",
+				database, sanitizeDBName(database))
 		}
 
 		// Initialize config (PersistentPreRun doesn't run for init command)
@@ -505,7 +513,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 		if syncFromRemote {
-			if err := cloneFromRemote(ctx, beadsDir, syncURL, dbName); err != nil {
+			if err := cloneFromRemote(ctx, beadsDir, syncURL, dbName, nil); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1140,7 +1148,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					giCmd := exec.Command("git", "add", ".gitignore")
 					_ = giCmd.Run()
 				}
-				commitCmd := exec.Command("git", "commit", "-m", "bd init: initialize beads issue tracking")
+				commitArgs := []string{"commit", "-m", "bd init: initialize beads issue tracking"}
+				if fromJSONL {
+					commitArgs = append(commitArgs, "--no-verify")
+				}
+				commitCmd := exec.Command("git", commitArgs...)
 				if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
 					if !quiet && !strings.Contains(string(commitOut), "nothing to commit") {
 						fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", commitErr)

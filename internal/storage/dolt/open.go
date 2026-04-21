@@ -202,6 +202,18 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 	if cfg.ServerUser == "" {
 		cfg.ServerUser = fileCfg.GetDoltServerUser()
 	}
+	// Populate password and TLS the same way the CLI CRUD path does. Without
+	// this, callers that rely on NewFromConfigWithOptions (e.g. doctor's
+	// SharedStore) fail to reach externally-hosted Dolt servers that keep
+	// credentials in ~/.config/beads/credentials, while bd create/list/close
+	// succeed (bd-h5k7). GetDoltServerPasswordForPort checks BEADS_DOLT_PASSWORD
+	// env first, then credentials file keyed by [host:resolved-port].
+	if cfg.ServerPassword == "" {
+		cfg.ServerPassword = fileCfg.GetDoltServerPasswordForPort(cfg.ServerPort)
+	}
+	if !cfg.ServerTLS {
+		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
+	}
 
 	// Pool size: env var > config.yaml > caller override > default (10).
 	// Useful for shared-server setups with many worktrees (GH#3140).

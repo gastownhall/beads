@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 )
@@ -97,6 +98,31 @@ func TestAutoPush_SkippedForReadOnlyCommands(t *testing.T) {
 			t.Errorf("isReadOnlyCommand(%q) = true, want false", cmd)
 		}
 	}
+}
+
+func TestAutoPushTimeoutConstants(t *testing.T) {
+	// Verify timeout defaults are reasonable (GH#3370).
+	if autoPushTimeout < 10*time.Second || autoPushTimeout > 120*time.Second {
+		t.Errorf("autoPushTimeout = %s, want 10s-120s range", autoPushTimeout)
+	}
+	if autoPushRemoteTimeout < 2*time.Second || autoPushRemoteTimeout > 30*time.Second {
+		t.Errorf("autoPushRemoteTimeout = %s, want 2s-30s range", autoPushRemoteTimeout)
+	}
+}
+
+func TestMaybeAutoPush_CancelledContext(t *testing.T) {
+	// maybeAutoPush should handle cancelled context gracefully (GH#3370).
+	t.Setenv("BD_DOLT_AUTO_PUSH", "true")
+
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	maybeAutoPush(ctx)
 }
 
 func TestMaybeAutoPush_DisabledByConfig(t *testing.T) {
