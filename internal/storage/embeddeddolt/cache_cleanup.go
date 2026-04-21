@@ -51,6 +51,11 @@ func (s *EmbeddedDoltStore) cleanGitRemoteCacheGarbage() {
 			return nil
 		}
 		if info.ModTime().Before(cutoff) {
+			// #nosec G122 -- path is under .dolt/git-remote-cache/ which is
+			// owned by the user running bd. A TOCTOU symlink swap would
+			// require write access to that directory; in that case the
+			// attacker already controls the Dolt data. The tmp_pack_/tmp_idx_
+			// prefix check further narrows the scope to files Dolt itself writes.
 			_ = os.Remove(path)
 		}
 		return nil
