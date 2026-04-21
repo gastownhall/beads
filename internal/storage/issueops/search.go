@@ -100,7 +100,11 @@ func searchTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types
 		for i, issue := range issues {
 			ids[i] = issue.ID
 		}
-		labelMap, labelErr := GetLabelsForIssuesInTx(ctx, tx, ids)
+		// Fast path: searchTableInTx queries exclusively either the issues
+		// or wisps table, so every ID in `ids` belongs to tables.Labels.
+		// Skip the per-batch wisp-partition round-trip that the generic
+		// GetLabelsForIssuesInTx performs (GH#3414).
+		labelMap, labelErr := GetLabelsForIssuesFromTableInTx(ctx, tx, tables.Labels, ids)
 		if labelErr != nil {
 			return nil, fmt.Errorf("search %s: hydrate labels: %w", tables.Main, labelErr)
 		}
@@ -112,7 +116,7 @@ func searchTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types
 
 		// Optionally hydrate dependencies in bulk (same batched pattern as labels).
 		if filter.IncludeDependencies {
-			depMap, depErr := GetDependencyRecordsForIssuesInTx(ctx, tx, ids)
+			depMap, depErr := GetDependencyRecordsForIssuesFromTableInTx(ctx, tx, tables.Dependencies, ids)
 			if depErr != nil {
 				return nil, fmt.Errorf("search %s: hydrate dependencies: %w", tables.Main, depErr)
 			}

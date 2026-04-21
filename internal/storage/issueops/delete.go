@@ -73,14 +73,11 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 		return &types.DeleteIssuesResult{}, nil
 	}
 
-	// Partition into wisps and regular issues.
-	var wispIDs, regularIDs []string
-	for _, id := range ids {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			regularIDs = append(regularIDs, id)
-		}
+	// Partition into wisps and regular issues in a single batched query
+	// instead of one round-trip per ID (GH#3414).
+	wispIDs, regularIDs, err := PartitionWispIDsInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, err
 	}
 
 	// Delete wisps first.

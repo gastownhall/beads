@@ -109,14 +109,11 @@ func GetCommentsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string
 
 	result := make(map[string][]*types.Comment)
 
-	// Partition IDs by wisp status.
-	var wispIDs, permIDs []string
-	for _, id := range issueIDs {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
-		}
+	// Partition IDs by wisp status in a single batched query, to avoid N
+	// round-trips on remote backends (GH#3414).
+	wispIDs, permIDs, err := PartitionWispIDsInTx(ctx, tx, issueIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(permIDs) > 0 {

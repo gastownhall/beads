@@ -34,69 +34,82 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx *sql.Tx) (map[string][]
 
 // GetDependencyRecordsForIssuesInTx returns dependency records for specific issues,
 // routing each ID to dependencies or wisp_dependencies based on wisp status.
-// Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
+// Uses a single batched wisp-partition query + batched IN clauses, so cost is
+// O(1 + N/queryBatchSize) round-trips rather than O(N) — important on remote
+// backends (see GH#3414).
 func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]*types.Dependency, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]*types.Dependency), nil
 	}
 
+	wispIDs, permIDs, err := PartitionWispIDsInTx(ctx, tx, issueIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	result := make(map[string][]*types.Dependency)
-
-	var wispIDs, permIDs []string
-	for _, id := range issueIDs {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
+	if len(wispIDs) > 0 {
+		if err := getDependencyRecordsIntoFromTable(ctx, tx, "wisp_dependencies", wispIDs, result); err != nil {
+			return nil, err
 		}
 	}
-
-	for _, pair := range []struct {
-		table string
-		ids   []string
-	}{
-		{"wisp_dependencies", wispIDs},
-		{"dependencies", permIDs},
-	} {
-		if len(pair.ids) == 0 {
-			continue
-		}
-		for start := 0; start < len(pair.ids); start += queryBatchSize {
-			end := start + queryBatchSize
-			if end > len(pair.ids) {
-				end = len(pair.ids)
-			}
-			batch := pair.ids[start:end]
-			placeholders := make([]string, len(batch))
-			args := make([]any, len(batch))
-			for i, id := range batch {
-				placeholders[i] = "?"
-				args[i] = id
-			}
-			//nolint:gosec // G201: pair.table is hardcoded
-			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-				`SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
-				 FROM %s WHERE issue_id IN (%s) ORDER BY issue_id`,
-				pair.table, strings.Join(placeholders, ",")), args...)
-			if err != nil {
-				return nil, fmt.Errorf("get dependency records from %s: %w", pair.table, err)
-			}
-			for rows.Next() {
-				dep, scanErr := scanDependencyRow(rows)
-				if scanErr != nil {
-					_ = rows.Close()
-					return nil, fmt.Errorf("get dependency records: scan: %w", scanErr)
-				}
-				result[dep.IssueID] = append(result[dep.IssueID], dep)
-			}
-			_ = rows.Close()
-			if err := rows.Err(); err != nil {
-				return nil, fmt.Errorf("get dependency records: rows: %w", err)
-			}
+	if len(permIDs) > 0 {
+		if err := getDependencyRecordsIntoFromTable(ctx, tx, "dependencies", permIDs, result); err != nil {
+			return nil, err
 		}
 	}
-
 	return result, nil
+}
+
+// GetDependencyRecordsForIssuesFromTableInTx is a fast-path variant used by
+// callers that already know every ID belongs to a single dep table (e.g.
+// searchTableInTx). Skips the wisp-partition round-trip.
+func GetDependencyRecordsForIssuesFromTableInTx(ctx context.Context, tx *sql.Tx, depTable string, issueIDs []string) (map[string][]*types.Dependency, error) {
+	if len(issueIDs) == 0 {
+		return make(map[string][]*types.Dependency), nil
+	}
+	result := make(map[string][]*types.Dependency)
+	if err := getDependencyRecordsIntoFromTable(ctx, tx, depTable, issueIDs, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by callers).
+func getDependencyRecordsIntoFromTable(ctx context.Context, tx *sql.Tx, depTable string, ids []string, result map[string][]*types.Dependency) error {
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
+			 FROM %s WHERE issue_id IN (%s) ORDER BY issue_id`,
+			depTable, strings.Join(placeholders, ",")), args...)
+		if err != nil {
+			return fmt.Errorf("get dependency records from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			dep, scanErr := scanDependencyRow(rows)
+			if scanErr != nil {
+				_ = rows.Close()
+				return fmt.Errorf("get dependency records: scan: %w", scanErr)
+			}
+			result[dep.IssueID] = append(result[dep.IssueID], dep)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("get dependency records: rows: %w", err)
+		}
+	}
+	return nil
 }
 
 // GetDependencyCountsInTx returns dependency counts for multiple issues within a transaction.
@@ -203,14 +216,12 @@ func GetBlockingInfoForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []st
 		return
 	}
 
-	// Partition into wisp and perm IDs for routing.
-	var wispIDs, permIDs []string
-	for _, id := range issueIDs {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
-		}
+	// Partition into wisp and perm IDs for routing. Use the batched
+	// partitioner so we don't take a round-trip per ID on remote backends
+	// (GH#3414).
+	wispIDs, permIDs, partErr := PartitionWispIDsInTx(ctx, tx, issueIDs)
+	if partErr != nil {
+		return nil, nil, nil, partErr
 	}
 
 	// Process wisp IDs against wisp_dependencies.
