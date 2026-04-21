@@ -583,9 +583,9 @@ func TestEventTypeValidation(t *testing.T) {
 	if !IssueType("molecule").IsBuiltIn() {
 		t.Error("IssueType(molecule).IsBuiltIn() = false, want true")
 	}
-	// custom types must NOT be treated as built-in
-	if IssueType("gate").IsBuiltIn() {
-		t.Error("IssueType(gate).IsBuiltIn() = true, want false")
+	// gate is now a built-in type (used by bd gate, formula gates — GH#3213)
+	if !IssueType("gate").IsBuiltIn() {
+		t.Error("IssueType(gate).IsBuiltIn() = false, want true")
 	}
 
 	// Normalize must not map event to a core type
