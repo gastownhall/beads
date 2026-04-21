@@ -55,9 +55,18 @@ func bdConfigListJSON(t *testing.T, bd, dir string) map[string]string {
 	if start < 0 {
 		t.Fatalf("no JSON object in config list output: %s", s)
 	}
-	var m map[string]string
-	if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(s[start:]), &raw); err != nil {
 		t.Fatalf("parse config list JSON: %v\n%s", err, s)
+	}
+	m := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if k == "schema_version" {
+			continue
+		}
+		if sv, ok := v.(string); ok {
+			m[k] = sv
+		}
 	}
 	return m
 }

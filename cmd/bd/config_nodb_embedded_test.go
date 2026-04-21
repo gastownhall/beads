@@ -152,14 +152,14 @@ func TestEmbeddedConfigValidateJSONNoWorkspaceWritesStdout(t *testing.T) {
 		t.Fatalf("expected JSON error on stdout only, got stderr:\n%s", stderr)
 	}
 
-	var payload map[string]string
+	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
 		t.Fatalf("parse config validate --json output: %v\nstdout:\n%s", err, stdout)
 	}
-	if payload["error"] != activeWorkspaceNotFoundError() {
-		t.Fatalf("error = %q, want %q", payload["error"], activeWorkspaceNotFoundError())
+	if errField, _ := payload["error"].(string); errField != activeWorkspaceNotFoundError() {
+		t.Fatalf("error = %q, want %q", errField, activeWorkspaceNotFoundError())
 	}
-	if !strings.Contains(payload["hint"], "bd where") {
-		t.Fatalf("expected hint to mention bd where, got %q", payload["hint"])
+	if hint, _ := payload["hint"].(string); !strings.Contains(hint, "bd where") {
+		t.Fatalf("expected hint to mention bd where, got %q", hint)
 	}
 }
