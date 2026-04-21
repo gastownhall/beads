@@ -1,8 +1,12 @@
 # Instructions for AI Agents Working on Beads
 
+> **Reading order**: Architecture → `docs/CLAUDE.md` | Workflow → `AGENT_INSTRUCTIONS.md` | Quick ref → `AGENTS.md`
+>
+> Run `bd prime` for AI-optimized context. Run `bd memories` to see persistent learnings.
+
 ## Project Overview
 
-This is **beads** (command: `bd`), an issue tracker designed for AI-supervised coding workflows. We dogfood our own tool!
+This is **beads** (command: `bd`), a Dolt-powered issue tracker designed for AI-supervised coding workflows. We dogfood our own tool!
 
 ## Issue Tracking
 
@@ -56,13 +60,12 @@ bd list --overdue               # Due date in past (not closed)
 ### Workflow
 
 1. **Check for ready work**: Run `bd ready` to see what's unblocked
-2. **Claim your task**: `bd update <id> --status in_progress`
+2. **Claim your task**: `bd update <id> --claim` (atomic compare-and-swap)
 3. **Work on it**: Implement, test, document
 4. **Discover new work**: If you find bugs or TODOs, create issues:
    - `bd create "Found bug in auth" -t bug -p 1 --json`
    - Link it: `bd dep add <new-id> <current-id> --type discovered-from`
 5. **Complete**: `bd close <id> --reason "Implemented"`
-6. **Export**: Run `bd export -o .beads/issues.jsonl` before committing
 
 ### Issue Types
 
@@ -93,51 +96,56 @@ Only `blocks` dependencies affect the ready work queue.
 
 ### Code Standards
 
-- **Go version**: 1.21+
-- **Linting**: `golangci-lint run ./...` (baseline warnings documented in LINTING.md)
-- **Testing**: All new features need tests (`go test ./...`)
+- **Go version**: 1.25+ (see `go.mod` for exact version)
+- **Build tag**: `-tags gms_pure_go` is **MANDATORY** for all builds and tests
+- **Build/Install**: `make build` / `make install` (never bare `go build` or `go install`)
+- **Testing**: `make test` (never bare `go test ./...` — it misses required tags)
+- **Linting**: `golangci-lint run ./...` (baseline warnings documented in docs/LINTING.md)
 - **Documentation**: Update relevant .md files
 
 ### File Organization
 
 ```
 beads/
-├── cmd/bd/              # CLI commands
+├── cmd/bd/              # CLI commands (Cobra, one file per command)
 ├── internal/
 │   ├── types/           # Core data types
+│   ├── config/          # Configuration
+│   ├── configfile/      # Config file handling
 │   └── storage/         # Storage layer
-│       └── sqlite/      # SQLite implementation
+│       ├── dolt/        # Dolt implementation (primary)
+│       └── embeddeddolt/ # Embedded Dolt (CGO-dependent)
+├── integrations/        # MCP server, external integrations
 ├── examples/            # Integration examples
 └── *.md                 # Documentation
 ```
 
 ### Before Committing
 
-1. **Run tests**: `go test ./...`
+1. **Run tests**: `make test` (or `./scripts/test.sh`)
 2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
-3. **Export issues**: `bd export -o .beads/issues.jsonl`
-4. **Update docs**: If you changed behavior, update README.md or other docs
-5. **Git add both**: `git add .beads/issues.jsonl <your-changes>`
+3. **Update docs**: If you changed behavior, update README.md or other docs
+4. **Install git hooks**: `bd hooks install` (auto-commits Dolt changes)
 
 ### Git Workflow
 
+bd uses **Dolt** as its primary database with automatic versioning:
+
 ```bash
-# Make changes
+# Each bd write auto-commits to Dolt history
+bd create "Issue title" -p 1
+
+# Sync with remote
+bd dolt push    # Push Dolt data
+bd dolt pull    # Pull Dolt data
+
+# Git workflow (code changes only)
 git add <files>
-
-# Export beads issues
-bd export -o .beads/issues.jsonl
-git add .beads/issues.jsonl
-
-# Commit
 git commit -m "Your message"
-
-# After pull
-git pull
-bd import .beads/issues.jsonl  # Sync Dolt database
+git push
 ```
 
-Or use the git hooks in `examples/git-hooks/` for automation.
+Install git hooks via `bd hooks install` for automatic sync.
 
 ## Current Project Status
 
@@ -145,18 +153,11 @@ Run `bd stats` to see overall progress.
 
 ### Active Areas
 
-- **Core CLI**: Mature, but always room for polish
+- **Core CLI**: Mature, always room for polish
 - **Examples**: Growing collection of agent integrations
 - **Documentation**: Comprehensive but can always improve
-- **MCP Server**: Planned (see bd-5)
-- **Migration Tools**: Planned (see bd-6)
-
-### 1.0 Milestone
-
-We're working toward 1.0. Key blockers tracked in bd. Run:
-```bash
-bd dep tree bd-8  # Show 1.0 epic dependencies
-```
+- **MCP Server**: Available at `integrations/beads-mcp/`
+- **Claude Plugin**: Skills and hooks at `claude-plugin/`
 
 ## Common Tasks
 
@@ -171,11 +172,11 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 
 ### Adding Storage Features
 
-1. Update schema in `internal/storage/sqlite/schema.go`
+1. Add Dolt SQL schema changes in `internal/storage/dolt/`
 2. Add migration if needed
 3. Update `internal/types/types.go` if new types
-4. Implement in `internal/storage/sqlite/sqlite.go`
-5. Add tests
+4. Implement in `internal/storage/dolt/` (queries, issues, etc.)
+5. Add tests (both unit and embedded via `//go:build cgo`)
 6. Update export/import in `cmd/bd/export.go` and `cmd/bd/import.go`
 
 ### Adding Examples
@@ -190,23 +191,24 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 
 - Check existing issues: `bd list`
 - Look at recent commits: `git log --oneline -20`
-- Read the docs: README.md, TEXT_FORMATS.md, EXTENDING.md
+- Read the docs: README.md, ADVANCED.md, docs/CONFIG.md
 - Create an issue if unsure: `bd create "Question: ..." -t task -p 2`
 
 ## Important Files
 
 - **README.md** - Main documentation (keep this updated!)
-- **EXTENDING.md** - Database extension guide
-- **TEXT_FORMATS.md** - JSONL format analysis
+- **AGENT_INSTRUCTIONS.md** - Detailed agent operational guide (authoritative)
+- **ADVANCED.md** - Advanced features (rename, merge, compaction)
 - **CONTRIBUTING.md** - Contribution guidelines
 - **SECURITY.md** - Security policy
+- **docs/CLAUDE.md** - Architecture overview
 
 ## Pro Tips for Agents
 
 - Always use `--json` flags for programmatic use
 - Link discoveries with `discovered-from` to maintain context
 - Check `bd ready` before asking "what next?"
-- Export to JSONL before committing (or use git hooks)
+- Use `bd dolt push` to sync Dolt data to remote
 - Use `bd dep tree` to understand complex dependencies
 - Priority 0-1 issues are usually more important than 2-4
 
@@ -300,21 +302,27 @@ case types.StatusClosed:
 ## Building and Testing
 
 ```bash
-# Build
-go build -o bd ./cmd/bd
+# Build (uses gms_pure_go tag, CGO)
+make build
 
-# Test
-go test ./...
+# Install to ~/.local/bin (canonical path)
+make install
+
+# Test (default local/CI path)
+make test
 
 # Test with coverage
-go test -coverprofile=coverage.out ./...
+go test -tags gms_pure_go -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
-# Run locally
-./bd init --prefix test
-./bd create "Test issue" -p 1
-./bd ready
+# Verify installed binary
+bd init --prefix test
+bd create "Test issue" -p 1
+bd ready
 ```
+
+> **WARNING**: Never use bare `go build -o bd` or `go install` — they miss the
+> required `gms_pure_go` tag and create stale binaries. Always use `make install`.
 
 ## Release Process (Maintainers)
 

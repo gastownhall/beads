@@ -103,7 +103,6 @@ bd ready
 - **AGENTS.md** - Complete workflow and development guide (READ THIS!)
 - **README.md** - User-facing documentation
 - **ADVANCED.md** - Advanced features (rename, merge, compaction)
-- **EXTENDING.md** - How to add custom tables to the database
 - **LABELS.md** - Complete label system guide
 - **CONFIG.md** - Configuration system
 

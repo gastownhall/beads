@@ -22,13 +22,10 @@ cd beads
 # Build the project (uses gms_pure_go tag via Makefile)
 make build
 
-# Run tests
-go test ./...
+# Run tests (uses correct build tags automatically)
+make test
 
-# Run with race detection
-go test -race ./...
-
-# Build and install locally
+# Build and install locally to ~/.local/bin
 make install
 ```
 
@@ -48,18 +45,18 @@ beads/
 ## Running Tests
 
 ```bash
-# Run all tests
-go test ./...
+# Run all tests (recommended — uses correct build tags)
+make test
 
 # Run tests with coverage
-go test -v -coverprofile=coverage.out ./...
+go test -tags gms_pure_go -v -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
 # Run specific package tests
-go test ./internal/storage/dolt/ -v
+go test -tags gms_pure_go ./internal/storage/dolt/ -v
 
 # Run tests with race detection
-go test -race ./...
+go test -tags gms_pure_go -race ./...
 ```
 
 ## Code Style
@@ -310,13 +307,14 @@ All contributions go through code review:
 ### Testing Locally
 
 ```bash
-# Build and test your changes quickly
-go build -o bd ./cmd/bd && ./bd init --prefix test
+# Build and install your changes
+make install
 
 # Test specific functionality
-./bd create "Test issue" -p 1 -t bug
-./bd dep add test-2 test-1
-./bd ready
+bd init --prefix test
+bd create "Test issue" -p 1 -t bug
+bd dep add test-2 test-1
+bd ready
 ```
 
 ### Database Inspection
