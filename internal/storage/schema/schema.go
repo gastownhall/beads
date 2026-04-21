@@ -216,15 +216,20 @@ func runMigrations(ctx context.Context, db DBConn, minVersion int, tolerateExist
 }
 
 // isConcurrentInitError returns true for errors that are expected and harmless
-// during concurrent schema initialization:
+// during concurrent schema initialization, or when the desired state is already
+// present because a db was bootstrapped out-of-band:
 //   - "already exists" — table/index/key created by another process (1050, 1061)
 //   - "duplicate column" — ALTER TABLE ADD COLUMN raced (1060)
 //   - "duplicate key name" — CREATE INDEX raced (1061)
 //   - "serialization failure" — Dolt write conflict from concurrent transaction
+//   - "does not have column" — ALTER TABLE DROP COLUMN on already-missing column
+//     (Dolt 1105); symmetric with "duplicate column" above. Makes DROP COLUMN
+//     migrations idempotent across dbs bootstrapped with different base schemas.
 func isConcurrentInitError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "already exists") ||
 		strings.Contains(msg, "duplicate column") ||
 		strings.Contains(msg, "duplicate key name") ||
-		strings.Contains(msg, "serialization failure")
+		strings.Contains(msg, "serialization failure") ||
+		strings.Contains(msg, "does not have column")
 }
