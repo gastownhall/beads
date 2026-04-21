@@ -514,11 +514,12 @@ func TestIssueTypeIsValid(t *testing.T) {
 		{TypeChore, true},
 		{TypeDecision, true},
 		{TypeMessage, true},
-		// Molecule is now a core type (used by swarm create)
+		// Molecule is a core type (used by swarm create)
 		{IssueType("molecule"), true},
-		// Orchestrator types are now custom types (not built-in)
+		// Gate is a core type (used by bd gate, formula gates — GH#3213)
+		{IssueType("gate"), true},
+		// Remaining orchestrator types are custom types (not built-in)
 		{IssueType("merge-request"), false},
-		{IssueType("gate"), false},
 		{IssueType("agent"), false},
 		{IssueType("role"), false},
 		{IssueType("convoy"), false},

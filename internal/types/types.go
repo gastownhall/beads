@@ -529,6 +529,7 @@ const (
 	TypeDecision  IssueType = "decision"
 	TypeMessage   IssueType = "message"
 	TypeMolecule  IssueType = "molecule"  // Molecule type for swarm coordination (internal use)
+	TypeGate      IssueType = "gate"      // Gate type for async coordination (bd gate, formula gates)
 	TypeSpike     IssueType = "spike"     // Timeboxed investigation to reduce uncertainty
 	TypeStory     IssueType = "story"     // User story describing a feature from the user's perspective
 	TypeMilestone IssueType = "milestone" // Marks completion of a set of related issues (no work itself)
@@ -540,19 +541,22 @@ const (
 // ValidateWithCustom and treated as built-in for hydration trust (GH#1356).
 const TypeEvent IssueType = "event"
 
-// Note: Orchestrator types (molecule, gate, convoy, merge-request, slot, agent, role, rig)
+// Note: Most orchestrator types (convoy, merge-request, slot, agent, role, rig)
 // were removed from beads core. They are now purely custom types with no built-in constants.
-// Use string literals like types.IssueType("molecule") if needed, and configure types.custom.
-// (event was also an orchestrator type but was promoted to a built-in internal type above.)
+// Use string literals like types.IssueType("convoy") if needed, and configure types.custom.
+// molecule, gate, and event were re-promoted to built-in because bd commands rely on them:
+//   - molecule: bd mol pour/wisp/bond (swarm coordination)
+//   - gate: bd gate create/check/resolve, formula gate steps (GH#3213)
+//   - event: set-state audit trail beads (GH#1356)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
 // IsValid checks if the issue type is a core work type.
 // Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
-// and molecule type are built-in. Other types require types.custom configuration.
+// and internal types (molecule, gate) are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
 	switch t {
 	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule,
-		TypeSpike, TypeStory, TypeMilestone:
+		TypeGate, TypeSpike, TypeStory, TypeMilestone:
 		return true
 	}
 	return false
