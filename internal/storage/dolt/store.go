@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -284,6 +285,9 @@ const serverRetryMaxElapsed = 30 * time.Second
 const serverWriteRetryMaxElapsed = 12 * time.Second
 const serverWriteLockWait = 2 * time.Second
 
+var serverWriteLockHintDelay = 500 * time.Millisecond
+var serverWriteLockHintInterval = 3 * time.Second
+
 func newServerRetryBackoff() backoff.BackOff {
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = serverRetryMaxElapsed
@@ -517,7 +521,70 @@ func (s *DoltStore) releaseServerWriteLock(ctx context.Context, conn *sql.Conn, 
 	}
 }
 
-func (s *DoltStore) acquireServerWriteLock(ctx context.Context) (*sql.Conn, string, error) {
+type serverWriteLockWaitReporter struct {
+	stopCh chan struct{}
+	doneCh chan struct{}
+}
+
+func formatServerWriteLockWaitMessage(elapsed time.Duration) string {
+	if elapsed < serverWriteLockWait {
+		return "waiting for shared-server write lock..."
+	}
+	rounded := elapsed.Round(time.Second)
+	if rounded < time.Second {
+		rounded = time.Second
+	}
+	return fmt.Sprintf("waiting for shared-server write lock (%s elapsed)...", rounded)
+}
+
+func startServerWriteLockWaitReporter(out io.Writer, waitStart time.Time) *serverWriteLockWaitReporter {
+	if out == nil || serverWriteLockHintDelay <= 0 {
+		return nil
+	}
+	reporter := &serverWriteLockWaitReporter{
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
+	}
+	go func() {
+		defer close(reporter.doneCh)
+
+		timer := time.NewTimer(serverWriteLockHintDelay)
+		defer timer.Stop()
+
+		select {
+		case <-reporter.stopCh:
+			return
+		case <-timer.C:
+			fmt.Fprintln(out, formatServerWriteLockWaitMessage(time.Since(waitStart)))
+		}
+
+		if serverWriteLockHintInterval <= 0 {
+			return
+		}
+
+		ticker := time.NewTicker(serverWriteLockHintInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reporter.stopCh:
+				return
+			case <-ticker.C:
+				fmt.Fprintln(out, formatServerWriteLockWaitMessage(time.Since(waitStart)))
+			}
+		}
+	}()
+	return reporter
+}
+
+func (r *serverWriteLockWaitReporter) stop() {
+	if r == nil {
+		return
+	}
+	close(r.stopCh)
+	<-r.doneCh
+}
+
+func (s *DoltStore) acquireServerWriteLock(ctx context.Context, waitStart time.Time) (*sql.Conn, string, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to acquire connection for write lock: %w", err)
@@ -526,6 +593,8 @@ func (s *DoltStore) acquireServerWriteLock(ctx context.Context) (*sql.Conn, stri
 	start := time.Now()
 	var locked int
 	lockName := s.serverWriteLockName()
+	reporter := startServerWriteLockWaitReporter(os.Stderr, waitStart)
+	defer reporter.stop()
 	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", lockName, int(serverWriteLockWait/time.Second)).Scan(&locked); err != nil {
 		doltMetrics.lockWaitMs.Record(ctx, float64(time.Since(start).Milliseconds()))
 		_ = conn.Close()
@@ -541,12 +610,13 @@ func (s *DoltStore) acquireServerWriteLock(ctx context.Context) (*sql.Conn, stri
 
 func (s *DoltStore) withServerWriteLock(ctx context.Context, fn func() error) error {
 	attempts := 0
+	waitStart := time.Now()
 	bo := newServerWriteRetryBackoff()
 	var conn *sql.Conn
 	var lockName string
 	err := backoff.Retry(func() error {
 		attempts++
-		c, l, err := s.acquireServerWriteLock(ctx)
+		c, l, err := s.acquireServerWriteLock(ctx, waitStart)
 		if err != nil && isRetryableWriteLockError(err) {
 			return err
 		}

@@ -6,8 +6,12 @@
 package dolt
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1050,6 +1054,93 @@ func TestServerWriteLockRetriesAfterTimeoutAcrossStores(t *testing.T) {
 	}
 	if err := <-doneB; err != nil {
 		t.Fatalf("storeB CreateIssue after retry: %v", err)
+	}
+}
+
+func TestServerWriteLockContentionLogsWaitHint(t *testing.T) {
+	storeA, storeB, cleanup := setupConcurrentPeerStores(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+	})
+
+	enterFinalize := make(chan struct{})
+	releaseFinalize := make(chan struct{})
+	storeA.commitVersionedWriteFn = func(context.Context, []string, string) error {
+		close(enterFinalize)
+		<-releaseFinalize
+		return nil
+	}
+
+	doneA := make(chan error, 1)
+	go func() {
+		doneA <- storeA.CreateIssue(ctx, &types.Issue{
+			ID:          "peer-lock-log-a",
+			Title:       "Peer lock log A",
+			Description: "first peer holds the advisory lock while stderr is captured",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}, "peer-a")
+	}()
+
+	<-enterFinalize
+
+	doneB := make(chan error, 1)
+	go func() {
+		doneB <- storeB.CreateIssue(ctx, &types.Issue{
+			ID:          "peer-lock-log-b",
+			Title:       "Peer lock log B",
+			Description: "second peer should emit a visible wait hint",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+		}, "peer-b")
+	}()
+
+	time.Sleep(serverWriteLockWait + 250*time.Millisecond)
+
+	select {
+	case err := <-doneB:
+		t.Fatalf("expected second store write to remain waiting, got %v", err)
+	default:
+	}
+
+	close(releaseFinalize)
+
+	if err := <-doneA; err != nil {
+		t.Fatalf("storeA CreateIssue: %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("storeB CreateIssue: %v", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+	os.Stderr = origStderr
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close read pipe: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "waiting for shared-server write lock") {
+		t.Fatalf("expected visible wait hint during contention, got %q", output)
 	}
 }
 

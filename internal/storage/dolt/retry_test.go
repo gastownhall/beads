@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
 )
@@ -343,5 +345,53 @@ func TestReleaseServerWriteLock_LogsWarningOnFailure(t *testing.T) {
 
 	if !strings.Contains(string(output), `failed to release write lock "bd_write_testdb"`) {
 		t.Fatalf("expected release warning, got %q", string(output))
+	}
+}
+
+func TestFormatServerWriteLockWaitMessage(t *testing.T) {
+	t.Run("initial wait", func(t *testing.T) {
+		got := formatServerWriteLockWaitMessage(500 * time.Millisecond)
+		if got != "waiting for shared-server write lock..." {
+			t.Fatalf("unexpected initial wait message: %q", got)
+		}
+	})
+
+	t.Run("long wait includes elapsed", func(t *testing.T) {
+		got := formatServerWriteLockWaitMessage(4*time.Second + 400*time.Millisecond)
+		if !strings.Contains(got, "waiting for shared-server write lock") {
+			t.Fatalf("missing wait prefix: %q", got)
+		}
+		if !strings.Contains(got, "4s elapsed") {
+			t.Fatalf("missing elapsed time: %q", got)
+		}
+	})
+}
+
+func TestServerWriteLockWaitReporter_RateLimited(t *testing.T) {
+	origDelay := serverWriteLockHintDelay
+	origInterval := serverWriteLockHintInterval
+	serverWriteLockHintDelay = 5 * time.Millisecond
+	serverWriteLockHintInterval = 10 * time.Millisecond
+	t.Cleanup(func() {
+		serverWriteLockHintDelay = origDelay
+		serverWriteLockHintInterval = origInterval
+	})
+
+	var buf bytes.Buffer
+	reporter := startServerWriteLockWaitReporter(&buf, time.Now().Add(-3*time.Second))
+	time.Sleep(28 * time.Millisecond)
+	reporter.stop()
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected periodic wait messages, got %q", buf.String())
+	}
+	if len(lines) > 4 {
+		t.Fatalf("expected rate-limited wait messages, got %d lines: %q", len(lines), buf.String())
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, "waiting for shared-server write lock") {
+			t.Fatalf("unexpected wait message line: %q", line)
+		}
 	}
 }
