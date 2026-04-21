@@ -39,6 +39,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt/migrations"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -1482,10 +1483,10 @@ func initSchemaOnDB(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
-	// Run DoltStore-specific backward-compat migrations for databases that
-	// predate the embedded migration system (e.g. ALTER TABLE ADD COLUMN,
-	// historical data transforms). These are idempotent.
-	if err := RunCompatMigrations(db); err != nil {
+	// Run backward-compat migrations for databases that predate the embedded
+	// migration system (e.g. ALTER TABLE ADD COLUMN, historical data
+	// transforms). These are idempotent.
+	if err := migrations.RunCompatMigrations(db); err != nil {
 		return fmt.Errorf("failed to run compat migrations: %w", err)
 	}
 

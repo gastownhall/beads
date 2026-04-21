@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/dolt/migrations"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -640,7 +640,7 @@ func handleToSeparateBranch(branch string, dryRun bool) {
 
 // listMigrations returns registered Dolt schema migrations.
 func listMigrations() []string {
-	return dolt.ListCompatMigrations()
+	return migrations.ListCompatMigrations()
 }
 
 // migrateSyncCmd is the "bd migrate sync <branch>" subcommand that

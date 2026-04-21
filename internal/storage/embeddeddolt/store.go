@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt/migrations"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -232,8 +233,14 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 // committing them to Dolt history. Uses withRootConn so the database can be
 // created before USE; this avoids running CREATE DATABASE inside withConn,
 // which is not safe for concurrent use in the embedded Dolt engine.
+//
+// After the schema-migration transaction commits, a fresh *sql.DB is opened
+// and used to drive the idempotent compat-migration runner. Mirrors the
+// server-mode open path in dolt/store.go:initSchemaOnDB and repairs
+// pre-existing embedded databases that predate the embedded migration
+// system's full coverage (GH#3412).
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
-	return s.withRootConn(ctx, true, func(tx *sql.Tx) error {
+	if err := s.withRootConn(ctx, true, func(tx *sql.Tx) error {
 		if s.database != "" {
 			if !validIdentifier.MatchString(s.database) {
 				msg := fmt.Sprintf("embeddeddolt: invalid database name: %q", s.database)
@@ -279,7 +286,25 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Run idempotent compat migrations on a fresh connection scoped to the
+	// newly-created database and branch. The embedded migration system only
+	// covers databases created from fresh init; pre-existing databases that
+	// predate specific SQL migrations need the defensive compat runner to
+	// repair missing columns and tables (GH#3412).
+	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	if err != nil {
+		return fmt.Errorf("embeddeddolt: open for compat migrations: %w", err)
+	}
+	defer func() { _ = cleanup() }()
+
+	if err := migrations.RunCompatMigrations(db); err != nil {
+		return fmt.Errorf("embeddeddolt: compat migrations: %w", err)
+	}
+	return nil
 }
 
 // ensureIgnoredTables creates dolt_ignore'd wisp tables if they don't exist.
