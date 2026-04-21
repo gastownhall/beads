@@ -13,8 +13,8 @@ import (
 // use this constant to avoid column-list drift between scan sites.
 const IssueSelectColumns = `id, content_hash, title, description, design, acceptance_criteria, notes,
 	       status, priority, issue_type, assignee, estimated_minutes,
-	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
-	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
+	       created_at, created_by, created_by_session, owner, updated_at, started_at, closed_at, external_ref, spec_id,
+	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason, closed_by_session,
 	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
 	       await_type, await_id, timeout_ns, waiters,
 	       mol_type,
@@ -36,9 +36,9 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
 	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
-	var createdBy sql.NullString
+	var createdBy, createdBySession sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
-	var contentHash, sourceRepo, closeReason sql.NullString
+	var contentHash, sourceRepo, closeReason, closedBySession sql.NullString
 	var workType, sourceSystem sql.NullString
 	var sender, wispType, molType, eventKind, actor, target, payload sql.NullString
 	var awaitType, awaitID, waiters sql.NullString
@@ -49,8 +49,8 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-		&createdAtStr, &createdBy, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
-		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
+		&createdAtStr, &createdBy, &createdBySession, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason, &closedBySession,
 		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&molType,
@@ -88,6 +88,12 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	}
 	if createdBy.Valid {
 		issue.CreatedBy = createdBy.String
+	}
+	if createdBySession.Valid {
+		issue.CreatedBySession = createdBySession.String
+	}
+	if closedBySession.Valid {
+		issue.ClosedBySession = closedBySession.String
 	}
 	if owner.Valid {
 		issue.Owner = owner.String

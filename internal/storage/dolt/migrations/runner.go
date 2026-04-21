@@ -35,6 +35,7 @@ var compatMigrationsList = []CompatMigration{
 	{"wisp_events_created_at_index", MigrateWispEventsCreatedAtIndex},
 	{"custom_status_type_tables", MigrateCustomStatusTypeTables},
 	{"backfill_custom_tables", BackfillCustomTables},
+	{"add_session_columns", MigrateAddSessionColumns},
 }
 
 // RunCompatMigrations executes all backward-compat migrations. These handle

@@ -47,7 +47,7 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
-			created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
+			created_at, created_by, created_by_session, owner, updated_at, started_at, closed_at, external_ref, spec_id,
 			compaction_level, compacted_at, compacted_at_commit, original_size,
 			sender, ephemeral, no_history, wisp_type, pinned, is_template,
 			mol_type, work_type, source_system, source_repo, close_reason,
@@ -57,7 +57,7 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -87,7 +87,7 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 	`, table),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
-		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
+		issue.CreatedAt, issue.CreatedBy, issue.CreatedBySession, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
 		issue.CompactionLevel, issue.CompactedAt, NullStringPtr(issue.CompactedAtCommit), NullIntVal(issue.OriginalSize),
 		issue.Sender, issue.Ephemeral, issue.NoHistory, issue.WispType, issue.Pinned, issue.IsTemplate,
 		issue.MolType, issue.WorkType, issue.SourceSystem, issue.SourceRepo, issue.CloseReason,

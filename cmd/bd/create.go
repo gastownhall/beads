@@ -219,6 +219,14 @@ var createCmd = &cobra.Command{
 			deferUntil = &t
 		}
 
+		// Get Claude Code session ID from flag or environment variable.
+		// Captured at create as created_by_session (immutable after creation).
+		// Mirrors the existing --session pattern on bd close / bd update --status=closed.
+		createSession, _ := cmd.Flags().GetString("session")
+		if createSession == "" {
+			createSession = os.Getenv("CLAUDE_SESSION_ID")
+		}
+
 		// Parse --metadata flag (GH#1406)
 		var metadata json.RawMessage
 		if cmd.Flags().Changed("metadata") {
@@ -278,6 +286,7 @@ var createCmd = &cobra.Command{
 				Ephemeral:          wisp,
 				NoHistory:          noHistory,
 				CreatedBy:          getActorWithGit(),
+				CreatedBySession:   createSession,
 				Owner:              getOwner(),
 				MolType:            molType,
 				WispType:           wispType,
@@ -475,6 +484,7 @@ var createCmd = &cobra.Command{
 			Ephemeral:          wisp,
 			NoHistory:          noHistory,
 			CreatedBy:          getActorWithGit(),
+			CreatedBySession:   createSession,
 			Owner:              getOwner(),
 			MolType:            molType,
 			WispType:           wispType,
@@ -723,6 +733,7 @@ type createIssueParams struct {
 	Ephemeral          bool
 	NoHistory          bool
 	CreatedBy          string
+	CreatedBySession   string
 	Owner              string
 	MolType            types.MolType
 	WispType           types.WispType
@@ -758,6 +769,7 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		Ephemeral:          params.Ephemeral,
 		NoHistory:          params.NoHistory,
 		CreatedBy:          params.CreatedBy,
+		CreatedBySession:   params.CreatedBySession,
 		Owner:              params.Owner,
 		MolType:            params.MolType,
 		WispType:           params.WispType,
@@ -844,6 +856,7 @@ func init() {
 	createCmd.Flags().String("due", "", "Due date/time. Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
 	createCmd.Flags().String("defer", "", "Defer until date (issue hidden from bd ready until then). Same formats as --due")
 	createCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
+	createCmd.Flags().String("session", "", "Claude Code session ID to record as created_by_session (or set CLAUDE_SESSION_ID env var)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(createCmd)
 }

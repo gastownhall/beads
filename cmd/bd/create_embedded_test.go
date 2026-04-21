@@ -644,6 +644,101 @@ A new feature
 			t.Errorf("expected title-related error, got: %s", out)
 		}
 	})
+
+	// ===== Session Flag (created_by_session) =====
+
+	t.Run("create_with_session", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "cs")
+		issue := bdCreate(t, bd, dir, "Created with explicit session", "--session", "sess-create-1")
+		if issue.CreatedBySession != "sess-create-1" {
+			t.Errorf("CreatedBySession: got %q, want %q", issue.CreatedBySession, "sess-create-1")
+		}
+
+		// Verify round-trip through bd show --json.
+		shown := bdShow(t, bd, dir, issue.ID)
+		if shown.CreatedBySession != "sess-create-1" {
+			t.Errorf("show CreatedBySession: got %q, want %q", shown.CreatedBySession, "sess-create-1")
+		}
+	})
+
+	t.Run("create_session_from_env", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "ce")
+		cmd := exec.Command(bd, "create", "--json", "Env session test")
+		cmd.Dir = dir
+		env := bdEnv(dir)
+		env = append(env, "CLAUDE_SESSION_ID=env-create-sess")
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd create with env session failed: %v\n%s", err, out)
+		}
+		issue := parseIssueJSON(t, out)
+		if issue.CreatedBySession != "env-create-sess" {
+			t.Errorf("CreatedBySession: got %q, want %q", issue.CreatedBySession, "env-create-sess")
+		}
+	})
+
+	t.Run("create_without_session_empty", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "cn")
+		issue := bdCreate(t, bd, dir, "No session provided")
+		if issue.CreatedBySession != "" {
+			t.Errorf("CreatedBySession without flag or env: got %q, want empty", issue.CreatedBySession)
+		}
+	})
+
+	t.Run("created_by_session_immutable", func(t *testing.T) {
+		// Create with session A, then run an update that would touch other
+		// fields, and verify created_by_session is unchanged afterward.
+		// created_by_session is not in IsAllowedUpdateField, so it cannot be
+		// modified through the update path — this test locks that invariant.
+		dir, _, _ := bdInit(t, bd, "--prefix", "ci")
+		issue := bdCreate(t, bd, dir, "Immutable session test", "--session", "sess-original")
+		if issue.CreatedBySession != "sess-original" {
+			t.Fatalf("precondition: CreatedBySession got %q, want %q", issue.CreatedBySession, "sess-original")
+		}
+
+		// Update something else on the issue. Attempt with a different --session
+		// env — that only affects closed_by_session on status=closed, never
+		// created_by_session.
+		cmd := exec.Command(bd, "update", issue.ID, "--priority", "1")
+		cmd.Dir = dir
+		env := bdEnv(dir)
+		env = append(env, "CLAUDE_SESSION_ID=sess-attempted-override")
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd update failed: %v\n%s", err, out)
+		}
+
+		shown := bdShow(t, bd, dir, issue.ID)
+		if shown.CreatedBySession != "sess-original" {
+			t.Errorf("after update, CreatedBySession: got %q, want %q (immutable)", shown.CreatedBySession, "sess-original")
+		}
+	})
+
+	t.Run("create_session_json_and_long", func(t *testing.T) {
+		// Regression: created_by_session must hydrate in JSON output AND appear
+		// in the `bd show --long` human surface.
+		dir, _, _ := bdInit(t, bd, "--prefix", "cl")
+		issue := bdCreate(t, bd, dir, "JSON and long render", "--session", "sess-render")
+
+		// JSON round-trip.
+		shown := bdShow(t, bd, dir, issue.ID)
+		if shown.CreatedBySession != "sess-render" {
+			t.Errorf("JSON CreatedBySession: got %q, want %q", shown.CreatedBySession, "sess-render")
+		}
+
+		// Long render.
+		cmd := exec.Command(bd, "show", issue.ID, "--long")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd show --long failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "Created by session: sess-render") {
+			t.Errorf("bd show --long should contain 'Created by session: sess-render', got:\n%s", out)
+		}
+	})
 }
 
 // TestEmbeddedCreateCommitPending verifies that CommitPending works on EmbeddedDoltStore:
@@ -952,4 +1047,64 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 	}
 
 	t.Logf("created %d issues across %d concurrent workers (%d succeeded), %d in DB", len(allIDs), numWorkers, successes, stats.TotalIssues)
+}
+
+// TestEmbeddedCreateSessionConcurrent verifies that concurrent bd create
+// invocations with distinct --session values each persist their own
+// created_by_session without cross-contamination. Uses real OS processes
+// (bd invocations) to exercise the full multi-process code path, not just
+// goroutine-level concurrency.
+func TestEmbeddedCreateSessionConcurrent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "csc")
+
+	const numWorkers = 5
+	type result struct {
+		worker  int
+		issueID string
+		session string
+		err     error
+	}
+	results := make([]result, numWorkers)
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			session := fmt.Sprintf("sess-concurrent-%d", worker)
+			title := fmt.Sprintf("Concurrent session %d", worker)
+
+			// Use bdRunWithFlockRetry so flock contention between processes
+			// is handled the same way the rest of the suite handles it.
+			out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--json", "--session", session, title)
+			if err != nil {
+				results[worker] = result{worker: worker, err: fmt.Errorf("bd create failed: %w\n%s", err, out)}
+				return
+			}
+			issue := parseIssueJSON(t, out)
+			results[worker] = result{worker: worker, issueID: issue.ID, session: issue.CreatedBySession}
+		}(w)
+	}
+	wg.Wait()
+
+	// Verify each successful worker got its own session persisted with no mix-up.
+	for _, r := range results {
+		if r.err != nil {
+			if strings.Contains(r.err.Error(), "one writer at a time") {
+				continue // acceptable flock loss under contention
+			}
+			t.Errorf("worker %d failed: %v", r.worker, r.err)
+			continue
+		}
+		want := fmt.Sprintf("sess-concurrent-%d", r.worker)
+		if r.session != want {
+			t.Errorf("worker %d: CreatedBySession got %q, want %q (issue %s)", r.worker, r.session, want, r.issueID)
+		}
+	}
 }

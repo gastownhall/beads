@@ -243,6 +243,9 @@ func formatIssueLongExtras(issue *types.Issue, formatTime func(time.Time) string
 
 	// Extended timestamps and closure details
 	var closeParts []string
+	if issue.CreatedBySession != "" {
+		closeParts = append(closeParts, fmt.Sprintf("  Created by session: %s", issue.CreatedBySession))
+	}
 	if issue.ClosedAt != nil {
 		closeParts = append(closeParts, fmt.Sprintf("  Closed at: %s", formatTime(*issue.ClosedAt)))
 	}
