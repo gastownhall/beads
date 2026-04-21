@@ -155,7 +155,7 @@ jobs:
             mkdir -p "$staging"
             cp "bd-darwin-${arch}" "$staging/bd"
             cp LICENSE README.md CHANGELOG.md "$staging/"
-            tar -czf "${staging}.tar.gz" "$staging"
+            tar -czf "${staging}.tar.gz" -C "$staging" .
             shasum -a 256 "${staging}.tar.gz" >> darwin-checksums.txt
           done
 
