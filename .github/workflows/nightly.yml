@@ -60,6 +60,7 @@ jobs:
       - name: Upload coverage
         uses: codecov/codecov-action@v6
         if: success()
+        continue-on-error: true
         with:
           file: ./coverage.out
           fail_ci_if_error: false
