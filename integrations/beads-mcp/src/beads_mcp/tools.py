@@ -3,17 +3,12 @@
 import asyncio
 import logging
 import os
+from contextlib import suppress
 from contextvars import ContextVar
 from functools import lru_cache
-from typing import Annotated, Any, TYPE_CHECKING
+from typing import Annotated, Any
 
-from .bd_client import create_bd_client, BdClientBase, BdError
-from .workspace import resolve_workspace_root as _shared_resolve_workspace_root
-
-logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from typing import List
+from .bd_client import BdClientBase, BdError, create_bd_client
 from .models import (
     AddDependencyParams,
     BlockedIssue,
@@ -33,6 +28,14 @@ from .models import (
     Stats,
     UpdateIssueParams,
 )
+from .workspace import (
+    get_git_workspace_roots as _get_git_workspace_roots,
+)
+from .workspace import (
+    resolve_workspace_root as _shared_resolve_workspace_root,
+)
+
+logger = logging.getLogger(__name__)
 
 # ContextVar for request-scoped workspace routing
 current_workspace: ContextVar[str | None] = ContextVar("workspace", default=None)
@@ -106,7 +109,7 @@ def _resolve_beads_redirect(beads_dir: str, workspace_root: str) -> str | None:
         return None
 
     try:
-        with open(redirect_path, "r") as f:
+        with open(redirect_path) as f:
             redirect_target = f.read().strip()
 
         if not redirect_target:
@@ -154,12 +157,18 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
         current = os.path.abspath(start_dir or os.getcwd())
 
         # Resolve symlinks like Go CLI does
-        try:
+        with suppress(Exception):
             current = os.path.realpath(current)
-        except Exception:
-            pass
 
-        # Walk up directory tree
+        git_roots = _get_git_workspace_roots(current)
+        worktree_root = None
+        fallback_root = None
+        if git_roots is not None:
+            worktree_root, main_repo_root = git_roots
+            if main_repo_root != worktree_root:
+                fallback_root = main_repo_root
+
+        # Walk up directory tree, but do not cross the current repo/worktree boundary.
         while True:
             beads_dir = os.path.join(current, ".beads")
             if os.path.isdir(beads_dir):
@@ -177,7 +186,20 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
             parent = os.path.dirname(current)
             if parent == current:  # Reached filesystem root
                 break
+            if worktree_root is not None and current == worktree_root:
+                break
             current = parent
+
+        if fallback_root is not None:
+            beads_dir = os.path.join(fallback_root, ".beads")
+            if os.path.isdir(beads_dir):
+                redirected = _resolve_beads_redirect(beads_dir, fallback_root)
+                if redirected:
+                    logger.debug(f"Followed shared worktree fallback from {fallback_root} to {redirected}")
+                    return redirected
+
+                if _has_beads_project_files(beads_dir):
+                    return fallback_root
 
         return None
 
