@@ -856,8 +856,20 @@ var rootCmd = &cobra.Command{
 			doltCfg.ServerTLS = cfg.GetDoltServerTLS()
 		} else if cfgErr == nil {
 			// Load returned (nil, nil) — no config file found.
-			// Log so silent fallback to default DB is visible.
-			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; database name may default incorrectly\n", beadsDir)
+			// Fall back to the canonical default database name; matches the
+			// behavior of newDoltStoreFromConfig / newReadOnlyStoreFromConfig
+			// (see store_factory.go). Without this, embeddeddolt.New rejects
+			// the empty database name with "database name must not be empty
+			// (caller should default to \"beads\")".
+			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; using default database name %q\n", beadsDir, configfile.DefaultDoltDatabase)
+			doltCfg.Database = configfile.DefaultDoltDatabase
+		}
+		// If config parse failed (cfgErr != nil), still default the database
+		// name so the store-open error is about the real problem (the parse
+		// failure warning already printed) rather than a confusing "database
+		// name must not be empty" downstream.
+		if doltCfg.Database == "" {
+			doltCfg.Database = configfile.DefaultDoltDatabase
 		}
 		doltCfg.SyncRemote = resolveSyncRemote()
 
