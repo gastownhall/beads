@@ -19,13 +19,8 @@ func TestJSONContract_ListOutputIsValidJSON(t *testing.T) {
 	w.create("JSON contract test issue")
 
 	out := w.run("list", "--json")
-	var envelope map[string]any
-	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
-		t.Fatalf("bd list --json produced invalid JSON: %v\nOutput:\n%s", err, out)
-	}
-	assertSchemaVersion(t, envelope, "bd list --json")
-	items, ok := envelope["items"].([]any)
-	if !ok || len(items) == 0 {
+	items := parseJSONOutput(t, out)
+	if len(items) == 0 {
 		t.Fatal("bd list --json returned no items")
 	}
 }
@@ -59,11 +54,10 @@ func TestJSONContract_ReadyOutputIsValidJSON(t *testing.T) {
 	w := newWorkspace(t)
 
 	out := w.run("ready", "--json")
-	var envelope map[string]any
-	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+	var arr []map[string]any
+	if err := json.Unmarshal([]byte(out), &arr); err != nil {
 		t.Fatalf("bd ready --json produced invalid JSON: %v\nOutput:\n%s", err, out)
 	}
-	assertSchemaVersion(t, envelope, "bd ready --json")
 }
 
 // TestJSONContract_CreateOutputHasID verifies bd create --json returns
@@ -215,7 +209,8 @@ func TestJSONContract_PingOutputIsValidJSON(t *testing.T) {
 }
 
 // TestJSONContract_SchemaVersionPresent verifies that schema_version is
-// present in output from all core --json commands.
+// present in object-returning --json commands (show, create, ping).
+// Array-returning commands (list, ready) do not include schema_version.
 func TestJSONContract_SchemaVersionPresent(t *testing.T) {
 	t.Parallel()
 	w := newWorkspace(t)
@@ -225,8 +220,6 @@ func TestJSONContract_SchemaVersionPresent(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"list", []string{"list", "--json"}},
-		{"ready", []string{"ready", "--json"}},
 		{"show", []string{"show", id, "--json"}},
 		{"ping", []string{"ping", "--json"}},
 	}

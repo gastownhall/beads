@@ -103,7 +103,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 }
 
 type importResultJSON struct {
-	Source     string   `json:"source"`
+	Source    string   `json:"source"`
 	Created   int      `json:"created"`
 	Skipped   int      `json:"skipped"`
 	DedupHits int      `json:"dedup_skipped,omitempty"`
@@ -177,7 +177,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	result := importResultJSON{
 		Source:    source,
 		DedupHits: dedupHits,
-		DryRun:   importDryRun,
+		DryRun:    importDryRun,
 	}
 
 	if importDryRun {
@@ -208,11 +208,12 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	// Import issues
 	if len(issues) > 0 {
 		opts := ImportOptions{SkipPrefixValidation: true}
-		_, err := importIssuesCore(ctx, "", store, issues, opts)
+		importResult, err := importIssuesCore(ctx, "", store, issues, opts)
 		if err != nil {
 			return fmt.Errorf("import failed: %w", err)
 		}
-		result.Created = len(issues)
+		result.Created = importResult.Created
+		result.Skipped += importResult.Skipped
 		for _, issue := range issues {
 			result.IDs = append(result.IDs, issue.ID)
 		}

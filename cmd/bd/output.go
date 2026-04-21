@@ -13,11 +13,10 @@ const JSONSchemaVersion = 1
 
 // outputJSON outputs data as pretty-printed JSON to stdout.
 //
-// All output includes a top-level "schema_version" field so consumers
+// Object input: schema_version is injected as a top-level field so consumers
 // (Jawnt MCP, BeadsX, gt mail, sync scripts) can detect format changes.
-//
-//   - Object input: schema_version is injected as a top-level field.
-//   - Array/slice input: wrapped as {"schema_version": N, "items": [...]}.
+// Array/slice input: output as-is (no envelope wrapping) to preserve
+// backwards compatibility with existing consumers that parse raw arrays.
 func outputJSON(v interface{}) {
 	wrapped := wrapWithSchemaVersion(v)
 	encoder := json.NewEncoder(os.Stdout)
@@ -37,9 +36,9 @@ func outputJSONRaw(v interface{}) {
 	}
 }
 
-// wrapWithSchemaVersion adds schema_version to the output. For objects,
-// it's injected as a top-level field. For arrays, the data is wrapped
-// in {"schema_version": N, "items": [...]}.
+// wrapWithSchemaVersion adds schema_version to object output. Arrays
+// and slices are returned unchanged to preserve backwards compatibility
+// with existing consumers that parse raw JSON arrays.
 func wrapWithSchemaVersion(v interface{}) interface{} {
 	if v == nil {
 		return map[string]interface{}{"schema_version": JSONSchemaVersion}
@@ -50,24 +49,22 @@ func wrapWithSchemaVersion(v interface{}) interface{} {
 		rv = rv.Elem()
 	}
 
-	switch rv.Kind() {
-	case reflect.Slice, reflect.Array:
-		return map[string]interface{}{
-			"schema_version": JSONSchemaVersion,
-			"items":          v,
-		}
-	default:
-		data, err := json.Marshal(v)
-		if err != nil {
-			return v
-		}
-		var m map[string]interface{}
-		if err := json.Unmarshal(data, &m); err != nil {
-			return v
-		}
-		m["schema_version"] = JSONSchemaVersion
-		return m
+	// Arrays/slices: return as-is (no envelope) for backwards compat.
+	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+		return v
 	}
+
+	// Objects: inject schema_version as a top-level field.
+	data, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return v
+	}
+	m["schema_version"] = JSONSchemaVersion
+	return m
 }
 
 // outputJSONError outputs an error as JSON to stderr and exits with code 1.

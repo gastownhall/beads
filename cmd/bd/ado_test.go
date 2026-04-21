@@ -667,26 +667,21 @@ func TestADOProjectsJSONOutput(t *testing.T) {
 		}
 	})
 
-	// Parse the schema-versioned envelope
-	var envelope struct {
-		SchemaVersion int               `json:"schema_version"`
-		Items         []json.RawMessage `json:"items"`
-	}
-	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+	// Verify it's valid JSON array
+	var projects []json.RawMessage
+	if err := json.Unmarshal([]byte(output), &projects); err != nil {
 		t.Fatalf("failed to parse JSON output: %v\nraw: %s", err, output)
 	}
-	if envelope.SchemaVersion < 1 {
-		t.Errorf("expected schema_version >= 1, got %d", envelope.SchemaVersion)
-	}
-	if len(envelope.Items) != 1 {
-		t.Errorf("expected 1 project, got %d", len(envelope.Items))
+	if len(projects) != 1 {
+		t.Errorf("expected 1 project, got %d", len(projects))
 	}
 
+	// Verify project content
 	var proj struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 	}
-	if err := json.Unmarshal(envelope.Items[0], &proj); err != nil {
+	if err := json.Unmarshal(projects[0], &proj); err != nil {
 		t.Fatalf("failed to parse project: %v", err)
 	}
 	if proj.Name != "TestProject" {

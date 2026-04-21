@@ -1,7 +1,8 @@
 # JSON Output Schema Contract
 
-All `bd` commands that support `--json` output include a `schema_version` field
-at the top level. Consumers should check this field to detect format changes.
+Commands that return a single object (show, create, close, ping, etc.) include a
+`schema_version` field at the top level. Commands that return arrays (list, ready,
+blocked, etc.) output a raw JSON array for backwards compatibility.
 
 ## Schema Version
 
@@ -35,16 +36,13 @@ Commands that return a single issue or result emit a JSON object with
 
 ### List commands (list, ready, search, stale, etc.)
 
-Commands that return multiple items emit an envelope object:
+Commands that return multiple items emit a raw JSON array:
 
 ```json
-{
-  "schema_version": 1,
-  "items": [
-    {"id": "beads-abc", "title": "First", ...},
-    {"id": "beads-def", "title": "Second", ...}
-  ]
-}
+[
+  {"id": "beads-abc", "title": "First", ...},
+  {"id": "beads-def", "title": "Second", ...}
+]
 ```
 
 ### Error output (stderr)
@@ -63,7 +61,7 @@ Errors with `--json` active emit JSON to stderr:
 
 ### bd list --json
 
-Required fields per item in `items[]`:
+Required fields per item:
 - `id` (string): Issue ID (e.g., "beads-abc")
 - `title` (string): Issue title
 - `status` (string): open, in_progress, closed, deferred
@@ -100,7 +98,7 @@ items, plus:
 - `dependencies` (object[]): Full dependency records
 - `comments` (object[]): Comment thread
 
-### bd import --json
+### `import --json`
 
 Returns a summary object when `--json` is active:
 - `source` (string): File path or "stdin"
@@ -119,12 +117,11 @@ is included per line.
 
 ## Consumer Guidelines
 
-1. **Always check `schema_version`** before parsing. If the version is
+1. **Check `schema_version`** on object output. If the version is
    higher than expected, log a warning but attempt to parse anyway
    (additive changes are backward-compatible).
 
-2. **For list commands**, read items from the `items` field, not the
-   top-level object.
+2. **For list commands**, parse the output as a JSON array directly.
 
 3. **Ignore unknown fields**. New fields may be added without bumping
    the schema version.

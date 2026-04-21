@@ -45,23 +45,13 @@ func TestWrapWithSchemaVersion_Slice(t *testing.T) {
 	input := []string{"a", "b", "c"}
 	result := wrapWithSchemaVersion(input)
 
-	m, ok := result.(map[string]interface{})
+	// Arrays pass through unchanged for backwards compatibility.
+	arr, ok := result.([]string)
 	if !ok {
-		t.Fatalf("expected map[string]interface{}, got %T", result)
-	}
-	if m["schema_version"] != JSONSchemaVersion {
-		t.Errorf("schema_version = %v, want %d", m["schema_version"], JSONSchemaVersion)
-	}
-	items, ok := m["items"]
-	if !ok {
-		t.Fatal("missing items key")
-	}
-	arr, ok := items.([]string)
-	if !ok {
-		t.Fatalf("items type = %T, want []string", items)
+		t.Fatalf("expected []string (passthrough), got %T", result)
 	}
 	if len(arr) != 3 {
-		t.Errorf("items length = %d, want 3", len(arr))
+		t.Errorf("slice length = %d, want 3", len(arr))
 	}
 }
 
