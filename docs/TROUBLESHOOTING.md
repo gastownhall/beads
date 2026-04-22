@@ -732,6 +732,40 @@ Remember: Different dependency types have different meanings:
 
 ## Performance Issues
 
+### Remote bd commands are slow (connecting to a central Dolt server)
+
+If `bd export`, `bd list`, `bd doctor`, or pre-commit hooks take tens of seconds to minutes when the Dolt server is on a different machine than the one running `bd`, follow the measurement-first sequence below. **Do not reach for VPNs, SSH tunnels, WireGuard, or network-layer fixes until you have ruled out query-count amplification.** The 2026-04-18 investigation showed a 208s `bd export` was ~99% a single N+1 pattern in bd itself, ~1% Dolt — tunneling would have been wasted effort.
+
+**Step 1 — measure warm MySQL RTT from the slow machine:**
+
+```bash
+# Host and port come from .beads/metadata.json
+mysql -h <host> -P <port> -u <user> -e "SELECT 1;" >/dev/null   # prime the connection
+time mysql -h <host> -P <port> -u <user> -e "SELECT 1;"
+```
+
+- Warm RTT < 20 ms → network is fine; the bottleneck is bd's query count or connection churn. Go to step 2.
+- Warm RTT 20-50 ms → enable WSL2 `networkingMode=mirrored` on the client (`%USERPROFILE%\.wslconfig` → `[wsl2] networkingMode=mirrored`, then `wsl --shutdown`). Reversible, unilateral, no hostA coordination.
+- Warm RTT > 100 ms → something is broken (DNS inspection, firewall, flaky LAN). Fix that first; don't build tunnels on top.
+
+**Step 2 — capture a per-query trace.** Apply the SQL-trace driver-wrapper patch documented in `docs/design/remote-latency-perf-design.md` Appendix B on a scratch branch. Run the slow command with `BD_SQL_LOG=/tmp/bd-sql.log`, then analyze:
+
+```bash
+jq -s 'group_by(.q) | map({q: .[0].q, n: length}) | sort_by(.n) | reverse | .[:10]' /tmp/bd-sql.log
+```
+
+Any single query shape with count >> the number of rows in the project is an N+1.
+
+**Step 3 — check the handshake-storm signature.** Any two of the following on a hot path explains 10-100× remote slowdown: `SetMaxOpenConns(1)`, short `SetConnMaxLifetime` (≤ 30 s), default `InterpolateParams=false` in the MySQL DSN. The main server-mode pool in `internal/storage/dolt/store.go:1257 applyPoolLimits` is already 10/5/1h; if the slow command goes through it, the pool is not the issue.
+
+**Step 4 — disable `export.auto` for unrelated commands.** bd's auto-export runs in `PersistentPostRun` for every non-export command. On a slow remote link, that silently adds the export cost to `bd list`, `bd show`, `bd ready`, `bd doctor`, etc. The pre-commit hook runs its own export regardless, so disabling auto-export does not hurt commit behavior:
+
+```bash
+bd config set export.auto false
+```
+
+For the full case study and the reproducibility patch that produced the 2,285-probe count, see `docs/design/remote-latency-perf-design.md` and `docs/design/remote-latency-perf-plan.md`.
+
 ### Export/import is slow
 
 For large databases (10k+ issues):

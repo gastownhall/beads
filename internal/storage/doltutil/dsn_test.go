@@ -36,3 +36,24 @@ func TestServerDSN_TLSEnabledWhenRequested(t *testing.T) {
 		t.Errorf("DSN should not contain tls=false when TLS is enabled; got %q", dsn)
 	}
 }
+
+// TestServerDSN_InterpolateParams asserts the DSN enables client-side
+// parameter interpolation (see design 2026-04-18 §5 Commit 2) and preserves
+// the other non-default flags.
+//
+// Note: go-sql-driver/mysql's FormatDSN only emits parameters whose value
+// differs from the driver's own defaults. AllowNativePasswords defaults to
+// true, so it is never serialized into the DSN string even though the
+// mysql.Config struct has it set — that's not a regression, just how the
+// driver serializes. We therefore only assert on non-default flags.
+func TestServerDSN_InterpolateParams(t *testing.T) {
+	dsn := ServerDSN{Host: "127.0.0.1", Port: 3307, User: "root"}.String()
+	if !strings.Contains(dsn, "interpolateParams=true") {
+		t.Fatalf("expected interpolateParams=true in DSN, got: %s", dsn)
+	}
+	for _, want := range []string{"parseTime=true", "multiStatements=true"} {
+		if !strings.Contains(dsn, want) {
+			t.Fatalf("expected %s in DSN, got: %s", want, dsn)
+		}
+	}
+}

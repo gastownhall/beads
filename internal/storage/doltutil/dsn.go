@@ -20,7 +20,8 @@ type ServerDSN struct {
 }
 
 // String builds the MySQL DSN string. Always sets parseTime=true,
-// multiStatements=true, allowNativePasswords=true, and a connect timeout.
+// multiStatements=true, interpolateParams=true, allowNativePasswords=true,
+// and a connect timeout.
 func (d ServerDSN) String() string {
 	timeout := d.Timeout
 	if timeout == 0 {
@@ -28,13 +29,25 @@ func (d ServerDSN) String() string {
 	}
 
 	cfg := mysql.Config{
-		User:                 d.User,
-		Passwd:               d.Password,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", d.Host, d.Port),
-		DBName:               d.Database,
-		ParseTime:            true,
-		MultiStatements:      true,
+		User:            d.User,
+		Passwd:          d.Password,
+		Net:             "tcp",
+		Addr:            fmt.Sprintf("%s:%d", d.Host, d.Port),
+		DBName:          d.Database,
+		ParseTime:       true,
+		MultiStatements: true,
+		// InterpolateParams collapses each parameterized query from
+		// 3 network round-trips (PREPARE + EXECUTE + CLOSE) to 1 by
+		// quoting args client-side. Audit (design §5, Commit 2):
+		//   - string/int/int64/bool/time.Time/nil: identical wire output
+		//   - []byte appears only in federation.go / credentials.go
+		//     password paths, driver hex-escapes identically
+		//   - zero Prepare/Stmt reuse in non-test code
+		//   - no driver.Valuer implementations in internal/types
+		//   - no json.RawMessage passed directly as an Exec arg
+		//   - orthogonal to MultiStatements (go-sql-driver/mysql
+		//     v1.9.3 connection.go:340-410)
+		InterpolateParams:    true,
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 	}

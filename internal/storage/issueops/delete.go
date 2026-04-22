@@ -74,13 +74,9 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 	}
 
 	// Partition into wisps and regular issues.
-	var wispIDs, regularIDs []string
-	for _, id := range ids {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			regularIDs = append(regularIDs, id)
-		}
+	wispIDs, regularIDs, err := PartitionByWispInTx(ctx, tx, ids)
+	if err != nil {
+		return nil, err
 	}
 
 	// Delete wisps first.
