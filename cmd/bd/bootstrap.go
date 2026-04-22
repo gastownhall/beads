@@ -249,7 +249,10 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	// Check sync.remote (primary) or sync.git-remote (deprecated fallback)
 	syncRemote := resolveSyncRemote()
 	if syncRemote != "" {
-		plan.SyncRemote = normalizeRemoteURL(syncRemote)
+		// User-provided sync.remote — trust the URL format as-is.
+		// normalizeRemoteURL would convert http:// to git+http://,
+		// breaking Dolt remotesapi endpoints (GH#3339).
+		plan.SyncRemote = syncRemote
 		plan.Action = "sync"
 		plan.Reason = "sync.remote configured — will clone from " + syncRemote
 		return plan

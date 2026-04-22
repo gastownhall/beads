@@ -22,6 +22,7 @@ func TestIsRemoteURL(t *testing.T) {
 		{"ssh://git@github.com/org/repo", true},
 		{"git+ssh://git@github.com/org/repo", true},
 		{"git+https://github.com/org/repo", true},
+		{"git+http://example.com/repo.git", true},
 		{"git@github.com:org/repo.git", true},
 		{"deploy@myserver.com:beads/data", true},
 
@@ -65,6 +66,7 @@ func TestValidateRemoteURL(t *testing.T) {
 		{"ssh URL", "ssh://git@github.com/org/repo", false, ""},
 		{"git+ssh URL", "git+ssh://git@github.com/org/repo", false, ""},
 		{"git+https URL", "git+https://github.com/org/repo", false, ""},
+		{"git+http URL", "git+http://example.com/repo.git", false, ""},
 		{"SCP-style git", "git@github.com:org/repo.git", false, ""},
 		{"SCP-style deploy", "deploy@myserver.com:beads/data", false, ""},
 		{"https with port", "https://example.com:8443/repo", false, ""},
@@ -102,6 +104,7 @@ func TestValidateRemoteURL(t *testing.T) {
 		{"ssh no host", "ssh:///path", true, "hostname"},
 		{"git+ssh no host", "git+ssh:///path", true, "hostname"},
 		{"git+https no host", "git+https:///path", true, "hostname"},
+		{"git+http no host", "git+http:///path", true, "hostname"},
 		{"s3 no bucket", "s3:///path", true, "bucket"},
 		{"gs no bucket", "gs:///path", true, "bucket"},
 		{"az no host", "az:///path", true, "hostname"},

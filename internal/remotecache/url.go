@@ -21,6 +21,7 @@ var remoteSchemes = []string{
 	"ssh://",
 	"git+ssh://",
 	"git+https://",
+	"git+http://",
 }
 
 // allowedSchemes is the set of recognized URL schemes for validation.
@@ -35,6 +36,7 @@ var allowedSchemes = map[string]bool{
 	"ssh":       true,
 	"git+ssh":   true,
 	"git+https": true,
+	"git+http":  true,
 }
 
 // gitSSHPattern matches SCP-style git remote URLs (user@host:path).
@@ -133,7 +135,7 @@ func validateSchemeURL(rawURL string) error {
 		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 			return fmt.Errorf("dolthub:// URL must have org/repo format (e.g., dolthub://myorg/myrepo)")
 		}
-	case "https", "http", "git+https":
+	case "https", "http", "git+https", "git+http":
 		if parsed.Host == "" {
 			return fmt.Errorf("%s:// URL must include a hostname", scheme)
 		}
@@ -219,7 +221,7 @@ func ValidateRemoteURLWithPatterns(rawURL string, patterns []string) error {
 
 func sortedSchemes() []string {
 	// Return in a consistent display order
-	return []string{"dolthub", "https", "http", "ssh", "git+ssh", "git+https", "s3", "gs", "az", "file"}
+	return []string{"dolthub", "https", "http", "ssh", "git+ssh", "git+https", "git+http", "s3", "gs", "az", "file"}
 }
 
 // CacheKey returns a filesystem-safe identifier for a remote URL.

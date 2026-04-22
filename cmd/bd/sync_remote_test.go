@@ -21,6 +21,11 @@ func TestNormalizeRemoteURL(t *testing.T) {
 		{"http://github.com/org/repo.git", "git+http://github.com/org/repo.git"},
 		{"ssh://git@github.com/org/repo.git", "git+ssh://git@github.com/org/repo.git"},
 		{"git@github.com:org/repo.git", "git+ssh://git@github.com/org/repo.git"},
+
+		// Dolt remotesapi URLs — also converted (callers that need
+		// pass-through for user-provided URLs should skip normalization)
+		{"http://myserver:7007/mydb", "git+http://myserver:7007/mydb"},
+		{"https://doltremoteapi.example.com/mydb", "git+https://doltremoteapi.example.com/mydb"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

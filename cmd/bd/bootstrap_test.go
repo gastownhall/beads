@@ -327,6 +327,47 @@ func TestDetectBootstrapAction_SyncWhenOriginHasDoltRef(t *testing.T) {
 	}
 }
 
+func TestDetectBootstrapAction_ExplicitSyncRemotePreservesRemotesAPIURL(t *testing.T) {
+	restore := snapshotBootstrapEnv(t)
+	defer restore()
+	config.ResetForTesting()
+	defer config.ResetForTesting()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const syncRemote = "http://myserver:7007/mydb"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("sync.remote: "+syncRemote+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize failed: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Action != "sync" {
+		t.Errorf("action = %q, want %q", plan.Action, "sync")
+	}
+	if plan.SyncRemote != syncRemote {
+		t.Errorf("SyncRemote = %q, want unnormalized explicit sync.remote %q", plan.SyncRemote, syncRemote)
+	}
+}
+
 func TestDetectBootstrapAction_InitWhenOriginHasNoDoltRef(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")

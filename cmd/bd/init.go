@@ -304,7 +304,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			var earlySyncURL string
 			earlyRemoteHasDoltData := false
 			if s := resolveSyncRemote(); s != "" {
-				earlySyncURL = normalizeRemoteURL(s)
+				earlySyncURL = s
 				earlyRemoteHasDoltData = true // sync.remote configured = user intends bootstrap
 			} else if isGitRepo() && !isBareGitRepo() {
 				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
@@ -568,7 +568,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// sync.remote was explicitly configured. Treat as bootstrap-
 			// from-remote intent; CheckRemoteSafety still enforces that
 			// --force/--reinit-local can't silently fight that intent.
-			syncURL = normalizeRemoteURL(syncURL)
+			// Trust the URL format as-is: normalizeRemoteURL would convert
+			// http:// to git+http:// and break Dolt remotesapi endpoints
+			// configured explicitly by the user (GH#3339).
 			syncFromRemote = true
 		} else if isGitRepo() && !isBareGitRepo() {
 			if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
