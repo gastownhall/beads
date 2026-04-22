@@ -213,3 +213,207 @@ func TestFindBeadsDir_WorktreeSeparateDBPreservesLocal(t *testing.T) {
 			result, worktreeBeadsDir)
 	}
 }
+
+// TestFindBeadsDir_WorktreeSeparateDBPreservesLocalWithDoltDir is the same
+// separate-DB regression guard but exercises the `dolt/` directory branch of
+// hasBeadsDatabase (server mode) rather than the *.db branch.
+func TestFindBeadsDir_WorktreeSeparateDBPreservesLocalWithDoltDir(t *testing.T) {
+	runWorktreeSeparateDBPreservedTest(t, "dolt")
+}
+
+// TestFindBeadsDir_WorktreeSeparateDBPreservesLocalWithEmbeddedDolt exercises
+// the `embeddeddolt/` directory branch of hasBeadsDatabase (embedded-engine
+// mode) for the separate-DB regression guard.
+func TestFindBeadsDir_WorktreeSeparateDBPreservesLocalWithEmbeddedDolt(t *testing.T) {
+	runWorktreeSeparateDBPreservedTest(t, "embeddeddolt")
+}
+
+// runWorktreeSeparateDBPreservedTest is shared by the three separate-DB
+// regression tests. databaseMarker names what to create inside the worktree's
+// .beads/ so hasBeadsDatabase returns true: "dolt" / "embeddeddolt" (directory)
+// or "beads.db" (file).
+func runWorktreeSeparateDBPreservedTest(t *testing.T, databaseMarker string) {
+	t.Helper()
+
+	originalEnv := os.Getenv("BEADS_DIR")
+	defer func() {
+		if originalEnv != "" {
+			os.Setenv("BEADS_DIR", originalEnv)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+	}()
+	os.Unsetenv("BEADS_DIR")
+
+	tmpDir, err := os.MkdirTemp("", "beads-separate-db-variant-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mainRepoDir := filepath.Join(tmpDir, "main-repo")
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = mainRepoDir
+	if err := cmd.Run(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	runGit(mainRepoDir, "config", "user.email", "test@example.com")
+	runGit(mainRepoDir, "config", "user.name", "Test User")
+
+	// Main repo has a real DB so the shared fallback would win if the
+	// worktree's own database weren't recognized.
+	mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "beads.db"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainRepoDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(mainRepoDir, "add", "README.md")
+	runGit(mainRepoDir, "commit", "-m", "initial")
+
+	worktreeDir := filepath.Join(tmpDir, "worktree")
+	runGit(mainRepoDir, "worktree", "add", worktreeDir, "HEAD")
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd.Dir = mainRepoDir
+		_ = cmd.Run()
+	}()
+
+	worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+	if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	switch databaseMarker {
+	case "dolt", "embeddeddolt":
+		if err := os.MkdirAll(filepath.Join(worktreeBeadsDir, databaseMarker), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		if err := os.WriteFile(filepath.Join(worktreeBeadsDir, databaseMarker), []byte{}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Chdir(worktreeDir)
+	git.ResetCaches()
+
+	result := FindBeadsDir()
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	worktreeResolved, _ := filepath.EvalSymlinks(worktreeBeadsDir)
+
+	if resultResolved != worktreeResolved {
+		t.Errorf("FindBeadsDir() = %q, want worktree .beads %q (separate-DB mode via %q)",
+			result, worktreeBeadsDir, databaseMarker)
+	}
+}
+
+// TestFindBeadsDir_WorktreeNoDatabaseAnywhereFallsBackToLocal exercises the
+// lenient-fallback escape hatch in step 3b: when the worktree has inherited
+// metadata but no database AND the shared fallback also has no database,
+// FindBeadsDir should return the worktree-local .beads/ so a fresh
+// `bd init` in the worktree can still bootstrap. If the strict check ran
+// unconditionally, a brand-new worktree with no main-repo database would
+// return empty and block init.
+func TestFindBeadsDir_WorktreeNoDatabaseAnywhereFallsBackToLocal(t *testing.T) {
+	originalEnv := os.Getenv("BEADS_DIR")
+	defer func() {
+		if originalEnv != "" {
+			os.Setenv("BEADS_DIR", originalEnv)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+	}()
+	os.Unsetenv("BEADS_DIR")
+
+	tmpDir, err := os.MkdirTemp("", "beads-no-db-anywhere-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mainRepoDir := filepath.Join(tmpDir, "main-repo")
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = mainRepoDir
+	if err := cmd.Run(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	runGit(mainRepoDir, "config", "user.email", "test@example.com")
+	runGit(mainRepoDir, "config", "user.name", "Test User")
+
+	// Main repo has a .beads/ with metadata only — NO database. This is the
+	// "pre-bd-init" state on both sides.
+	mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "metadata.json"), []byte(`{"database":"dolt"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, ".gitignore"), []byte("*.db\ndolt/\nembeddeddolt/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainRepoDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(mainRepoDir, "add", "README.md", ".beads/metadata.json", ".beads/.gitignore")
+	runGit(mainRepoDir, "commit", "-m", "seed .beads without db")
+
+	worktreeDir := filepath.Join(tmpDir, "worktree")
+	runGit(mainRepoDir, "worktree", "add", worktreeDir, "HEAD")
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd.Dir = mainRepoDir
+		_ = cmd.Run()
+	}()
+
+	worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+	if _, err := os.Stat(filepath.Join(worktreeBeadsDir, "metadata.json")); err != nil {
+		t.Fatalf("precondition: worktree should have inherited metadata.json, got: %v", err)
+	}
+
+	t.Chdir(worktreeDir)
+	git.ResetCaches()
+
+	result := FindBeadsDir()
+	if result == "" {
+		t.Fatal("FindBeadsDir returned empty; lenient escape hatch should return the worktree .beads/ when no DB exists anywhere")
+	}
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	worktreeResolved, _ := filepath.EvalSymlinks(worktreeBeadsDir)
+	if resultResolved != worktreeResolved {
+		t.Errorf("FindBeadsDir() = %q, want worktree .beads %q (lenient fallback — no DB anywhere)",
+			result, worktreeBeadsDir)
+	}
+}

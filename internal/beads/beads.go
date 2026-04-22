@@ -862,11 +862,13 @@ func findDatabaseInTree() string {
 		return ""
 	}
 
-	// Resolve symlinks in working directory to ensure consistent path handling
-	// This prevents issues when repos are accessed via symlinks (e.g. /Users/user/Code -> /Users/user/Documents/Code)
-	if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolvedDir
-	}
+	// Canonicalize the starting directory so the gitRoot boundary comparison
+	// below matches. utils.CanonicalizePath resolves symlinks AND normalizes
+	// case on macOS/Windows — the same form git helpers return — so the
+	// eventual `dir == gitRoot` check doesn't silently overshoot on
+	// /var → /private/var or case-insensitive filesystems. Matches the
+	// canonicalization strategy in FindBeadsDir.
+	dir = utils.CanonicalizePath(dir)
 
 	// Check cwd first — a rig subdirectory with its own .beads/ takes
 	// priority over the git root's .beads/ (same fix as FindBeadsDir step 1b).
@@ -923,6 +925,12 @@ func findDatabaseInTree() string {
 		// For worktrees, extend search boundary to include main repo
 		gitRoot = mainRepoRoot
 	}
+	// Canonicalize the boundary so the `dir == gitRoot` comparison is robust
+	// against symlink or case-form mismatches between git helpers and os.Getwd.
+	gitRootCanonical := ""
+	if gitRoot != "" {
+		gitRootCanonical = utils.CanonicalizePath(gitRoot)
+	}
 
 	// Walk up directory tree (regular repository or worktree fallback)
 	for {
@@ -945,7 +953,7 @@ func findDatabaseInTree() string {
 		}
 
 		// Stop at git root to avoid finding unrelated databases
-		if gitRoot != "" && dir == gitRoot {
+		if gitRootCanonical != "" && dir == gitRootCanonical {
 			break
 		}
 

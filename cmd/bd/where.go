@@ -109,14 +109,18 @@ func findOriginalBeadsDir() string {
 		cwd = resolved
 	}
 
-	// Check BEADS_DIR first
+	// Check BEADS_DIR first: if the env points at a .beads directory with a
+	// redirect file, that's the original. Fall through to the fs walk if
+	// BEADS_DIR is set but does not contain a redirect — bd's startup now
+	// rebinds BEADS_DIR to the resolved target (#3230) after following
+	// redirects, so an unconditional early-return here would hide every
+	// redirect from `bd where` output.
 	if envDir := os.Getenv("BEADS_DIR"); envDir != "" {
 		envDir = utils.CanonicalizePath(envDir)
 		redirectFile := filepath.Join(envDir, beads.RedirectFileName)
 		if _, err := os.Stat(redirectFile); err == nil {
 			return envDir
 		}
-		return ""
 	}
 
 	// Walk up directory tree looking for .beads with redirect
