@@ -354,6 +354,82 @@ func TestGetReadyWork_TypeFilter(t *testing.T) {
 	}
 }
 
+// TestGetReadyWork_ExcludeTypeFilter verifies that filter.ExcludeTypes is
+// honored in addition to the hardcoded default exclusion list. Regression test
+// for GH#3397: the CLI flag --exclude-type was silently ignored because
+// GetReadyWorkInTx built the NOT IN clause from the hardcoded defaults only.
+func TestGetReadyWork_ExcludeTypeFilter(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	epic := &types.Issue{
+		ID:        "rw-ex-epic",
+		Title:     "An Epic",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	task := &types.Issue{
+		ID:        "rw-ex-task",
+		Title:     "A Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	bug := &types.Issue{
+		ID:        "rw-ex-bug",
+		Title:     "A Bug",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeBug,
+	}
+
+	for _, iss := range []*types.Issue{epic, task, bug} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	// Single-type exclusion.
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{
+		ExcludeTypes: []types.IssueType{types.TypeEpic},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, w := range work {
+		if w.ID == epic.ID {
+			t.Error("epic should not appear when ExcludeTypes includes epic")
+		}
+	}
+
+	// Multi-type exclusion.
+	work, err = store.GetReadyWork(ctx, types.WorkFilter{
+		ExcludeTypes: []types.IssueType{types.TypeEpic, types.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	foundBug := false
+	for _, w := range work {
+		if w.ID == epic.ID {
+			t.Error("epic should not appear when ExcludeTypes includes epic")
+		}
+		if w.ID == task.ID {
+			t.Error("task should not appear when ExcludeTypes includes task")
+		}
+		if w.ID == bug.ID {
+			foundBug = true
+		}
+	}
+	if !foundBug {
+		t.Error("bug should still appear when ExcludeTypes excludes only epic and task")
+	}
+}
+
 // TestGetReadyWork_CustomStatusBlockerStillBlocks verifies that a blocker with
 // a custom status still prevents blocked issues from appearing in ready work.
 // Regression test for bd-1x0.

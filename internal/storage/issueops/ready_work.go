@@ -51,6 +51,18 @@ func GetReadyWorkInTx(
 		args = append(args, filter.Type)
 	} else {
 		excludeTypes := []string{"merge-request", "gate", "molecule", "message", "agent", "role", "rig"}
+		seen := make(map[string]bool, len(excludeTypes)+len(filter.ExcludeTypes))
+		for _, t := range excludeTypes {
+			seen[t] = true
+		}
+		for _, t := range filter.ExcludeTypes {
+			s := string(t)
+			if s == "" || seen[s] {
+				continue
+			}
+			seen[s] = true
+			excludeTypes = append(excludeTypes, s)
+		}
 		placeholders := make([]string, len(excludeTypes))
 		for i, t := range excludeTypes {
 			placeholders[i] = "?"
