@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -82,14 +81,6 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 		database = sanitized
 	}
 	return embeddeddolt.New(ctx, beadsDir, database, "main")
-}
-
-// sanitizeDBName replaces hyphens and dots with underscores for
-// SQL-idiomatic embedded Dolt database names (GH#2142, GH#3231).
-func sanitizeDBName(name string) string {
-	name = strings.ReplaceAll(name, "-", "_")
-	name = strings.ReplaceAll(name, ".", "_")
-	return name
 }
 
 // migrateHyphenatedDB renames a legacy hyphenated database directory and
