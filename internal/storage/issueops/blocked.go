@@ -332,6 +332,40 @@ func GetChildrenOfIssuesInTx(ctx context.Context, tx *sql.Tx, parentIDs []string
 	return children, nil
 }
 
+// GetDescendantIDsInTx returns IDs of all transitive parent-child descendants
+// of rootID, traversing parent-child edges in both the dependencies and
+// wisp_dependencies tables via BFS. rootID itself is NOT included. Cycles are
+// broken via a visited set. maxDepth caps traversal depth; pass 0 for the
+// default safety cap.
+func GetDescendantIDsInTx(ctx context.Context, tx *sql.Tx, rootID string, maxDepth int) ([]string, error) {
+	if rootID == "" {
+		return nil, nil
+	}
+	if maxDepth <= 0 {
+		maxDepth = 100
+	}
+	seen := map[string]bool{rootID: true}
+	var result []string
+	frontier := []string{rootID}
+	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
+		children, err := GetChildrenOfIssuesInTx(ctx, tx, frontier)
+		if err != nil {
+			return nil, err
+		}
+		var next []string
+		for _, c := range children {
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			result = append(result, c)
+			next = append(next, c)
+		}
+		frontier = next
+	}
+	return result, nil
+}
+
 // GetBlockedIssuesInTx returns issues that are blocked by other issues.
 // This is the full implementation including transitive child blocking and parent filtering.
 //
