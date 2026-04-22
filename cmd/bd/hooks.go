@@ -831,7 +831,7 @@ func fixHuskyHookLayout(sourceDir, targetDir string) {
 	}
 
 	// Remove the h dispatcher from target — it's not useful after shim replacement
-	os.Remove(hPath)
+	_ = os.Remove(hPath)
 }
 
 // isHuskyDir reports whether dir looks like a husky-managed hooks directory
