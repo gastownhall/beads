@@ -62,7 +62,8 @@ bd list --overdue               # Due date in past (not closed)
    - `bd create "Found bug in auth" -t bug -p 1 --json`
    - Link it: `bd dep add <new-id> <current-id> --type discovered-from`
 5. **Complete**: `bd close <id> --reason "Implemented"`
-6. **Export**: Run `bd export -o .beads/issues.jsonl` before committing
+
+(Writes auto-commit to Dolt history; `.beads/issues.jsonl` is maintained by auto-export — no manual `bd export` needed.)
 
 ### Issue Types
 
@@ -93,8 +94,8 @@ Only `blocks` dependencies affect the ready work queue.
 
 ### Code Standards
 
-- **Go version**: 1.21+
-- **Linting**: `golangci-lint run ./...` (baseline warnings documented in LINTING.md)
+- **Go version**: 1.25+ (see `go.mod`)
+- **Linting**: `golangci-lint run ./...` (baseline warnings documented in `docs/LINTING.md`)
 - **Testing**: All new features need tests (`go test ./...`)
 - **Documentation**: Update relevant .md files
 
@@ -102,42 +103,42 @@ Only `blocks` dependencies affect the ready work queue.
 
 ```
 beads/
-├── cmd/bd/              # CLI commands
+├── cmd/bd/              # CLI commands (Cobra)
 ├── internal/
 │   ├── types/           # Core data types
-│   └── storage/         # Storage layer
-│       └── sqlite/      # SQLite implementation
+│   ├── storage/         # Storage layer
+│   │   ├── dolt/            # Dolt backend (versioned SQL)
+│   │   ├── embeddeddolt/    # Embedded-mode Dolt
+│   │   ├── schema/          # Schema + migrations
+│   │   ├── issueops/        # Issue-level helpers
+│   │   └── versioncontrolops/ # VC helpers
+│   └── ui/              # Shared styles / rendering
+├── docs/                # User and contributor docs
 ├── examples/            # Integration examples
-└── *.md                 # Documentation
+└── *.md                 # Top-level guides (README.md, AGENTS.md, etc.)
 ```
 
 ### Before Committing
 
 1. **Run tests**: `go test ./...`
 2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
-3. **Export issues**: `bd export -o .beads/issues.jsonl`
-4. **Update docs**: If you changed behavior, update README.md or other docs
-5. **Git add both**: `git add .beads/issues.jsonl <your-changes>`
+3. **Update docs**: If you changed behavior, update README.md or other docs
 
 ### Git Workflow
 
+bd uses **Dolt** as its database. Issue writes auto-commit to Dolt history (one commit per write). Standard Git is for *code* changes; `bd dolt push` / `bd dolt pull` (or auto-export) handle Dolt sync.
+
 ```bash
-# Make changes
+# Make code changes
 git add <files>
-
-# Export beads issues
-bd export -o .beads/issues.jsonl
-git add .beads/issues.jsonl
-
-# Commit
 git commit -m "Your message"
 
-# After pull
-git pull
-bd import .beads/issues.jsonl  # Sync Dolt database
+# Push / pull
+git push            # code
+bd dolt push        # beads issues (auto-export also writes .beads/issues.jsonl for portability)
 ```
 
-Or use the git hooks in `examples/git-hooks/` for automation.
+Run `bd hooks install` once per clone to wire up pre-commit / post-merge hooks so bd state stays in sync with git operations.
 
 ## Current Project Status
 
@@ -171,10 +172,10 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 
 ### Adding Storage Features
 
-1. Update schema in `internal/storage/sqlite/schema.go`
-2. Add migration if needed
+1. Update schema in `internal/storage/schema/`
+2. Add migration SQL under `internal/storage/schema/migrations/`
 3. Update `internal/types/types.go` if new types
-4. Implement in `internal/storage/sqlite/sqlite.go`
+4. Implement in `internal/storage/dolt/` (and `embeddeddolt/` if embedded-mode specific)
 5. Add tests
 6. Update export/import in `cmd/bd/export.go` and `cmd/bd/import.go`
 
@@ -190,14 +191,15 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 
 - Check existing issues: `bd list`
 - Look at recent commits: `git log --oneline -20`
-- Read the docs: README.md, TEXT_FORMATS.md, EXTENDING.md
+- Read the docs: README.md, AGENT_INSTRUCTIONS.md, `docs/`
 - Create an issue if unsure: `bd create "Question: ..." -t task -p 2`
 
 ## Important Files
 
 - **README.md** - Main documentation (keep this updated!)
-- **EXTENDING.md** - Database extension guide
-- **TEXT_FORMATS.md** - JSONL format analysis
+- **AGENT_INSTRUCTIONS.md** - Detailed agent operational guide
+- **AGENTS.md** - Agent-entry pointer (kept in sync with AGENT_INSTRUCTIONS.md)
+- **docs/CLAUDE.md** - Architecture notes for Claude Code
 - **CONTRIBUTING.md** - Contribution guidelines
 - **SECURITY.md** - Security policy
 
@@ -206,7 +208,7 @@ bd dep tree bd-8  # Show 1.0 epic dependencies
 - Always use `--json` flags for programmatic use
 - Link discoveries with `discovered-from` to maintain context
 - Check `bd ready` before asking "what next?"
-- Export to JSONL before committing (or use git hooks)
+- Dolt auto-commits every bd write — manual export is not required
 - Use `bd dep tree` to understand complex dependencies
 - Priority 0-1 issues are usually more important than 2-4
 
