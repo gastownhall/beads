@@ -785,19 +785,29 @@ func fixHuskyHookLayout(sourceDir, targetDir string) {
 	// sources "h" (the dispatcher). The dispatcher uses dirname(dirname($0))
 	// to find user hooks in the parent .husky/ directory — this path math
 	// breaks when the shim is relocated to .beads/hooks/.
-	hPath := filepath.Join(targetDir, "h")
-	hContent, err := os.ReadFile(hPath) // #nosec G304 -- path is in known hooks directory
+	//
+	// Detect v9 by checking for the dispatcher in the *source* directory:
+	// preservePreexistingHooks intentionally skips copying `h` to target, so
+	// keying off targetDir would never match.
+	srcH := filepath.Join(sourceDir, "h")
+	hContent, err := os.ReadFile(srcH) // #nosec G304 -- path is in known hooks directory
 	if err != nil {
-		return // No h dispatcher — not a husky v9 source directory
+		return // No h dispatcher in source — not a husky v9 source directory
 	}
 	if !strings.Contains(string(hContent), `dirname "$(dirname`) {
 		return // Not the husky v9 dispatcher
 	}
 
 	// Source is .husky/_/ — user hooks live in the parent .husky/ directory.
+	// Iterate the source shims rather than the target: preservePreexistingHooks
+	// has already run sanitizeHuskyHook on the copied shims, which strips the
+	// `. "$(dirname "$0")/h"` line, so a content-based shim check against
+	// target would no longer match. Because every non-`h` file in sourceDir
+	// is a v9 shim by construction, we can map source entry → user hook
+	// directly.
 	userHooksDir := filepath.Dir(sourceDir)
 
-	entries, readErr := os.ReadDir(targetDir)
+	entries, readErr := os.ReadDir(sourceDir)
 	if readErr != nil {
 		return
 	}
@@ -806,18 +816,13 @@ func fixHuskyHookLayout(sourceDir, targetDir string) {
 			continue
 		}
 		hookPath := filepath.Join(targetDir, entry.Name())
-		content, readErr := os.ReadFile(hookPath) // #nosec G304 -- constrained to hooks dir
-		if readErr != nil {
-			continue
-		}
-		// Only replace husky v9 shims (files that source the h dispatcher)
-		if !strings.Contains(string(content), `. "$(dirname "$0")/h"`) {
-			continue
+		if _, statErr := os.Stat(hookPath); statErr != nil {
+			continue // target hook not copied — nothing to replace
 		}
 		userHookPath := filepath.Join(userHooksDir, entry.Name())
 		userContent, readErr := os.ReadFile(userHookPath) // #nosec G304 -- constrained to husky dir
 		if readErr != nil {
-			continue // No corresponding user hook — leave shim as-is
+			continue // No corresponding user hook — leave copied content as-is
 		}
 		// Ensure the content has a shebang (user hooks in .husky/ often omit it)
 		replacement := string(userContent)
@@ -829,9 +834,6 @@ func fixHuskyHookLayout(sourceDir, targetDir string) {
 			fmt.Fprintf(os.Stderr, "Warning: failed to replace husky v9 shim %s: %v\n", entry.Name(), writeErr)
 		}
 	}
-
-	// Remove the h dispatcher from target — it's not useful after shim replacement
-	_ = os.Remove(hPath)
 }
 
 // isHuskyDir reports whether dir looks like a husky-managed hooks directory
