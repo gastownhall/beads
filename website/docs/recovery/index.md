@@ -41,5 +41,5 @@ Most issues can be diagnosed with `bd status`. Start there before following spec
 If these runbooks don't resolve your issue:
 
 1. Check the [FAQ](/reference/faq)
-2. Search [existing issues](https://github.com/steveyegge/beads/issues)
+2. Search [existing issues](https://github.com/gastownhall/beads/issues)
 3. Open a new issue with diagnostic output

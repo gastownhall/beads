@@ -226,4 +226,4 @@ For integration help, see:
 - **README.md** - Server configuration
 - **examples/** - Sample integrations
 
-File issues at: https://github.com/steveyegge/beads/issues
+File issues at: https://github.com/gastownhall/beads/issues

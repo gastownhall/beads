@@ -222,4 +222,4 @@ bd info --json
 uname -a
 ```
 
-Report at: https://github.com/steveyegge/beads/issues
+Report at: https://github.com/gastownhall/beads/issues

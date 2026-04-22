@@ -512,7 +512,7 @@ jobs:
 
       - name: Install bd
         run: |
-          curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+          curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
       - name: Pull changes
         run: |
@@ -650,4 +650,4 @@ Future commits will go to your current branch (e.g., `main`).
 
 ---
 
-**Need help?** Open an issue at https://github.com/steveyegge/beads/issues
+**Need help?** Open an issue at https://github.com/gastownhall/beads/issues

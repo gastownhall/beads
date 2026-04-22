@@ -142,4 +142,4 @@ Git hooks are optional. They auto-sync issues but you can skip them during `bd i
 
 - [MCP Server](/integrations/mcp-server) - Detailed MCP configuration
 - [Installation](/getting-started/installation) - Full install guide
-- [Detailed Copilot Guide](https://github.com/steveyegge/beads/blob/main/docs/COPILOT_INTEGRATION.md) - Comprehensive documentation
+- [Detailed Copilot Guide](https://github.com/gastownhall/beads/blob/main/docs/COPILOT_INTEGRATION.md) - Comprehensive documentation

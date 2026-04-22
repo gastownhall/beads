@@ -334,7 +334,7 @@ npx bd create "New issue"
 
 ## Resources
 
-- [beads GitHub repository](https://github.com/steveyegge/beads)
+- [beads GitHub repository](https://github.com/gastownhall/beads)
 - [npm package page](https://www.npmjs.com/package/@beads/bd)
-- [Complete documentation](https://github.com/steveyegge/beads#readme)
+- [Complete documentation](https://github.com/gastownhall/beads#readme)
 - [Claude Code hooks documentation](https://docs.claude.com/claude-code)

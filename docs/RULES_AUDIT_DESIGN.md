@@ -1,6 +1,6 @@
 # `bd rules audit` / `bd rules compact` Design Doc
 
-> **Status:** Ready | **Target:** Upstream PR to `steveyegge/beads`
+> **Status:** Ready | **Target:** Upstream PR to `gastownhall/beads`
 > **Companion spec:** SESSION-OUTPUT-SPEC Items 2 & 6
 
 ---

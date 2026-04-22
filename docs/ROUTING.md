@@ -236,7 +236,7 @@ go test -v -run TestRouting
 
 ## Future Enhancements
 
-See [bd-k58](https://github.com/steveyegge/beads/issues/k58) for proposal workflow:
+See [bd-k58](https://github.com/gastownhall/beads/issues/k58) for proposal workflow:
 - `bd propose <id>` - Move issue from planning to upstream
 - `bd withdraw <id>` - Un-propose
 - `bd accept <id>` - Maintainer accepts proposal

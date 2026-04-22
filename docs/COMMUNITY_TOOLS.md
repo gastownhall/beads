@@ -111,7 +111,7 @@ Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@
 
 ## Discussion
 
-See [GitHub Discussions #276](https://github.com/steveyegge/beads/discussions/276) for ongoing UI development conversations, design decisions, and community contributions.
+See [GitHub Discussions #276](https://github.com/gastownhall/beads/discussions/276) for ongoing UI development conversations, design decisions, and community contributions.
 
 ## Contributing
 

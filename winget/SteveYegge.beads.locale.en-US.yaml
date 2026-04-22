@@ -4,12 +4,12 @@ PackageVersion: 0.30.7
 PackageLocale: en-US
 Publisher: Steve Yegge
 PublisherUrl: https://github.com/steveyegge
-PublisherSupportUrl: https://github.com/steveyegge/beads/issues
+PublisherSupportUrl: https://github.com/gastownhall/beads/issues
 Author: Steve Yegge
 PackageName: beads
-PackageUrl: https://github.com/steveyegge/beads
+PackageUrl: https://github.com/gastownhall/beads
 License: MIT
-LicenseUrl: https://github.com/steveyegge/beads/blob/main/LICENSE
+LicenseUrl: https://github.com/gastownhall/beads/blob/main/LICENSE
 Copyright: Copyright (c) 2024 Steve Yegge
 ShortDescription: Distributed, Dolt-powered graph issue tracker for AI agents
 Description: |
@@ -24,6 +24,6 @@ Tags:
   - git
   - cli
   - developer-tools
-ReleaseNotesUrl: https://github.com/steveyegge/beads/releases/tag/v0.30.7
+ReleaseNotesUrl: https://github.com/gastownhall/beads/releases/tag/v0.30.7
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

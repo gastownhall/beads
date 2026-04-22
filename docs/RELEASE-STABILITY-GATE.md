@@ -61,7 +61,7 @@ document the breaking change with explicit migration steps before shipping.
 
 ## Related Issues
 
-- [#2764](https://github.com/steveyegge/beads/issues/2764) — Test gap: upgrade paths
-- [#2765](https://github.com/steveyegge/beads/issues/2765) — Test gap: mode preservation
-- [#2949](https://github.com/steveyegge/beads/issues/2949) — v0.63.3 silent mode switch
-- [#2950](https://github.com/steveyegge/beads/issues/2950) — beads.role left unset
+- [#2764](https://github.com/gastownhall/beads/issues/2764) — Test gap: upgrade paths
+- [#2765](https://github.com/gastownhall/beads/issues/2765) — Test gap: mode preservation
+- [#2949](https://github.com/gastownhall/beads/issues/2949) — v0.63.3 silent mode switch
+- [#2950](https://github.com/gastownhall/beads/issues/2950) — beads.role left unset

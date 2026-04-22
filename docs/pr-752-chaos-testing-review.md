@@ -1,6 +1,6 @@
 # PR #752 Chaos Testing Review
 
-**PR**: https://github.com/steveyegge/beads/pull/752
+**PR**: https://github.com/gastownhall/beads/pull/752
 **Author**: jordanhubbard
 **Bead**: bd-kx1j
 **Status**: Under Review

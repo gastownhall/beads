@@ -31,7 +31,7 @@ download_binary() {
 
     # Try downloading the release binary first
     local asset="beads_${ver_bare}_${OS}_${ARCH}.tar.gz"
-    local url="https://github.com/steveyegge/beads/releases/download/${version}/${asset}"
+    local url="https://github.com/gastownhall/beads/releases/download/${version}/${asset}"
 
     echo -e "  ${YELLOW:-}downloading ${version}...${NC:-}" >&2
     local tmpdir
@@ -73,7 +73,7 @@ build_from_source() {
     if ! git clone --depth 1 --branch "$version" "$PROJECT_ROOT" "$srcdir" 2>/dev/null; then
         # Tag might not exist locally; try the remote
         if ! git clone --depth 1 --branch "$version" \
-            "https://github.com/steveyegge/beads.git" "$srcdir" 2>/dev/null; then
+            "https://github.com/gastownhall/beads.git" "$srcdir" 2>/dev/null; then
             rm -rf "$srcdir"
             echo -e "  ${RED:-}ERROR: cannot clone tag ${version}${NC:-}" >&2
             return 1

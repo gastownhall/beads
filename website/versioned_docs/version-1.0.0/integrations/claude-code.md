@@ -138,7 +138,7 @@ For enhanced UX with slash commands:
 
 ```bash
 # In Claude Code
-/plugin marketplace add steveyegge/beads
+/plugin marketplace add gastownhall/beads
 /plugin install beads
 # Restart Claude Code
 ```

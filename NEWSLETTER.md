@@ -83,9 +83,9 @@ Contributors: coffeegoddd (Dustin Brown / DoltHub), matt wilkie (maphew), harry-
 ```bash
 brew upgrade bd
 # or
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 **Breaking change**: `BD_ACTOR` is deprecated in favor of `BEADS_ACTOR`. The old variable still works as a fallback but will be removed in a future release.
 
-Full changelog: [CHANGELOG.md](CHANGELOG.md) | GitHub release: [v0.62.0](https://github.com/steveyegge/beads/releases/tag/v0.62.0)
+Full changelog: [CHANGELOG.md](CHANGELOG.md) | GitHub release: [v0.62.0](https://github.com/gastownhall/beads/releases/tag/v0.62.0)

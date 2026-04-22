@@ -106,7 +106,7 @@ The automation requires this secret to be configured:
 
 **PYPI_API_TOKEN**: Your PyPI API token
 1. Generate token at https://pypi.org/manage/account/token/
-2. Add to GitHub at https://github.com/steveyegge/beads/settings/secrets/actions
+2. Add to GitHub at https://github.com/gastownhall/beads/settings/secrets/actions
 3. Name: `PYPI_API_TOKEN`
 4. Value: `pypi-...` (your full token)
 
@@ -170,9 +170,9 @@ Just push your tag and wait ~5 minutes:
 git push origin v0.9.X
 ```
 
-Monitor at: https://github.com/steveyegge/beads/actions
+Monitor at: https://github.com/gastownhall/beads/actions
 
-The release will appear at: https://github.com/steveyegge/beads/releases
+The release will appear at: https://github.com/gastownhall/beads/releases
 
 ### Documentation site (Docusaurus)
 

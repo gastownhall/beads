@@ -30,7 +30,7 @@ Traditional issue trackers (Jira, GitHub Issues) weren't designed for AI agents.
 brew install beads
 
 # Or quick install (macOS/Linux/FreeBSD)
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 # Initialize in your project
 cd your-project
@@ -322,7 +322,7 @@ brew install beads
 ### Quick Install Script (All Platforms)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 The installer will:
@@ -372,7 +372,7 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 
 **From source**:
 ```bash
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 go build -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/
@@ -402,7 +402,7 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 
 **Via quick install script**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 **Via go install**:
@@ -420,7 +420,7 @@ Beads ships with native Windows support—no MSYS or MinGW required.
 
 **Via PowerShell script**:
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 The script installs a prebuilt Windows release if available. Go is only required for `go install` or building from source.
@@ -526,13 +526,13 @@ CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
 ### Quick install script (macOS/Linux/FreeBSD)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### PowerShell installer (Windows)
 
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 ### Homebrew
@@ -824,7 +824,7 @@ bd dolt pull
 
 When a teammate clones the repo, `bd bootstrap` auto-detects the existing database on `refs/dolt/data` and clones it — no manual remote setup needed.
 
-See [Sync](/cli-reference/sync) for CLI details. For remote configuration and federation, see the repository docs [DOLT-BACKEND.md](https://github.com/steveyegge/beads/blob/main/docs/DOLT-BACKEND.md) and [FEDERATION-SETUP.md](https://github.com/steveyegge/beads/blob/main/FEDERATION-SETUP.md).
+See [Sync](/cli-reference/sync) for CLI details. For remote configuration and federation, see the repository docs [DOLT-BACKEND.md](https://github.com/gastownhall/beads/blob/main/docs/DOLT-BACKEND.md) and [FEDERATION-SETUP.md](https://github.com/gastownhall/beads/blob/main/FEDERATION-SETUP.md).
 
 ## Optional: Notion sync
 
@@ -925,7 +925,7 @@ bd admin cleanup --force
 - More sync scenarios: [Sync](/cli-reference/sync)
 - Full command list: [CLI Reference](/cli-reference)
 
-See the [repository README](https://github.com/steveyegge/beads/blob/main/README.md) for an overview and links to deeper docs.
+See the [repository README](https://github.com/gastownhall/beads/blob/main/README.md) for an overview and links to deeper docs.
 
 </document>
 
@@ -953,8 +953,8 @@ Use the command that matches your install method.
 
 | Install method | Platforms | Command |
 |---|---|---|
-| Quick install script | macOS, Linux, FreeBSD | `curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh \| bash` |
-| PowerShell installer | Windows | `irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 \| iex` |
+| Quick install script | macOS, Linux, FreeBSD | `curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh \| bash` |
+| PowerShell installer | Windows | `irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 \| iex` |
 | Homebrew | macOS, Linux | `brew upgrade beads` |
 | go install | macOS, Linux, FreeBSD, Windows | `go install github.com/steveyegge/beads/cmd/bd@latest` |
 | npm | macOS, Linux, Windows | `npm update -g @beads/bd` |
@@ -964,13 +964,13 @@ Use the command that matches your install method.
 ### Quick install script (macOS/Linux/FreeBSD)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### PowerShell installer (Windows)
 
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 ### Homebrew
@@ -4519,7 +4519,7 @@ For enhanced UX with slash commands:
 
 ```bash
 # In Claude Code
-/plugin marketplace add steveyegge/beads
+/plugin marketplace add gastownhall/beads
 /plugin install beads
 # Restart Claude Code
 ```
@@ -4708,7 +4708,7 @@ Git hooks are optional. They auto-sync issues but you can skip them during `bd i
 
 - [MCP Server](/integrations/mcp-server) - Detailed MCP configuration
 - [Installation](/getting-started/installation) - Full install guide
-- [Detailed Copilot Guide](https://github.com/steveyegge/beads/blob/main/docs/COPILOT_INTEGRATION.md) - Comprehensive documentation
+- [Detailed Copilot Guide](https://github.com/gastownhall/beads/blob/main/docs/COPILOT_INTEGRATION.md) - Comprehensive documentation
 
 </document>
 
@@ -5157,7 +5157,7 @@ Most issues can be diagnosed with `bd status`. Start there before following spec
 If these runbooks don't resolve your issue:
 
 1. Check the [FAQ](/reference/faq)
-2. Search [existing issues](https://github.com/steveyegge/beads/issues)
+2. Search [existing issues](https://github.com/gastownhall/beads/issues)
 3. Open a new issue with diagnostic output
 
 </document>
@@ -5512,7 +5512,7 @@ storage.UnderlyingDB().Exec(`
 `)
 ```
 
-See [EXTENDING.md](https://github.com/steveyegge/beads/blob/main/docs/EXTENDING.md).
+See [EXTENDING.md](https://github.com/gastownhall/beads/blob/main/docs/EXTENDING.md).
 
 ## Event System
 
@@ -5886,7 +5886,7 @@ bd setup aider    # Aider
 
 ### Can beads import from GitHub Issues?
 
-Yes — see the [GitHub integration documentation](https://github.com/steveyegge/beads/blob/main/docs/GITHUB_IMPORT.md) for details.
+Yes — see the [GitHub integration documentation](https://github.com/gastownhall/beads/blob/main/docs/GITHUB_IMPORT.md) for details.
 
 ## Troubleshooting
 
@@ -5916,9 +5916,9 @@ bd hooks status
 
 ### How do I report a bug?
 
-1. Check existing issues: https://github.com/steveyegge/beads/issues
+1. Check existing issues: https://github.com/gastownhall/beads/issues
 2. Include: `bd version`, `bd info --json`, reproduction steps
-3. File at: https://github.com/steveyegge/beads/issues/new
+3. File at: https://github.com/gastownhall/beads/issues/new
 
 </document>
 
@@ -6264,7 +6264,7 @@ bd info --json
 uname -a
 ```
 
-Report at: https://github.com/steveyegge/beads/issues
+Report at: https://github.com/gastownhall/beads/issues
 
 </document>
 

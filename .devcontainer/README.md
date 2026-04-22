@@ -74,5 +74,5 @@ git config --global user.email "your.email@example.com"
 
 ## Related Issues
 
-- GitHub Issue [#229](https://github.com/steveyegge/beads/issues/229): Git hooks not available in devcontainers
+- GitHub Issue [#229](https://github.com/gastownhall/beads/issues/229): Git hooks not available in devcontainers
 - bd-ry1u: Publish official devcontainer configuration

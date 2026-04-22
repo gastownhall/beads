@@ -25,8 +25,8 @@ Use the command that matches your install method.
 
 | Install method | Platforms | Command |
 |---|---|---|
-| Quick install script | macOS, Linux, FreeBSD | `curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh \| bash` |
-| PowerShell installer | Windows | `irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 \| iex` |
+| Quick install script | macOS, Linux, FreeBSD | `curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh \| bash` |
+| PowerShell installer | Windows | `irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 \| iex` |
 | Homebrew | macOS, Linux | `brew upgrade beads` |
 | go install | macOS, Linux, FreeBSD, Windows | `go install github.com/steveyegge/beads/cmd/bd@latest` |
 | npm | macOS, Linux, Windows | `npm update -g @beads/bd` |
@@ -36,13 +36,13 @@ Use the command that matches your install method.
 ### Quick install script (macOS/Linux/FreeBSD)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### PowerShell installer (Windows)
 
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 ### Homebrew
@@ -162,7 +162,7 @@ The old binary stored data in SQLite. The new binary uses Dolt.
 
 ```bash
 # Download the script from the beads repo
-curl -fsSLO https://raw.githubusercontent.com/steveyegge/beads/main/scripts/migrate-sqlite-to-current.sh
+curl -fsSLO https://raw.githubusercontent.com/gastownhall/beads/main/scripts/migrate-sqlite-to-current.sh
 chmod +x migrate-sqlite-to-current.sh
 
 # Run it in your project directory
@@ -171,7 +171,7 @@ chmod +x migrate-sqlite-to-current.sh
 
 The script exports issues, dependencies, and labels from SQLite, handles type normalization, and imports everything into the new Dolt backend.
 
-**Alternative: manual export with the old binary.** Old binaries are always available on [GitHub Releases](https://github.com/steveyegge/beads/releases). Download the version that matches your project, then:
+**Alternative: manual export with the old binary.** Old binaries are always available on [GitHub Releases](https://github.com/gastownhall/beads/releases). Download the version that matches your project, then:
 
 ```bash
 # 1. Export with the old binary

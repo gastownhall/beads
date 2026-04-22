@@ -17,13 +17,13 @@ brew install beads
 ### Install Script (macOS/Linux/FreeBSD)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### PowerShell (Windows)
 
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 ### npm
@@ -66,12 +66,12 @@ Building from source or using `go install` requires CGO dependencies:
 | Fedora/RHEL | `sudo dnf install -y libicu-devel libzstd-devel` |
 
 ```bash
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 go build -o bd ./cmd/bd
 ```
 
-See [CONTRIBUTING.md](https://github.com/steveyegge/beads/blob/main/CONTRIBUTING.md) for full developer setup.
+See [CONTRIBUTING.md](https://github.com/gastownhall/beads/blob/main/CONTRIBUTING.md) for full developer setup.
 
 ## Next Steps
 

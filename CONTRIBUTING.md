@@ -16,7 +16,7 @@ Thank you for your interest in contributing to bd! This document provides guidel
 
 ```bash
 # Clone the repository
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 
 # Build the project (uses gms_pure_go tag via Makefile)
@@ -370,7 +370,7 @@ dlv debug ./cmd/bd -- create "Test issue"
 
 ## Questions?
 
-- Check existing [issues](https://github.com/steveyegge/beads/issues)
+- Check existing [issues](https://github.com/gastownhall/beads/issues)
 - Open a new issue for questions
 - Review [README.md](README.md) and other documentation
 

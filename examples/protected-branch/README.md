@@ -249,7 +249,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install bd
-        run: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+        run: curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
       - name: Check for changes
         id: check

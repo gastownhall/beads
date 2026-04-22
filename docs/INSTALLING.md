@@ -52,8 +52,8 @@ You can install beads using mise in 2 different ways:
 1. Install the latest github release
 
 ```bash
-mise install github:steveyegge/beads
-mise use -g github:steveyegge/beads
+mise install github:gastownhall/beads
+mise use -g github:gastownhall/beads
 ```
 
 2.  Build the latest code from git using go:
@@ -74,7 +74,7 @@ mise use -g go:github.com/steveyegge/beads/cmd/bd
 ### Quick Install Script (All Platforms)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 The installer will:
@@ -87,7 +87,7 @@ The installer will:
 On macOS, the script preserves the downloaded binary signature by default. If you explicitly want ad-hoc local re-signing, opt in:
 
 ```bash
-BEADS_INSTALL_RESIGN_MACOS=1 curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+BEADS_INSTALL_RESIGN_MACOS=1 curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### Comparison of Installation Methods
@@ -136,7 +136,7 @@ CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/c
 
 **From source**:
 ```bash
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 make build   # uses gms_pure_go tag and CGO
 sudo mv bd /usr/local/bin/
@@ -172,7 +172,7 @@ CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/c
 
 **From source**:
 ```bash
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 make build   # uses gms_pure_go tag and CGO
 sudo mv bd /usr/local/bin/
@@ -182,7 +182,7 @@ sudo mv bd /usr/local/bin/
 
 **Via Quick Install Script**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 **Via go install** (server-mode only, simplest):
@@ -200,7 +200,7 @@ Beads now ships with native Windows support—no MSYS or MinGW required.
 
 **Via PowerShell script**:
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 The script installs a prebuilt Windows release if available and verifies the downloaded ZIP checksum against release `checksums.txt`. Go is only required for `go install` or building from source.
@@ -225,7 +225,7 @@ Requires MinGW-w64 gcc on your PATH. ICU is **not** required — `gms_pure_go` s
 
 **From source**:
 ```pwsh
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 make build   # uses gms_pure_go tag and CGO
 Move-Item bd.exe $env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\
@@ -321,7 +321,7 @@ For enhanced UX with slash commands:
 
 ```bash
 # In Claude Code
-/plugin marketplace add steveyegge/beads
+/plugin marketplace add gastownhall/beads
 /plugin install beads
 # Restart Claude Code
 ```
@@ -464,13 +464,13 @@ Some users report crashes when running `bd init` or other commands on macOS. Thi
 CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
 
 # Or if building from source
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 CGO_ENABLED=1 go build -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/
 ```
 
-If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/steveyegge/beads/issues).
+If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/gastownhall/beads/issues).
 
 ### Claude Code Plugin: MCP server fails to start
 
@@ -513,13 +513,13 @@ Use the update command that matches how you installed `bd`.
 ### Quick Install Script (macOS/Linux/FreeBSD)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### PowerShell Installer (Windows)
 
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 ### Homebrew

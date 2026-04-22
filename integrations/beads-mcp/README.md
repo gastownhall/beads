@@ -1,6 +1,6 @@
 # beads-mcp
 
-MCP server for [beads](https://github.com/steveyegge/beads) issue tracker and agentic memory system.
+MCP server for [beads](https://github.com/gastownhall/beads) issue tracker and agentic memory system.
 Enables AI agents to manage tasks using bd CLI through Model Context Protocol.
 
 > **Note:** For environments with shell access (Claude Code, Cursor, Windsurf), the **CLI + hooks approach is recommended** over MCP. It uses ~1-2k tokens vs 10-50k for MCP schemas, resulting in lower compute cost and latency. See the [main README](../../README.md) for CLI setup.
@@ -36,7 +36,7 @@ Add to your Claude Desktop config:
 For development, clone the repository:
 
 ```bash
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads/integrations/beads-mcp
 uv sync
 ```
@@ -225,7 +225,7 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 
 ## Known Issues
 
-### ~~MCP Tools Not Loading in Claude Code~~ (Issue [#346](https://github.com/steveyegge/beads/issues/346)) - RESOLVED
+### ~~MCP Tools Not Loading in Claude Code~~ (Issue [#346](https://github.com/gastownhall/beads/issues/346)) - RESOLVED
 
 **Status:** ✅ Fixed in v0.24.0+
 

@@ -16,7 +16,7 @@ Beads (`bd`) is an issue tracker designed specifically for AI-supervised coding 
 
 1. Install beads CLI:
 ```bash
-curl -sSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 2. Install Python and uv (for MCP server):
@@ -33,7 +33,7 @@ There are two ways to install the beads plugin:
 
 ```bash
 # In Claude Code
-/plugin marketplace add steveyegge/beads
+/plugin marketplace add gastownhall/beads
 /plugin install beads
 ```
 
@@ -41,7 +41,7 @@ There are two ways to install the beads plugin:
 
 ```bash
 # Clone the repository (shell command)
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 ```
 
@@ -306,7 +306,7 @@ The plugin requires the `bd` CLI to be installed. Update it separately:
 
 ```bash
 # Quick update
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 # Or with go
 go install github.com/steveyegge/beads/cmd/bd@latest
@@ -373,7 +373,7 @@ Beads follows semantic versioning. The plugin version tracks the bd CLI version:
 
 ## Learn More
 
-- **GitHub**: https://github.com/steveyegge/beads
+- **GitHub**: https://github.com/gastownhall/beads
 - **Documentation**: See README.md in the repository
 - **Examples**: Check `examples/` directory for integration patterns
 - **MCP Server**: See `integrations/beads-mcp/` for server details

@@ -95,7 +95,7 @@ All success criteria from bd-febc met:
 1. Visit: https://www.npmjs.com/package/@beads/bd
 2. Install: `npm install -g @beads/bd`
 3. Use: `bd init` in your project
-4. Read: https://github.com/steveyegge/beads for full docs
+4. Read: https://github.com/gastownhall/beads for full docs
 
 ### For Maintainers
 
@@ -113,9 +113,9 @@ Create `.github/workflows/publish-npm.yml` to auto-publish on GitHub releases.
 ## 🔗 Links
 
 - **npm package**: https://www.npmjs.com/package/@beads/bd
-- **GitHub repo**: https://github.com/steveyegge/beads
+- **GitHub repo**: https://github.com/gastownhall/beads
 - **npm organization**: https://www.npmjs.com/org/beads
-- **Documentation**: https://github.com/steveyegge/beads#readme
+- **Documentation**: https://github.com/gastownhall/beads#readme
 
 ## 💡 Key Features
 

@@ -156,7 +156,7 @@ You don't have permission to publish to @beads. Either:
 
 The version in package.json doesn't match a GitHub release, or the release doesn't have the required binary assets.
 
-Check: https://github.com/steveyegge/beads/releases/v{VERSION}
+Check: https://github.com/gastownhall/beads/releases/v{VERSION}
 
 ## Version Sync
 
@@ -167,5 +167,5 @@ Keep these in sync:
 
 The postinstall script downloads binaries from:
 ```
-https://github.com/steveyegge/beads/releases/download/v{VERSION}/beads_{VERSION}_{platform}_{arch}.{ext}
+https://github.com/gastownhall/beads/releases/download/v{VERSION}/beads_{VERSION}_{platform}_{arch}.{ext}
 ```

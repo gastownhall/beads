@@ -26,7 +26,7 @@ Traditional issue trackers (Jira, GitHub Issues) weren't designed for AI agents.
 brew install beads
 
 # Or quick install (macOS/Linux/FreeBSD)
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 # Initialize in your project
 cd your-project

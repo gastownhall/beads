@@ -391,7 +391,7 @@ async function testPlatformDetection() {
     // Check if GitHub release has this binary
     const version = require(path.join(PACKAGE_DIR, 'package.json')).version;
     const ext = platform === 'win32' ? 'zip' : 'tar.gz';
-    const binaryUrl = `https://github.com/steveyegge/beads/releases/download/v${version}/beads_${version}_${platform}_${mappedArch}.${ext}`;
+    const binaryUrl = `https://github.com/gastownhall/beads/releases/download/v${version}/beads_${version}_${platform}_${mappedArch}.${ext}`;
 
     logInfo(`Expected binary URL: ${binaryUrl}`);
     logSuccess('Platform detection logic validated');

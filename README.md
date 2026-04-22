@@ -4,9 +4,9 @@
 
 **Platforms:** macOS, Linux, Windows, FreeBSD
 
-[![License](https://img.shields.io/github/license/steveyegge/beads)](LICENSE)
+[![License](https://img.shields.io/github/license/gastownhall/beads)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/steveyegge/beads)](https://goreportcard.com/report/github.com/steveyegge/beads)
-[![Release](https://img.shields.io/github/v/release/steveyegge/beads)](https://github.com/steveyegge/beads/releases)
+[![Release](https://img.shields.io/github/v/release/gastownhall/beads)](https://github.com/gastownhall/beads/releases)
 [![npm version](https://img.shields.io/npm/v/@beads/bd)](https://www.npmjs.com/package/@beads/bd)
 [![PyPI](https://img.shields.io/pypi/v/beads-mcp)](https://pypi.org/project/beads-mcp/)
 
@@ -18,7 +18,7 @@ Beads provides a persistent, structured memory for coding agents. It replaces me
 
 ```bash
 # Install beads CLI (system-wide - don't clone this repo into your project)
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 # Initialize in YOUR project
 cd your-project
@@ -175,7 +175,7 @@ This is useful for:
 - **Evaluation/testing** — ephemeral databases in `/tmp`
 
 For daemon mode without git, use `bd daemon start --local`
-(see [PR #433](https://github.com/steveyegge/beads/pull/433)).
+(see [PR #433](https://github.com/gastownhall/beads/pull/433)).
 
 ## 📝 Documentation
 

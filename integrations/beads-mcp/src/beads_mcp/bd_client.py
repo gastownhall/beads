@@ -71,8 +71,8 @@ class BdNotFoundError(BdError):
             f"bd CLI not found at: {attempted_path}\n\n"
             "The beads Claude Code plugin requires the bd CLI to be installed separately.\n\n"
             "Install bd CLI:\n"
-            "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash\n\n"
-            "Or visit: https://github.com/steveyegge/beads#installation\n\n"
+            "  curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash\n\n"
+            "Or visit: https://github.com/gastownhall/beads#installation\n\n"
             "After installation, restart Claude Code to reload the MCP server."
         )
 
@@ -390,7 +390,7 @@ class BdCliClient(BdClientBase):
         if version < min_version:
             min_ver_str = ".".join(str(x) for x in min_version)
             cur_ver_str = ".".join(str(x) for x in version)
-            install_cmd = "curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
+            install_cmd = "curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"
             raise BdVersionError(
                 f"bd version {cur_ver_str} is too old. "
                 f"This MCP server requires bd >= {min_ver_str}. "

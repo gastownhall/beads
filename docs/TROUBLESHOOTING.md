@@ -180,13 +180,13 @@ Some users report crashes when running `bd init` or other commands on macOS. Thi
 CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
 
 # Or if building from source
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 CGO_ENABLED=1 go build -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/
 ```
 
-If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/steveyegge/beads/issues).
+If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/gastownhall/beads/issues).
 
 ## Antivirus False Positives
 
@@ -210,7 +210,7 @@ If you installed via Homebrew, this shouldn't be necessary as the formula alread
    # macOS/Linux
    shasum -a 256 bd
    ```
-   Compare with checksums from the [GitHub release page](https://github.com/steveyegge/beads/releases)
+   Compare with checksums from the [GitHub release page](https://github.com/gastownhall/beads/releases)
 
 2. **Add bd to antivirus exclusions only after verification**:
    - Add the bd installation directory to your antivirus exclusion list
@@ -433,9 +433,9 @@ bd init
 bd config set sync.branch ""  # Disable sync branch feature
 ```
 
-**Note:** The `--hard` and `--skip-init` flags mentioned in [GH#479](https://github.com/steveyegge/beads/issues/479) were never implemented. Use the workarounds above for a complete reset.
+**Note:** The `--hard` and `--skip-init` flags mentioned in [GH#479](https://github.com/gastownhall/beads/issues/479) were never implemented. Use the workarounds above for a complete reset.
 
-**Related:** [GH#922](https://github.com/steveyegge/beads/issues/922)
+**Related:** [GH#922](https://github.com/gastownhall/beads/issues/922)
 
 ### Database corruption
 
@@ -927,7 +927,7 @@ bd dolt push
 
 **Related:**
 - See [Claude Code sandboxing documentation](https://www.anthropic.com/engineering/claude-code-sandboxing) for more about sandbox restrictions
-- GitHub issue [#353](https://github.com/steveyegge/beads/issues/353) for background
+- GitHub issue [#353](https://github.com/gastownhall/beads/issues/353) for background
 
 ## Platform-Specific Issues
 
@@ -1014,14 +1014,14 @@ export PATH="$HOME/.local/bin:$PATH"
 
 If none of these solutions work:
 
-1. **Check existing issues**: [GitHub Issues](https://github.com/steveyegge/beads/issues)
+1. **Check existing issues**: [GitHub Issues](https://github.com/gastownhall/beads/issues)
 2. **Enable debug logging**: `bd --verbose <command>`
 3. **File a bug report**: Include:
    - bd version: `bd version`
    - OS and architecture: `uname -a`
    - Error message and full command
    - Steps to reproduce
-4. **Join discussions**: [GitHub Discussions](https://github.com/steveyegge/beads/discussions)
+4. **Join discussions**: [GitHub Discussions](https://github.com/gastownhall/beads/discussions)
 
 ## Related Documentation
 

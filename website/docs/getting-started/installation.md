@@ -25,7 +25,7 @@ brew install beads
 ### Quick Install Script (All Platforms)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 The installer will:
@@ -75,7 +75,7 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 
 **From source**:
 ```bash
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 go build -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/
@@ -105,7 +105,7 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 
 **Via quick install script**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 **Via go install**:
@@ -123,7 +123,7 @@ Beads ships with native Windows support—no MSYS or MinGW required.
 
 **Via PowerShell script**:
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 The script installs a prebuilt Windows release if available. Go is only required for `go install` or building from source.
@@ -229,13 +229,13 @@ CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
 ### Quick install script (macOS/Linux/FreeBSD)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### PowerShell installer (Windows)
 
 ```pwsh
-irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
 ### Homebrew

@@ -489,7 +489,7 @@ When `BEADS_DIR` points to a different git repository than your current director
 2. Git operations (add, commit, push, pull) target the beads repo
 3. Your code repository is never touched
 
-This was contributed by @dand-oss in [PR #533](https://github.com/steveyegge/beads/pull/533).
+This was contributed by @dand-oss in [PR #533](https://github.com/gastownhall/beads/pull/533).
 
 ### Combining with Worktrees
 

@@ -266,7 +266,7 @@ bd dolt pull
 
 When a teammate clones the repo, `bd bootstrap` auto-detects the existing database on `refs/dolt/data` and clones it — no manual remote setup needed.
 
-See [Sync](/cli-reference/sync) for CLI details. For remote configuration and federation, see the repository docs [DOLT-BACKEND.md](https://github.com/steveyegge/beads/blob/main/docs/DOLT-BACKEND.md) and [FEDERATION-SETUP.md](https://github.com/steveyegge/beads/blob/main/FEDERATION-SETUP.md).
+See [Sync](/cli-reference/sync) for CLI details. For remote configuration and federation, see the repository docs [DOLT-BACKEND.md](https://github.com/gastownhall/beads/blob/main/docs/DOLT-BACKEND.md) and [FEDERATION-SETUP.md](https://github.com/gastownhall/beads/blob/main/FEDERATION-SETUP.md).
 
 ## Optional: Notion sync
 
@@ -367,4 +367,4 @@ bd admin cleanup --force
 - More sync scenarios: [Sync](/cli-reference/sync)
 - Full command list: [CLI Reference](/cli-reference)
 
-See the [repository README](https://github.com/steveyegge/beads/blob/main/README.md) for an overview and links to deeper docs.
+See the [repository README](https://github.com/gastownhall/beads/blob/main/README.md) for an overview and links to deeper docs.

@@ -6,7 +6,7 @@ Integration for [Junie](https://www.jetbrains.com/junie/) (JetBrains AI Agent) w
 
 ```bash
 # Install beads
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 # Initialize beads in your project
 bd init

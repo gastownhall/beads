@@ -13,4 +13,4 @@ Avoid these prefixes in user-defined keys to prevent conflicts with future Beads
 
 ## Related
 
-- [#1416](https://github.com/steveyegge/beads/issues/1416) — Optional schema enforcement (future)
+- [#1416](https://github.com/gastownhall/beads/issues/1416) — Optional schema enforcement (future)

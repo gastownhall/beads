@@ -123,7 +123,7 @@ bd setup aider    # Aider
 
 ### Can beads import from GitHub Issues?
 
-Yes — see the [GitHub integration documentation](https://github.com/steveyegge/beads/blob/main/docs/GITHUB_IMPORT.md) for details.
+Yes — see the [GitHub integration documentation](https://github.com/gastownhall/beads/blob/main/docs/GITHUB_IMPORT.md) for details.
 
 ## Troubleshooting
 
@@ -153,6 +153,6 @@ bd hooks status
 
 ### How do I report a bug?
 
-1. Check existing issues: https://github.com/steveyegge/beads/issues
+1. Check existing issues: https://github.com/gastownhall/beads/issues
 2. Include: `bd version`, `bd info --json`, reproduction steps
-3. File at: https://github.com/steveyegge/beads/issues/new
+3. File at: https://github.com/gastownhall/beads/issues/new

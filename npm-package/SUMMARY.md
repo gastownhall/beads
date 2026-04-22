@@ -47,7 +47,7 @@ npm-package/
 - Runs automatically after `npm install`
 - Detects OS (darwin/linux/windows) and architecture (amd64/arm64)
 - Downloads the correct binary from GitHub releases
-- Constructs URL: `https://github.com/steveyegge/beads/releases/download/v{VERSION}/beads_{VERSION}_{platform}_{arch}.{ext}`
+- Constructs URL: `https://github.com/gastownhall/beads/releases/download/v{VERSION}/beads_{VERSION}_{platform}_{arch}.{ext}`
 - Supports both tar.gz (Unix) and zip (Windows) archives
 - Extracts the binary to `bin/` directory
 - Makes binary executable on Unix systems
@@ -250,7 +250,7 @@ Note: Requires creating @beads organization on npm.
 
 ## References
 
-- [beads repository](https://github.com/steveyegge/beads)
+- [beads repository](https://github.com/gastownhall/beads)
 - [npm scoped packages](https://docs.npmjs.com/cli/v8/using-npm/scope)
 - [npm postinstall scripts](https://docs.npmjs.com/cli/v8/using-npm/scripts#pre--post-scripts)
 - [Node.js child_process](https://nodejs.org/api/child_process.html)

@@ -89,7 +89,7 @@ storage.UnderlyingDB().Exec(`
 `)
 ```
 
-See [EXTENDING.md](https://github.com/steveyegge/beads/blob/main/docs/EXTENDING.md).
+See [EXTENDING.md](https://github.com/gastownhall/beads/blob/main/docs/EXTENDING.md).
 
 ## Event System
 

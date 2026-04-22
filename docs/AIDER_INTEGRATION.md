@@ -372,6 +372,6 @@ Then sync:
 ## References
 
 - [Aider Documentation](https://aider.chat/docs/)
-- [Beads Documentation](https://github.com/steveyegge/beads)
+- [Beads Documentation](https://github.com/gastownhall/beads)
 - [AGENTS.md](../AGENTS.md) - Complete bd workflow guide
 - [QUICKSTART.md](QUICKSTART.md) - Quick start guide
