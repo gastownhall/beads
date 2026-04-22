@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsRecognizedConfigKey(t *testing.T) {
 	recognized := []string{
@@ -37,6 +40,31 @@ func TestSuggestConfigKey(t *testing.T) {
 		got := suggestConfigKey(tt.input)
 		if got != tt.want {
 			t.Errorf("suggestConfigKey(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestRejectProtectedConfigKey(t *testing.T) {
+	rejectedKeys := []string{"issue_prefix", "issue-prefix"}
+	for _, key := range rejectedKeys {
+		msg, rejected := rejectProtectedConfigKey(key)
+		if !rejected {
+			t.Errorf("rejectProtectedConfigKey(%q) = (_, false), want rejected", key)
+			continue
+		}
+		// Error message must surface the alternatives bd-f4m asks for.
+		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix"}
+		for _, want := range wantSubstrings {
+			if !strings.Contains(msg, want) {
+				t.Errorf("rejectProtectedConfigKey(%q) message missing %q; got:\n%s", key, want, msg)
+			}
+		}
+	}
+
+	allowedKeys := []string{"allowed_prefixes", "export.auto", "status.custom", "custom.anything"}
+	for _, key := range allowedKeys {
+		if _, rejected := rejectProtectedConfigKey(key); rejected {
+			t.Errorf("rejectProtectedConfigKey(%q) = (_, true), want not rejected", key)
 		}
 	}
 }

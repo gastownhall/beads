@@ -83,6 +83,17 @@ var configSetCmd = &cobra.Command{
 		key := args[0]
 		value := args[1]
 
+		// Reject keys that look like init-only state so the user does not
+		// silently land a write in a store that 'bd create' never reads.
+		// bd-f4m: 'bd config set issue-prefix' used to write DB key "issue-prefix"
+		// (dash) while 'bd create' only reads YAML "issue-prefix" or DB
+		// "issue_prefix" (underscore) — three divergent stores, write never
+		// visible.
+		if msg, rejected := rejectProtectedConfigKey(key); rejected {
+			fmt.Fprintln(os.Stderr, msg)
+			os.Exit(1)
+		}
+
 		// Warn on unrecognized config keys so typos don't silently become
 		// no-ops. The custom.* namespace is exempt (user-extensible). GH#3293.
 		if !isRecognizedConfigKey(key) {
@@ -754,6 +765,25 @@ func isRecognizedConfigKey(key string) bool {
 		}
 	}
 	return false
+}
+
+// rejectProtectedConfigKey rejects keys that are owned by a dedicated
+// lifecycle command (init/rename) rather than 'bd config set'. The canonical
+// example (bd-f4m) is issue_prefix: 'bd create' reads YAML "issue-prefix"
+// then DB "issue_prefix", while 'bd config set' would land in DB
+// "issue-prefix" — a third key no reader consults. Accepting either the
+// dash or underscore form silently produces a write that looks like it
+// succeeded but is never visible to 'bd create'. Reject both and point the
+// user at the right command.
+func rejectProtectedConfigKey(key string) (string, bool) {
+	switch key {
+	case "issue_prefix", "issue-prefix":
+		return "Error: issue_prefix cannot be set via 'bd config set'.\n" +
+			"  - New project:       bd init --prefix <prefix>\n" +
+			"  - Fresh clone:       bd bootstrap\n" +
+			"  - Rename existing:   bd rename-prefix <new-prefix>", true
+	}
+	return "", false
 }
 
 // suggestConfigKey tries to find a close match for a mistyped key by checking
