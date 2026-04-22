@@ -1,11 +1,100 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
+	"os"
+	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+var gateTestStdoutMu sync.Mutex
+
+type gateCloseCall struct {
+	id      string
+	reason  string
+	actor   string
+	session string
+}
+
+type fakeGateCheckStore struct {
+	storage.DoltStorage
+	issues       []*types.Issue
+	searchFilter types.IssueFilter
+	closeCalls   []gateCloseCall
+}
+
+func (f *fakeGateCheckStore) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
+	f.searchFilter = filter
+	return f.issues, nil
+}
+
+func (f *fakeGateCheckStore) CloseIssue(_ context.Context, id, reason, actor, session string) error {
+	f.closeCalls = append(f.closeCalls, gateCloseCall{
+		id:      id,
+		reason:  reason,
+		actor:   actor,
+		session: session,
+	})
+	return nil
+}
+
+func captureGateStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	gateTestStdoutMu.Lock()
+	defer gateTestStdoutMu.Unlock()
+
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
+
+	fn()
+
+	_ = w.Close()
+	os.Stdout = old
+	<-done
+	_ = r.Close()
+
+	return buf.String()
+}
+
+func resetGateCheckFlags(t *testing.T) {
+	t.Helper()
+
+	if err := gateCheckCmd.Flags().Set("type", ""); err != nil {
+		t.Fatalf("reset type flag: %v", err)
+	}
+	if err := gateCheckCmd.Flags().Set("dry-run", "false"); err != nil {
+		t.Fatalf("reset dry-run flag: %v", err)
+	}
+	if err := gateCheckCmd.Flags().Set("escalate", "false"); err != nil {
+		t.Fatalf("reset escalate flag: %v", err)
+	}
+	if err := gateCheckCmd.Flags().Set("limit", "100"); err != nil {
+		t.Fatalf("reset limit flag: %v", err)
+	}
+
+	gateCheckCmd.Flags().Lookup("type").Changed = false
+	gateCheckCmd.Flags().Lookup("dry-run").Changed = false
+	gateCheckCmd.Flags().Lookup("escalate").Changed = false
+	gateCheckCmd.Flags().Lookup("limit").Changed = false
+}
 
 func TestShouldCheckGate(t *testing.T) {
 	tests := []struct {
@@ -303,6 +392,200 @@ func TestCheckGHRun_PersistsDiscoveredRunIDOutsideDryRun(t *testing.T) {
 	}
 	if updateCalls != 1 {
 		t.Fatalf("expected one await_id update outside dry-run, got %d", updateCalls)
+	}
+}
+
+func TestCheckGHRun_ReturnsErrorWhenPersistingDiscoveredRunIDFails(t *testing.T) {
+	origDiscover := discoverRunIDByWorkflowNameFunc
+	origUpdate := updateGateAwaitIDFunc
+	origStatus := checkGHRunStatusFunc
+	t.Cleanup(func() {
+		discoverRunIDByWorkflowNameFunc = origDiscover
+		updateGateAwaitIDFunc = origUpdate
+		checkGHRunStatusFunc = origStatus
+	})
+
+	discoverRunIDByWorkflowNameFunc = func(workflowHint string) (string, error) {
+		if workflowHint != "release.yml" {
+			t.Fatalf("unexpected workflow hint %q", workflowHint)
+		}
+		return "12345", nil
+	}
+	updateGateAwaitIDFunc = func(_ interface{}, gateID, runID string) error {
+		if gateID != "bd-gate" {
+			t.Fatalf("expected gate ID bd-gate, got %q", gateID)
+		}
+		if runID != "12345" {
+			t.Fatalf("expected discovered run ID 12345, got %q", runID)
+		}
+		return errors.New("write failed")
+	}
+	checkGHRunStatusFunc = func(runID string) (bool, bool, string, error) {
+		t.Fatalf("did not expect status check after await_id persistence failure, got %q", runID)
+		return false, false, "", nil
+	}
+
+	resolved, escalated, reason, err := checkGHRun(&types.Issue{
+		ID:      "bd-gate",
+		AwaitID: "release.yml",
+	}, true)
+	if err == nil {
+		t.Fatal("expected checkGHRun to return an error when await_id persistence fails")
+	}
+	if resolved {
+		t.Fatal("did not expect resolution when await_id persistence fails")
+	}
+	if escalated {
+		t.Fatal("did not expect escalation when await_id persistence fails")
+	}
+	if reason != "" {
+		t.Fatalf("expected empty reason on persistence failure, got %q", reason)
+	}
+	if !gateTestContains(err.Error(), "failed to update gate with discovered run ID") {
+		t.Fatalf("expected wrapped persistence error, got %v", err)
+	}
+}
+
+func TestGateCheck_GHRunWorkflowDiscoveryPersistence(t *testing.T) {
+	tests := []struct {
+		name            string
+		dryRun          bool
+		wantUpdateCalls int
+		wantCloseCalls  int
+		wantOutput      string
+	}{
+		{
+			name:            "dry run keeps discovered run ID in memory only",
+			dryRun:          true,
+			wantUpdateCalls: 0,
+			wantCloseCalls:  0,
+			wantOutput:      "would resolve - workflow 'release' succeeded",
+		},
+		{
+			name:            "live run persists discovered run ID before closing",
+			dryRun:          false,
+			wantUpdateCalls: 1,
+			wantCloseCalls:  1,
+			wantOutput:      "resolved - workflow 'release' succeeded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origStore := store
+			origRootCtx := rootCtx
+			origJSONOutput := jsonOutput
+			origReadonlyMode := readonlyMode
+			origActor := actor
+			origDiscover := discoverRunIDByWorkflowNameFunc
+			origUpdate := updateGateAwaitIDFunc
+			origStatus := checkGHRunStatusFunc
+			t.Cleanup(func() {
+				store = origStore
+				rootCtx = origRootCtx
+				jsonOutput = origJSONOutput
+				readonlyMode = origReadonlyMode
+				actor = origActor
+				discoverRunIDByWorkflowNameFunc = origDiscover
+				updateGateAwaitIDFunc = origUpdate
+				checkGHRunStatusFunc = origStatus
+				resetGateCheckFlags(t)
+			})
+
+			resetGateCheckFlags(t)
+
+			fakeStore := &fakeGateCheckStore{
+				issues: []*types.Issue{
+					{
+						ID:        "bd-gate",
+						IssueType: "gate",
+						AwaitType: "gh:run",
+						AwaitID:   "release.yml",
+					},
+				},
+			}
+
+			store = fakeStore
+			rootCtx = context.Background()
+			jsonOutput = false
+			readonlyMode = false
+			actor = "test-actor"
+
+			if err := gateCheckCmd.Flags().Set("dry-run", map[bool]string{true: "true", false: "false"}[tt.dryRun]); err != nil {
+				t.Fatalf("set dry-run flag: %v", err)
+			}
+			if err := gateCheckCmd.Flags().Set("type", "gh:run"); err != nil {
+				t.Fatalf("set type flag: %v", err)
+			}
+			if err := gateCheckCmd.Flags().Set("escalate", "false"); err != nil {
+				t.Fatalf("set escalate flag: %v", err)
+			}
+			if err := gateCheckCmd.Flags().Set("limit", "100"); err != nil {
+				t.Fatalf("set limit flag: %v", err)
+			}
+
+			updateCalls := 0
+			discoverRunIDByWorkflowNameFunc = func(workflowHint string) (string, error) {
+				if workflowHint != "release.yml" {
+					t.Fatalf("unexpected workflow hint %q", workflowHint)
+				}
+				return "12345", nil
+			}
+			updateGateAwaitIDFunc = func(_ interface{}, gateID, runID string) error {
+				updateCalls++
+				if gateID != "bd-gate" {
+					t.Fatalf("expected gate ID bd-gate, got %q", gateID)
+				}
+				if runID != "12345" {
+					t.Fatalf("expected discovered run ID 12345, got %q", runID)
+				}
+				return nil
+			}
+			checkGHRunStatusFunc = func(runID string) (bool, bool, string, error) {
+				if runID != "12345" {
+					t.Fatalf("expected discovered run ID 12345, got %q", runID)
+				}
+				return true, false, "workflow 'release' succeeded", nil
+			}
+
+			output := captureGateStdout(t, func() {
+				gateCheckCmd.Run(gateCheckCmd, nil)
+			})
+
+			if updateCalls != tt.wantUpdateCalls {
+				t.Fatalf("updateGateAwaitIDFunc call count = %d, want %d", updateCalls, tt.wantUpdateCalls)
+			}
+			if len(fakeStore.closeCalls) != tt.wantCloseCalls {
+				t.Fatalf("CloseIssue call count = %d, want %d", len(fakeStore.closeCalls), tt.wantCloseCalls)
+			}
+			if !gateTestContains(output, tt.wantOutput) {
+				t.Fatalf("output %q does not contain %q", output, tt.wantOutput)
+			}
+			if !gateTestContains(output, "Checked 1 gates: 1 resolved, 0 escalated, 0 errors") {
+				t.Fatalf("summary output missing expected counts: %q", output)
+			}
+			if fakeStore.searchFilter.IssueType == nil || *fakeStore.searchFilter.IssueType != "gate" {
+				t.Fatalf("expected gate filter, got %+v", fakeStore.searchFilter)
+			}
+			if len(fakeStore.searchFilter.ExcludeStatus) != 1 || fakeStore.searchFilter.ExcludeStatus[0] != types.StatusClosed {
+				t.Fatalf("expected closed-status exclusion, got %+v", fakeStore.searchFilter.ExcludeStatus)
+			}
+			if fakeStore.searchFilter.Limit != 100 {
+				t.Fatalf("expected limit 100, got %d", fakeStore.searchFilter.Limit)
+			}
+			if tt.wantCloseCalls == 1 {
+				call := fakeStore.closeCalls[0]
+				if call.id != "bd-gate" {
+					t.Fatalf("expected CloseIssue for bd-gate, got %q", call.id)
+				}
+				if call.reason != "workflow 'release' succeeded" {
+					t.Fatalf("expected CloseIssue reason to match status, got %q", call.reason)
+				}
+				if call.actor != "test-actor" {
+					t.Fatalf("expected CloseIssue actor test-actor, got %q", call.actor)
+				}
+			}
+		})
 	}
 }
 
