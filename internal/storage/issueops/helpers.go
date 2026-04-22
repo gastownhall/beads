@@ -501,7 +501,7 @@ func ReadConfigPrefix(ctx context.Context, tx *sql.Tx) (string, error) {
 	var configPrefix string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_prefix").Scan(&configPrefix)
 	if err == sql.ErrNoRows || configPrefix == "" {
-		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' first)", storage.ErrNotInitialized)
+		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' for a new project, or 'bd bootstrap' to clone an existing remote)", storage.ErrNotInitialized)
 	} else if err != nil {
 		return "", fmt.Errorf("failed to get config: %w", err)
 	}
