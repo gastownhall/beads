@@ -553,6 +553,34 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 	return false
 }
 
+// hasBeadsDatabase is the strict counterpart to hasBeadsProjectFiles: it
+// returns true only when beadsDir contains an actual database — a dolt/
+// directory, an embeddeddolt/ directory, or a non-backup *.db file. Mere
+// presence of metadata.json / config.yaml / issues.jsonl does not count.
+//
+// Used by FindBeadsDir's worktree-separate-DB branch to distinguish a
+// genuine separate-database worktree (which owns its own Dolt data) from
+// a worktree that has inherited tracked .beads/ artifacts through a git
+// checkout of the parent repo's working-tree snapshot. Without this strict
+// check, the separate-DB branch would match on inherited metadata.json and
+// return a broken directory, short-circuiting the shared-DB fallback.
+func hasBeadsDatabase(beadsDir string) bool {
+	if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err == nil && info.IsDir() {
+		return true
+	}
+	if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil && info.IsDir() {
+		return true
+	}
+	dbMatches, _ := filepath.Glob(filepath.Join(beadsDir, "*.db"))
+	for _, match := range dbMatches {
+		baseName := filepath.Base(match)
+		if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
+			return true
+		}
+	}
+	return false
+}
+
 // FindBeadsDir finds the .beads/ directory in the current directory tree.
 // Returns empty string if not found.
 //
@@ -610,12 +638,24 @@ func FindBeadsDir() string {
 		walkBoundary = git.GetRepoRoot()
 	}
 
-	for dir := cwd; dir != "/" && dir != "."; {
+	// Canonicalize both walk start and walk boundary so the `dir == walkBoundary`
+	// comparison below works even when the two come from different sources
+	// (os.Getwd() often returns unresolved symlinks like /var/... on macOS
+	// while git rev-parse returns the canonical /private/var/... form). Without
+	// this, the boundary check silently never matches and the walk overshoots
+	// the worktree root — finding an inherited .beads/ directory there and
+	// short-circuiting the worktree-fallback logic in step 3.
+	cwdCanonical := utils.CanonicalizePath(cwd)
+	walkBoundaryCanonical := ""
+	if walkBoundary != "" {
+		walkBoundaryCanonical = utils.CanonicalizePath(walkBoundary)
+	}
+	for dir := cwdCanonical; dir != "/" && dir != "."; {
 		// Stop at the walk boundary (exclusive — don't check this directory).
 		// For worktrees: stops before worktree root so step 3 handles it.
 		// For non-worktrees: stops before git root (which is checked below in the
 		// post-worktree walk, step 4).
-		if walkBoundary != "" && dir == walkBoundary {
+		if walkBoundaryCanonical != "" && dir == walkBoundaryCanonical {
 			break
 		}
 
@@ -648,11 +688,38 @@ func FindBeadsDir() string {
 			}
 		}
 
-		// 3b. Worktree's own .beads (separate-DB mode, no redirect)
+		// 3b. Worktree's own .beads (separate-DB mode, no redirect).
+		//
+		// Only accept the worktree-local .beads/ as separate-DB if it owns an
+		// actual database (dolt/, embeddeddolt/, or a *.db file). A worktree
+		// that only has metadata.json / config.yaml / issues.jsonl is almost
+		// certainly carrying tracked artifacts from the parent repo's
+		// working-tree snapshot — `git worktree add` checks them out, but the
+		// dolt/ data directory is gitignored and therefore absent. Returning
+		// such a directory short-circuits the shared-DB fallback (3c) and
+		// causes bd to spawn a sidecar Dolt server against an empty data
+		// directory, which cannot serve the project's database.
+		//
+		// If no fallback is available (non-worktree edge case, or the main
+		// repo itself has no .beads/), fall back to hasBeadsProjectFiles so a
+		// fresh `bd init` can still locate the nascent project directory.
 		if worktreeRoot := git.GetRepoRoot(); worktreeRoot != "" {
 			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
 			if info, err := os.Stat(worktreeBeadsDir); err == nil && info.IsDir() {
-				if hasBeadsProjectFiles(worktreeBeadsDir) {
+				if hasBeadsDatabase(worktreeBeadsDir) {
+					return worktreeBeadsDir
+				}
+				// Lenient acceptance only when there is no shared .beads with
+				// a real database to fall back to.
+				fallback := GetWorktreeFallbackBeadsDir()
+				fallbackHasDB := false
+				if fallback != "" {
+					if fbInfo, err := os.Stat(fallback); err == nil && fbInfo.IsDir() {
+						resolved := FollowRedirect(fallback)
+						fallbackHasDB = hasBeadsDatabase(resolved)
+					}
+				}
+				if !fallbackHasDB && hasBeadsProjectFiles(worktreeBeadsDir) {
 					return worktreeBeadsDir
 				}
 			}
@@ -685,8 +752,16 @@ func FindBeadsDir() string {
 		if isWt && mainRepoRoot != "" {
 			extendedRoot = mainRepoRoot
 		}
+		// Canonicalize the extended-root so the `dir == extendedRoot` check
+		// matches when extendedRoot came from a git helper (canonical) and
+		// the starting `dir` came from walkBoundary (also canonicalized
+		// above). Keeps the walk bounded on macOS-style /var → /private/var.
+		extendedRootCanonical := ""
+		if extendedRoot != "" {
+			extendedRootCanonical = utils.CanonicalizePath(extendedRoot)
+		}
 
-		for dir := walkBoundary; dir != "/" && dir != "."; {
+		for dir := walkBoundaryCanonical; dir != "/" && dir != "."; {
 			beadsDir := filepath.Join(dir, ".beads")
 			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 				beadsDir = FollowRedirect(beadsDir)
@@ -696,7 +771,7 @@ func FindBeadsDir() string {
 			}
 
 			// Stop at the extended root
-			if extendedRoot != "" && dir == extendedRoot {
+			if extendedRootCanonical != "" && dir == extendedRootCanonical {
 				break
 			}
 
