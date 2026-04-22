@@ -16,25 +16,25 @@ buildGoModule {
   subPackages = [ "cmd/bd" ];
   doCheck = false;
 
-  # Go module dependencies hash - if build fails with hash mismatch, update with the "got:" value
-  vendorHash = "sha256-7DJgqJX2HDa9gcGD8fLNHLIXvGAEivYeDYx3snCUyCE=";
+  # gms_pure_go uses Go's stdlib regex instead of go-icu-regex
+  tags = [ "gms_pure_go" ];
+
+  # proxyVendor avoids the vendor/modules.txt consistency check that fails
+  # due to an upstream go.mod/vendor sync issue (needs go mod tidy upstream).
+  # The hash below is the go modules hash used to build the local proxy.
+  proxyVendor = true;
+  vendorHash = "sha256-2nQkAIxhAUVNC6SPwocjlfbgt6oG8WFapw/V+j2Pang=";
 
   # Relax go.mod version for Nix: nixpkgs Go may lag behind the latest
   # patch release, and GOTOOLCHAIN=auto can't download in the Nix sandbox.
   postPatch = ''
     goVer="$(go env GOVERSION | sed 's/^go//')"
     go mod edit -go="$goVer"
-
-    env
   '';
 
   # Allow patch-level toolchain upgrades when a dependency's minimum Go patch
   # version is newer than nixpkgs' bundled patch version.
   env.GOTOOLCHAIN = "auto";
-  # Due to https://github.com/dolthub/go-icu-regex, which requires
-  # separate install of icu headers and library.
-  env.CGO_CPPFLAGS="-I${icu.dev}/include";
-  env.CGO_LDFLAGS="-L${icu}/lib";
 
   # Git is required for tests
   nativeBuildInputs = [ git ];
