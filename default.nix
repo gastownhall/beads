@@ -1,6 +1,5 @@
 {
   lib,
-  self,
   buildGoModule,
   git,
   icu,
@@ -10,7 +9,7 @@ buildGoModule {
   pname = "beads";
   version = "1.0.2";
 
-  src = self;
+  src = ./.;
 
   # Point to the main Go package
   subPackages = [ "cmd/bd" ];
@@ -33,8 +32,8 @@ buildGoModule {
   env.GOTOOLCHAIN = "auto";
   # Due to https://github.com/dolthub/go-icu-regex, which requires
   # separate install of icu headers and library.
-  env.CGO_CPPFLAGS="-I${icu.dev}/include";
-  env.CGO_LDFLAGS="-L${icu}/lib";
+  env.CGO_CPPFLAGS = "-I${icu.dev}/include";
+  env.CGO_LDFLAGS = "-L${icu}/lib";
 
   # Git is required for tests
   nativeBuildInputs = [ git ];
