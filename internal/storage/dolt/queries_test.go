@@ -354,6 +354,96 @@ func TestGetReadyWork_TypeFilter(t *testing.T) {
 	}
 }
 
+// TestGetReadyWork_ParentFilterReturnsDescendants verifies that --parent
+// returns all transitive descendants, not just direct children. Regression
+// test for GH#3396: the SQL clause was a one-hop subquery, so grandchildren
+// of the given parent were silently dropped despite the help text and the
+// WorkFilter.ParentID godoc both promising "descendants (recursive)".
+func TestGetReadyWork_ParentFilterReturnsDescendants(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	epic := &types.Issue{
+		ID:        "rw-pd-epic",
+		Title:     "Epic",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	phase := &types.Issue{
+		ID:        "rw-pd-phase",
+		Title:     "Phase",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	leaf := &types.Issue{
+		ID:        "rw-pd-leaf",
+		Title:     "Leaf Task",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+
+	for _, iss := range []*types.Issue{epic, phase, leaf} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", iss.ID, err)
+		}
+	}
+
+	// epic <- phase <- leaf via parent-child deps.
+	for _, dep := range []*types.Dependency{
+		{IssueID: phase.ID, DependsOnID: epic.ID, Type: types.DepParentChild},
+		{IssueID: leaf.ID, DependsOnID: phase.ID, Type: types.DepParentChild},
+	} {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("failed to add dep %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+
+	// Direct parent filter still works (control).
+	parentPhase := phase.ID
+	workPhase, err := store.GetReadyWork(ctx, types.WorkFilter{ParentID: &parentPhase})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	foundLeaf := false
+	for _, w := range workPhase {
+		if w.ID == leaf.ID {
+			foundLeaf = true
+		}
+	}
+	if !foundLeaf {
+		t.Error("direct-parent filter should return the leaf task")
+	}
+
+	// Grandparent filter: leaf must appear (the bug under test).
+	parentEpic := epic.ID
+	workEpic, err := store.GetReadyWork(ctx, types.WorkFilter{ParentID: &parentEpic})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	foundLeaf = false
+	foundPhase := false
+	for _, w := range workEpic {
+		if w.ID == leaf.ID {
+			foundLeaf = true
+		}
+		if w.ID == phase.ID {
+			foundPhase = true
+		}
+	}
+	if !foundPhase {
+		t.Error("grandparent filter should include the direct child (phase)")
+	}
+	if !foundLeaf {
+		t.Error("grandparent filter should include transitive grandchildren (leaf) — regression for GH#3396")
+	}
+}
+
 // TestGetReadyWork_CustomStatusBlockerStillBlocks verifies that a blocker with
 // a custom status still prevents blocked issues from appearing in ready work.
 // Regression test for bd-1x0.

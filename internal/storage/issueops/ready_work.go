@@ -90,11 +90,29 @@ func GetReadyWorkInTx(
 			args = append(args, label)
 		}
 	}
-	// Parent filtering.
+	// Parent filtering: return all transitive descendants of parentID.
+	// GH#3396: previously was a one-hop subquery against dependencies, so
+	// grandchildren were silently dropped despite the help text and
+	// WorkFilter.ParentID godoc both promising "descendants (recursive)".
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
-		args = append(args, parentID, parentID)
+		descendants, dErr := GetDescendantIDsInTx(ctx, tx, parentID, 0)
+		if dErr != nil {
+			return nil, fmt.Errorf("get descendants for parent filter: %w", dErr)
+		}
+		// Compose two branches, matching the prior semantics:
+		//   1. Any ID reachable via parent-child deps from parentID.
+		//   2. Dotted-ID descendants (id LIKE "parent.%") that have no
+		//      explicit parent-child dep — the implicit-parent convention.
+		var orParts []string
+		if len(descendants) > 0 {
+			placeholders, batchArgs := buildSQLInClause(descendants)
+			orParts = append(orParts, fmt.Sprintf("id IN (%s)", placeholders))
+			args = append(args, batchArgs...)
+		}
+		orParts = append(orParts, "(id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child'))")
+		args = append(args, parentID)
+		whereClauses = append(whereClauses, "("+strings.Join(orParts, " OR ")+")")
 	}
 
 	// Molecule filtering: filter to direct children of the specified molecule.
