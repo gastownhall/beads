@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -282,9 +283,27 @@ func hasBeadsHooks(settingsPath string) bool {
 
 // VerifyPrimeOutput checks if bd prime command works and adapts correctly.
 // repoPath is the project root directory.
+//
+// Uses a short timeout because bd prime acquires the embedded-mode flock on
+// .beads/embeddeddolt/.lock. If another bd process (sync, export) holds the
+// lock, bd prime would block indefinitely and deadlock the doctor run
+// (bd-ffe).
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
-	cmd := exec.Command("bd", "prime")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bd", "prime")
 	output, err := cmd.CombinedOutput()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return DoctorCheck{
+			Name:    "bd prime Command",
+			Status:  "warning",
+			Message: "Command timed out",
+			Detail:  "bd prime did not finish in 10s; another bd process may hold the embedded-mode lock",
+			Fix:     "Check for stuck bd processes (ps | grep bd), then re-run 'bd doctor'",
+		}
+	}
 
 	if err != nil {
 		return DoctorCheck{

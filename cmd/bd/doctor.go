@@ -184,16 +184,8 @@ Examples:
   bd doctor --migration=post   # Validate Dolt migration completed
   bd doctor --migration=pre --json  # Machine-parseable migration validation`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if isEmbeddedMode() {
-			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in embedded mode.")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
-			fmt.Fprintln(os.Stderr, "  • Verify database exists:  ls -la .beads/embeddeddolt/")
-			fmt.Fprintln(os.Stderr, "  • Check bd version:        bd version")
-			fmt.Fprintln(os.Stderr, "  • Reinitialize if needed:  bd init --force")
-			fmt.Fprintln(os.Stderr, "  • Switch to server mode:   bd init --server")
-			os.Exit(0)
-		}
+		// bd-ffe: embedded mode runs the full check pipeline. Server-only
+		// checks (RunDoltHealthChecks) already gate on server reachability.
 		// Use global jsonOutput set by PersistentPreRun
 
 		// Determine path to check

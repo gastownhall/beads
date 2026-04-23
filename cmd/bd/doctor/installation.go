@@ -127,7 +127,7 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 			}
 		}
 
-		doltPath := getDatabasePath(beadsDir)
+		doltPath := resolveDatabasePath(beadsDir)
 		if info, err := os.Stat(doltPath); err == nil {
 			if !info.IsDir() {
 				return DoctorCheck{
@@ -137,8 +137,10 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 					Fix:     "Run 'bd doctor --fix' to fix permissions",
 				}
 			}
-			// If shared store is nil, the database could not be opened
-			if store == nil {
+			if store == nil && ss.IsEmbedded() {
+				// Embedded mode: doctor does not open the engine (bd-ffe).
+				// Fall through to the filesystem-permissions OK path below.
+			} else if store == nil {
 				return DoctorCheck{
 					Name:    "Permissions",
 					Status:  StatusError,

@@ -295,8 +295,9 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 	// Check if database exists (backend-aware)
 	switch backend {
 	case configfile.BackendDolt:
-		// Dolt is directory-backed: treat .beads/dolt as the DB existence signal.
-		if info, err := os.Stat(getDatabasePath(beadsDir)); err == nil && info.IsDir() {
+		// Dolt is directory-backed. resolveDatabasePath handles both
+		// server mode (.beads/dolt/) and embedded mode (.beads/embeddeddolt/<db>).
+		if info, err := os.Stat(resolveDatabasePath(beadsDir)); err == nil && info.IsDir() {
 			return DoctorCheck{
 				Name:    "Fresh Clone",
 				Status:  StatusOK,
