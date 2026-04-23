@@ -12,8 +12,8 @@ import (
 // that occurs when each check opens and closes its own store (GH#2636).
 //
 // In server mode, the underlying store is a *dolt.DoltStore. In embedded mode
-// (the default), it is a *embeddeddolt.EmbeddedDoltStore (bd-ffe). Both
-// satisfy storage.DoltStorage.
+// (the default), it is a *embeddeddolt.EmbeddedDoltStore. Both satisfy
+// storage.DoltStorage.
 //
 // Usage:
 //
@@ -32,9 +32,9 @@ type SharedStore struct {
 	// mode this is the dolt.DoltStore's UnderlyingDB. In embedded mode it is
 	// a dedicated sql.DB opened via embeddeddolt.OpenSQL (may be nil when the
 	// store failed to open).
-	rawDB        *sql.DB
-	rawCleanup   func() error
-	isEmbedded   bool
+	rawDB      *sql.DB
+	rawCleanup func() error
+	isEmbedded bool
 }
 
 // Store returns the shared DoltStorage, or nil if the database couldn't be opened.
@@ -67,7 +67,7 @@ func (ss *SharedStore) RawDB() *sql.DB {
 }
 
 // IsEmbedded reports whether the shared store is backed by an embedded Dolt engine.
-// Checks that require server-mode connectivity can gate on this (AC bullet 2 of bd-ffe).
+// Checks that require server-mode connectivity can gate on this.
 func (ss *SharedStore) IsEmbedded() bool {
 	return ss != nil && ss.isEmbedded
 }
@@ -120,7 +120,7 @@ func sharedStoreIsEmbeddedConfig(beadsDir string) bool {
 
 // embeddedSkippedCheck builds a standard "skipped in embedded mode" DoctorCheck.
 // Used by DB-backed checks that cannot run without an open store and whose
-// open path would deadlock subprocess-spawning checks (bd-ffe).
+// open path would deadlock subprocess-spawning checks.
 func embeddedSkippedCheck(name, detail string) DoctorCheck {
 	return DoctorCheck{
 		Name:    name,

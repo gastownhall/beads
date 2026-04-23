@@ -286,8 +286,7 @@ func hasBeadsHooks(settingsPath string) bool {
 //
 // Uses a short timeout because bd prime acquires the embedded-mode flock on
 // .beads/embeddeddolt/.lock. If another bd process (sync, export) holds the
-// lock, bd prime would block indefinitely and deadlock the doctor run
-// (bd-ffe).
+// lock, bd prime would block indefinitely and deadlock the doctor run.
 func VerifyPrimeOutput(repoPath string) DoctorCheck {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

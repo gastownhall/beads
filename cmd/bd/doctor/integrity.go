@@ -50,7 +50,7 @@ func CheckIDFormatWithStore(ss *SharedStore) DoctorCheck {
 	db := ss.RawDB()
 	if db == nil {
 		if ss.IsEmbedded() {
-			return embeddedSkippedCheck("Issue IDs", "raw SQL access requires a server-mode store; embedded skipped in full doctor run (bd-ffe)")
+			return embeddedSkippedCheck("Issue IDs", "raw SQL access requires a server-mode store; embedded skipped in full doctor run")
 		}
 		return DoctorCheck{
 			Name:    "Issue IDs",
@@ -154,7 +154,7 @@ func CheckDependencyCyclesWithStore(ss *SharedStore) DoctorCheck {
 	db := ss.RawDB()
 	if db == nil {
 		if ss.IsEmbedded() {
-			return embeddedSkippedCheck("Dependency Cycles", "raw SQL access requires a server-mode store; embedded skipped in full doctor run (bd-ffe)")
+			return embeddedSkippedCheck("Dependency Cycles", "raw SQL access requires a server-mode store; embedded skipped in full doctor run")
 		}
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
@@ -365,7 +365,7 @@ func CheckRepoFingerprintWithStore(ss *SharedStore, path string) DoctorCheck {
 	store := ss.Store()
 	if store == nil {
 		if ss.IsEmbedded() {
-			return embeddedSkippedCheck("Repo Fingerprint", "embedded engine not opened by doctor to avoid subprocess deadlock (bd-ffe)")
+			return embeddedSkippedCheck("Repo Fingerprint", "embedded engine not opened by doctor to avoid subprocess deadlock")
 		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",

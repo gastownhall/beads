@@ -31,7 +31,7 @@ func TestSharedStore_NilSafe(t *testing.T) {
 // embedded mode records the mode but does NOT open the Dolt engine.
 // Opening the engine would hold the exclusive flock for the lifetime of the
 // doctor run, deadlocking subprocesses that the doctor itself spawns
-// (e.g. `bd prime` via VerifyPrimeOutput) — bd-ffe.
+// (e.g. `bd prime` via VerifyPrimeOutput).
 func TestSharedStore_EmbeddedModeDoesNotOpen(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -56,10 +56,10 @@ func TestSharedStore_EmbeddedModeDoesNotOpen(t *testing.T) {
 		t.Fatal("expected IsEmbedded=true for embedded-mode config")
 	}
 	if ss.Store() != nil {
-		t.Error("embedded-mode SharedStore must not open the engine (bd-ffe)")
+		t.Error("embedded-mode SharedStore must not open the engine")
 	}
 	if ss.RawDB() != nil {
-		t.Error("embedded-mode SharedStore must not hold a raw DB (bd-ffe)")
+		t.Error("embedded-mode SharedStore must not hold a raw DB")
 	}
 
 	// The lock file must remain free — no flock should have been acquired.
@@ -71,7 +71,7 @@ func TestSharedStore_EmbeddedModeDoesNotOpen(t *testing.T) {
 
 // TestCheckDatabaseVersionWithStore_EmbeddedMode verifies that DB-backed
 // checks emit a clear "skipped in embedded mode" diagnostic instead of
-// a misleading "Unable to open database" error (bd-ffe AC3).
+// a misleading "Unable to open database" error.
 func TestCheckDatabaseVersionWithStore_EmbeddedMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

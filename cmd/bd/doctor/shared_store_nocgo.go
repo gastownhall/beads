@@ -10,7 +10,7 @@ import (
 )
 
 // NewSharedStore opens a single read-only DoltStorage for the given repo path.
-// Embedded-mode routing (bd-ffe) requires CGO; non-CGO builds only support
+// Embedded-mode routing requires CGO; non-CGO builds only support
 // server-mode Dolt.
 func NewSharedStore(path string) *SharedStore {
 	beadsDir := ResolveBeadsDirForRepo(path)

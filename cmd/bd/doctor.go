@@ -184,8 +184,8 @@ Examples:
   bd doctor --migration=post   # Validate Dolt migration completed
   bd doctor --migration=pre --json  # Machine-parseable migration validation`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// bd-ffe: embedded mode runs the full check pipeline. Server-only
-		// checks (RunDoltHealthChecks) already gate on server reachability.
+		// Embedded mode runs the full check pipeline. Server-only checks
+		// (RunDoltHealthChecks) already gate on server reachability.
 		// Use global jsonOutput set by PersistentPreRun
 
 		// Determine path to check

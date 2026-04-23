@@ -138,7 +138,7 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 				}
 			}
 			if store == nil && ss.IsEmbedded() {
-				// Embedded mode: doctor does not open the engine (bd-ffe).
+				// Embedded mode: doctor does not open the engine.
 				// Fall through to the filesystem-permissions OK path below.
 			} else if store == nil {
 				return DoctorCheck{

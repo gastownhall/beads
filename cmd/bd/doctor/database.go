@@ -96,7 +96,7 @@ func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorChe
 	store := ss.Store()
 	if store == nil {
 		if ss.IsEmbedded() {
-			return embeddedSkippedCheck("Database", "embedded engine not opened by doctor to avoid subprocess deadlock (bd-ffe)")
+			return embeddedSkippedCheck("Database", "embedded engine not opened by doctor to avoid subprocess deadlock")
 		}
 		if !sharedStoreNeedsLocalDoltDir(beadsDir) {
 			return DoctorCheck{
@@ -203,7 +203,7 @@ func CheckSchemaCompatibilityWithStore(ss *SharedStore) DoctorCheck {
 	store := ss.Store()
 	if store == nil {
 		if ss.IsEmbedded() {
-			return embeddedSkippedCheck("Schema Compatibility", "embedded engine not opened by doctor to avoid subprocess deadlock (bd-ffe)")
+			return embeddedSkippedCheck("Schema Compatibility", "embedded engine not opened by doctor to avoid subprocess deadlock")
 		}
 		return DoctorCheck{
 			Name:    "Schema Compatibility",
@@ -277,7 +277,7 @@ func CheckDatabaseIntegrityWithStore(ss *SharedStore) DoctorCheck {
 	store := ss.Store()
 	if store == nil {
 		if ss.IsEmbedded() {
-			return embeddedSkippedCheck("Database Integrity", "embedded engine not opened by doctor to avoid subprocess deadlock (bd-ffe)")
+			return embeddedSkippedCheck("Database Integrity", "embedded engine not opened by doctor to avoid subprocess deadlock")
 		}
 		return DoctorCheck{
 			Name:    "Database Integrity",
@@ -403,7 +403,7 @@ func CheckProjectIdentityWithStore(ss *SharedStore, path string) DoctorCheck {
 					Category: CategoryData,
 				}
 			}
-			return embeddedSkippedCheck("Project Identity", "metadata.json lacks project_id and embedded engine not opened by doctor (bd-ffe)")
+			return embeddedSkippedCheck("Project Identity", "metadata.json lacks project_id and embedded engine not opened by doctor")
 		}
 		doltPath := resolveDatabasePath(beadsDir)
 		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
@@ -496,7 +496,7 @@ func FixDatabaseConfig(path string) error {
 // This is the legacy server-mode location (.beads/dolt/<db>). In embedded
 // mode the database actually lives at .beads/embeddeddolt/<db> — callers
 // that need the real on-disk path for both modes should use
-// resolveDatabasePath instead (bd-ffe).
+// resolveDatabasePath instead.
 func getDatabasePath(beadsDir string) string {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
@@ -508,7 +508,7 @@ func getDatabasePath(beadsDir string) string {
 // resolveDatabasePath returns the actual on-disk database directory for the
 // configured mode: server-mode uses .beads/dolt/ (or dolt_data_dir), embedded
 // mode uses .beads/embeddeddolt/<database>. Use this when an os.Stat presence
-// check must work in both modes (bd-ffe).
+// check must work in both modes.
 //
 // When metadata.json is missing, falls back to whichever legacy directory
 // already exists on disk (.beads/dolt/ wins for compatibility with pre-

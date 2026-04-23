@@ -11,7 +11,7 @@ import (
 
 // NewSharedStore opens a single read-only DoltStorage for the given repo path,
 // routing to the embedded engine or an external Dolt server based on
-// metadata.json (bd-ffe).
+// metadata.json.
 //
 // In server mode, the returned SharedStore holds an open *dolt.DoltStore and
 // a raw *sql.DB for diagnostic queries. In embedded mode, the SharedStore
