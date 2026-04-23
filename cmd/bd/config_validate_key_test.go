@@ -52,7 +52,7 @@ func TestRejectProtectedConfigKey(t *testing.T) {
 			t.Errorf("rejectProtectedConfigKey(%q) = (_, false), want rejected", key)
 			continue
 		}
-		// Error message must surface the alternatives bd-f4m asks for.
+		// Error message must surface the three lifecycle alternatives.
 		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix"}
 		for _, want := range wantSubstrings {
 			if !strings.Contains(msg, want) {

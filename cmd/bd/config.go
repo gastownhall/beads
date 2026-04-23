@@ -85,7 +85,7 @@ var configSetCmd = &cobra.Command{
 
 		// Reject keys that look like init-only state so the user does not
 		// silently land a write in a store that 'bd create' never reads.
-		// bd-f4m: 'bd config set issue-prefix' used to write DB key "issue-prefix"
+		// 'bd config set issue-prefix' used to write DB key "issue-prefix"
 		// (dash) while 'bd create' only reads YAML "issue-prefix" or DB
 		// "issue_prefix" (underscore) — three divergent stores, write never
 		// visible.
@@ -769,7 +769,7 @@ func isRecognizedConfigKey(key string) bool {
 
 // rejectProtectedConfigKey rejects keys that are owned by a dedicated
 // lifecycle command (init/rename) rather than 'bd config set'. The canonical
-// example (bd-f4m) is issue_prefix: 'bd create' reads YAML "issue-prefix"
+// example is issue_prefix: 'bd create' reads YAML "issue-prefix"
 // then DB "issue_prefix", while 'bd config set' would land in DB
 // "issue-prefix" — a third key no reader consults. Accepting either the
 // dash or underscore form silently produces a write that looks like it
