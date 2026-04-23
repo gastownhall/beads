@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -446,6 +448,24 @@ func TestCheckGHRun_ReturnsErrorWhenPersistingDiscoveredRunIDFails(t *testing.T)
 	}
 }
 
+func TestCheckGHRunStatus_Success(t *testing.T) {
+	installFakeGHScript(t, `{"status":"completed","conclusion":"success","name":"release"}`)
+
+	resolved, escalated, reason, err := checkGHRunStatus("12345")
+	if err != nil {
+		t.Fatalf("checkGHRunStatus returned error: %v", err)
+	}
+	if !resolved {
+		t.Fatal("expected successful workflow run to resolve the gate")
+	}
+	if escalated {
+		t.Fatal("did not expect successful workflow run to escalate the gate")
+	}
+	if reason != "workflow 'release' succeeded" {
+		t.Fatalf("checkGHRunStatus reason = %q, want %q", reason, "workflow 'release' succeeded")
+	}
+}
+
 func TestGateCheck_GHRunWorkflowDiscoveryPersistence(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -626,6 +646,36 @@ func TestWorkflowNameMatches(t *testing.T) {
 			}
 		})
 	}
+}
+
+func installFakeGHScript(t *testing.T, stdout string) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	var (
+		scriptPath string
+		script     string
+	)
+
+	if runtime.GOOS == "windows" {
+		scriptPath = filepath.Join(dir, "gh.cmd")
+		script = "@echo off\r\necho " + stdout + "\r\n"
+	} else {
+		scriptPath = filepath.Join(dir, "gh")
+		script = "#!/bin/sh\ncat <<'EOF'\n" + stdout + "\nEOF\n"
+	}
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(scriptPath, 0o755); err != nil {
+			t.Fatalf("chmod fake gh: %v", err)
+		}
+	}
+
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // gateTestContainsIgnoreCase checks if haystack contains needle (case-insensitive)
