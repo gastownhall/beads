@@ -79,6 +79,12 @@ Examples:
   bd compact --stats                       # Show statistics
 `,
 	Run: func(_ *cobra.Command, _ []string) {
+		// Block mutating operations in embedded mode; allow --stats, --analyze, --dry-run read-only paths.
+		if !compactStats && !compactAnalyze && !compactDryRun {
+			if err := requireServerMode("compact"); err != nil {
+				FatalError("%v", err)
+			}
+		}
 		// Compact modifies data unless --stats or --analyze or --dry-run or --dolt with --dry-run
 		if !compactStats && !compactAnalyze && !compactDryRun && !(compactDolt && compactDryRun) {
 			CheckReadonly("compact")
@@ -756,15 +762,23 @@ func runCompactDolt() {
 	// Check for dolt directory
 	doltPath := filepath.Join(beadsDir, "dolt")
 	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
+		if compactDryRun {
+			if jsonOutput {
+				output := map[string]interface{}{
+					"dry_run":   true,
+					"dolt_path": doltPath,
+					"available": false,
+				}
+				outputJSON(output)
+				return
+			}
+			fmt.Printf("DRY RUN - Dolt garbage collection\n\n")
+			fmt.Printf("Dolt directory: %s\n", doltPath)
+			fmt.Printf("No local Dolt directory found; nothing to collect.\n")
+			return
+		}
 		fmt.Fprintf(os.Stderr, "Error: Dolt directory not found at %s\n", doltPath)
 		fmt.Fprintf(os.Stderr, "Hint: --dolt flag is only for repositories using the Dolt backend\n")
-		os.Exit(1)
-	}
-
-	// Check if dolt command is available
-	if _, err := exec.LookPath("dolt"); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: dolt command not found in PATH\n")
-		fmt.Fprintf(os.Stderr, "Hint: install Dolt from https://github.com/dolthub/dolt\n")
 		os.Exit(1)
 	}
 
@@ -791,6 +805,13 @@ func runCompactDolt() {
 		fmt.Printf("Current size: %s\n", formatBytes(sizeBefore))
 		fmt.Printf("\nRun without --dry-run to perform garbage collection.\n")
 		return
+	}
+
+	// Check if dolt command is available
+	if _, err := exec.LookPath("dolt"); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: dolt command not found in PATH\n")
+		fmt.Fprintf(os.Stderr, "Hint: install Dolt from https://github.com/dolthub/dolt\n")
+		os.Exit(1)
 	}
 
 	if !jsonOutput {

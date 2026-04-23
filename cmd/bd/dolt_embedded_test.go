@@ -291,3 +291,84 @@ func TestEmbeddedDoltConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestAdminEmbeddedBlocked verifies that bd admin subcommands are blocked in
+// embedded mode. The guard was previously on adminCmd.PersistentPreRunE which
+// fired before cmdCtx.ServerMode was populated, causing a false "embedded mode"
+// error even in server-mode projects. The guard is now inside each subcommand's
+// Run func, after store init. This test ensures embedded mode still correctly
+// rejects admin commands.
+func TestAdminEmbeddedBlocked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ta")
+
+	blockedCmds := []struct {
+		name string
+		args []string
+	}{
+		{"compact --dolt", []string{"admin", "compact", "--dolt"}},
+		{"cleanup --dry-run", []string{"admin", "cleanup", "--dry-run"}},
+		{"reset", []string{"admin", "reset"}},
+	}
+
+	for _, tc := range blockedCmds {
+		tc := tc
+		t.Run("blocked_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command(bd, tc.args...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Errorf("bd %s should fail in embedded mode but succeeded: %s", tc.name, out)
+				return
+			}
+			if !strings.Contains(string(out), "not yet supported in embedded mode") {
+				t.Errorf("bd %s: expected 'not yet supported in embedded mode', got: %s", tc.name, out)
+			}
+		})
+	}
+}
+
+// TestAdminEmbeddedCompactReadOnlyAllowed verifies read-only compact modes are
+// not blocked by the embedded-mode admin guard.
+func TestAdminEmbeddedCompactReadOnlyAllowed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ta")
+
+	readOnlyCmds := []struct {
+		name string
+		args []string
+	}{
+		{"compact --stats", []string{"admin", "compact", "--stats"}},
+		{"compact --dolt --dry-run", []string{"admin", "compact", "--dolt", "--dry-run"}},
+	}
+
+	for _, tc := range readOnlyCmds {
+		tc := tc
+		t.Run("allowed_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command(bd, tc.args...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Errorf("bd %s should be allowed in embedded mode: %v\n%s", tc.name, err, out)
+				return
+			}
+			if strings.Contains(string(out), "not yet supported in embedded mode") {
+				t.Errorf("bd %s hit embedded-mode guard unexpectedly: %s", tc.name, out)
+			}
+		})
+	}
+}

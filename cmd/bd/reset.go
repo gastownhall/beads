@@ -38,6 +38,9 @@ func init() {
 }
 
 func runReset(cmd *cobra.Command, args []string) {
+	if err := requireServerMode("reset"); err != nil {
+		FatalError("%v", err)
+	}
 	CheckReadonly("reset")
 
 	force, _ := cmd.Flags().GetBool("force")

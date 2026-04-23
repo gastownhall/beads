@@ -46,6 +46,9 @@ SEE ALSO:
   bd doctor --fix    Automatic health checks and repairs (recommended for routine maintenance)
   bd admin compact   Compact old closed issues to save space`,
 	Run: func(cmd *cobra.Command, args []string) {
+		if err := requireServerMode("cleanup"); err != nil {
+			FatalError("%v", err)
+		}
 		force, _ := cmd.Flags().GetBool("force")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		cascade, _ := cmd.Flags().GetBool("cascade")
