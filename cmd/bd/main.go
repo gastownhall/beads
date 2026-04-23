@@ -850,6 +850,7 @@ var rootCmd = &cobra.Command{
 			// Use doltserver.DefaultConfig for port resolution (env > port file >
 			// config.yaml). Port 0 is fine here — auto-start will resolve it.
 			doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+			doltCfg.ServerSocket = cfg.GetDoltServerSocket()
 			doltCfg.ServerUser = cfg.GetDoltServerUser()
 			// Use the resolved port for credential lookup — metadata.json port
 			// and runtime port can diverge (e.g., tunnel on 3308 vs local on 3307).

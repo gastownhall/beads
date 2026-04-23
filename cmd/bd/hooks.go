@@ -747,6 +747,93 @@ func preservePreexistingHooks(targetDir string) {
 		}
 		fmt.Printf("  Preserving existing %s hook from %s\n", entry.Name(), currentDir)
 	}
+
+	// GH#3132: Fix husky hook layout after copying.
+	fixHuskyHookLayout(currentDir, targetDir)
+}
+
+// fixHuskyHookLayout handles two husky-specific issues when hooks are copied
+// from a husky-managed directory into .beads/hooks/.
+//
+// Bug 1 (v8): Husky v8 hooks source "$(dirname "$0")/_/husky.sh", but the
+// _/ subdirectory is not copied because preservePreexistingHooks skips
+// directories. Fix: create a relative symlink to the original _/ directory.
+//
+// Bug 2 (v9): Husky v9 uses a "h" dispatcher that resolves user hooks via
+// dirname(dirname($0)), which breaks when relocated. The shims in .husky/_/
+// are wrappers, not actual user hooks. Fix: replace copied shims with the
+// real user hook content from the parent directory (.husky/).
+func fixHuskyHookLayout(sourceDir, targetDir string) {
+	// Bug 1: Symlink _/ helper directory for husky v8 compatibility.
+	// Husky v8 hooks source $(dirname "$0")/_/husky.sh — the _/ directory
+	// must be reachable from the target hooks directory.
+	srcHelper := filepath.Join(sourceDir, "_")
+	if info, err := os.Stat(srcHelper); err == nil && info.IsDir() {
+		tgtHelper := filepath.Join(targetDir, "_")
+		if _, err := os.Lstat(tgtHelper); os.IsNotExist(err) {
+			relPath, relErr := filepath.Rel(targetDir, srcHelper)
+			if relErr == nil {
+				if symlinkErr := os.Symlink(relPath, tgtHelper); symlinkErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to symlink husky helper directory: %v\n", symlinkErr)
+				}
+			}
+		}
+	}
+
+	// Bug 2: Replace husky v9 shims with actual user hook content.
+	// Husky v9 sets core.hooksPath=.husky/_/ where each hook is a shim that
+	// sources "h" (the dispatcher). The dispatcher uses dirname(dirname($0))
+	// to find user hooks in the parent .husky/ directory — this path math
+	// breaks when the shim is relocated to .beads/hooks/.
+	//
+	// Detect v9 by checking for the dispatcher in the *source* directory:
+	// preservePreexistingHooks intentionally skips copying `h` to target, so
+	// keying off targetDir would never match.
+	srcH := filepath.Join(sourceDir, "h")
+	hContent, err := os.ReadFile(srcH) // #nosec G304 -- path is in known hooks directory
+	if err != nil {
+		return // No h dispatcher in source — not a husky v9 source directory
+	}
+	if !strings.Contains(string(hContent), `dirname "$(dirname`) {
+		return // Not the husky v9 dispatcher
+	}
+
+	// Source is .husky/_/ — user hooks live in the parent .husky/ directory.
+	// Iterate the source shims rather than the target: preservePreexistingHooks
+	// has already run sanitizeHuskyHook on the copied shims, which strips the
+	// `. "$(dirname "$0")/h"` line, so a content-based shim check against
+	// target would no longer match. Because every non-`h` file in sourceDir
+	// is a v9 shim by construction, we can map source entry → user hook
+	// directly.
+	userHooksDir := filepath.Dir(sourceDir)
+
+	entries, readErr := os.ReadDir(sourceDir)
+	if readErr != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == "h" {
+			continue
+		}
+		hookPath := filepath.Join(targetDir, entry.Name())
+		if _, statErr := os.Stat(hookPath); statErr != nil {
+			continue // target hook not copied — nothing to replace
+		}
+		userHookPath := filepath.Join(userHooksDir, entry.Name())
+		userContent, readErr := os.ReadFile(userHookPath) // #nosec G304 -- constrained to husky dir
+		if readErr != nil {
+			continue // No corresponding user hook — leave copied content as-is
+		}
+		// Ensure the content has a shebang (user hooks in .husky/ often omit it)
+		replacement := string(userContent)
+		if !strings.HasPrefix(replacement, "#!") {
+			replacement = "#!/usr/bin/env sh\n" + replacement
+		}
+		// #nosec G306 -- git hooks must be executable
+		if writeErr := os.WriteFile(hookPath, []byte(replacement), 0755); writeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to replace husky v9 shim %s: %v\n", entry.Name(), writeErr)
+		}
+	}
 }
 
 // isHuskyDir reports whether dir looks like a husky-managed hooks directory

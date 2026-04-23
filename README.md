@@ -114,8 +114,16 @@ or environment variables:
 |------|---------|---------|
 | `--server-host` | `BEADS_DOLT_SERVER_HOST` | `127.0.0.1` |
 | `--server-port` | `BEADS_DOLT_SERVER_PORT` | `3307` |
+| `--server-socket` | `BEADS_DOLT_SERVER_SOCKET` | (none; uses TCP) |
 | `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
 | | `BEADS_DOLT_PASSWORD` | (none) |
+
+**Unix domain sockets:** Use `--server-socket` to connect via a Unix socket
+instead of TCP. This avoids port conflicts between concurrent projects and
+is useful in sandboxed environments (e.g., Claude Code) where file-level
+access control is simpler than network allowlists. The Dolt server must be
+started with `dolt sql-server --socket <path>`. Auto-start is not supported
+in socket mode.
 
 ### Backup & Migration
 

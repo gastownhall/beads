@@ -17,7 +17,7 @@ buildGoModule {
   doCheck = false;
 
   # Go module dependencies hash - if build fails with hash mismatch, update with the "got:" value
-  vendorHash = "sha256-7DJgqJX2HDa9gcGD8fLNHLIXvGAEivYeDYx3snCUyCE=";
+  vendorHash = "sha256-Rn1MnasYUOBbIgjFx0E6R2Zak6la1VajDkHqoiFpHtw=";
 
   # Relax go.mod version for Nix: nixpkgs Go may lag behind the latest
   # patch release, and GOTOOLCHAIN=auto can't download in the Nix sandbox.
