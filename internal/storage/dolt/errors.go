@@ -28,6 +28,12 @@ var (
 
 	// ErrExec indicates a database exec (INSERT/UPDATE/DELETE) failure.
 	ErrExec = errors.New("exec error")
+
+	// ErrDanglingReference indicates that the pre-push integrity check detected
+	// missing chunks in the local Dolt noms store. The push was aborted to
+	// prevent propagating the corruption to the remote. Run bd dolt verify
+	// to diagnose and recover.
+	ErrDanglingReference = errors.New("dangling chunk reference")
 )
 
 // isTableNotExistError returns true if the error indicates a MySQL/Dolt

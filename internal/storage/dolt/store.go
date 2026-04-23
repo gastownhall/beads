@@ -272,6 +272,11 @@ const (
 // this prevents the process from blocking forever.
 const cliExecTimeout = 5 * time.Minute
 
+// fsckTimeout is the maximum time to wait for dolt fsck to verify the local
+// chunk store before a push. fsck reads local files only; 30 seconds is ample
+// for any DB size we currently operate.
+const fsckTimeout = 30 * time.Second
+
 // Retry configuration for transient connection errors (stale pool connections,
 // brief network issues, server restarts).
 const serverRetryMaxElapsed = 30 * time.Second
@@ -1875,11 +1880,45 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 	return nil
 }
 
+// prePushFSCK runs dolt fsck --quiet to verify local chunk integrity before
+// pushing. This prevents propagating Dolt remote corruption (dangling blob
+// references) that arise when concurrent pushes race on the remote manifest.
+//
+// When multiple agents push simultaneously, one push's manifest update can
+// land before another's chunks finish uploading, leaving a manifest that
+// references chunks that were never stored. Any agent that then fetches and
+// re-pushes that remote faithfully propagates the dangling reference.
+//
+// If CLIDir is empty or .dolt/noms does not exist, the check is skipped.
+// Any fsck failure returns ErrDanglingReference — the push is NOT attempted.
+func (s *DoltStore) prePushFSCK(ctx context.Context) error {
+	dir := s.CLIDir()
+	if dir == "" {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".dolt", "noms")); os.IsNotExist(err) {
+		return nil
+	}
+	fsckCtx, cancel := context.WithTimeout(ctx, fsckTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(fsckCtx, "dolt", "fsck", "--quiet") // #nosec G204 -- fixed command
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+			ErrDanglingReference, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // doltCLIPush shells out to `dolt push` from the database directory.
 // Used for git-protocol remotes where CALL DOLT_PUSH times out through the SQL connection.
 // If creds is non-nil, credentials are set on the subprocess environment only,
 // avoiding process-wide env var races with concurrent goroutines.
 func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, creds *remoteCredentials) error {
+	if err := s.prePushFSCK(ctx); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, cliExecTimeout)
 	defer cancel()
 	args := []string{"push"}
