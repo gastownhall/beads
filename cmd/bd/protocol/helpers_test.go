@@ -160,9 +160,7 @@ func testPrefix(t *testing.T) string {
 
 func newWorkspace(t *testing.T) *workspace {
 	t.Helper()
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("skipping: dolt not installed")
-	}
+	testutil.RequireDoltBinary(t)
 	if testDoltPort == 0 {
 		t.Skip("skipping: test Dolt server not available")
 	}

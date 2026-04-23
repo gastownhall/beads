@@ -49,6 +49,10 @@ func TestMain(m *testing.M) {
 	// Start an isolated Dolt server so regression tests don't pollute
 	// the production database on port 3307.
 	if _, err := exec.LookPath("dolt"); err != nil {
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			fmt.Fprintln(os.Stderr, "FAIL: dolt missing under GITHUB_ACTIONS — CI workflow must install dolt")
+			os.Exit(1)
+		}
 		fmt.Fprintln(os.Stderr, "SKIP: dolt not found in PATH; regression tests require dolt")
 		os.Exit(0)
 	}

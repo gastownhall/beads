@@ -22,9 +22,7 @@ import (
 // route credential-bearing pushes through the shared Dolt root even when the
 // per-project dbPath is stale and lacks the remote.
 func TestCredentialCLIRoutingE2ESharedServer(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping test")
-	}
+	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)
 
 	baseDir, err := os.MkdirTemp("", "credential-cli-routing-shared-server-e2e-*")

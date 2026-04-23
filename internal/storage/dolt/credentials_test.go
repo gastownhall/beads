@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestEncryptDecryptWithKey(t *testing.T) {
@@ -340,9 +342,7 @@ func setupCredentialTestStoreWithURL(t *testing.T, remoteUser, remotePassword st
 // CLI subprocess routing for Push, ForcePush, and Pull when credentials are set.
 // The guard is shared across all three operations (same insertion pattern in store.go).
 func TestCredentialCLIRouting(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping credential routing test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	tests := []struct {
 		name           string
@@ -406,9 +406,7 @@ func TestCredentialCLIRoutingNoRemote(t *testing.T) {
 }
 
 func TestCredentialCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping shared-server credential routing test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	sharedRoot := t.TempDir()
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
@@ -448,9 +446,7 @@ func TestCredentialCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
 }
 
 func TestCloudAuthCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping shared-server cloud-auth routing test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	sharedRoot := t.TempDir()
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
@@ -492,9 +488,7 @@ func TestCloudAuthCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
 // that controls CLI subprocess routing for federation PushTo, PullFrom, and Fetch
 // when peer credentials are resolved from the federation_peers table.
 func TestFederationCredentialCLIRouting(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping credential routing test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	tests := []struct {
 		name        string
@@ -528,9 +522,7 @@ func TestFederationCredentialCLIRouting(t *testing.T) {
 }
 
 func TestCloudAuthCLIRouting(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
+	testutil.RequireDoltBinary(t)
 
 	tests := []struct {
 		name      string
@@ -576,9 +568,7 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 }
 
 func TestCloudAuthCLIRoutingStructural(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
+	testutil.RequireDoltBinary(t)
 
 	t.Run("embedded mode", func(t *testing.T) {
 		store := setupCredentialTestStoreWithURL(t, "", "", false, true, "origin", "az://account.blob.core.windows.net/container")
@@ -600,9 +590,7 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 // DoltHub (primary) + Azure (backup) remotes. AZURE_STORAGE_ACCOUNT should
 // trigger CLI routing ONLY for the Azure remote, not the DoltHub remote.
 func TestPerRemoteCloudAuthHybrid(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
+	testutil.RequireDoltBinary(t)
 
 	tmpDir := t.TempDir()
 	dbName := "testdb"

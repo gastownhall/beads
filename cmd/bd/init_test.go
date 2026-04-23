@@ -18,15 +18,14 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // skipIfNoDolt skips the test when no Dolt server is available.
 // Checks both binary availability and test server status.
 func skipIfNoDolt(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("skipping: dolt not installed")
-	}
+	testutil.RequireDoltBinary(t)
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test server not running")
 	}
@@ -1443,10 +1442,7 @@ func TestInit_WithBEADS_DIR_DoltBackend(t *testing.T) {
 		t.Skip("Skipping BEADS_DIR Dolt test on Windows")
 	}
 
-	// Check if dolt is available
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping Dolt backend test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	// Reset global state
 	origDBPath := dbPath
@@ -1515,9 +1511,6 @@ func TestInitDoltMetadata(t *testing.T) {
 	skipIfNoDolt(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping Dolt metadata test on Windows")
-	}
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping Dolt metadata test")
 	}
 
 	saveAndRestoreGlobals(t)
@@ -1629,9 +1622,6 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 	skipIfNoDolt(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping Dolt metadata test on Windows")
-	}
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping Dolt metadata test")
 	}
 
 	saveAndRestoreGlobals(t)

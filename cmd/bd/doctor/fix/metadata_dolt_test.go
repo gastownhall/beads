@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // setupDoltWorkspace creates a temp beads workspace with a Dolt database.
@@ -18,9 +19,7 @@ import (
 // Returns the workspace root path.
 func setupDoltWorkspace(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
