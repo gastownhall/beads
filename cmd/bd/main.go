@@ -35,6 +35,7 @@ import (
 )
 
 var (
+	changeDir  string
 	dbPath     string
 	actor      string
 	store      storage.DoltStorage
@@ -481,6 +482,7 @@ func init() {
 	}
 
 	// Register persistent flags
+	rootCmd.PersistentFlags().StringVarP(&changeDir, "directory", "C", "", "Change to this directory before running the command (like git -C)")
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db)")
 	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -561,6 +563,13 @@ var rootCmd = &cobra.Command{
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)
 		debug.SetQuiet(quietFlag)
+
+		// Apply -C flag: change working directory before any .beads/ discovery.
+		if changeDir != "" {
+			if err := os.Chdir(changeDir); err != nil {
+				FatalError("cannot change to directory %q: %v", changeDir, err)
+			}
+		}
 
 		// Block dangerous env var overrides that could cause data fragmentation (bd-hevyw).
 		if err := checkBlockedEnvVars(); err != nil {
