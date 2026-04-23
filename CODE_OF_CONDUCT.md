@@ -79,6 +79,8 @@ Maintainers may exempt authorized project bots from rate limits for defined, low
 
 Agent-produced contributions that introduce changes to security-sensitive code (authentication, authorization, data handling, cryptography) require explicit human review of security implications before submission.
 
+**Tracking is a project-level choice, not a framework requirement.** The Covenant specifies policy (per-principal limits, circuit breakers) rather than mechanism. Small projects may track per-principal volume informally through GitHub usernames and manual review; larger projects may use PR labels, bot-based enforcement, or commit-trailer parsing. Adopting projects should implement tracking proportionate to their scale and review capacity.
+
 ---
 
 ## Part III: Agent Operating Standards
@@ -188,7 +190,7 @@ This Code of Conduct is designed to be adopted by any open source project naviga
 
 The Agentic Covenant is maintained by the [beads](https://github.com/gastownhall/beads) project — a distributed graph issue tracker for AI agents.
 
-Version 1.0 was published in April 2026. It draws on operational experience governing a community where AI agents are first-class participants, and on the work of:
+Version 1.1 was published in April 2026, revised from v1.0 after community stress-testing to tighten mutual-obligation framing, narrow the Disclosure Safe Harbor to project scope, and add a Maintainer Discretion clause. It draws on operational experience governing a community where AI agents are first-class participants, and on the work of:
 
 - [Contributor Covenant](https://www.contributor-covenant.org/) by Coraline Ada Ehmke — the foundation for Part I
 - The [Linux kernel coding assistants policy](https://docs.kernel.org/process/coding-assistants.html) — the `Assisted-by` attribution convention
