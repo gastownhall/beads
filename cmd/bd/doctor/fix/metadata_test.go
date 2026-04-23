@@ -80,6 +80,18 @@ func TestFixMissingMetadata_DoltConfigExists(t *testing.T) {
 	t.Logf("FixMissingMetadata result: %v", err)
 }
 
+func TestFixProjectIdentity_NotBeadsWorkspace(t *testing.T) {
+	if err := FixProjectIdentity(t.TempDir()); err == nil {
+		t.Fatal("expected error for non-beads workspace")
+	}
+}
+
+func TestFixMissingDoltDatabase_NotBeadsWorkspace(t *testing.T) {
+	if err := FixMissingDoltDatabase(t.TempDir()); err == nil {
+		t.Fatal("expected error for non-beads workspace")
+	}
+}
+
 // TestFixMissingMetadataJSON_Regenerates verifies that FixMissingMetadataJSON
 // creates a metadata.json file when it's missing but .beads/ exists (GH#2478).
 func TestFixMissingMetadataJSON_Regenerates(t *testing.T) {

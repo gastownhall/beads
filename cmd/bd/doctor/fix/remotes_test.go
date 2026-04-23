@@ -3,6 +3,7 @@ package fix
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -37,5 +38,27 @@ func TestResolveRemoteConsistencyContext_SharedWorktreeFallback(t *testing.T) {
 	wantDBDir := filepath.Join(doltserver.ResolveDoltDir(wantBeadsDir), cfg.GetDoltDatabase())
 	if ctx.dbDir != wantDBDir {
 		t.Fatalf("dbDir = %q, want %q", ctx.dbDir, wantDBDir)
+	}
+}
+
+func TestResolveRemoteConsistencyContext_MissingConfig(t *testing.T) {
+	dir := setupTestWorkspace(t)
+
+	_, err := resolveRemoteConsistencyContext(dir)
+	if err == nil {
+		t.Fatal("expected missing config error")
+	}
+	if !strings.Contains(err.Error(), "failed to load config") {
+		t.Fatalf("expected failed config load error, got: %v", err)
+	}
+}
+
+func TestRemoteConsistency_InvalidWorkspace(t *testing.T) {
+	err := RemoteConsistency(t.TempDir())
+	if err == nil {
+		t.Fatal("expected invalid workspace error")
+	}
+	if !strings.Contains(err.Error(), "not a beads workspace") {
+		t.Fatalf("expected invalid workspace error, got: %v", err)
 	}
 }

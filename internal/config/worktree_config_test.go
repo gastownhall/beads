@@ -233,6 +233,31 @@ func TestGitDirsForRepo_NonGitRepo(t *testing.T) {
 	}
 }
 
+func TestWorktreePathHelpers_EdgeCases(t *testing.T) {
+	t.Run("empty git path", func(t *testing.T) {
+		if got := gitPathForRepo(t.TempDir(), ""); got != "" {
+			t.Fatalf("gitPathForRepo(empty) = %q, want empty", got)
+		}
+	})
+
+	t.Run("missing relative git path falls back to clean path", func(t *testing.T) {
+		repoPath := t.TempDir()
+		want := filepath.Join(repoPath, "missing-git-dir")
+		if got := gitPathForRepo(repoPath, "missing-git-dir"); got != want {
+			t.Fatalf("gitPathForRepo(missing) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("same path handles empty inputs", func(t *testing.T) {
+		if !samePath("", "") {
+			t.Fatal("samePath(empty, empty) = false, want true")
+		}
+		if samePath("", t.TempDir()) {
+			t.Fatal("samePath(empty, dir) = true, want false")
+		}
+	})
+}
+
 func TestFindProjectConfigYamlWithFinder_UsesLoadedWorktreeConfig(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()

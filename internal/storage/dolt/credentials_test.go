@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -238,6 +239,31 @@ func TestEnsureCredentialKeyInitializesWhenMissing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, credentialKeyFile)); err != nil {
 		t.Fatalf("expected key file after lazy init: %v", err)
+	}
+}
+
+func TestAddFederationPeerReturnsCredentialKeyInitError(t *testing.T) {
+	parentFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("failed to create parent file: %v", err)
+	}
+
+	store := &DoltStore{
+		dbPath:   filepath.Join(parentFile, "dolt"),
+		beadsDir: filepath.Join(parentFile, ".beads"),
+	}
+
+	err := store.AddFederationPeer(t.Context(), &storage.FederationPeer{
+		Name:        "peerone",
+		RemoteURL:   "file:///tmp/nonexistent-peer",
+		Password:    "secret",
+		Sovereignty: "T2",
+	})
+	if err == nil {
+		t.Fatal("expected credential key initialization error")
+	}
+	if !strings.Contains(err.Error(), "failed to initialize credential key") {
+		t.Fatalf("expected credential key initialization error, got: %v", err)
 	}
 }
 
