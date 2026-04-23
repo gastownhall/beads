@@ -104,6 +104,61 @@ func TestEmbeddedReady(t *testing.T) {
 			t.Errorf("normal issue should still appear with --exclude-label: %s", out)
 		}
 	})
+
+	// ===== -C flag =====
+
+	t.Run("ready_with_C_flag", func(t *testing.T) {
+		// Run bd ready from a different directory using -C to point at the beads project
+		tmpDir := t.TempDir()
+		cmd := exec.Command(bd, "-C", dir, "ready")
+		cmd.Dir = tmpDir // Run from a directory with no .beads/
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd -C %s ready failed: %v\n%s", dir, err, out)
+		}
+		if !strings.Contains(string(out), "Ready test issue") {
+			t.Errorf("expected issue in ready -C output: %s", out)
+		}
+	})
+
+	t.Run("ready_with_C_flag_invalid_dir", func(t *testing.T) {
+		// -C with a non-existent directory must fail with a clear error message.
+		cmd := exec.Command(bd, "-C", "/nonexistent/bd-C-test-path", "ready")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected bd -C /nonexistent to fail, got output: %s", out)
+		}
+		if !strings.Contains(string(out), "cannot change to directory") {
+			t.Errorf("expected directory error message, got: %s", out)
+		}
+	})
+
+	t.Run("ready_with_C_flag_does_not_leak_cwd", func(t *testing.T) {
+		// Verify that -C does not permanently mutate the process cwd.
+		// Two sequential invocations from the same tmpDir: the first uses -C to
+		// reach the project; the second omits -C and must fail (no .beads/ in tmpDir),
+		// proving BEADS_DIR was not leaked into the test process environment.
+		tmpDir := t.TempDir()
+		env := bdEnv(dir) // strips all BEADS_* vars
+
+		cmd1 := exec.Command(bd, "-C", dir, "ready")
+		cmd1.Dir = tmpDir
+		cmd1.Env = env
+		if out, err := cmd1.CombinedOutput(); err != nil {
+			t.Fatalf("first bd -C ready failed: %v\n%s", err, out)
+		}
+
+		cmd2 := exec.Command(bd, "ready")
+		cmd2.Dir = tmpDir
+		cmd2.Env = env // same env — BEADS_DIR must not have leaked
+		out2, err2 := cmd2.CombinedOutput()
+		if err2 == nil {
+			t.Fatalf("second bd ready (no -C) should have failed in tmpDir, got: %s", out2)
+		}
+	})
 }
 
 func TestEmbeddedReadyConcurrent(t *testing.T) {

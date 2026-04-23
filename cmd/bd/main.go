@@ -35,6 +35,7 @@ import (
 )
 
 var (
+	changeDir  string
 	dbPath     string
 	actor      string
 	store      storage.DoltStorage
@@ -463,6 +464,7 @@ func init() {
 	}
 
 	// Register persistent flags
+	rootCmd.PersistentFlags().StringVarP(&changeDir, "directory", "C", "", "Change to this directory before running the command (like git -C)")
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db)")
 	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -543,6 +545,26 @@ var rootCmd = &cobra.Command{
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)
 		debug.SetQuiet(quietFlag)
+
+		// Apply -C flag: discover .beads/ from the target directory and expose it
+		// via BEADS_DIR rather than permanently mutating the process cwd.
+		// The temporary Chdir is restored immediately so the global cwd is not
+		// left mutated (safe for in-process test execution and repeated use).
+		if changeDir != "" {
+			origDir, err := os.Getwd()
+			if err != nil {
+				FatalError("cannot get working directory: %v", err)
+			}
+			if err := os.Chdir(changeDir); err != nil {
+				FatalError("cannot change to directory %q: %v", changeDir, err)
+			}
+			if resolved := beads.FindBeadsDir(); resolved != "" {
+				_ = os.Setenv("BEADS_DIR", resolved)
+			}
+			if err := os.Chdir(origDir); err != nil {
+				FatalError("cannot restore working directory: %v", err)
+			}
+		}
 
 		// Block dangerous env var overrides that could cause data fragmentation (bd-hevyw).
 		if err := checkBlockedEnvVars(); err != nil {
