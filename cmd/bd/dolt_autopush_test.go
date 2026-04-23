@@ -50,8 +50,8 @@ func TestIsDoltAutoPushEnabled_ExplicitConfig(t *testing.T) {
 	}
 }
 
-func TestIsDoltAutoPushEnabled_DefaultNoStore(t *testing.T) {
-	// When no explicit config and no store, should return false.
+func TestIsDoltAutoPushEnabled_DefaultOff(t *testing.T) {
+	// Default (no explicit config) must return false — auto-push is opt-in only.
 	os.Unsetenv("BD_DOLT_AUTO_PUSH")
 	t.Cleanup(func() { os.Unsetenv("BD_DOLT_AUTO_PUSH") })
 
@@ -61,10 +61,9 @@ func TestIsDoltAutoPushEnabled_DefaultNoStore(t *testing.T) {
 		t.Fatalf("config.Initialize: %v", err)
 	}
 
-	// store is nil → auto-detection returns false
 	got := isDoltAutoPushEnabled(context.Background())
 	if got != false {
-		t.Errorf("isDoltAutoPushEnabled() with nil store = %v, want false", got)
+		t.Errorf("isDoltAutoPushEnabled() default = %v, want false", got)
 	}
 }
 
@@ -104,9 +103,6 @@ func TestAutoPushTimeoutConstants(t *testing.T) {
 	// Verify timeout defaults are reasonable (GH#3370).
 	if autoPushTimeout < 10*time.Second || autoPushTimeout > 120*time.Second {
 		t.Errorf("autoPushTimeout = %s, want 10s-120s range", autoPushTimeout)
-	}
-	if autoPushRemoteTimeout < 2*time.Second || autoPushRemoteTimeout > 30*time.Second {
-		t.Errorf("autoPushRemoteTimeout = %s, want 2s-30s range", autoPushRemoteTimeout)
 	}
 }
 

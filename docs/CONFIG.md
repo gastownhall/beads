@@ -44,7 +44,7 @@ Tool-level settings you can configure:
 | `external_projects` | - | - | (none) | Map project names to paths for cross-project deps |
 | `backup.enabled` | - | `BD_BACKUP_ENABLED` | `false` | Enable periodic Dolt-native backup to `.beads/backup/` |
 | `backup.interval` | - | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-backups |
-| `dolt.auto-push` | - | `BD_DOLT_AUTO_PUSH` | (auto) | Auto-push to Dolt remote after writes (auto-enabled when origin exists) |
+| `dolt.auto-push` | - | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (explicit opt-in) |
 | `dolt.auto-push-interval` | - | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share a single Dolt server across all projects at `~/.beads/shared-server/` |
 | `dolt.idle-timeout` | - | - | `30m` | Idle auto-stop timeout (`"0"` disables) |
@@ -103,11 +103,11 @@ backup:
 
 ### Dolt Auto-Push
 
-When a Dolt remote named `origin` is configured, `bd` automatically pushes after write commands with a 5-minute debounce. This completes the Dolt replication story: add a remote once, and data flows automatically.
+By default, `bd` does not push automatically after write commands. Auto-push is explicit opt-in because concurrent pushes to git-protocol Dolt remotes can corrupt or strand remote history when multiple writers race.
 
 ```yaml
 dolt:
-  auto-push: true       # Auto-enable when origin remote exists (default)
+  auto-push: false      # Explicit opt-in only; set true for single-writer setups
   auto-push-interval: 5m  # Minimum time between auto-pushes
 ```
 
@@ -118,10 +118,10 @@ dolt:
 - Push failures are warnings only (non-fatal)
 - Last push time and commit are tracked in the metadata table
 
-**Opt out:**
+**Opt in:**
 ```yaml
 dolt:
-  auto-push: false
+  auto-push: true
 ```
 
 ### Actor Identity Resolution
