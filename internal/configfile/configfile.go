@@ -26,6 +26,7 @@ type Config struct {
 	DoltMode           string `json:"dolt_mode,omitempty"`            // "embedded" (default) or "server"
 	DoltServerHost     string `json:"dolt_server_host,omitempty"`     // Server host (default: 127.0.0.1)
 	DoltServerPort     int    `json:"dolt_server_port,omitempty"`     // Server port (default: 3307)
+	DoltServerSocket   string `json:"dolt_server_socket,omitempty"`   // Unix domain socket path (overrides host/port)
 	DoltServerUser     string `json:"dolt_server_user,omitempty"`     // MySQL user (default: root)
 	DoltDatabase       string `json:"dolt_database,omitempty"`        // SQL database name (default: beads)
 	DoltServerTLS      bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
@@ -296,6 +297,15 @@ func (c *Config) GetDoltServerPort() int {
 		return c.DoltServerPort
 	}
 	return DefaultDoltServerPort
+}
+
+// GetDoltServerSocket returns the Dolt server Unix domain socket path.
+// Checks BEADS_DOLT_SERVER_SOCKET env var first, then config. Empty means use TCP.
+func (c *Config) GetDoltServerSocket() string {
+	if s := os.Getenv("BEADS_DOLT_SERVER_SOCKET"); s != "" {
+		return s
+	}
+	return c.DoltServerSocket
 }
 
 // GetDoltServerUser returns the Dolt server MySQL user.

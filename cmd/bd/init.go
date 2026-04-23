@@ -82,6 +82,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		initServerMode, _ := cmd.Flags().GetBool("server")
 		serverHost, _ := cmd.Flags().GetString("server-host")
 		serverPort, _ := cmd.Flags().GetInt("server-port")
+		serverSocket, _ := cmd.Flags().GetString("server-socket")
 		serverUser, _ := cmd.Flags().GetString("server-user")
 		database, _ := cmd.Flags().GetString("database")
 		destroyToken, _ := cmd.Flags().GetString("destroy-token")
@@ -559,6 +560,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if serverPort != 0 {
 			doltCfg.ServerPort = serverPort
 		}
+		if serverSocket != "" {
+			doltCfg.ServerSocket = serverSocket
+		}
 		if serverUser != "" {
 			doltCfg.ServerUser = serverUser
 		}
@@ -778,6 +782,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 				if serverPort != 0 {
 					cfg.DoltServerPort = serverPort
+				}
+				if serverSocket != "" {
+					cfg.DoltServerSocket = serverSocket
 				}
 				if serverUser != "" {
 					cfg.DoltServerUser = serverUser
@@ -1281,6 +1288,7 @@ func init() {
 	initCmd.Flags().Bool("server", false, "Use external dolt sql-server instead of embedded engine")
 	initCmd.Flags().String("server-host", "", "Dolt server host (default: 127.0.0.1)")
 	initCmd.Flags().Int("server-port", 0, "Dolt server port (default: 3307)")
+	initCmd.Flags().String("server-socket", "", "Unix domain socket path (overrides host/port)")
 	initCmd.Flags().String("server-user", "", "Dolt server MySQL user (default: root)")
 	initCmd.Flags().String("database", "", "Use existing server database name (overrides prefix-based naming)")
 	initCmd.Flags().Bool("shared-server", false, "Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)")
