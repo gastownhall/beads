@@ -315,10 +315,14 @@ verify_candidate() {
         [ -z "$VERIFY_DETAIL" ] && VERIFY_DETAIL="dependency lost"
     fi
 
-    if bd_in "$ws" "$cand_bin" doctor quick >/dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${NC} doctor quick"
+    # `--check-health` is the lightweight health check; bare `doctor quick`
+    # was never a real subcommand (cobra treated "quick" as the positional
+    # [path] arg and only "passed" because embedded mode short-circuited
+    # with exit 0).
+    if bd_in "$ws" "$cand_bin" doctor --check-health >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} doctor --check-health"
     else
-        echo -e "  ${RED}✗${NC} doctor quick failed"
+        echo -e "  ${RED}✗${NC} doctor --check-health failed"
         VERIFY_ERRORS=$((VERIFY_ERRORS + 1))
         [ -z "$VERIFY_DETAIL" ] && VERIFY_DETAIL="doctor failed"
     fi
