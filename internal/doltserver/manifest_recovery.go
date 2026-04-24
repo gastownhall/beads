@@ -10,10 +10,18 @@ import (
 	"time"
 )
 
-// corruptManifestSignature is the error emitted by dolt sql-server when its
-// manifest references a root hash that was never flushed to disk (typically
-// after an unclean shutdown). See GH#3290.
-const corruptManifestSignature = "root hash doesn't exist"
+const (
+	// corruptManifestSignature is the error emitted by dolt sql-server when its
+	// manifest references a root hash that was never flushed to disk (typically
+	// after an unclean shutdown). See GH#3290.
+	corruptManifestSignature = "root hash doesn't exist"
+
+	// corruptJournalSignature is emitted by dolt sql-server when the journal
+	// contains damaged blocks. Unlike the empty-manifest case, Dolt may still
+	// have user data to recover, so bd must not run destructive repair
+	// automatically. See GH#2559.
+	corruptJournalSignature = "corrupted journal"
+)
 
 // logTailBytes is the size of the tail scanned when looking for the corrupt
 // manifest signature in the dolt server log. 64 KiB comfortably covers the
@@ -23,6 +31,16 @@ const logTailBytes = 64 * 1024
 // logHasCorruptManifestError returns true if the tail of the dolt server log
 // contains the corrupt-manifest signature.
 func logHasCorruptManifestError(logPath string) (bool, error) {
+	return logHasSignature(logPath, corruptManifestSignature)
+}
+
+// logHasCorruptJournalError returns true if the tail of the dolt server log
+// contains Dolt's journal-corruption signature.
+func logHasCorruptJournalError(logPath string) (bool, error) {
+	return logHasSignature(logPath, corruptJournalSignature)
+}
+
+func logHasSignature(logPath, signature string) (bool, error) {
 	f, err := os.Open(logPath) //nolint:gosec // G304: path derived from beadsDir
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -49,7 +67,28 @@ func logHasCorruptManifestError(logPath string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(string(buf), corruptManifestSignature), nil
+	return strings.Contains(string(buf), signature), nil
+}
+
+func corruptJournalRecoveryHint(beadsDir string) string {
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	backupDir := filepath.Join(beadsDir, "dolt.corrupt."+ts)
+	return fmt.Sprintf(`Dolt journal corruption detected in %s.
+
+bd will not run automatic journal repair because Dolt's repair mode can discard data.
+Recommended recovery when your remote is current:
+  mv %s %s
+  bd bootstrap --dry-run
+  bd bootstrap --yes
+  bd stats
+
+If the remote may be stale, snapshot %s first and inspect with:
+  dolt fsck
+  dolt fsck --revive-journal-with-data-loss
+
+Only use the fsck revive path after reviewing Dolt's data-loss warning.`,
+		logPath(beadsDir), doltDir, backupDir, doltDir)
 }
 
 // findCorruptNomsDirs walks doltDir and returns the paths of every

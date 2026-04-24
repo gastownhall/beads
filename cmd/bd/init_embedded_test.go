@@ -421,6 +421,36 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 
+	t.Run("auto_commit_bypasses_hooks", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		preCommitPath := filepath.Join(dir, ".git", "hooks", "pre-commit")
+		preCommit := "#!/bin/sh\necho hook-fired >> .hook-ran\nexit 1\n"
+		if err := os.WriteFile(preCommitPath, []byte(preCommit), 0755); err != nil {
+			t.Fatal(err)
+		}
+		unsetHooksPath := exec.Command("git", "config", "--unset", "core.hooksPath")
+		unsetHooksPath.Dir = dir
+		if out, err := unsetHooksPath.CombinedOutput(); err != nil {
+			t.Fatalf("git config --unset core.hooksPath failed: %v\n%s", err, out)
+		}
+
+		runBDInit(t, bd, dir, "--prefix", "hook")
+
+		if _, err := os.Stat(filepath.Join(dir, ".hook-ran")); err == nil {
+			t.Fatal("expected init auto-commit to bypass git hooks")
+		}
+		logCmd := exec.Command("git", "log", "--oneline", "-n", "1")
+		logCmd.Dir = dir
+		logOut, err := logCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git log failed: %v\n%s", err, logOut)
+		}
+		if !strings.Contains(string(logOut), "bd init: initialize beads issue tracking") {
+			t.Fatalf("expected init commit to succeed, got log: %s", logOut)
+		}
+	})
+
 	t.Run("from_jsonl", func(t *testing.T) {
 		dir := t.TempDir()
 		initGitRepoAt(t, dir)
@@ -723,9 +753,10 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	env := bdEnv(dir)
 
 	type result struct {
-		idx int
-		out string
-		err error
+		idx      int
+		out      string
+		err      error
+		timedOut bool
 	}
 	results := make([]result, N)
 	var wg sync.WaitGroup
@@ -733,17 +764,24 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			cmd := exec.Command(bd, "init", "--prefix", "conc", "--force", "--quiet")
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+
+			cmd := exec.CommandContext(ctx, bd, "init", "--prefix", "conc", "--force", "--quiet", "--skip-agents")
 			cmd.Dir = dir
 			cmd.Env = env
 			out, err := cmd.CombinedOutput()
-			results[idx] = result{idx: idx, out: string(out), err: err}
+			results[idx] = result{idx: idx, out: string(out), err: err, timedOut: ctx.Err() == context.DeadlineExceeded}
 		}(i)
 	}
 	wg.Wait()
 
 	successes, lockErrors := 0, 0
 	for _, r := range results {
+		if r.timedOut {
+			t.Errorf("process %d timed out after 45s running concurrent bd init: %v\n%s", r.idx, r.err, r.out)
+			continue
+		}
 		if strings.Contains(r.out, "panic") {
 			t.Errorf("process %d panicked:\n%s", r.idx, r.out)
 		}

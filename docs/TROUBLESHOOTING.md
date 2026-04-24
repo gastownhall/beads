@@ -300,6 +300,32 @@ dolt sql-server --host 127.0.0.1 --port 3307 --data-dir /path/to/your/dolt/data
 
 If you want auto-start behavior, remove `dolt_server_port` from `.beads/metadata.json`.
 
+### Dolt journal corruption after restart
+
+**Symptom:** After a system restart, `bd` reports that the Dolt server started
+but is not accepting connections, and `.beads/dolt-server.log` contains:
+
+```text
+possible data loss detected in journal file at offset ...: corrupted journal
+```
+
+**Cause:** Dolt detected damaged journal blocks after an unclean shutdown. This
+is not the same as a stale PID, stale port, or stale lock file. `bd` will not
+run Dolt's data-loss repair mode automatically.
+
+**Safe recovery when your remote is current:**
+
+```bash
+mv .beads/dolt .beads/dolt.corrupt.$(date +%Y%m%dT%H%M%S)
+bd bootstrap --dry-run
+bd bootstrap --yes
+bd stats
+```
+
+If the remote may be stale, keep the corrupt directory for forensics and inspect
+it with `dolt fsck` before considering `dolt fsck --revive-journal-with-data-loss`.
+Only use the revive path after reviewing Dolt's data-loss warning.
+
 ### `database is locked`
 
 Another bd process is accessing the database. Solutions:
