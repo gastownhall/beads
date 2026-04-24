@@ -337,7 +337,7 @@ func findDuplicateCandidates(issue types.Issue, allIssues []*types.Issue, thresh
 			candidates = append(candidates, map[string]any{
 				"id":     other.ID,
 				"title":  other.Title,
-				"score":  round3(score),
+				"score":  score,
 				"status": string(other.Status),
 			})
 		}
