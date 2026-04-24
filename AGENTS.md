@@ -11,6 +11,20 @@ This file exists for compatibility with tools that look for AGENTS.md.
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
 - **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs
 
+## PR Safety for Agents
+
+Before implementing work, opening a PR, or merging/closing a PR, run the PR
+preflight:
+```bash
+scripts/pr-preflight.sh --search "<topic keywords>" --repo gastownhall/beads
+scripts/pr-preflight.sh <pr-number> --repo gastownhall/beads
+```
+
+External contributor PRs have priority. Review and build on their branch when
+possible, preserve their tests and attribution, and never close or supersede
+their PR silently. If a rewrite is unavoidable, explain why on the original PR
+and credit their design/tests.
+
 ## Visual Design Anti-Patterns
 
 **NEVER use emoji-style icons** (🔴🟠🟡🔵⚪) in CLI output. They cause cognitive overload.

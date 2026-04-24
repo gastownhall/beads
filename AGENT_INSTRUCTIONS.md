@@ -117,6 +117,14 @@ defer to the standard PR flow to keep changes reviewable.
 
 **Read [CONTRIBUTING.md](CONTRIBUTING.md)** — it contains promises we've made to contributors. Violating them damages trust and community.
 
+Run the read-only preflight before implementing related work, opening a PR, or
+merging/closing a PR:
+
+```bash
+scripts/pr-preflight.sh --search "<topic keywords>" --repo gastownhall/beads
+scripts/pr-preflight.sh <pr-number> --repo gastownhall/beads
+```
+
 **Before implementing any feature or fix, check for existing open PRs on the same topic:**
 
 ```bash
@@ -132,7 +140,8 @@ gh pr list --repo gastownhall/beads --state open --search "<topic keywords>" --j
 
 If you must rewrite (e.g., fundamentally different approach needed), explain why on the original PR and credit the contributor's design/tests in your commits.
 
-This is enforced by pre-use hooks. If you try `gh pr create`, it will be blocked.
+Do not rely on auto-discovery of CONTRIBUTING.md; the preflight is the agent
+gate for PR handling.
 
 ## Landing the Plane
 

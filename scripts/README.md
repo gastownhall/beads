@@ -2,6 +2,23 @@
 
 Utility scripts for maintaining the beads project.
 
+## pr-preflight.sh
+
+Read-only PR safety check for agents and maintainers.
+
+```bash
+# Before implementing or opening a related PR
+./scripts/pr-preflight.sh --search "topic keywords" --repo gastownhall/beads
+
+# Before changing, closing, or merging an existing PR
+./scripts/pr-preflight.sh 123 --repo gastownhall/beads
+```
+
+It reports contributor/fork status, draft/review/merge/check state, risky diff
+signals such as `.beads/` changes or missing tests, and the required
+contributor-protection next steps. It does not replace code review or local
+validation.
+
 ## release.sh (⭐ The Easy Button)
 
 **One-command release** from version bump to local installation.
