@@ -139,8 +139,8 @@ Examples:
 			// flow. Actual directory creation is deferred to executeSyncAction
 			// to preserve --dry-run semantics.
 			if isGitRepo() && !isBareGitRepo() {
-				if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
-					if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
+					if gitOriginHasDoltDataRef() {
 						if fallbackDir := beads.GetWorktreeFallbackBeadsDir(); fallbackDir != "" {
 							beadsDir = fallbackDir
 						} else {
@@ -259,8 +259,8 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	// (refs/dolt/data). This only applies to git remotes — Dolt-native
 	// remotes (DoltHub, S3, etc.) must be configured via sync.remote.
 	if isGitRepo() && !isBareGitRepo() {
-		if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
-			if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+		if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
+			if gitOriginHasDoltDataRef() {
 				plan.SyncRemote = normalizeRemoteURL(originURL)
 				plan.Action = "sync"
 				plan.Reason = "Found Dolt data on git origin (refs/dolt/data) — will clone from " + originURL

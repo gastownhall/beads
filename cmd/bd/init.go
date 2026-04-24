@@ -307,9 +307,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				earlySyncURL = normalizeRemoteURL(s)
 				earlyRemoteHasDoltData = true // sync.remote configured = user intends bootstrap
 			} else if isGitRepo() && !isBareGitRepo() {
-				if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
+				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 					earlySyncURL = normalizeRemoteURL(originURL)
-					earlyRemoteHasDoltData = gitLsRemoteHasRef("origin", "refs/dolt/data")
+					earlyRemoteHasDoltData = gitOriginHasDoltDataRef()
 				}
 			}
 			if earlySyncURL != "" {
@@ -571,9 +571,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			syncURL = normalizeRemoteURL(syncURL)
 			syncFromRemote = true
 		} else if isGitRepo() && !isBareGitRepo() {
-			if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
+			if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 				syncURL = normalizeRemoteURL(originURL)
-				remoteHasDoltData = gitLsRemoteHasRef("origin", "refs/dolt/data")
+				remoteHasDoltData = gitOriginHasDoltDataRef()
 
 				decision := CheckRemoteSafety(RemoteSafetyInput{
 					Force:             force,
@@ -607,11 +607,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 						}
 					}
 					// Race-safety: re-verify the remote state hasn't
-					// changed between our earlier gitLsRemoteHasRef and
+					// changed between our earlier gitOriginHasDoltDataRef and
 					// the user's confirmation. If another agent pushed
 					// during the prompt window, fail rather than silently
 					// overwriting their fresh work.
-					if gitLsRemoteHasRef("origin", "refs/dolt/data") != remoteHasDoltData {
+					if gitOriginHasDoltDataRef() != remoteHasDoltData {
 						fmt.Fprintf(os.Stderr, "\nAborted: remote state changed during confirmation. Re-run to re-verify intent.\n")
 						os.Exit(ExitRemoteDivergenceRefused)
 					}

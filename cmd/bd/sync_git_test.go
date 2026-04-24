@@ -62,7 +62,7 @@ func TestIsBareGitRepo(t *testing.T) {
 	})
 }
 
-func TestGitRemoteGetURL(t *testing.T) {
+func TestGitOriginGetURL(t *testing.T) {
 	t.Run("returns origin URL", func(t *testing.T) {
 		repoDir := t.TempDir()
 		bareDir := filepath.Join(t.TempDir(), "bare.git")
@@ -79,12 +79,12 @@ func TestGitRemoteGetURL(t *testing.T) {
 			t.Fatalf("failed to chdir: %v", err)
 		}
 
-		url, err := gitRemoteGetURL("origin")
+		url, err := gitOriginGetURL()
 		if err != nil {
-			t.Fatalf("gitRemoteGetURL failed: %v", err)
+			t.Fatalf("gitOriginGetURL failed: %v", err)
 		}
 		if url != bareDir {
-			t.Errorf("gitRemoteGetURL = %q, want %q", url, bareDir)
+			t.Errorf("gitOriginGetURL = %q, want %q", url, bareDir)
 		}
 	})
 
@@ -101,14 +101,14 @@ func TestGitRemoteGetURL(t *testing.T) {
 			t.Fatalf("failed to chdir: %v", err)
 		}
 
-		_, err = gitRemoteGetURL("origin")
+		_, err = gitOriginGetURL()
 		if err == nil {
 			t.Fatal("expected error for nonexistent remote")
 		}
 	})
 }
 
-func TestGitLsRemoteHasRef(t *testing.T) {
+func TestGitOriginHasDoltDataRef(t *testing.T) {
 	t.Run("returns false for nonexistent ref", func(t *testing.T) {
 		bareDir := filepath.Join(t.TempDir(), "bare.git")
 		runGitForSyncTest(t, "", "init", "--bare", bareDir)
@@ -126,7 +126,7 @@ func TestGitLsRemoteHasRef(t *testing.T) {
 			t.Fatalf("failed to chdir: %v", err)
 		}
 
-		if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+		if gitOriginHasDoltDataRef() {
 			t.Fatal("expected false for nonexistent ref")
 		}
 	})
@@ -135,14 +135,14 @@ func TestGitLsRemoteHasRef(t *testing.T) {
 		bareDir := filepath.Join(t.TempDir(), "bare.git")
 		runGitForSyncTest(t, "", "init", "--bare", bareDir)
 
-		// Create a repo, commit, push to create refs/heads/main
+		// Create a repo, commit, push to create refs/dolt/data
 		repoDir := t.TempDir()
 		runGitForSyncTest(t, repoDir, "init", "-b", "main")
 		runGitForSyncTest(t, repoDir, "config", "user.email", "test@test.com")
 		runGitForSyncTest(t, repoDir, "config", "user.name", "Test User")
 		runGitForSyncTest(t, repoDir, "commit", "--allow-empty", "-m", "init")
 		runGitForSyncTest(t, repoDir, "remote", "add", "origin", bareDir)
-		runGitForSyncTest(t, repoDir, "push", "origin", "main")
+		runGitForSyncTest(t, repoDir, "push", "origin", "HEAD:refs/dolt/data")
 
 		oldWd, err := os.Getwd()
 		if err != nil {
@@ -153,7 +153,7 @@ func TestGitLsRemoteHasRef(t *testing.T) {
 			t.Fatalf("failed to chdir: %v", err)
 		}
 
-		if !gitLsRemoteHasRef("origin", "refs/heads/main") {
+		if !gitOriginHasDoltDataRef() {
 			t.Fatal("expected true for existing ref")
 		}
 	})

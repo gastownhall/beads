@@ -293,7 +293,7 @@ func TestDetectBootstrapAction_SyncWhenOriginHasDoltRef(t *testing.T) {
 	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
 	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
 	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
-	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
 	// Create refs/dolt/data by pushing HEAD to that ref
 	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
 
@@ -390,7 +390,7 @@ func TestBootstrapFreshCloneDetectsRemote(t *testing.T) {
 	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
 	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
 	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
-	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
 	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
 
 	// Clone into a fresh directory — no .beads exists.
@@ -420,11 +420,11 @@ func TestBootstrapFreshCloneDetectsRemote(t *testing.T) {
 	if !isGitRepo() {
 		t.Fatal("expected to be in a git repo")
 	}
-	originURL, err := gitRemoteGetURL("origin")
+	originURL, err := gitOriginGetURL()
 	if err != nil || originURL == "" {
 		t.Fatalf("expected origin URL, got err=%v url=%q", err, originURL)
 	}
-	if !gitLsRemoteHasRef("origin", "refs/dolt/data") {
+	if !gitOriginHasDoltDataRef() {
 		t.Fatal("expected origin to have refs/dolt/data")
 	}
 
@@ -474,7 +474,7 @@ func TestBootstrapFreshCloneNoRemoteData(t *testing.T) {
 	if !isGitRepo() {
 		t.Fatal("expected to be in a git repo")
 	}
-	if gitLsRemoteHasRef("origin", "refs/dolt/data") {
+	if gitOriginHasDoltDataRef() {
 		t.Fatal("origin should NOT have refs/dolt/data")
 	}
 
@@ -783,7 +783,7 @@ func TestBootstrapFreshCloneSynthesizedDirUsesDefaultDB(t *testing.T) {
 	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
 	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
 	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
-	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
 	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
 
 	// Clone — no .beads dir
@@ -865,7 +865,7 @@ func TestBootstrapRigSubdirUsesParentDBName(t *testing.T) {
 	runGitForBootstrapTest(t, rigDir, "config", "user.name", "Test User")
 	runGitForBootstrapTest(t, rigDir, "commit", "--allow-empty", "-m", "init")
 	runGitForBootstrapTest(t, rigDir, "remote", "add", "origin", bareDir)
-	runGitForBootstrapTest(t, rigDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, rigDir, "push", "origin", "HEAD:refs/dolt/data")
 	runGitForBootstrapTest(t, rigDir, "push", "origin", "HEAD:refs/dolt/data")
 
 	oldWd, err := os.Getwd()

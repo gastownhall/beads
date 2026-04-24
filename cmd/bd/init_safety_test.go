@@ -19,9 +19,9 @@ import (
 
 func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 	cases := []struct {
-		name    string
-		in      RemoteSafetyInput
-		want    RemoteSafetyAction
+		name     string
+		in       RemoteSafetyInput
+		want     RemoteSafetyAction
 		wantExit int // 0 when not a refusal
 	}{
 		// No-remote-data column: nothing to refuse, regardless of flags.
@@ -177,7 +177,7 @@ func TestFormatDestroyToken(t *testing.T) {
 // no `.beads/` directory created.
 //
 // Per the test-engineer position: the fixture uses a synthetic git ref
-// (no real Dolt push needed). `gitLsRemoteHasRef` only checks that the
+// (no real Dolt push needed). `gitOriginHasDoltDataRef` only checks that the
 // ref exists, not its content.
 func TestInitForceRefusesWhenRemoteHasDoltData(t *testing.T) {
 	bdBin := buildBDForInitTests(t)
