@@ -12,6 +12,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  detect-ci-tier:
+    name: Detect CI tier
+    runs-on: ubuntu-latest
+    outputs:
+      full_embedded: ${{ steps.tier.outputs.full_embedded }}
+      reason: ${{ steps.tier.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Decide embedded Dolt coverage
+        id: tier
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/ci-embedded-tier.sh
+
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
   # regressions from re-entering the build (see docs/ICU-POLICY.md).
@@ -161,6 +179,8 @@ jobs:
 
   build-embedded:
     name: Build (Embedded Dolt)
+    needs: detect-ci-tier
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -191,7 +211,8 @@ jobs:
 
   test-embedded-storage:
     name: Test (Embedded Dolt Storage)
-    needs: build-embedded
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -218,7 +239,8 @@ jobs:
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: build-embedded
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
