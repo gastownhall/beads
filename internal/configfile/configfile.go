@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 const ConfigFileName = "metadata.json"
@@ -263,13 +265,20 @@ func (c *Config) GetDoltMode() string {
 }
 
 // GetDoltServerHost returns the Dolt server host.
-// Checks BEADS_DOLT_SERVER_HOST env var first, then config, then default.
+// Priority: BEADS_DOLT_SERVER_HOST env var > metadata.json dolt_server_host
+// > config.yaml / global config dolt.host > DefaultDoltServerHost.
+// The config.yaml layer mirrors the dolt.port fix (GH#2073) so a shared
+// team / user-level Dolt server can be configured once without per-clone
+// metadata.json edits.
 func (c *Config) GetDoltServerHost() string {
 	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
 		return h
 	}
 	if c.DoltServerHost != "" {
 		return c.DoltServerHost
+	}
+	if h := config.GetYamlConfig("dolt.host"); h != "" {
+		return h
 	}
 	return DefaultDoltServerHost
 }

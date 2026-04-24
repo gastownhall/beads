@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -266,6 +268,44 @@ func TestDoltServerMode(t *testing.T) {
 					t.Errorf("GetDoltServerHost() = %q, want %q", got, tt.want)
 				}
 			})
+		}
+	})
+
+	t.Run("GetDoltServerHost_config_yaml", func(t *testing.T) {
+		// Mirror of the dolt.port config.yaml fix (GH#2073) for host.
+		// Precedence: env > metadata.json > config.yaml > default.
+
+		// Ensure no host env var leaks into the test.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml,
+			[]byte("dolt.host: 100.64.0.1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		// config.yaml wins when metadata.json leaves host unset.
+		emptyCfg := &Config{}
+		if got := emptyCfg.GetDoltServerHost(); got != "100.64.0.1" {
+			t.Errorf("empty cfg + config.yaml: GetDoltServerHost() = %q, want 100.64.0.1", got)
+		}
+
+		// metadata.json wins over config.yaml when both set.
+		metaCfg := &Config{DoltServerHost: "192.168.1.100"}
+		if got := metaCfg.GetDoltServerHost(); got != "192.168.1.100" {
+			t.Errorf("metadata over config.yaml: GetDoltServerHost() = %q, want 192.168.1.100", got)
+		}
+
+		// env var wins over config.yaml.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "10.0.0.1")
+		if got := emptyCfg.GetDoltServerHost(); got != "10.0.0.1" {
+			t.Errorf("env over config.yaml: GetDoltServerHost() = %q, want 10.0.0.1", got)
 		}
 	})
 
