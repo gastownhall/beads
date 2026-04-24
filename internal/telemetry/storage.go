@@ -193,6 +193,17 @@ func (s *InstrumentedStorage) SearchIssues(ctx context.Context, query string, fi
 	return issues, err
 }
 
+func (s *InstrumentedStorage) SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssueSummaries", attrs...)
+	summaries, err := s.inner.SearchIssueSummaries(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(summaries)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return summaries, err
+}
+
 // ── Dependencies ────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {

@@ -45,6 +45,13 @@ type Storage interface {
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 
+	// SearchIssueSummaries is the narrow projection of SearchIssues used by
+	// list-shaped rendering paths (compact + --agent in bd list) that don't
+	// dereference TEXT/JSON columns. Added in D3 (be-nu4.3.2); SELECTs only
+	// IssueSummaryColumns so rendering doesn't pay full-hydration cost.
+	// IssueSummary is read-only.
+	SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error)
+
 	// Dependencies
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
 	RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error

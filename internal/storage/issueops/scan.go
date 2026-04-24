@@ -22,6 +22,13 @@ const IssueSelectColumns = `id, content_hash, title, description, design, accept
 	       due_at, defer_until,
 	       work_type, source_system, metadata`
 
+// IssueSummaryColumns is the narrow projection used by SearchIssueSummaries
+// (D3, be-nu4.3.2). Intentionally excludes TEXT/JSON payloads and compaction
+// metadata so list-shaped paths don't pay hydration cost they don't render.
+// Order matches ScanIssueSummaryFrom.
+const IssueSummaryColumns = `id, title, status, priority, issue_type, assignee, pinned,
+	       created_at, updated_at, closed_at`
+
 // IssueScanner is the common interface between *sql.Row and *sql.Rows,
 // allowing a single scan function to work with both single-row and
 // multi-row query results.
@@ -176,6 +183,44 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	}
 
 	return &issue, nil
+}
+
+// ScanIssueSummaryFrom scans a narrow summary from any IssueScanner.
+// The caller must ensure the query selected exactly IssueSummaryColumns in order.
+func ScanIssueSummaryFrom(s IssueScanner) (*types.IssueSummary, error) {
+	var sum types.IssueSummary
+	var createdAtStr, updatedAtStr sql.NullString
+	var closedAt sql.NullTime
+	var assignee sql.NullString
+	var pinned sql.NullInt64
+	var status, issueType string
+
+	if err := s.Scan(
+		&sum.ID, &sum.Title, &status, &sum.Priority, &issueType,
+		&assignee, &pinned,
+		&createdAtStr, &updatedAtStr, &closedAt,
+	); err != nil {
+		return nil, err
+	}
+
+	sum.Status = types.Status(status)
+	sum.IssueType = types.IssueType(issueType)
+	if createdAtStr.Valid {
+		sum.CreatedAt = ParseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		sum.UpdatedAt = ParseTimeString(updatedAtStr.String)
+	}
+	if closedAt.Valid {
+		sum.ClosedAt = &closedAt.Time
+	}
+	if assignee.Valid {
+		sum.Assignee = assignee.String
+	}
+	if pinned.Valid && pinned.Int64 != 0 {
+		sum.Pinned = true
+	}
+	return &sum, nil
 }
 
 // ParseTimeString parses a time string from database TEXT columns (non-nullable).

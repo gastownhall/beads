@@ -551,6 +551,9 @@ func (s *configStore) DeleteIssue(_ context.Context, _ string) error           {
 func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
 	return nil, nil
 }
+func (s *configStore) SearchIssueSummaries(_ context.Context, _ string, _ types.IssueFilter) ([]*types.IssueSummary, error) {
+	return nil, nil
+}
 func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
 	return nil
 }

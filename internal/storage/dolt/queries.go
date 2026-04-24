@@ -24,6 +24,18 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	return result, err
 }
 
+// SearchIssueSummaries is the narrow-projection variant of SearchIssues used by
+// list-shaped render paths (compact + --agent). D3 build, be-nu4.3.2.
+func (s *DoltStore) SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
+	var result []*types.IssueSummary
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssueSummariesInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
 // GetReadyWork returns issues that are ready to work on (not blocked).
 //
 // Blocking semantics are unified through computeBlockedIDs, which is the
