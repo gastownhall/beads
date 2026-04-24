@@ -296,6 +296,40 @@ This project uses AI agents for maintenance. We've established strict rules to p
 
 If any of this goes wrong, please open an issue — we take contributor experience seriously.
 
+### Refactoring Campaign PR Intake Checklist
+
+Before starting a rewrite, cleanup, or large refactoring pass, maintainers and agents must review open contributor PRs that touch the same area. Use this checklist to decide whether to merge, rebase, incorporate, or close each PR.
+
+1. Identify overlap:
+   - Read the PR description, changed files, linked issues, and latest review comments.
+   - Compare the PR scope with the planned refactor and note any shared files, commands, migrations, tests, docs, or release paths.
+   - If the PR is unrelated, leave it alone unless the refactor would still create a merge conflict.
+
+2. Prefer clean merges:
+   - If the PR is focused, passing CI, and aligned with current design, review it as the first option.
+   - Merge it before the refactor when that reduces conflict risk.
+   - Preserve the contributor's commits and attribution unless the contributor agrees to a squash or rework.
+
+3. Request a rebase when needed:
+   - Ask for a rebase if the PR is still valid but conflicts with main or depends on code that has moved.
+   - Give concrete instructions about the new target files or APIs.
+   - Do not rewrite the same work in parallel while waiting unless there is a release blocker or security issue.
+
+4. Preserve tests and intent:
+   - Treat contributor tests as part of the contribution, not optional scaffolding.
+   - If a refactor supersedes implementation code, port the tests or explain why they are invalid.
+   - Keep user-facing behavior, docs examples, and regression coverage intact unless the PR is explicitly changing the contract.
+
+5. Close superseded PRs with explicit rationale:
+   - Close only after commenting with the replacement commit, PR, or issue.
+   - Explain what was preserved, what changed, and why the original branch will not be merged.
+   - Thank the contributor and invite follow-up if their use case was not fully covered.
+
+6. Leave an audit trail:
+   - Link the intake decision from the refactor PR or Beads issue.
+   - Record any follow-up work as Beads issues instead of hidden notes.
+   - Call out contributor-owned tests or behavior in the refactor PR summary.
+
 ## Code Review Process
 
 All contributions go through code review:
