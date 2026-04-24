@@ -1054,3 +1054,138 @@ func benchmarkGetIssuesByIDsMixed(b *testing.B, totalN int) {
 func BenchmarkGetIssuesByIDs_Mixed1K(b *testing.B)  { benchmarkGetIssuesByIDsMixed(b, 1000) }
 func BenchmarkGetIssuesByIDs_Mixed10K(b *testing.B) { benchmarkGetIssuesByIDsMixed(b, 10000) }
 func BenchmarkGetIssuesByIDs_Mixed50K(b *testing.B) { benchmarkGetIssuesByIDsMixed(b, 50000) }
+
+// =============================================================================
+// WispIDSet scoped-query benchmarks (be-rgm / small-N against large-W)
+// =============================================================================
+//
+// These benchmarks target the case maphew flagged on PR #3453:
+// a small hydration batch (N input IDs) against a wisps table of W rows.
+// The pre-be-rgm unscoped `SELECT id FROM wisps` scaled O(W); the
+// scoped `SELECT id FROM wisps WHERE id IN (?…)` should scale O(N·log W)
+// instead, so a small N against a large W should be materially cheaper
+// than the full-scan implementation.
+//
+// Seed shape: a large wisps table (W rows) plus a handful of permanent
+// issues (≈ inputN/2, just enough to build a mixed-input batch). The
+// input batch is inputN/2 perms + inputN/2 sampled wisps, so only a
+// tiny fraction of the wisp table is actually hydrated each call.
+
+// seedSmallNLargeW seeds permCount permanent issues and wispCount active
+// wisps and returns (permIDs, wispIDs) in creation order.
+func seedSmallNLargeW(b *testing.B, store *DoltStore, permCount, wispCount int) (permIDs, wispIDs []string) {
+	b.Helper()
+	ctx := context.Background()
+
+	permIDs = make([]string, 0, permCount)
+	for i := 0; i < permCount; i++ {
+		iss := &types.Issue{
+			ID:        fmt.Sprintf("smN-perm-%d", i),
+			Title:     "perm",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			b.Fatalf("create perm %d: %v", i, err)
+		}
+		permIDs = append(permIDs, iss.ID)
+	}
+	wispIDs = make([]string, 0, wispCount)
+	for i := 0; i < wispCount; i++ {
+		iss := &types.Issue{
+			Title:     "wisp",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			b.Fatalf("create wisp %d: %v", i, err)
+		}
+		wispIDs = append(wispIDs, iss.ID)
+	}
+	return permIDs, wispIDs
+}
+
+// mixedInputSmallN returns a mixed input slice of size inputN: half
+// permanents (from permIDs) + half wisps (from wispIDs). The callers
+// want half/half so both the perm and wisp branches of the partition
+// exercise the IN-clause.
+func mixedInputSmallN(permIDs, wispIDs []string, inputN int) []string {
+	input := make([]string, 0, inputN)
+	half := inputN / 2
+	for i := 0; i < half && i < len(permIDs); i++ {
+		input = append(input, permIDs[i])
+	}
+	for i := 0; i < inputN-len(input) && i < len(wispIDs); i++ {
+		input = append(input, wispIDs[i])
+	}
+	return input
+}
+
+// benchmarkGetLabelsForIssuesSmallN runs GetLabelsForIssues against a
+// seeded store where wispW wisps exist but only inputN input IDs are
+// hydrated. Half the input is permanent and half is wisps.
+func benchmarkGetLabelsForIssuesSmallN(b *testing.B, wispW, inputN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	permIDs, wispIDs := seedSmallNLargeW(b, store, inputN/2+1, wispW)
+	input := mixedInputSmallN(permIDs, wispIDs, inputN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.GetLabelsForIssues(ctx, input); err != nil {
+			b.Fatalf("GetLabelsForIssues: %v", err)
+		}
+	}
+}
+
+// BenchmarkGetLabelsForIssues_SmallNLargeW_10_5K measures the canonical
+// regression case: 10 input IDs against 5 000 wisps in the table.
+func BenchmarkGetLabelsForIssues_SmallNLargeW_10_5K(b *testing.B) {
+	benchmarkGetLabelsForIssuesSmallN(b, 5000, 10)
+}
+
+// BenchmarkGetLabelsForIssues_SmallNLargeW_10_10K stresses the same
+// shape against a bigger wisp table so the O(W) full-scan regression
+// would be obvious in wall time.
+func BenchmarkGetLabelsForIssues_SmallNLargeW_10_10K(b *testing.B) {
+	benchmarkGetLabelsForIssuesSmallN(b, 10000, 10)
+}
+
+// BenchmarkGetLabelsForIssues_SmallNLargeW_100_5K checks a slightly
+// larger N to confirm the scaled-N·log(W) path still beats full scan.
+func BenchmarkGetLabelsForIssues_SmallNLargeW_100_5K(b *testing.B) {
+	benchmarkGetLabelsForIssuesSmallN(b, 5000, 100)
+}
+
+// benchmarkGetIssuesByIDsSmallN mirrors benchmarkGetLabelsForIssuesSmallN
+// for the issue-hydration caller.
+func benchmarkGetIssuesByIDsSmallN(b *testing.B, wispW, inputN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	permIDs, wispIDs := seedSmallNLargeW(b, store, inputN/2+1, wispW)
+	input := mixedInputSmallN(permIDs, wispIDs, inputN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.GetIssuesByIDs(ctx, input); err != nil {
+			b.Fatalf("GetIssuesByIDs: %v", err)
+		}
+	}
+}
+
+func BenchmarkGetIssuesByIDs_SmallNLargeW_10_5K(b *testing.B) {
+	benchmarkGetIssuesByIDsSmallN(b, 5000, 10)
+}
+func BenchmarkGetIssuesByIDs_SmallNLargeW_10_10K(b *testing.B) {
+	benchmarkGetIssuesByIDsSmallN(b, 10000, 10)
+}
+func BenchmarkGetIssuesByIDs_SmallNLargeW_100_5K(b *testing.B) {
+	benchmarkGetIssuesByIDsSmallN(b, 5000, 100)
+}
