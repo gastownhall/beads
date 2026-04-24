@@ -201,21 +201,26 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID 
 // transaction, including labels. Automatically routes each ID to the correct
 // table (issues/wisps). Uses batched IN clauses.
 //
+// wispSet is an optional pre-built set of active wisp IDs (see WispIDSetInTx).
+// Pass nil to have the helper build the set once internally; callers hydrating
+// multiple batches inside one tx can build it up-front and reuse.
+//
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string) ([]*types.Issue, error) {
+func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string, wispSet map[string]struct{}) ([]*types.Issue, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 
-	// Partition IDs by wisp status.
-	var wispIDs, permIDs []string
-	for _, id := range ids {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
+	if wispSet == nil {
+		var err error
+		wispSet, err = WispIDSetInTx(ctx, tx)
+		if err != nil {
+			return nil, fmt.Errorf("get issues by IDs: build wisp set: %w", err)
 		}
 	}
+
+	// Partition IDs by wisp status.
+	wispIDs, permIDs := partitionByWispSet(ids, wispSet)
 
 	var allIssues []*types.Issue
 	for _, pair := range []struct {
@@ -335,7 +340,7 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID st
 	for i, d := range deps {
 		ids[i] = d.depID
 	}
-	issues, err := GetIssuesByIDsInTx(ctx, tx, ids)
+	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get dependencies: fetch issues: %w", err)
 	}
@@ -398,7 +403,7 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID stri
 	for i, d := range deps {
 		ids[i] = d.depID
 	}
-	issues, err := GetIssuesByIDsInTx(ctx, tx, ids)
+	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get dependents: fetch issues: %w", err)
 	}
@@ -451,7 +456,7 @@ func GetDependenciesInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*ty
 		return nil, nil
 	}
 
-	return GetIssuesByIDsInTx(ctx, tx, ids)
+	return GetIssuesByIDsInTx(ctx, tx, ids, nil)
 }
 
 // GetDependentsInTx returns issues that depend on the given issueID.
@@ -484,5 +489,5 @@ func GetDependentsInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*type
 		return nil, nil
 	}
 
-	return GetIssuesByIDsInTx(ctx, tx, ids)
+	return GetIssuesByIDsInTx(ctx, tx, ids, nil)
 }

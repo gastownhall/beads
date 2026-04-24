@@ -402,7 +402,7 @@ func GetBlockedIssuesInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilt
 	for id := range blockerMap {
 		blockedIDs = append(blockedIDs, id)
 	}
-	issues, err := GetIssuesByIDsInTx(ctx, tx, blockedIDs)
+	issues, err := GetIssuesByIDsInTx(ctx, tx, blockedIDs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("batch-fetch blocked issues: %w", err)
 	}

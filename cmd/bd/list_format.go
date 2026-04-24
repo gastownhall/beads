@@ -28,6 +28,16 @@ func pinIndicator(issue *types.Issue) string {
 	return ""
 }
 
+// pinIndicatorSummary is the summary-shaped parallel of pinIndicator.
+// Output must stay byte-identical to pinIndicator(issue with same Pinned);
+// the render-parity hard gate in be-nu4.3.2 enforces this.
+func pinIndicatorSummary(sum *types.IssueSummary) string {
+	if sum.Pinned {
+		return "📌 "
+	}
+	return ""
+}
+
 // Priority tags for pretty output - simple text, semantic colors applied via ui package
 // Design principle: only P0/P1 get color for attention, P2-P4 are neutral
 func renderPriorityTag(priority int) string {
@@ -256,6 +266,58 @@ func formatIssueCompact(buf *strings.Builder, issue *types.Issue, labels []strin
 			ui.RenderPriority(issue.Priority),
 			ui.RenderType(string(issue.IssueType)),
 			assigneeStr, labelsStr, issue.Title, depInfo))
+	}
+}
+
+// formatSummaryAgent is the summary-shaped parallel of formatAgentIssue. Output
+// must stay byte-identical; enforced by the render-parity hard gate
+// (be-nu4.3.2 acceptance criteria).
+func formatSummaryAgent(buf *strings.Builder, sum *types.IssueSummary, blockedBy, blocks []string, parent string) {
+	depInfo := formatDependencyInfo(blockedBy, blocks, parent)
+	if depInfo != "" {
+		buf.WriteString(fmt.Sprintf("%s: %s %s\n", sum.ID, sum.Title, depInfo))
+	} else {
+		buf.WriteString(fmt.Sprintf("%s: %s\n", sum.ID, sum.Title))
+	}
+}
+
+// formatSummaryCompact is the summary-shaped parallel of formatIssueCompact.
+// Output must stay byte-identical; enforced by the render-parity hard gate
+// (be-nu4.3.2 acceptance criteria).
+func formatSummaryCompact(buf *strings.Builder, sum *types.IssueSummary, labels []string, blockedBy, blocks []string, parent string) {
+	labelsStr := ""
+	if len(labels) > 0 {
+		labelsStr = fmt.Sprintf(" %v", labels)
+	}
+	assigneeStr := ""
+	if sum.Assignee != "" {
+		assigneeStr = fmt.Sprintf(" @%s", sum.Assignee)
+	}
+
+	depInfo := formatDependencyInfo(blockedBy, blocks, parent)
+	if depInfo != "" {
+		depInfo = " " + depInfo
+	}
+
+	statusIcon := renderStatusIcon(sum.Status)
+	if len(blockedBy) > 0 && sum.Status == types.StatusOpen {
+		statusIcon = renderStatusIcon(types.StatusBlocked)
+	}
+
+	if sum.Status == types.StatusClosed {
+		line := fmt.Sprintf("%s %s%s [P%d] [%s]%s%s - %s%s",
+			statusIcon, pinIndicatorSummary(sum), sum.ID, sum.Priority,
+			sum.IssueType, assigneeStr, labelsStr, sum.Title, depInfo)
+		buf.WriteString(ui.RenderClosedLine(line))
+		buf.WriteString("\n")
+	} else {
+		buf.WriteString(fmt.Sprintf("%s %s%s [%s] [%s]%s%s - %s%s\n",
+			statusIcon,
+			pinIndicatorSummary(sum),
+			ui.RenderID(sum.ID),
+			ui.RenderPriority(sum.Priority),
+			ui.RenderType(string(sum.IssueType)),
+			assigneeStr, labelsStr, sum.Title, depInfo))
 	}
 }
 

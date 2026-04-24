@@ -551,6 +551,15 @@ func (s *configStore) DeleteIssue(_ context.Context, _ string) error           {
 func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
 	return nil, nil
 }
+func (s *configStore) SearchIssueSummaries(_ context.Context, _ string, _ types.IssueFilter) ([]*types.IssueSummary, error) {
+	return nil, nil
+}
+func (s *configStore) CountIssues(_ context.Context, _ types.IssueFilter) (int, error) {
+	return 0, nil
+}
+func (s *configStore) CountIssuesGroupedBy(_ context.Context, _ types.IssueFilter, _ string) (map[string]int, error) {
+	return nil, nil
+}
 func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
 	return nil
 }

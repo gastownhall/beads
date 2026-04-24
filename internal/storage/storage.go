@@ -45,6 +45,30 @@ type Storage interface {
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 
+	// SearchIssueSummaries is the narrow projection of SearchIssues used by
+	// list-shaped rendering paths (compact + --agent in bd list) that don't
+	// dereference TEXT/JSON columns. Added in D3 (be-nu4.3.2); SELECTs only
+	// IssueSummaryColumns so rendering doesn't pay full-hydration cost.
+	// IssueSummary is read-only.
+	SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error)
+
+	// CountIssues returns the number of issues matching filter. When the
+	// filter is zero-valued, this is a simple SELECT COUNT(*). Shares
+	// BuildIssueFilterClauses with SearchIssues so filter semantics match
+	// exactly (be-nu4 §11.7). Added in D1 (be-nu4.1.1).
+	CountIssues(ctx context.Context, filter types.IssueFilter) (int, error)
+
+	// CountIssuesGroupedBy returns per-group counts for a single field.
+	// field must be one of: status | priority | issue_type | assignee | label.
+	// For "label", each label contributes one entry; an issue with N labels
+	// contributes to N groups, and issues with zero labels contribute to the
+	// "" bucket (matches the pre-D1 Go-side semantics of cmd/bd/count.go).
+	// Priority values are returned as their integer string form ("0", "1",
+	// ...); callers that render "P0" format at the CLI layer. Assignee keys
+	// collapse NULL and '' into "". Any field value outside the allowlist is
+	// rejected with a named-allowlist error. Added in D1 (be-nu4.1.1).
+	CountIssuesGroupedBy(ctx context.Context, filter types.IssueFilter, field string) (map[string]int, error)
+
 	// Dependencies
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
 	RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error

@@ -115,7 +115,7 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx *sql.Tx) ([]*types.E
 			epicsWithChildren = append(epicsWithChildren, epicID)
 		}
 	}
-	epicIssues, err := GetIssuesByIDsInTx(ctx, tx, epicsWithChildren)
+	epicIssues, err := GetIssuesByIDsInTx(ctx, tx, epicsWithChildren, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to batch-fetch epic issues: %w", err)
 	}

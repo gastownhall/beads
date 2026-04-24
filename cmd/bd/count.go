@@ -80,7 +80,7 @@ Examples:
 			groupCount++
 		}
 		if byType {
-			groupBy = "type"
+			groupBy = "issue_type"
 			groupCount++
 		}
 		if byAssignee {
@@ -197,70 +197,35 @@ Examples:
 			filter.PriorityMax = &priorityMax
 		}
 
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err != nil {
-			FatalError("%v", err)
-		}
-
-		// If no grouping, just print count
+		// If no grouping, count directly at the storage layer.
 		if groupBy == "" {
+			total, err := store.CountIssues(ctx, filter)
+			if err != nil {
+				FatalError("%v", err)
+			}
 			if jsonOutput {
 				result := struct {
 					Count int `json:"count"`
-				}{Count: len(issues)}
+				}{Count: total}
 				outputJSON(result)
 			} else {
-				fmt.Println(len(issues))
+				fmt.Println(total)
 			}
 			return
 		}
 
-		// Group by the specified field
-		counts := make(map[string]int)
-
-		// For label grouping, fetch all labels in one query to avoid N+1
-		var labelsMap map[string][]string
-		if groupBy == "label" {
-			issueIDs := make([]string, len(issues))
-			for i, issue := range issues {
-				issueIDs[i] = issue.ID
-			}
-			var err error
-			labelsMap, err = store.GetLabelsForIssues(ctx, issueIDs)
-			if err != nil {
-				FatalError("getting labels: %v", err)
-			}
+		// Group-by path: one SQL COUNT(*) for the total plus one GROUP BY for
+		// the per-group tallies. Storage returns raw keys; the CLI layer
+		// formats priority/assignee/label display strings.
+		total, err := store.CountIssues(ctx, filter)
+		if err != nil {
+			FatalError("%v", err)
 		}
-
-		for _, issue := range issues {
-			var groupKey string
-			switch groupBy {
-			case "status":
-				groupKey = string(issue.Status)
-			case "priority":
-				groupKey = fmt.Sprintf("P%d", issue.Priority)
-			case "type":
-				groupKey = string(issue.IssueType)
-			case "assignee":
-				if issue.Assignee == "" {
-					groupKey = "(unassigned)"
-				} else {
-					groupKey = issue.Assignee
-				}
-			case "label":
-				// For labels, count each label separately
-				labels := labelsMap[issue.ID]
-				if len(labels) > 0 {
-					for _, label := range labels {
-						counts[label]++
-					}
-					continue
-				} else {
-					groupKey = "(no labels)"
-				}
-			}
-			counts[groupKey]++
+		rawCounts, err := store.CountIssuesGroupedBy(ctx, filter, groupBy)
+		if err != nil {
+			FatalError("%v", err)
 		}
+		counts := renderGroupKeys(rawCounts, groupBy)
 
 		type GroupCount struct {
 			Group string `json:"group"`
@@ -282,12 +247,12 @@ Examples:
 				Total  int          `json:"total"`
 				Groups []GroupCount `json:"groups"`
 			}{
-				Total:  len(issues),
+				Total:  total,
 				Groups: groups,
 			}
 			outputJSON(result)
 		} else {
-			fmt.Printf("Total: %d\n\n", len(issues))
+			fmt.Printf("Total: %d\n\n", total)
 			for _, g := range groups {
 				fmt.Printf("%s: %d\n", g.Group, g.Count)
 			}
@@ -336,4 +301,31 @@ func init() {
 	countCmd.Flags().Bool("by-label", false, "Group count by label")
 
 	rootCmd.AddCommand(countCmd)
+}
+
+// renderGroupKeys converts the raw storage-layer group keys into the
+// display strings the CLI has historically printed. Priority "N" becomes
+// "P<N>"; empty assignee becomes "(unassigned)"; the empty label bucket
+// becomes "(no labels)". Other fields pass through unchanged. Keeping the
+// rendering at the CLI layer lets storage stay agnostic of output format
+// while preserving byte-for-byte parity with the pre-D1 `bd count` output.
+func renderGroupKeys(raw map[string]int, groupBy string) map[string]int {
+	out := make(map[string]int, len(raw))
+	for k, v := range raw {
+		display := k
+		switch groupBy {
+		case "priority":
+			display = "P" + k
+		case "assignee":
+			if k == "" {
+				display = "(unassigned)"
+			}
+		case "label":
+			if k == "" {
+				display = "(no labels)"
+			}
+		}
+		out[display] += v
+	}
+	return out
 }

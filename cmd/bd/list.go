@@ -269,6 +269,51 @@ func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
 	})
 }
 
+// sortSummaries parallels sortIssues for the narrow-projection render paths.
+// Supports only the sort fields present on IssueSummary; other values are no-op.
+func sortSummaries(summaries []*types.IssueSummary, sortBy string, reverse bool) {
+	if sortBy == "" {
+		return
+	}
+	slices.SortFunc(summaries, func(a, b *types.IssueSummary) int {
+		var result int
+		switch sortBy {
+		case "priority":
+			result = cmp.Compare(a.Priority, b.Priority)
+		case "created":
+			result = b.CreatedAt.Compare(a.CreatedAt)
+		case "updated":
+			result = b.UpdatedAt.Compare(a.UpdatedAt)
+		case "closed":
+			if a.ClosedAt == nil && b.ClosedAt == nil {
+				result = 0
+			} else if a.ClosedAt == nil {
+				result = 1
+			} else if b.ClosedAt == nil {
+				result = -1
+			} else {
+				result = b.ClosedAt.Compare(*a.ClosedAt)
+			}
+		case "status":
+			result = cmp.Compare(a.Status, b.Status)
+		case "id":
+			result = cmp.Compare(a.ID, b.ID)
+		case "title":
+			result = cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
+		case "type":
+			result = cmp.Compare(a.IssueType, b.IssueType)
+		case "assignee":
+			result = cmp.Compare(a.Assignee, b.Assignee)
+		default:
+			result = 0
+		}
+		if reverse {
+			return -result
+		}
+		return result
+	})
+}
+
 // knownListFlags maps bare words that users might pass as positional args
 // but are actually flag names. Each maps to a hint for the error message.
 var knownListFlags = map[string]string{
@@ -849,7 +894,58 @@ var listCmd = &cobra.Command{
 			activeStore = routedStore
 		}
 
-		// Direct mode
+		// Narrow-projection render fast path (D3 / be-nu4.3.2): compact + --agent
+		// render paths don't dereference TEXT/JSON columns, so they use
+		// SearchIssueSummaries to skip full-Issue hydration cost. Watch / pretty /
+		// --format / JSON / --long all stay on SearchIssues (they need fields not
+		// in the narrow projection).
+		useSummary := !watchMode && !prettyFormat && formatStr == "" && !jsonOutput && (ui.IsAgentMode() || !longFormat)
+		if useSummary {
+			summaries, err := activeStore.SearchIssueSummaries(ctx, "", filter)
+			if err != nil {
+				FatalError("%v", err)
+			}
+			sortSummaries(summaries, sortBy, reverse)
+			truncated := effectiveLimit > 0 && len(summaries) > effectiveLimit
+			if truncated {
+				summaries = summaries[:effectiveLimit]
+			}
+
+			maybeShowUpgradeNotification()
+
+			issueIDs := make([]string, len(summaries))
+			for i, s := range summaries {
+				issueIDs[i] = s.ID
+			}
+			blockedByMap, blocksMap, parentMap, _ := activeStore.GetBlockingInfoForIssues(ctx, issueIDs)
+
+			var buf strings.Builder
+			if ui.IsAgentMode() {
+				for _, s := range summaries {
+					formatSummaryAgent(&buf, s, blockedByMap[s.ID], blocksMap[s.ID], parentMap[s.ID])
+				}
+				fmt.Print(buf.String())
+				printTruncationHint(truncated, effectiveLimit)
+				return
+			}
+
+			for _, s := range summaries {
+				formatSummaryCompact(&buf, s, s.Labels, blockedByMap[s.ID], blocksMap[s.ID], parentMap[s.ID])
+			}
+
+			if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: noPager}); err != nil {
+				if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil {
+					fmt.Fprintf(os.Stderr, "Error writing output: %v\n", writeErr)
+				}
+			}
+			printTruncationHint(truncated, effectiveLimit)
+			maybeShowTip(store)
+			return
+		}
+
+		// Direct mode (full-hydration path): --long, --watch, --pretty, --format,
+		// and JSON output all need fields outside IssueSummary (metadata, notes,
+		// description, etc.), so they stay on SearchIssues.
 		issues, err := activeStore.SearchIssues(ctx, "", filter)
 		if err != nil {
 			FatalError("%v", err)
@@ -985,7 +1081,9 @@ var listCmd = &cobra.Command{
 			printTruncationHint(truncated, effectiveLimit)
 			return
 		} else if longFormat {
-			// Long format: multi-line with details
+			// Long format: multi-line with details.
+			// --long stays on SearchIssues per addendum be-nu4.3.1 (needs Metadata,
+			// which IssueSummary intentionally omits to preserve D3's perf win).
 			buf.WriteString(fmt.Sprintf("\nFound %d issues:\n\n", len(issues)))
 			for _, issue := range issues {
 				labels := labelsMap[issue.ID]

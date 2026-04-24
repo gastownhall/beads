@@ -414,16 +414,18 @@ func resolveCurrentIssueID(ctx context.Context) string {
 
 	currentActor := getActorWithGit()
 
-	// 1. In-progress issues assigned to current actor
+	// 1. In-progress issues assigned to current actor.
+	// Narrow projection (be-nu4.3.2 audit freebie): only .ID is read.
 	if currentActor != "" {
 		status := types.StatusInProgress
 		filter := types.IssueFilter{
 			Status:   &status,
 			Assignee: &currentActor,
+			Limit:    1,
 		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
+		summaries, err := store.SearchIssueSummaries(ctx, "", filter)
+		if err == nil && len(summaries) > 0 {
+			return summaries[0].ID
 		}
 	}
 
@@ -433,10 +435,11 @@ func resolveCurrentIssueID(ctx context.Context) string {
 		filter := types.IssueFilter{
 			Status:   &status,
 			Assignee: &currentActor,
+			Limit:    1,
 		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
+		summaries, err := store.SearchIssueSummaries(ctx, "", filter)
+		if err == nil && len(summaries) > 0 {
+			return summaries[0].ID
 		}
 	}
 

@@ -38,21 +38,28 @@ func GetLabelsInTx(ctx context.Context, tx *sql.Tx, table, issueID string) ([]st
 // GetLabelsForIssuesInTx fetches labels for multiple issues in a single transaction.
 // Routes each ID to labels or wisp_labels based on wisp status.
 // Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
-func GetLabelsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]string, error) {
+//
+// wispSet is an optional pre-built set of active wisp IDs (see WispIDSetInTx).
+// Pass nil to have the helper build the set once internally; callers hydrating
+// multiple batches inside one tx can build it up-front and reuse. Either way,
+// routing is consistent for the tx's lifetime (Dolt MVCC) and a wisp created
+// in another connection after the set is built will NOT be visible to this tx.
+func GetLabelsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string, wispSet map[string]struct{}) (map[string][]string, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]string), nil
 	}
 
-	result := make(map[string][]string)
-
-	var wispIDs, permIDs []string
-	for _, id := range issueIDs {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
+	if wispSet == nil {
+		var err error
+		wispSet, err = WispIDSetInTx(ctx, tx)
+		if err != nil {
+			return nil, fmt.Errorf("get labels for issues: build wisp set: %w", err)
 		}
 	}
+
+	result := make(map[string][]string)
+
+	wispIDs, permIDs := partitionByWispSet(issueIDs, wispSet)
 
 	for _, pair := range []struct {
 		table string

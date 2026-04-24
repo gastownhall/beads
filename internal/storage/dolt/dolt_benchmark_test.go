@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -972,4 +973,262 @@ func BenchmarkGetLabels(b *testing.B) {
 			b.Fatalf("failed to get labels: %v", err)
 		}
 	}
+}
+
+// =============================================================================
+// WispIDSet mixed-ID routing benchmarks (be-nu4.2.1 / D2)
+// =============================================================================
+
+// seedMixedForWispSetBench populates the store with N issues at the requested
+// wisp share. IDs are returned in the order created (perms first, then wisps)
+// so benchmarks can shuffle if needed. Callers are responsible for cleanup.
+func seedMixedForWispSetBench(b *testing.B, store *DoltStore, totalN int, wispShare float64) []string {
+	b.Helper()
+	ctx := context.Background()
+	numWisps := int(float64(totalN) * wispShare)
+	numPerms := totalN - numWisps
+
+	ids := make([]string, 0, totalN)
+	for i := 0; i < numPerms; i++ {
+		iss := &types.Issue{
+			ID:        fmt.Sprintf("ws-perm-%d", i),
+			Title:     "perm",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			b.Fatalf("create perm %d: %v", i, err)
+		}
+		ids = append(ids, iss.ID)
+	}
+	for i := 0; i < numWisps; i++ {
+		iss := &types.Issue{
+			Title:     "wisp",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			b.Fatalf("create wisp %d: %v", i, err)
+		}
+		ids = append(ids, iss.ID)
+	}
+	return ids
+}
+
+func benchmarkGetLabelsForIssuesMixed(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	ids := seedMixedForWispSetBench(b, store, totalN, 0.25)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.GetLabelsForIssues(ctx, ids); err != nil {
+			b.Fatalf("GetLabelsForIssues: %v", err)
+		}
+	}
+}
+
+func BenchmarkGetLabelsForIssues_Mixed1K(b *testing.B)  { benchmarkGetLabelsForIssuesMixed(b, 1000) }
+func BenchmarkGetLabelsForIssues_Mixed10K(b *testing.B) { benchmarkGetLabelsForIssuesMixed(b, 10000) }
+func BenchmarkGetLabelsForIssues_Mixed50K(b *testing.B) { benchmarkGetLabelsForIssuesMixed(b, 50000) }
+
+func benchmarkGetIssuesByIDsMixed(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	ids := seedMixedForWispSetBench(b, store, totalN, 0.25)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.GetIssuesByIDs(ctx, ids); err != nil {
+			b.Fatalf("GetIssuesByIDs: %v", err)
+		}
+	}
+}
+
+func BenchmarkGetIssuesByIDs_Mixed1K(b *testing.B)  { benchmarkGetIssuesByIDsMixed(b, 1000) }
+func BenchmarkGetIssuesByIDs_Mixed10K(b *testing.B) { benchmarkGetIssuesByIDsMixed(b, 10000) }
+func BenchmarkGetIssuesByIDs_Mixed50K(b *testing.B) { benchmarkGetIssuesByIDsMixed(b, 50000) }
+
+// =============================================================================
+// SearchIssueSummaries narrow-projection benchmarks (be-nu4.3.2 / D3)
+// =============================================================================
+
+// seedForSummaryBench populates the store with N issues: roughly equal splits
+// across priority/status/type and 25% wisp share, so the benchmark exercises
+// both the issues and wisps tables plus label hydration.
+func seedForSummaryBench(b *testing.B, store *DoltStore, totalN int) {
+	b.Helper()
+	ctx := context.Background()
+	numWisps := totalN / 4
+	numPerms := totalN - numWisps
+
+	// Batch creates to keep setup fast.
+	const batch = 500
+	statuses := []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusClosed}
+	types_ := []types.IssueType{types.TypeTask, types.TypeBug, types.TypeFeature, types.TypeEpic}
+
+	for start := 0; start < numPerms; start += batch {
+		end := start + batch
+		if end > numPerms {
+			end = numPerms
+		}
+		chunk := make([]*types.Issue, 0, end-start)
+		for i := start; i < end; i++ {
+			iss := &types.Issue{
+				ID:        fmt.Sprintf("sum-perm-%d", i),
+				Title:     fmt.Sprintf("summary perm %d", i),
+				Status:    statuses[i%len(statuses)],
+				Priority:  i % 5,
+				IssueType: types_[i%len(types_)],
+				Assignee:  fmt.Sprintf("user-%d", i%7),
+			}
+			chunk = append(chunk, iss)
+		}
+		if err := store.CreateIssuesWithFullOptions(ctx, chunk, "bench", storage.BatchCreateOptions{
+			OrphanHandling:       storage.OrphanAllow,
+			SkipPrefixValidation: true,
+		}); err != nil {
+			b.Fatalf("create perms batch %d: %v", start, err)
+		}
+		// Tag a subset of perms with labels so label hydration has work to do.
+		for _, iss := range chunk {
+			if len(iss.ID)%2 == 0 {
+				if err := store.AddLabel(ctx, iss.ID, "perf", "bench"); err != nil {
+					b.Fatalf("add label: %v", err)
+				}
+			}
+		}
+	}
+
+	// Wisps must be created individually (CreateIssues path routes them based on Ephemeral).
+	for i := 0; i < numWisps; i++ {
+		iss := &types.Issue{
+			Title:     fmt.Sprintf("summary wisp %d", i),
+			Status:    types.StatusOpen,
+			Priority:  i % 5,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			b.Fatalf("create wisp %d: %v", i, err)
+		}
+	}
+}
+
+func benchmarkSearchIssueSummaries(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.SearchIssueSummaries(ctx, "", types.IssueFilter{}); err != nil {
+			b.Fatalf("SearchIssueSummaries: %v", err)
+		}
+	}
+}
+
+func BenchmarkSearchIssueSummaries_1K(b *testing.B)  { benchmarkSearchIssueSummaries(b, 1000) }
+func BenchmarkSearchIssueSummaries_10K(b *testing.B) { benchmarkSearchIssueSummaries(b, 10000) }
+func BenchmarkSearchIssueSummaries_50K(b *testing.B) { benchmarkSearchIssueSummaries(b, 50000) }
+
+// =============================================================================
+// CountIssues / CountIssuesGroupedBy benchmarks (be-nu4.1.1 / D1)
+// =============================================================================
+
+// Reuses seedForSummaryBench so counts are measured against the same mixed
+// perms/wisps/labels population the summary benchmarks use — any future
+// comparison between a COUNT(*) and a SELECT+iterate stays apples-to-apples.
+
+func benchmarkCountIssues(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.CountIssues(ctx, types.IssueFilter{}); err != nil {
+			b.Fatalf("CountIssues: %v", err)
+		}
+	}
+}
+
+func BenchmarkCountIssues_1K(b *testing.B)  { benchmarkCountIssues(b, 1000) }
+func BenchmarkCountIssues_10K(b *testing.B) { benchmarkCountIssues(b, 10000) }
+func BenchmarkCountIssues_50K(b *testing.B) { benchmarkCountIssues(b, 50000) }
+
+func benchmarkCountIssuesGroupedBy(b *testing.B, totalN int, field string) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.CountIssuesGroupedBy(ctx, types.IssueFilter{}, field); err != nil {
+			b.Fatalf("CountIssuesGroupedBy(%s): %v", field, err)
+		}
+	}
+}
+
+func BenchmarkCountIssuesGroupedBy_status_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "status")
+}
+func BenchmarkCountIssuesGroupedBy_status_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "status")
+}
+func BenchmarkCountIssuesGroupedBy_status_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "status")
+}
+
+func BenchmarkCountIssuesGroupedBy_priority_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "priority")
+}
+func BenchmarkCountIssuesGroupedBy_priority_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "priority")
+}
+func BenchmarkCountIssuesGroupedBy_priority_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "priority")
+}
+
+func BenchmarkCountIssuesGroupedBy_issue_type_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "issue_type")
+}
+func BenchmarkCountIssuesGroupedBy_issue_type_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "issue_type")
+}
+func BenchmarkCountIssuesGroupedBy_issue_type_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "issue_type")
+}
+
+func BenchmarkCountIssuesGroupedBy_assignee_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "assignee")
+}
+func BenchmarkCountIssuesGroupedBy_assignee_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "assignee")
+}
+func BenchmarkCountIssuesGroupedBy_assignee_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "assignee")
+}
+
+func BenchmarkCountIssuesGroupedBy_label_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "label")
+}
+func BenchmarkCountIssuesGroupedBy_label_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "label")
+}
+func BenchmarkCountIssuesGroupedBy_label_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "label")
 }
