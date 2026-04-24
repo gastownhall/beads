@@ -105,10 +105,9 @@ func TestEmbeddedPrune(t *testing.T) {
 		}
 
 		// Double-check: the ephemeral still exists for `bd purge` to clean up.
-		// Use --ephemeral + --status=closed to surface wisps specifically.
-		listing := bdList(t, bd, dir, "--ephemeral", "--status=closed", "--json")
-		if !strings.Contains(listing, wispID) {
-			t.Errorf("expected ephemeral %s to survive bd prune, got: %s", wispID, listing)
+		out = bdPurge(t, bd, dir, "--pattern", "pw-*", "--dry-run")
+		if !strings.Contains(out, "Would purge 1") {
+			t.Errorf("expected purge dry-run to still see ephemeral %s after prune; got: %s", wispID, out)
 		}
 	})
 

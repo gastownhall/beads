@@ -19,6 +19,12 @@ type purgeScope struct {
 	// cmdName is the user-visible command name (e.g. "purge", "prune").
 	// Used in messages and the suggested `--force` hint.
 	cmdName string
+	// pastTense is the user-visible completed action (e.g. "purged", "pruned").
+	pastTense string
+	// countKey is the JSON key used for the actual deletion count.
+	countKey string
+	// dryRunCountKey is the JSON key used for the dry-run deletion count.
+	dryRunCountKey string
 	// subjectNoun describes what's being purged, in singular form
 	// (e.g. "closed ephemeral bead", "closed bead"). "(s)" is appended by
 	// the printer when multiple items are involved.
@@ -49,6 +55,9 @@ Skips: pinned beads (protected).
 To delete closed non-ephemeral beads (regular tasks, features, bugs, etc.)
 use ` + "`bd prune`" + ` instead.
 
+For full Dolt storage reclaim after deleting many rows, follow with ` + "`bd flatten`" + `
+so history can be collapsed and old chunks can be garbage-collected.
+
 EXAMPLES:
   bd purge                           # Preview what would be purged
   bd purge --force                   # Delete all closed ephemeral beads
@@ -57,10 +66,13 @@ EXAMPLES:
   bd purge --dry-run                 # Detailed preview with stats`,
 	Run: func(cmd *cobra.Command, _ []string) {
 		runPurgeOrPrune(cmd, purgeScope{
-			cmdName:       "purge",
-			subjectNoun:   "closed ephemeral bead",
-			ephemeralOnly: true,
-			requireFilter: false,
+			cmdName:        "purge",
+			pastTense:      "purged",
+			countKey:       "purged_count",
+			dryRunCountKey: "purge_count",
+			subjectNoun:    "closed ephemeral bead",
+			ephemeralOnly:  true,
+			requireFilter:  false,
 		})
 	},
 }
@@ -81,9 +93,9 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 	if scope.requireFilter && olderThan == "" && pattern == "" {
 		FatalErrorWithHint(
 			fmt.Sprintf("bd %s requires --older-than or --pattern", scope.cmdName),
-			"Protects against accidental bulk deletion. Use `--older-than 1d` to\n"+
-				"  include everything closed for at least one day, or `--pattern '<glob>'`\n"+
-				"  to scope by bead ID.")
+			"Protects against accidental bulk deletion. Use `--pattern '*'` to\n"+
+				"  include all closed beads in this scope, or `--older-than 1d`\n"+
+				"  / `--pattern '<glob>'` to narrow the deletion.")
 	}
 
 	if store == nil {
@@ -145,7 +157,7 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 	if len(closedIssues) == 0 {
 		if jsonOutput {
 			outputJSON(map[string]interface{}{
-				"purged_count": 0,
+				scope.countKey: 0,
 				"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
 			})
 		} else {
@@ -172,11 +184,11 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 		result, err := store.DeleteIssues(ctx, issueIDs, false, false, true)
 		if jsonOutput {
 			stats := map[string]interface{}{
-				"dry_run":      true,
-				"purge_count":  len(issueIDs),
-				"dependencies": 0,
-				"labels":       0,
-				"events":       0,
+				"dry_run":            true,
+				scope.dryRunCountKey: len(issueIDs),
+				"dependencies":       0,
+				"labels":             0,
+				"events":             0,
 			}
 			if err == nil {
 				stats["dependencies"] = result.DependenciesCount
@@ -230,7 +242,7 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 
 	if jsonOutput {
 		stats := map[string]interface{}{
-			"purged_count": result.DeletedCount,
+			scope.countKey: result.DeletedCount,
 			"dependencies": result.DependenciesCount,
 			"labels":       result.LabelsCount,
 			"events":       result.EventsCount,
@@ -240,8 +252,7 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 		}
 		outputJSON(stats)
 	} else {
-		past := strings.TrimSuffix(scope.cmdName, "e") + "ed" // purge→purged, prune→pruned
-		fmt.Printf("%s %s %d %s(s)\n", ui.RenderPass("✓"), capitalize(past), result.DeletedCount, scope.subjectNoun)
+		fmt.Printf("%s %s %d %s(s)\n", ui.RenderPass("✓"), capitalize(scope.pastTense), result.DeletedCount, scope.subjectNoun)
 		fmt.Printf("  Dependencies removed: %d\n", result.DependenciesCount)
 		fmt.Printf("  Labels removed:       %d\n", result.LabelsCount)
 		fmt.Printf("  Events removed:       %d\n", result.EventsCount)
