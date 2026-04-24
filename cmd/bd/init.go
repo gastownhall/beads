@@ -74,6 +74,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		skipHooks, _ := cmd.Flags().GetBool("skip-hooks")
 		skipAgents, _ := cmd.Flags().GetBool("skip-agents")
 		force, _ := cmd.Flags().GetBool("force")
+		reinitLocal, _ := cmd.Flags().GetBool("reinit-local")
+		discardRemote, _ := cmd.Flags().GetBool("discard-remote")
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 		roleFlag, _ := cmd.Flags().GetString("role")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
@@ -86,6 +88,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		serverUser, _ := cmd.Flags().GetString("server-user")
 		database, _ := cmd.Flags().GetString("database")
 		destroyToken, _ := cmd.Flags().GetString("destroy-token")
+
+		// --force is a deprecated alias for --reinit-local. They share
+		// semantics for the local data-safety guard; both refuse remote
+		// divergence unless --discard-remote is also passed. See
+		// docs/adr/0002-init-safety-invariants.md.
+		if force && !reinitLocal {
+			fmt.Fprintf(os.Stderr, "%s --force is deprecated; use --reinit-local instead.\n", ui.RenderWarn("DeprecationWarning:"))
+			fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the init flag surface.\n\n")
+			reinitLocal = true
+		}
 		sharedServer, _ := cmd.Flags().GetBool("shared-server")
 		externalServer, _ := cmd.Flags().GetBool("external")
 
@@ -179,19 +191,22 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Non-fatal - continue with defaults
 		}
 
-		// Safety guard: check for existing beads data
-		// This prevents accidental re-initialization
-		if !force {
+		// Safety guard: check for existing beads data.
+		// This prevents accidental re-initialization. --force and
+		// --reinit-local both bypass this local-only guard; they do NOT
+		// authorize cross-boundary operations on remote history (see
+		// CheckRemoteSafety at cmd/bd/init_safety.go and
+		// docs/adr/0002-init-safety-invariants.md).
+		if !reinitLocal {
 			if err := checkExistingBeadsData(prefix); err != nil {
 				FatalError("%v", err)
 			}
 		}
 
-		// Even with --force, warn about existing data and require confirmation.
-		// In non-interactive mode, accepts --destroy-token for explicit opt-in,
-		// or --quiet for legacy (deprecated) bypass.
-		// This prevents AI agents and users from accidentally destroying data.
-		if force {
+		// Even with --reinit-local, warn about existing data and require
+		// confirmation. Non-interactive mode accepts --destroy-token for
+		// explicit opt-in; interactive mode prompts for typed confirmation.
+		if reinitLocal {
 			if count, err := countExistingIssues(prefix); err == nil && count > 0 {
 				fmt.Fprintf(os.Stderr, "\n%s Re-initializing will destroy the existing database.\n\n", ui.RenderWarn("WARNING:"))
 				fmt.Fprintf(os.Stderr, "  Existing issues: %d\n\n", count)
@@ -207,18 +222,24 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					expected := fmt.Sprintf("destroy %d issues", count)
 					if strings.TrimSpace(scanner.Text()) != expected {
 						fmt.Fprintf(os.Stderr, "\nAborted. Database was NOT modified.\n")
-						os.Exit(1)
+						os.Exit(ExitLocalExistsRefused)
 					}
 				} else {
 					// Non-interactive (piped input, AI agent, etc.)
-					expectedToken := fmt.Sprintf("DESTROY-%s", prefix)
+					//
+					// ADR invariant (docs/adr/0002-init-safety-invariants.md):
+					// runtime error text must not echo a complete destructive
+					// invocation. See 'bd help init-safety' for the token
+					// format. This closes the 58f5989bf failure class where
+					// an agent copy-pasted the suggested command.
+					expectedToken := FormatDestroyToken(prefix)
 					if destroyToken == expectedToken {
 						fmt.Fprintf(os.Stderr, "Destroy token accepted. Proceeding with re-initialization.\n")
 					} else {
 						fmt.Fprintf(os.Stderr, "Refusing to destroy %d issues in non-interactive mode.\n", count)
-						fmt.Fprintf(os.Stderr, "To proceed, use: bd init --force --destroy-token=%s\n", expectedToken)
-						fmt.Fprintf(os.Stderr, "Or export first: bd export > backup.jsonl\n")
-						os.Exit(1)
+						fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the required --destroy-token format.\n")
+						fmt.Fprintf(os.Stderr, "  Or export first: bd export > backup.jsonl\n")
+						os.Exit(ExitDestroyTokenMissing)
 					}
 				}
 			}
@@ -273,6 +294,39 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// MySQL identifiers must start with a letter or underscore.
 		if len(prefix) > 0 && !((prefix[0] >= 'a' && prefix[0] <= 'z') || (prefix[0] >= 'A' && prefix[0] <= 'Z') || prefix[0] == '_') {
 			prefix = "bd_" + prefix
+		}
+
+		// Cross-boundary safety (bd-q83 / ADR 0002): check remote state
+		// BEFORE any filesystem side-effects so a refusal exits cleanly.
+		// We only refuse here; bootstrap decisions happen later once
+		// beadsDir is computed. See CheckRemoteSafety in init_safety.go.
+		{
+			var earlySyncURL string
+			earlyRemoteHasDoltData := false
+			if s := resolveSyncRemote(); s != "" {
+				earlySyncURL = normalizeRemoteURL(s)
+				earlyRemoteHasDoltData = true // sync.remote configured = user intends bootstrap
+			} else if isGitRepo() && !isBareGitRepo() {
+				if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
+					earlySyncURL = normalizeRemoteURL(originURL)
+					earlyRemoteHasDoltData = gitLsRemoteHasRef("origin", "refs/dolt/data")
+				}
+			}
+			if earlySyncURL != "" {
+				earlyDecision := CheckRemoteSafety(RemoteSafetyInput{
+					Force:             force,
+					ReinitLocal:       reinitLocal,
+					DiscardRemote:     discardRemote,
+					DestroyToken:      destroyToken,
+					ExpectedToken:     FormatDestroyToken(prefix),
+					RemoteHasDoltData: earlyRemoteHasDoltData,
+					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+				})
+				if earlyDecision.Action == ActionRefuseDivergence || earlyDecision.Action == ActionRequireDestroyToken {
+					fmt.Fprintf(os.Stderr, "\n%s\n\n", earlyDecision.UserMessage)
+					os.Exit(earlyDecision.ExitCode)
+				}
+			}
 		}
 
 		// Determine beadsDir first (used for all storage path calculations).
@@ -493,23 +547,78 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// Auto-bootstrap from git remote if sync.git-remote is configured
-		// or origin has refs/dolt/data. This makes bd init and bd bootstrap
 		// Auto-bootstrap from remote if sync.remote (or deprecated
 		// sync.git-remote) is configured, or git origin has Dolt data
 		// (refs/dolt/data). This makes bd init and bd bootstrap
 		// interchangeable — both clone from the remote when one exists.
+		//
+		// Cross-boundary safety (bd-q83 / ADR 0002): when the caller
+		// passes --force or --reinit-local and the remote already has
+		// refs/dolt/data, we must refuse — the new local identity would
+		// orphan-push over the team's history on first write. The
+		// CheckRemoteSafety chokepoint encodes this invariant; any future
+		// flag that can interact with remote history must route through
+		// it rather than adding another `&& !someFlag` here.
 		syncURL := resolveSyncRemote()
 		bootstrappedFromRemote := false
 		syncFromRemote := false
+		remoteHasDoltData := false
+
 		if syncURL != "" {
+			// sync.remote was explicitly configured. Treat as bootstrap-
+			// from-remote intent; CheckRemoteSafety still enforces that
+			// --force/--reinit-local can't silently fight that intent.
 			syncURL = normalizeRemoteURL(syncURL)
 			syncFromRemote = true
 		} else if isGitRepo() && !isBareGitRepo() {
 			if originURL, err := gitRemoteGetURL("origin"); err == nil && originURL != "" {
 				syncURL = normalizeRemoteURL(originURL)
-				if !force && gitLsRemoteHasRef("origin", "refs/dolt/data") {
+				remoteHasDoltData = gitLsRemoteHasRef("origin", "refs/dolt/data")
+
+				decision := CheckRemoteSafety(RemoteSafetyInput{
+					Force:             force,
+					ReinitLocal:       reinitLocal,
+					DiscardRemote:     discardRemote,
+					DestroyToken:      destroyToken,
+					ExpectedToken:     FormatDestroyToken(prefix),
+					RemoteHasDoltData: remoteHasDoltData,
+					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+				})
+
+				switch decision.Action {
+				case ActionRefuseDivergence, ActionRequireDestroyToken:
+					fmt.Fprintf(os.Stderr, "\n%s\n\n", decision.UserMessage)
+					os.Exit(decision.ExitCode)
+				case ActionBootstrap:
 					syncFromRemote = true
+				case ActionProceedWithDivergence:
+					// Interactive destroy-token prompt (non-interactive
+					// path already validated by CheckRemoteSafety).
+					if decision.Reason == "authorized-divergence" && term.IsTerminal(int(os.Stdin.Fd())) && destroyToken == "" {
+						expected := FormatDestroyToken(prefix)
+						fmt.Fprintf(os.Stderr, "\n%s You are about to discard the remote's Dolt history.\n\n", ui.RenderWarn("WARNING:"))
+						fmt.Fprintf(os.Stderr, "  Remote: %s\n", syncURL)
+						fmt.Fprintf(os.Stderr, "  Type %q to confirm: ", expected)
+						scanner := bufio.NewScanner(os.Stdin)
+						scanner.Scan()
+						if strings.TrimSpace(scanner.Text()) != expected {
+							fmt.Fprintf(os.Stderr, "\nAborted. See 'bd help init-safety' for details.\n")
+							os.Exit(ExitDestroyTokenMissing)
+						}
+					}
+					// Race-safety: re-verify the remote state hasn't
+					// changed between our earlier gitLsRemoteHasRef and
+					// the user's confirmation. If another agent pushed
+					// during the prompt window, fail rather than silently
+					// overwriting their fresh work.
+					if gitLsRemoteHasRef("origin", "refs/dolt/data") != remoteHasDoltData {
+						fmt.Fprintf(os.Stderr, "\nAborted: remote state changed during confirmation. Re-run to re-verify intent.\n")
+						os.Exit(ExitRemoteDivergenceRefused)
+					}
+					// Proceed without bootstrap; remote will be overwritten on next push.
+					// syncFromRemote stays false.
+				case ActionNoRemoteData:
+					// Fresh remote, no-op for bootstrap decision.
 				}
 			}
 		}
@@ -1270,7 +1379,9 @@ func init() {
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude settings generation")
-	initCmd.Flags().Bool("force", false, "Force re-initialization even if database already has issues (may cause data loss)")
+	initCmd.Flags().Bool("force", false, "Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').")
+	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.")
+	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
 	initCmd.Flags().Bool("from-jsonl", false, "Import issues from .beads/issues.jsonl instead of git history")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")
