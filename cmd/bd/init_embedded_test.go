@@ -753,9 +753,10 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	env := bdEnv(dir)
 
 	type result struct {
-		idx int
-		out string
-		err error
+		idx      int
+		out      string
+		err      error
+		timedOut bool
 	}
 	results := make([]result, N)
 	var wg sync.WaitGroup
@@ -763,17 +764,24 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			cmd := exec.Command(bd, "init", "--prefix", "conc", "--force", "--quiet", "--skip-agents")
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+
+			cmd := exec.CommandContext(ctx, bd, "init", "--prefix", "conc", "--force", "--quiet", "--skip-agents")
 			cmd.Dir = dir
 			cmd.Env = env
 			out, err := cmd.CombinedOutput()
-			results[idx] = result{idx: idx, out: string(out), err: err}
+			results[idx] = result{idx: idx, out: string(out), err: err, timedOut: ctx.Err() == context.DeadlineExceeded}
 		}(i)
 	}
 	wg.Wait()
 
 	successes, lockErrors := 0, 0
 	for _, r := range results {
+		if r.timedOut {
+			t.Errorf("process %d timed out after 45s running concurrent bd init: %v\n%s", r.idx, r.err, r.out)
+			continue
+		}
 		if strings.Contains(r.out, "panic") {
 			t.Errorf("process %d panicked:\n%s", r.idx, r.out)
 		}
