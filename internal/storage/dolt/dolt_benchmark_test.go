@@ -1140,3 +1140,95 @@ func benchmarkSearchIssueSummaries(b *testing.B, totalN int) {
 func BenchmarkSearchIssueSummaries_1K(b *testing.B)  { benchmarkSearchIssueSummaries(b, 1000) }
 func BenchmarkSearchIssueSummaries_10K(b *testing.B) { benchmarkSearchIssueSummaries(b, 10000) }
 func BenchmarkSearchIssueSummaries_50K(b *testing.B) { benchmarkSearchIssueSummaries(b, 50000) }
+
+// =============================================================================
+// CountIssues / CountIssuesGroupedBy benchmarks (be-nu4.1.1 / D1)
+// =============================================================================
+
+// Reuses seedForSummaryBench so counts are measured against the same mixed
+// perms/wisps/labels population the summary benchmarks use — any future
+// comparison between a COUNT(*) and a SELECT+iterate stays apples-to-apples.
+
+func benchmarkCountIssues(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.CountIssues(ctx, types.IssueFilter{}); err != nil {
+			b.Fatalf("CountIssues: %v", err)
+		}
+	}
+}
+
+func BenchmarkCountIssues_1K(b *testing.B)  { benchmarkCountIssues(b, 1000) }
+func BenchmarkCountIssues_10K(b *testing.B) { benchmarkCountIssues(b, 10000) }
+func BenchmarkCountIssues_50K(b *testing.B) { benchmarkCountIssues(b, 50000) }
+
+func benchmarkCountIssuesGroupedBy(b *testing.B, totalN int, field string) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.CountIssuesGroupedBy(ctx, types.IssueFilter{}, field); err != nil {
+			b.Fatalf("CountIssuesGroupedBy(%s): %v", field, err)
+		}
+	}
+}
+
+func BenchmarkCountIssuesGroupedBy_status_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "status")
+}
+func BenchmarkCountIssuesGroupedBy_status_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "status")
+}
+func BenchmarkCountIssuesGroupedBy_status_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "status")
+}
+
+func BenchmarkCountIssuesGroupedBy_priority_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "priority")
+}
+func BenchmarkCountIssuesGroupedBy_priority_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "priority")
+}
+func BenchmarkCountIssuesGroupedBy_priority_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "priority")
+}
+
+func BenchmarkCountIssuesGroupedBy_issue_type_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "issue_type")
+}
+func BenchmarkCountIssuesGroupedBy_issue_type_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "issue_type")
+}
+func BenchmarkCountIssuesGroupedBy_issue_type_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "issue_type")
+}
+
+func BenchmarkCountIssuesGroupedBy_assignee_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "assignee")
+}
+func BenchmarkCountIssuesGroupedBy_assignee_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "assignee")
+}
+func BenchmarkCountIssuesGroupedBy_assignee_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "assignee")
+}
+
+func BenchmarkCountIssuesGroupedBy_label_1K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 1000, "label")
+}
+func BenchmarkCountIssuesGroupedBy_label_10K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 10000, "label")
+}
+func BenchmarkCountIssuesGroupedBy_label_50K(b *testing.B) {
+	benchmarkCountIssuesGroupedBy(b, 50000, "label")
+}

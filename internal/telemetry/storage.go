@@ -204,6 +204,27 @@ func (s *InstrumentedStorage) SearchIssueSummaries(ctx context.Context, query st
 	return summaries, err
 }
 
+func (s *InstrumentedStorage) CountIssues(ctx context.Context, filter types.IssueFilter) (int, error) {
+	ctx, span, t := s.op(ctx, "CountIssues")
+	count, err := s.inner.CountIssues(ctx, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", count))
+	}
+	s.done(ctx, span, t, err)
+	return count, err
+}
+
+func (s *InstrumentedStorage) CountIssuesGroupedBy(ctx context.Context, filter types.IssueFilter, field string) (map[string]int, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.group_by", field)}
+	ctx, span, t := s.op(ctx, "CountIssuesGroupedBy", attrs...)
+	groups, err := s.inner.CountIssuesGroupedBy(ctx, filter, field)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(groups)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return groups, err
+}
+
 // ── Dependencies ────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {

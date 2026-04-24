@@ -32,6 +32,30 @@ func (s *EmbeddedDoltStore) SearchIssueSummaries(ctx context.Context, query stri
 	return result, err
 }
 
+// CountIssues returns the number of issues matching filter without hydrating
+// any row data. D1 build, be-nu4.1.1.
+func (s *EmbeddedDoltStore) CountIssues(ctx context.Context, filter types.IssueFilter) (int, error) {
+	var result int
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.CountIssuesInTx(ctx, tx, filter)
+		return err
+	})
+	return result, err
+}
+
+// CountIssuesGroupedBy returns per-group counts for the given field. D1 build,
+// be-nu4.1.1.
+func (s *EmbeddedDoltStore) CountIssuesGroupedBy(ctx context.Context, filter types.IssueFilter, field string) (map[string]int, error) {
+	var result map[string]int
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.CountIssuesGroupedByInTx(ctx, tx, filter, field)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error) {
 	issueFilter := issueops.WispFilterToIssueFilter(filter)
 	var result []*types.Issue
