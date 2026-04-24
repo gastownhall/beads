@@ -115,20 +115,20 @@ func runProve(cmd *cobra.Command, args []string) {
 
 	result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
 	if err != nil {
-		FatalError("fetching issue %s: %v", issueID, err)
+		FatalErrorRespectJSON("fetching issue %s: %v", issueID, err)
 	}
 	if result == nil || result.Issue == nil {
 		if result != nil {
 			result.Close()
 		}
-		FatalError("issue %s not found", issueID)
+		FatalErrorRespectJSON("issue %s not found", issueID)
 	}
 	defer result.Close()
 
 	details := buildIssueDetailsForProve(ctx, result.Store, result.Issue)
-	allIssues, err := result.Store.SearchIssues(ctx, "", types.IssueFilter{})
+	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		FatalError("fetching issues: %v", err)
+		FatalErrorRespectJSON("fetching issues: %v", err)
 	}
 	repoRoot, _ := os.Getwd()
 	packet := buildProofPacket(details, allIssues, duplicateThreshold, pathHints, titlePrefixRegex, repoRoot)
