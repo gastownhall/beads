@@ -435,6 +435,85 @@ func TestReadySuite(t *testing.T) {
 // blockers. Regression test for GH#1359: the old SQLite backend filtered out
 // issues whose IDs contained "-mol-" or "-wisp-", hiding poured molecule steps
 // from `bd ready`. The Dolt backend should not have this filtering.
+// TestGetReadyWork_ExcludeLabels verifies that WorkFilter.ExcludeLabels filters
+// out issues that carry any of the specified labels.
+func TestGetReadyWork_ExcludeLabels(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	s := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
+	ctx := context.Background()
+
+	issues := []*types.Issue{
+		{ID: "excl-1", Title: "Normal task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now()},
+		{ID: "excl-2", Title: "Triage pending task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now()},
+		{ID: "excl-3", Title: "Wontfix task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now()},
+		{ID: "excl-4", Title: "Tagged with multiple labels", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now()},
+	}
+	for _, iss := range issues {
+		if err := s.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", iss.ID, err)
+		}
+	}
+	if err := s.AddLabel(ctx, "excl-2", "triage:pending", "test"); err != nil {
+		t.Fatalf("AddLabel excl-2: %v", err)
+	}
+	if err := s.AddLabel(ctx, "excl-3", "wontfix", "test"); err != nil {
+		t.Fatalf("AddLabel excl-3: %v", err)
+	}
+	if err := s.AddLabel(ctx, "excl-4", "triage:pending", "test"); err != nil {
+		t.Fatalf("AddLabel excl-4 triage:pending: %v", err)
+	}
+	if err := s.AddLabel(ctx, "excl-4", "backend", "test"); err != nil {
+		t.Fatalf("AddLabel excl-4 backend: %v", err)
+	}
+
+	t.Run("ExcludeSingleLabel", func(t *testing.T) {
+		results, err := s.GetReadyWork(ctx, types.WorkFilter{ExcludeLabels: []string{"triage:pending"}})
+		if err != nil {
+			t.Fatalf("GetReadyWork: %v", err)
+		}
+		ids := make(map[string]bool)
+		for _, r := range results {
+			ids[r.ID] = true
+		}
+		if ids["excl-2"] {
+			t.Error("excl-2 (triage:pending) should be excluded")
+		}
+		if ids["excl-4"] {
+			t.Error("excl-4 (has triage:pending) should be excluded")
+		}
+		if !ids["excl-1"] {
+			t.Error("excl-1 (unlabelled) should be included")
+		}
+		if !ids["excl-3"] {
+			t.Error("excl-3 (wontfix, not triage:pending) should be included")
+		}
+	})
+
+	t.Run("ExcludeMultipleLabels", func(t *testing.T) {
+		results, err := s.GetReadyWork(ctx, types.WorkFilter{ExcludeLabels: []string{"triage:pending", "wontfix"}})
+		if err != nil {
+			t.Fatalf("GetReadyWork: %v", err)
+		}
+		ids := make(map[string]bool)
+		for _, r := range results {
+			ids[r.ID] = true
+		}
+		if ids["excl-2"] {
+			t.Error("excl-2 (triage:pending) should be excluded")
+		}
+		if ids["excl-3"] {
+			t.Error("excl-3 (wontfix) should be excluded")
+		}
+		if ids["excl-4"] {
+			t.Error("excl-4 (triage:pending) should be excluded")
+		}
+		if !ids["excl-1"] {
+			t.Error("excl-1 (no excluded labels) should be included")
+		}
+	})
+}
+
 func TestReadyWorkIncludesMoleculeSteps(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -548,5 +627,14 @@ func TestReadyCommandInit(t *testing.T) {
 	}
 	if sortFlag.DefValue != "priority" {
 		t.Errorf("--sort default should be 'priority', got %q", sortFlag.DefValue)
+	}
+
+	// Verify --exclude-label flag exists and defaults to empty
+	excludeLabelFlag := readyCmd.Flags().Lookup("exclude-label")
+	if excludeLabelFlag == nil {
+		t.Fatal("--exclude-label flag should exist")
+	}
+	if excludeLabelFlag.DefValue != "[]" {
+		t.Errorf("--exclude-label default should be '[]', got %q", excludeLabelFlag.DefValue)
 	}
 }
