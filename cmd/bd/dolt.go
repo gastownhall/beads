@@ -607,8 +607,11 @@ func showEmbeddedDoltStatus(beadsDir string) {
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
-			"mode":            "embedded",
-			"running":         false,
+			"mode": "embedded",
+			// Embedded mode has an active in-process engine, but no
+			// separate server process. Use a server-specific field so
+			// clients do not read running=false as "Dolt is unavailable".
+			"server_running":  false,
 			"data_dir":        dataDir,
 			"data_dir_exists": dataDirExists,
 		})

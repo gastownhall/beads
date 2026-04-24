@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -80,6 +81,23 @@ func TestEmbeddedDolt(t *testing.T) {
 		out := bdDolt(t, bd, dir, "status")
 		if !strings.Contains(out, "embedded") {
 			t.Errorf("expected embedded-mode status output to mention 'embedded': %s", out)
+		}
+	})
+
+	t.Run("embedded_status_json", func(t *testing.T) {
+		out := bdDolt(t, bd, dir, "status", "--json")
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("status --json returned invalid JSON: %v\n%s", err, out)
+		}
+		if result["mode"] != "embedded" {
+			t.Errorf("mode = %v, want embedded", result["mode"])
+		}
+		if result["server_running"] != false {
+			t.Errorf("server_running = %v, want false", result["server_running"])
+		}
+		if _, ok := result["running"]; ok {
+			t.Errorf("running should be omitted for embedded mode; use server_running instead: %v", result["running"])
 		}
 	})
 
