@@ -68,7 +68,7 @@ func GetStaleIssuesInTx(ctx context.Context, tx *sql.Tx, filter types.StaleFilte
 
 	// GetIssuesByIDsInTx returns issues in arbitrary order (WHERE IN),
 	// so re-order to preserve the updated_at ASC ordering from the query.
-	issues, err := GetIssuesByIDsInTx(ctx, tx, ids)
+	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, nil)
 	if err != nil {
 		return nil, err
 	}

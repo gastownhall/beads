@@ -30,7 +30,7 @@ func (s *EmbeddedDoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([
 	var result []*types.Issue
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetIssuesByIDsInTx(ctx, tx, ids)
+		result, err = issueops.GetIssuesByIDsInTx(ctx, tx, ids, nil)
 		return err
 	})
 	return result, err

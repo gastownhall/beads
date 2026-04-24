@@ -20,6 +20,18 @@ func (s *EmbeddedDoltStore) SearchIssues(ctx context.Context, query string, filt
 	return result, err
 }
 
+// SearchIssueSummaries is the narrow-projection variant of SearchIssues used by
+// list-shaped render paths (compact + --agent). D3 build, be-nu4.3.2.
+func (s *EmbeddedDoltStore) SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
+	var result []*types.IssueSummary
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssueSummariesInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error) {
 	issueFilter := issueops.WispFilterToIssueFilter(filter)
 	var result []*types.Issue
@@ -35,7 +47,7 @@ func (s *EmbeddedDoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []s
 	var result map[string][]string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetLabelsForIssuesInTx(ctx, tx, issueIDs)
+		result, err = issueops.GetLabelsForIssuesInTx(ctx, tx, issueIDs, nil)
 		return err
 	})
 	return result, err

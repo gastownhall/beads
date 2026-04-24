@@ -499,7 +499,7 @@ func (s *DoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.
 	var result []*types.Issue
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetIssuesByIDsInTx(ctx, tx, ids)
+		result, err = issueops.GetIssuesByIDsInTx(ctx, tx, ids, nil)
 		return err
 	})
 	return result, err
