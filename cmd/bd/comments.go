@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var commentsCmd = &cobra.Command{
@@ -38,13 +37,24 @@ Examples:
 			FatalErrorRespectJSON("getting comments: %v", err)
 		}
 		ctx := rootCtx
-		fullID, err := utils.ResolvePartialID(ctx, store, issueID)
+
+		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
 		if err != nil {
+			if result != nil {
+				result.Close()
+			}
 			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
-		issueID = fullID
+		if result == nil || result.Issue == nil {
+			if result != nil {
+				result.Close()
+			}
+			FatalErrorRespectJSON("issue %s not found", issueID)
+		}
+		defer result.Close()
+		issueID = result.ResolvedID
 
-		comments, err := store.GetIssueComments(ctx, issueID)
+		comments, err := result.Store.GetIssueComments(ctx, issueID)
 		if err != nil {
 			FatalErrorRespectJSON("getting comments: %v", err)
 		}
@@ -128,13 +138,23 @@ Examples:
 		}
 		ctx := rootCtx
 
-		fullID, err := utils.ResolvePartialID(ctx, store, issueID)
+		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
 		if err != nil {
+			if result != nil {
+				result.Close()
+			}
 			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
-		issueID = fullID
+		if result == nil || result.Issue == nil {
+			if result != nil {
+				result.Close()
+			}
+			FatalErrorRespectJSON("issue %s not found", issueID)
+		}
+		defer result.Close()
+		issueID = result.ResolvedID
 
-		comment, err := store.AddIssueComment(ctx, issueID, author, commentText)
+		comment, err := result.Store.AddIssueComment(ctx, issueID, author, commentText)
 		if err != nil {
 			FatalErrorRespectJSON("adding comment: %v", err)
 		}

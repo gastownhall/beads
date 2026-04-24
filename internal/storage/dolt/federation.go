@@ -377,6 +377,9 @@ func (s *DoltStore) isPeerGitProtocolRemote(ctx context.Context, peer string) bo
 // Used for git-protocol remotes where CALL DOLT_PUSH times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPushToPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
+	if err := s.prePushFSCK(ctx); err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "dolt", "push", peer, s.branch) // #nosec G204 -- fixed command with validated peer/branch
 	cmd.Dir = s.CLIDir()
 	creds.applyToCmd(cmd)

@@ -79,8 +79,10 @@ func TestDoltShowConfigDefaultMode(t *testing.T) {
 		if !containsAny(output, "testdb", "Database") {
 			t.Errorf("output should show database name: %s", output)
 		}
-		if !containsAny(output, "Host", "Port", "User") {
-			t.Errorf("output should show server connection info: %s", output)
+		// Default mode is embedded; show embedded engine info instead of
+		// server connection details.
+		if !containsAny(output, "embedded", "Data") {
+			t.Errorf("output should show embedded mode info: %s", output)
 		}
 	})
 
@@ -105,6 +107,9 @@ func TestDoltShowConfigDefaultMode(t *testing.T) {
 		}
 		if result["database"] != "testdb" {
 			t.Errorf("expected database 'testdb', got %v", result["database"])
+		}
+		if embedded, ok := result["embedded"].(bool); !ok || !embedded {
+			t.Errorf("expected embedded=true in JSON output, got %v", result["embedded"])
 		}
 		// mode field should no longer be present
 		if _, ok := result["mode"]; ok {

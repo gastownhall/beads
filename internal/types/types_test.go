@@ -514,11 +514,12 @@ func TestIssueTypeIsValid(t *testing.T) {
 		{TypeChore, true},
 		{TypeDecision, true},
 		{TypeMessage, true},
-		// Molecule is now a core type (used by swarm create)
+		// Molecule is a core type (used by swarm create)
 		{IssueType("molecule"), true},
-		// Orchestrator types are now custom types (not built-in)
+		// Gate is a core type (used by bd gate, formula gates — GH#3213)
+		{IssueType("gate"), true},
+		// Remaining orchestrator types are custom types (not built-in)
 		{IssueType("merge-request"), false},
-		{IssueType("gate"), false},
 		{IssueType("agent"), false},
 		{IssueType("role"), false},
 		{IssueType("convoy"), false},
@@ -582,9 +583,9 @@ func TestEventTypeValidation(t *testing.T) {
 	if !IssueType("molecule").IsBuiltIn() {
 		t.Error("IssueType(molecule).IsBuiltIn() = false, want true")
 	}
-	// custom types must NOT be treated as built-in
-	if IssueType("gate").IsBuiltIn() {
-		t.Error("IssueType(gate).IsBuiltIn() = true, want false")
+	// gate is now a built-in type (used by bd gate, formula gates — GH#3213)
+	if !IssueType("gate").IsBuiltIn() {
+		t.Error("IssueType(gate).IsBuiltIn() = false, want true")
 	}
 
 	// Normalize must not map event to a core type

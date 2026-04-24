@@ -3,11 +3,28 @@ package testutil
 import (
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"testing"
 	"time"
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
 const DoltDockerImage = "dolthub/dolt-sql-server:1.86.0"
+
+// RequireDoltBinary ensures the `dolt` CLI binary is available. The test is
+// skipped locally when dolt is missing but fatally fails under GitHub Actions
+// (GITHUB_ACTIONS=true). CI is expected to install dolt; a missing binary
+// there means the workflow is broken, not that the test should be skipped.
+func RequireDoltBinary(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("dolt"); err != nil {
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			t.Fatalf("dolt binary missing under GITHUB_ACTIONS: %v — the CI workflow must install dolt (see .github/workflows/ci.yml)", err)
+		}
+		t.Skipf("dolt binary not found: %v", err)
+	}
+}
 
 // FindFreePort finds an available TCP port by binding to :0.
 func FindFreePort() (int, error) {

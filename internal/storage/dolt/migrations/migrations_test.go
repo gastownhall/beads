@@ -2,7 +2,6 @@ package migrations
 
 import (
 	"database/sql"
-	"os/exec"
 	"testing"
 	"time"
 
@@ -17,9 +16,7 @@ import (
 func openTestDoltBranch(t *testing.T) *sql.DB {
 	t.Helper()
 
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt binary not found, skipping migration test")
-	}
+	testutil.RequireDoltBinary(t)
 	if testServerPort == 0 {
 		t.Skip("test Dolt server not running, skipping migration test")
 	}

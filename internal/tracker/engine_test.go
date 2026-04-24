@@ -5,7 +5,6 @@ package tracker
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -19,9 +18,7 @@ import (
 // newTestStore creates a dolt store on the shared database with branch isolation.
 func newTestStore(t *testing.T) *dolt.DoltStore {
 	t.Helper()
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping test")
-	}
+	testutil.RequireDoltBinary(t)
 	if testServerPort == 0 || testSharedDB == "" {
 		t.Skip("shared test Dolt database not initialized, skipping test")
 	}

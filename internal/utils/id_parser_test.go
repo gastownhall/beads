@@ -7,18 +7,16 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"os/exec"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func newTestStore(t *testing.T) *dolt.DoltStore {
 	t.Helper()
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping test")
-	}
+	testutil.RequireDoltBinary(t)
 	if testServerPort == 0 {
 		t.Skip("Test Dolt server not running, skipping test")
 	}

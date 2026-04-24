@@ -91,10 +91,12 @@ type TransitionsResult struct {
 
 // SearchResult represents a Jira JQL search response.
 type SearchResult struct {
-	StartAt    int     `json:"startAt"`
-	MaxResults int     `json:"maxResults"`
-	Total      int     `json:"total"`
-	Issues     []Issue `json:"issues"`
+	StartAt       int     `json:"startAt"`
+	MaxResults    int     `json:"maxResults"`
+	Total         int     `json:"total"`
+	NextPageToken string  `json:"nextPageToken"`
+	IsLast        bool    `json:"isLast"`
+	Issues        []Issue `json:"issues"`
 }
 
 // Client provides HTTP access to a Jira instance.
@@ -164,8 +166,10 @@ const searchFields = "summary,description,status,priority,issuetype,project,assi
 func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) {
 	var allIssues []Issue
 	startAt := 0
+	nextPageToken := ""
 	maxResults := 100
 	page := 0
+	useV2Pagination := c.APIVersion == "2"
 
 	for {
 		select {
@@ -182,13 +186,17 @@ func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) 
 		params := url.Values{
 			"jql":        {jql},
 			"fields":     {searchFields},
-			"startAt":    {fmt.Sprintf("%d", startAt)},
 			"maxResults": {fmt.Sprintf("%d", maxResults)},
+		}
+		if useV2Pagination {
+			params.Set("startAt", fmt.Sprintf("%d", startAt))
+		} else if nextPageToken != "" {
+			params.Set("nextPageToken", nextPageToken)
 		}
 
 		// v3 uses /search/jql; v2 uses /search (both accept jql as a query param)
 		searchPath := "search/jql"
-		if c.APIVersion == "2" {
+		if useV2Pagination {
 			searchPath = "search"
 		}
 		apiURL := fmt.Sprintf("%s/%s?%s", c.apiBase(), searchPath, params.Encode())
@@ -205,10 +213,20 @@ func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) 
 
 		allIssues = append(allIssues, result.Issues...)
 
-		if len(result.Issues) == 0 || startAt+len(result.Issues) >= result.Total {
+		if len(result.Issues) == 0 {
 			break
 		}
-		startAt += len(result.Issues)
+		if useV2Pagination {
+			if startAt+len(result.Issues) >= result.Total {
+				break
+			}
+			startAt += len(result.Issues)
+			continue
+		}
+		if result.IsLast || result.NextPageToken == "" {
+			break
+		}
+		nextPageToken = result.NextPageToken
 	}
 
 	return allIssues, nil
