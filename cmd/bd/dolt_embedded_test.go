@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,15 +51,16 @@ func TestEmbeddedDolt(t *testing.T) {
 
 	// ===== Server-only commands must fail in embedded mode =====
 
+	// status and show are intentionally NOT in this list: they report
+	// embedded-mode state rather than erroring out. See the
+	// embedded_status/embedded_show subtests below.
 	serverOnlyCmds := []struct {
 		name string
 		args []string
 	}{
 		{"start", []string{"start"}},
 		{"stop", []string{"stop"}},
-		{"status", []string{"status"}},
 		{"test", []string{"test"}},
-		{"show", []string{"show"}},
 		{"set", []string{"set", "host", "127.0.0.1"}},
 		{"killall", []string{"killall"}},
 		{"clean-databases", []string{"clean-databases"}},
@@ -72,6 +74,39 @@ func TestEmbeddedDolt(t *testing.T) {
 			}
 		})
 	}
+
+	// ===== Embedded-mode inspection commands succeed with embedded-mode output =====
+
+	t.Run("embedded_status", func(t *testing.T) {
+		out := bdDolt(t, bd, dir, "status")
+		if !strings.Contains(out, "embedded") {
+			t.Errorf("expected embedded-mode status output to mention 'embedded': %s", out)
+		}
+	})
+
+	t.Run("embedded_status_json", func(t *testing.T) {
+		out := bdDolt(t, bd, dir, "status", "--json")
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("status --json returned invalid JSON: %v\n%s", err, out)
+		}
+		if result["mode"] != "embedded" {
+			t.Errorf("mode = %v, want embedded", result["mode"])
+		}
+		if result["server_running"] != false {
+			t.Errorf("server_running = %v, want false", result["server_running"])
+		}
+		if _, ok := result["running"]; ok {
+			t.Errorf("running should be omitted for embedded mode; use server_running instead: %v", result["running"])
+		}
+	})
+
+	t.Run("embedded_show", func(t *testing.T) {
+		out := bdDolt(t, bd, dir, "show")
+		if !strings.Contains(out, "Mode:") || !strings.Contains(out, "embedded") {
+			t.Errorf("expected embedded-mode show output to contain 'Mode:' and 'embedded': %s", out)
+		}
+	})
 
 	// ===== Working commands =====
 
