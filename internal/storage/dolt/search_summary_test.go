@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -177,7 +178,10 @@ func seedSummaryParityFixture(t *testing.T, store *DoltStore, n int) {
 			}
 			chunk = append(chunk, iss)
 		}
-		if err := store.CreateIssues(ctx, chunk, "test"); err != nil {
+		if err := store.CreateIssuesWithFullOptions(ctx, chunk, "test", storage.BatchCreateOptions{
+			OrphanHandling:       storage.OrphanAllow,
+			SkipPrefixValidation: true,
+		}); err != nil {
 			t.Fatalf("create perms: %v", err)
 		}
 		for i, iss := range chunk {
