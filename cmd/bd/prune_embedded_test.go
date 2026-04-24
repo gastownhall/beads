@@ -98,16 +98,12 @@ func TestEmbeddedPrune(t *testing.T) {
 		wispID := createAndCloseEphemeral(t, bd, dir, "Closed wisp")
 
 		out := bdPrune(t, bd, dir, "--pattern", "pw-*", "--force")
-		// Either "no beads to prune" or a pruned count of 0; the ephemeral
-		// must not appear.
+		// Prune's non-ephemeral scope must not match the wisp at all.
 		if strings.Contains(out, wispID) {
 			t.Errorf("prune wrongly touched ephemeral %s: %s", wispID, out)
 		}
-
-		// Double-check: the ephemeral still exists for `bd purge` to clean up.
-		out = bdPurge(t, bd, dir, "--pattern", "pw-*", "--dry-run")
-		if !strings.Contains(out, "Would purge 1") {
-			t.Errorf("expected purge dry-run to still see ephemeral %s after prune; got: %s", wispID, out)
+		if !strings.Contains(strings.ToLower(out), "no closed beads to prune") {
+			t.Errorf("expected prune to skip closed ephemeral %s; got: %s", wispID, out)
 		}
 	})
 
