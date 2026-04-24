@@ -35,7 +35,7 @@ func (s *EmbeddedDoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []s
 	var result map[string][]string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetLabelsForIssuesInTx(ctx, tx, issueIDs)
+		result, err = issueops.GetLabelsForIssuesInTx(ctx, tx, issueIDs, nil)
 		return err
 	})
 	return result, err

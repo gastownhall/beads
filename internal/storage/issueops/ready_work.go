@@ -200,7 +200,7 @@ func GetReadyWorkInTx(
 	}
 
 	// Batch-fetch full issues preserving order.
-	issues, err := GetIssuesByIDsInTx(ctx, tx, issueIDs)
+	issues, err := GetIssuesByIDsInTx(ctx, tx, issueIDs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get ready work: fetch issues: %w", err)
 	}

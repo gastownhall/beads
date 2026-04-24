@@ -973,3 +973,84 @@ func BenchmarkGetLabels(b *testing.B) {
 		}
 	}
 }
+
+// =============================================================================
+// WispIDSet mixed-ID routing benchmarks (be-nu4.2.1 / D2)
+// =============================================================================
+
+// seedMixedForWispSetBench populates the store with N issues at the requested
+// wisp share. IDs are returned in the order created (perms first, then wisps)
+// so benchmarks can shuffle if needed. Callers are responsible for cleanup.
+func seedMixedForWispSetBench(b *testing.B, store *DoltStore, totalN int, wispShare float64) []string {
+	b.Helper()
+	ctx := context.Background()
+	numWisps := int(float64(totalN) * wispShare)
+	numPerms := totalN - numWisps
+
+	ids := make([]string, 0, totalN)
+	for i := 0; i < numPerms; i++ {
+		iss := &types.Issue{
+			ID:        fmt.Sprintf("ws-perm-%d", i),
+			Title:     "perm",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			b.Fatalf("create perm %d: %v", i, err)
+		}
+		ids = append(ids, iss.ID)
+	}
+	for i := 0; i < numWisps; i++ {
+		iss := &types.Issue{
+			Title:     "wisp",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			b.Fatalf("create wisp %d: %v", i, err)
+		}
+		ids = append(ids, iss.ID)
+	}
+	return ids
+}
+
+func benchmarkGetLabelsForIssuesMixed(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	ids := seedMixedForWispSetBench(b, store, totalN, 0.25)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.GetLabelsForIssues(ctx, ids); err != nil {
+			b.Fatalf("GetLabelsForIssues: %v", err)
+		}
+	}
+}
+
+func BenchmarkGetLabelsForIssues_Mixed1K(b *testing.B)  { benchmarkGetLabelsForIssuesMixed(b, 1000) }
+func BenchmarkGetLabelsForIssues_Mixed10K(b *testing.B) { benchmarkGetLabelsForIssuesMixed(b, 10000) }
+func BenchmarkGetLabelsForIssues_Mixed50K(b *testing.B) { benchmarkGetLabelsForIssuesMixed(b, 50000) }
+
+func benchmarkGetIssuesByIDsMixed(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	ids := seedMixedForWispSetBench(b, store, totalN, 0.25)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.GetIssuesByIDs(ctx, ids); err != nil {
+			b.Fatalf("GetIssuesByIDs: %v", err)
+		}
+	}
+}
+
+func BenchmarkGetIssuesByIDs_Mixed1K(b *testing.B)  { benchmarkGetIssuesByIDsMixed(b, 1000) }
+func BenchmarkGetIssuesByIDs_Mixed10K(b *testing.B) { benchmarkGetIssuesByIDsMixed(b, 10000) }
+func BenchmarkGetIssuesByIDs_Mixed50K(b *testing.B) { benchmarkGetIssuesByIDsMixed(b, 50000) }
