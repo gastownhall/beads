@@ -857,6 +857,10 @@ startupLoop:
 		}
 		_ = os.Remove(pidPath(beadsDir))
 		_ = os.Remove(portPath(beadsDir))
+		if hasJournalCorruption, logErr := logHasCorruptJournalError(logPath(beadsDir)); logErr == nil && hasJournalCorruption {
+			return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\n\n%s",
+				pid, actualPort, err, corruptJournalRecoveryHint(beadsDir))
+		}
 		return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\nCheck logs: %s",
 			pid, actualPort, err, logPath(beadsDir))
 	}

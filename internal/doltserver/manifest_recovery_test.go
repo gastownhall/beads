@@ -38,6 +38,38 @@ func TestLogHasCorruptManifestError(t *testing.T) {
 	}
 }
 
+func TestLogHasCorruptJournalError(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "dolt-server.log")
+
+	if err := os.WriteFile(logPath, []byte(`Starting server with Config HP="127.0.0.1:51570"
+possible data loss detected in journal file at offset 1080309: corrupted journal
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := logHasCorruptJournalError(logPath)
+	if err != nil || !got {
+		t.Fatalf("corrupt journal log: got (%v, %v), want (true, nil)", got, err)
+	}
+}
+
+func TestCorruptJournalRecoveryHint(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	got := corruptJournalRecoveryHint(beadsDir)
+	for _, want := range []string{
+		"Dolt journal corruption detected",
+		"bd bootstrap --dry-run",
+		"bd bootstrap --yes",
+		"dolt fsck --revive-journal-with-data-loss",
+		"will not run automatic journal repair",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("hint missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // writeNomsDir creates a .dolt/noms/ shape under root and returns its path.
 // If journalSize >= 0, a 32-char journal file is written with that size.
 // If idxSize >= 0, a journal.idx file is written with that size.
