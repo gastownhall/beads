@@ -66,7 +66,7 @@ func TestWispIDSetInTx_HardGate(t *testing.T) {
 	ids := []string{perm.ID, wisp.ID}
 	if err := store.withReadTx(ctx, func(tx *sql.Tx) error {
 		// WispIDSetInTx should contain only the wisp ID, not the perm.
-		set, err := issueops.WispIDSetInTx(ctx, tx)
+		set, err := issueops.WispIDSetInTx(ctx, tx, ids)
 		if err != nil {
 			t.Fatalf("WispIDSetInTx: %v", err)
 		}
@@ -160,7 +160,7 @@ func TestWispIDSetInTx_Empty(t *testing.T) {
 
 		// And the wisp set query itself should return cleanly on an empty
 		// wisps table.
-		set, err := issueops.WispIDSetInTx(ctx, tx)
+		set, err := issueops.WispIDSetInTx(ctx, tx, nil)
 		if err != nil {
 			t.Fatalf("WispIDSetInTx empty: %v", err)
 		}

@@ -201,9 +201,11 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID 
 // transaction, including labels. Automatically routes each ID to the correct
 // table (issues/wisps). Uses batched IN clauses.
 //
-// wispSet is an optional pre-built set of active wisp IDs (see WispIDSetInTx).
-// Pass nil to have the helper build the set once internally; callers hydrating
-// multiple batches inside one tx can build it up-front and reuse.
+// wispSet is an optional pre-built set of active wisp IDs scoped to
+// cover ids (see WispIDSetInTx). Pass nil to have the helper build
+// a scoped set internally; callers hydrating multiple batches inside
+// one tx can build the set once over the union of their IDs and
+// reuse it across calls.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string, wispSet map[string]struct{}) ([]*types.Issue, error) {
@@ -213,7 +215,7 @@ func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string, wispSet m
 
 	if wispSet == nil {
 		var err error
-		wispSet, err = WispIDSetInTx(ctx, tx)
+		wispSet, err = WispIDSetInTx(ctx, tx, ids)
 		if err != nil {
 			return nil, fmt.Errorf("get issues by IDs: build wisp set: %w", err)
 		}

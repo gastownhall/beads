@@ -1,6 +1,7 @@
 package issueops
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
@@ -67,5 +68,19 @@ func TestPartitionByWispSet(t *testing.T) {
 				t.Errorf("permIDs: got %v, want %v", gotPerms, tc.wantPerms)
 			}
 		})
+	}
+}
+
+func TestWispIDSetInTx_EmptyIDsNoQuery(t *testing.T) {
+	t.Parallel()
+	set, err := WispIDSetInTx(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("WispIDSetInTx(nil, nil): %v", err)
+	}
+	if set == nil {
+		t.Fatalf("expected non-nil empty map, got nil")
+	}
+	if len(set) != 0 {
+		t.Fatalf("expected empty map, got %v", set)
 	}
 }
