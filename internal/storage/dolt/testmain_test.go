@@ -175,6 +175,7 @@ func testMainInner(m *testing.M) int {
 	code = doltserver.ApplyLeakPolicy("internal/storage/dolt", code, swept)
 
 	testServerPort = 0
+	os.Unsetenv("BEADS_DOLT_SERVER_PORT")
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
 	os.Unsetenv("BEADS_TEST_PDEATHSIG")
