@@ -7,8 +7,8 @@
 
   outputs =
     {
-      self,
       nixpkgs,
+      ...
     }:
     let
       systems = [
@@ -19,19 +19,14 @@
       ];
 
       forAllSystems =
-        f:
-        nixpkgs.lib.genAttrs systems (
-          system:
-          f {
-            pkgs = import nixpkgs {
-              inherit system;
-            };
-            inherit system self;
-          }
-        );
-    in rec {
+        f: overlays: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system overlays; }));
+
+      overlay = import ./overlay.nix;
+    in
+    {
       icu = nixpkgs.icu77;
-      packages = forAllSystems (args: import ./packages.nix (args // { inherit icu; }));
+      packages = forAllSystems (import ./packages.nix) [ overlay ];
+      overlay.default = overlay;
 
       apps = forAllSystems (
         { self, system, ... }:
