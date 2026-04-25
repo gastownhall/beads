@@ -1005,6 +1005,11 @@ var rootCmd = &cobra.Command{
 		if err := telemetry.Init(rootCtx, "bd", Version, bdPrefix); err != nil {
 			debug.Logf("warning: telemetry init failed: %v", err)
 		}
+		// Decorate with OTel instrumentation so storage operations get spans
+		// and bd.storage.* / bd.issue.count metrics. No-op when telemetry is
+		// disabled. Wrapped before NewHookFiringStore below so storage spans
+		// measure pure DB time and don't include hook-firing overhead.
+		store = telemetry.WrapStorage(store)
 		rootCtx, commandSpan = telemetry.Tracer("bd").Start(rootCtx, "bd.command."+cmd.Name(),
 			oteltrace.WithAttributes(
 				attribute.String("bd.command", cmd.Name()),
