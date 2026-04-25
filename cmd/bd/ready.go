@@ -23,7 +23,7 @@ var readyCmd = &cobra.Command{
 Excludes in_progress, blocked, deferred, and hooked issues. This uses the
 GetReadyWork API which applies blocker-aware semantics to find truly claimable work.
 
-Note: 'bd list --ready' is NOT equivalent - it only filters by status=open.
+Note: 'bd list --ready' uses the same blocker-aware ready-work semantics.
 
 Use --mol to filter to a specific molecule's steps:
   bd ready --mol bd-patrol   # Show ready steps within molecule
