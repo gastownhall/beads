@@ -176,7 +176,8 @@ jobs:
   # Embedded Dolt tests - test the in-process Dolt engine (no server required)
   #
   # Split into: build → storage tests + parallel cmd test shards.
-  # Adding new *_embedded_test.go files auto-distributes via hash sharding.
+  # cmd/bd embedded tests use a committed shard manifest; newly-added tests
+  # still auto-distribute via hash fallback until the manifest is updated.
 
   build-embedded:
     name: Build (Embedded Dolt)
