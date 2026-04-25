@@ -453,7 +453,7 @@ Gate types:
 
 GitHub gates use the 'gh' CLI to query status:
   - gh:run checks 'gh run view <id> --json status,conclusion'
-  - gh:pr checks 'gh pr view <id> --json state,merged'
+  - gh:pr checks 'gh pr view <id> --json state,title'
 
 A gate is resolved when:
   - gh:run: status=completed AND conclusion=success
@@ -635,9 +635,8 @@ type ghRunStatus struct {
 
 // ghPRStatus holds the JSON response from 'gh pr view'
 type ghPRStatus struct {
-	State  string `json:"state"`
-	Merged bool   `json:"merged"`
-	Title  string `json:"title"`
+	State string `json:"state"`
+	Title string `json:"title"`
 }
 
 var (
@@ -790,8 +789,8 @@ func checkGHPR(gate *types.Issue) (resolved, escalated bool, reason string, err 
 		return false, false, "no PR number specified", nil
 	}
 
-	// Run: gh pr view <id> --json state,merged,title
-	cmd := exec.Command("gh", "pr", "view", gate.AwaitID, "--json", "state,merged,title") // #nosec G204 -- gate.AwaitID is a validated GitHub PR number
+	// Run: gh pr view <id> --json state,title
+	cmd := exec.Command("gh", "pr", "view", gate.AwaitID, "--json", "state,title") // #nosec G204 -- gate.AwaitID is a validated GitHub PR number
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -819,9 +818,6 @@ func checkGHPR(gate *types.Issue) (resolved, escalated bool, reason string, err 
 	case "MERGED":
 		return true, false, fmt.Sprintf("PR '%s' was merged", status.Title), nil
 	case "CLOSED":
-		if status.Merged {
-			return true, false, fmt.Sprintf("PR '%s' was merged", status.Title), nil
-		}
 		return false, true, fmt.Sprintf("PR '%s' was closed without merging", status.Title), nil
 	case "OPEN":
 		return false, false, fmt.Sprintf("PR '%s' is still open", status.Title), nil
