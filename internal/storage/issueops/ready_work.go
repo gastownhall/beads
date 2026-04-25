@@ -98,10 +98,19 @@ func GetReadyWorkInTx(
 		}
 		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM labels WHERE label IN (%s))", strings.Join(placeholders, ", ")))
 	}
-	// Parent filtering.
+	// Parent filtering: recursive CTE walks full parent-child tree (GH#3396).
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
+		whereClauses = append(whereClauses, `(id IN (
+			WITH RECURSIVE descendants AS (
+				SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?
+				UNION ALL
+				SELECT d.issue_id FROM dependencies d
+				INNER JOIN descendants dt ON d.depends_on_id = dt.issue_id
+				WHERE d.type = 'parent-child'
+			)
+			SELECT issue_id FROM descendants
+		) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))`)
 		args = append(args, parentID, parentID)
 	}
 
