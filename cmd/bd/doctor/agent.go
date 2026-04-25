@@ -234,7 +234,7 @@ func enrichCLIVersion(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("CLI version check: %s. An outdated CLI may lack bug fixes or schema migrations needed by the current database.", dc.Message),
 		observed:    dc.Message,
 		expected:    "CLI version matches latest GitHub release",
-		commands:    []string{"go install github.com/steveyegge/beads/cmd/bd@latest"},
+		commands:    []string{installScriptCommand},
 		sourceFiles: []string{"cmd/bd/doctor/version.go:CheckCLIVersion"},
 	}
 }
@@ -582,7 +582,7 @@ func enrichBdInPath(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("bd not in PATH: %s. Claude Code hooks invoke bd commands, but bd is not found in the system PATH. Hooks will fail silently.", dc.Message),
 		observed:    dc.Message,
 		expected:    "'bd' executable is in PATH and runnable",
-		commands:    []string{"which bd", "go install github.com/steveyegge/beads/cmd/bd@latest"},
+		commands:    []string{"which bd", installScriptCommand},
 		sourceFiles: []string{"cmd/bd/doctor/claude.go:CheckBdInPath"},
 	}
 }

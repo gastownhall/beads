@@ -308,8 +308,11 @@ The plugin requires the `bd` CLI to be installed. Update it separately:
 # Quick update
 curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
-# Or with go
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Or with Go (server-mode only)
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
+
+# Or with Go (embedded-capable)
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ### 3. Version Compatibility

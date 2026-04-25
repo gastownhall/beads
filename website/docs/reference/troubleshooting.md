@@ -20,8 +20,8 @@ go list -f {{.Target}} github.com/steveyegge/beads/cmd/bd
 # Add Go bin to PATH
 export PATH="$PATH:$(go env GOPATH)/bin"
 
-# Or reinstall
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Or reinstall with the recommended installer
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### `zsh: killed bd` on macOS
@@ -29,7 +29,7 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 CGO/SQLite compatibility issue:
 
 ```bash
-CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ### Permission denied

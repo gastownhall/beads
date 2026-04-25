@@ -53,8 +53,8 @@ bd version
 # Via Homebrew (macOS/Linux)
 brew upgrade beads
 
-# Via go install
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Via install script
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 # Via package manager
 # See https://github.com/gastownhall/beads#installing

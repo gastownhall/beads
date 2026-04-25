@@ -21,7 +21,7 @@ creating significant portability problems:
 | Linux | Binaries dynamically link a specific `libicui18n.so.NN` version; crash on distros with a different ICU version |
 | macOS | ICU is keg-only in Homebrew; `go install` fails without manual `CGO_CFLAGS`/`CGO_LDFLAGS` |
 | Windows | ICU C headers (`unicode/uregex.h`) not available; `go install` and CGO builds fail |
-| `go install` | Users cannot pass `-tags gms_pure_go` to `go install pkg@latest` |
+| `go install` | The module cannot make plain `go install pkg@latest` use `-tags gms_pure_go` automatically |
 
 ## How It Works
 

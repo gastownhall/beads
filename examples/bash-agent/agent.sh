@@ -39,7 +39,7 @@ AGENT_NAME="${BEADS_AGENT_NAME:-bash-agent-$$}"
 # Check if bd is installed
 if ! command -v bd &> /dev/null; then
     log_error "bd is not installed"
-    echo "Install with: go install github.com/steveyegge/beads/cmd/bd@latest"
+    echo "Install with: curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"
     exit 1
 fi
 

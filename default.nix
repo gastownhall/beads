@@ -3,7 +3,6 @@
   self,
   buildGoModule,
   git,
-  icu,
   ...
 }:
 buildGoModule {
@@ -14,6 +13,7 @@ buildGoModule {
 
   # Point to the main Go package
   subPackages = [ "cmd/bd" ];
+  tags = [ "gms_pure_go" ];
   doCheck = false;
 
   # Go module dependencies hash - if build fails with hash mismatch, update with the "got:" value
@@ -31,10 +31,6 @@ buildGoModule {
   # Allow patch-level toolchain upgrades when a dependency's minimum Go patch
   # version is newer than nixpkgs' bundled patch version.
   env.GOTOOLCHAIN = "auto";
-  # Due to https://github.com/dolthub/go-icu-regex, which requires
-  # separate install of icu headers and library.
-  env.CGO_CPPFLAGS="-I${icu.dev}/include";
-  env.CGO_LDFLAGS="-L${icu}/lib";
 
   # Git is required for tests
   nativeBuildInputs = [ git ];

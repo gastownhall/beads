@@ -751,7 +751,7 @@ main() {
     echo ""
     echo "Or install from source:"
     echo "  1. Install Go from https://go.dev/dl/"
-    echo "  2. Run: CGO_ENABLED=1 go install github.com/gastownhall/beads/cmd/bd@latest"
+    echo "  2. Run: CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/gastownhall/beads/cmd/bd@latest"
     echo ""
     exit 1
 }

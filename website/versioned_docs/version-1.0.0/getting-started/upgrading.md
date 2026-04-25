@@ -16,7 +16,8 @@ Use the command that matches your install method:
 | Install script (macOS/Linux) | `curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh \| bash` |
 | PowerShell (Windows) | `irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 \| iex` |
 | npm | `npm update -g @beads/bd` |
-| go install | `go install github.com/steveyegge/beads/cmd/bd@latest` |
+| go install (server-mode only) | `CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest` |
+| go install (embedded-capable) | `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest` |
 
 ## After Upgrading
 

@@ -135,8 +135,8 @@ go list -f {{.Target}} github.com/steveyegge/beads/cmd/bd
 # Add Go bin to PATH (add to ~/.bashrc or ~/.zshrc)
 export PATH="$PATH:$(go env GOPATH)/bin"
 
-# Or reinstall
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Or reinstall with the recommended installer
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### Wrong version of bd running / Multiple bd binaries in PATH
@@ -176,13 +176,13 @@ Some users report crashes when running `bd init` or other commands on macOS. Thi
 
 **Workaround:**
 ```bash
-# Build with CGO enabled
-CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
+# Install an embedded-capable build
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 
 # Or if building from source
 git clone https://github.com/gastownhall/beads
 cd beads
-CGO_ENABLED=1 go build -o bd ./cmd/bd
+CGO_ENABLED=1 go build -tags gms_pure_go -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/
 ```
 

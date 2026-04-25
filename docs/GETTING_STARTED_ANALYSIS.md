@@ -86,12 +86,15 @@ CONTRIBUTING.md. The happy path should be `brew install beads` or `npm install
 **Appears in:** INSTALLING.md (lines 107-130), README.md (lines 75-91),
 CONTRIBUTING.md
 
-**Root cause:** Users who `go install` need CGO + ICU headers. But prebuilt
-binaries don't need any of this.
+**Root cause:** Users who run plain CGO-enabled `go install` take the upstream
+ICU regex path. Supported `go install` forms avoid ICU by using either
+`CGO_ENABLED=0` (server-mode only) or `GOFLAGS=-tags=gms_pure_go`
+(embedded-capable). Prebuilt binaries don't need any of this.
 
-**The fix:** Same as above — stop promoting `go install` as a primary install
-method. The prebuilt binary path (Homebrew, npm, install script) requires zero
-build dependencies. CGO/ICU docs belong in CONTRIBUTING.md only.
+**The fix:** Same as above — stop promoting plain `go install` as a primary
+install method. The prebuilt binary path (Homebrew, npm, install script)
+requires zero build dependencies. The two supported `go install` forms belong
+in the full installation docs, not the happy path.
 
 ### 2.3 `zsh: killed bd` / macOS crashes (~20 lines, duplicated in 2 files)
 

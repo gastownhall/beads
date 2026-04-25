@@ -39,9 +39,9 @@ If you prefer step-by-step control:
 
 2. **Run tests and build**:
    ```bash
-   TMPDIR=/tmp go test ./...
+   make test
    golangci-lint run ./...
-   TMPDIR=/tmp go build -o bd ./cmd/bd
+   make build
    ./bd version  # Verify it shows new version
    ```
 
@@ -82,7 +82,7 @@ This updates:
 
 **IMPORTANT**: After version bump, rebuild the local binary:
 ```bash
-go build -o bd ./cmd/bd
+make build
 ./bd version  # Should show new version
 ```
 

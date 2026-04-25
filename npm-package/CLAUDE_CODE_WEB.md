@@ -159,13 +159,13 @@ or
 curl: (22) The requested URL returned error: 403
 ```
 
-**Workaround: Use go install**
+**Workaround: Use a supported go install mode**
 
-If Go is available (it usually is in Claude Code web), use the `go install` fallback:
+If Go is available (it usually is in Claude Code web), use the embedded-capable `go install` fallback:
 
 ```bash
-# Install via go
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Install via Go without ICU
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 
 # Add to PATH (required each session)
 export PATH="$PATH:$HOME/go/bin"
@@ -182,13 +182,13 @@ bd version
 
 echo "🔗 Setting up bd (beads issue tracker)..."
 
-# Try npm first, fall back to go install
+# Try npm first, fall back to a supported Go install
 if ! command -v bd &> /dev/null; then
     if npm install -g @beads/bd --quiet 2>/dev/null && command -v bd &> /dev/null; then
         echo "✓ Installed via npm"
     elif command -v go &> /dev/null; then
         echo "npm install failed, trying go install..."
-        go install github.com/steveyegge/beads/cmd/bd@latest
+        CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
         export PATH="$PATH:$HOME/go/bin"
         echo "✓ Installed via go install"
     else

@@ -39,6 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: ./scripts/check-build-tags.sh
+      - run: ./scripts/check-go-install-guidance.sh
 
   # Fast check to ensure all version files are in sync
   check-version-consistency:

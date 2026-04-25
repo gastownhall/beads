@@ -47,20 +47,11 @@ brew install beads
 
 ### [Mise-en-place](https://mise.jdx.dev)  (macOS/Linux/Windows)
 
-You can install beads using mise in 2 different ways:
-
-1. Install the latest github release
+You can install beads using mise from the latest GitHub release:
 
 ```bash
 mise install github:gastownhall/beads
 mise use -g github:gastownhall/beads
-```
-
-2.  Build the latest code from git using go:
-
-```bash
-mise install go:github.com/steveyegge/beads/cmd/bd@latest
-mise use -g go:github.com/steveyegge/beads/cmd/bd
 ```
 
 **NOTE**: The `-g` enables beads globally.  To enable project-specific versions, omit that.
@@ -69,7 +60,9 @@ mise use -g go:github.com/steveyegge/beads/cmd/bd
 - ✅ Same as Homebrew: simple, updates via `mise up`, works without Go, handles PATH
 - ✅ Supports all platforms
 - ✅ Always the latest release
-- ✅ May optionally use a different version for specific projects
+- ✅ May optionally use a different release version for specific projects
+
+Mise's Go backend follows the same caveats as `go install`; prefer the release backend above.
 
 ### Quick Install Script (All Platforms)
 
@@ -80,7 +73,7 @@ curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/inst
 The installer will:
 - Detect your platform (macOS/Linux/FreeBSD, amd64/arm64)
 - Verify downloaded release archives against release `checksums.txt`
-- Install via `go install` if Go is available
+- Fall back to the supported `go install` modes if Go is available
 - Fall back to building from source if needed
 - Guide you through PATH setup if necessary
 
@@ -207,8 +200,7 @@ The script installs a prebuilt Windows release if available and verifies the dow
 
 **Via go install** (server-mode only, simplest):
 ```pwsh
-$env:CGO_ENABLED=0
-go install github.com/steveyegge/beads/cmd/bd@latest
+$env:CGO_ENABLED="0"; go install github.com/steveyegge/beads/cmd/bd@latest
 # Then: bd init --server   (requires a running dolt sql-server)
 ```
 
@@ -216,9 +208,7 @@ This produces a server-mode-only binary with no C compiler requirement — the f
 
 **Via go install** (embedded-capable, needs MinGW):
 ```pwsh
-$env:CGO_ENABLED=1
-$env:GOFLAGS="-tags=gms_pure_go"
-go install github.com/steveyegge/beads/cmd/bd@latest
+$env:CGO_ENABLED="1"; $env:GOFLAGS="-tags=gms_pure_go"; go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 Requires MinGW-w64 gcc on your PATH. ICU is **not** required — `gms_pure_go` selects Go's stdlib `regexp`.
@@ -460,13 +450,13 @@ Some users report crashes when running `bd init` or other commands on macOS. Thi
 
 **Workaround:**
 ```bash
-# Build with CGO enabled
-CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
+# Install an embedded-capable build
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 
 # Or if building from source
 git clone https://github.com/gastownhall/beads
 cd beads
-CGO_ENABLED=1 go build -o bd ./cmd/bd
+CGO_ENABLED=1 go build -tags gms_pure_go -o bd ./cmd/bd
 sudo mv bd /usr/local/bin/
 ```
 
@@ -557,7 +547,7 @@ CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/c
 ```bash
 cd beads
 git pull
-go build -o bd ./cmd/bd
+make build
 sudo mv bd /usr/local/bin/
 ```
 

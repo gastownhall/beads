@@ -30,34 +30,20 @@ curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/inst
 
 The installer will:
 - Detect your platform (macOS/Linux/FreeBSD, amd64/arm64)
-- Install via `go install` if Go is available
+- Fall back to the supported `go install` modes if Go is available
 - Fall back to building from source if needed
 - Guide you through PATH setup if necessary
 
-## Build Dependencies (go install / from source)
+## Go Install and Build Dependencies
 
-If you install via `go install` or build from source, you need system dependencies for CGO:
+Use Homebrew, npm, or the install script if you do not specifically need `go install`.
 
-macOS (Homebrew):
-```bash
-brew install icu4c zstd
-```
+`go install` has two supported modes:
 
-Linux (Debian/Ubuntu):
-```bash
-sudo apt-get install -y libicu-dev libzstd-dev
-```
+- **Server-mode only:** `CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest`
+- **Embedded-capable:** `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest`
 
-Linux (Fedora/RHEL):
-```bash
-sudo dnf install -y libicu-devel libzstd-devel
-```
-
-If you see `unicode/uregex.h` missing on macOS, `icu4c` is keg-only. Use:
-```bash
-ICU_PREFIX="$(brew --prefix icu4c)"
-CGO_CFLAGS="-I${ICU_PREFIX}/include" CGO_CPPFLAGS="-I${ICU_PREFIX}/include" CGO_LDFLAGS="-L${ICU_PREFIX}/lib" go install github.com/steveyegge/beads/cmd/bd@latest
-```
+ICU headers are not required. The embedded-capable command uses `gms_pure_go` so go-mysql-server uses Go's stdlib regexp instead of ICU.
 
 ## Platform-Specific Installation
 
@@ -68,16 +54,21 @@ CGO_CFLAGS="-I${ICU_PREFIX}/include" CGO_CPPFLAGS="-I${ICU_PREFIX}/include" CGO_
 brew install beads
 ```
 
-**Via go install**:
+**Via go install** (server-mode only):
 ```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
+```
+
+**Via go install** (embedded-capable):
+```bash
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 **From source**:
 ```bash
 git clone https://github.com/gastownhall/beads
 cd beads
-go build -o bd ./cmd/bd
+make build
 sudo mv bd /usr/local/bin/
 ```
 
@@ -96,9 +87,14 @@ yay -S beads-git
 paru -S beads-git
 ```
 
-**Via go install**:
+**Via go install** (server-mode only):
 ```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
+```
+
+**Via go install** (embedded-capable):
+```bash
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ### FreeBSD
@@ -108,9 +104,9 @@ go install github.com/steveyegge/beads/cmd/bd@latest
 curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
-**Via go install**:
+**Via go install** (server-mode only):
 ```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ### Windows 11
@@ -128,12 +124,15 @@ irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 
 The script installs a prebuilt Windows release if available. Go is only required for `go install` or building from source.
 
-**Via go install**:
+**Via go install** (server-mode only):
 ```pwsh
-go install github.com/steveyegge/beads/cmd/bd@latest
+$env:CGO_ENABLED="0"; go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-If you see `unicode/uregex.h` missing while building, use the PowerShell install script instead.
+**Via go install** (embedded-capable):
+```pwsh
+$env:CGO_ENABLED="1"; $env:GOFLAGS="-tags=gms_pure_go"; go install github.com/steveyegge/beads/cmd/bd@latest
+```
 
 ## IDE and Editor Integrations
 
@@ -213,6 +212,9 @@ go list -f {{.Target}} github.com/steveyegge/beads/cmd/bd
 
 # Add Go bin to PATH (add to ~/.bashrc or ~/.zshrc)
 export PATH="$PATH:$(go env GOPATH)/bin"
+
+# Or reinstall with the recommended installer
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 ### `zsh: killed bd` or crashes on macOS
@@ -220,8 +222,8 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 This is typically caused by CGO/SQLite compatibility issues:
 
 ```bash
-# Build with CGO enabled
-CGO_ENABLED=1 go install github.com/steveyegge/beads/cmd/bd@latest
+# Install an embedded-capable build
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 ## Updating bd
@@ -247,7 +249,11 @@ brew upgrade beads
 ### go install
 
 ```bash
-go install github.com/steveyegge/beads/cmd/bd@latest
+# Server-mode only
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
+
+# Embedded-capable
+CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
 For post-upgrade steps (hooks, migrations), see [Upgrading](/getting-started/upgrading).

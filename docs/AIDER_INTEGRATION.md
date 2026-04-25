@@ -18,7 +18,7 @@ The beads integration for Aider:
 
 ```bash
 # Install beads CLI
-go install github.com/steveyegge/beads/cmd/bd@latest
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
 # Initialize in your project
 cd your-project

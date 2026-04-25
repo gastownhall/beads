@@ -115,7 +115,7 @@ Once version 1.0 is released, we will support the latest major version and one p
 2. **Review before sharing** - Check issue content before sharing project details
 3. **Use private repos** - If your issues contain proprietary information, use private git repositories
 4. **Validate git hooks** - If using automated export/import hooks, review them for safety
-5. **Regular updates** - Keep bd updated to the latest version: `go install github.com/steveyegge/beads/cmd/bd@latest`
+5. **Regular updates** - Keep bd updated with your package manager, or re-run the install script from [docs/INSTALLING.md](docs/INSTALLING.md).
 
 ## Known Limitations
 
