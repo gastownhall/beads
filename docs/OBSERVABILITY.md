@@ -59,9 +59,26 @@ Every metric and span carries the OTel resource describing the bd process:
 |-----------|-------|-------|
 | `service.name` | `bd` | Override with `OTEL_SERVICE_NAME`. |
 | `service.version` | bd version | |
-| `bd.prefix` | configured `issue_prefix` | Auto-stamped from the project's issue prefix (e.g. `myproject`, `infra`). Lets dashboards split metrics per beads project. |
+| `bd.prefix` | configured `issue_prefix` | Auto-stamped from the project's issue prefix (e.g. `myproject`, `infra`). Also stamped as a measurement attribute on every emitted metric — see below. |
 
 Add anything else via `OTEL_RESOURCE_ATTRIBUTES`.
+
+### Per-project metric partitioning (`bd_prefix` label)
+
+`bd.prefix` is stamped on every emitted metric measurement, not only on the
+resource. Why both: in the OTel→Prometheus translation, resource attributes
+land on the `target_info` series and need a `target_info * on(job, instance)
+group_left(bd_prefix) ...` join to be queryable on the metric itself — a
+join that fails when the SDK doesn't emit an `instance` label, which it
+often doesn't for short-lived CLI processes. Stamping the attribute on each
+measurement makes `bd_prefix` a first-class Prom label on every series:
+
+```promql
+bd_storage_operations_total{bd_prefix="myproj"}
+sum by (bd_prefix) (rate(bd_db_retry_count_total[5m]))
+```
+
+No join needed. All `bd_*` metrics listed below carry `bd_prefix`.
 
 ### Local debug mode
 
@@ -90,15 +107,21 @@ that sees one logs a one-line deprecation warning to stderr:
 bd list   # triggers metrics → visible in VictoriaMetrics
 ```
 
-Verification query in Grafana (VictoriaMetrics datasource):
+Verification queries in Grafana (VictoriaMetrics datasource):
 
 ```promql
-bd_storage_operations_total
+bd_storage_operations_total                              # all projects
+bd_storage_operations_total{bd_prefix="myproj"}          # one project
+sum by (bd_prefix) (rate(bd_storage_operations_total[5m])) # split per project
 ```
 
 ---
 
 ## Metrics
+
+> Every metric below carries `bd_prefix` (the project's issue prefix) as a
+> Prom label in addition to the per-metric attributes shown. Filter or split
+> dashboards with `{bd_prefix="..."}` directly — no `target_info` join needed.
 
 ### Storage (`bd_storage_*`)
 
