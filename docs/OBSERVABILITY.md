@@ -59,7 +59,7 @@ Every metric and span carries the OTel resource describing the bd process:
 |-----------|-------|-------|
 | `service.name` | `bd` | Override with `OTEL_SERVICE_NAME`. |
 | `service.version` | bd version | |
-| `db.namespace` | dolt database name | Auto-stamped from the resolved dolt database (e.g. `beads`, `beads_hq`). Lets dashboards split metrics by database when one workstation runs bd against several. |
+| `bd.prefix` | configured `issue_prefix` | Auto-stamped from the project's issue prefix (e.g. `myproject`, `infra`). Lets dashboards split metrics per beads project. |
 
 Add anything else via `OTEL_RESOURCE_ATTRIBUTES`.
 

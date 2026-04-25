@@ -149,7 +149,7 @@ func TestEnabled_SDKDisabledOverridesEverything(t *testing.T) {
 
 func TestBuildResource_DefaultServiceName(t *testing.T) {
 	clearAllEnv(t)
-	res, err := buildResource(context.Background(), "bd", "1.0.0", "ass_db")
+	res, err := buildResource(context.Background(), "bd", "1.0.0", "ass")
 	if err != nil {
 		t.Fatalf("buildResource: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestBuildResource_DefaultServiceName(t *testing.T) {
 func TestBuildResource_OTELServiceNameOverridesDefault(t *testing.T) {
 	clearAllEnv(t)
 	t.Setenv("OTEL_SERVICE_NAME", "bd-assistant")
-	res, err := buildResource(context.Background(), "bd", "1.0.0", "ass_db")
+	res, err := buildResource(context.Background(), "bd", "1.0.0", "ass")
 	if err != nil {
 		t.Fatalf("buildResource: %v", err)
 	}
@@ -178,25 +178,25 @@ func TestBuildResource_OTELServiceNameOverridesDefault(t *testing.T) {
 	}
 }
 
-func TestBuildResource_DBNamespaceStamped(t *testing.T) {
+func TestBuildResource_BDPrefixStamped(t *testing.T) {
 	clearAllEnv(t)
-	res, err := buildResource(context.Background(), "bd", "1.0.0", "ass_db")
+	res, err := buildResource(context.Background(), "bd", "1.0.0", "ass")
 	if err != nil {
 		t.Fatalf("buildResource: %v", err)
 	}
-	got, ok := lookupAttr(res.Attributes(), "db.namespace")
+	got, ok := lookupAttr(res.Attributes(), "bd.prefix")
 	if !ok {
-		t.Fatal("db.namespace missing")
+		t.Fatal("bd.prefix missing")
 	}
-	if got.AsString() != "ass_db" {
-		t.Errorf("db.namespace = %q, want ass_db", got.AsString())
+	if got.AsString() != "ass" {
+		t.Errorf("bd.prefix = %q, want ass", got.AsString())
 	}
 }
 
 func TestBuildResource_OTELResourceAttributesMerged(t *testing.T) {
 	clearAllEnv(t)
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=workstation,team=infra")
-	res, err := buildResource(context.Background(), "bd", "1.0.0", "ass_db")
+	res, err := buildResource(context.Background(), "bd", "1.0.0", "ass")
 	if err != nil {
 		t.Fatalf("buildResource: %v", err)
 	}
@@ -216,14 +216,14 @@ func TestBuildResource_OTELResourceAttributesMerged(t *testing.T) {
 	}
 }
 
-func TestBuildResource_DBNamespaceOmittedWhenEmpty(t *testing.T) {
+func TestBuildResource_BDPrefixOmittedWhenEmpty(t *testing.T) {
 	clearAllEnv(t)
 	res, err := buildResource(context.Background(), "bd", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("buildResource: %v", err)
 	}
-	if _, ok := lookupAttr(res.Attributes(), "db.namespace"); ok {
-		t.Error("db.namespace should be omitted when dbName is empty")
+	if _, ok := lookupAttr(res.Attributes(), "bd.prefix"); ok {
+		t.Error("bd.prefix should be omitted when prefix is empty")
 	}
 }
 

@@ -27,7 +27,7 @@
 //	OTEL_SERVICE_NAME=bd
 //	OTEL_RESOURCE_ATTRIBUTES=key=value,...
 //	    Override or extend resource attributes (service.name, service.version,
-//	    db.namespace, deployment.environment, ...).
+//	    bd.prefix, deployment.environment, ...).
 //
 //	OTEL_SDK_DISABLED=true
 //	    Force telemetry off even when BD_OTEL_ENABLED=true is set.
@@ -124,16 +124,18 @@ func translateLegacyEnv() []string {
 //
 // Defaults are merged with the host/process detectors and finally with the
 // FromEnv detector, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES can
-// override anything set by the caller. dbName, when non-empty, is stamped as
-// db.namespace to differentiate metrics emitted from bd processes bound to
-// distinct dolt databases.
-func buildResource(ctx context.Context, serviceName, version, dbName string) (*resource.Resource, error) {
+// override anything set by the caller. prefix, when non-empty, is stamped as
+// bd.prefix — the issue prefix is the project-level identifier in beads (it
+// shows in every issue ID), so dashboards split on it. The dolt database name
+// is deliberately not used: it's an implementation detail that is often
+// "beads" for everyone, whereas the prefix is unique per project.
+func buildResource(ctx context.Context, serviceName, version, prefix string) (*resource.Resource, error) {
 	attrs := []attribute.KeyValue{
 		semconv.ServiceNameKey.String(serviceName),
 		semconv.ServiceVersionKey.String(version),
 	}
-	if dbName != "" {
-		attrs = append(attrs, attribute.String("db.namespace", dbName))
+	if prefix != "" {
+		attrs = append(attrs, attribute.String("bd.prefix", prefix))
 	}
 	return resource.New(ctx,
 		resource.WithAttributes(attrs...),
@@ -151,10 +153,10 @@ func buildResource(ctx context.Context, serviceName, version, dbName string) (*r
 // local debugging); there is no remote trace backend.
 // Metrics are exported to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and/or stdout.
 //
-// dbName, when non-empty, is stamped as the db.namespace resource attribute
-// so metrics from bd processes bound to different dolt databases can be
+// prefix, when non-empty, is stamped as the bd.prefix resource attribute
+// so metrics from bd processes bound to different beads projects can be
 // distinguished by dashboard queries.
-func Init(ctx context.Context, serviceName, version, dbName string) error {
+func Init(ctx context.Context, serviceName, version, prefix string) error {
 	if mappings := translateLegacyEnv(); len(mappings) > 0 {
 		fmt.Fprintf(os.Stderr,
 			"warning: BD_OTEL_* environment variables are deprecated. Replace with BD_OTEL_ENABLED=true plus the standard OpenTelemetry SDK variables. Translated for this run: %s\n",
@@ -167,7 +169,7 @@ func Init(ctx context.Context, serviceName, version, dbName string) error {
 		return nil
 	}
 
-	res, err := buildResource(ctx, serviceName, version, dbName)
+	res, err := buildResource(ctx, serviceName, version, prefix)
 	if err != nil {
 		return fmt.Errorf("telemetry: resource: %w", err)
 	}

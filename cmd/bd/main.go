@@ -941,22 +941,6 @@ var rootCmd = &cobra.Command{
 		}
 		doltCfg.SyncRemote = resolveSyncRemote()
 
-		// Initialize OTel now that the dolt database name is resolved so it can
-		// be stamped as db.namespace on the resource. Must run before any DB
-		// access so SQL spans nest under the command span. Telemetry is a no-op
-		// unless an OpenTelemetry SDK environment variable selects an exporter.
-		if err := telemetry.Init(rootCtx, "bd", Version, doltCfg.Database); err != nil {
-			debug.Logf("warning: telemetry init failed: %v", err)
-		}
-		rootCtx, commandSpan = telemetry.Tracer("bd").Start(rootCtx, "bd.command."+cmd.Name(),
-			oteltrace.WithAttributes(
-				attribute.String("bd.command", cmd.Name()),
-				attribute.String("bd.version", Version),
-				attribute.String("bd.args", strings.Join(os.Args[1:], " ")),
-				attribute.String("bd.actor", actor),
-			),
-		)
-
 		// --global flag: switch to the global shared-server database.
 		// Must be in shared-server mode; errors otherwise.
 		if globalFlag {
@@ -1008,6 +992,27 @@ var rootCmd = &cobra.Command{
 		storeMutex.Lock()
 		storeActive = true
 		storeMutex.Unlock()
+
+		// Initialize OTel now that the store is open so the issue prefix can be
+		// read and stamped as bd.prefix on the resource. The prefix is the
+		// project-level identifier in beads (visible in every issue ID), so
+		// dashboards split metrics on it. Telemetry is a no-op unless an
+		// OpenTelemetry SDK environment variable selects an exporter.
+		var bdPrefix string
+		if p, gerr := store.GetConfig(rootCtx, "issue_prefix"); gerr == nil {
+			bdPrefix = strings.TrimSuffix(p, "-")
+		}
+		if err := telemetry.Init(rootCtx, "bd", Version, bdPrefix); err != nil {
+			debug.Logf("warning: telemetry init failed: %v", err)
+		}
+		rootCtx, commandSpan = telemetry.Tracer("bd").Start(rootCtx, "bd.command."+cmd.Name(),
+			oteltrace.WithAttributes(
+				attribute.String("bd.command", cmd.Name()),
+				attribute.String("bd.version", Version),
+				attribute.String("bd.args", strings.Join(os.Args[1:], " ")),
+				attribute.String("bd.actor", actor),
+			),
+		)
 
 		// Auto-import from issues.jsonl when embedded database is empty (GH#2994).
 		// This handles the upgrade path from pre-0.56 (dolt/) to 1.0+ (embeddeddolt/)
