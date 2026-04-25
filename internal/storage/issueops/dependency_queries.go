@@ -35,6 +35,10 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx *sql.Tx) (map[string][]
 // GetDependencyRecordsForIssuesInTx returns dependency records for specific issues,
 // routing each ID to dependencies or wisp_dependencies based on wisp status.
 // Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
+//
+// Partitions wisp/perm via a single WispIDSetInTx query rather than per-id
+// IsActiveWispInTx calls — the latter is O(N) round trips and saturates the
+// 120s context deadline at 50K issues (be-vzu).
 func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]*types.Dependency, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]*types.Dependency), nil
@@ -42,14 +46,11 @@ func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs
 
 	result := make(map[string][]*types.Dependency)
 
-	var wispIDs, permIDs []string
-	for _, id := range issueIDs {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
-		}
+	wispSet, err := WispIDSetInTx(ctx, tx, issueIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get dependency records: build wisp set: %w", err)
 	}
+	wispIDs, permIDs := partitionByWispSet(issueIDs, wispSet)
 
 	for _, pair := range []struct {
 		table string
@@ -203,15 +204,14 @@ func GetBlockingInfoForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []st
 		return
 	}
 
-	// Partition into wisp and perm IDs for routing.
-	var wispIDs, permIDs []string
-	for _, id := range issueIDs {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
-		}
+	// Partition into wisp and perm IDs for routing. Single WispIDSetInTx
+	// query avoids the per-id IsActiveWispInTx round-trip storm that
+	// saturated 120s context deadlines at 50K issues (be-vzu).
+	wispSet, wispErr := WispIDSetInTx(ctx, tx, issueIDs)
+	if wispErr != nil {
+		return nil, nil, nil, fmt.Errorf("get blocking info: build wisp set: %w", wispErr)
 	}
+	wispIDs, permIDs := partitionByWispSet(issueIDs, wispSet)
 
 	// Process wisp IDs against wisp_dependencies.
 	if len(wispIDs) > 0 {
