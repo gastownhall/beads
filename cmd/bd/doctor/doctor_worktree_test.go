@@ -10,6 +10,8 @@ import (
 
 func setupWorktreeRepo(t *testing.T) (mainRepoDir, worktreeDir string) {
 	t.Helper()
+	isolateGlobalGitConfig(t)
+
 	tmpDir, err := os.MkdirTemp("", "beads-doctor-worktree-test-*")
 	if err != nil {
 		t.Fatal(err)

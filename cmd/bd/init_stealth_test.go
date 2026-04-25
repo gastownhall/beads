@@ -58,6 +58,9 @@ func TestSetupGitExclude_Worktree(t *testing.T) {
 	if !strings.Contains(string(content), ".beads/") {
 		t.Errorf("main repo exclude missing .beads/ pattern: %s", content)
 	}
+	if !strings.Contains(string(content), ".agents/") {
+		t.Errorf("main repo exclude missing .agents/ pattern: %s", content)
+	}
 	if !strings.Contains(string(content), ".claude/settings.local.json") {
 		t.Errorf("main repo exclude missing .claude/settings.local.json pattern: %s", content)
 	}
@@ -166,6 +169,9 @@ func TestSetupGitExclude_RegularRepo(t *testing.T) {
 
 	if !strings.Contains(string(content), ".beads/") {
 		t.Errorf("exclude file missing .beads/ pattern: %s", content)
+	}
+	if !strings.Contains(string(content), ".agents/") {
+		t.Errorf("exclude file missing .agents/ pattern: %s", content)
 	}
 	if !strings.Contains(string(content), ".claude/settings.local.json") {
 		t.Errorf("exclude file missing .claude/settings.local.json pattern: %s", content)

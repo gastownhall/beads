@@ -1,0 +1,45 @@
+{
+  "name": "beads",
+  "description": "AI-supervised issue tracker for coding workflows. Manage tasks, discover work, and maintain context with simple CLI commands.",
+  "version": "1.0.3",
+  "author": {
+    "name": "Steve Yegge",
+    "url": "https://github.com/steveyegge"
+  },
+  "repository": "https://github.com/gastownhall/beads",
+  "license": "MIT",
+  "homepage": "https://github.com/gastownhall/beads",
+  "keywords": [
+    "issue-tracker",
+    "task-management",
+    "ai-workflow",
+    "agent-memory"
+  ],
+  "skills": "./skills/",
+  "commands": "./skills/beads/commands/",
+  "agents": "./skills/beads/agents/",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bd prime"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bd prime"
+          }
+        ]
+      }
+    ]
+  }
+}

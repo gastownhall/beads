@@ -747,6 +747,7 @@ func TestMatchingLocalRemoteCLIRouting(t *testing.T) {
 
 func TestCloudAuthCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
 	testutil.RequireDoltBinary(t)
+	isolateCloudAuthEnv(t)
 
 	sharedRoot := t.TempDir()
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
@@ -855,6 +856,8 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			isolateCloudAuthEnv(t)
+
 			store := setupCredentialTestStoreWithURL(t, "", "", true, true, "origin", tt.remoteURL)
 			if tt.envKey != "" {
 				t.Setenv(tt.envKey, tt.envValue)
@@ -871,6 +874,8 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
 	t.Run("embedded mode", func(t *testing.T) {
+		isolateCloudAuthEnv(t)
+
 		store := setupCredentialTestStoreWithURL(t, "", "", false, true, "origin", "az://account.blob.core.windows.net/container")
 		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
 		if store.shouldUseCLIForCloudAuth(store.remote) {
@@ -878,6 +883,8 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 		}
 	})
 	t.Run("no CLI remote", func(t *testing.T) {
+		isolateCloudAuthEnv(t)
+
 		store := setupCredentialTestStoreWithURL(t, "", "", true, false, "origin", "az://account.blob.core.windows.net/container")
 		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
 		if store.shouldUseCLIForCloudAuth(store.remote) {
@@ -891,6 +898,7 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 // trigger CLI routing ONLY for the Azure remote, not the DoltHub remote.
 func TestPerRemoteCloudAuthHybrid(t *testing.T) {
 	testutil.RequireDoltBinary(t)
+	isolateCloudAuthEnv(t)
 
 	tmpDir := t.TempDir()
 	dbName := "testdb"
@@ -977,4 +985,37 @@ func TestEnvPrefixesForRemoteURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func isolateCloudAuthEnv(t *testing.T) {
+	t.Helper()
+
+	original := make(map[string]string)
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || !hasCloudAuthEnvPrefix(name) {
+			continue
+		}
+		original[name] = value
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("failed to unset %s: %v", name, err)
+		}
+	}
+
+	t.Cleanup(func() {
+		for name, value := range original {
+			_ = os.Setenv(name, value)
+		}
+	})
+}
+
+func hasCloudAuthEnvPrefix(name string) bool {
+	for _, prefixes := range cloudAuthSchemeMap {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(name, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -69,8 +69,9 @@ echo "  • cmd/bd/version.go"
 update_file "cmd/bd/version.go" "Version = \"$CURRENT_VERSION\"" "Version = \"$NEW_VERSION\""
 
 # 2. Plugin JSON files
-echo "  • .claude-plugin/*.json"
-update_file "claude-plugin/.claude-plugin/plugin.json" "\"version\": \"$CURRENT_VERSION\"" "\"version\": \"$NEW_VERSION\""
+echo "  • plugin metadata"
+update_file "plugins/beads/.claude-plugin/plugin.json" "\"version\": \"$CURRENT_VERSION\"" "\"version\": \"$NEW_VERSION\""
+update_file "plugins/beads/.codex-plugin/plugin.json" "\"version\": \"$CURRENT_VERSION\"" "\"version\": \"$NEW_VERSION\""
 update_file ".claude-plugin/marketplace.json" "\"version\": \"$CURRENT_VERSION\"" "\"version\": \"$NEW_VERSION\""
 
 # 3. MCP Python package

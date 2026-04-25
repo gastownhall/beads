@@ -379,7 +379,8 @@ git push origin main
 **Files updated automatically:**
 
 - `cmd/bd/version.go` - CLI version
-- `claude-plugin/.claude-plugin/plugin.json` - Plugin version
+- `plugins/beads/.claude-plugin/plugin.json` - Claude plugin version
+- `plugins/beads/.codex-plugin/plugin.json` - Codex plugin version
 - `.claude-plugin/marketplace.json` - Marketplace version
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
 - `README.md` - Documentation version

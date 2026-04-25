@@ -642,6 +642,7 @@ var rootCmd = &cobra.Command{
 			"powershell",
 			"prime",
 			"quickstart",
+			"run-hook",
 			"setup",
 			"version",
 			"where",

@@ -9,7 +9,7 @@ The `bd setup` command uses a **recipe-based architecture** to configure beads i
 
 ### `bd prime` as SSOT
 
-`bd prime` is the **single source of truth** for operational workflow commands. The beads section in each tool's instruction file provides a pointer to `bd prime` for hook-enabled agents (Claude, Gemini) or the full command reference for hookless agents (Factory, Codex, Mux).
+`bd prime` is the **single source of truth** for operational workflow commands. The beads section in each tool's instruction file provides a pointer to `bd prime` for hook-enabled agents (Claude, Gemini) or the full command reference for AGENTS-first agents (Factory, Mux). The repo-local Beads agent skill under `.agents/skills/` is the skill-based instruction surface; `bd setup codex` installs it and can also add Codex project hooks.
 
 ### Profiles
 
@@ -17,10 +17,10 @@ Each integration uses one of two **profiles** that control how much content is w
 
 | Profile | Used By | Content |
 |---------|---------|---------|
-| `full` | Factory, Codex, Mux, OpenCode | Complete command reference, issue types, priorities, workflow |
+| `full` | Factory, Mux, OpenCode | Complete command reference, issue types, priorities, workflow |
 | `minimal` | Claude Code, Gemini CLI | Pointer to `bd prime`, quick reference only (~60% smaller) |
 
-Hook-enabled agents (Claude, Gemini) use the `minimal` profile because `bd prime` injects full context at session start. Hookless agents need the `full` profile because their instruction file is their only source of instructions.
+Hook-enabled agents (Claude, Gemini) use the `minimal` profile because `bd prime` injects full context at session start. AGENTS-first agents use the `full` profile because their instruction file remains the primary integration surface. Skill-aware agents use `.agents/skills/beads/SKILL.md`, with `AGENTS.md` available as an explicit fallback.
 
 **Profile precedence:** If a file already has a `full` profile section and a `minimal` profile tool installs to the same file (e.g., via symlinks), the `full` profile is preserved to avoid information loss.
 
@@ -35,7 +35,7 @@ Hook-enabled agents (Claude, Gemini) use the `minimal` profile because `bd prime
 | `claude` | `~/.claude/settings.json` + `CLAUDE.md` | SessionStart/PreCompact hooks + minimal section |
 | `gemini` | `~/.gemini/settings.json` + `GEMINI.md` | SessionStart/PreCompress hooks + minimal section |
 | `factory` | `AGENTS.md` | Marked section |
-| `codex` | `AGENTS.md` | Marked section |
+| `codex` | `.agents/skills/beads/SKILL.md` | Beads agent skill |
 | `mux` | `AGENTS.md` | Marked section |
 | `aider` | `.aider.conf.yml` + `.aider/` | Multi-file config |
 
@@ -52,7 +52,8 @@ bd setup kilocode   # Kilo Code
 bd setup claude     # Claude Code
 bd setup gemini     # Gemini CLI
 bd setup factory    # Factory.ai Droid
-bd setup codex      # Codex CLI
+bd setup codex      # Beads agent skill
+bd setup codex --hooks  # Beads agent skill + project-local Codex hooks
 bd setup mux        # Mux
 bd setup aider      # Aider
 
@@ -162,21 +163,68 @@ You can use multiple integrations simultaneously - they complement each other!
 
 ## Codex CLI
 
-Codex reads `AGENTS.md` instructions at the start of each run/session. Adding the beads section is enough to get Codex and beads working together.
+Codex reads repo-local skills from `.agents/skills/`. The Codex setup path installs the generic `beads` agent skill by default, with optional project-local hooks for automatic `bd prime` injection at session start and after context compaction. `AGENTS.md` remains available as an explicit fallback for older or non-skill clients.
 
 ### Installation
 
 ```bash
-bd setup codex
+bd init                 # New projects: AGENTS.md + Beads agent skill + Codex hooks
+bd setup codex          # Beads agent skill
+bd setup codex --hooks  # Beads agent skill + .codex/hooks.json + .codex/config.toml
+bd setup codex --agents # Beads agent skill + AGENTS.md fallback
 ```
 
 ### What Gets Installed
 
-Creates or updates `AGENTS.md` with the beads integration section (same markers as Factory.ai).
+**Baseline install** (`bd setup codex`):
+- Creates or updates `.agents/skills/beads/SKILL.md`
+- Creates or updates `.agents/skills/beads/agents/openai.yaml`
+
+**New project init** (`bd init`):
+- Creates or updates `AGENTS.md`
+- Creates or updates `.agents/skills/beads/SKILL.md`
+- Creates project-local Codex hook config under `.codex/`
+- `--stealth` skips `AGENTS.md` and lifecycle hooks, but still installs the Beads agent skill
+- `--skip-agents` skips instruction files (`AGENTS.md` and `CLAUDE.md`), but still installs the Beads agent skill and project hooks
+
+**Hook install** (`bd setup codex --hooks`):
+- Creates or updates the Beads agent skill
+- Creates or updates `.codex/hooks.json` with:
+  - a `SessionStart` hook that runs `bd prime --codex`
+  - a `UserPromptSubmit` hook that runs `bd run-hook --codex` and reinjects `bd prime --codex` context only when the transcript shows a context compaction since the latest user message
+- Creates or updates `.codex/config.toml` with `[features] codex_hooks = true`
+- Creates or updates `.codex/.gitignore` so hook runtime state is not committed
+
+**AGENTS fallback** (`bd setup codex --agents`):
+- Also creates or updates `AGENTS.md` with the beads integration section
+
+Use `--stealth` with `--hooks` to install `bd prime --codex --stealth` and `bd run-hook --codex --stealth` instead.
+
+### Codex Plugin Package
+
+This repository also ships a shared plugin package for plugin marketplace installs:
+
+- `.agents/plugins/marketplace.json` - repo-local Codex marketplace entry
+- `plugins/beads/.codex-plugin/plugin.json` - Codex plugin metadata
+- `plugins/beads/skills/beads/` - plugin-owned Beads skill
+- `plugins/beads/.claude-plugin/plugin.json` - Claude plugin metadata
+
+The plugin package is separate from `bd setup codex`. `bd setup codex` writes a setup-only Beads skill directly into the target repository; the plugin package is the richer marketplace bundle for Claude and Codex.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--check` | Check the Beads agent skill; with `--hooks`, also verify `.codex/hooks.json` and `codex_hooks` enablement |
+| `--remove` | Remove the Beads agent skill; with `--hooks`, also remove the beads-managed Codex hooks and `codex_hooks` feature flag |
+| `--hooks` | Install/check/remove project-local Codex hook configuration in `.codex/` |
+| `--agents` | Also install/check/remove `AGENTS.md` fallback content |
+| `--stealth` | With `--hooks`, install stealth variants of the Codex prime and hook-runner commands |
 
 ### Notes
 
 - Restart Codex if it's already running to pick up the new instructions.
+- The hook install is project-local. It does not touch global Codex config.
 - In worktree/shared/`BEADS_DIR` setups, use `bd where` to confirm the resolved workspace; the integration does not require a local `./.beads`.
 
 ## Mux

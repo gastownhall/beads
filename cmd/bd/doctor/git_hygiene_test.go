@@ -40,6 +40,7 @@ func runGit(t *testing.T, dir string, args ...string) string {
 
 func initRepo(t *testing.T, dir string, branch string) {
 	t.Helper()
+	isolateGlobalGitConfig(t)
 	_ = os.MkdirAll(filepath.Join(dir, ".beads"), 0755)
 	runGit(t, dir, "init", "-b", branch)
 	runGit(t, dir, "config", "user.email", "test@test.com")

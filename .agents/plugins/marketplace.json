@@ -1,0 +1,20 @@
+{
+  "name": "beads-marketplace",
+  "interface": {
+    "displayName": "Beads"
+  },
+  "plugins": [
+    {
+      "name": "beads",
+      "source": {
+        "source": "local",
+        "path": "./plugins/beads"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

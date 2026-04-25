@@ -19,9 +19,20 @@ import (
 var (
 	primeFullMode    bool
 	primeMCPMode     bool
+	primeCodexMode   bool
 	primeStealthMode bool
 	primeExportMode  bool
 )
+
+const beadsPrimeContextHeading = "# Beads Workflow Context"
+
+type primeRunOptions struct {
+	ForceFull bool
+	ForceMCP  bool
+	Codex     bool
+	Stealth   bool
+	Export    bool
+}
 
 // resolveGlobalPrimePath returns the path to ~/.config/beads/PRIME.md if it
 // exists. configDirOverride is used for testing; pass "" for production.
@@ -41,6 +52,61 @@ func resolveGlobalPrimePath(configDirOverride string) string {
 		return p
 	}
 	return ""
+}
+
+func runPrime(w io.Writer, opts primeRunOptions) error {
+	// Resolve the active beads workspace.
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		// Not in a beads project: silent success for hook integrations.
+		return nil
+	}
+
+	// Detect MCP mode (unless overridden by flags). Codex has its own MCP
+	// configuration, so do not let Claude MCP settings affect Codex runs.
+	mcpMode := isMCPActive()
+	if opts.Codex || isCodexEnvironment() {
+		mcpMode = isCodexMCPActive()
+	}
+	if opts.ForceFull {
+		mcpMode = false
+	}
+	if opts.ForceMCP {
+		mcpMode = true
+	}
+
+	// Check for stealth mode: flag OR config (GH#593).
+	stealthMode := opts.Stealth || config.GetBool("no-git-ops")
+
+	// Check for custom PRIME.md override (unless --export flag).
+	if !opts.Export {
+		localPrimePath := filepath.Join(".beads", "PRIME.md")
+		redirectedPrimePath := filepath.Join(beadsDir, "PRIME.md")
+
+		// Try local first (user's clone-specific customization).
+		// #nosec G304 -- path is relative to cwd
+		if content, err := os.ReadFile(localPrimePath); err == nil {
+			_, err = fmt.Fprint(w, string(content))
+			return err
+		}
+		// Fall back to redirected location (shared customization).
+		// #nosec G304 -- path is constructed from beadsDir which we control
+		if content, err := os.ReadFile(redirectedPrimePath); err == nil {
+			_, err = fmt.Fprint(w, string(content))
+			return err
+		}
+		// Fall back to global config (~/.config/beads/PRIME.md).
+		// #nosec G304 -- path constructed from UserConfigDir which we control
+		if globalPath := resolveGlobalPrimePath(""); globalPath != "" {
+			if content, err := os.ReadFile(globalPath); err == nil {
+				_, err = fmt.Fprint(w, string(content))
+				return err
+			}
+		}
+	}
+
+	// Output workflow context (adaptive based on MCP and stealth mode).
+	return outputPrimeContext(w, mcpMode, stealthMode)
 }
 
 var primeCmd = &cobra.Command{
@@ -65,60 +131,13 @@ Config options:
 	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default output entirely.
 	- Use --export to dump the default content for customization.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Resolve the active beads workspace.
-		beadsDir := beads.FindBeadsDir()
-		if beadsDir == "" {
-			// Not in a beads project - silent exit with success
-			// CRITICAL: No stderr output, exit 0
-			// This enables cross-platform hook integration
-			os.Exit(0)
-		}
-
-		// Detect MCP mode (unless overridden by flags)
-		mcpMode := isMCPActive()
-		if primeFullMode {
-			mcpMode = false
-		}
-		if primeMCPMode {
-			mcpMode = true
-		}
-
-		// Check for stealth mode: flag OR config (GH#593)
-		// This allows users to disable git ops in session close protocol via config
-		stealthMode := primeStealthMode || config.GetBool("no-git-ops")
-
-		// Check for custom PRIME.md override (unless --export flag)
-		// This allows users to fully customize workflow instructions
-		// Check local .beads/ first (clone-specific override), then the
-		// resolved workspace location.
-		if !primeExportMode {
-			localPrimePath := filepath.Join(".beads", "PRIME.md")
-			redirectedPrimePath := filepath.Join(beadsDir, "PRIME.md")
-
-			// Try local first (user's clone-specific customization)
-			// #nosec G304 -- path is relative to cwd
-			if content, err := os.ReadFile(localPrimePath); err == nil {
-				fmt.Print(string(content))
-				return
-			}
-			// Fall back to redirected location (shared customization)
-			// #nosec G304 -- path is constructed from beadsDir which we control
-			if content, err := os.ReadFile(redirectedPrimePath); err == nil {
-				fmt.Print(string(content))
-				return
-			}
-			// Fall back to global config (~/.config/beads/PRIME.md)
-			// #nosec G304 -- path constructed from UserConfigDir which we control
-			if globalPath := resolveGlobalPrimePath(""); globalPath != "" {
-				if content, err := os.ReadFile(globalPath); err == nil {
-					fmt.Print(string(content))
-					return
-				}
-			}
-		}
-
-		// Output workflow context (adaptive based on MCP and stealth mode)
-		if err := outputPrimeContext(os.Stdout, mcpMode, stealthMode); err != nil {
+		if err := runPrime(os.Stdout, primeRunOptions{
+			ForceFull: primeFullMode,
+			ForceMCP:  primeMCPMode,
+			Codex:     primeCodexMode,
+			Stealth:   primeStealthMode,
+			Export:    primeExportMode,
+		}); err != nil {
 			// Suppress all errors - silent exit with success
 			// Never write to stderr (breaks Windows compatibility)
 			os.Exit(0)
@@ -129,6 +148,7 @@ Config options:
 func init() {
 	primeCmd.Flags().BoolVar(&primeFullMode, "full", false, "Force full CLI output (ignore MCP detection)")
 	primeCmd.Flags().BoolVar(&primeMCPMode, "mcp", false, "Force MCP mode (minimal output)")
+	primeCmd.Flags().BoolVar(&primeCodexMode, "codex", false, "Use Codex MCP detection (for Codex hooks/tools)")
 	primeCmd.Flags().BoolVar(&primeStealthMode, "stealth", false, "Stealth mode (no git operations, flush only)")
 	primeCmd.Flags().BoolVar(&primeExportMode, "export", false, "Output default content (ignores PRIME.md override)")
 	rootCmd.AddCommand(primeCmd)
@@ -299,7 +319,7 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 
 	redirectNotice := getRedirectNotice(false)
 
-	context := `# Beads Issue Tracker Active
+	context := beadsPrimeContextHeading + `
 
 ` + redirectNotice + `# 🚨 SESSION CLOSE PROTOCOL 🚨
 
@@ -408,10 +428,10 @@ git push                    # Push to remote
 
 	redirectNotice := getRedirectNotice(true)
 
-	context := `# Beads Workflow Context
+	context := beadsPrimeContextHeading + `
 
 > **Context Recovery**: Run ` + "`bd prime`" + ` after compaction, clear, or new session
-> Hooks auto-call this in Claude Code when a beads workspace is resolved
+> Hook integrations auto-call this when a beads workspace is resolved
 
 ` + redirectNotice + `# 🚨 SESSION CLOSE PROTOCOL 🚨
 

@@ -93,14 +93,54 @@ func InstallClaude(global bool, stealth bool) {
 // InstallClaudeProject installs project-local Claude hooks, returning an error
 // instead of exiting. Used by bd init to integrate Claude setup automatically.
 func InstallClaudeProject(stealth bool) error {
+	return InstallClaudeProjectWithOutput(stealth, os.Stdout, os.Stderr)
+}
+
+// InstallClaudeProjectWithOutput installs project-local Claude hooks using
+// explicit output streams. Used by bd init to honor --quiet.
+func InstallClaudeProjectWithOutput(stealth bool, stdout, stderr io.Writer) error {
 	env, err := claudeEnvProvider()
 	if err != nil {
 		return err
 	}
+	env.stdout = stdout
+	env.stderr = stderr
 	return installClaude(env, false, stealth)
 }
 
 func installClaude(env claudeEnv, global bool, stealth bool) error {
+	settingsPath, err := installClaudeHooks(env, global, stealth)
+	if err != nil {
+		return err
+	}
+
+	// Install minimal beads section in CLAUDE.md.
+	// Hooks handle the heavy lifting via bd prime; CLAUDE.md just needs a pointer.
+	if err := installAgents(claudeAgentsEnv(env), claudeAgentsIntegration); err != nil {
+		// Non-fatal: hooks are already installed
+		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
+	}
+
+	_, _ = fmt.Fprintln(env.stdout, "\n✓ Claude Code integration installed")
+	_, _ = fmt.Fprintf(env.stdout, "  Settings: %s\n", settingsPath)
+	_, _ = fmt.Fprintln(env.stdout, "\nRestart Claude Code for changes to take effect.")
+	return nil
+}
+
+// InstallClaudeProjectHooksWithOutput installs only project-local Claude hooks.
+// Used by bd init --skip-agents, which should avoid creating CLAUDE.md.
+func InstallClaudeProjectHooksWithOutput(stealth bool, stdout, stderr io.Writer) error {
+	env, err := claudeEnvProvider()
+	if err != nil {
+		return err
+	}
+	env.stdout = stdout
+	env.stderr = stderr
+	_, err = installClaudeHooks(env, false, stealth)
+	return err
+}
+
+func installClaudeHooks(env claudeEnv, global bool, stealth bool) (string, error) {
 	var settingsPath string
 	if global {
 		settingsPath = globalSettingsPath(env.homeDir)
@@ -112,14 +152,14 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 
 	if err := env.ensureDir(filepath.Dir(settingsPath), 0o755); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: %v\n", err)
-		return err
+		return "", err
 	}
 
 	settings := make(map[string]interface{})
 	if data, err := env.readFile(settingsPath); err == nil {
 		if err := json.Unmarshal(data, &settings); err != nil {
 			_, _ = fmt.Fprintf(env.stderr, "Error: failed to parse settings.json: %v\n", err)
-			return err
+			return "", err
 		}
 	}
 
@@ -160,12 +200,12 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
-		return err
+		return "", err
 	}
 
 	if err := env.writeFile(settingsPath, data); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
-		return err
+		return "", err
 	}
 
 	// Migrate legacy hooks: remove beads hooks from settings.local.json if present
@@ -191,17 +231,7 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 		}
 	}
 
-	// Install minimal beads section in CLAUDE.md.
-	// Hooks handle the heavy lifting via bd prime; CLAUDE.md just needs a pointer.
-	if err := installAgents(claudeAgentsEnv(env), claudeAgentsIntegration); err != nil {
-		// Non-fatal: hooks are already installed
-		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
-	}
-
-	_, _ = fmt.Fprintln(env.stdout, "\n✓ Claude Code integration installed")
-	_, _ = fmt.Fprintf(env.stdout, "  Settings: %s\n", settingsPath)
-	_, _ = fmt.Fprintln(env.stdout, "\nRestart Claude Code for changes to take effect.")
-	return nil
+	return settingsPath, nil
 }
 
 // CheckClaude checks if Claude integration is installed
