@@ -132,6 +132,7 @@ func testMainInner(m *testing.M) int {
 	doltserver.SweepOrphanedTestServers(suiteTempRoot)
 
 	testServerPort = 0
+	os.Unsetenv("BEADS_DOLT_SERVER_PORT")
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
 	os.Unsetenv("BEADS_TEST_PDEATHSIG")
