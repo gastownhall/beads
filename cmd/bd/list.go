@@ -850,9 +850,56 @@ var listCmd = &cobra.Command{
 		}
 
 		// Direct mode
-		issues, err := activeStore.SearchIssues(ctx, "", filter)
-		if err != nil {
-			FatalError("%v", err)
+		var issues []*types.Issue
+		if readyFlag {
+			// Use blocker-aware GetReadyWork semantics (GH#3478).
+			// This ensures bd list --ready matches bd ready behavior,
+			// excluding issues with open blocks dependencies.
+			wf := types.WorkFilter{
+				Status: types.StatusOpen,
+				Limit:  filter.Limit,
+			}
+			if filter.IssueType != nil {
+				wf.Type = string(*filter.IssueType)
+			}
+			if filter.Priority != nil {
+				wf.Priority = filter.Priority
+			}
+			if filter.Assignee != nil {
+				wf.Assignee = filter.Assignee
+			}
+			if filter.NoAssignee {
+				wf.Unassigned = true
+			}
+			if len(filter.Labels) > 0 {
+				wf.Labels = filter.Labels
+			}
+			if len(filter.LabelsAny) > 0 {
+				wf.LabelsAny = filter.LabelsAny
+			}
+			if len(filter.ExcludeLabels) > 0 {
+				wf.ExcludeLabels = filter.ExcludeLabels
+			}
+			if filter.LabelPattern != "" {
+				wf.LabelPattern = filter.LabelPattern
+			}
+			if filter.LabelRegex != "" {
+				wf.LabelRegex = filter.LabelRegex
+			}
+			if filter.ParentID != nil {
+				wf.ParentID = filter.ParentID
+			}
+			var err error
+			issues, err = activeStore.GetReadyWork(ctx, wf)
+			if err != nil {
+				FatalError("%v", err)
+			}
+		} else {
+			var err error
+			issues, err = activeStore.SearchIssues(ctx, "", filter)
+			if err != nil {
+				FatalError("%v", err)
+			}
 		}
 
 		// Apply sorting
@@ -1107,7 +1154,7 @@ func init() {
 	listCmd.Flags().Bool("no-pager", false, "Disable pager output")
 
 	// Ready filter: show only issues ready to be worked on (bd-ihu31)
-	listCmd.Flags().Bool("ready", false, "Show only ready issues (status=open, excludes hooked/in_progress/blocked/deferred)")
+	listCmd.Flags().Bool("ready", false, "Show only ready issues (no active blockers, same semantics as bd ready)")
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)
