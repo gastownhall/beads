@@ -92,7 +92,8 @@ func TestSchemaAfterInit(t *testing.T) {
 		"issues": {
 			"defer_until", "due_at", "rig", "role_type", "agent_state",
 			"hook_bead", "role_bead", "await_type", "event_kind",
-			"idx_issues_status", "idx_issues_external_ref",
+			"idx_issues_status_updated_at", "idx_issues_defer_until",
+			"idx_issues_external_ref",
 		},
 		"dependencies": {
 			"thread_id", "metadata", "idx_dependencies_thread",
