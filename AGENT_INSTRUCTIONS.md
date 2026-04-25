@@ -8,7 +8,7 @@ This document contains detailed operational instructions for AI agents working o
 
 ### Code Standards
 
-- **Go version**: 1.25+ (see `go.mod` for exact version)
+- **Go version**: see `go.mod` for the required version (currently 1.26+)
 - **Linting**: `golangci-lint run ./...` (baseline warnings documented in [docs/LINTING.md](docs/LINTING.md))
 - **Testing**: All new features need tests (`make test` for the normal local/CI path, `make test-icu-path` only when intentionally exercising the opt-in ICU regex path)
 - **Documentation**: Update relevant .md files

@@ -96,7 +96,7 @@ Only `blocks` dependencies affect the ready work queue.
 
 ### Code Standards
 
-- **Go version**: 1.25+ (see `go.mod` for exact version)
+- **Go version**: see `go.mod` for the required version (currently 1.26+)
 - **Build tag**: `-tags gms_pure_go` is **MANDATORY** for all builds and tests
 - **Build/Install**: `make build` / `make install` (never bare `go build` or `go install`)
 - **Testing**: `make test` (never bare `go test ./...` — it misses required tags)

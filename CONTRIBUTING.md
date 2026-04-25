@@ -6,7 +6,7 @@ Thank you for your interest in contributing to bd! This document provides guidel
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go (see `go.mod` for the required version; currently 1.26+)
 - Git
 - A C compiler (CGO is required for the embedded Dolt database)
 - (Optional) golangci-lint for local linting
