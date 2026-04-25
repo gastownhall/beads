@@ -166,6 +166,17 @@ func SetupSharedTestDB(port int, dbName string) (*sql.DB, error) {
 		}
 	}
 
+	// Synchronize on the new database being visible to a fresh connection
+	// before returning. Without this, a sibling pool from dolt.New() — opened
+	// inside initSharedSchema — can race the Dolt server's catalog refresh
+	// and fail with "Error 1049 (HY000): database not found: <dbName>"
+	// (be-nx7 external-port path). Poll USE on the same db handle until it
+	// succeeds: the same retry condition the dolt package uses (GH-1851).
+	if err := waitForDatabaseVisible(ctx, db, dbName); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("SetupSharedTestDB: wait for visibility: %w", err)
+	}
+
 	// Switch to the database and clean stale branches
 	CleanTestBranches(db, dbName)
 
@@ -306,4 +317,40 @@ func commitAllowEmpty(ctx context.Context, db doltBranchSQL, message string) err
 		return fmt.Errorf("commit %q: %w", message, err)
 	}
 	return nil
+}
+
+// waitForDatabaseVisible polls USE <dbName> with exponential backoff until the
+// Dolt server reports the database as available. Bounded to ~10s — far longer
+// than any catalog-refresh window observed in practice — so a real failure
+// surfaces a clear error instead of hanging the test binary.
+func waitForDatabaseVisible(ctx context.Context, db *sql.DB, dbName string) error {
+	const maxElapsed = 10 * time.Second
+	deadline := time.Now().Add(maxElapsed)
+	delay := 50 * time.Millisecond
+	var lastErr error
+	for {
+		//nolint:gosec // G201: dbName comes from test infrastructure
+		_, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", dbName))
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		errLower := strings.ToLower(err.Error())
+		// Catalog races surface as "unknown database" or "database not found";
+		// any other failure is permanent and should bubble up immediately.
+		if !strings.Contains(errLower, "unknown database") && !strings.Contains(errLower, "database not found") {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("database %q not visible after %s: %w", dbName, maxElapsed, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < time.Second {
+			delay *= 2
+		}
+	}
 }

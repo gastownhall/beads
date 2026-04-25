@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -63,6 +64,19 @@ func testMainInner(m *testing.M) int {
 		defer testutil.TerminateDoltContainer()
 		testServerPort = testutil.DoltContainerPortInt()
 
+		// Pin both env vars to the testcontainer port so applyConfigDefaults
+		// resolves to the container regardless of what BEADS_DOLT_SERVER_PORT
+		// the surrounding shell already exports (see external-port branch above).
+		containerPort := strconv.Itoa(testServerPort)
+		if err := os.Setenv("BEADS_DOLT_SERVER_PORT", containerPort); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: set BEADS_DOLT_SERVER_PORT: %v\n", err)
+			return 1
+		}
+		if err := os.Setenv("BEADS_DOLT_PORT", containerPort); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: set BEADS_DOLT_PORT: %v\n", err)
+			return 1
+		}
+
 		// Set up shared database for branch-per-test isolation
 		testSharedDB = "dolt_pkg_shared"
 		db, err := testutil.SetupSharedTestDB(testServerPort, testSharedDB)
@@ -90,6 +104,7 @@ func testMainInner(m *testing.M) int {
 	doltserver.SweepOrphanedTestServers(suiteTempRoot)
 
 	testServerPort = 0
+	os.Unsetenv("BEADS_DOLT_SERVER_PORT")
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
 	os.Unsetenv("BEADS_TEST_PDEATHSIG")

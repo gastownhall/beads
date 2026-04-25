@@ -661,9 +661,14 @@ func isRetryableError(err error) bool {
 	}
 	// Dolt server catalog race: after CREATE DATABASE, the server's in-memory
 	// catalog may not have registered the new database yet. The immediately
-	// following USE (implicit via DSN) fails with "Unknown database". This is
-	// transient and resolves once the catalog refreshes. (GH-1851)
+	// following USE (implicit via DSN) fails with "Unknown database" (standard
+	// MySQL wording) or "database not found: <name>" (Dolt's own wording from
+	// go-mysql-server). Both are transient and resolve once the catalog
+	// refreshes. (GH-1851; be-nx7 external-port test path)
 	if strings.Contains(errStr, "unknown database") {
+		return true
+	}
+	if strings.Contains(errStr, "database not found") {
 		return true
 	}
 	// Dolt internal race: after CREATE DATABASE, information_schema queries
