@@ -30,7 +30,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/utils"
-	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -993,26 +992,11 @@ var rootCmd = &cobra.Command{
 		storeActive = true
 		storeMutex.Unlock()
 
-		// Initialize OTel now that the store is open so the issue prefix can be
-		// read and stamped as bd.prefix on the resource. The prefix is the
-		// project-level identifier in beads (visible in every issue ID), so
-		// dashboards split metrics on it. Telemetry is a no-op unless an
-		// OpenTelemetry SDK environment variable selects an exporter.
-		var bdPrefix string
-		if p, gerr := store.GetConfig(rootCtx, "issue_prefix"); gerr == nil {
-			bdPrefix = strings.TrimSuffix(p, "-")
-		}
-		if err := telemetry.Init(rootCtx, "bd", Version, bdPrefix); err != nil {
-			debug.Logf("warning: telemetry init failed: %v", err)
-		}
-		rootCtx, commandSpan = telemetry.Tracer("bd").Start(rootCtx, "bd.command."+cmd.Name(),
-			oteltrace.WithAttributes(
-				attribute.String("bd.command", cmd.Name()),
-				attribute.String("bd.version", Version),
-				attribute.String("bd.args", strings.Join(os.Args[1:], " ")),
-				attribute.String("bd.actor", actor),
-			),
-		)
+		// Initialize OTel and start the root bd.command.<name> span. The store
+		// is read for the bd.prefix resource attribute (project-level metric
+		// splitter). Telemetry is opt-in — startCommandTelemetry is a noop
+		// unless BD_OTEL_ENABLED=true (or a legacy BD_OTEL_* selector is set).
+		rootCtx, commandSpan = startCommandTelemetry(rootCtx, store, cmd.Name(), Version, actor, os.Args[1:])
 
 		// Auto-import from issues.jsonl when embedded database is empty (GH#2994).
 		// This handles the upgrade path from pre-0.56 (dolt/) to 1.0+ (embeddeddolt/)
