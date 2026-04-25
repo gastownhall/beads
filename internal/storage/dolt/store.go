@@ -44,6 +44,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -427,7 +428,7 @@ func lockProcessHint() string {
 func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if s.breaker != nil && !s.breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1)
+		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
 		return ErrCircuitOpen
 	}
 
@@ -442,7 +443,7 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 				s.breaker.RecordFailure()
 				// Check if the breaker just tripped — if so, stop retrying
 				if s.breaker.State() == circuitOpen {
-					doltMetrics.circuitTrips.Add(ctx, 1)
+					doltMetrics.circuitTrips.Add(ctx, 1, telemetry.WithMergedAttrs())
 					return backoff.Permanent(fmt.Errorf("%w (circuit breaker tripped)", err))
 				}
 			}
@@ -458,7 +459,7 @@ func (s *DoltStore) withRetry(ctx context.Context, op func() error) error {
 		return nil
 	}, backoff.WithContext(bo, ctx))
 	if attempts > 1 {
-		doltMetrics.retryCount.Add(ctx, int64(attempts-1))
+		doltMetrics.retryCount.Add(ctx, int64(attempts-1), telemetry.WithMergedAttrs())
 	}
 	return err
 }
@@ -528,7 +529,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Current number of open connections (in-use + idle)"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().OpenConnections))
+			o.Observe(int64(db.Stats().OpenConnections), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -536,7 +537,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Connections currently in use"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().InUse))
+			o.Observe(int64(db.Stats().InUse), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -544,7 +545,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Idle connections in pool"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().Idle))
+			o.Observe(int64(db.Stats().Idle), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -552,7 +553,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Maximum number of open connections (pool limit)"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().MaxOpenConnections))
+			o.Observe(int64(db.Stats().MaxOpenConnections), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -632,7 +633,7 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	return backoff.Retry(func() error {
 		err := s.withWriteTx(ctx, fn)
 		if err != nil && isSerializationError(err) {
-			doltMetrics.serializationErrors.Add(ctx, 1)
+			doltMetrics.serializationErrors.Add(ctx, 1, telemetry.WithMergedAttrs())
 			return err // retryable
 		}
 		if err != nil {
@@ -965,7 +966,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if breaker != nil && !breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1)
+		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
 		return nil, ErrCircuitOpen
 	}
 

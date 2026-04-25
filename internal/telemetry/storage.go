@@ -77,18 +77,18 @@ func (s *InstrumentedStorage) op(ctx context.Context, name string, attrs ...attr
 		trace.WithAttributes(all...),
 		trace.WithSpanKind(trace.SpanKindClient),
 	)
-	s.ops.Add(ctx, 1, metric.WithAttributes(all...))
+	s.ops.Add(ctx, 1, WithMergedAttrs(all...))
 	return ctx, span, time.Now()
 }
 
 // done ends the span, records duration and optional error.
 func (s *InstrumentedStorage) done(ctx context.Context, span trace.Span, start time.Time, err error, attrs ...attribute.KeyValue) {
 	ms := float64(time.Since(start).Milliseconds())
-	s.dur.Record(ctx, ms, metric.WithAttributes(attrs...))
+	s.dur.Record(ctx, ms, WithMergedAttrs(attrs...))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		s.errs.Add(ctx, 1, metric.WithAttributes(attrs...))
+		s.errs.Add(ctx, 1, WithMergedAttrs(attrs...))
 	}
 	span.End()
 }
@@ -388,7 +388,7 @@ func (s *InstrumentedStorage) GetStatistics(ctx context.Context) (*types.Statist
 	if err == nil && v != nil {
 		// Record current issue counts as gauge snapshots, broken down by status.
 		statusAttr := func(status string) metric.MeasurementOption {
-			return metric.WithAttributes(attribute.String("status", status))
+			return WithMergedAttrs(attribute.String("status", status))
 		}
 		s.issueGauge.Record(ctx, int64(v.OpenIssues), statusAttr("open"))
 		s.issueGauge.Record(ctx, int64(v.InProgressIssues), statusAttr("in_progress"))

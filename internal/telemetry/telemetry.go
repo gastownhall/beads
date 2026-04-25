@@ -157,6 +157,8 @@ func buildResource(ctx context.Context, serviceName, version, prefix string) (*r
 // so metrics from bd processes bound to different beads projects can be
 // distinguished by dashboard queries.
 func Init(ctx context.Context, serviceName, version, prefix string) error {
+	captureBaseAttrs(prefix)
+
 	if mappings := translateLegacyEnv(); len(mappings) > 0 {
 		fmt.Fprintf(os.Stderr,
 			"warning: BD_OTEL_* environment variables are deprecated. Replace with BD_OTEL_ENABLED=true plus the standard OpenTelemetry SDK variables. Translated for this run: %s\n",
