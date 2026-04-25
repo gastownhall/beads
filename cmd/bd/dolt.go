@@ -835,6 +835,9 @@ func listRemoteSurfaces(ctx context.Context, st storage.RemoteStore, dbPath stri
 		// that flock, so treat the SQL-visible remotes as the shared surface.
 		return sqlRemotes, sqlErr, sqlRemotes, nil
 	}
+	if strings.TrimSpace(dbPath) == "" {
+		return sqlRemotes, sqlErr, nil, fmt.Errorf("local Dolt CLI directory is not configured; set BEADS_DOLT_CLI_DIR to list filesystem remotes")
+	}
 	cliRemotes, cliErr = listDoltCLIRemotes(dbPath)
 	return sqlRemotes, sqlErr, cliRemotes, cliErr
 }
@@ -918,7 +921,10 @@ var doltRemoteAddCmd = &cobra.Command{
 		// In embedded mode, SQL and CLI operate on the same directory,
 		// so the SQL add already wrote the remote config — skip CLI.
 		cliFailed := false
-		if !embedded && cliURL != url {
+		if !embedded && dbPath == "" {
+			cliFailed = true
+			fmt.Fprintf(os.Stderr, "Warning: SQL remote added but CLI remote was not configured: set BEADS_DOLT_CLI_DIR to the local Dolt database path\n")
+		} else if !embedded && cliURL != url {
 			if err := doltutil.AddCLIRemote(dbPath, name, url); err != nil {
 				cliFailed = true
 				// Non-fatal: SQL remote was added successfully
@@ -1061,13 +1067,13 @@ var doltRemoteListCmd = &cobra.Command{
 		}
 
 		if cliErr != nil {
-			fmt.Printf("\n%s Could not read CLI remotes: %v\n", ui.RenderWarn("⚠"), cliErr)
+			fmt.Printf("\n%s Could not read CLI remotes: %v\n", ui.RenderWarn("!"), cliErr)
 		}
 		if hasDiscrepancy {
 			if embedded {
-				fmt.Printf("\n%s Remote discrepancies detected.\n", ui.RenderWarn("⚠"))
+				fmt.Printf("\n%s Remote discrepancies detected.\n", ui.RenderWarn("!"))
 			} else {
-				fmt.Printf("\n%s Remote discrepancies detected. Run 'bd doctor --fix' to resolve.\n", ui.RenderWarn("⚠"))
+				fmt.Printf("\n%s Remote discrepancies detected. Run 'bd doctor --fix' to resolve.\n", ui.RenderWarn("!"))
 			}
 		}
 	},
@@ -1124,7 +1130,12 @@ var doltRemoteRemoveCmd = &cobra.Command{
 		// In embedded mode, SQL and CLI operate on the same directory,
 		// so the SQL remove already cleared the remote config — skip CLI.
 		cliRemoveFailed := false
-		if !embedded && cliURL != "" {
+		if !embedded && dbPath == "" {
+			cliRemoveFailed = cliURL != ""
+			if cliURL != "" {
+				fmt.Fprintf(os.Stderr, "Warning: SQL remote removed but CLI remote was not configured: set BEADS_DOLT_CLI_DIR to the local Dolt database path\n")
+			}
+		} else if !embedded && cliURL != "" {
 			if err := doltutil.RemoveCLIRemote(dbPath, name); err != nil {
 				cliRemoveFailed = true
 				fmt.Fprintf(os.Stderr, "Warning: SQL remote removed but CLI remote failed: %v\n", err)

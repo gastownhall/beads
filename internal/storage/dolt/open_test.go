@@ -145,6 +145,7 @@ func TestApplyCLIAutoStart_RespectsExternalMode(t *testing.T) {
 
 func TestCLIDirUsesSharedDoltRootInSharedServerMode(t *testing.T) {
 	sharedRoot := t.TempDir()
+	t.Setenv(EnvDoltCLIDir, "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
 
@@ -162,6 +163,7 @@ func TestCLIDirUsesSharedDoltRootInSharedServerMode(t *testing.T) {
 }
 
 func TestCLIDirUsesDbPathOutsideSharedServerMode(t *testing.T) {
+	t.Setenv(EnvDoltCLIDir, "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
 
 	dbPath := filepath.Join(t.TempDir(), ".beads", "dolt")
@@ -175,6 +177,58 @@ func TestCLIDirUsesDbPathOutsideSharedServerMode(t *testing.T) {
 	want := filepath.Join(dbPath, "local_db")
 	if got := store.CLIDir(); got != want {
 		t.Fatalf("CLIDir() = %q, want %q", got, want)
+	}
+}
+
+func TestCLIDirUsesExplicitEnvOverride(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	cliDir := filepath.Join(t.TempDir(), "server-db")
+	t.Setenv(EnvDoltCLIDir, cliDir)
+
+	store := &DoltStore{
+		serverMode:  true,
+		serverOwner: doltserver.ServerModeExternal,
+		dbPath:      filepath.Join(t.TempDir(), ".beads", "dolt"),
+		database:    "local_db",
+	}
+
+	if got := store.CLIDir(); got != cliDir {
+		t.Fatalf("CLIDir() = %q, want %q", got, cliDir)
+	}
+}
+
+func TestCLIDirEmptyForGenericExternalServerModeWithoutEnv(t *testing.T) {
+	t.Setenv(EnvDoltCLIDir, "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+
+	store := &DoltStore{
+		serverMode:  true,
+		serverOwner: doltserver.ServerModeExternal,
+		dbPath:      filepath.Join(t.TempDir(), ".beads", "dolt"),
+		database:    "local_db",
+	}
+
+	if got := store.CLIDir(); got != "" {
+		t.Fatalf("CLIDir() = %q, want empty string", got)
+	}
+}
+
+func TestDoltCLIRequiresExplicitDirInGenericExternalServerMode(t *testing.T) {
+	t.Setenv(EnvDoltCLIDir, "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+
+	store := &DoltStore{
+		serverMode:  true,
+		serverOwner: doltserver.ServerModeExternal,
+		branch:      "main",
+	}
+
+	err := store.doltCLIPull(t.Context(), "origin", nil)
+	if err == nil {
+		t.Fatal("doltCLIPull() error = nil, want explicit CLI dir error")
+	}
+	if !strings.Contains(err.Error(), EnvDoltCLIDir) {
+		t.Fatalf("doltCLIPull() error = %q, want mention of %s", err.Error(), EnvDoltCLIDir)
 	}
 }
 

@@ -738,12 +738,31 @@ func (s *DoltStore) shouldUseCLIForCloudAuth(remote string) bool {
 	if len(prefixes) == 0 {
 		return false // unknown scheme — not a cloud remote
 	}
+	return envHasAnyPrefix(prefixes)
+}
+
+func envHasAnyPrefix(prefixes []string) bool {
 	for _, e := range os.Environ() {
 		for _, prefix := range prefixes {
 			if strings.HasPrefix(e, prefix) {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+func (s *DoltStore) hasCloudAuthForSQLRemote(ctx context.Context, remote string) bool {
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return false
+	}
+	for _, r := range remotes {
+		if r.Name != remote {
+			continue
+		}
+		prefixes := envPrefixesForRemoteURL(r.URL)
+		return len(prefixes) > 0 && envHasAnyPrefix(prefixes)
 	}
 	return false
 }

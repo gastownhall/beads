@@ -70,6 +70,18 @@ bd init --server
 export BEADS_DOLT_SERVER_MODE=1
 ```
 
+For externally managed servers, set `BEADS_DOLT_CLI_DIR` when a sync operation
+must fall back to the local Dolt CLI, such as git-protocol remotes or
+credentials/cloud auth that only exist in the current shell:
+
+```bash
+export BEADS_DOLT_CLI_DIR=/path/to/dolt-data/beads
+```
+
+The value must be the actual Dolt database directory where `dolt push` or
+`dolt pull` can run, not the parent server root. Remote types supported by
+SQL `DOLT_PUSH` / `DOLT_PULL` do not need this setting.
+
 ```yaml
 # .beads/config.yaml (server mode settings)
 dolt:
