@@ -14,10 +14,7 @@ func TestIgnoredTableDDL(t *testing.T) {
 	combined := strings.Join(ddl, "\n")
 
 	// Verify all expected tables are referenced.
-	for _, table := range []string{
-		"local_metadata", "repo_mtimes", "wisps",
-		"wisp_labels", "wisp_dependencies", "wisp_events", "wisp_comments",
-	} {
+	for _, table := range ignoredTableNames {
 		if !strings.Contains(combined, table) {
 			t.Errorf("IgnoredTableDDL missing reference to table %q", table)
 		}

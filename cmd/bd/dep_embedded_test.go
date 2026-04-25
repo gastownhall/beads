@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdDep runs "bd dep" with the given args and returns raw stdout.
@@ -62,6 +65,41 @@ func bdDepJSON(t *testing.T, bd, dir string, args ...string) map[string]interfac
 		t.Fatalf("parse dep JSON: %v\n%s", err, s)
 	}
 	return m
+}
+
+func dropEmbeddedWispDependencies(t *testing.T, beadsDir, database string) {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS wisp_dependencies"); err != nil {
+		t.Fatalf("drop table wisp_dependencies: %v", err)
+	}
+}
+
+func TestEmbeddedDepMissingWispDependencies(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mw")
+	blocker := bdCreate(t, bd, dir, "Missing wisp dep blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "Missing wisp dep blocked", "--type", "task")
+
+	dropEmbeddedWispDependencies(t, beadsDir, "mw")
+
+	out := bdDep(t, bd, dir, "add", blocked.ID, blocker.ID)
+	if !strings.Contains(out, "Added dependency") {
+		t.Fatalf("expected dep add to succeed after recreating wisp_dependencies: %s", out)
+	}
+
+	tree := bdDep(t, bd, dir, "tree", blocked.ID)
+	if !strings.Contains(tree, blocker.ID) {
+		t.Fatalf("expected dep tree to include blocker %s after wisp_dependencies repair:\n%s", blocker.ID, tree)
+	}
 }
 
 func TestEmbeddedDep(t *testing.T) {
