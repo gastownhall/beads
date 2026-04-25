@@ -2,11 +2,15 @@ package telemetry
 
 import (
 	"context"
+	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // clearAllEnv clears every BD_OTEL_* and OTEL_* env var the package looks at,
@@ -224,6 +228,100 @@ func TestBuildResource_BDPrefixOmittedWhenEmpty(t *testing.T) {
 	}
 	if _, ok := lookupAttr(res.Attributes(), "bd.prefix"); ok {
 		t.Error("bd.prefix should be omitted when prefix is empty")
+	}
+}
+
+// resetTelemetryState restores noop providers and clears registered shutdown
+// hooks after a test that called Init, so global OTel state doesn't leak
+// between tests.
+func resetTelemetryState(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		Shutdown(context.Background())
+		otel.SetTracerProvider(tracenoop.NewTracerProvider())
+		otel.SetMeterProvider(metricnoop.NewMeterProvider())
+	})
+}
+
+func TestInit_NoOpWhenDisabled(t *testing.T) {
+	clearAllEnv(t)
+	resetTelemetryState(t)
+	if err := Init(context.Background(), "bd", "v0.0.0", "ass"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+}
+
+func TestInit_LegacyEnvActivatesAndWarns(t *testing.T) {
+	clearAllEnv(t)
+	resetTelemetryState(t)
+	t.Setenv("BD_OTEL_METRICS_URL", "http://example.invalid/metrics")
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	if err := Init(context.Background(), "bd", "v0.0.0", "ass"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	if !strings.Contains(string(out), "BD_OTEL_*") {
+		t.Errorf("expected BD_OTEL_* deprecation warning on stderr, got %q", string(out))
+	}
+	if got := os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"); got != "http://example.invalid/metrics" {
+		t.Errorf("legacy env should have populated OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, got %q", got)
+	}
+}
+
+func TestInit_StdoutExporters(t *testing.T) {
+	clearAllEnv(t)
+	resetTelemetryState(t)
+	t.Setenv("BD_OTEL_ENABLED", "true")
+	t.Setenv("OTEL_TRACES_EXPORTER", "console")
+	t.Setenv("OTEL_METRICS_EXPORTER", "console")
+
+	// Console exporters write to stdout on shutdown; redirect to keep test
+	// output pristine.
+	origStdout := os.Stdout
+	_, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() {
+		_ = w.Close()
+		os.Stdout = origStdout
+	})
+
+	if err := Init(context.Background(), "bd", "v0.0.0", "ass"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+}
+
+func TestOTLPMetricsEndpointSet(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{"none", nil, false},
+		{"metrics-specific", map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://example.invalid"}, true},
+		{"generic", map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://example.invalid"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAllEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := otlpMetricsEndpointSet(); got != tc.want {
+				t.Errorf("otlpMetricsEndpointSet() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
