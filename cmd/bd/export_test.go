@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -533,5 +534,139 @@ func TestExportNoHistoryBeadRoundTrip(t *testing.T) {
 	}
 	if imported.Ephemeral {
 		t.Error("NoHistory bead must not become ephemeral=true after roundtrip")
+	}
+}
+
+func TestExportNoDuplicateWisps(t *testing.T) {
+	// GH#3352: A previous bug caused every wisp to appear twice in the export
+	// because export.go ran a separate Ephemeral=true query and appended the
+	// results, even though SearchIssues(Ephemeral=nil) already includes wisps.
+	// This regression test ensures no duplicate IDs appear in the export and
+	// the wisp count matches what was created.
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	ensureTestMode(t)
+	saved := saveAndRestoreGlobals(t)
+	_ = saved
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	dbName := uniqueTestDBName(t)
+	testDBPath := filepath.Join(beadsDir, "dolt")
+	writeTestMetadata(t, testDBPath, dbName)
+	s := newTestStore(t, testDBPath)
+	store = s
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	t.Cleanup(func() {
+		store = nil
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	})
+
+	ctx := context.Background()
+	rootCtx = ctx
+
+	// Create regular (persistent) issues.
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("duptest-regular-%d", i)
+		if _, err := s.DB().ExecContext(ctx,
+			`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, fmt.Sprintf("Regular issue %d", i), "", "", "", "", "open", 2, "task"); err != nil {
+			t.Fatalf("insert regular issue %d: %v", i, err)
+		}
+	}
+
+	// Create ephemeral wisps via the store API (routes to wisps table).
+	wispIDs := make(map[string]bool)
+	for i := 1; i <= 3; i++ {
+		wisp := &types.Issue{
+			Title:     fmt.Sprintf("Wisp %d for export dedup", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		if err := s.CreateIssue(ctx, wisp, "test"); err != nil {
+			t.Fatalf("CreateIssue (wisp %d): %v", i, err)
+		}
+		wispIDs[wisp.ID] = true
+	}
+
+	// Export with --all to include everything.
+	exportFile := filepath.Join(tmpDir, "dedup_export.jsonl")
+	exportOutput = exportFile
+	exportAll = true
+	exportIncludeInfra = false
+	exportScrub = false
+	exportNoMemories = true
+	t.Cleanup(func() {
+		exportOutput = ""
+		exportAll = false
+		exportNoMemories = false
+	})
+
+	if err := runExport(nil, nil); err != nil {
+		t.Fatalf("runExport: %v", err)
+	}
+
+	data, err := os.ReadFile(exportFile)
+	if err != nil {
+		t.Fatalf("read export file: %v", err)
+	}
+
+	lines := splitJSONL(data)
+
+	// Parse every line and collect IDs.
+	seenIDs := make(map[string]int)
+	exportedWispCount := 0
+	for _, line := range lines {
+		var rec map[string]interface{}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("parse exported JSONL: %v", err)
+		}
+		id, ok := rec["id"].(string)
+		if !ok {
+			continue // skip non-issue records (e.g. memories)
+		}
+		seenIDs[id]++
+		if wispIDs[id] {
+			exportedWispCount++
+		}
+	}
+
+	// Assert no duplicate IDs.
+	for id, count := range seenIDs {
+		if count > 1 {
+			t.Errorf("duplicate export entry for ID %q: appeared %d times", id, count)
+		}
+	}
+
+	// Assert all wisps are present exactly once.
+	if exportedWispCount != len(wispIDs) {
+		t.Errorf("expected %d wisps in export, got %d", len(wispIDs), exportedWispCount)
+	}
+
+	// Assert total count = 3 regular + 3 wisps = 6.
+	expectedTotal := 6
+	if len(seenIDs) != expectedTotal {
+		t.Errorf("expected %d unique issues in export, got %d", expectedTotal, len(seenIDs))
 	}
 }
