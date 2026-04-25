@@ -22,18 +22,26 @@ const (
 	ServerModeEmbedded = doltserver.ServerModeEmbedded
 )
 
-// ApplyCLIAutoStart sets the same standalone auto-start policy used by the
-// normal CLI path. This intentionally ignores metadata.json explicit-port
-// suppression so doctor and other CLI helper paths behave the same way as
-// cmd/bd/main.go on cold repo-local standalone setups.
+// ApplyCLIAutoStart sets the standalone auto-start policy used by the
+// normal CLI path. Honors the actual server mode resolved from
+// metadata.json + env: when External (e.g. metadata.json has explicit
+// dolt_server_port), suppresses fallback auto-spawn — the user has
+// configured an external server; if it's transiently unreachable, bd
+// errors out rather than silently spawning a different server from
+// .beads/dolt/ (the shadow database bug).
+//
+// Cold standalone setups remain unaffected: bd init writes the port and
+// starts the server in one shot, so subsequent commands find a running
+// server and don't need fallback auto-start. If the user explicitly
+// stops the server, External mode's "you manage the lifecycle" semantics
+// asks the user to run `bd dolt start`.
 func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 	autoStartCfg := config.GetString("dolt.auto-start")
 	if autoStartCfg == "" {
 		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
 	}
-	// Pass ServerModeOwned to avoid external-mode suppression — this path
-	// intentionally behaves like a standalone owned-server setup.
-	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, ServerModeOwned)
+	mode := doltserver.ResolveServerMode(beadsDir)
+	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, mode)
 }
 
 // NewFromConfig creates a DoltStore based on the metadata.json configuration.
