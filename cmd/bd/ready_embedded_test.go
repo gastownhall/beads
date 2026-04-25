@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -54,6 +55,28 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 		if !json.Valid([]byte(s[start:])) {
 			t.Errorf("invalid JSON in ready output: %s", s[:min(200, len(s))])
+		}
+	})
+
+	t.Run("ready_json_truncation_hint", func(t *testing.T) {
+		for i := 0; i < 3; i++ {
+			bdCreate(t, bd, dir, fmt.Sprintf("Ready capped issue %d", i), "--type", "task")
+		}
+
+		cmd := exec.Command(bd, "ready", "--json", "--limit", "2")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("bd ready --json --limit 2 failed: %v\nstderr: %s\nstdout: %s", err, stderr.String(), out)
+		}
+		if !json.Valid(bytes.TrimSpace(out)) {
+			t.Fatalf("ready JSON stdout should remain parseable, got: %s", out)
+		}
+		if !strings.Contains(stderr.String(), "Use --limit 0 for all") {
+			t.Fatalf("expected truncation hint on stderr, got: %q", stderr.String())
 		}
 	})
 

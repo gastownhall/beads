@@ -492,6 +492,9 @@ func TestEmbeddedList(t *testing.T) {
 		if !strings.Contains(out, "Found") {
 			t.Error("--long format should contain 'Found N issues'")
 		}
+		if !strings.Contains(out, "Description:") || !strings.Contains(out, "This is a bug") {
+			t.Errorf("--long format should include issue descriptions, got: %s", out)
+		}
 	})
 
 	t.Run("pretty_format", func(t *testing.T) {

@@ -101,6 +101,12 @@ func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string) 
 	if issue.Assignee != "" {
 		buf.WriteString(fmt.Sprintf("  Assignee: %s\n", issue.Assignee))
 	}
+	if desc := strings.TrimSpace(issue.Description); desc != "" {
+		buf.WriteString("  Description:\n")
+		for _, line := range strings.Split(desc, "\n") {
+			buf.WriteString(fmt.Sprintf("    %s\n", line))
+		}
+	}
 	if len(labels) > 0 {
 		buf.WriteString(fmt.Sprintf("  Labels: %v\n", labels))
 	}

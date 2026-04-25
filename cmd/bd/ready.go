@@ -178,6 +178,19 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if err != nil {
 			FatalError("%v", err)
 		}
+
+		totalReady := len(issues)
+		truncated := false
+		if filter.Limit > 0 && len(issues) == filter.Limit {
+			countFilter := filter
+			countFilter.Limit = 0
+			allIssues, countErr := activeStore.GetReadyWork(ctx, countFilter)
+			if countErr == nil && len(allIssues) > len(issues) {
+				totalReady = len(allIssues)
+				truncated = true
+			}
+		}
+
 		if jsonOutput {
 			// Always output array, even if empty
 			if issues == nil {
@@ -223,6 +236,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				}
 			}
 			outputJSON(issuesWithCounts)
+			if truncated {
+				fmt.Fprintf(os.Stderr, "Showing %d of %d ready issues. Use --limit 0 for all, or --limit N to raise the cap.\n", len(issues), totalReady)
+			}
 			return
 		}
 		// Show upgrade notification if needed
@@ -244,20 +260,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			maybeShowTip(store)
 			return
 		}
-		// Check if results were truncated by the limit
-		totalReady := len(issues)
-		truncated := false
-		if filter.Limit > 0 && len(issues) == filter.Limit {
-			// Re-query without limit to get total count
-			countFilter := filter
-			countFilter.Limit = 0
-			allIssues, countErr := activeStore.GetReadyWork(ctx, countFilter)
-			if countErr == nil && len(allIssues) > len(issues) {
-				totalReady = len(allIssues)
-				truncated = true
-			}
-		}
-
 		// Build parent epic map for pretty display
 		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
 
@@ -663,7 +665,7 @@ type MoleculeReadyOutput struct {
 }
 
 func init() {
-	readyCmd.Flags().IntP("limit", "n", 10, "Maximum issues to show")
+	readyCmd.Flags().IntP("limit", "n", 100, "Maximum issues to show (use 0 for unlimited)")
 	readyCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
 	readyCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	readyCmd.Flags().BoolP("unassigned", "u", false, "Show only unassigned issues")
