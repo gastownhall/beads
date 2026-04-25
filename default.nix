@@ -16,16 +16,16 @@ buildGoModule {
   tags = [ "gms_pure_go" ];
   doCheck = false;
 
-  # Go module dependencies hash - if build fails with hash mismatch, update with the "got:" value
-  vendorHash = "sha256-Rn1MnasYUOBbIgjFx0E6R2Zak6la1VajDkHqoiFpHtw=";
+  # proxyVendor avoids vendor/modules.txt consistency checks when the vendored
+  # tree lags go.mod/go.sum.
+  proxyVendor = true;
+  vendorHash = "sha256-S/NavjGH6VSPU+rCtqtviOcGhgXc6VZUXCUhasSdUGU=";
 
   # Relax go.mod version for Nix: nixpkgs Go may lag behind the latest
   # patch release, and GOTOOLCHAIN=auto can't download in the Nix sandbox.
   postPatch = ''
     goVer="$(go env GOVERSION | sed 's/^go//')"
     go mod edit -go="$goVer"
-
-    env
   '';
 
   # Allow patch-level toolchain upgrades when a dependency's minimum Go patch
