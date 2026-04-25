@@ -118,6 +118,16 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 			args = append(args, label)
 		}
 	}
+	if len(filter.ExcludeLabels) > 0 {
+		placeholders := make([]string, len(filter.ExcludeLabels))
+		for i, label := range filter.ExcludeLabels {
+			placeholders[i] = "?"
+			args = append(args, label)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"id NOT IN (SELECT issue_id FROM labels WHERE label IN (%s))",
+			strings.Join(placeholders, ", ")))
+	}
 	// Parent filtering: filter to children of specified parent (GH#2009)
 	// Explicit parent-child dependency takes precedence over dotted-ID prefix.
 	if filter.ParentID != nil {
