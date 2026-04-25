@@ -71,7 +71,7 @@ BD_OTEL_ENABLED=true OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=console 
 
 ### Legacy environment variables (deprecated)
 
-The earlier `BD_OTEL_*` data variables are honoured for backwards
+The earlier `BD_OTEL_*` data variables are honored for backwards
 compatibility. Setting any of them activates telemetry on its own (no
 `BD_OTEL_ENABLED=true` required) and translates to the standard OTLP equivalent
 — a legacy value wins over a pre-existing `OTEL_*` value so a machine-global

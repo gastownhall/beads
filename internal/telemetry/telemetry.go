@@ -11,7 +11,7 @@
 //	    Master switch. Activates telemetry; without it the standard OTEL_*
 //	    variables below are ignored.
 //
-// Once activated, beads honours the standard OpenTelemetry SDK environment
+// Once activated, beads honors the standard OpenTelemetry SDK environment
 // variables:
 //
 //	OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:8428/opentelemetry/api/v1/push
@@ -34,7 +34,7 @@
 //
 // # Legacy environment variables
 //
-// The earlier BD_OTEL_* variables remain honoured for backwards compatibility
+// The earlier BD_OTEL_* variables remain honored for backwards compatibility
 // and take precedence over their OTEL_* equivalents. A deprecation warning is
 // logged when any are detected:
 //
