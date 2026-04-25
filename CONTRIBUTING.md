@@ -145,14 +145,14 @@ Slow tests use `testing.Short()` to skip when `-short` flag is present.
 ```bash
 # Fast tests (recommended for development - skips slow tests)
 # Use this for rapid iteration during development
-go test -short ./...
+make test
 
 # Full test suite (before committing - includes all tests)
 # Run this before pushing to ensure nothing breaks
-go test ./...
+make test
 
 # With race detection and coverage
-go test -race -coverprofile=coverage.out ./...
+CGO_ENABLED=1 go test -tags gms_pure_go -race -coverprofile=coverage.out ./...
 ```
 
 **When to use `-short`:**
@@ -182,16 +182,17 @@ Tests are split into two categories based on whether they need the embedded Dolt
 
 ```bash
 # Fast non-CGO tests (recommended for development)
-make test                     # or: go test -short ./...
+make test                     # or: ./scripts/test.sh
 
-# Full CGO-enabled suite (before committing)
-make test-full-cgo            # or: ./scripts/test-cgo.sh ./...
+# Opt-in ICU regex path (maintainer-only)
+make test-icu-path            # or: ./scripts/test-icu-path.sh ./...
 
-# Run a specific CGO test
-./scripts/test-cgo.sh -run '^TestMyFeature$' ./cmd/bd/...
+# Run a specific package or test with shipped config
+CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
+CGO_ENABLED=1 go test -tags gms_pure_go -run '^TestMyFeature$' ./cmd/bd/...
 ```
 
-On macOS, always use the script or Make target for CGO tests -- they configure the required ICU linker flags automatically.
+On macOS, use the Make target or script for the opt-in ICU regex path -- they configure the required ICU linker flags automatically.
 
 ### ICU and Build Tags
 

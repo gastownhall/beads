@@ -185,7 +185,7 @@ This is enforced by pre-use hooks. If you try `gh pr create`, it will be blocked
 bd create "Add integration tests for sync" -t task -p 2 --json
 
 # 2. Run quality gates (only if code changes were made)
-go test -short ./...
+make test
 golangci-lint run ./...
 
 # 3. Close finished issues
@@ -317,7 +317,7 @@ make test
 make test-icu-path
 
 # Coverage run
-go test -coverprofile=coverage.out ./...
+go test -tags gms_pure_go -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
 # Verify installed binary
