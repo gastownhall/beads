@@ -1005,11 +1005,6 @@ var rootCmd = &cobra.Command{
 		if err := telemetry.Init(rootCtx, "bd", Version, bdPrefix); err != nil {
 			debug.Logf("warning: telemetry init failed: %v", err)
 		}
-		// Decorate with OTel instrumentation so storage operations get spans
-		// and bd.storage.* / bd.issue.count metrics. No-op when telemetry is
-		// disabled. Wrapped before NewHookFiringStore below so storage spans
-		// measure pure DB time and don't include hook-firing overhead.
-		store = telemetry.WrapStorage(store)
 		rootCtx, commandSpan = telemetry.Tracer("bd").Start(rootCtx, "bd.command."+cmd.Name(),
 			oteltrace.WithAttributes(
 				attribute.String("bd.command", cmd.Name()),
@@ -1045,14 +1040,12 @@ var rootCmd = &cobra.Command{
 			hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
 		}
 
-		// Wrap store with hook-firing decorator so ALL mutations
-		// automatically fire on_create/on_update/on_close hooks.
-		// Set BD_NO_HOOKS=1 to disable all hook firing (useful for
-		// bulk imports, migrations, or environments where hooks
-		// should not run).
-		if hookRunner != nil && store != nil && !config.GetBool("no-hooks") {
-			store = storage.NewHookFiringStore(store, hookRunner)
-		}
+		// Compose the storage decorator chain: OTel instrumentation (no-op
+		// when telemetry is off) wrapped by hook firing (skipped when
+		// BD_NO_HOOKS=1, which is useful for bulk imports, migrations, or
+		// environments where on_create/on_update/on_close hooks should not
+		// run). Order matters — see wireStorageDecorators in storage_chain.go.
+		store = wireStorageDecorators(store, hookRunner, config.GetBool("no-hooks"))
 
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)
