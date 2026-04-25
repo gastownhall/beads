@@ -51,10 +51,9 @@ func NewFromConfig(ctx context.Context, beadsDir string) (*DoltStore, error) {
 }
 
 // NewFromConfigWithCLIOptions creates a DoltStore using the standalone CLI
-// auto-start policy from cmd/bd/main.go instead of the explicit-port
-// suppression used by library-style config opens. This is for CLI helper paths
-// like `bd doctor` that should behave the same way as normal top-level CLI
-// commands on cold repo-local standalone setups.
+// auto-start policy from cmd/bd/main.go. This is for CLI helper paths like
+// `bd doctor` that should behave the same way as normal top-level CLI commands
+// while still honoring externally managed server mode.
 func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Config) (*DoltStore, error) {
 	fileCfg, err := configfile.Load(beadsDir)
 	if err != nil {

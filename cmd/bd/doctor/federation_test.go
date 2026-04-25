@@ -98,9 +98,11 @@ func TestCheckFederationRemotesAPI_ServerNotRunning(t *testing.T) {
 	}
 }
 
-func TestDoltServerConfig_EnablesCLIAutoStartWithConfiguredPort(t *testing.T) {
+func TestDoltServerConfig_SuppressesCLIAutoStartWithConfiguredPort(t *testing.T) {
 	t.Setenv("BEADS_TEST_MODE", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -119,8 +121,35 @@ func TestDoltServerConfig_EnablesCLIAutoStartWithConfiguredPort(t *testing.T) {
 	}
 
 	result := doltServerConfig(beadsDir, filepath.Join(beadsDir, "dolt"))
+	if result.AutoStart {
+		t.Fatal("doltServerConfig should suppress CLI auto-start with an external configured server port")
+	}
+}
+
+func TestDoltServerConfig_EnablesCLIAutoStartWithoutConfiguredPort(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		Backend:      configfile.BackendDolt,
+		DoltDatabase: "beads_test",
+	}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := doltServerConfig(beadsDir, filepath.Join(beadsDir, "dolt"))
 	if !result.AutoStart {
-		t.Fatal("doltServerConfig should enable CLI auto-start even with a configured server port")
+		t.Fatal("doltServerConfig should enable CLI auto-start for owned standalone configs")
 	}
 }
 
