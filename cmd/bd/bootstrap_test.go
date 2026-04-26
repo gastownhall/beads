@@ -1557,6 +1557,45 @@ func TestCloneFromRemoteOwnedModeUsesCLI(t *testing.T) {
 	}
 }
 
+func TestResolveRemoteCloneModeDefaultConfigUsesEmbedded(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	cfg := configfile.DefaultConfig()
+
+	got := resolveRemoteCloneMode(beadsDir, cfg, remoteCloneAuto)
+	if got != remoteCloneEmbedded {
+		t.Fatalf("resolveRemoteCloneMode(default cfg) = %v, want embedded", got)
+	}
+}
+
+func TestResolveRemoteCloneModeExplicitExternalOverridesMissingMetadata(t *testing.T) {
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	cfg := &configfile.Config{
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: 3312,
+		DoltDatabase:   "beads_external",
+	}
+
+	got := resolveRemoteCloneMode(beadsDir, cfg, remoteCloneExternalServer)
+	if got != remoteCloneExternalServer {
+		t.Fatalf("resolveRemoteCloneMode(explicit external) = %v, want external server", got)
+	}
+}
+
 // TestCloneFromRemoteSharedServerModeUsesServer verifies that
 // BEADS_DOLT_SHARED_SERVER=1 triggers the server clone path.
 func TestCloneFromRemoteSharedServerModeUsesServer(t *testing.T) {

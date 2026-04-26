@@ -665,6 +665,15 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 	return nil
 }
 
+type remoteCloneMode int
+
+const (
+	remoteCloneAuto remoteCloneMode = iota
+	remoteCloneEmbedded
+	remoteCloneExternalServer
+	remoteCloneCLI
+)
+
 // cloneFromRemote clones a Dolt database from a remote URL.
 // In embedded mode, uses the embedded engine's DOLT_CLONE procedure.
 // In external server mode, connects to the running server via MySQL and
@@ -673,13 +682,17 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 // BootstrapFromRemoteWithDB.
 // Shared by bd init and bd bootstrap to keep clone logic in one place.
 func cloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config) error {
-	mode := doltserver.ResolveServerMode(beadsDir)
+	return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cfg, remoteCloneAuto)
+}
+
+func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config, cloneMode remoteCloneMode) error {
+	mode := resolveRemoteCloneMode(beadsDir, cfg, cloneMode)
 
 	switch mode {
-	case doltserver.ServerModeEmbedded:
+	case remoteCloneEmbedded:
 		return cloneViaEmbedded(ctx, beadsDir, remoteURL, dbName)
 
-	case doltserver.ServerModeExternal:
+	case remoteCloneExternalServer:
 		if cfg == nil {
 			// Caller didn't provide config; fall back to loading from disk.
 			if loaded, err := configfile.Load(beadsDir); err == nil && loaded != nil {
@@ -693,8 +706,30 @@ func cloneFromRemote(ctx context.Context, beadsDir, remoteURL, dbName string, cf
 		fmt.Fprintf(os.Stderr, "Warning: server mode detected but no config available, falling back to CLI clone\n")
 		return cloneViaCLI(ctx, beadsDir, remoteURL, dbName)
 
-	default: // ServerModeOwned
+	default:
 		return cloneViaCLI(ctx, beadsDir, remoteURL, dbName)
+	}
+}
+
+func resolveRemoteCloneMode(beadsDir string, cfg *configfile.Config, cloneMode remoteCloneMode) remoteCloneMode {
+	if cloneMode != remoteCloneAuto {
+		return cloneMode
+	}
+
+	if cfg != nil {
+		if cfg.IsDoltServerMode() || doltserver.IsSharedServerMode() || os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
+			return remoteCloneExternalServer
+		}
+		return remoteCloneEmbedded
+	}
+
+	switch doltserver.ResolveServerMode(beadsDir) {
+	case doltserver.ServerModeEmbedded:
+		return remoteCloneEmbedded
+	case doltserver.ServerModeExternal:
+		return remoteCloneExternalServer
+	default:
+		return remoteCloneCLI
 	}
 }
 
@@ -722,12 +757,13 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 // data directory, which is the correct behavior for externally managed
 // servers where bd does not know the filesystem layout.
 func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config) error {
-	resolved := doltserver.DefaultConfig(beadsDir)
+	port := serverClonePort(beadsDir, cfg)
 	dsn := doltutil.ServerDSN{
+		Socket:   cfg.GetDoltServerSocket(),
 		Host:     cfg.GetDoltServerHost(),
-		Port:     resolved.Port,
+		Port:     port,
 		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(resolved.Port),
+		Password: cfg.GetDoltServerPasswordForPort(port),
 		TLS:      cfg.GetDoltServerTLS(),
 		// No Database — DOLT_CLONE creates the database.
 	}.String()
@@ -743,15 +779,38 @@ func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg
 
 	if err := db.PingContext(cloneCtx); err != nil {
 		return fmt.Errorf("dolt server unreachable at %s:%d (is dolt sql-server running?): %w",
-			cfg.GetDoltServerHost(), resolved.Port, err)
+			cfg.GetDoltServerHost(), port, err)
 	}
 
 	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName); err != nil {
 		return fmt.Errorf("clone from remote via server: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s:%d)\n",
-		remoteURL, cfg.GetDoltServerHost(), resolved.Port)
+		remoteURL, cfg.GetDoltServerHost(), port)
 	return nil
+}
+
+func serverClonePort(beadsDir string, cfg *configfile.Config) int {
+	if cfg != nil && cfg.DoltServerPort > 0 {
+		return cfg.DoltServerPort
+	}
+	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	if resolved := doltserver.DefaultConfig(beadsDir); resolved.Port > 0 {
+		return resolved.Port
+	}
+	if cfg != nil {
+		return cfg.GetDoltServerPort()
+	}
+	return configfile.DefaultDoltServerPort
 }
 
 // cloneViaCLI clones by shelling out to the dolt CLI.
