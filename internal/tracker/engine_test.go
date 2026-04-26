@@ -2482,6 +2482,131 @@ func TestEnginePullFiltersDependencyTypes(t *testing.T) {
 	}
 }
 
+func TestEnginePullFiltersLinearRelationsBySource(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issues := []*types.Issue{
+		{ID: "bd-source-child", Title: "Child", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-source-parent", Title: "Parent", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-source-related-parent", Title: "Related parent", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+	}
+	for i, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+		ref := fmt.Sprintf("https://test.test/EXT-SRC-%d", i+1)
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"external_ref": ref}, "test-actor"); err != nil {
+			t.Fatalf("UpdateIssue external_ref: %v", err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{Identifier: "EXT-SRC-1", Title: "Child"},
+		{Identifier: "EXT-SRC-2", Title: "Parent"},
+		{Identifier: "EXT-SRC-3", Title: "Related parent"},
+	}
+	tracker.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		conv := (&mockMapper{}).IssueToBeads(ti)
+		if ti.Identifier == "EXT-SRC-1" {
+			conv.Dependencies = []DependencyInfo{
+				{
+					FromExternalID: "EXT-SRC-1",
+					ToExternalID:   "EXT-SRC-2",
+					Type:           string(types.DepParentChild),
+					Source:         DependencySourceParent,
+				},
+				{
+					FromExternalID: "EXT-SRC-1",
+					ToExternalID:   "EXT-SRC-3",
+					Type:           string(types.DepParentChild),
+					Source:         DependencySourceRelation,
+				},
+			}
+		}
+		return conv
+	}}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	if _, err := engine.Sync(ctx, SyncOptions{
+		Pull:              true,
+		DependencySources: []DependencySource{DependencySourceParent},
+	}); err != nil {
+		t.Fatalf("Sync error: %v", err)
+	}
+
+	depRecords, err := store.GetDependencyRecords(ctx, "bd-source-child")
+	if err != nil {
+		t.Fatalf("GetDependencyRecords error: %v", err)
+	}
+	if len(depRecords) != 1 {
+		t.Fatalf("expected 1 dependency record, got %d: %+v", len(depRecords), depRecords)
+	}
+	if depRecords[0].DependsOnID != "bd-source-parent" || depRecords[0].Type != types.DepParentChild {
+		t.Fatalf("dependency = %s -> %s (%s), want bd-source-child -> bd-source-parent (%s)",
+			depRecords[0].IssueID, depRecords[0].DependsOnID, depRecords[0].Type, types.DepParentChild)
+	}
+}
+
+func TestEnginePreviewDependenciesDedupesPendingRelations(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issues := []*types.Issue{
+		{ID: "bd-preview-source", Title: "Source", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-preview-target", Title: "Target", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+	}
+	for i, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+		ref := fmt.Sprintf("https://test.test/EXT-PREVIEW-%d", i+1)
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"external_ref": ref}, "test-actor"); err != nil {
+			t.Fatalf("UpdateIssue external_ref: %v", err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	var messages []string
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.OnMessage = func(msg string) { messages = append(messages, msg) }
+
+	errCount := engine.previewDependencies(ctx, []DependencyInfo{
+		{
+			FromExternalID: "EXT-PREVIEW-1",
+			ToExternalID:   "EXT-PREVIEW-2",
+			Type:           string(types.DepRelated),
+			Source:         DependencySourceRelation,
+		},
+		{
+			FromExternalID: "EXT-PREVIEW-1",
+			ToExternalID:   "EXT-PREVIEW-2",
+			Type:           string(types.DepRelated),
+			Source:         DependencySourceRelation,
+		},
+	}, nil)
+	if errCount != 0 {
+		t.Fatalf("previewDependencies errCount = %d, want 0", errCount)
+	}
+
+	dependencyLines := 0
+	summaryFound := false
+	for _, msg := range messages {
+		if strings.Contains(msg, "Would create dependency:") {
+			dependencyLines++
+		}
+		if strings.Contains(msg, "Would create 1 dependencies") {
+			summaryFound = true
+		}
+	}
+	if dependencyLines != 1 || !summaryFound {
+		t.Fatalf("dry-run messages = %v, want one dependency preview and a one-dependency summary", messages)
+	}
+}
+
 func TestEnginePullHydratesNewPrelinkedExternalRefAfterLastSync(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

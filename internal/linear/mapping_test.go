@@ -441,6 +441,48 @@ func TestIssueToBeadsWithParent(t *testing.T) {
 	if result.Dependencies[0].ToLinearID != "PROJ-123" {
 		t.Errorf("ToLinearID = %q, want %q", result.Dependencies[0].ToLinearID, "PROJ-123")
 	}
+	if result.Dependencies[0].Source != DependencySourceParent {
+		t.Errorf("Source = %q, want %q", result.Dependencies[0].Source, DependencySourceParent)
+	}
+}
+
+func TestIssueToBeadsRelationMappedToParentChildKeepsRelationSource(t *testing.T) {
+	config := DefaultMappingConfig()
+	config.RelationMap["related"] = "parent-child"
+
+	linearIssue := &Issue{
+		ID:         "uuid-456",
+		Identifier: "PROJ-456",
+		Title:      "Related Issue",
+		URL:        "https://linear.app/team/issue/PROJ-456",
+		Priority:   3,
+		State:      &State{Type: "unstarted", Name: "Todo"},
+		Relations: &Relations{Nodes: []Relation{
+			{
+				ID:   "rel-1",
+				Type: "related",
+				RelatedIssue: struct {
+					ID         string `json:"id"`
+					Identifier string `json:"identifier"`
+				}{ID: "uuid-789", Identifier: "PROJ-789"},
+			},
+		}},
+		CreatedAt: "2024-01-15T10:00:00Z",
+		UpdatedAt: "2024-01-16T12:00:00Z",
+	}
+
+	result := IssueToBeads(linearIssue, config)
+
+	if len(result.Dependencies) != 1 {
+		t.Fatalf("Expected 1 dependency, got %d", len(result.Dependencies))
+	}
+	dep := result.Dependencies[0]
+	if dep.Type != "parent-child" {
+		t.Errorf("Dependency type = %q, want %q", dep.Type, "parent-child")
+	}
+	if dep.Source != DependencySourceRelation {
+		t.Errorf("Source = %q, want %q", dep.Source, DependencySourceRelation)
+	}
 }
 
 func TestBuildLinearToLocalUpdates(t *testing.T) {

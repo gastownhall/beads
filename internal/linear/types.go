@@ -277,7 +277,13 @@ type DependencyInfo struct {
 	FromLinearID string // Linear identifier of the dependent issue (e.g., "TEAM-123")
 	ToLinearID   string // Linear identifier of the dependency target
 	Type         string // Beads dependency type (blocks, related, duplicates, parent-child)
+	Source       string // Linear relationship origin: parent or relation
 }
+
+const (
+	DependencySourceParent   = "parent"
+	DependencySourceRelation = "relation"
+)
 
 // StateCache caches workflow states for the team to avoid repeated API calls.
 type StateCache struct {

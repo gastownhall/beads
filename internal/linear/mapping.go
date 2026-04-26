@@ -557,6 +557,7 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 			FromLinearID: li.Identifier,
 			ToLinearID:   li.Parent.Identifier,
 			Type:         "parent-child",
+			Source:       DependencySourceParent,
 		})
 	}
 
@@ -571,6 +572,7 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 					FromLinearID: li.Identifier,
 					ToLinearID:   rel.RelatedIssue.Identifier,
 					Type:         depType,
+					Source:       DependencySourceRelation,
 				})
 				continue
 			}
@@ -581,6 +583,7 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 					FromLinearID: rel.RelatedIssue.Identifier,
 					ToLinearID:   li.Identifier,
 					Type:         depType,
+					Source:       DependencySourceRelation,
 				})
 				continue
 			}
@@ -590,6 +593,7 @@ func IssueToBeads(li *Issue, config *MappingConfig) *IssueConversion {
 				FromLinearID: li.Identifier,
 				ToLinearID:   rel.RelatedIssue.Identifier,
 				Type:         depType,
+				Source:       DependencySourceRelation,
 			})
 		}
 	}

@@ -94,6 +94,9 @@ type SyncOptions struct {
 	// DependencyTypes limits which dependency types pull creates from tracker
 	// mapper output. Empty means all dependency types are created.
 	DependencyTypes []types.DependencyType
+	// DependencySources limits which dependency sources pull creates from tracker
+	// mapper output. Empty means all dependency sources are created.
+	DependencySources []DependencySource
 }
 
 // SyncResult is the complete result of a sync operation.
@@ -193,4 +196,13 @@ type DependencyInfo struct {
 	FromExternalID string // External identifier of the dependent issue
 	ToExternalID   string // External identifier of the dependency target
 	Type           string // Beads dependency type (blocks, related, duplicates, parent-child)
+	Source         DependencySource
 }
+
+// DependencySource identifies which tracker relationship produced a dependency.
+type DependencySource string
+
+const (
+	DependencySourceParent   DependencySource = "parent"
+	DependencySourceRelation DependencySource = "relation"
+)

@@ -459,11 +459,11 @@ func runLinearPull(cmd *cobra.Command, args []string) {
 	engine.PullHooks = buildLinearPullHooks(ctx)
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
-		Pull:            true,
-		Push:            false,
-		DryRun:          dryRun,
-		IssueIDs:        args,
-		DependencyTypes: linearPullDependencyTypes(relations),
+		Pull:              true,
+		Push:              false,
+		DryRun:            dryRun,
+		IssueIDs:          args,
+		DependencySources: linearPullDependencySources(relations),
 	})
 	if err != nil {
 		FatalError("sync failed: %v", err)

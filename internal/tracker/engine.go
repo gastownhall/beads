@@ -434,7 +434,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
-		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes)
+		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
 		if opts.DryRun {
 			dryRunIssue := *conv.Issue
 			if strings.TrimSpace(ref) != "" {
@@ -556,21 +556,33 @@ func marshalTrackerMetadata(metadata interface{}) (json.RawMessage, bool) {
 	return json.RawMessage(raw), true
 }
 
-func appendFilteredDependencies(dst []DependencyInfo, deps []DependencyInfo, allowedTypes []types.DependencyType) []DependencyInfo {
+func appendFilteredDependencies(dst []DependencyInfo, deps []DependencyInfo, allowedTypes []types.DependencyType, allowedSources []DependencySource) []DependencyInfo {
 	if len(deps) == 0 {
 		return dst
 	}
-	if len(allowedTypes) == 0 {
+	if len(allowedTypes) == 0 && len(allowedSources) == 0 {
 		return append(dst, deps...)
 	}
 	allowed := make(map[string]struct{}, len(allowedTypes))
 	for _, depType := range allowedTypes {
 		allowed[string(depType)] = struct{}{}
 	}
+	allowedSourceSet := make(map[DependencySource]struct{}, len(allowedSources))
+	for _, source := range allowedSources {
+		allowedSourceSet[source] = struct{}{}
+	}
 	for _, dep := range deps {
-		if _, ok := allowed[dep.Type]; ok {
-			dst = append(dst, dep)
+		if len(allowed) > 0 {
+			if _, ok := allowed[dep.Type]; !ok {
+				continue
+			}
 		}
+		if len(allowedSourceSet) > 0 {
+			if _, ok := allowedSourceSet[dep.Source]; !ok {
+				continue
+			}
+		}
+		dst = append(dst, dep)
 	}
 	return dst
 }
@@ -1141,6 +1153,7 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 	}
 
 	wouldCreate := 0
+	pending := make(map[string]struct{}, len(deps))
 	for _, dep := range deps {
 		fromIssue, err := resolveIssue(ctx, dep.FromExternalID)
 		if err != nil {
@@ -1158,6 +1171,11 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 		if dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
 			continue
 		}
+		key := pendingDependencyPreviewKey(fromIssue.ID, toIssue.ID, dep.Type, dep.Source)
+		if _, ok := pending[key]; ok {
+			continue
+		}
+		pending[key] = struct{}{}
 		fromDisplay := firstNonEmpty(fromIssue.ID, dep.FromExternalID)
 		toDisplay := firstNonEmpty(toIssue.ID, dep.ToExternalID)
 		e.msg("[dry-run] Would create dependency: %s -> %s (%s)", fromDisplay, toDisplay, dep.Type)
@@ -1167,6 +1185,15 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 		e.msg("[dry-run] Would create %d dependencies", wouldCreate)
 	}
 	return 0
+}
+
+func pendingDependencyPreviewKey(fromID, toID, depType string, source DependencySource) string {
+	return strings.Join([]string{
+		strings.TrimSpace(fromID),
+		strings.TrimSpace(toID),
+		strings.TrimSpace(depType),
+		string(source),
+	}, "\x00")
 }
 
 func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*types.Issue) (func(context.Context, string) (*types.Issue, error), error) {

@@ -65,6 +65,7 @@ func (m *linearFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.Issu
 			FromExternalID: d.FromLinearID,
 			ToExternalID:   d.ToLinearID,
 			Type:           d.Type,
+			Source:         tracker.DependencySource(d.Source),
 		})
 	}
 
