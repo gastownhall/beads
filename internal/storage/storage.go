@@ -255,6 +255,7 @@ type Transaction interface {
 
 	// Dependency operations
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
+	AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, opts DependencyAddOptions) error
 	RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 
@@ -281,4 +282,11 @@ type Transaction interface {
 	AddComment(ctx context.Context, issueID, actor, comment string) error
 	ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error)
 	GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error)
+}
+
+// DependencyAddOptions controls transaction-scoped dependency insertion.
+type DependencyAddOptions struct {
+	// SkipCycleCheck bypasses the recursive pre-insert cycle check. This is
+	// intended for bulk wiring paths that perform a final graph check separately.
+	SkipCycleCheck bool
 }

@@ -263,7 +263,11 @@ func (t *hookTrackingTransaction) CloseIssue(ctx context.Context, id string, rea
 }
 
 func (t *hookTrackingTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	if err := t.Transaction.AddDependency(ctx, dep, actor); err != nil {
+	return t.AddDependencyWithOptions(ctx, dep, actor, DependencyAddOptions{})
+}
+
+func (t *hookTrackingTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, opts DependencyAddOptions) error {
+	if err := t.Transaction.AddDependencyWithOptions(ctx, dep, actor, opts); err != nil {
 		return err
 	}
 	if issue, err := t.Transaction.GetIssue(ctx, dep.IssueID); err == nil {

@@ -31,6 +31,9 @@ type AddDependencyOpts struct {
 	// IsCrossPrefix is true when source and target have different prefixes,
 	// meaning the target lives in another rig's database.
 	IsCrossPrefix bool
+	// SkipCycleCheck skips the recursive pre-insert cycle check for callers
+	// that intentionally trade validation cost for bulk graph wiring speed.
+	SkipCycleCheck bool
 }
 
 // AddDependencyInTx validates and inserts a dependency within an existing
@@ -120,7 +123,7 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	}
 
 	// Cycle detection for blocking deps via recursive CTE.
-	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
+	if !opts.SkipCycleCheck && (dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks) {
 		// Build UNION ALL across all dep tables for the CTE.
 		var unions []string
 		for _, t := range depTables {

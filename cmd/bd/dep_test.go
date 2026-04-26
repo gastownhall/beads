@@ -463,6 +463,14 @@ func TestDepAddFlagAliases(t *testing.T) {
 	if !strings.Contains(longDesc, "--depends-on") {
 		t.Error("Expected Long description to mention --depends-on flag")
 	}
+	if fileFlag := depAddCmd.Flags().Lookup("file"); fileFlag == nil {
+		t.Fatal("depAddCmd should have --file flag")
+	} else if fileFlag.DefValue != "" {
+		t.Errorf("Expected default file='', got %q", fileFlag.DefValue)
+	}
+	if !strings.Contains(longDesc, "--file") {
+		t.Error("Expected Long description to mention --file flag")
+	}
 }
 
 func TestDepBlocksFlag(t *testing.T) {

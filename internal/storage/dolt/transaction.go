@@ -631,37 +631,36 @@ func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
 // AddDependency adds a dependency within the transaction.
 // Checks for existing pairs to prevent silent type overwrites.
 func (t *doltTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	return t.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{})
+}
+
+func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
 	table := "dependencies"
+	sourceTable := "issues"
 	if t.isActiveWisp(ctx, dep.IssueID) {
 		table = "wisp_dependencies"
+		sourceTable = "wisps"
 	}
 
-	// Check for existing dependency to prevent silent type overwrites.
-	var existingType string
-	//nolint:gosec // G201: table is hardcoded
-	err := t.tx.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT type FROM %s WHERE issue_id = ? AND depends_on_id = ?
-	`, table), dep.IssueID, dep.DependsOnID).Scan(&existingType)
-	if err == nil {
-		if existingType == string(dep.Type) {
-			return nil // idempotent
-		}
-		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
-			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
-	}
-	if err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("failed to check existing dependency: %w", err)
+	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	targetTable := "issues"
+	if !strings.HasPrefix(dep.DependsOnID, "external:") && !isCrossPrefix && t.isActiveWisp(ctx, dep.DependsOnID) {
+		targetTable = "wisps"
 	}
 
-	//nolint:gosec // G201: table is hardcoded
-	_, err = t.tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, depends_on_id, type, created_at, created_by, thread_id)
-		VALUES (?, ?, ?, NOW(), ?, ?)
-	`, table), dep.IssueID, dep.DependsOnID, dep.Type, actor, dep.ThreadID)
-	if err == nil {
-		t.dirty.MarkDirty(table)
+	opts := issueops.AddDependencyOpts{
+		SourceTable:    sourceTable,
+		TargetTable:    targetTable,
+		WriteTable:     table,
+		IsCrossPrefix:  isCrossPrefix,
+		SkipCycleCheck: addOpts.SkipCycleCheck,
 	}
-	return wrapExecError("add dependency in tx", err)
+	if err := issueops.AddDependencyInTx(ctx, t.tx, dep, actor, opts); err != nil {
+		return err
+	}
+	t.dirty.MarkDirty(table)
+	t.store.invalidateBlockedIDsCache()
+	return nil
 }
 
 func (t *doltTransaction) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {

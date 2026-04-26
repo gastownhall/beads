@@ -93,8 +93,15 @@ func (t *embeddedTransaction) SearchIssues(ctx context.Context, query string, fi
 }
 
 func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	return t.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{})
+}
+
+func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
 	t.dirty.MarkDirty("dependencies")
-	return issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{})
+	return issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
+		IsCrossPrefix:  types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
+		SkipCycleCheck: addOpts.SkipCycleCheck,
+	})
 }
 
 func (t *embeddedTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {

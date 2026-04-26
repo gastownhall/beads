@@ -67,6 +67,20 @@ func bdDepJSON(t *testing.T, bd, dir string, args ...string) map[string]interfac
 	return m
 }
 
+func bdDepWithInput(t *testing.T, bd, dir, input string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"dep"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd dep %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
 func dropEmbeddedWispDependencies(t *testing.T, beadsDir, database string) {
 	t.Helper()
 	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
@@ -211,6 +225,49 @@ func TestEmbeddedDep(t *testing.T) {
 		m := bdDepJSON(t, bd, dir, "add", j1.ID, j2.ID)
 		if m["status"] != "added" {
 			t.Errorf("expected status=added, got %v", m["status"])
+		}
+	})
+
+	t.Run("add_bulk_file_jsonl", func(t *testing.T) {
+		b1 := bdCreate(t, bd, dir, "Bulk dep A", "--type", "task")
+		b2 := bdCreate(t, bd, dir, "Bulk dep B", "--type", "task")
+		b3 := bdCreate(t, bd, dir, "Bulk dep C", "--type", "task")
+		path := filepath.Join(t.TempDir(), "deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"issue_id\":%q,\"depends_on_id\":%q,\"type\":\"tracks\"}\n", b1.ID, b2.ID, b3.ID, b2.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write deps file: %v", err)
+		}
+
+		out := bdDep(t, bd, dir, "add", "--file", path)
+		if !strings.Contains(out, "Added 2 dependencies") {
+			t.Fatalf("expected bulk add summary, got: %s", out)
+		}
+		list1 := bdDep(t, bd, dir, "list", b1.ID)
+		if !strings.Contains(list1, b2.ID) {
+			t.Fatalf("expected first bulk dependency in list: %s", list1)
+		}
+		list3 := bdDep(t, bd, dir, "list", b3.ID)
+		if !strings.Contains(list3, b2.ID) || !strings.Contains(list3, "tracks") {
+			t.Fatalf("expected typed bulk dependency in list: %s", list3)
+		}
+	})
+
+	t.Run("add_bulk_file_validation_no_partial_mutation", func(t *testing.T) {
+		v1 := bdCreate(t, bd, dir, "Bulk validation A", "--type", "task")
+		v2 := bdCreate(t, bd, dir, "Bulk validation B", "--type", "task")
+		path := filepath.Join(t.TempDir(), "bad-deps.jsonl")
+		body := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":\"\",\"to\":%q}\n{\"from\":%q,\"to\":\"\"}\n", v1.ID, v2.ID, v2.ID, v1.ID)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write bad deps file: %v", err)
+		}
+
+		out := bdDepFail(t, bd, dir, "add", "--file", path)
+		if !strings.Contains(out, "line 2: missing from") || !strings.Contains(out, "line 3: missing to") {
+			t.Fatalf("expected all validation errors, got: %s", out)
+		}
+		list := bdDep(t, bd, dir, "list", v1.ID)
+		if strings.Contains(list, v2.ID) {
+			t.Fatalf("bulk validation failure should not add valid rows: %s", list)
 		}
 	})
 
@@ -473,4 +530,28 @@ func TestEmbeddedDepNoCycleCheck(t *testing.T) {
 	// Verify --no-cycle-check also works with the dep --blocks shorthand.
 	extra := bdCreate(t, bd, dir, "bulk-dep-extra", "--type", "task")
 	bdDep(t, bd, dir, extra.ID, "--blocks", ids[n-1], "--no-cycle-check")
+}
+
+func TestEmbeddedDepBulkNoCycleCheckSkipsPerEdgeCycleValidation(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "bcy")
+
+	a := bdCreate(t, bd, dir, "Bulk cycle A", "--type", "task")
+	b := bdCreate(t, bd, dir, "Bulk cycle B", "--type", "task")
+	input := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":%q}\n", a.ID, b.ID, b.ID, a.ID)
+
+	out := bdDepWithInput(t, bd, dir, input, "add", "--file", "-", "--no-cycle-check")
+	if !strings.Contains(out, "Added 2 dependencies") {
+		t.Fatalf("expected bulk add summary, got: %s", out)
+	}
+
+	cycles := bdDep(t, bd, dir, "cycles")
+	if !strings.Contains(cycles, "Found") {
+		t.Fatalf("expected skipped cycle validation to leave detectable cycle, got: %s", cycles)
+	}
 }

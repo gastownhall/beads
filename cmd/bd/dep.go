@@ -2,9 +2,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -197,6 +201,10 @@ The depends-on-id can be:
   - A local issue ID (e.g., bd-xyz)
   - An external reference: external:<project>:<capability>
 
+For bulk wiring, pass newline-delimited JSON with --file. Each line must be an
+object with "from" and "to" fields, and may include "type". The aliases
+"issue_id" and "depends_on_id" are also accepted. Use --file - to read stdin.
+
 External references are stored as-is and resolved at query time using
 the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
@@ -206,11 +214,23 @@ Examples:
   bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
   bd dep add bd-42 --depends-on bd-41                 # Alias (same effect)
   bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency
-  bd dep add bd-42 bd-41 --no-cycle-check             # Skip cycle check (bulk wiring)`,
+  bd dep add bd-42 bd-41 --no-cycle-check             # Skip cycle check (bulk wiring)
+  bd dep add --file deps.jsonl                        # Bulk JSONL: {"from":"bd-42","to":"bd-41"}`,
 	Args: func(cmd *cobra.Command, args []string) error {
+		file, _ := cmd.Flags().GetString("file")
 		blockedBy, _ := cmd.Flags().GetString("blocked-by")
 		dependsOn, _ := cmd.Flags().GetString("depends-on")
 		hasFlag := blockedBy != "" || dependsOn != ""
+
+		if file != "" {
+			if len(args) != 0 {
+				return fmt.Errorf("--file cannot be used with positional issue IDs")
+			}
+			if hasFlag {
+				return fmt.Errorf("--file cannot be used with --blocked-by or --depends-on")
+			}
+			return nil
+		}
 
 		if hasFlag {
 			// If a flag is provided, we only need 1 positional arg (the dependent issue)
@@ -231,6 +251,12 @@ Examples:
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("dep add")
 		depType, _ := cmd.Flags().GetString("type")
+		file, _ := cmd.Flags().GetString("file")
+
+		if file != "" {
+			addBulkDependencies(cmd, file, depType)
+			return
+		}
 
 		// Get the dependency target from flag or positional arg
 		blockedBy, _ := cmd.Flags().GetString("blocked-by")
@@ -333,6 +359,248 @@ Examples:
 		fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
 			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), depType)
 	},
+}
+
+type bulkDepInput struct {
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Type        string `json:"type"`
+	IssueID     string `json:"issue_id"`
+	DependsOnID string `json:"depends_on_id"`
+}
+
+type bulkDepEdge struct {
+	Line        int
+	IssueID     string
+	DependsOnID string
+	Type        types.DependencyType
+	Store       storage.DoltStorage
+	StoreKey    string
+	Cleanups    []func()
+}
+
+func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) {
+	edges, err := readBulkDepEdges(file, defaultType)
+	if err != nil {
+		FatalErrorRespectJSON("%v", err)
+	}
+
+	resolved, err := validateBulkDepEdges(rootCtx, edges)
+	if err != nil {
+		FatalErrorRespectJSON("%v", err)
+	}
+	defer func() {
+		for _, edge := range resolved {
+			for _, cleanup := range edge.Cleanups {
+				cleanup()
+			}
+		}
+	}()
+
+	if len(resolved) == 0 {
+		FatalErrorRespectJSON("no dependency edges found")
+	}
+	targetStore := resolved[0].Store
+	targetStoreKey := resolved[0].StoreKey
+	for _, edge := range resolved[1:] {
+		if edge.StoreKey != targetStoreKey {
+			FatalErrorRespectJSON("bulk dep add requires all source issues to resolve to the same store")
+		}
+	}
+
+	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
+	commitMsg := fmt.Sprintf("dependency: add %d edges", len(resolved))
+	if err := transact(rootCtx, targetStore, commitMsg, func(tx storage.Transaction) error {
+		for _, edge := range resolved {
+			dep := &types.Dependency{
+				IssueID:     edge.IssueID,
+				DependsOnID: edge.DependsOnID,
+				Type:        edge.Type,
+			}
+			if err := tx.AddDependencyWithOptions(rootCtx, dep, actor, storage.DependencyAddOptions{SkipCycleCheck: noCycleCheck}); err != nil {
+				return fmt.Errorf("line %d: %w", edge.Line, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		FatalErrorRespectJSON("%v", err)
+	}
+
+	if !noCycleCheck {
+		warnIfCyclesExist(targetStore)
+	}
+
+	if jsonOutput {
+		out := make([]map[string]interface{}, 0, len(resolved))
+		for _, edge := range resolved {
+			out = append(out, map[string]interface{}{
+				"issue_id":      edge.IssueID,
+				"depends_on_id": edge.DependsOnID,
+				"type":          string(edge.Type),
+			})
+		}
+		outputJSON(map[string]interface{}{
+			"status":       "added",
+			"count":        len(resolved),
+			"dependencies": out,
+		})
+		return
+	}
+
+	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(resolved))
+}
+
+func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
+	var r io.Reader
+	var f *os.File
+	if file == "-" {
+		r = os.Stdin
+	} else {
+		var err error
+		f, err = os.Open(file)
+		if err != nil {
+			return nil, fmt.Errorf("open dependency file: %w", err)
+		}
+		defer f.Close()
+		r = f
+	}
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var edges []bulkDepEdge
+	var errs []string
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var in bulkDepInput
+		if err := json.Unmarshal([]byte(line), &in); err != nil {
+			errs = append(errs, fmt.Sprintf("line %d: invalid JSON: %v", lineNo, err))
+			continue
+		}
+
+		from := strings.TrimSpace(in.From)
+		if from == "" {
+			from = strings.TrimSpace(in.IssueID)
+		}
+		to := strings.TrimSpace(in.To)
+		if to == "" {
+			to = strings.TrimSpace(in.DependsOnID)
+		}
+		depType := strings.TrimSpace(in.Type)
+		if depType == "" {
+			depType = defaultType
+		}
+
+		if from == "" {
+			errs = append(errs, fmt.Sprintf("line %d: missing from", lineNo))
+		}
+		if to == "" {
+			errs = append(errs, fmt.Sprintf("line %d: missing to", lineNo))
+		}
+		dt := types.DependencyType(depType)
+		if !dt.IsValid() {
+			errs = append(errs, fmt.Sprintf("line %d: invalid dependency type %q: must be non-empty and at most 50 characters", lineNo, depType))
+		}
+		if from == "" || to == "" || !dt.IsValid() {
+			continue
+		}
+
+		edges = append(edges, bulkDepEdge{
+			Line:        lineNo,
+			IssueID:     from,
+			DependsOnID: to,
+			Type:        dt,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read dependency file: %w", err)
+	}
+	if len(errs) > 0 {
+		return nil, bulkDepValidationError(errs)
+	}
+	return edges, nil
+}
+
+func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEdge, error) {
+	resolved := make([]bulkDepEdge, 0, len(edges))
+	var errs []string
+
+	for _, edge := range edges {
+		current := edge
+		fromID, fromStore, fromCleanup, err := resolveIDWithRouting(ctx, store, edge.IssueID)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("line %d: resolving issue ID %s: %v", edge.Line, edge.IssueID, err))
+			continue
+		}
+		current.Cleanups = append(current.Cleanups, fromCleanup)
+		current.IssueID = fromID
+		current.Store = fromStore
+		current.StoreKey = dependencyStoreKey(fromStore)
+
+		if strings.HasPrefix(edge.DependsOnID, "external:") {
+			if err := validateExternalRef(edge.DependsOnID); err != nil {
+				errs = append(errs, fmt.Sprintf("line %d: %v", edge.Line, err))
+				resolved = append(resolved, current)
+				continue
+			}
+			current.DependsOnID = edge.DependsOnID
+		} else {
+			toID, _, toCleanup, err := resolveIDWithRouting(ctx, store, edge.DependsOnID)
+			if err != nil {
+				srcPrefix := types.ExtractPrefix(current.IssueID)
+				tgtPrefix := types.ExtractPrefix(edge.DependsOnID)
+				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
+					toID = edge.DependsOnID
+				} else {
+					errs = append(errs, fmt.Sprintf("line %d: resolving dependency ID %s: %v", edge.Line, edge.DependsOnID, err))
+					resolved = append(resolved, current)
+					continue
+				}
+			} else {
+				current.Cleanups = append(current.Cleanups, toCleanup)
+			}
+			current.DependsOnID = toID
+		}
+
+		if isChildOf(current.IssueID, current.DependsOnID) {
+			errs = append(errs, fmt.Sprintf("line %d: cannot add dependency: %s is already a child of %s", edge.Line, current.IssueID, current.DependsOnID))
+			resolved = append(resolved, current)
+			continue
+		}
+
+		resolved = append(resolved, current)
+	}
+
+	if len(errs) > 0 {
+		for _, edge := range resolved {
+			for _, cleanup := range edge.Cleanups {
+				cleanup()
+			}
+		}
+		return nil, bulkDepValidationError(errs)
+	}
+	return resolved, nil
+}
+
+func bulkDepValidationError(errs []string) error {
+	return fmt.Errorf("bulk dependency validation failed:\n  %s", strings.Join(errs, "\n  "))
+}
+
+func dependencyStoreKey(s storage.DoltStorage) string {
+	if locator, ok := storage.UnwrapStore(s).(storage.StoreLocator); ok {
+		if cliDir := strings.TrimSpace(locator.CLIDir()); cliDir != "" {
+			return "cli:" + filepath.Clean(cliDir)
+		}
+		if path := strings.TrimSpace(locator.Path()); path != "" {
+			return "path:" + filepath.Clean(path)
+		}
+	}
+	return fmt.Sprintf("instance:%p", s)
 }
 
 var depListCmd = &cobra.Command{
@@ -1121,6 +1389,7 @@ func init() {
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes)")
 	depAddCmd.Flags().String("blocked-by", "", "Issue ID that blocks the first issue (alternative to positional arg)")
 	depAddCmd.Flags().String("depends-on", "", "Issue ID that the first issue depends on (alias for --blocked-by)")
+	depAddCmd.Flags().String("file", "", "Read dependency edges from JSONL file, or '-' for stdin")
 	depAddCmd.Flags().Bool("no-cycle-check", false, "Skip cycle detection after adding (use for bulk wiring — run 'bd dep cycles' to verify afterwards)")
 
 	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
