@@ -463,7 +463,7 @@ A gate is resolved when:
 
 A gate is escalated when:
   - gh:run: status=completed AND conclusion in (failure, canceled)
-  - gh:pr: state=CLOSED AND merged=false
+  - gh:pr: state=CLOSED
 
 Examples:
   bd gate check              # Check all gates
