@@ -25,7 +25,7 @@ func TestIgnoredTableDDL(t *testing.T) {
 
 	// Verify columns added by later migrations are present (the bug that
 	// motivated this refactor: started_at was missing from the Go constant).
-	for _, col := range []string{"started_at", "no_history"} {
+	for _, col := range []string{"started_at", "no_history", "created_by_session", "claimed_by_session"} {
 		if !strings.Contains(combined, col) {
 			t.Errorf("IgnoredTableDDL missing column %q — migration not included?", col)
 		}
