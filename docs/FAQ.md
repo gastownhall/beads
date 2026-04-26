@@ -194,6 +194,7 @@ bd ready --json  # Start using bd normally
 All writes go directly to the Dolt database and are automatically committed to Dolt history. To sync with Dolt remotes:
 
 ```bash
+bd init --remote http://myserver:7007/mydb  # Configure remote during first init
 bd dolt push    # Push changes to Dolt remote
 bd dolt pull    # Pull changes from Dolt remote
 ```

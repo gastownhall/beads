@@ -37,6 +37,7 @@ Git worktrees share the same `.git` directory and `.beads` database:
 Sync with remotes using Dolt's native push/pull:
 
 ```bash
+bd init --remote http://myserver:7007/mydb  # First setup or clone from a Dolt remote
 bd dolt push    # Push changes to Dolt remote
 bd dolt pull    # Pull changes from Dolt remote
 ```

@@ -345,6 +345,128 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 
+	t.Run("remote_bootstraps_existing_dolt_data", func(t *testing.T) {
+		remoteDir := filepath.Join(t.TempDir(), "remote")
+		remoteURL := "file://" + remoteDir
+
+		sourceDir, _, _ := bdInit(t, bd, "--prefix", "src", "--skip-hooks", "--skip-agents")
+		sourceCfg, err := configfile.Load(filepath.Join(sourceDir, ".beads"))
+		if err != nil {
+			t.Fatalf("load source metadata.json: %v", err)
+		}
+		if sourceCfg.ProjectID == "" {
+			t.Fatal("source project ID is empty")
+		}
+
+		cmd := exec.Command(bd, "create", "Remote issue", "--type", "task")
+		cmd.Dir = sourceDir
+		cmd.Env = bdEnv(sourceDir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd create failed: %v\n%s", err, out)
+		}
+		bdDolt(t, bd, sourceDir, "commit")
+		bdDolt(t, bd, sourceDir, "remote", "add", "origin", remoteURL)
+		bdDolt(t, bd, sourceDir, "push", "--force")
+
+		cloneDir := t.TempDir()
+		initGitRepoAt(t, cloneDir)
+		gitBin, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatalf("git not found: %v", err)
+		}
+		pathDir := filepath.Join(t.TempDir(), "path")
+		if err := os.MkdirAll(pathDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(gitBin, filepath.Join(pathDir, "git")); err != nil {
+			t.Fatalf("symlink git into PATH: %v", err)
+		}
+		noDoltEnv := bdEnv(cloneDir)
+		replacedPath := false
+		for i, entry := range noDoltEnv {
+			if strings.HasPrefix(entry, "PATH=") {
+				noDoltEnv[i] = "PATH=" + pathDir
+				replacedPath = true
+				break
+			}
+		}
+		if !replacedPath {
+			noDoltEnv = append(noDoltEnv, "PATH="+pathDir)
+		}
+		cmd = exec.Command(bd, "init", "--quiet", "--prefix", "clone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+		cmd.Dir = cloneDir
+		cmd.Env = noDoltEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd init --remote without dolt CLI failed: %v\n%s", err, out)
+		}
+
+		cloneCfg, err := configfile.Load(filepath.Join(cloneDir, ".beads"))
+		if err != nil {
+			t.Fatalf("load clone metadata.json: %v", err)
+		}
+		if cloneCfg.ProjectID != sourceCfg.ProjectID {
+			t.Fatalf("clone ProjectID = %q, want source ProjectID %q", cloneCfg.ProjectID, sourceCfg.ProjectID)
+		}
+		if val := readBack(t, filepath.Join(cloneDir, ".beads"), "clone", "_project_id", true); val != sourceCfg.ProjectID {
+			t.Fatalf("clone database _project_id = %q, want source ProjectID %q", val, sourceCfg.ProjectID)
+		}
+
+		cmd = exec.Command(bd, "list")
+		cmd.Dir = cloneDir
+		cmd.Env = bdEnv(cloneDir)
+		listOut, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd list failed: %v\n%s", err, listOut)
+		}
+		if !strings.Contains(string(listOut), "Remote issue") {
+			t.Fatalf("cloned database missing remote issue:\n%s", listOut)
+		}
+
+		cloneBeadsDir := filepath.Join(cloneDir, ".beads")
+		out := bdDolt(t, bd, cloneDir, "remote", "list")
+		if !strings.Contains(out, "origin") || !strings.Contains(out, remoteURL) {
+			t.Fatalf("expected origin remote %q in remote list:\n%s", remoteURL, out)
+		}
+
+		configYAML, err := os.ReadFile(filepath.Join(cloneBeadsDir, "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		if !strings.Contains(string(configYAML), remoteURL) {
+			t.Fatalf("config.yaml should persist --remote URL %q:\n%s", remoteURL, configYAML)
+		}
+	})
+
+	t.Run("remote_empty_initializes_fresh_and_wires_origin", func(t *testing.T) {
+		remoteDir := filepath.Join(t.TempDir(), "empty-remote")
+		if err := os.MkdirAll(remoteDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		remoteURL := "file://" + remoteDir
+
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		runBDInit(t, bd, dir, "--prefix", "fresh", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+
+		beadsDir := filepath.Join(dir, ".beads")
+		if val := readBack(t, beadsDir, "fresh", "issue_prefix", false); val != "fresh" {
+			t.Fatalf("fresh issue_prefix = %q, want %q", val, "fresh")
+		}
+
+		out := bdDolt(t, bd, dir, "remote", "list")
+		if !strings.Contains(out, "origin") || !strings.Contains(out, remoteURL) {
+			t.Fatalf("expected origin remote %q in remote list:\n%s", remoteURL, out)
+		}
+
+		configYAML, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		if !strings.Contains(string(configYAML), remoteURL) {
+			t.Fatalf("config.yaml should persist --remote URL %q:\n%s", remoteURL, configYAML)
+		}
+	})
+
 	t.Run("database", func(t *testing.T) {
 		_, beadsDir, _ := bdInit(t, bd, "--database", "custom_db")
 		cfg, err := configfile.Load(beadsDir)
