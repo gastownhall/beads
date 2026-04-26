@@ -9,6 +9,81 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
+func TestInitCommandRegistersRemoteFlag(t *testing.T) {
+	if initCmd.Flags().Lookup("remote") == nil {
+		t.Fatal("init command does not register --remote")
+	}
+}
+
+func TestInitExplicitRemoteDrivesCloneAndPersistence(t *testing.T) {
+	const remote = "git+ssh://git@example.com/right/repo.git"
+	resolveConfiguredRemote := func() string {
+		return "git+ssh://git@example.com/wrong/repo.git"
+	}
+
+	syncURL, source := resolveInitConfiguredSyncRemote(remote, true, resolveConfiguredRemote)
+	if syncURL != remote {
+		t.Fatalf("syncURL = %q, want explicit remote %q", syncURL, remote)
+	}
+	if source != initSyncRemoteExplicit {
+		t.Fatalf("source = %v, want explicit", source)
+	}
+	syncFromRemote := syncURL != ""
+	syncURLFromConfig := syncURL != "" && source != initSyncRemoteNone
+	if !syncFromRemote {
+		t.Fatal("explicit remote did not select clone-from-remote path")
+	}
+	if !syncURLFromConfig {
+		t.Fatal("explicit remote was not treated as user-configured sync URL")
+	}
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("# Beads Config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistInitSyncRemote(beadsDir, remote, syncURL, syncFromRemote, syncURLFromConfig); err != nil {
+		t.Fatalf("persistInitSyncRemote failed: %v", err)
+	}
+	configBytes, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configBytes), remote) {
+		t.Fatalf("config.yaml does not contain explicit remote %q:\n%s", remote, configBytes)
+	}
+}
+
+func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
+	if got := initRemoteCloneMode(true, true); got != remoteCloneExternalServer {
+		t.Fatalf("initRemoteCloneMode(server=true, external=true) = %v, want external server clone mode", got)
+	}
+}
+
+func TestInitExplicitEmptyRemoteSkipsAmbientConfig(t *testing.T) {
+	called := false
+	resolveConfiguredRemote := func() string {
+		called = true
+		return "git+ssh://git@example.com/ambient/repo.git"
+	}
+
+	syncURL, source := resolveInitConfiguredSyncRemote("", true, resolveConfiguredRemote)
+	if called {
+		t.Fatal("explicit empty --remote consulted ambient sync config")
+	}
+	if syncURL != "" {
+		t.Fatalf("syncURL = %q, want empty explicit remote", syncURL)
+	}
+	if source != initSyncRemoteExplicit {
+		t.Fatalf("source = %v, want explicit", source)
+	}
+	if syncURL != "" {
+		t.Fatal("explicit empty --remote would trigger early remote safety")
+	}
+}
+
 func TestPersistInitSyncRemoteExplicitRemoteWritesTargetDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	callerDir := filepath.Join(tmpDir, "caller")

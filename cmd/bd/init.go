@@ -80,6 +80,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		roleFlag, _ := cmd.Flags().GetString("role")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 		initRemote, _ := cmd.Flags().GetString("remote")
+		initRemoteChanged := cmd.Flags().Changed("remote")
 		// Dolt server connection flags
 		backendFlag, _ := cmd.Flags().GetString("backend")
 		initServerMode, _ := cmd.Flags().GetBool("server")
@@ -303,18 +304,18 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// beadsDir is computed. See CheckRemoteSafety in init_safety.go.
 		{
 			var earlySyncURL string
+			earlyRemoteSource := initSyncRemoteNone
 			earlyRemoteHasDoltData := false
-			if initRemote != "" {
-				earlySyncURL = initRemote
+			earlySyncURL, earlyRemoteSource = resolveInitConfiguredSyncRemote(initRemote, initRemoteChanged, resolveSyncRemote)
+			if earlyRemoteSource == initSyncRemoteExplicit {
 				// An explicit --remote is intent to bootstrap or wire that URL,
 				// but it is not proof that the remote already contains Dolt
 				// history. Let the clone attempt below distinguish populated
 				// remotes from empty remotes so --reinit-local can still fall
 				// back to a fresh local init against a new remote.
-			} else if s := resolveSyncRemote(); s != "" {
-				earlySyncURL = s
+			} else if earlyRemoteSource == initSyncRemoteConfigured {
 				earlyRemoteHasDoltData = true // sync.remote configured = user intends bootstrap
-			} else if isGitRepo() && !isBareGitRepo() {
+			} else if earlyRemoteSource == initSyncRemoteNone && isGitRepo() && !isBareGitRepo() {
 				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 					earlySyncURL = normalizeRemoteURL(originURL)
 					earlyRemoteHasDoltData = gitOriginHasDoltDataRef()
@@ -567,8 +568,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// CheckRemoteSafety chokepoint encodes this invariant; any future
 		// flag that can interact with remote history must route through
 		// it rather than adding another `&& !someFlag` here.
-		syncURL := resolveSyncRemote()
-		syncURLFromConfig := syncURL != "" // true when URL came from explicit user config
+		syncResolutionURL, syncRemoteSource := resolveInitConfiguredSyncRemote(initRemote, initRemoteChanged, resolveSyncRemote)
+		syncURL := syncResolutionURL
+		syncURLFromConfig := syncURL != "" && syncRemoteSource != initSyncRemoteNone // true when URL came from explicit user config
 		bootstrappedFromRemote := false
 		syncFromRemote := false
 		remoteHasDoltData := false
@@ -581,7 +583,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// http:// to git+http:// and break Dolt remotesapi endpoints
 			// configured explicitly by the user (GH#3339).
 			syncFromRemote = true
-		} else if isGitRepo() && !isBareGitRepo() {
+		} else if syncRemoteSource == initSyncRemoteNone && isGitRepo() && !isBareGitRepo() {
 			if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 				syncURL = normalizeRemoteURL(originURL)
 				remoteHasDoltData = gitOriginHasDoltDataRef()
@@ -636,15 +638,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if syncFromRemote {
 			var err error
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
-			if initServerMode {
-				cloneMode := remoteCloneCLI
-				if externalServer {
-					cloneMode = remoteCloneExternalServer
-				}
-				err = cloneFromRemoteWithMode(ctx, beadsDir, syncURL, dbName, cloneCfg, cloneMode)
-			} else {
-				err = cloneFromRemoteWithMode(ctx, beadsDir, syncURL, dbName, cloneCfg, remoteCloneEmbedded)
-			}
+			err = cloneFromRemoteWithMode(ctx, beadsDir, syncURL, dbName, cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
 			if err != nil {
 				if isEmptyRemoteCloneError(err) {
 					if !quiet {
@@ -1419,6 +1413,7 @@ func init() {
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")
 	initCmd.Flags().String("agents-profile", "", "AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)")
 	initCmd.Flags().String("agents-file", "", "Custom filename for agent instructions (default: AGENTS.md)")
+	initCmd.Flags().String("remote", "", "Dolt remote URL to clone from and persist as sync.remote")
 
 	// Non-interactive mode for CI/cloud agents
 	initCmd.Flags().Bool("non-interactive", false, "Skip all interactive prompts (auto-detected in CI or non-TTY environments)")
@@ -1860,6 +1855,34 @@ func shouldWireInitRemote(syncURL string, syncFromRemote, syncURLFromConfig bool
 	// Auto-detected plain git origins are not Dolt remotes. Only wire origin
 	// when it was explicitly configured or proven to carry refs/dolt/data.
 	return syncURL != "" && (syncFromRemote || syncURLFromConfig)
+}
+
+type initSyncRemoteSource int
+
+const (
+	initSyncRemoteNone initSyncRemoteSource = iota
+	initSyncRemoteExplicit
+	initSyncRemoteConfigured
+)
+
+func resolveInitConfiguredSyncRemote(initRemote string, initRemoteChanged bool, resolveConfiguredRemote func() string) (string, initSyncRemoteSource) {
+	if initRemoteChanged {
+		return initRemote, initSyncRemoteExplicit
+	}
+	if syncURL := resolveConfiguredRemote(); syncURL != "" {
+		return syncURL, initSyncRemoteConfigured
+	}
+	return "", initSyncRemoteNone
+}
+
+func initRemoteCloneMode(initServerMode, externalServer bool) remoteCloneMode {
+	if !initServerMode {
+		return remoteCloneEmbedded
+	}
+	if externalServer {
+		return remoteCloneExternalServer
+	}
+	return remoteCloneCLI
 }
 
 func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, serverSocket, serverUser, dbName string) *configfile.Config {
