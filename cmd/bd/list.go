@@ -96,7 +96,7 @@ func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbP
 	// their descendants. This matches the behavior of --json and --flat (GH#3349).
 	allDescendants := make(map[string]*types.Issue)
 
-	err = findAllDescendants(ctx, store, dbPath, parentID, baseFilter, allDescendants, 0, 10) // max depth 10
+	err = findAllDescendants(ctx, store, dbPath, parentID, baseFilter, allDescendants)
 	if err != nil {
 		return nil, fmt.Errorf("error finding descendants: %v", err)
 	}
@@ -119,11 +119,7 @@ func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbP
 
 // findAllDescendants recursively finds all descendants using parent filtering.
 // baseFilter carries CLI filters (--type, --status, etc.) so the tree respects them.
-func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue, currentDepth, maxDepth int) error {
-	if currentDepth >= maxDepth {
-		return nil // Prevent infinite recursion
-	}
-
+func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue) error {
 	var children []*types.Issue
 	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
 		filter := baseFilter
@@ -140,7 +136,7 @@ func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath s
 	for _, child := range children {
 		if _, exists := result[child.ID]; !exists {
 			result[child.ID] = child
-			err = findAllDescendants(ctx, store, dbPath, child.ID, baseFilter, result, currentDepth+1, maxDepth)
+			err = findAllDescendants(ctx, store, dbPath, child.ID, baseFilter, result)
 			if err != nil {
 				return err
 			}

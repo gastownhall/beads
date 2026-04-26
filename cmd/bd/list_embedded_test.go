@@ -377,6 +377,20 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
+	t.Run("ready_parent_filter_includes_grandchildren", func(t *testing.T) {
+		parent := bdCreate(t, bd, dir, "Ready parent recursive", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Ready child recursive", "--type", "task", "--parent", parent.ID)
+		grandchild := bdCreate(t, bd, dir, "Ready grandchild recursive", "--type", "task", "--parent", child.ID)
+
+		issues := bdListJSON(t, bd, dir, "--ready", "--parent", parent.ID, "--limit", "0")
+		if !containsID(issues, child.ID) {
+			t.Errorf("ready parent filter should include direct child %s, got %v", child.ID, listIssueIDs(issues))
+		}
+		if !containsID(issues, grandchild.ID) {
+			t.Errorf("ready parent filter should include recursive grandchild %s, got %v", grandchild.ID, listIssueIDs(issues))
+		}
+	})
+
 	t.Run("flat", func(t *testing.T) {
 		// --flat disables tree format, uses legacy flat list
 		out := bdList(t, bd, dir, "--flat")

@@ -132,8 +132,22 @@ func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) (
 	// Explicit parent-child dependency takes precedence over dotted-ID prefix.
 	if filter.ParentID != nil {
 		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
-		args = append(args, parentID, parentID)
+		descendantIDs, descErr := s.getDescendantIDs(ctx, parentID)
+		if descErr != nil {
+			return nil, fmt.Errorf("get parent descendants: %w", descErr)
+		}
+		parentClauses := []string{"(id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child'))"}
+		args = append(args, parentID)
+		for start := 0; start < len(descendantIDs); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(descendantIDs) {
+				end = len(descendantIDs)
+			}
+			placeholders, batchArgs := doltBuildSQLInClause(descendantIDs[start:end])
+			parentClauses = append(parentClauses, fmt.Sprintf("id IN (%s)", placeholders))
+			args = append(args, batchArgs...)
+		}
+		whereClauses = append(whereClauses, "("+strings.Join(parentClauses, " OR ")+")")
 	}
 
 	// Molecule filtering: filter to direct children of the specified molecule.
@@ -441,6 +455,16 @@ func (s *DoltStore) getChildrenWithParents(ctx context.Context, parentIDs []stri
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetChildrenWithParentsInTx(ctx, tx, parentIDs)
+		return err
+	})
+	return result, err
+}
+
+func (s *DoltStore) getDescendantIDs(ctx context.Context, rootID string) ([]string, error) {
+	var result []string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDescendantIDsInTx(ctx, tx, rootID, 0)
 		return err
 	})
 	return result, err
