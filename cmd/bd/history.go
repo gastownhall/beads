@@ -32,18 +32,20 @@ Examples:
 			FatalErrorRespectJSON("failed to get history: %v", err)
 		}
 
-		if len(history) == 0 {
-			fmt.Printf("No history found for issue %s\n", issueID)
-			return
-		}
-
 		// Apply limit if specified
 		if historyLimit > 0 && historyLimit < len(history) {
 			history = history[:historyLimit]
 		}
 
+		// Honor --json before the empty-history early-return so consumers
+		// always get valid JSON ([]) regardless of whether history exists.
 		if jsonOutput {
 			outputJSON(history)
+			return
+		}
+
+		if len(history) == 0 {
+			fmt.Printf("No history found for issue %s\n", issueID)
 			return
 		}
 

@@ -168,6 +168,27 @@ func TestEmbeddedHistory(t *testing.T) {
 		}
 	})
 
+	// --json must always produce parseable JSON, even when history is empty.
+	// Without this, consumers piping `bd history --json | jq` break on the
+	// empty case while every other --json subcommand returns valid JSON.
+	t.Run("nonexistent_issue_json_returns_empty_array", func(t *testing.T) {
+		cmd := exec.Command(bd, "history", "--json", "hi-nonexistent999")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd history --json failed: %v\n%s", err, out)
+		}
+		s := strings.TrimSpace(string(out))
+		var entries []map[string]interface{}
+		if err := json.Unmarshal([]byte(s), &entries); err != nil {
+			t.Fatalf("expected valid JSON for empty history, got prose:\n%s\n(parse error: %v)", s, err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("expected empty array for nonexistent issue, got %d entries", len(entries))
+		}
+	})
+
 	// ===== Wrong number of args =====
 
 	t.Run("no_args_fails", func(t *testing.T) {
