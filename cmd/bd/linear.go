@@ -95,6 +95,7 @@ Type Filtering (--push only):
   --exclude-type wisp       Exclude issues of these types
   --include-ephemeral       Include ephemeral issues (wisps, etc.); default is to exclude
   --parent TICKET           Only push this ticket and its descendants
+  --relations               Import Linear relations as bd dependencies on pull
 
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
@@ -103,6 +104,7 @@ Conflict Resolution:
 
 Examples:
   bd linear sync --pull                         # Import from Linear
+  bd linear sync --pull --relations             # Import Linear blocking relations as bd deps
   bd linear sync --push --create-only           # Push new issues only
   bd linear sync --push --type=task,feature     # Push only tasks and features
   bd linear sync --push --exclude-type=wisp     # Push all except wisps
@@ -152,6 +154,7 @@ func init() {
 	linearSyncCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps, etc.) when pushing to Linear")
 	linearSyncCmd.Flags().String("parent", "", "Limit push to this beads ticket and its descendants")
 	linearSyncCmd.Flags().StringSlice("team", nil, "Team ID(s) to sync (overrides configured team_id/team_ids)")
+	linearSyncCmd.Flags().Bool("relations", false, "Import Linear relations as bd dependencies when pulling")
 	registerSelectiveSyncFlags(linearSyncCmd)
 
 	linearCmd.AddCommand(linearSyncCmd)
@@ -172,6 +175,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
 	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
 	cliTeams, _ := cmd.Flags().GetStringSlice("team")
+	relations, _ := cmd.Flags().GetBool("relations")
 
 	if !dryRun {
 		CheckReadonly("linear sync")
@@ -227,6 +231,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 		CreateOnly: createOnly,
 		State:      state,
 	}
+	opts.DependencyTypes = linearPullDependencyTypes(relations)
 
 	// Convert type filters
 	for _, t := range typeFilters {
@@ -291,6 +296,13 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 			}
 		}
 	}
+}
+
+func linearPullDependencyTypes(includeRelations bool) []types.DependencyType {
+	if includeRelations {
+		return nil
+	}
+	return []types.DependencyType{types.DepParentChild}
 }
 
 // buildLinearPullHooks creates PullHooks for Linear-specific pull behavior.

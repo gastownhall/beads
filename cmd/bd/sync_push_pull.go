@@ -168,6 +168,7 @@ func init() {
 	// Linear push/pull
 	linearPushCmd.Flags().Bool("dry-run", false, "Preview push without making changes")
 	linearPullCmd.Flags().Bool("dry-run", false, "Preview pull without making changes")
+	linearPullCmd.Flags().Bool("relations", false, "Import Linear relations as bd dependencies when pulling")
 	linearCmd.AddCommand(linearPushCmd)
 	linearCmd.AddCommand(linearPullCmd)
 
@@ -431,6 +432,7 @@ func runLinearPull(cmd *cobra.Command, args []string) {
 		FatalError("at least one bead ID or external reference is required")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	relations, _ := cmd.Flags().GetBool("relations")
 	if !dryRun {
 		CheckReadonly("linear pull")
 	}
@@ -457,10 +459,11 @@ func runLinearPull(cmd *cobra.Command, args []string) {
 	engine.PullHooks = buildLinearPullHooks(ctx)
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
-		Pull:     true,
-		Push:     false,
-		DryRun:   dryRun,
-		IssueIDs: args,
+		Pull:            true,
+		Push:            false,
+		DryRun:          dryRun,
+		IssueIDs:        args,
+		DependencyTypes: linearPullDependencyTypes(relations),
 	})
 	if err != nil {
 		FatalError("sync failed: %v", err)

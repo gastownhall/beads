@@ -91,6 +91,9 @@ type SyncOptions struct {
 	// or external refs (e.g. "EXT-456"). When non-empty, push filters local issues
 	// by ID and pull uses FetchIssue() for targeted retrieval instead of bulk fetch.
 	IssueIDs []string
+	// DependencyTypes limits which dependency types pull creates from tracker
+	// mapper output. Empty means all dependency types are created.
+	DependencyTypes []types.DependencyType
 }
 
 // SyncResult is the complete result of a sync operation.

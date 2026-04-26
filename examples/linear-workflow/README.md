@@ -38,6 +38,9 @@ bd linear status
 # Pull issues from Linear
 bd linear sync --pull
 
+# Pull issues and Linear blocking relations as bd dependencies
+bd linear sync --pull --relations
+
 # Push local issues to Linear
 bd linear sync --push
 
@@ -76,6 +79,9 @@ Import issues from Linear without pushing local changes:
 
 ```bash
 bd linear sync --pull
+
+# Import Linear relations as bd dependencies
+bd linear sync --pull --relations
 
 # Filter by state
 bd linear sync --pull --state open    # Only open issues
@@ -199,6 +205,12 @@ bd config set linear.label_type_map.story feature
 ### Relation Mapping
 
 Map Linear relations to bd dependencies:
+
+Relation import is opt-in during pull:
+
+```bash
+bd linear sync --pull --relations
+```
 
 | Linear Relation | Beads Dependency |
 |-----------------|------------------|

@@ -2037,6 +2037,197 @@ func TestEngineCreateDependencies(t *testing.T) {
 	}
 }
 
+func TestEngineCreateDependenciesResolvesExternalIdentifiers(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue1 := &types.Issue{
+		ID:        "bd-linear-blocked",
+		Title:     "Blocked issue",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	issue2 := &types.Issue{
+		ID:        "bd-linear-blocker",
+		Title:     "Blocker issue",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		Priority:  2,
+	}
+	for _, issue := range []*types.Issue{issue1, issue2} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+	}
+	if err := store.UpdateIssue(ctx, issue1.ID, map[string]interface{}{"external_ref": "https://linear.app/team/issue/TEAM-101/blocked-issue"}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue issue1 external_ref: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, issue2.ID, map[string]interface{}{"external_ref": "https://linear.app/team/issue/TEAM-100/blocker-issue"}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue issue2 external_ref: %v", err)
+	}
+
+	engine := NewEngine(&mockExternalRefTracker{
+		mockTracker: newMockTracker("linear"),
+		isRef: func(ref string) bool {
+			return strings.Contains(ref, "linear.app")
+		},
+		extract: func(ref string) string {
+			parts := strings.Split(ref, "/")
+			for _, part := range parts {
+				if strings.HasPrefix(part, "TEAM-") {
+					return part
+				}
+			}
+			return ref
+		},
+	}, store, "test-actor")
+
+	deps := []DependencyInfo{
+		{FromExternalID: "TEAM-101", ToExternalID: "TEAM-100", Type: string(types.DepBlocks)},
+	}
+	errCount := engine.createDependencies(ctx, deps)
+	if errCount != 0 {
+		t.Errorf("createDependencies returned errCount=%d, want 0; warnings=%v", errCount, engine.warnings)
+	}
+
+	depRecords, err := store.GetDependencyRecords(ctx, issue1.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords error: %v", err)
+	}
+	if len(depRecords) != 1 {
+		t.Fatalf("expected 1 dependency record, got %d", len(depRecords))
+	}
+	if depRecords[0].DependsOnID != issue2.ID || depRecords[0].Type != types.DepBlocks {
+		t.Errorf("dependency = %s -> %s (%s), want %s -> %s (%s)",
+			depRecords[0].IssueID, depRecords[0].DependsOnID, depRecords[0].Type,
+			issue1.ID, issue2.ID, types.DepBlocks)
+	}
+}
+
+func TestEnginePullCreatesDependenciesForUnchangedIssues(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue1 := &types.Issue{
+		ID:          "bd-unchanged-1",
+		Title:       "Blocked issue",
+		Description: "already pulled",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+	}
+	issue2 := &types.Issue{
+		ID:          "bd-unchanged-2",
+		Title:       "Blocker issue",
+		Description: "already pulled",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+	}
+	for _, issue := range []*types.Issue{issue1, issue2} {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+		ref := fmt.Sprintf("https://test.test/EXT-%s", strings.TrimPrefix(issue.ID, "bd-unchanged-"))
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"external_ref": ref}, "test-actor"); err != nil {
+			t.Fatalf("UpdateIssue external_ref: %v", err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{Identifier: "EXT-1", Title: issue1.Title, Description: issue1.Description},
+		{Identifier: "EXT-2", Title: issue2.Title, Description: issue2.Description},
+	}
+	tracker.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		conv := (&mockMapper{}).IssueToBeads(ti)
+		if ti.Identifier == "EXT-1" {
+			conv.Dependencies = []DependencyInfo{
+				{FromExternalID: "EXT-1", ToExternalID: "EXT-2", Type: string(types.DepBlocks)},
+			}
+		}
+		return conv
+	}}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync error: %v", err)
+	}
+	if result.PullStats.Updated != 0 || result.PullStats.Created != 0 {
+		t.Fatalf("PullStats = %+v, want only skipped unchanged issues", result.PullStats)
+	}
+
+	depRecords, err := store.GetDependencyRecords(ctx, issue1.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords error: %v", err)
+	}
+	if len(depRecords) != 1 || depRecords[0].DependsOnID != issue2.ID {
+		t.Fatalf("dependency records = %+v, want %s -> %s", depRecords, issue1.ID, issue2.ID)
+	}
+}
+
+func TestEnginePullFiltersDependencyTypes(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issues := []*types.Issue{
+		{ID: "bd-filter-child", Title: "Child", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-filter-parent", Title: "Parent", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-filter-blocker", Title: "Blocker", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+	}
+	for i, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+		ref := fmt.Sprintf("https://test.test/EXT-%d", i+1)
+		if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"external_ref": ref}, "test-actor"); err != nil {
+			t.Fatalf("UpdateIssue external_ref: %v", err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{Identifier: "EXT-1", Title: "Child"},
+		{Identifier: "EXT-2", Title: "Parent"},
+		{Identifier: "EXT-3", Title: "Blocker"},
+	}
+	tracker.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		conv := (&mockMapper{}).IssueToBeads(ti)
+		if ti.Identifier == "EXT-1" {
+			conv.Dependencies = []DependencyInfo{
+				{FromExternalID: "EXT-1", ToExternalID: "EXT-2", Type: string(types.DepParentChild)},
+				{FromExternalID: "EXT-1", ToExternalID: "EXT-3", Type: string(types.DepBlocks)},
+			}
+		}
+		return conv
+	}}
+
+	engine := NewEngine(tracker, store, "test-actor")
+	if _, err := engine.Sync(ctx, SyncOptions{
+		Pull:            true,
+		DependencyTypes: []types.DependencyType{types.DepParentChild},
+	}); err != nil {
+		t.Fatalf("Sync error: %v", err)
+	}
+
+	depRecords, err := store.GetDependencyRecords(ctx, "bd-filter-child")
+	if err != nil {
+		t.Fatalf("GetDependencyRecords error: %v", err)
+	}
+	if len(depRecords) != 1 {
+		t.Fatalf("expected 1 dependency record, got %d: %+v", len(depRecords), depRecords)
+	}
+	if depRecords[0].DependsOnID != "bd-filter-parent" || depRecords[0].Type != types.DepParentChild {
+		t.Fatalf("dependency = %s -> %s (%s), want bd-filter-child -> bd-filter-parent (%s)",
+			depRecords[0].IssueID, depRecords[0].DependsOnID, depRecords[0].Type, types.DepParentChild)
+	}
+}
+
 func TestEngineCreateDependencies_UnresolvableRef(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

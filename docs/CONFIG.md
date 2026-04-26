@@ -718,6 +718,12 @@ bd config set linear.relation_map.duplicate duplicates
 bd config set linear.relation_map.related related
 ```
 
+Relation import is opt-in when pulling:
+
+```bash
+bd linear sync --pull --relations
+```
+
 **Sync commands:**
 
 ```bash
@@ -726,6 +732,9 @@ bd linear sync
 
 # Pull only (import from Linear)
 bd linear sync --pull
+
+# Pull issues and Linear relations as bd dependencies
+bd linear sync --pull --relations
 
 # Push only (export to Linear)
 bd linear sync --push

@@ -409,6 +409,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
+		if !opts.DryRun {
+			pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes)
+		}
+
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
 			stats.Skipped++
 			continue
@@ -464,7 +468,6 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			stats.Created++
 		}
 
-		pendingDeps = append(pendingDeps, conv.Dependencies...)
 	}
 
 	// Create dependencies after all issues are imported
@@ -527,6 +530,25 @@ func marshalTrackerMetadata(metadata interface{}) (json.RawMessage, bool) {
 		return nil, false
 	}
 	return json.RawMessage(raw), true
+}
+
+func appendFilteredDependencies(dst []DependencyInfo, deps []DependencyInfo, allowedTypes []types.DependencyType) []DependencyInfo {
+	if len(deps) == 0 {
+		return dst
+	}
+	if len(allowedTypes) == 0 {
+		return append(dst, deps...)
+	}
+	allowed := make(map[string]struct{}, len(allowedTypes))
+	for _, depType := range allowedTypes {
+		allowed[string(depType)] = struct{}{}
+	}
+	for _, dep := range deps {
+		if _, ok := allowed[dep.Type]; ok {
+			dst = append(dst, dep)
+		}
+	}
+	return dst
 }
 
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {
@@ -952,15 +974,21 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		return 0
 	}
 
+	resolveIssue, err := e.dependencyIssueResolver(ctx)
+	if err != nil {
+		e.warn("Failed to build dependency resolver: %v", err)
+		return len(deps)
+	}
+
 	errCount := 0
 	for _, dep := range deps {
-		fromIssue, err := e.Store.GetIssueByExternalRef(ctx, dep.FromExternalID)
+		fromIssue, err := resolveIssue(ctx, dep.FromExternalID)
 		if err != nil {
 			e.warn("Failed to resolve dependency source %s: %v", dep.FromExternalID, err)
 			errCount++
 			continue
 		}
-		toIssue, err := e.Store.GetIssueByExternalRef(ctx, dep.ToExternalID)
+		toIssue, err := resolveIssue(ctx, dep.ToExternalID)
 		if err != nil {
 			e.warn("Failed to resolve dependency target %s: %v", dep.ToExternalID, err)
 			errCount++
@@ -982,6 +1010,46 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		}
 	}
 	return errCount
+}
+
+func (e *Engine) dependencyIssueResolver(ctx context.Context) (func(context.Context, string) (*types.Issue, error), error) {
+	issues, searchErr := e.Store.SearchIssues(ctx, "", types.IssueFilter{})
+	if searchErr != nil {
+		return nil, searchErr
+	}
+	byExternal := make(map[string]*types.Issue, len(issues)*2)
+	for _, candidate := range issues {
+		if candidate == nil || candidate.ExternalRef == nil {
+			continue
+		}
+		ref := strings.TrimSpace(*candidate.ExternalRef)
+		if ref == "" || !e.Tracker.IsExternalRef(ref) {
+			continue
+		}
+		byExternal[ref] = candidate
+		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
+		if identifier != "" {
+			byExternal[identifier] = candidate
+			byExternal[strings.ToLower(identifier)] = candidate
+		}
+	}
+
+	return func(ctx context.Context, externalID string) (*types.Issue, error) {
+		externalID = strings.TrimSpace(externalID)
+		if externalID == "" {
+			return nil, nil
+		}
+		if issue := byExternal[externalID]; issue != nil {
+			return issue, nil
+		}
+		if issue := byExternal[strings.ToLower(externalID)]; issue != nil {
+			return issue, nil
+		}
+		if strings.Contains(externalID, "://") {
+			return e.Store.GetIssueByExternalRef(ctx, externalID)
+		}
+		return nil, nil
+	}, nil
 }
 
 // buildDescendantSet returns the set of issue IDs consisting of the given parent
