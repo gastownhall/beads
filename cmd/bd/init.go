@@ -79,6 +79,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 		roleFlag, _ := cmd.Flags().GetString("role")
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
+		initRemote, _ := cmd.Flags().GetString("remote")
 		// Dolt server connection flags
 		backendFlag, _ := cmd.Flags().GetString("backend")
 		initServerMode, _ := cmd.Flags().GetBool("server")
