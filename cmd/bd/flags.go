@@ -31,7 +31,7 @@ func registerCommonIssueFlags(cmd *cobra.Command) {
 	cmd.Flags().String("acceptance", "", "Acceptance criteria")
 	cmd.Flags().String("notes", "", "Additional notes")
 	cmd.Flags().String("append-notes", "", "Append to existing notes (with newline separator)")
-	cmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC')")
+	cmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)")
 }
 
 // getDescriptionFlag retrieves the description value, checking --body-file, --description-file,

@@ -424,6 +424,15 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("linear_external_ref", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "ler")
+		ref := "https://linear.app/team/issue/TEAM-123/fix-login"
+		issue := bdCreate(t, bd, dir, "Pre-linked Linear issue", "--external-ref", ref)
+		if issue.ExternalRef == nil || *issue.ExternalRef != ref {
+			t.Errorf("external_ref: got %v, want %q", issue.ExternalRef, ref)
+		}
+	})
+
 	t.Run("metadata", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "mt")
 		issue := bdCreate(t, bd, dir, "Metadata issue", "--metadata", `{"key":"value"}`)

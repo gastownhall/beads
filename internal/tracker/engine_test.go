@@ -603,6 +603,84 @@ func TestEnginePullOnly(t *testing.T) {
 	}
 }
 
+func TestEnginePullUsesPrelinkedExternalRefIdentifier(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	localRef := "https://linear.app/team/issue/TEAM-123/fix-login"
+	local := &types.Issue{
+		ID:          "bd-linear-prelink",
+		Title:       "Fix login",
+		Description: "Local draft",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr(localRef),
+	}
+	if err := store.CreateIssue(ctx, local, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	base := newMockTracker("linear")
+	base.issues = []TrackerIssue{{
+		ID:          "linear-internal-123",
+		Identifier:  "TEAM-123",
+		URL:         "https://linear.app/team/issue/TEAM-123/renamed-login-fix",
+		Title:       "Fix login",
+		Description: "Linear copy",
+		Priority:    2,
+		UpdatedAt:   time.Now(),
+	}}
+	lt := &mockExternalRefTracker{
+		mockTracker: base,
+		buildRef: func(issue *TrackerIssue) string {
+			return "https://linear.app/team/issue/" + issue.Identifier
+		},
+		extract: func(ref string) string {
+			parts := strings.Split(ref, "/issue/")
+			if len(parts) != 2 {
+				return ""
+			}
+			return strings.Split(parts[1], "/")[0]
+		},
+		isRef: func(ref string) bool {
+			return strings.Contains(ref, "linear.app/") && strings.Contains(ref, "/issue/")
+		},
+	}
+
+	engine := NewEngine(lt, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if result.PullStats.Created != 0 || result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want Created=0 Updated=1", result.PullStats)
+	}
+
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{ExternalRefContains: "TEAM-123"})
+	if err != nil {
+		t.Fatalf("SearchIssues() error: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("issues linked to TEAM-123 = %d, want 1", len(issues))
+	}
+	got, err := store.GetIssue(ctx, local.ID)
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	wantRef := "https://linear.app/team/issue/TEAM-123"
+	if got.ExternalRef == nil || *got.ExternalRef != wantRef {
+		t.Fatalf("external_ref = %#v, want %q", got.ExternalRef, wantRef)
+	}
+	if got.Description != "Linear copy" {
+		t.Fatalf("description = %q, want Linear copy", got.Description)
+	}
+}
+
 func TestEnginePushOnly(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

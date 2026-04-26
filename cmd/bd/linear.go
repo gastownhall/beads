@@ -70,6 +70,8 @@ Examples:
   bd linear sync --push         # Export issues to Linear
   bd linear sync                # Bidirectional sync (pull then push)
   bd linear sync --dry-run      # Preview sync without changes
+  bd create "Fix login" --external-ref https://linear.app/team/issue/TEAM-123
+                              # Link a local issue to an existing Linear issue
   bd linear status              # Show sync status`,
 }
 
