@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -364,7 +365,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 		hydrated, hydratedLocalIDs, err := e.fetchPrelinkedIssues(ctx, extIssues, localIssues, lastSync)
 		if err != nil {
-			e.warn("Failed to hydrate pre-linked %s issues: %v", e.Tracker.DisplayName(), err)
+			return nil, fmt.Errorf("hydrating pre-linked %s issues: %w", e.Tracker.DisplayName(), err)
 		}
 		extIssues = append(extIssues, hydrated...)
 		stats.Candidates += len(hydrated)
@@ -595,11 +596,18 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 
 	var hydrated []TrackerIssue
 	for _, local := range localIssues {
-		if local == nil || local.ExternalRef == nil || !local.CreatedAt.After(*lastSync) {
+		if local == nil || local.ExternalRef == nil {
 			continue
 		}
 		ref := strings.TrimSpace(*local.ExternalRef)
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
+			continue
+		}
+		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		if err != nil {
+			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+		}
+		if !changedAfterLastSync {
 			continue
 		}
 		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
@@ -626,6 +634,38 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		seen[strings.ToLower(identifier)] = struct{}{}
 	}
 	return hydrated, hydratedLocalIDs, nil
+}
+
+type dbProvider interface {
+	DB() *sql.DB
+}
+
+func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (bool, error) {
+	if local == nil {
+		return false, nil
+	}
+	provider, ok := e.Store.(dbProvider)
+	if !ok || provider.DB() == nil {
+		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), nil
+	}
+
+	var previousRef sql.NullString
+	err := provider.DB().QueryRowContext(ctx, `
+		SELECT external_ref
+		FROM (
+			SELECT id, external_ref, commit_date FROM dolt_history_issues
+		) h
+		WHERE h.id = ? AND h.commit_date <= ?
+		ORDER BY h.commit_date DESC
+		LIMIT 1
+	`, local.ID, lastSync.UTC()).Scan(&previousRef)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !previousRef.Valid || strings.TrimSpace(previousRef.String) != strings.TrimSpace(currentRef), nil
 }
 
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {

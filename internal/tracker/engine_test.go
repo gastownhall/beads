@@ -58,6 +58,7 @@ type mockTracker struct {
 	created         []*types.Issue
 	updated         map[string]*types.Issue
 	fetchErr        error
+	fetchIssueErr   error
 	createErr       error
 	createFailAfter int // fail after this many successful creates (0 = fail immediately)
 	updateErr       error
@@ -168,6 +169,9 @@ func (m *mockTracker) FetchIssues(ctx context.Context, opts FetchOptions) ([]Tra
 }
 
 func (m *mockTracker) FetchIssue(_ context.Context, identifier string) (*TrackerIssue, error) {
+	if m.fetchIssueErr != nil {
+		return nil, m.fetchIssueErr
+	}
 	if m.fetchErr != nil {
 		return nil, m.fetchErr
 	}
@@ -2559,6 +2563,168 @@ func TestEnginePullHydratesNewPrelinkedExternalRefAfterLastSync(t *testing.T) {
 	}
 	if got.ExternalRef == nil || *got.ExternalRef != "https://linear.app/team/issue/TEAM-123" {
 		t.Fatalf("external_ref = %#v, want canonical prelinked ref", got.ExternalRef)
+	}
+}
+
+func TestEnginePullHydratesOlderIssueWhenExternalRefAddedAfterLastSync(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	local := &types.Issue{
+		ID:          "bd-prelinked-existing",
+		Title:       "Local stub",
+		Description: "stub",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		CreatedAt:   time.Now().UTC().Add(-4 * time.Hour),
+		UpdatedAt:   time.Now().UTC().Add(-4 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, local, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+
+	lastSync := time.Now().UTC()
+	if err := store.SetLocalMetadata(ctx, "linear.last_sync", lastSync.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("SetLocalMetadata error: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	localRef := "https://linear.app/team/issue/TEAM-456/stub"
+	if err := store.UpdateIssue(ctx, local.ID, map[string]interface{}{"external_ref": localRef}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue external_ref error: %v", err)
+	}
+
+	base := newMockTracker("linear")
+	base.issues = []TrackerIssue{{
+		ID:          "linear-internal-456",
+		Identifier:  "TEAM-456",
+		URL:         "https://linear.app/team/issue/TEAM-456/remote-title",
+		Title:       "Remote title",
+		Description: "Remote description",
+		Priority:    1,
+		UpdatedAt:   lastSync.Add(-30 * time.Minute),
+	}}
+	base.fetchIssues = func(_ context.Context, opts FetchOptions) ([]TrackerIssue, error) {
+		if opts.Since == nil {
+			return base.issues, nil
+		}
+		return nil, nil
+	}
+	lt := &mockExternalRefTracker{
+		mockTracker: base,
+		buildRef: func(issue *TrackerIssue) string {
+			return "https://linear.app/team/issue/" + issue.Identifier
+		},
+		extract: func(ref string) string {
+			parts := strings.Split(ref, "/issue/")
+			if len(parts) != 2 {
+				return ""
+			}
+			return strings.Split(parts[1], "/")[0]
+		},
+		isRef: func(ref string) bool {
+			return strings.Contains(ref, "linear.app/") && strings.Contains(ref, "/issue/")
+		},
+	}
+
+	engine := NewEngine(lt, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync error: %v", err)
+	}
+	if result.PullStats.Updated != 1 {
+		t.Fatalf("PullStats = %+v, want one hydrated update", result.PullStats)
+	}
+	got, err := store.GetIssue(ctx, local.ID)
+	if err != nil {
+		t.Fatalf("GetIssue error: %v", err)
+	}
+	if got.Title != "Remote title" || got.Description != "Remote description" {
+		t.Fatalf("hydrated issue = %q/%q, want remote content", got.Title, got.Description)
+	}
+	if got.ExternalRef == nil || *got.ExternalRef != "https://linear.app/team/issue/TEAM-456" {
+		t.Fatalf("external_ref = %#v, want canonical prelinked ref", got.ExternalRef)
+	}
+}
+
+func TestEngineSyncPrelinkedHydrationFailureStopsPushAndLastSync(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	local := &types.Issue{
+		ID:          "bd-prelinked-failure",
+		Title:       "Local stub",
+		Description: "stub",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		CreatedAt:   time.Now().UTC().Add(-4 * time.Hour),
+		UpdatedAt:   time.Now().UTC().Add(-4 * time.Hour),
+	}
+	if err := store.CreateIssue(ctx, local, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+
+	lastSync := time.Now().UTC()
+	lastSyncStr := lastSync.Format(time.RFC3339Nano)
+	if err := store.SetLocalMetadata(ctx, "linear.last_sync", lastSyncStr); err != nil {
+		t.Fatalf("SetLocalMetadata error: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	localRef := "https://linear.app/team/issue/TEAM-789/stub"
+	if err := store.UpdateIssue(ctx, local.ID, map[string]interface{}{"external_ref": localRef}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue external_ref error: %v", err)
+	}
+
+	base := newMockTracker("linear")
+	base.fetchIssueErr = fmt.Errorf("linear fetch failed")
+	base.fetchIssues = func(_ context.Context, opts FetchOptions) ([]TrackerIssue, error) {
+		if opts.Since == nil {
+			return base.issues, nil
+		}
+		return nil, nil
+	}
+	lt := &mockExternalRefTracker{
+		mockTracker: base,
+		buildRef: func(issue *TrackerIssue) string {
+			return "https://linear.app/team/issue/" + issue.Identifier
+		},
+		extract: func(ref string) string {
+			parts := strings.Split(ref, "/issue/")
+			if len(parts) != 2 {
+				return ""
+			}
+			return strings.Split(parts[1], "/")[0]
+		},
+		isRef: func(ref string) bool {
+			return strings.Contains(ref, "linear.app/") && strings.Contains(ref, "/issue/")
+		},
+	}
+
+	engine := NewEngine(lt, store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true, Push: true})
+	if err == nil {
+		t.Fatalf("Sync error = nil, want hydration failure")
+	}
+	if result == nil || result.Success {
+		t.Fatalf("result = %+v, want unsuccessful result", result)
+	}
+	if !strings.Contains(err.Error(), "hydrating pre-linked linear issues") {
+		t.Fatalf("Sync error = %v, want hydration context", err)
+	}
+	if len(base.created) != 0 || len(base.updated) != 0 {
+		t.Fatalf("push ran after hydration failure: created=%d updated=%d", len(base.created), len(base.updated))
+	}
+	gotLastSync, err := store.GetLocalMetadata(ctx, "linear.last_sync")
+	if err != nil {
+		t.Fatalf("GetLocalMetadata error: %v", err)
+	}
+	if gotLastSync != lastSyncStr {
+		t.Fatalf("last_sync = %q, want unchanged %q", gotLastSync, lastSyncStr)
 	}
 }
 
