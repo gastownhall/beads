@@ -308,6 +308,16 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
+	t.Run("ready_exclude_type", func(t *testing.T) {
+		issues := bdListJSON(t, bd, dir, "--ready", "--exclude-type", "epic", "--limit", "0")
+		if containsID(issues, seed.epic) {
+			t.Errorf("--ready --exclude-type epic should exclude epic %s, got %v", seed.epic, listIssueIDs(issues))
+		}
+		if !containsID(issues, seed.readyTask) {
+			t.Errorf("--ready --exclude-type epic should still include ready task %s, got %v", seed.readyTask, listIssueIDs(issues))
+		}
+	})
+
 	t.Run("overdue", func(t *testing.T) {
 		issues := bdListJSON(t, bd, dir, "--overdue")
 		if !containsID(issues, seed.overdueTask) {
@@ -348,6 +358,22 @@ func TestEmbeddedList(t *testing.T) {
 		out := bdList(t, bd, dir, "--tree", "--parent", seed.epic)
 		if !strings.Contains(out, seed.epic) {
 			t.Errorf("tree output should contain parent ID %s", seed.epic)
+		}
+	})
+
+	t.Run("ready_parent_tree_excludes_blocked_descendants", func(t *testing.T) {
+		parent := bdCreate(t, bd, dir, "Ready parent tree", "--type", "epic")
+		readyChild := bdCreate(t, bd, dir, "Ready child in tree", "--type", "task", "--parent", parent.ID)
+		blockedChild := bdCreate(t, bd, dir, "Blocked child in tree", "--type", "task", "--parent", parent.ID)
+		blocker := bdCreate(t, bd, dir, "Tree child blocker", "--type", "task")
+		bdDepAdd(t, bd, dir, blockedChild.ID, blocker.ID)
+
+		out := bdList(t, bd, dir, "--ready", "--parent", parent.ID, "--no-pager")
+		if !strings.Contains(out, readyChild.ID) {
+			t.Errorf("ready child %s should appear in ready parent tree:\n%s", readyChild.ID, out)
+		}
+		if strings.Contains(out, blockedChild.ID) {
+			t.Errorf("blocked child %s should not appear in ready parent tree:\n%s", blockedChild.ID, out)
 		}
 	})
 

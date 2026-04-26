@@ -296,11 +296,11 @@ func TestLoadWatchedIssues_WithParentIncludesHierarchyAndStableOrder(t *testing.
 	addParentChild(grandchild, child)
 
 	filter := types.IssueFilter{ParentID: &parent.ID}
-	first, err := loadWatchedIssues(ctx, store, filter, parent.ID, "", false)
+	first, err := loadWatchedIssues(ctx, store, filter, false, parent.ID, "", false)
 	if err != nil {
 		t.Fatalf("loadWatchedIssues first call failed: %v", err)
 	}
-	second, err := loadWatchedIssues(ctx, store, filter, parent.ID, "", false)
+	second, err := loadWatchedIssues(ctx, store, filter, false, parent.ID, "", false)
 	if err != nil {
 		t.Fatalf("loadWatchedIssues second call failed: %v", err)
 	}

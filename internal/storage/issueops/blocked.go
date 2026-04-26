@@ -334,34 +334,81 @@ func GetChildrenOfIssuesInTx(ctx context.Context, tx *sql.Tx, parentIDs []string
 
 // GetDescendantIDsInTx returns IDs of all transitive parent-child descendants
 // of rootID, traversing parent-child edges in both the dependencies and
-// wisp_dependencies tables via BFS. rootID itself is NOT included. Cycles are
-// broken via a visited set. maxDepth caps traversal depth; pass 0 for the
-// default safety cap.
+// wisp_dependencies tables. rootID itself is NOT included. Cycles are broken
+// inside the recursive CTE. maxDepth caps traversal depth only when positive;
+// reaching that cap returns an explicit error rather than silently truncating.
 func GetDescendantIDsInTx(ctx context.Context, tx *sql.Tx, rootID string, maxDepth int) ([]string, error) {
 	if rootID == "" {
 		return nil, nil
 	}
-	if maxDepth <= 0 {
-		maxDepth = 100
+
+	queryDescendants := func(includeWisps bool) ([]string, bool, error) {
+		edgeQuery := `
+			SELECT issue_id, depends_on_id FROM dependencies WHERE type = 'parent-child'
+		`
+		if includeWisps {
+			edgeQuery += `
+			UNION ALL
+			SELECT issue_id, depends_on_id FROM wisp_dependencies WHERE type = 'parent-child'
+		`
+		}
+
+		query := fmt.Sprintf(`
+			WITH RECURSIVE
+			parent_edges(issue_id, depends_on_id) AS (
+				%s
+			),
+			descendants(id, depth, path) AS (
+				SELECT issue_id, 1, CONCAT(',', ?, ',', issue_id, ',')
+				FROM parent_edges
+				WHERE depends_on_id = ?
+				UNION ALL
+				SELECT e.issue_id, d.depth + 1, CONCAT(d.path, e.issue_id, ',')
+				FROM parent_edges e
+				JOIN descendants d ON e.depends_on_id = d.id
+				WHERE (? <= 0 OR d.depth < ?)
+				  AND LOCATE(CONCAT(',', e.issue_id, ','), d.path) = 0
+			)
+			SELECT id, depth FROM descendants WHERE id <> ?
+		`, edgeQuery)
+
+		rows, err := tx.QueryContext(ctx, query, rootID, rootID, maxDepth, maxDepth, rootID)
+		if err != nil {
+			return nil, false, err
+		}
+		defer func() { _ = rows.Close() }()
+
+		var result []string
+		reachedMaxDepth := false
+		for rows.Next() {
+			var id string
+			var depth int
+			if err := rows.Scan(&id, &depth); err != nil {
+				return nil, false, fmt.Errorf("scan descendant: %w", err)
+			}
+			result = append(result, id)
+			if maxDepth > 0 && depth >= maxDepth {
+				reachedMaxDepth = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, false, fmt.Errorf("descendant rows: %w", err)
+		}
+		return result, reachedMaxDepth, nil
 	}
-	seen := map[string]bool{rootID: true}
-	var result []string
-	frontier := []string{rootID}
-	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
-		children, err := GetChildrenOfIssuesInTx(ctx, tx, frontier)
+
+	result, reachedMaxDepth, err := queryDescendants(true)
+	if err != nil {
+		if !isTableNotExistError(err) {
+			return nil, err
+		}
+		result, reachedMaxDepth, err = queryDescendants(false)
 		if err != nil {
 			return nil, err
 		}
-		var next []string
-		for _, c := range children {
-			if seen[c] {
-				continue
-			}
-			seen[c] = true
-			result = append(result, c)
-			next = append(next, c)
-		}
-		frontier = next
+	}
+	if reachedMaxDepth {
+		return nil, fmt.Errorf("parent descendant traversal for %s reached max depth %d", rootID, maxDepth)
 	}
 	return result, nil
 }

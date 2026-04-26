@@ -520,6 +520,64 @@ func TestGetReadyWork_ParentFilterReturnsDescendants(t *testing.T) {
 	}
 }
 
+func TestGetReadyWork_ParentFilterReturnsDeepDescendants(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	root := &types.Issue{
+		ID:        "rw-deep-root",
+		Title:     "Deep Root",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	if err := store.CreateIssue(ctx, root, "tester"); err != nil {
+		t.Fatalf("failed to create root: %v", err)
+	}
+
+	parentID := root.ID
+	const depth = 105
+	for i := 1; i <= depth; i++ {
+		issue := &types.Issue{
+			ID:        fmt.Sprintf("rw-deep-%03d", i),
+			Title:     fmt.Sprintf("Deep child %03d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID:     issue.ID,
+			DependsOnID: parentID,
+			Type:        types.DepParentChild,
+		}, "tester"); err != nil {
+			t.Fatalf("failed to add parent-child dep for %s: %v", issue.ID, err)
+		}
+		parentID = issue.ID
+	}
+
+	rootID := root.ID
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{ParentID: &rootID})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	foundLeaf := false
+	for _, w := range work {
+		if w.ID == fmt.Sprintf("rw-deep-%03d", depth) {
+			foundLeaf = true
+			break
+		}
+	}
+	if !foundLeaf {
+		t.Fatalf("parent filter should include descendant beyond depth 100, got %d descendants", len(work))
+	}
+}
+
 // TestGetReadyWork_CustomStatusBlockerStillBlocks verifies that a blocker with
 // a custom status still prevents blocked issues from appearing in ready work.
 // Regression test for bd-1x0.
