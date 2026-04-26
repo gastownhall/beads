@@ -148,8 +148,11 @@ Examples:
 				FatalErrorRespectJSON("%v", err)
 			}
 
-			// Check for cycles after adding dependency
-			warnIfCyclesExist(fromStore)
+			// Check for cycles after adding dependency (skipped with --no-cycle-check)
+			noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
+			if !noCycleCheck {
+				warnIfCyclesExist(fromStore)
+			}
 
 			if isEmbeddedMode() && fromStore != nil {
 				if _, err := fromStore.CommitPending(ctx, actor); err != nil {
@@ -202,7 +205,8 @@ Examples:
   bd dep add bd-42 bd-41                              # Positional args
   bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
   bd dep add bd-42 --depends-on bd-41                 # Alias (same effect)
-  bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency`,
+  bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency
+  bd dep add bd-42 bd-41 --no-cycle-check             # Skip cycle check (bulk wiring)`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		blockedBy, _ := cmd.Flags().GetString("blocked-by")
 		dependsOn, _ := cmd.Flags().GetString("depends-on")
@@ -304,8 +308,11 @@ Examples:
 			FatalErrorRespectJSON("%v", err)
 		}
 
-		// Check for cycles after adding dependency
-		warnIfCyclesExist(fromStore)
+		// Check for cycles after adding dependency (skipped with --no-cycle-check)
+		noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
+		if !noCycleCheck {
+			warnIfCyclesExist(fromStore)
+		}
 
 		if isEmbeddedMode() && fromStore != nil {
 			if _, err := fromStore.CommitPending(ctx, actor); err != nil {
@@ -1109,10 +1116,12 @@ func ParseExternalRef(ref string) (project, capability string) {
 func init() {
 	// dep command shorthand flag
 	depCmd.Flags().StringP("blocks", "b", "", "Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)")
+	depCmd.Flags().Bool("no-cycle-check", false, "Skip cycle detection after adding (use for bulk wiring — run 'bd dep cycles' to verify afterwards)")
 
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes)")
 	depAddCmd.Flags().String("blocked-by", "", "Issue ID that blocks the first issue (alternative to positional arg)")
 	depAddCmd.Flags().String("depends-on", "", "Issue ID that the first issue depends on (alias for --blocked-by)")
+	depAddCmd.Flags().Bool("no-cycle-check", false, "Skip cycle detection after adding (use for bulk wiring — run 'bd dep cycles' to verify afterwards)")
 
 	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")

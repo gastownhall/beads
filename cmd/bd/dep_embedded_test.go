@@ -436,3 +436,41 @@ func TestEmbeddedDepConcurrent(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddedDepNoCycleCheck(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ncc")
+
+	// Create a linear chain of issues to simulate bulk dependency wiring.
+	const n = 10
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		issue := bdCreate(t, bd, dir, fmt.Sprintf("bulk-dep-%d", i), "--type", "task")
+		ids[i] = issue.ID
+	}
+
+	// Wire the chain with --no-cycle-check — each call must succeed without
+	// hanging on a full-graph cycle traversal.
+	for i := 1; i < n; i++ {
+		out := bdDep(t, bd, dir, "add", ids[i], ids[i-1], "--no-cycle-check")
+		// Must not print a cycle warning (there are no cycles in a linear chain).
+		if strings.Contains(out, "cycle") {
+			t.Errorf("unexpected cycle warning with --no-cycle-check: %s", out)
+		}
+	}
+
+	// Verify the graph is acyclic after bulk wiring.
+	cyclesOut := bdDep(t, bd, dir, "cycles")
+	if strings.Contains(cyclesOut, "Found") {
+		t.Errorf("unexpected cycles after bulk wiring: %s", cyclesOut)
+	}
+
+	// Verify --no-cycle-check also works with the dep --blocks shorthand.
+	extra := bdCreate(t, bd, dir, "bulk-dep-extra", "--type", "task")
+	bdDep(t, bd, dir, extra.ID, "--blocks", ids[n-1], "--no-cycle-check")
+}
