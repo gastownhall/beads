@@ -457,7 +457,7 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 		r = os.Stdin
 	} else {
 		var err error
-		f, err = os.Open(file)
+		f, err = os.Open(file) // #nosec G304 -- user-supplied bulk dependency file
 		if err != nil {
 			return nil, fmt.Errorf("open dependency file: %w", err)
 		}
