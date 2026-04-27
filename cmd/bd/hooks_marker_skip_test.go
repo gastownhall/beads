@@ -6,7 +6,7 @@ import (
 )
 
 // TestIsOnlyShebangOrEmpty_TableDriven exercises the helper used by
-// preservePreexistingHooks to decide, after stripping a BEADS INTEGRATION
+// shouldPreserveHookContent to decide, after stripping a BEADS INTEGRATION
 // block, whether anything user-owned remains worth preserving. (GH#3536)
 func TestIsOnlyShebangOrEmpty_TableDriven(t *testing.T) {
 	tests := []struct {
@@ -32,24 +32,94 @@ func TestIsOnlyShebangOrEmpty_TableDriven(t *testing.T) {
 	}
 }
 
-// TestPreservePreexistingHooks_StripsLegacyMarkerBlock reproduces GH#3536.
-// In the v0.62.x inline-injection model, bd appended its BEADS INTEGRATION
-// block to the BOTTOM of an otherwise-user-owned hook. When v1.0.x tries to
-// preserve that hook into .beads/hooks/<name>, the marker-presence check
-// previously caused the entire file to be skipped — silently discarding the
-// user's content.
-//
-// Expected behaviour after the fix: the bd marker block is stripped, the
-// user content above it is preserved, and the new v1.0.x BEADS INTEGRATION
-// block (added later by injectHookSection) re-installs the bd integration.
-//
-// This test exercises only the strip-decision logic — the same composition
-// used inside preservePreexistingHooks.
-func TestPreservePreexistingHooks_StripsLegacyMarkerBlock(t *testing.T) {
-	// A v0.62.x-style file: user dispatcher above, bd marker block below.
-	existing := `#!/bin/sh
+// TestShouldPreserveHookContent_TableDriven covers every branch of the new
+// pure-function decision used by preservePreexistingHooks. Each case mirrors
+// a real situation the migration path encounters. (GH#3536)
+func TestShouldPreserveHookContent_TableDriven(t *testing.T) {
+	const v062Marker = "# --- BEGIN BEADS INTEGRATION v0.62.0 ---\n" +
+		"# This section is managed by beads. Do not remove these markers.\n" +
+		"if command -v bd >/dev/null 2>&1; then\n" +
+		"  bd hook pre-commit \"$@\"\n" +
+		"fi\n" +
+		"# --- END BEADS INTEGRATION v0.62.0 ---\n"
+
+	tests := []struct {
+		name      string
+		content   string
+		fromHusky bool
+		wantKeep  bool
+		wantBody  string // exact wantBody when wantKeep is true; ignored otherwise
+		wantNot   string // substring that must NOT be present in the kept body
+	}{
+		{
+			name:     "inline marker — wholly bd-managed, skip",
+			content:  "#!/bin/sh\n# bd (beads)\nbd hook pre-commit \"$@\"\n",
+			wantKeep: false,
+		},
+		{
+			name: "v0.62.x style: dispatcher above + bd marker block — strip and preserve",
+			content: "#!/bin/sh\nset -e\n" +
+				"# user dispatcher\n" +
+				"if [ -f .pre-commit-config.yaml ] && command -v pre-commit >/dev/null 2>&1; then\n" +
+				"    pre-commit run --hook-stage pre-commit \"$@\"\n" +
+				"fi\n\n" +
+				v062Marker,
+			wantKeep: true,
+			wantNot:  "BEADS INTEGRATION",
+		},
+		{
+			name:     "marker block + only shebang — strip leaves nothing, skip",
+			content:  "#!/bin/sh\n\n" + v062Marker,
+			wantKeep: false,
+		},
+		{
+			name:     "no markers — preserve verbatim",
+			content:  "#!/bin/sh\nset -e\necho 'plain user hook'\nmake lint\n",
+			wantKeep: true,
+			wantBody: "#!/bin/sh\nset -e\necho 'plain user hook'\nmake lint\n",
+		},
+		{
+			name:      "husky v8: source line stripped, PATH injected",
+			content:   "#!/usr/bin/env sh\n. \"$(dirname -- \"$0\")/_/husky.sh\"\n\nnpx lint-staged\n",
+			fromHusky: true,
+			wantKeep:  true,
+			wantNot:   "/_/husky.sh",
+		},
+		{
+			name:      "husky after marker-strip: still gets sanitised",
+			content:   "#!/usr/bin/env sh\n. \"$(dirname -- \"$0\")/_/husky.sh\"\n\nnpx lint-staged\n\n" + v062Marker,
+			fromHusky: true,
+			wantKeep:  true,
+			wantNot:   "BEADS INTEGRATION",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, keep := shouldPreserveHookContent(tt.content, tt.fromHusky)
+			if keep != tt.wantKeep {
+				t.Fatalf("keep = %v, want %v (body=%q)", keep, tt.wantKeep, body)
+			}
+			if !tt.wantKeep {
+				return
+			}
+			if tt.wantBody != "" && body != tt.wantBody {
+				t.Errorf("body mismatch:\nwant=%q\ngot =%q", tt.wantBody, body)
+			}
+			if tt.wantNot != "" && strings.Contains(body, tt.wantNot) {
+				t.Errorf("kept body unexpectedly contains %q:\n%s", tt.wantNot, body)
+			}
+		})
+	}
+}
+
+// TestShouldPreserveHookContent_StrippedDispatcherSurvives is the explicit
+// GH#3536 regression: the user dispatcher above the bd marker block must
+// remain in the returned body so preservePreexistingHooks writes it into
+// .beads/hooks/<name>.
+func TestShouldPreserveHookContent_StrippedDispatcherSurvives(t *testing.T) {
+	in := `#!/bin/sh
 set -e
-# User's custom dispatcher (e.g. invokes the pre-commit framework)
 if [ -f .pre-commit-config.yaml ] && command -v pre-commit >/dev/null 2>&1; then
     pre-commit run --hook-stage pre-commit "$@"
 fi
@@ -61,96 +131,18 @@ if command -v bd >/dev/null 2>&1; then
 fi
 # --- END BEADS INTEGRATION v0.62.0 ---
 `
-
-	// 1. Old behaviour would skip on marker presence: confirm the marker IS present.
-	if !strings.Contains(existing, hookSectionBeginPrefix) {
-		t.Fatal("test fixture missing marker — fix the fixture")
+	body, keep := shouldPreserveHookContent(in, false)
+	if !keep {
+		t.Fatalf("dispatcher with marker block: keep=false, body=%q", body)
 	}
-
-	// 2. Strip the bd section. User content must be preserved.
-	stripped, found := removeHookSection(existing)
-	if !found {
-		t.Fatal("removeHookSection did not find a section in fixture")
+	if !strings.Contains(body, "pre-commit run --hook-stage") {
+		t.Errorf("dispatcher line lost:\n%s", body)
 	}
-	if !strings.Contains(stripped, "pre-commit run --hook-stage") {
-		t.Errorf("user dispatcher line lost in strip:\n%s", stripped)
+	if strings.Contains(body, "BEGIN BEADS INTEGRATION") ||
+		strings.Contains(body, "END BEADS INTEGRATION") {
+		t.Errorf("bd markers leaked through:\n%s", body)
 	}
-	if strings.Contains(stripped, "BEGIN BEADS INTEGRATION") ||
-		strings.Contains(stripped, "END BEADS INTEGRATION") {
-		t.Errorf("strip left bd markers in place:\n%s", stripped)
-	}
-
-	// 3. The stripped file must NOT be classified as "only shebang or empty",
-	//    so preservation will keep it instead of skipping.
-	if isOnlyShebangOrEmpty(stripped) {
-		t.Errorf("stripped file mis-classified as empty (would be skipped):\n%s", stripped)
-	}
-}
-
-// TestPreservePreexistingHooks_SkipsWhollyManagedFile guards the inverse
-// case: a file that contains ONLY the bd marker block (no user content)
-// genuinely is wholly bd-owned and should still be skipped — both the v1.0.x
-// shim format and the bare-marker-block-with-shebang form.
-func TestPreservePreexistingHooks_SkipsWhollyManagedFile(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-	}{
-		{
-			name: "v1.0.x bare shim",
-			content: `#!/usr/bin/env sh
-# --- BEGIN BEADS INTEGRATION v1.0.3 ---
-if command -v bd >/dev/null 2>&1; then
-  bd hooks run pre-commit "$@"
-fi
-# --- END BEADS INTEGRATION v1.0.3 ---
-`,
-		},
-		{
-			name: "v0.62.0 marker block + nothing else",
-			content: `#!/bin/sh
-
-# --- BEGIN BEADS INTEGRATION v0.62.0 ---
-# managed
-if command -v bd >/dev/null 2>&1; then
-  bd hook pre-commit "$@"
-fi
-# --- END BEADS INTEGRATION v0.62.0 ---
-`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stripped, found := removeHookSection(tt.content)
-			if !found {
-				t.Fatal("removeHookSection did not find a section")
-			}
-			if !isOnlyShebangOrEmpty(stripped) {
-				t.Errorf("expected stripped content to be classified as empty (preservation should skip), got:\n%q", stripped)
-			}
-		})
-	}
-}
-
-// TestPreservePreexistingHooks_LeavesNonMarkerHookAlone is the regression
-// guard: a file with no bd markers must not be touched by the new
-// strip-then-preserve logic.
-func TestPreservePreexistingHooks_LeavesNonMarkerHookAlone(t *testing.T) {
-	content := `#!/bin/sh
-set -e
-echo "user pre-commit"
-make lint
-`
-	if strings.Contains(content, hookSectionBeginPrefix) {
-		t.Fatal("test fixture contains bd marker — adjust fixture")
-	}
-	// removeHookSection on a no-marker file should report nothing found and
-	// return content unchanged.
-	stripped, found := removeHookSection(content)
-	if found {
-		t.Errorf("unexpected: removeHookSection reported found on a no-marker file")
-	}
-	if stripped != content {
-		t.Errorf("removeHookSection mutated a no-marker file:\nbefore=%q\nafter =%q", content, stripped)
+	if strings.Contains(body, "bd hook pre-commit") {
+		t.Errorf("legacy 'bd hook' invocation should have been stripped with the marker block:\n%s", body)
 	}
 }
