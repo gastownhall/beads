@@ -19,6 +19,9 @@ func TestResolveChangeDirBeadsDirDoesNotChangeCWD(t *testing.T) {
 	t.Chdir(startDir)
 
 	projectDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(projectDir); err == nil {
+		projectDir = resolved
+	}
 	beadsDir := filepath.Join(projectDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
