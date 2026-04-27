@@ -113,6 +113,58 @@ func TestShouldPreserveHookContent_TableDriven(t *testing.T) {
 	}
 }
 
+// TestShouldPreserveHookContent_TwoBlankLinesBeforeMarker exercises the
+// boundary where user content ends in two blank lines before the bd marker
+// block. removeHookSection collapses runs of `\n\n\n` to `\n\n`, so this
+// fixture confirms the strip doesn't over-trim user content.
+func TestShouldPreserveHookContent_TwoBlankLinesBeforeMarker(t *testing.T) {
+	in := "#!/bin/sh\n" +
+		"set -e\n" +
+		"echo 'user line 1'\n" +
+		"echo 'user line 2'\n" +
+		"\n" +
+		"\n" +
+		"# --- BEGIN BEADS INTEGRATION v0.62.0 ---\n" +
+		"if command -v bd >/dev/null 2>&1; then bd hook pre-commit \"$@\"; fi\n" +
+		"# --- END BEADS INTEGRATION v0.62.0 ---\n"
+
+	body, keep := shouldPreserveHookContent(in, false)
+	if !keep {
+		t.Fatalf("two-blank-line boundary: keep=false, body=%q", body)
+	}
+	if !strings.Contains(body, "echo 'user line 1'") || !strings.Contains(body, "echo 'user line 2'") {
+		t.Errorf("user content lost across two-blank-line boundary:\n%q", body)
+	}
+	if strings.Contains(body, "BEADS INTEGRATION") {
+		t.Errorf("bd markers leaked through:\n%q", body)
+	}
+}
+
+// TestShouldPreserveHookContent_CRLFNormalised verifies that a v0.62.x hook
+// stored with Windows-style `\r\n` line endings is normalised to LF on the
+// preserved-and-stripped output. Mirrors the normalisation that
+// injectHookSection applies on its inject path. (GH#3536 nit)
+func TestShouldPreserveHookContent_CRLFNormalised(t *testing.T) {
+	in := "#!/bin/sh\r\n" +
+		"set -e\r\n" +
+		"echo 'user'\r\n" +
+		"\r\n" +
+		"# --- BEGIN BEADS INTEGRATION v0.62.0 ---\r\n" +
+		"if command -v bd >/dev/null 2>&1; then bd hook pre-commit \"$@\"; fi\r\n" +
+		"# --- END BEADS INTEGRATION v0.62.0 ---\r\n"
+
+	body, keep := shouldPreserveHookContent(in, false)
+	if !keep {
+		t.Fatalf("CRLF input: keep=false, body=%q", body)
+	}
+	if strings.Contains(body, "\r\n") {
+		t.Errorf("CRLF survived into preserved output (should be normalised to LF):\n%q", body)
+	}
+	if !strings.Contains(body, "echo 'user'") {
+		t.Errorf("user content lost:\n%q", body)
+	}
+}
+
 // TestShouldPreserveHookContent_StrippedDispatcherSurvives is the explicit
 // GH#3536 regression: the user dispatcher above the bd marker block must
 // remain in the returned body so preservePreexistingHooks writes it into

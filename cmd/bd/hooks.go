@@ -271,7 +271,12 @@ func removeHookSection(content string) (string, bool) {
 // nothing meaningful — only an optional shebang line plus blank lines and
 // comments. Used by shouldPreserveHookContent to decide, after stripping a
 // BEADS INTEGRATION block, whether anything user-owned remains worth
-// preserving. (GH#3536)
+// preserving.
+//
+// Note: non-shebang comment lines (e.g. `# preamble`) are intentionally
+// treated as non-content. A file that's only a shebang plus a comment is
+// classified empty and skipped — comments alone aren't user logic worth
+// carrying forward to .beads/hooks/<name>. (GH#3536)
 func isOnlyShebangOrEmpty(content string) bool {
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -311,7 +316,11 @@ func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
 		if isOnlyShebangOrEmpty(stripped) {
 			return "", false
 		}
-		content = stripped
+		// Normalize CRLF → LF on the preserved-and-stripped content so
+		// Windows / autocrlf=true repos don't end up with `\r\n` line
+		// endings in .beads/hooks/<name>. Mirrors the normalization that
+		// injectHookSection does on its output (`hooks.go` ~line 622).
+		content = strings.ReplaceAll(stripped, "\r\n", "\n")
 	}
 	if fromHusky {
 		content = sanitizeHuskyHook(content)
