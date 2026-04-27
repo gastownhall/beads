@@ -286,7 +286,7 @@ func isOnlyShebangOrEmpty(content string) bool {
 // shouldPreserveHookContent decides what preservePreexistingHooks should do
 // with one hook file's content. Returns (transformedContent, true) when the
 // file should be preserved into the target directory (possibly with the bd
-// section stripped or the husky helper-layout sanitised); returns
+// section stripped or the husky helper-layout sanitized); returns
 // ("", false) when preservation should skip this file because it's wholly
 // bd-managed and contains nothing user-owned worth keeping.
 //
@@ -297,7 +297,7 @@ func isOnlyShebangOrEmpty(content string) bool {
 //     block injected into them (the v0.49+ section-marker model). Strip
 //     the bd block and preserve the remaining user content. If only a
 //     shebang/blank/comments remain, treat as wholly bd-owned and skip.
-//   - When fromHusky is true, sanitise the (possibly stripped) content so
+//   - When fromHusky is true, sanitize the (possibly stripped) content so
 //     it doesn't depend on husky's helper-layout being mirrored into the
 //     target directory (GH#3132).
 //

@@ -86,7 +86,7 @@ func TestShouldPreserveHookContent_TableDriven(t *testing.T) {
 			wantNot:   "/_/husky.sh",
 		},
 		{
-			name:      "husky after marker-strip: still gets sanitised",
+			name:      "husky after marker-strip: still gets sanitized",
 			content:   "#!/usr/bin/env sh\n. \"$(dirname -- \"$0\")/_/husky.sh\"\n\nnpx lint-staged\n\n" + v062Marker,
 			fromHusky: true,
 			wantKeep:  true,
