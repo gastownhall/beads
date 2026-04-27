@@ -1289,3 +1289,109 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 		}
 	})
 }
+
+// TestShouldUseExternalDoltStatus covers the routing predicate for
+// `bd dolt status`. The predicate decides whether to ping the configured
+// SQL endpoint (externally-managed server) or read the local PID file
+// (bd-managed server). Three scenarios qualify as externally-managed:
+// non-local hosts, and local hosts where bd does not own the lifecycle
+// (auto-start disabled — be-0eyj). Other configurations should keep the
+// PID-file path so bd-managed servers continue to report PID/log/data.
+func TestShouldUseExternalDoltStatus(t *testing.T) {
+	tests := []struct {
+		name              string
+		cfg               *configfile.Config
+		autoStartDisabled bool
+		want              bool
+	}{
+		{
+			name:              "nil config falls back to PID-file path",
+			cfg:               nil,
+			autoStartDisabled: false,
+			want:              false,
+		},
+		{
+			name: "embedded mode never uses external status",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "embedded",
+			},
+			autoStartDisabled: true, // even with auto-start off
+			want:              false,
+		},
+		{
+			name: "server mode + remote host always uses external status",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "dolt.example.com",
+			},
+			autoStartDisabled: false,
+			want:              true,
+		},
+		{
+			name: "server mode + remote host + auto-start disabled",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "192.168.1.50",
+			},
+			autoStartDisabled: true,
+			want:              true,
+		},
+		{
+			name: "server mode + local host + auto-start enabled keeps PID-file path",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "127.0.0.1",
+			},
+			autoStartDisabled: false,
+			want:              false,
+		},
+		{
+			name: "server mode + local host + auto-start disabled routes to external (be-0eyj)",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "127.0.0.1",
+			},
+			autoStartDisabled: true,
+			want:              true,
+		},
+		{
+			name: "server mode + empty host (defaults to local) + auto-start disabled",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "server",
+				// DoltServerHost empty → defaults to 127.0.0.1
+			},
+			autoStartDisabled: true,
+			want:              true,
+		},
+		{
+			name: "server mode + localhost literal + auto-start disabled",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "localhost",
+			},
+			autoStartDisabled: true,
+			want:              true,
+		},
+	}
+
+	// Make sure ambient env doesn't perturb cfg.IsDoltServerMode() lookups.
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldUseExternalDoltStatus(tc.cfg, tc.autoStartDisabled)
+			if got != tc.want {
+				t.Errorf("shouldUseExternalDoltStatus = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
