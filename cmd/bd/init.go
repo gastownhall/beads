@@ -859,12 +859,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// This UUID is stored in both metadata.json and the database,
 			// and verified on every connection to detect cross-project leakage.
 			//
-			// When --database is specified and the database already exists on the
-			// server, adopt the existing project_id instead of generating a new
-			// one. This prevents identity mismatch when a second user joins a
-			// shared remote Dolt server. (GH#2922)
+			// Adopt the existing _project_id from the database when:
+			//   - --database is set and the database already exists on a
+			//     shared remote Dolt server (GH#2922), or
+			//   - we just bootstrapped from a remote whose Dolt history
+			//     already carried a _project_id.
+			// In both cases another rig has already chosen an identity;
+			// minting a new one and writing it back would overwrite the
+			// source identity and cause cross-project verification to
+			// fail on subsequent pulls.
 			if cfg.ProjectID == "" {
-				if database != "" && store != nil {
+				if store != nil && (database != "" || bootstrappedFromRemote) {
 					if existingID, err := store.GetMetadata(ctx, "_project_id"); err == nil && existingID != "" {
 						cfg.ProjectID = existingID
 						if !quiet {
