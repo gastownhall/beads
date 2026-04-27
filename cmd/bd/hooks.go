@@ -267,6 +267,22 @@ func removeHookSection(content string) (string, bool) {
 	return result, true
 }
 
+// isOnlyShebangOrEmpty reports whether the given hook content consists of
+// nothing meaningful — only an optional shebang line plus blank lines and
+// comments. Used by preservePreexistingHooks to decide, after stripping a
+// BEADS INTEGRATION block, whether anything user-owned remains worth
+// preserving. (GH#3536)
+func isOnlyShebangOrEmpty(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#!") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // HookStatus represents the status of a single git hook
 type HookStatus struct {
 	Name      string
@@ -721,10 +737,25 @@ func preservePreexistingHooks(targetDir string) {
 		}
 
 		contentStr := string(content)
-		// Skip if it's already a beads hook
-		if strings.Contains(contentStr, hookSectionBeginPrefix) ||
-			strings.Contains(contentStr, inlineHookMarker) {
+		// inlineHookMarker (the "# bd (beads)" tag from GH#1120) was always
+		// applied to wholly bd-owned files. If we see it, skip — there's no
+		// user content to preserve.
+		if strings.Contains(contentStr, inlineHookMarker) {
 			continue
+		}
+		// hookSectionBeginPrefix is different: starting with the GH#1380
+		// section-marker model (v0.49+), bd injected its block INTO existing
+		// user-owned hooks (e.g. dispatchers, framework integrations). Marker
+		// presence does NOT mean the file is wholly bd-owned. Strip the bd
+		// section and preserve any remaining user content. Only skip if
+		// stripping leaves nothing meaningful (i.e. the file was just a
+		// shebang plus the bd block). (GH#3536)
+		if strings.Contains(contentStr, hookSectionBeginPrefix) {
+			stripped, _ := removeHookSection(contentStr)
+			if isOnlyShebangOrEmpty(stripped) {
+				continue
+			}
+			contentStr = stripped
 		}
 
 		// If this came from a husky directory, rewrite the hook so it no
