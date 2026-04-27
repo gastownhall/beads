@@ -148,6 +148,11 @@ func productionPortReasons(cfg *Config) []string {
 // the entire test/prod split rather than each layer checking
 // independently.
 //
+// Operators setting BEADS_TEST_SERVER=1 are responsible for ensuring
+// BEADS_DOLT_SERVER_PORT points at a real test server; the opt-in disables
+// the AD-01 guards entirely, so a misconfigured port can connect a test
+// process to a production database.
+//
 // See productionPortReasons for the three detection sources.
 func isProductionPort(cfg *Config) bool {
 	if os.Getenv("BEADS_TEST_SERVER") == "1" {
