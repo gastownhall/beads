@@ -237,7 +237,8 @@ const (
 // Checks (in priority order):
 //  1. BEADS_DOLT_SERVER_MODE=1 env var
 //  2. BEADS_DOLT_SHARED_SERVER env var (shared-server implies server mode)
-//  3. dolt_mode field in metadata.json
+//  3. dolt_mode field in metadata.json (project-local, explicit)
+//  4. dolt.mode in config.yaml (user-global fallback, only when metadata.json has no mode)
 //
 // Runtime env vars take precedence over persisted metadata.json to prevent
 // stale dolt_mode=embedded from overriding active server intent (GH#2949).
@@ -253,10 +254,11 @@ func (c *Config) IsDoltServerMode() bool {
 	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
 		return true
 	}
-	if strings.ToLower(c.DoltMode) == DoltModeServer {
-		return true
+	if c.DoltMode != "" {
+		// metadata.json has an explicit mode — respect it over config.yaml
+		return strings.ToLower(c.DoltMode) == DoltModeServer
 	}
-	// Fall back to config.yaml dolt.mode setting
+	// Fall back to config.yaml dolt.mode setting (no metadata.json mode set)
 	if mode := config.GetYamlConfig("dolt.mode"); strings.EqualFold(mode, "server") {
 		return true
 	}

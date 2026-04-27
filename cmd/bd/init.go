@@ -211,15 +211,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			configHost := config.GetYamlConfig("dolt.host")
 			envHost := os.Getenv("BEADS_DOLT_SERVER_HOST")
 			remoteHost := ""
-			if envHost != "" && envHost != "127.0.0.1" {
+			if envHost != "" && !isLocalHost(envHost) {
 				remoteHost = envHost
-			} else if configHost != "" && configHost != "127.0.0.1" {
+			} else if configHost != "" && !isLocalHost(configHost) {
 				remoteHost = configHost
 			}
 			if remoteHost != "" && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: dolt.host is configured (%s) but server mode is not enabled.\n", remoteHost)
 				fmt.Fprintf(os.Stderr, "  bd init will create an embedded local database, ignoring the remote host.\n")
-				fmt.Fprintf(os.Stderr, "  To use the remote server, set dolt.mode: server in ~/.config/bd/config.yaml\n")
+				fmt.Fprintf(os.Stderr, "  To use the remote server, set dolt.mode: server in %s\n", config.UserConfigYamlPath())
 				fmt.Fprintf(os.Stderr, "  or pass --server to bd init.\n")
 			}
 		}
