@@ -1171,7 +1171,7 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 		if dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
 			continue
 		}
-		key := pendingDependencyPreviewKey(fromIssue.ID, toIssue.ID, dep.Type, dep.Source)
+		key := pendingDependencyPreviewKey(fromIssue.ID, toIssue.ID, dep.Type)
 		if _, ok := pending[key]; ok {
 			continue
 		}
@@ -1187,12 +1187,11 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 	return 0
 }
 
-func pendingDependencyPreviewKey(fromID, toID, depType string, source DependencySource) string {
+func pendingDependencyPreviewKey(fromID, toID, depType string) string {
 	return strings.Join([]string{
 		strings.TrimSpace(fromID),
 		strings.TrimSpace(toID),
 		strings.TrimSpace(depType),
-		string(source),
 	}, "\x00")
 }
 

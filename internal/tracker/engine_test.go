@@ -2585,7 +2585,7 @@ func TestEnginePreviewDependenciesDedupesPendingRelations(t *testing.T) {
 			FromExternalID: "EXT-PREVIEW-1",
 			ToExternalID:   "EXT-PREVIEW-2",
 			Type:           string(types.DepRelated),
-			Source:         DependencySourceRelation,
+			Source:         DependencySourceParent,
 		},
 	}, nil)
 	if errCount != 0 {
