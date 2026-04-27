@@ -662,16 +662,35 @@ servers are preserved.`,
 	},
 }
 
-// staleDatabasePrefixes identifies test/agent databases that should not persist
-// on the production Dolt server. These accumulate from interrupted test runs and
-// terminated agents, wasting server memory.
-// - testdb_*: BEADS_TEST_MODE=1 FNV hash of temp paths
-// - doctest_*: doctor test helpers
-// - doctortest_*: doctor test helpers
-// - beads_pt*: orchestrator patrol_helpers_test.go random prefixes
-// - beads_vr*: orchestrator mail/router_test.go random prefixes
-// - beads_t[0-9a-f]*: protocol test random prefixes (t + 8 hex chars)
-var staleDatabasePrefixes = []string{"testdb_", "doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t"}
+// staleDatabasePrefixes lists database name prefixes that
+// `bd dolt clean-databases` will drop. This is the cleanup side of the
+// test/prod split. Two sibling lists must converge with it (be-avn):
+//   - internal/storage/dolt/store.go:testDatabasePrefixes (firewall side)
+//   - .gc/system/packs/dolt/formulas/mol-dog-stale-db.toml (city formula)
+//
+// The firewall list, this cleanup list, and the formula list MUST
+// converge — operators rely on consistent semantics across `bd dolt
+// clean-databases`, the SQL-side firewall, and `gc dolt cleanup`.
+//
+// Origin of each prefix:
+//   - testdb_     : applyConfigDefaults derives this for BEADS_TEST_MODE=1
+//     without an explicit Database (FNV hash of cfg.Path).
+//   - beads_test  : convention for hand-written integration tests.
+//   - beads_pt    : property-test fixtures.
+//   - beads_vr    : version-roundtrip / migration fixtures.
+//   - doctest_    : `bd doctor` self-check fixtures.
+//   - doctortest_ : older `bd doctor` fixture name (kept for back-compat).
+//   - benchdb_    : per-bench scratch DBs (uniqueBenchDBName below,
+//     format `benchdb_<pid>_<8 hex>`).
+var staleDatabasePrefixes = []string{
+	"testdb_",
+	"beads_test",
+	"beads_pt",
+	"beads_vr",
+	"doctest_",
+	"doctortest_",
+	"benchdb_",
+}
 
 var doltCleanDatabasesCmd = &cobra.Command{
 	Use:   "clean-databases",
@@ -679,7 +698,7 @@ var doltCleanDatabasesCmd = &cobra.Command{
 	Long: `Identify and drop leftover test and agent databases that accumulate
 on the shared Dolt server from interrupted test runs and terminated agents.
 
-Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*, beads_t*
+Stale database prefixes: testdb_*, beads_test*, beads_pt*, beads_vr*, doctest_*, doctortest_*, benchdb_*
 
 These waste server memory and can degrade performance under concurrent load.
 Use --dry-run to see what would be dropped without actually dropping.`,
