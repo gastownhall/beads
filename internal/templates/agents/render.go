@@ -147,8 +147,13 @@ func templateBody(profile Profile) string {
 		return strings.TrimRight(beadsSectionMinimal, "\n")
 	default:
 		// Full profile uses the same body as the legacy beads-section.md
-		// Strip the existing markers from the embedded content
-		body := strings.TrimRight(beadsSection, "\n")
+		// Strip the existing markers from the embedded content. Normalize CRLF→LF
+		// first so a Windows-checkout build (where //go:embed picks up CRLF bytes
+		// from the working tree) still matches the LF-only prefix/suffix below.
+		// Without this, the legacy markers stay in the body and RenderSection
+		// wraps them again, producing doubled markers in the installed file (#3552).
+		body := strings.ReplaceAll(beadsSection, "\r\n", "\n")
+		body = strings.TrimRight(body, "\n")
 		body = strings.TrimPrefix(body, "<!-- BEGIN BEADS INTEGRATION -->\n")
 		body = strings.TrimSuffix(body, "\n<!-- END BEADS INTEGRATION -->")
 		return body

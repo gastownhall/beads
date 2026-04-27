@@ -2,3 +2,9 @@
 # Shell scripts must always use LF line endings (especially git hook templates)
 *.sh text eol=lf
 cmd/bd/templates/hooks/* text eol=lf
+
+# Embedded markdown templates are shipped data, not user-edited text. Pin LF so
+# Windows checkouts (default core.autocrlf=true) don't bake CRLF into //go:embed
+# bytes, which breaks LF-only marker stripping in templateBody() and produces
+# doubled BEGIN/END BEADS INTEGRATION markers in installed AGENTS.md (#3552).
+internal/templates/agents/defaults/*.md text eol=lf

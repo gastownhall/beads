@@ -50,6 +50,22 @@ func TestRenderSectionFull(t *testing.T) {
 	}
 }
 
+// TestRenderSectionFullSingleMarkers guards against #3552: when bd is built
+// from a Windows checkout, //go:embed picks up CRLF bytes from the working
+// tree, and templateBody()'s LF-only marker stripping previously left the
+// legacy markers inside the body. RenderSection then wrapped them in fresh
+// markers, producing doubled BEGIN/END pairs. Output must always contain
+// exactly one of each — regardless of the embedded file's line endings.
+func TestRenderSectionFullSingleMarkers(t *testing.T) {
+	section := RenderSection(ProfileFull)
+	if got := strings.Count(section, "<!-- BEGIN BEADS INTEGRATION"); got != 1 {
+		t.Errorf("expected exactly 1 BEGIN marker, got %d", got)
+	}
+	if got := strings.Count(section, "<!-- END BEADS INTEGRATION -->"); got != 1 {
+		t.Errorf("expected exactly 1 END marker, got %d", got)
+	}
+}
+
 func TestRenderSectionMinimal(t *testing.T) {
 	section := RenderSection(ProfileMinimal)
 	if section == "" {
