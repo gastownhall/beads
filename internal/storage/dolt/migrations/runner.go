@@ -37,15 +37,51 @@ var compatMigrationsList = []CompatMigration{
 	{"backfill_custom_tables", BackfillCustomTables},
 }
 
-// RunCompatMigrations executes all backward-compat migrations. These handle
+// RunCompatMigrations executes pending backward-compat migrations. These handle
 // historical data transforms for databases that predate the embedded
 // migration system (ALTER TABLE ADD COLUMN, data moves, FK drops, etc.).
-// Each migration is idempotent and checks whether its changes have already
-// been applied.
+//
+// A compat_migrations tracking table records which migrations have already
+// been applied. Once a migration is recorded, it is skipped on subsequent
+// store opens. Without this gate every bd invocation paid for ~30 SQL
+// roundtrips of idempotent no-op checks (be-9s8).
 func RunCompatMigrations(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS compat_migrations (
+		name VARCHAR(64) PRIMARY KEY,
+		applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return fmt.Errorf("creating compat_migrations table: %w", err)
+	}
+
+	applied := make(map[string]bool, len(compatMigrationsList))
+	rows, err := db.Query("SELECT name FROM compat_migrations")
+	if err != nil {
+		return fmt.Errorf("reading compat_migrations: %w", err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scanning compat_migrations: %w", err)
+		}
+		applied[name] = true
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating compat_migrations: %w", err)
+	}
+
 	for _, m := range compatMigrationsList {
+		if applied[m.Name] {
+			continue
+		}
 		if err := m.Func(db); err != nil {
 			return fmt.Errorf("compat migration %q failed: %w", m.Name, err)
+		}
+		// INSERT IGNORE so concurrent processes racing on a fresh DB don't
+		// fail on duplicate-key — same pattern as schema_migrations.
+		if _, err := db.Exec("INSERT IGNORE INTO compat_migrations (name) VALUES (?)", m.Name); err != nil {
+			return fmt.Errorf("recording compat migration %s: %w", m.Name, err)
 		}
 	}
 
@@ -72,11 +108,12 @@ func RunCompatMigrations(db *sql.DB) error {
 		"issue_snapshots", "compaction_snapshots", "federation_peers",
 		"custom_statuses", "custom_types",
 		"dolt_ignore",
+		"compat_migrations",
 	}
 	for _, table := range migrationTables {
 		_, _ = db.Exec("CALL DOLT_ADD(?)", table)
 	}
-	_, err := db.Exec("CALL DOLT_COMMIT('-m', 'schema: auto-migrate')")
+	_, err = db.Exec("CALL DOLT_COMMIT('-m', 'schema: auto-migrate')")
 	if err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 			log.Printf("dolt compat migration commit warning: %v", err)
