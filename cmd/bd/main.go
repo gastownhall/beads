@@ -57,6 +57,14 @@ var (
 	previousVersion        = ""    // The last bd version user had (empty = first run or unknown)
 	upgradeAcknowledged    = false // Set to true after showing upgrade notification once per session
 )
+
+type envSnapshotValue struct {
+	value string
+	ok    bool
+}
+
+var changeDirEnvSnapshot map[string]envSnapshotValue
+
 var (
 	sandboxMode     bool
 	globalFlag      bool               // Use the global shared-server database (beads_global)
@@ -498,6 +506,58 @@ func init() {
 	rootCmd.SetHelpFunc(colorizedHelpFunc)
 }
 
+func resolveChangeDirBeadsDir(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve -C directory %q: %w", path, err)
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot use -C directory %q: %w", path, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("cannot use -C directory %q: not a directory", path)
+	}
+	beadsDir := beads.FindBeadsDirFrom(absPath)
+	if beadsDir == "" {
+		return "", fmt.Errorf("cannot use -C directory %q: no beads project found", path)
+	}
+	return beadsDir, nil
+}
+
+func applyChangeDirSelection() {
+	if strings.TrimSpace(changeDir) == "" {
+		return
+	}
+	beadsDir, err := resolveChangeDirBeadsDir(changeDir)
+	if err != nil {
+		FatalError("%v", err)
+	}
+	changeDirEnvSnapshot = make(map[string]envSnapshotValue, 3)
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		value, ok := os.LookupEnv(key)
+		changeDirEnvSnapshot[key] = envSnapshotValue{value: value, ok: ok}
+	}
+	_ = os.Setenv("BEADS_DIR", beadsDir)
+}
+
+func restoreChangeDirSelection() {
+	if changeDirEnvSnapshot == nil {
+		return
+	}
+	for key, snapshot := range changeDirEnvSnapshot {
+		if snapshot.ok {
+			_ = os.Setenv(key, snapshot.value)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	}
+	changeDirEnvSnapshot = nil
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "bd",
 	Short: "bd - Dependency-aware issue tracker",
@@ -546,25 +606,7 @@ var rootCmd = &cobra.Command{
 		debug.SetVerbose(verboseFlag)
 		debug.SetQuiet(quietFlag)
 
-		// Apply -C flag: discover .beads/ from the target directory and expose it
-		// via BEADS_DIR rather than permanently mutating the process cwd.
-		// The temporary Chdir is restored immediately so the global cwd is not
-		// left mutated (safe for in-process test execution and repeated use).
-		if changeDir != "" {
-			origDir, err := os.Getwd()
-			if err != nil {
-				FatalError("cannot get working directory: %v", err)
-			}
-			if err := os.Chdir(changeDir); err != nil {
-				FatalError("cannot change to directory %q: %v", changeDir, err)
-			}
-			if resolved := beads.FindBeadsDir(); resolved != "" {
-				_ = os.Setenv("BEADS_DIR", resolved)
-			}
-			if err := os.Chdir(origDir); err != nil {
-				FatalError("cannot restore working directory: %v", err)
-			}
-		}
+		applyChangeDirSelection()
 
 		// Block dangerous env var overrides that could cause data fragmentation (bd-hevyw).
 		if err := checkBlockedEnvVars(); err != nil {
@@ -1000,6 +1042,8 @@ var rootCmd = &cobra.Command{
 		// after successful command execution, not in PreRun
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		defer restoreChangeDirSelection()
+
 		// Dolt auto-commit: after a successful write command (and after final flush),
 		// create a Dolt commit so changes don't remain only in the working set.
 		if commandDidWrite.Load() && !commandDidExplicitDoltCommit {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -20,11 +21,11 @@ func TestEmbeddedReady(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "rd")
+	bdCreate(t, bd, dir, "Ready test issue", "--type", "task")
 
 	// ===== Default =====
 
 	t.Run("ready_default", func(t *testing.T) {
-		bdCreate(t, bd, dir, "Ready test issue", "--type", "task")
 		cmd := exec.Command(bd, "ready")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
@@ -122,17 +123,17 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 	})
 
-	t.Run("ready_with_C_flag_invalid_dir", func(t *testing.T) {
-		// -C with a non-existent directory must fail with a clear error message.
-		cmd := exec.Command(bd, "-C", "/nonexistent/bd-C-test-path", "ready")
-		cmd.Dir = dir
+	t.Run("ready_with_C_flag_invalid_path", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cmd := exec.Command(bd, "-C", filepath.Join(tmpDir, "missing"), "ready")
+		cmd.Dir = tmpDir
 		cmd.Env = bdEnv(dir)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
-			t.Fatalf("expected bd -C /nonexistent to fail, got output: %s", out)
+			t.Fatalf("bd -C missing ready succeeded unexpectedly:\n%s", out)
 		}
-		if !strings.Contains(string(out), "cannot change to directory") {
-			t.Errorf("expected directory error message, got: %s", out)
+		if !strings.Contains(string(out), "cannot use -C directory") {
+			t.Errorf("expected invalid -C path error, got: %s", out)
 		}
 	})
 

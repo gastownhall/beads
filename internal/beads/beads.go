@@ -516,6 +516,67 @@ func FindDatabasePath() string {
 	return ""
 }
 
+// FindBeadsDirFrom finds the effective .beads/ directory as if discovery
+// started from startDir, without changing the process working directory.
+func FindBeadsDirFrom(startDir string) string {
+	if startDir == "" {
+		return ""
+	}
+
+	info, err := os.Stat(startDir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+
+	startDir = utils.CanonicalizePath(startDir)
+	repoRoot := ""
+	if out, err := gitOutput(startDir, "rev-parse", "--show-toplevel"); err == nil {
+		repoRoot = utils.CanonicalizePath(out)
+	}
+	fallbackBeadsDir := ""
+	fallbackHasDB := false
+	if repoRoot != "" {
+		fallbackBeadsDir = worktreeFallbackBeadsDirForRepo(repoRoot)
+		if fallbackBeadsDir != "" {
+			if fbInfo, err := os.Stat(fallbackBeadsDir); err == nil && fbInfo.IsDir() {
+				fallbackHasDB = hasBeadsDatabase(FollowRedirect(fallbackBeadsDir))
+			}
+		}
+	}
+
+	for dir := startDir; dir != "/" && dir != "."; {
+		beadsDir := filepath.Join(dir, ".beads")
+		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+			resolved := FollowRedirect(beadsDir)
+			isWorktreeRoot := repoRoot != "" && utils.PathsEqual(dir, repoRoot)
+			if isWorktreeRoot && fallbackHasDB && !hasBeadsDatabase(resolved) {
+				// A worktree root can contain tracked .beads metadata without
+				// owning the ignored database directory. Match FindBeadsDir by
+				// preferring the shared worktree database in that case.
+			} else if hasBeadsProjectFiles(resolved) {
+				return resolved
+			}
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	if fallbackBeadsDir != "" {
+		if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
+			resolved := FollowRedirect(fallbackBeadsDir)
+			if hasBeadsProjectFiles(resolved) {
+				return resolved
+			}
+		}
+	}
+
+	return ""
+}
+
 // hasBeadsProjectFiles checks if a .beads directory contains actual project files.
 // Returns true if the directory contains any of:
 // - metadata.json or config.yaml (project configuration)
