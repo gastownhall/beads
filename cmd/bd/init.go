@@ -646,7 +646,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					}
 					syncFromRemote = false
 				} else {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %v\n", syncURL, err)
+					fmt.Fprintf(os.Stderr, "Hint: verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.\n")
 					os.Exit(1)
 				}
 			} else {

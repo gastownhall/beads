@@ -346,6 +346,9 @@ func TestEmbeddedInit(t *testing.T) {
 	})
 
 	t.Run("remote_bootstraps_existing_dolt_data", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("uses os.Symlink to mask dolt off PATH; symlink semantics differ on Windows")
+		}
 		remoteDir := filepath.Join(t.TempDir(), "remote")
 		remoteURL := "file://" + remoteDir
 
@@ -464,6 +467,68 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 		if !strings.Contains(string(configYAML), remoteURL) {
 			t.Fatalf("config.yaml should persist --remote URL %q:\n%s", remoteURL, configYAML)
+		}
+	})
+
+	t.Run("remote_clone_failure_emits_url_and_hint", func(t *testing.T) {
+		// remotesapi:// is rejected by dolt as an unknown scheme almost
+		// instantly, so this exercises the non-empty-remote clone failure
+		// path without depending on TCP timeouts. Verifies (a) init exits
+		// non-zero rather than silently bootstrapping fresh, (b) the wrap
+		// from cmd/bd/init.go echoes the URL the user typed in %q form,
+		// and (c) the Hint: line is present.
+		remoteURL := "remotesapi://127.0.0.1:1/no-such-db"
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bd, "init", "--quiet", "--prefix", "fail", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected bd init --remote with bogus URL to fail; got success:\n%s", out)
+		}
+		wantWrap := fmt.Sprintf("failed to clone remote %q", remoteURL)
+		if !strings.Contains(string(out), wantWrap) {
+			t.Fatalf("expected init.go wrap %q in output; got:\n%s", wantWrap, out)
+		}
+		if !strings.Contains(string(out), "Hint:") {
+			t.Fatalf("expected error output to include a Hint: about reachability/credentials; got:\n%s", out)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, ".beads", "config.yaml")); statErr == nil {
+			t.Fatalf(".beads/config.yaml should not exist after a failed clone; init must not silently fall through to fresh init")
+		}
+	})
+
+	t.Run("remote_http_url_preserved_verbatim", func(t *testing.T) {
+		// Explicit --remote http:// URL pointed at a refused TCP port:
+		// asserts the URL flows through to the clone call unchanged
+		// (no normalization to git+http://), per GH#3339. The 30s context
+		// caps gRPC dial backoff in case a CI runner ever stalls.
+		remoteURL := "http://127.0.0.1:1/no-such-db"
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bd, "init", "--quiet", "--prefix", "fail2", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected bd init --remote with unreachable http URL to fail; got success:\n%s", out)
+		}
+		// Match the %q-quoted form init.go writes ("http://...") so this
+		// can't accidentally pass against an output that contains the
+		// rewritten "git+http://..." substring.
+		wantWrap := fmt.Sprintf("failed to clone remote %q", remoteURL)
+		if !strings.Contains(string(out), wantWrap) {
+			t.Fatalf("expected init.go wrap %q in output (proves no git+http:// rewrite); got:\n%s", wantWrap, out)
+		}
+		if strings.Contains(string(out), "git+http://127.0.0.1:1") {
+			t.Fatalf("explicit --remote http:// must not be normalized to git+http://; got:\n%s", out)
 		}
 	})
 
