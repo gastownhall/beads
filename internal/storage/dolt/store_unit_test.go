@@ -259,9 +259,15 @@ func TestApplyConfigDefaults_TestModeWithPort(t *testing.T) {
 // forces port 1 even when BEADS_DOLT_PORT is explicitly set to the production port.
 // This is the fix for Clown Show #14: The orchestrator's beads module injects
 // BEADS_DOLT_PORT=3307 from metadata.json, bypassing the test mode guard.
+//
+// AD-01 (be-c5p): the production-port guard now honors BEADS_TEST_SERVER=1 as
+// the operator's opt-in for dedicated test servers. This case explicitly
+// covers the no-opt-in path (operator did NOT signal "I'm on a test server"),
+// where the guard must still force port 1.
 func TestApplyConfigDefaults_TestModeBlocksProdPort(t *testing.T) {
 	origTestMode := os.Getenv("BEADS_TEST_MODE")
 	origPort := os.Getenv("BEADS_DOLT_PORT")
+	origTestServer := os.Getenv("BEADS_TEST_SERVER")
 	defer func() {
 		if origTestMode == "" {
 			os.Unsetenv("BEADS_TEST_MODE")
@@ -273,10 +279,16 @@ func TestApplyConfigDefaults_TestModeBlocksProdPort(t *testing.T) {
 		} else {
 			os.Setenv("BEADS_DOLT_PORT", origPort)
 		}
+		if origTestServer == "" {
+			os.Unsetenv("BEADS_TEST_SERVER")
+		} else {
+			os.Setenv("BEADS_TEST_SERVER", origTestServer)
+		}
 	}()
 
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Setenv("BEADS_DOLT_PORT", "3307") // Production port
+	os.Unsetenv("BEADS_TEST_SERVER")     // No test-server opt-in for this case.
 
 	cfg := &Config{}
 	applyConfigDefaults(cfg)
