@@ -210,6 +210,91 @@ do-stuff
 	}
 }
 
+// TestInjectHookSection_IfBlockWithCommentInBody covers the backward-walk
+// branch in findExecBlockInjectionPoint where the if-body contains a blank
+// line or a comment between the `if ...` opener and the `exec` line. Without
+// this fixture the comment/blank skip-and-continue branch is unexercised.
+func TestInjectHookSection_IfBlockWithCommentInBody(t *testing.T) {
+	existing := `#!/bin/sh
+echo "before"
+if [ -x /usr/local/bin/foo ]; then
+    # Why we use foo: documented elsewhere.
+
+    exec /usr/local/bin/foo "$@"
+fi
+`
+	out := injectHookSection(existing, testBeadsSection)
+
+	beadsIdx := strings.Index(out, "BEGIN BEADS INTEGRATION")
+	ifIdx := strings.Index(out, "if [ -x /usr/local/bin/foo ]")
+	if beadsIdx == -1 || ifIdx == -1 {
+		t.Fatalf("missing markers:\n%s", out)
+	}
+	if beadsIdx >= ifIdx {
+		t.Errorf("bd section should be injected above the if-block (not between if and exec); got:\n%s", out)
+	}
+	if !strings.Contains(out, "# Why we use foo") {
+		t.Errorf("body comment was lost:\n%s", out)
+	}
+}
+
+// TestIsAllowedAfterExec_TableDriven directly exercises every branch of the
+// helper, including `elif <args>` and `else <args>` (with arguments rather
+// than the bare keyword which is handled by the switch above).
+func TestIsAllowedAfterExec_TableDriven(t *testing.T) {
+	tests := []struct {
+		name    string
+		trimmed string
+		want    bool
+	}{
+		{name: "empty", trimmed: "", want: true},
+		{name: "comment", trimmed: "# a comment", want: true},
+		{name: "fi", trimmed: "fi", want: true},
+		{name: "bare else", trimmed: "else", want: true},
+		{name: "done", trimmed: "done", want: true},
+		{name: "esac", trimmed: "esac", want: true},
+		{name: "close brace", trimmed: "}", want: true},
+		{name: "case fallthrough", trimmed: ";;", want: true},
+		{name: "elif with cond", trimmed: "elif command -v foo > /dev/null; then", want: true},
+		{name: "else with stuff", trimmed: "else stuff-on-same-line", want: true},
+		{name: "exit 0", trimmed: "exit 0", want: true},
+		{name: "exit no arg", trimmed: "exit", want: true},
+		{name: "echo space", trimmed: "echo 'msg'", want: true},
+		{name: "real code", trimmed: "do-real-thing arg", want: false},
+		{name: "assignment", trimmed: "FOO=bar", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAllowedAfterExec(tt.trimmed); got != tt.want {
+				t.Errorf("isAllowedAfterExec(%q) = %v, want %v", tt.trimmed, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsExecLine_TableDriven covers the helper's tab-prefix branch and a
+// few negatives for completeness.
+func TestIsExecLine_TableDriven(t *testing.T) {
+	tests := []struct {
+		trimmed string
+		want    bool
+	}{
+		{trimmed: "exec /bin/foo", want: true},
+		{trimmed: "exec", want: true},
+		{trimmed: "exec\t/bin/foo", want: true},
+		{trimmed: "execute foo", want: false},
+		{trimmed: "echo exec", want: false},
+		{trimmed: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.trimmed, func(t *testing.T) {
+			if got := isExecLine(tt.trimmed); got != tt.want {
+				t.Errorf("isExecLine(%q) = %v, want %v", tt.trimmed, got, tt.want)
+			}
+		})
+	}
+}
+
 func snippet(s string, from, n int) string {
 	if from < 0 || from >= len(s) {
 		return ""
