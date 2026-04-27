@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -207,10 +208,16 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		allConfig, err := store.GetAllConfig(ctx)
 		if err == nil {
 			fullPrefix := kvPrefix + memoryPrefix
-			for k, v := range allConfig {
-				if !strings.HasPrefix(k, fullPrefix) {
-					continue
+			// Sort keys for deterministic output order (GH#3474).
+			var memKeys []string
+			for k := range allConfig {
+				if strings.HasPrefix(k, fullPrefix) {
+					memKeys = append(memKeys, k)
 				}
+			}
+			sort.Strings(memKeys)
+			for _, k := range memKeys {
+				v := allConfig[k]
 				userKey := strings.TrimPrefix(k, fullPrefix)
 				record := map[string]string{
 					"_type": "memory",
@@ -219,7 +226,7 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 				}
 				data, err := json.Marshal(record)
 				if err != nil {
-					continue
+					return issueCount, memoryCount, fmt.Errorf("failed to marshal memory %s: %w", userKey, err)
 				}
 				if _, err := f.Write(data); err != nil {
 					return issueCount, memoryCount, fmt.Errorf("failed to write memory: %w", err)

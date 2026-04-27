@@ -537,6 +537,108 @@ func TestExportNoHistoryBeadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestExportMemoryDeterminism(t *testing.T) {
+	// GH#3474: memory lines must appear in deterministic order across exports.
+	// Seeds multiple memories, exports twice to separate files, and asserts
+	// byte-for-byte identical output.
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	ensureTestMode(t)
+	saved := saveAndRestoreGlobals(t)
+	_ = saved
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	dbName := uniqueTestDBName(t)
+	testDBPath := filepath.Join(beadsDir, "dolt")
+	writeTestMetadata(t, testDBPath, dbName)
+	s := newTestStore(t, testDBPath)
+	store = s
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	t.Cleanup(func() {
+		store = nil
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	})
+
+	ctx := context.Background()
+	rootCtx = ctx
+
+	// Seed 5 memories with keys that would sort differently than insertion order.
+	memKeys := []string{"zeta-config", "alpha-note", "mu-decision", "beta-lesson", "omega-context"}
+	for _, mk := range memKeys {
+		storageKey := "kv.memory." + mk
+		if err := s.SetConfig(ctx, storageKey, "value-for-"+mk); err != nil {
+			t.Fatalf("SetConfig(%s): %v", storageKey, err)
+		}
+	}
+
+	doExport := func(path string) []byte {
+		t.Helper()
+		exportOutput = path
+		exportAll = false
+		exportIncludeInfra = false
+		exportScrub = false
+		exportNoMemories = false
+		if err := runExport(nil, nil); err != nil {
+			t.Fatalf("runExport(%s): %v", path, err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return data
+	}
+
+	export1 := doExport(filepath.Join(tmpDir, "export1.jsonl"))
+	export2 := doExport(filepath.Join(tmpDir, "export2.jsonl"))
+
+	if string(export1) != string(export2) {
+		t.Error("exports are not byte-identical — memory ordering is non-deterministic")
+		t.Logf("export1:\n%s", export1)
+		t.Logf("export2:\n%s", export2)
+	}
+
+	// Verify memories are present and sorted alphabetically by key.
+	lines := splitJSONL(export1)
+	var memoryKeys []string
+	for _, line := range lines {
+		var rec map[string]interface{}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("parse line: %v", err)
+		}
+		if rec["_type"] == "memory" {
+			memoryKeys = append(memoryKeys, rec["key"].(string))
+		}
+	}
+	if len(memoryKeys) != len(memKeys) {
+		t.Fatalf("expected %d memory lines, got %d", len(memKeys), len(memoryKeys))
+	}
+	for i := 1; i < len(memoryKeys); i++ {
+		if memoryKeys[i] < memoryKeys[i-1] {
+			t.Errorf("memory keys not sorted: %q appears after %q", memoryKeys[i], memoryKeys[i-1])
+		}
+	}
+}
+
 func TestExportNoDuplicateWisps(t *testing.T) {
 	// GH#3352: A previous bug caused every wisp to appear twice in the export
 	// because export.go ran a separate Ephemeral=true query and appended the
