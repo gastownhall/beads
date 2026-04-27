@@ -174,11 +174,16 @@ bd close bd-42 --reason "Completed" --json
 ### Workflow for AI Agents
 
 1. **Check ready work**: `bd ready` shows unblocked issues
-2. **Claim your task atomically**: `bd update <id> --claim`
-3. **Work on it**: Implement, test, document
-4. **Discover new work?** Create linked issue:
+2. **Read execution metadata first**: before deciding local vs delegated work, model, or reasoning level, inspect structured metadata:
+   ```bash
+   bd show <id> --json | jq '.[0] | {id,title,metadata,description,notes}'
+   ```
+   The execution metadata keys `execution_agent_type`, `execution_suggested_model`, `execution_reasoning_effort`, `execution_mode`, and `execution_parallel_group` are authoritative hints when present. Use description and notes as fallback context.
+3. **Claim your task atomically**: `bd update <id> --claim`
+4. **Work on it**: Implement, test, document
+5. **Discover new work?** Create linked issue:
    - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
-5. **Complete**: `bd close <id> --reason "Done"`
+6. **Complete**: `bd close <id> --reason "Done"`
 
 ### Auto-Sync
 
