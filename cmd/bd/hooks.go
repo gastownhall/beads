@@ -143,13 +143,123 @@ func injectHookSectionWithDepth(existing, section string, depth int) string {
 		return injectHookSectionWithDepth(cleaned, section, depth+1)
 	}
 
-	// Case 3: no markers — append
+	// Case 3: no markers. If the existing hook ends in an exec-replacing
+	// block (e.g. the templated hook produced by `pre-commit init-templatedir`,
+	// which ends with `exec "$INSTALL_PYTHON" -mpre_commit ...`), appending
+	// at the bottom would make the bd section unreachable. Detect that
+	// pattern and inject above the exec block instead. (GH#3537)
+	if injectAt := findExecBlockInjectionPoint(existing); injectAt >= 0 {
+		return existing[:injectAt] + section + "\n" + existing[injectAt:]
+	}
+
+	// Case 3 fallback: no markers, no trailing exec — append at end.
 	result := existing
 	if !strings.HasSuffix(result, "\n") {
 		result += "\n"
 	}
 	result += "\n" + section
 	return result
+}
+
+// findExecBlockInjectionPoint inspects the tail of a hook file. If it ends in
+// an exec-replacing chain (a final `exec <cmd>` reachable from the bottom of
+// the file, possibly inside an `if`/`elif`/`else`/`fi` ladder whose other
+// branches only `echo`/`exit`), returns the byte offset where the bd section
+// should be injected — i.e. just above the start of the enclosing control
+// structure (or above the bare `exec` line if there is none). Returns -1 when
+// the file does not end in such a pattern; callers should fall back to
+// appending at the bottom.
+//
+// Motivation: appending below a terminating `exec` makes the appended content
+// unreachable, because `exec` replaces the running shell process. (GH#3537)
+func findExecBlockInjectionPoint(content string) int {
+	lines := strings.Split(content, "\n")
+
+	// 1. Find the last line that is an effective `exec ...` statement.
+	//    Skip blank lines, comments, and the standard tail patterns
+	//    (`fi`, `else`, `elif`, `exit N`, `echo ...`) when scanning back.
+	lastExecLine := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if isExecLine(trimmed) {
+			lastExecLine = i
+			break
+		}
+		if !isAllowedAfterExec(trimmed) {
+			// Found non-trivial code at the tail that isn't part of an
+			// exec-terminated chain — not a pattern we should rewrite.
+			return -1
+		}
+	}
+	if lastExecLine == -1 {
+		return -1
+	}
+
+	// 2. Walk backward from lastExecLine to find the start of the enclosing
+	//    control structure (an `if ...` at column 0, possibly preceded by
+	//    elif/else/then continuations of the same block). If we don't find
+	//    one, treat the exec line itself as the injection target.
+	blockStartLine := lastExecLine
+	for i := lastExecLine - 1; i >= 0; i-- {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Skip continuations of the if-block we're inside: elif/else/then,
+		// and any indented body line (they belong to the surrounding block).
+		if strings.HasPrefix(trimmed, "elif ") || trimmed == "else" ||
+			strings.HasPrefix(trimmed, "else ") || trimmed == "then" {
+			continue
+		}
+		if line != trimmed { // indented body of an enclosing block
+			continue
+		}
+		// Column-0 line that isn't a continuation. If it opens an if-block,
+		// that's the start of our construct.
+		if strings.HasPrefix(trimmed, "if ") {
+			blockStartLine = i
+		}
+		break
+	}
+
+	// 3. Convert blockStartLine -> byte offset.
+	offset := 0
+	for i := 0; i < blockStartLine; i++ {
+		offset += len(lines[i]) + 1 // +1 for the '\n' that strings.Split removed
+	}
+	return offset
+}
+
+// isExecLine reports whether trimmed is an effective `exec <cmd>` statement.
+func isExecLine(trimmed string) bool {
+	return trimmed == "exec" || strings.HasPrefix(trimmed, "exec ") ||
+		strings.HasPrefix(trimmed, "exec\t")
+}
+
+// isAllowedAfterExec reports whether a trailing line in an exec-terminated
+// chain is harmless filler — control-flow closers, alternative branches,
+// fallback exits, comments, and blanks. Anything else means the file does
+// not strictly terminate via exec, so we should not rewrite it.
+func isAllowedAfterExec(trimmed string) bool {
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return true
+	}
+	switch trimmed {
+	case "fi", "else", "done", "esac", "}", ";;":
+		return true
+	}
+	if strings.HasPrefix(trimmed, "elif ") || strings.HasPrefix(trimmed, "else ") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "exit") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "echo ") || strings.HasPrefix(trimmed, "echo\t") {
+		// pre-commit's else branch prints a hint before exit 1.
+		return true
+	}
+	return false
 }
 
 // removeOrphanedBeginBlock removes an orphaned BEGIN block starting at beginIdx.
