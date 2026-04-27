@@ -1253,6 +1253,11 @@ type IssueFilter struct {
 	// Hydration options — control which relational data is populated on returned issues.
 	// Labels are always hydrated. Dependencies are not by default (for performance).
 	IncludeDependencies bool // When true, populate Issue.Dependencies with []*Dependency records
+
+	// SkipLabels suppresses label hydration. When true, the labels JOIN is
+	// skipped and Issue.Labels is left nil (callers MUST treat as empty).
+	// Opt-in performance flag for the bd list --skip-labels code path.
+	SkipLabels bool
 }
 
 // SortPolicy determines how ready work is ordered

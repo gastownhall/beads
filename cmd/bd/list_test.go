@@ -371,6 +371,42 @@ func TestListQueryCapabilitiesSuite(t *testing.T) {
 		}
 	})
 
+	// AD-02: hydration toggle. SkipLabels=true means SearchIssues skips the
+	// labels JOIN entirely; rows are returned but Labels stays nil. Distinct
+	// from NoLabels (filter rows where labels=[]).
+	t.Run("skip labels hydration", func(t *testing.T) {
+		// Default hydration: issue1 has labels populated.
+		hydrated, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			IDs: []string{issue1.ID},
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(hydrated) != 1 {
+			t.Fatalf("Expected 1 issue, got %d", len(hydrated))
+		}
+		if len(hydrated[0].Labels) == 0 {
+			t.Fatalf("precondition: issue1 should have labels in default hydration, got none")
+		}
+		// SkipLabels=true: same row, but Labels is left nil.
+		skipped, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			IDs:        []string{issue1.ID},
+			SkipLabels: true,
+		})
+		if err != nil {
+			t.Fatalf("Search with SkipLabels failed: %v", err)
+		}
+		if len(skipped) != 1 {
+			t.Fatalf("Expected 1 issue with SkipLabels, got %d", len(skipped))
+		}
+		if len(skipped[0].Labels) != 0 {
+			t.Errorf("SkipLabels=true should leave Labels empty, got %v", skipped[0].Labels)
+		}
+		if skipped[0].ID != issue1.ID {
+			t.Errorf("SkipLabels must not change row identity, got %s want %s", skipped[0].ID, issue1.ID)
+		}
+	})
+
 	t.Run("exclude label - single", func(t *testing.T) {
 		// issue1 has "critical" and "security"; issue3 has "docs"; issue2 has none.
 		// Excluding "critical" should return issue2 and issue3.
@@ -755,7 +791,7 @@ func TestFormatIssueLong(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf strings.Builder
-			formatIssueLong(&buf, tt.issue, tt.labels)
+			formatIssueLong(&buf, tt.issue, tt.labels, false)
 			result := buf.String()
 			if !strings.Contains(result, tt.want) {
 				t.Errorf("formatIssueLong() = %q, want to contain %q", result, tt.want)

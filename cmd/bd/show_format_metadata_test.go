@@ -188,7 +188,7 @@ func TestFormatIssueLong_WithMetadata(t *testing.T) {
 		Metadata:  json.RawMessage(`{"team":"platform","sprint":"Q1"}`),
 	}
 	var buf strings.Builder
-	formatIssueLong(&buf, issue, nil)
+	formatIssueLong(&buf, issue, nil, false)
 	result := buf.String()
 	if !strings.Contains(result, "Metadata: 2 keys") {
 		t.Errorf("expected 'Metadata: 2 keys' in long format, got: %q", result)
@@ -205,7 +205,7 @@ func TestFormatIssueLong_WithoutMetadata(t *testing.T) {
 		Status:    types.StatusOpen,
 	}
 	var buf strings.Builder
-	formatIssueLong(&buf, issue, nil)
+	formatIssueLong(&buf, issue, nil, false)
 	result := buf.String()
 	if strings.Contains(result, "Metadata:") {
 		t.Errorf("expected no Metadata line for issue without metadata, got: %q", result)
@@ -234,7 +234,7 @@ func TestFormatIssueLong_NonObjectMetadata(t *testing.T) {
 				Metadata:  tt.metadata,
 			}
 			var buf strings.Builder
-			formatIssueLong(&buf, issue, nil)
+			formatIssueLong(&buf, issue, nil, false)
 			result := buf.String()
 			if !strings.Contains(result, "Metadata: set") {
 				t.Errorf("expected 'Metadata: set' for %s metadata, got: %q", tt.name, result)
@@ -257,7 +257,7 @@ func TestFormatIssueLong_EmptyMetadata(t *testing.T) {
 		Metadata:  json.RawMessage(`{}`),
 	}
 	var buf strings.Builder
-	formatIssueLong(&buf, issue, nil)
+	formatIssueLong(&buf, issue, nil, false)
 	result := buf.String()
 	if strings.Contains(result, "Metadata:") {
 		t.Errorf("expected no Metadata line for empty metadata, got: %q", result)
