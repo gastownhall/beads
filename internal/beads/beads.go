@@ -564,6 +564,20 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 // checkout of the parent repo's working-tree snapshot. Without this strict
 // check, the separate-DB branch would match on inherited metadata.json and
 // return a broken directory, short-circuiting the shared-DB fallback.
+// isClaudeCodeAgentWorktree returns true if dir is inside a Claude Code
+// per-agent worktree (path matches .claude/worktrees/agent-<id>/...).
+// The Claude Code harness (https://docs.claude.com/en/docs/claude-code)
+// creates these via `git worktree add` for parallel-agent isolation;
+// the resulting worktrees ship a stub .beads/ (tracked metadata files
+// but no dolt/ database) that would otherwise shadow the parent repo's
+// real .beads/ during bd's upward walk. The check is a generous
+// substring match — false positives are bounded to projects that
+// genuinely place repos under .claude/worktrees/agent-*/, which is
+// strongly discouraged in any case.
+func isClaudeCodeAgentWorktree(dir string) bool {
+	return strings.Contains(filepath.ToSlash(dir), "/.claude/worktrees/agent-")
+}
+
 func hasBeadsDatabase(beadsDir string) bool {
 	if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err == nil && info.IsDir() {
 		return true
@@ -659,11 +673,21 @@ func FindBeadsDir() string {
 			break
 		}
 
-		beadsDir := filepath.Join(dir, ".beads")
-		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-			beadsDir = FollowRedirect(beadsDir)
-			if hasBeadsProjectFiles(beadsDir) {
-				return beadsDir
+		// Skip Claude Code agent worktrees during the walk. The harness
+		// creates per-agent worktrees at .claude/worktrees/agent-<id>/,
+		// each populated by `git worktree add` which checks out tracked
+		// .beads/{metadata.json,config.yaml,issues.jsonl} but NOT the
+		// gitignored dolt/ data directory. Stopping at such a stub leaves
+		// bd connected to an empty database ("table not found: issues").
+		// Step 3c's fallback to the shared .beads handles the resolution
+		// once we walk past the stub. (Tracked under flagship-2mi8.1.)
+		if !isClaudeCodeAgentWorktree(dir) {
+			beadsDir := filepath.Join(dir, ".beads")
+			if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+				beadsDir = FollowRedirect(beadsDir)
+				if hasBeadsProjectFiles(beadsDir) {
+					return beadsDir
+				}
 			}
 		}
 
