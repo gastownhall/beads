@@ -186,6 +186,19 @@ do-stuff
 `,
 			wantNegative: true,
 		},
+		{
+			// Two disjoint exec blocks with real code after both. The scan
+			// walks back from EOF, hits `do-stuff` (real code), bails with -1
+			// and the caller appends as normal. (review nit on PR #3556)
+			name: "two disjoint exec blocks, real code after both",
+			content: `#!/bin/sh
+if [ -x /a ]; then exec /a; fi
+echo middle
+if [ -x /b ]; then exec /b; fi
+do-stuff
+`,
+			wantNegative: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -235,6 +248,38 @@ fi
 	}
 	if !strings.Contains(out, "# Why we use foo") {
 		t.Errorf("body comment was lost:\n%s", out)
+	}
+}
+
+// TestInjectHookSection_Idempotent_PrecommitTemplate confirms that running
+// injectHookSection twice on a pre-commit-templated hook is idempotent: the
+// first run takes Case 3 (no markers → inject above the exec block); the
+// second run takes Case 1 (markers present → replace between markers) and
+// reuses the same injection point. The output of run 2 must equal run 1.
+// (review nit on PR #3556 — guards against a future refactor regressing
+// the idempotency that the marker logic currently provides for free.)
+func TestInjectHookSection_Idempotent_PrecommitTemplate(t *testing.T) {
+	existing := `#!/usr/bin/env bash
+HERE="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "$INSTALL_PYTHON" ]; then
+    exec "$INSTALL_PYTHON" -mpre_commit "$@"
+elif command -v pre-commit > /dev/null; then
+    exec pre-commit "$@"
+else
+    echo 'not found' 1>&2
+    exit 1
+fi
+`
+	once := injectHookSection(existing, testBeadsSection)
+	twice := injectHookSection(once, testBeadsSection)
+	if once != twice {
+		t.Errorf("injectHookSection is not idempotent.\nrun 1:\n%s\nrun 2:\n%s", once, twice)
+	}
+	// Sanity: the bd block must still be above the exec block after both runs.
+	beadsIdx := strings.Index(twice, "BEGIN BEADS INTEGRATION")
+	ifIdx := strings.Index(twice, `if [ -x "$INSTALL_PYTHON" ]`)
+	if beadsIdx == -1 || ifIdx == -1 || beadsIdx >= ifIdx {
+		t.Errorf("after two runs the bd block should still sit above the if-block:\n%s", twice)
 	}
 }
 

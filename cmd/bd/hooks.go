@@ -172,8 +172,23 @@ func injectHookSectionWithDepth(existing, section string, depth int) string {
 //
 // Motivation: appending below a terminating `exec` makes the appended content
 // unreachable, because `exec` replaces the running shell process. (GH#3537)
+//
+// Limitations (the function uses line-based heuristics, not a shell parser):
+//   - A heredoc body containing a literal line that starts with `exec` is
+//     treated as code, not data. In practice this is harmless because the
+//     terminator line (e.g. `EOF`) is then classified as non-filler and the
+//     scan returns -1, but a contrived terminator name could fool it.
+//   - A trailing comment on an `exec` line (e.g. `exec /bin/foo  # disabled`)
+//     is treated as a live `exec` statement. Use a separate comment line if
+//     intent is to disable it.
+//   - Two disjoint `if/exec` blocks separated by real code: the scan only
+//     considers the LAST one; the real code in the middle correctly causes
+//     the scan to return -1 and the caller falls back to append.
 func findExecBlockInjectionPoint(content string) int {
-	lines := strings.Split(content, "\n")
+	// Trim a trailing newline so strings.Split doesn't produce an empty
+	// sentinel as the last element. The scan then sees lines exactly as
+	// they appear in the file with no off-by-one ambiguity.
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 
 	// 1. Find the last line that is an effective `exec ...` statement.
 	//    Skip blank lines, comments, and the standard tail patterns
