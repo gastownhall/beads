@@ -238,6 +238,28 @@ bd update <id> --notes "additional notes"
 bd update <id> --acceptance "acceptance criteria"
 ```
 
+**Read execution metadata before prose.** When enacting a bd issue, inspect the
+structured metadata before using description or notes to choose execution mode,
+delegation, model, reasoning level, or parallel group:
+
+```bash
+bd show <id> --json | jq '.[0] | {id,title,metadata,description,notes}'
+```
+
+The execution metadata keys are:
+
+- `execution_agent_type`
+- `execution_suggested_model`
+- `execution_reasoning_effort`
+- `execution_mode`
+- `execution_parallel_group`
+
+When these keys are present, treat them as the authoritative execution hints.
+Use `description` for the work scope and `notes` for rationale or fallback
+context. Parent/orchestrator agents must read these fields before spawning
+subagents because a running subagent cannot change its model or reasoning effort
+after launch.
+
 **Use stdin for descriptions with special characters** (backticks, `!`, nested quotes):
 ```bash
 # Pipe via stdin to avoid shell escaping issues
