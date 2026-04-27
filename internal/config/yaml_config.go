@@ -65,6 +65,7 @@ var YamlOnlyKeys = map[string]bool{
 	"backup.git-repo": true,
 
 	// Dolt server settings
+	"dolt.mode":          true, // Connection mode: "server" or "embedded" (default embedded)
 	"dolt.idle-timeout":  true, // Idle auto-stop timeout (default "30m", "0" disables)
 	"dolt.shared-server": true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
 	"dolt.max-conns":     true, // Connection pool size override (default 10, GH#3140)
@@ -529,6 +530,11 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "true" && lower != "false" {
 			return fmt.Errorf("dolt.shared-server must be \"true\" or \"false\", got %q", value)
+		}
+	case "dolt.mode":
+		lower := strings.ToLower(value)
+		if lower != "server" && lower != "embedded" {
+			return fmt.Errorf("dolt.mode must be \"server\" or \"embedded\", got %q", value)
 		}
 	}
 	return nil

@@ -192,6 +192,38 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Non-fatal - continue with defaults
 		}
 
+		// config.yaml fallback for dolt.mode: if --server wasn't passed and
+		// env var didn't set it, check config.yaml for dolt.mode: server.
+		if !initServerMode {
+			if modeVal := config.GetYamlConfig("dolt.mode"); strings.EqualFold(modeVal, "server") {
+				initServerMode = true
+				serverMode = initServerMode
+				if cmdCtx != nil {
+					cmdCtx.ServerMode = initServerMode
+				}
+			}
+		}
+
+		// Ambiguous config warning: dolt.host is set to a remote address but
+		// server mode is not enabled. This helps users who configured a host
+		// but forgot to set dolt.mode: server.
+		if !initServerMode {
+			configHost := config.GetYamlConfig("dolt.host")
+			envHost := os.Getenv("BEADS_DOLT_SERVER_HOST")
+			remoteHost := ""
+			if envHost != "" && envHost != "127.0.0.1" {
+				remoteHost = envHost
+			} else if configHost != "" && configHost != "127.0.0.1" {
+				remoteHost = configHost
+			}
+			if remoteHost != "" && !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: dolt.host is configured (%s) but server mode is not enabled.\n", remoteHost)
+				fmt.Fprintf(os.Stderr, "  bd init will create an embedded local database, ignoring the remote host.\n")
+				fmt.Fprintf(os.Stderr, "  To use the remote server, set dolt.mode: server in ~/.config/bd/config.yaml\n")
+				fmt.Fprintf(os.Stderr, "  or pass --server to bd init.\n")
+			}
+		}
+
 		// Safety guard: check for existing beads data.
 		// This prevents accidental re-initialization. --force and
 		// --reinit-local both bypass this local-only guard; they do NOT
