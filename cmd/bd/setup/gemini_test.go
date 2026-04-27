@@ -468,12 +468,12 @@ func TestHasGeminiBeadsHooks(t *testing.T) {
 
 func TestGeminiSettingsPaths(t *testing.T) {
 	projectPath := geminiProjectSettingsPath("/my/project")
-	if projectPath != "/my/project/.gemini/settings.json" {
-		t.Errorf("unexpected project path: %s", projectPath)
+	if want := filepath.Join("/my/project", ".gemini", "settings.json"); projectPath != want {
+		t.Errorf("project path = %q, want %q", projectPath, want)
 	}
 
 	globalPath := geminiGlobalSettingsPath("/home/user")
-	if globalPath != "/home/user/.gemini/settings.json" {
-		t.Errorf("unexpected global path: %s", globalPath)
+	if want := filepath.Join("/home/user", ".gemini", "settings.json"); globalPath != want {
+		t.Errorf("global path = %q, want %q", globalPath, want)
 	}
 }
