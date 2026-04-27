@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,13 +100,28 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 // compareIssuesByPriority provides stable sorting for tree display
 // Primary sort: priority (P0 before P1 before P2...)
 // Secondary sort: ID for deterministic ordering when priorities match
+func compareIDsNumerically(a, b string) int {
+	aDot := strings.LastIndex(a, ".")
+	bDot := strings.LastIndex(b, ".")
+	if aDot >= 0 && bDot >= 0 {
+		aPrefix, aSuffix := a[:aDot], a[aDot+1:]
+		bPrefix, bSuffix := b[:bDot], b[bDot+1:]
+		if aPrefix == bPrefix {
+			aNum, aErr := strconv.Atoi(aSuffix)
+			bNum, bErr := strconv.Atoi(bSuffix)
+			if aErr == nil && bErr == nil {
+				return cmp.Compare(aNum, bNum)
+			}
+		}
+	}
+	return cmp.Compare(a, b)
+}
+
 func compareIssuesByPriority(a, b *types.Issue) int {
-	// Primary: priority (ascending: P0 before P1 before P2...)
 	if result := cmp.Compare(a.Priority, b.Priority); result != 0 {
 		return result
 	}
-	// Secondary: ID for deterministic order when priorities match
-	return cmp.Compare(a.ID, b.ID)
+	return compareIDsNumerically(a.ID, b.ID)
 }
 
 // printPrettyTree recursively prints the issue tree
