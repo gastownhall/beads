@@ -27,6 +27,8 @@ func TestMain(m *testing.M) {
 
 func testMainInner(m *testing.M) int {
 	os.Setenv("BEADS_TEST_MODE", "1")
+	// AD-01 (be-c5p): allow migration tests to connect to the test container.
+	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
