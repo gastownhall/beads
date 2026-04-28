@@ -7,44 +7,61 @@ import (
 	"strings"
 )
 
+// CompatTier classifies a compat migration's eligibility for tracking-table
+// gating. Drift-tier migrations always re-run because their idempotency check
+// IS the drift detector — gating them silences the self-heal that GH#3412 /
+// be-bjxf depends on. Backfill-tier migrations are one-shot data fills; safe
+// to skip after first apply.
+type CompatTier int
+
+const (
+	CompatTierDrift    CompatTier = iota // always run; check is the drift detector
+	CompatTierBackfill                   // gate via compat_migrations after first apply
+)
+
 // CompatMigration represents a backward-compat migration for databases that
 // predate the embedded migration system.
 type CompatMigration struct {
 	Name string
 	Func func(*sql.DB) error
+	Tier CompatTier
 }
 
 // compatMigrationsList is the ordered list of backward-compat migrations
 // for databases that predate the embedded migration system. Each migration
 // must be idempotent — safe to run multiple times.
 var compatMigrationsList = []CompatMigration{
-	{"wisp_type_column", MigrateWispTypeColumn},
-	{"spec_id_column", MigrateSpecIDColumn},
-	{"orphan_detection", DetectOrphanedChildren},
-	{"wisps_table", MigrateWispsTable},
-	{"wisp_auxiliary_tables", MigrateWispAuxiliaryTables},
-	{"issue_counter_table", MigrateIssueCounterTable},
-	{"infra_to_wisps", MigrateInfraToWisps},
-	{"wisp_dep_type_index", MigrateWispDepTypeIndex},
-	{"cleanup_autopush_metadata", MigrateCleanupAutopushMetadata},
-	{"uuid_primary_keys", MigrateUUIDPrimaryKeys},
-	{"add_no_history_column", MigrateAddNoHistoryColumn},
-	{"add_started_at_column", MigrateAddStartedAtColumn},
-	{"drop_hop_columns", MigrateDropHOPColumns},
-	{"drop_child_counters_fk", MigrateDropChildCountersFK},
-	{"wisp_events_created_at_index", MigrateWispEventsCreatedAtIndex},
-	{"custom_status_type_tables", MigrateCustomStatusTypeTables},
-	{"backfill_custom_tables", BackfillCustomTables},
+	{"wisp_type_column", MigrateWispTypeColumn, CompatTierDrift},
+	{"spec_id_column", MigrateSpecIDColumn, CompatTierDrift},
+	{"orphan_detection", DetectOrphanedChildren, CompatTierDrift},
+	{"wisps_table", MigrateWispsTable, CompatTierDrift},
+	{"wisp_auxiliary_tables", MigrateWispAuxiliaryTables, CompatTierDrift},
+	{"issue_counter_table", MigrateIssueCounterTable, CompatTierDrift},
+	{"infra_to_wisps", MigrateInfraToWisps, CompatTierDrift},
+	{"wisp_dep_type_index", MigrateWispDepTypeIndex, CompatTierDrift},
+	{"cleanup_autopush_metadata", MigrateCleanupAutopushMetadata, CompatTierDrift},
+	{"uuid_primary_keys", MigrateUUIDPrimaryKeys, CompatTierDrift},
+	{"add_no_history_column", MigrateAddNoHistoryColumn, CompatTierDrift},
+	{"add_started_at_column", MigrateAddStartedAtColumn, CompatTierDrift},
+	{"drop_hop_columns", MigrateDropHOPColumns, CompatTierDrift},
+	{"drop_child_counters_fk", MigrateDropChildCountersFK, CompatTierDrift},
+	{"wisp_events_created_at_index", MigrateWispEventsCreatedAtIndex, CompatTierDrift},
+	{"custom_status_type_tables", MigrateCustomStatusTypeTables, CompatTierDrift},
+	{"backfill_custom_tables", BackfillCustomTables, CompatTierBackfill},
 }
 
 // RunCompatMigrations executes pending backward-compat migrations. These handle
 // historical data transforms for databases that predate the embedded
 // migration system (ALTER TABLE ADD COLUMN, data moves, FK drops, etc.).
 //
-// A compat_migrations tracking table records which migrations have already
-// been applied. Once a migration is recorded, it is skipped on subsequent
-// store opens. Without this gate every bd invocation paid for ~30 SQL
-// roundtrips of idempotent no-op checks (be-9s8).
+// A compat_migrations tracking table records which migrations have run, but
+// gating is tier-aware:
+//   - CompatTierDrift migrations always run because their idempotency check
+//     is the drift detector — gating them silences the schema-shape self-heal
+//     that GH#3412 / be-bjxf depends on.
+//   - CompatTierBackfill migrations are one-shot data fills and are skipped
+//     once recorded as applied. This is the be-9s8 fast path that drops
+//     the bd-invocation cost of repeated idempotent inserts.
 func RunCompatMigrations(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS compat_migrations (
 		name VARCHAR(64) PRIMARY KEY,
@@ -72,7 +89,7 @@ func RunCompatMigrations(db *sql.DB) error {
 	}
 
 	for _, m := range compatMigrationsList {
-		if applied[m.Name] {
+		if m.Tier == CompatTierBackfill && applied[m.Name] {
 			continue
 		}
 		if err := m.Func(db); err != nil {

@@ -6,10 +6,14 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt/migrations"
 )
 
-// TestRunCompatMigrationsSkipsWhenUpToDate verifies that RunCompatMigrations
-// returns early once all migrations have been recorded as applied.
-// Regression test for be-9s8: previously, every store open ran all 17
-// compat migrations, adding ~30 SQL queries per bd invocation.
+// TestRunCompatMigrationsSkipsWhenUpToDate verifies that backfill-tier
+// migrations are gated by compat_migrations once recorded as applied.
+// Drift-tier migrations (the schema-shape repairs) intentionally run
+// every time — their idempotency check IS the drift detector, per
+// GH#3412 / be-bjxf — so this test exercises only the backfill path.
+//
+// Regression test for be-9s8 (the fast-path savings) and be-zjv6 (the
+// fix that re-enables drift-tier self-heal by gating only backfill-tier).
 func TestRunCompatMigrationsSkipsWhenUpToDate(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -17,11 +21,14 @@ func TestRunCompatMigrationsSkipsWhenUpToDate(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// setupTestStore already ran RunCompatMigrations during init.
-	// Drop a table that compat migration 015 (custom_status_type_tables)
-	// would recreate, as a marker for "did the migration run again?".
-	if _, err := store.db.ExecContext(ctx, "DROP TABLE IF EXISTS custom_statuses"); err != nil {
-		t.Fatalf("failed to drop custom_statuses: %v", err)
+	// setupTestStore already ran RunCompatMigrations, so compat_migrations
+	// has a row for backfill_custom_tables and custom_types is populated
+	// (migration 016 backfilled the legacy default rows).
+	// Clear custom_types to set up the gating assertion: if the backfill
+	// re-runs, it will repopulate the table; if it's gated, the table
+	// stays empty.
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM custom_types"); err != nil {
+		t.Fatalf("failed to clear custom_types: %v", err)
 	}
 
 	if err := migrations.RunCompatMigrations(store.db); err != nil {
@@ -29,19 +36,18 @@ func TestRunCompatMigrationsSkipsWhenUpToDate(t *testing.T) {
 	}
 
 	var count int
-	err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'custom_statuses' AND table_schema = DATABASE()").Scan(&count)
-	if err != nil {
-		t.Fatalf("checking custom_statuses: %v", err)
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM custom_types").Scan(&count); err != nil {
+		t.Fatalf("checking custom_types: %v", err)
 	}
 	if count != 0 {
-		t.Error("custom_statuses was recreated — RunCompatMigrations should skip when migrations are tracked as applied")
+		t.Errorf("custom_types has %d rows, want 0 — backfill_custom_tables should be gated by compat_migrations once applied", count)
 	}
 }
 
 // TestRunCompatMigrationsRunsPendingMigrations verifies the slow path:
-// when compat_migrations is empty (e.g. pre-fix DB upgrading), pending
-// migrations actually run.
+// when compat_migrations is empty (e.g. pre-fix DB upgrading), every
+// migration runs — both drift-tier (which always runs anyway) and
+// backfill-tier (whose tracking-table row was cleared).
 func TestRunCompatMigrationsRunsPendingMigrations(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
