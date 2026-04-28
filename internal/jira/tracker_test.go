@@ -117,6 +117,9 @@ func TestJiraToTrackerIssue(t *testing.T) {
 	if ti.AssigneeEmail != "alice@example.com" {
 		t.Errorf("AssigneeEmail = %q, want %q", ti.AssigneeEmail, "alice@example.com")
 	}
+	if ti.ParentID != "" {
+		t.Errorf("ParentID = %q, want empty", ti.ParentID)
+	}
 	if ti.CreatedAt.IsZero() {
 		t.Error("CreatedAt should not be zero")
 	}
@@ -235,6 +238,81 @@ func TestFieldMapperIssueToBeads(t *testing.T) {
 	}
 }
 
+func TestFieldMapperIssueToBeadsParentChildDependencies(t *testing.T) {
+	ji := &Issue{
+		ID:   "10001",
+		Key:  "PROJ-42",
+		Self: "https://company.atlassian.net/rest/api/3/issue/10001",
+		Fields: IssueFields{
+			Summary:   "Child issue",
+			IssueType: &IssueTypeField{Name: "Task"},
+			Parent:    &IssueRef{ID: "10000", Key: "PROJ-1"},
+			Subtasks: []IssueRef{
+				{ID: "10002", Key: "PROJ-43"},
+				{ID: "10003", Key: "PROJ-44"},
+			},
+		},
+	}
+
+	ti := jiraToTrackerIssue(ji, nil)
+	if ti.ParentID != "PROJ-1" {
+		t.Errorf("ParentID = %q, want %q", ti.ParentID, "PROJ-1")
+	}
+	if ti.ParentInternalID != "10000" {
+		t.Errorf("ParentInternalID = %q, want %q", ti.ParentInternalID, "10000")
+	}
+
+	conv := (&jiraFieldMapper{}).IssueToBeads(&ti)
+	if conv == nil {
+		t.Fatal("IssueToBeads returned nil")
+	}
+
+	assertDependency(t, conv.Dependencies, "PROJ-42", "PROJ-1", string(types.DepParentChild), tracker.DependencySourceParent)
+	assertDependency(t, conv.Dependencies, "PROJ-43", "PROJ-42", string(types.DepParentChild), tracker.DependencySourceParent)
+	assertDependency(t, conv.Dependencies, "PROJ-44", "PROJ-42", string(types.DepParentChild), tracker.DependencySourceParent)
+}
+
+func TestFieldMapperIssueToBeadsIssueLinkDependencies(t *testing.T) {
+	ji := &Issue{
+		ID:   "10001",
+		Key:  "PROJ-42",
+		Self: "https://company.atlassian.net/rest/api/3/issue/10001",
+		Fields: IssueFields{
+			Summary:   "Linked issue",
+			IssueType: &IssueTypeField{Name: "Task"},
+			IssueLinks: []IssueLinkField{
+				{
+					Type:         &IssueLinkType{Name: "Blocks", Outward: "blocks", Inward: "is blocked by"},
+					OutwardIssue: &IssueRef{ID: "10002", Key: "PROJ-43"},
+				},
+				{
+					Type:        &IssueLinkType{Name: "Blocks", Outward: "blocks", Inward: "is blocked by"},
+					InwardIssue: &IssueRef{ID: "10003", Key: "PROJ-44"},
+				},
+				{
+					Type:         &IssueLinkType{Name: "Relates", Outward: "relates to", Inward: "relates to"},
+					OutwardIssue: &IssueRef{ID: "10004", Key: "PROJ-45"},
+				},
+				{
+					Type:         &IssueLinkType{Name: "Duplicate", Outward: "duplicates", Inward: "is duplicated by"},
+					OutwardIssue: &IssueRef{ID: "10005", Key: "PROJ-46"},
+				},
+			},
+		},
+	}
+
+	ti := jiraToTrackerIssue(ji, nil)
+	conv := (&jiraFieldMapper{}).IssueToBeads(&ti)
+	if conv == nil {
+		t.Fatal("IssueToBeads returned nil")
+	}
+
+	assertDependency(t, conv.Dependencies, "PROJ-43", "PROJ-42", string(types.DepBlocks), tracker.DependencySourceRelation)
+	assertDependency(t, conv.Dependencies, "PROJ-42", "PROJ-44", string(types.DepBlocks), tracker.DependencySourceRelation)
+	assertDependency(t, conv.Dependencies, "PROJ-42", "PROJ-45", string(types.DepRelated), tracker.DependencySourceRelation)
+	assertDependency(t, conv.Dependencies, "PROJ-42", "PROJ-46", string(types.DepDuplicates), tracker.DependencySourceRelation)
+}
+
 func TestFieldMapperIssueToTracker(t *testing.T) {
 	mapper := &jiraFieldMapper{}
 
@@ -316,6 +394,14 @@ func TestTrackerFieldMapperPropagatesVersion(t *testing.T) {
 	mapper := tr.FieldMapper().(*jiraFieldMapper)
 	if mapper.apiVersion != "2" {
 		t.Errorf("FieldMapper apiVersion = %q, want %q", mapper.apiVersion, "2")
+	}
+}
+
+func TestSearchFieldsIncludesRelationshipFields(t *testing.T) {
+	for _, field := range []string{"parent", "subtasks", "issuelinks"} {
+		if !strings.Contains(searchFields, field) {
+			t.Errorf("searchFields missing %q: %s", field, searchFields)
+		}
 	}
 }
 
@@ -893,4 +979,14 @@ func TestPriorityMapCaseInsensitiveMatch(t *testing.T) {
 			t.Errorf("PriorityToBeads(%q) = %d, want %d", tt.name, got, tt.want)
 		}
 	}
+}
+
+func assertDependency(t *testing.T, deps []tracker.DependencyInfo, from, to, depType string, source tracker.DependencySource) {
+	t.Helper()
+	for _, dep := range deps {
+		if dep.FromExternalID == from && dep.ToExternalID == to && dep.Type == depType && dep.Source == source {
+			return
+		}
+	}
+	t.Fatalf("dependency %s -> %s type %s source %s not found in %#v", from, to, depType, source, deps)
 }
