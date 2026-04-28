@@ -15,7 +15,7 @@ bd setup claude
 bd setup claude --check  # Verify
 ```
 
-Installs SessionStart hook (`bd prime`) and PreCompact hook (`bd dolt push`).
+Installs SessionStart hook (`bd prime`) and PreCompact hook (`bd prime`).
 
 ## Cursor IDE
 

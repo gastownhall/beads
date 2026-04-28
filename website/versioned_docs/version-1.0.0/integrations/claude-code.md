@@ -18,7 +18,7 @@ bd setup claude
 
 This installs:
 - **SessionStart hook** - Runs `bd prime` on session start
-- **PreCompact hook** - Runs `bd dolt push` before context compaction
+- **PreCompact hook** - Runs `bd prime` before context compaction
 
 ### Manual Setup
 
@@ -28,7 +28,7 @@ Add to your Claude Code hooks configuration:
 {
   "hooks": {
     "SessionStart": ["bd prime"],
-    "PreCompact": ["bd dolt push"]
+    "PreCompact": ["bd prime"]
   }
 }
 ```
@@ -43,7 +43,7 @@ bd setup claude --check
 
 1. **Session starts** → `bd prime` injects ~1-2k tokens of context
 2. **You work** → Use `bd` CLI commands directly
-3. **Session compacts** → `bd dolt push` saves work to Dolt remote
+3. **Session compacts** → `bd prime` refreshes workflow context before compaction
 4. **Session ends** → Changes synced via git
 
 ## Essential Commands for Agents
