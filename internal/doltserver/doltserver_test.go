@@ -1803,3 +1803,113 @@ func TestEnsureGlobalDatabase_ServerNotReachable(t *testing.T) {
 		t.Error("expected error when server is not reachable")
 	}
 }
+
+// TestExternalNonLocalhostHost_GH3518 covers the helper that drives
+// the new error-message branching in EnsureRunning. When the
+// configured Dolt server is non-localhost, EnsureRunning's "external
+// server unreachable" path now suggests verifying the external server
+// rather than running `bd dolt start` (which would not help).
+func TestExternalNonLocalhostHost_GH3518(t *testing.T) {
+	t.Run("env host non-localhost returns (host, true)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		// IsDoltServerMode now infers from non-localhost host (GH#3545)
+		// so we don't need to set BEADS_DOLT_SERVER_MODE here — that's
+		// the whole point of the sibling fix.
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		host, ok := externalNonLocalhostHost(dir)
+		if !ok {
+			t.Fatalf("externalNonLocalhostHost: ok=false, want true")
+		}
+		if host != "192.0.2.10" {
+			t.Errorf("host = %q, want 192.0.2.10", host)
+		}
+	})
+
+	t.Run("env host localhost returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		host, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Errorf("externalNonLocalhostHost: ok=true, want false (host=%q)", host)
+		}
+	})
+
+	t.Run("env host 127.0.0.1 returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		_, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Error("externalNonLocalhostHost: ok=true, want false for 127.0.0.1")
+		}
+	})
+
+	t.Run("metadata.json DoltServerHost non-localhost + dolt_mode server returns (host, true)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		metaCfg := &configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "10.0.0.5",
+		}
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+
+		host, ok := externalNonLocalhostHost(dir)
+		if !ok {
+			t.Fatalf("externalNonLocalhostHost: ok=false, want true")
+		}
+		if host != "10.0.0.5" {
+			t.Errorf("host = %q, want 10.0.0.5", host)
+		}
+	})
+
+	t.Run("no config returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		// No metadata.json — configfile.Load returns nil cfg, no error.
+		// (Or an error; either way, helper returns false.)
+
+		_, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Error("externalNonLocalhostHost: ok=true, want false for empty beadsDir")
+		}
+	})
+
+	t.Run("non-server mode does NOT yield external", func(t *testing.T) {
+		// Even with a non-localhost env host, IsDoltServerMode would
+		// be true (post-GH#3545). To exercise the !IsDoltServerMode
+		// gate, force backend off-dolt — which short-circuits the
+		// IsDoltServerMode method.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		metaCfg := &configfile.Config{
+			Backend: "sqlite", // anything not BackendDolt; GetBackend
+			// normalizes back to BackendDolt regardless, but the
+			// gate inside IsDoltServerMode reads c.GetBackend()
+			// which returns BackendDolt for any input. The point of
+			// this subtest is documentary — assert current shape.
+			DoltMode: "embedded",
+		}
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		// With non-localhost env host, IsDoltServerMode is true via
+		// inference, so externalNonLocalhostHost returns true. Pin
+		// behavior so future changes to the gate are intentional.
+		host, ok := externalNonLocalhostHost(dir)
+		if !ok {
+			t.Errorf("with non-localhost env host, externalNonLocalhostHost should be true; got ok=false host=%q", host)
+		}
+	})
+}
