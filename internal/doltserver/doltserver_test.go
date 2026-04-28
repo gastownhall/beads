@@ -410,6 +410,70 @@ func TestReclaimPortBusyNonDolt(t *testing.T) {
 	}
 }
 
+// TestReclaimPort_NonDoltError_IncludesDiagnostics_GH3516 pins the
+// content of the "non-dolt process" error message: must include the
+// platform-specific listener-discovery hint and the docker / external-
+// server case ("if this is YOUR own Dolt instance ..."). Operators
+// hitting a port collision with their own dolt-in-docker instance
+// previously saw only "non-dolt process (PID N) — free the port" and
+// missed that they could just point bd at the existing server.
+func TestReclaimPort_NonDoltError_IncludesDiagnostics_GH3516(t *testing.T) {
+	dir := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	occupiedPort := ln.Addr().(*net.TCPAddr).Port
+
+	_, err = reclaimPort("127.0.0.1", occupiedPort, dir)
+	if err == nil {
+		t.Fatal("reclaimPort should fail when a non-dolt process holds the port")
+	}
+	msg := err.Error()
+
+	// Platform-specific listener-discovery hint must appear.
+	expectedListenerCmd := fmt.Sprintf(portConflictHint, occupiedPort)
+	if !strings.Contains(msg, expectedListenerCmd) {
+		t.Errorf("error message missing platform-specific listener hint %q\nfull msg: %s",
+			expectedListenerCmd, msg)
+	}
+
+	// Docker / external-server hint must appear.
+	for _, want := range []string{
+		"YOUR own Dolt instance",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"bd dolt status",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q\nfull msg: %s", want, msg)
+		}
+	}
+}
+
+// TestPortConflictDiagnostics_GH3516 unit-tests the diagnostic helper
+// directly. Makes the contract robust to wording changes in the
+// surrounding error format string — future edits to the wrapper
+// error in reclaimPort don't silently lose the operator-actionable
+// guidance.
+func TestPortConflictDiagnostics_GH3516(t *testing.T) {
+	got := portConflictDiagnostics(3308)
+
+	if !strings.Contains(got, "Identify the listener:") {
+		t.Errorf("missing 'Identify the listener:' header\nfull: %s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf(portConflictHint, 3308)) {
+		t.Errorf("platform hint not interpolated for port=3308\nfull: %s", got)
+	}
+	if !strings.Contains(got, "BEADS_DOLT_SERVER_PORT=3308") {
+		t.Errorf("env-var hint not parameterized with port=3308\nfull: %s", got)
+	}
+	if !strings.Contains(got, "container") {
+		t.Errorf("missing container/external-server hint\nfull: %s", got)
+	}
+}
+
 func TestMaxDoltServers(t *testing.T) {
 	t.Run("standalone", func(t *testing.T) {
 		orig := os.Getenv("GT_ROOT")
