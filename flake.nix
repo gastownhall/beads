@@ -48,7 +48,7 @@
         {
           default = pkgs.mkShell {
             buildInputs = with pkgs; [
-              go
+              go_1_26
               git
               gopls
               gotools

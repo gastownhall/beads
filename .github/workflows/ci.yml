@@ -336,17 +336,11 @@ jobs:
   test-nix:
     name: Test Nix Flake
     runs-on: ubuntu-latest
-    # Allow failure until nixpkgs updates Go to 1.25.6+
-    # (dolthub/driver requires go 1.26.2, nixpkgs-unstable may lag behind)
-    continue-on-error: true
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: DeterminateSystems/determinate-nix-action@v3
       - name: Run bd help via Nix
-        id: nix_help
-        continue-on-error: true
         run: |
           export BEADS_DB="$PWD/.ci-beads/beads.db"
           mkdir -p "$(dirname "$BEADS_DB")"
@@ -365,6 +359,3 @@ jobs:
             exit 1
           fi
           echo "Help text first line is correct"
-      - name: Note soft-failed Nix run
-        if: steps.nix_help.outcome != 'success'
-        run: echo "Nix run is non-blocking until nixpkgs toolchain catches up; skipping help-text assertion."

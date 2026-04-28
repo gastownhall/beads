@@ -1,6 +1,9 @@
 { pkgs, self, ... }:
 let
-  bdBase = pkgs.callPackage ./default.nix { inherit self; };
+  bdBase = pkgs.callPackage ./default.nix {
+    inherit self;
+    buildGoModule = pkgs.buildGo126Module;
+  };
 
   # Wrap the base package with shell completions baked in
   bd = pkgs.stdenv.mkDerivation {
