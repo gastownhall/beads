@@ -411,6 +411,12 @@ func jiraToTrackerIssue(ji *Issue, priorityMap map[string]string) tracker.Tracke
 		ti.Type = ji.Fields.IssueType.Name
 	}
 
+	// Parent relationship
+	if ji.Fields.Parent != nil {
+		ti.ParentID = ji.Fields.Parent.Key
+		ti.ParentInternalID = ji.Fields.Parent.ID
+	}
+
 	// Assignee
 	if ji.Fields.Assignee != nil {
 		ti.Assignee = ji.Fields.Assignee.DisplayName
