@@ -75,6 +75,7 @@ The installer will:
 - Verify downloaded release archives against release `checksums.txt`
 - Fall back to the supported `go install` modes if Go is available
 - Fall back to building from source if needed
+- Install fish completions automatically when fish is detected
 - Guide you through PATH setup if necessary
 
 On macOS, the script preserves the downloaded binary signature by default. If you explicitly want ad-hoc local re-signing, opt in:
@@ -97,6 +98,20 @@ BEADS_INSTALL_RESIGN_MACOS=1 curl -fsSL https://raw.githubusercontent.com/gastow
 | **AUR (Arch)** | Arch Linux users | `yay -Syu` | yay/paru | Community-maintained |
 
 **TL;DR:** Use Homebrew if available. Use npm if you're in a Node.js environment. Use the script for quick one-off installs or CI.
+
+### Shell Completions
+
+The CLI can generate shell completions:
+
+```bash
+bd completion fish > ~/.config/fish/completions/bd.fish
+bd completion bash > bd.bash
+bd completion zsh > _bd
+```
+
+Homebrew installs completions for bash, zsh, and fish automatically. The quick
+install script installs fish completions automatically when it detects fish, and
+also writes `beads.fish` for the `beads` alias it creates.
 
 ### A note on `go install` capability
 

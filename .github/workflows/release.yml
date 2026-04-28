@@ -261,6 +261,7 @@ jobs:
 
             def install
               bin.install "bd"
+              generate_completions_from_executable(bin/"bd", "completion", shells: [:bash, :zsh, :fish])
             end
           end
           FORMULA

@@ -285,6 +285,52 @@ create_beads_alias() {
     log_success "Created 'beads' alias -> bd"
 }
 
+install_fish_completions() {
+    local binary_path=$1
+
+    if [ ! -x "$binary_path" ]; then
+        log_warning "Skipping fish completions: $binary_path is not executable"
+        return 0
+    fi
+
+    local fish_config_root
+    fish_config_root="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
+
+    if [ -z "${HOME:-}" ] && [ -z "${XDG_CONFIG_HOME:-}" ]; then
+        log_warning "Skipping fish completions: HOME and XDG_CONFIG_HOME are unset"
+        return 0
+    fi
+
+    # Install fish completions when fish is available, when the user is currently
+    # running fish, or when a fish config directory already exists.
+    local shell_name="${SHELL##*/}"
+    if ! command -v fish >/dev/null 2>&1 &&
+        [ "$shell_name" != "fish" ] &&
+        [ ! -d "$fish_config_root" ]; then
+        return 0
+    fi
+
+    local completions_dir="$fish_config_root/completions"
+    mkdir -p "$completions_dir"
+
+    if "$binary_path" completion fish > "$completions_dir/bd.fish"; then
+        log_success "Installed fish completions to $completions_dir/bd.fish"
+    else
+        log_warning "Failed to generate fish completions for bd"
+        rm -f "$completions_dir/bd.fish"
+        return 0
+    fi
+
+    # The install script also creates a 'beads' alias. Give that command name
+    # its own completion file so users can tab-complete either spelling.
+    if BD_NAME=beads "$binary_path" completion fish > "$completions_dir/beads.fish"; then
+        log_success "Installed fish completions to $completions_dir/beads.fish"
+    else
+        log_warning "Failed to generate fish completions for beads alias"
+        rm -f "$completions_dir/beads.fish"
+    fi
+}
+
 # Download and install from GitHub releases
 install_from_release() {
     log_info "Installing bd from GitHub releases..."
@@ -392,6 +438,9 @@ install_from_release() {
 
     # Create 'beads' alias symlink
     create_beads_alias "$install_dir"
+
+    # Install fish completions when the user's environment indicates fish use.
+    install_fish_completions "$install_dir/bd"
 
     log_success "bd installed to $install_dir/bd"
 
@@ -508,6 +557,9 @@ install_with_go() {
     # Create 'beads' alias symlink
     create_beads_alias "$bin_dir"
 
+    # Install fish completions when the user's environment indicates fish use.
+    install_fish_completions "$bin_dir/bd"
+
     # Check if GOPATH/bin (or GOBIN) is in PATH
     if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
         log_warning "$bin_dir is not in your PATH"
@@ -562,6 +614,9 @@ build_from_source() {
 
             # Create 'beads' alias symlink
             create_beads_alias "$install_dir"
+
+            # Install fish completions when the user's environment indicates fish use.
+            install_fish_completions "$install_dir/bd"
 
             log_success "bd installed to $install_dir/bd"
 
