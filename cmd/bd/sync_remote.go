@@ -36,10 +36,21 @@ func resolveSyncRemoteFromDir(beadsDir string) string {
 // nothing to commit). Used by bd dolt remote add/remove to keep the
 // working tree clean after persisting sync.remote.
 //
-// Uses --no-verify so the bd-installed pre-commit hook can't re-enter
-// `bd export` and deadlock on the embedded Dolt lock the caller is
-// still holding. Same shape as the bootstrap-commit fix in PR #3457
-// (GH#3437); see GH#3598 for the bd dolt remote add reproduction.
+// Uses --no-verify so neither the bd-installed pre-commit hook nor any
+// commit-msg hook can re-enter `bd export` and deadlock on the embedded
+// Dolt lock the caller is still holding. Same shape as the
+// bootstrap-commit fix in PR #3457 (GH#3437); see GH#3598 for the
+// bd dolt remote add reproduction.
+//
+// Caveats:
+//   - --no-verify bypasses pre-commit and commit-msg hooks only; GPG
+//     signing (commit.gpgSign=true) is unaffected. A repo with required
+//     signing and no usable key will still surface as a "Warning:
+//     failed to commit config change" rather than a deadlock.
+//   - The "nothing to commit" string match below is git's
+//     English-locale phrasing. Translated git binaries would surface
+//     the message as a warning instead of being suppressed; harmless
+//     and pre-existing.
 func commitBeadsConfig(msg string) {
 	addCmd := exec.Command("git", "add", ".beads/config.yaml")
 	if err := addCmd.Run(); err != nil {
