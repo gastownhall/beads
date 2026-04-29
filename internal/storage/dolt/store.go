@@ -2100,7 +2100,10 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 			attribute.String("dolt.branch", s.branch),
 		)...),
 	)
-	defer func() { endSpan(span, retErr) }()
+	defer func() {
+		endSpan(span, retErr)
+		retErr = wrapRemoteNotFoundError(retErr, "push")
+	}()
 	creds := s.credentialsForRemote(remote)
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
@@ -2196,7 +2199,10 @@ func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr e
 			attribute.String("dolt.branch", s.branch),
 		)...),
 	)
-	defer func() { endSpan(span, retErr) }()
+	defer func() {
+		endSpan(span, retErr)
+		retErr = wrapRemoteNotFoundError(retErr, "pull")
+	}()
 
 	// GH#2474: Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors. Store initialization
