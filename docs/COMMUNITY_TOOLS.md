@@ -67,6 +67,10 @@ Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@
 
 - **[BeadHub](https://github.com/beadhub/beadhub)** - Open-source coordination server for AI agent teams running beads. The `bdh` CLI is a transparent wrapper over `bd` that adds work claiming, file reservation, presence awareness, and inter-agent messaging (async mail and sync chat). Includes a web dashboard. Free hosted at beadhub.ai for open-source projects. Built by [@juanre](https://github.com/juanre). (Python/TypeScript)
 
+## AI Context & Memory
+
+- **[Lore Context](https://github.com/Lore-Context/lore-context)** - Semantic memory layer for AI agents. Complements beads' structured task graph with episode-based context retrieval and cross-session knowledge accumulation. Run alongside `beads-mcp` for combined task management + semantic memory. See [Lore Context Integration Guide](LORE_CONTEXT_INTEGRATION.md) for setup. (Python)
+
 ## Historical / Stale
 
 - **[bdui](https://github.com/assimelha/bdui)** - Real-time terminal UI with tree view, dependency graph, and vim-style navigation. Built by [@assimelha](https://github.com/assimelha). (Node.js)
