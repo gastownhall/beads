@@ -15,6 +15,10 @@ import (
 // vs the filesystem CLI config and reports discrepancies.
 // Returns a check with Fix set for cases where --fix can resolve it.
 func CheckRemoteConsistency(repoPath string) DoctorCheck {
+	if IsRemoteServerMode(repoPath) {
+		return SkipForRemoteServer("Remote Consistency", CategoryData)
+	}
+
 	beadsDir := ResolveBeadsDirForRepo(repoPath)
 
 	cfg, err := configfile.Load(beadsDir)
