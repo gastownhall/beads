@@ -5,6 +5,7 @@ const (
 	StatusOK      = "ok"
 	StatusWarning = "warning"
 	StatusError   = "error"
+	StatusSkip    = "skip"
 )
 
 // Category constants for grouping doctor checks

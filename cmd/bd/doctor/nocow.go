@@ -24,6 +24,10 @@ import (
 func CheckBtrfsNoCOW(path string) DoctorCheck {
 	const name = "Btrfs NoCOW (dolt)"
 
+	if IsRemoteServerMode(path) {
+		return SkipForRemoteServer(name, CategoryPerformance)
+	}
+
 	if runtime.GOOS != "linux" {
 		return DoctorCheck{
 			Name:     name,
