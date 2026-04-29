@@ -124,6 +124,16 @@ Run 'bd backup init <path>' first to configure a destination.`,
 			return fmt.Errorf("no store available")
 		}
 
+		// Guard: reject sync when connected to a remote server without a
+		// cloud backup destination. File-based Dolt backups send paths to
+		// the server, which fails for remote machines.
+		if isRemoteDoltServer() {
+			cfg, _ := loadDoltBackupConfig()
+			if err := checkBackupSyncRemoteGuard(true, cfg); err != nil {
+				return err
+			}
+		}
+
 		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
 		if !ok {
 			return fmt.Errorf("storage backend does not support backup operations")
@@ -181,6 +191,22 @@ func checkBackupInitRemoteGuard(backupURL string, isRemote bool) error {
 		return fmt.Errorf("filesystem backup path is not supported for remote dolt servers; the path %q would be created on the remote server's filesystem, not locally. Use a cloud URL (DoltHub, S3, GCS) or JSONL export instead", backupURL)
 	}
 	return nil
+}
+
+// checkBackupSyncRemoteGuard returns an error when bd backup sync is run
+// against a remote Dolt server and no cloud backup destination is configured.
+// Dolt's native backup sends filesystem paths to the server via SQL, which
+// fails for remote servers. When the user has a cloud URL (DoltHub, S3, GCS)
+// configured, the sync can proceed normally.
+func checkBackupSyncRemoteGuard(isRemote bool, cfg *doltBackupConfig) error {
+	if !isRemote {
+		return nil
+	}
+	// If a cloud (non-file://) backup is configured, sync can proceed.
+	if cfg != nil && cfg.BackupURL != "" && !strings.HasPrefix(cfg.BackupURL, "file://") {
+		return nil
+	}
+	return fmt.Errorf("backup sync is not supported for remote dolt servers with a filesystem destination.\n\nDolt's backup mechanism sends filesystem paths to the server, which fails\nwhen the server is on a different machine.\n\nTo back up your data locally, use JSONL export:\n  bd export -o /path/to/backup.jsonl\n\nOr configure a cloud backup destination (DoltHub, S3, GCS):\n  bd backup init https://doltremoteapi.dolthub.com/<user>/<repo>")
 }
 
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
