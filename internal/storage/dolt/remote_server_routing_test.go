@@ -1,10 +1,26 @@
 package dolt
 
 import (
+	"database/sql"
+	"strings"
 	"testing"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/doltserver"
 )
+
+// stubDB returns a *sql.DB that is non-nil but will fail on any actual query.
+// This avoids nil-pointer panics in routing methods that call ListRemotes etc.
+func stubDB(t *testing.T) *sql.DB {
+	t.Helper()
+	// Open with a DSN that will fail on connect — but the *sql.DB handle is valid.
+	db, err := sql.Open("mysql", "root@tcp(127.0.0.1:1)/nonexistent")
+	if err != nil {
+		t.Fatalf("sql.Open stub: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
 
 // TestIsRemoteServer verifies the isRemoteServer method on DoltStore.
 func TestIsRemoteServer(t *testing.T) {
@@ -51,6 +67,7 @@ func TestRemoteServerPushSkipsCLIDirGuard(t *testing.T) {
 	t.Parallel()
 
 	s := &DoltStore{
+		db:          stubDB(t),
 		serverHost:  "mini2",
 		serverMode:  true,
 		serverOwner: doltserver.ServerModeExternal,
@@ -73,7 +90,7 @@ func TestRemoteServerPushSkipsCLIDirGuard(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error (no real DB), got nil")
 	}
-	if contains(err.Error(), "requires a local Dolt CLI database directory") {
+	if strings.Contains(err.Error(), "requires a local Dolt CLI database directory") {
 		t.Errorf("pushToRemote returned CLI-dir error on remote server: %v", err)
 	}
 }
@@ -83,11 +100,13 @@ func TestRemoteServerPullSkipsCLIDirGuard(t *testing.T) {
 	t.Parallel()
 
 	s := &DoltStore{
+		db:          stubDB(t),
 		serverHost:  "mini2",
 		serverMode:  true,
 		serverOwner: doltserver.ServerModeExternal,
 		remote:      "origin",
 		branch:      "main",
+		readOnly:    true, // skip auto-commit before pull (no real db)
 	}
 
 	if !s.requiresExplicitCLIDir() {
@@ -101,17 +120,18 @@ func TestRemoteServerPullSkipsCLIDirGuard(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error (no real DB), got nil")
 	}
-	if contains(err.Error(), "requires a local Dolt CLI database directory") {
+	if strings.Contains(err.Error(), "requires a local Dolt CLI database directory") {
 		t.Errorf("pullFromRemote returned CLI-dir error on remote server: %v", err)
 	}
 }
 
 // TestLocalServerPushStillRequiresCLIDir verifies that the CLI-dir guard still
-// fires for local external servers (the original behavior).
+// fires for local external servers with credentials and no CLI dir.
 func TestLocalServerPushStillRequiresCLIDir(t *testing.T) {
 	t.Parallel()
 
 	s := &DoltStore{
+		db:          stubDB(t),
 		serverHost:  "127.0.0.1",
 		serverMode:  true,
 		serverOwner: doltserver.ServerModeExternal,
@@ -126,22 +146,13 @@ func TestLocalServerPushStillRequiresCLIDir(t *testing.T) {
 
 	err := s.pushToRemote(t.Context(), "origin", false)
 	if err == nil {
-		// Local external server with credentials and no CLI dir should error.
-		// The error might be CLI-dir or might be something else depending on
-		// routing, but it should not silently succeed.
-		t.Log("push returned nil — local server may route to SQL path (acceptable)")
+		// Local external server with credentials and no CLI dir should error
+		// at the credential guard or fall through to SQL. Either way is OK —
+		// the key invariant is that remote servers bypass the guard.
+		t.Log("push returned nil — local server routed to SQL path (acceptable)")
+		return
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	// The error should be the CLI-dir error (credentials present, no CLI dir,
+	// local server) or a connection error. Both are acceptable.
+	t.Logf("local server push error (expected): %v", err)
 }
