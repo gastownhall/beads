@@ -717,6 +717,10 @@ func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
 // BackupDatabase registers dir as a file:// Dolt backup remote and syncs
 // the full database to it, preserving complete commit history.
 func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
+	if s.isRemoteServer() {
+		return fmt.Errorf("filesystem backup is not supported for remote dolt servers (host=%s); use JSONL export (bd backup export) or a cloud backup URL instead", s.serverHost)
+	}
+
 	info, err := os.Stat(dir)
 	if err != nil {
 		return fmt.Errorf("backup destination does not exist: %w", err)
@@ -754,6 +758,10 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 // RestoreDatabase restores the database from a Dolt backup at dir.
 // When force is true, an existing database is overwritten.
 func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
+	if s.isRemoteServer() {
+		return fmt.Errorf("filesystem restore is not supported for remote dolt servers (host=%s); use JSONL import (bd init --from-jsonl) instead", s.serverHost)
+	}
+
 	info, err := os.Stat(dir)
 	if err != nil {
 		return fmt.Errorf("backup source does not exist: %w", err)

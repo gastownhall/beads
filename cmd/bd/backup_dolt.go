@@ -56,6 +56,11 @@ After adding, run 'bd backup sync' to push your data.`,
 		// DoltHub URLs are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
+		// Guard: reject file:// URLs when connected to a remote server.
+		if err := checkBackupInitRemoteGuard(backupURL, isRemoteDoltServer()); err != nil {
+			return err
+		}
+
 		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
 		if !ok {
 			return fmt.Errorf("storage backend does not support backup operations")
@@ -166,6 +171,16 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
 		return nil
 	},
+}
+
+// checkBackupInitRemoteGuard returns an error if a file:// backup URL is being
+// sent to a remote Dolt server. The server would try to create the directory on
+// its own filesystem, not the client's. Cloud/DoltHub URLs are fine for remote.
+func checkBackupInitRemoteGuard(backupURL string, isRemote bool) error {
+	if isRemote && strings.HasPrefix(backupURL, "file://") {
+		return fmt.Errorf("filesystem backup path is not supported for remote dolt servers; the path %q would be created on the remote server's filesystem, not locally. Use a cloud URL (DoltHub, S3, GCS) or JSONL export instead", backupURL)
+	}
+	return nil
 }
 
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
