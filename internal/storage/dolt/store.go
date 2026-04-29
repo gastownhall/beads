@@ -196,6 +196,7 @@ type DoltStore struct {
 	remoteUser     string // Remote auth user for Hosted Dolt push/pull (optional)
 	remotePassword string // Remote auth password for Hosted Dolt push/pull (optional)
 	serverMode     bool   // true when connected to external dolt sql-server (not embedded)
+	serverHost     string // Server host (for remote-server detection in push/pull routing)
 	serverOwner    doltserver.ServerMode
 
 	// autoStartedServerDir is set when this store triggered a dolt sql-server
@@ -1103,6 +1104,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		remoteUser:           cfg.RemoteUser,
 		remotePassword:       cfg.RemotePassword,
 		serverMode:           true,
+		serverHost:           cfg.ServerHost,
 		serverOwner:          doltserver.ResolveServerMode(beadsDir),
 		readOnly:             cfg.ReadOnly,
 		autoStartedServerDir: autoStartedDir,
@@ -1572,6 +1574,15 @@ func (s *DoltStore) requiresExplicitCLIDir() bool {
 	return s.serverMode &&
 		s.serverOwner == doltserver.ServerModeExternal &&
 		!doltserver.IsSharedServerMode()
+}
+
+// isRemoteServer returns true when the store is connected to a Dolt
+// sql-server running on a remote host (not localhost). In this case,
+// CLI-based push/pull is impossible (no local database directory), but
+// SQL-based CALL DOLT_PUSH / CALL DOLT_PULL works because the command
+// is sent to the remote server which executes it server-side.
+func (s *DoltStore) isRemoteServer() bool {
+	return s.serverMode && !isLocalHost(s.serverHost)
 }
 
 func (s *DoltStore) requireCLIDir(operation string) (string, error) {
@@ -2098,7 +2109,7 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	if s.shouldUseCLIForCredentials(ctx, remote, creds) {
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
-	if !creds.empty() && s.requiresExplicitCLIDir() && s.CLIDir() == "" {
+	if !creds.empty() && s.requiresExplicitCLIDir() && s.CLIDir() == "" && !s.isRemoteServer() {
 		_, err := s.requireCLIDir("dolt push")
 		return err
 	}
@@ -2109,7 +2120,7 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	if s.shouldUseCLIForCloudAuth(remote) {
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
-	if s.requiresExplicitCLIDir() && s.CLIDir() == "" && s.hasCloudAuthForSQLRemote(ctx, remote) {
+	if s.requiresExplicitCLIDir() && s.CLIDir() == "" && s.hasCloudAuthForSQLRemote(ctx, remote) && !s.isRemoteServer() {
 		_, err := s.requireCLIDir("dolt push")
 		return err
 	}
@@ -2212,7 +2223,7 @@ func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr e
 		}
 		return nil
 	}
-	if !creds.empty() && s.requiresExplicitCLIDir() && s.CLIDir() == "" {
+	if !creds.empty() && s.requiresExplicitCLIDir() && s.CLIDir() == "" && !s.isRemoteServer() {
 		_, err := s.requireCLIDir("dolt pull")
 		return err
 	}
@@ -2220,7 +2231,7 @@ func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr e
 	if s.shouldUseCLIForCloudAuth(remote) {
 		return s.doltCLIPull(ctx, remote, creds)
 	}
-	if s.requiresExplicitCLIDir() && s.CLIDir() == "" && s.hasCloudAuthForSQLRemote(ctx, remote) {
+	if s.requiresExplicitCLIDir() && s.CLIDir() == "" && s.hasCloudAuthForSQLRemote(ctx, remote) && !s.isRemoteServer() {
 		_, err := s.requireCLIDir("dolt pull")
 		return err
 	}
