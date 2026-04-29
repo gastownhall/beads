@@ -201,6 +201,44 @@ func TestDirSize(t *testing.T) {
 	}
 }
 
+// TestCheckBackupInitRemoteGuard verifies that a local filesystem path is
+// rejected when the Dolt server is remote. DoltHub/cloud URLs should pass.
+//
+// User story (docs/REMOTE_SERVER_USER_STORIES.md - Backup):
+//
+//	Given beads is connected to a remote dolt server
+//	When I run `bd backup init /some/local/path`
+//	Then beads does NOT send that local path to the remote server
+//	And instead tells me this operation isn't supported in remote mode
+func TestCheckBackupInitRemoteGuard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		url      string
+		isRemote bool
+		wantErr  bool
+	}{
+		{name: "file URL + remote = error", url: "file:///mnt/backup", isRemote: true, wantErr: true},
+		{name: "file URL + local = ok", url: "file:///mnt/backup", isRemote: false, wantErr: false},
+		{name: "dolthub URL + remote = ok", url: "https://doltremoteapi.dolthub.com/user/repo", isRemote: true, wantErr: false},
+		{name: "aws URL + remote = ok", url: "aws://bucket/path", isRemote: true, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkBackupInitRemoteGuard(tt.url, tt.isRemote)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for url=%q isRemote=%v, got nil", tt.url, tt.isRemote)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for url=%q isRemote=%v: %v", tt.url, tt.isRemote, err)
+			}
+		})
+	}
+}
+
 func TestShowDoltBackupStatusJSON_NilWhenNotConfigured(t *testing.T) {
 	t.Parallel()
 	// When no .beads dir exists, should return configured=false
