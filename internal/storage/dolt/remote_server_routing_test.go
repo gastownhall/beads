@@ -162,8 +162,6 @@ func TestLocalServerPushStillRequiresCLIDir(t *testing.T) {
 // conflict is detected: isRemoteServer() returns true and CLIDir() is
 // non-empty. The warning emitted at init time depends on this detection.
 func TestRemoteServerCLIDirConflictDetected(t *testing.T) {
-	t.Parallel()
-
 	t.Setenv(EnvDoltCLIDir, "/tmp/fake-dolt-dir")
 
 	s := &DoltStore{
@@ -195,8 +193,6 @@ func TestRemoteServerCLIDirConflictDetected(t *testing.T) {
 // TestNoWarningForLocalServerWithCLIDir verifies that a local server with
 // BEADS_DOLT_CLI_DIR set does NOT trigger the warning.
 func TestNoWarningForLocalServerWithCLIDir(t *testing.T) {
-	t.Parallel()
-
 	t.Setenv(EnvDoltCLIDir, "/tmp/fake-dolt-dir")
 
 	s := &DoltStore{
@@ -217,8 +213,6 @@ func TestNoWarningForLocalServerWithCLIDir(t *testing.T) {
 // TestNoWarningForRemoteServerWithoutCLIDir verifies that a remote server
 // without BEADS_DOLT_CLI_DIR does NOT trigger the warning.
 func TestNoWarningForRemoteServerWithoutCLIDir(t *testing.T) {
-	t.Parallel()
-
 	// Ensure env var is NOT set (t.Setenv restores after test).
 	t.Setenv(EnvDoltCLIDir, "")
 
