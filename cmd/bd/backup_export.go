@@ -114,9 +114,11 @@ func atomicWriteFile(path string, data []byte) error {
 // (i.e., not localhost). Used to guard DOLT_BACKUP calls that send local
 // filesystem paths to the server via SQL.
 func isRemoteHost(host string) bool {
-	// TODO: implement remote host detection
-	_ = host
-	return false
+	switch host {
+	case "", "127.0.0.1", "localhost", "::1", "[::1]":
+		return false
+	}
+	return true
 }
 
 // isRemoteDoltServerForDir checks whether the Dolt server configured in the
@@ -163,6 +165,33 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 			debug.Logf("backup: no changes since last backup (commit %s)\n", truncateHash(currentCommit))
 			return state, nil
 		}
+	}
+
+	// When the Dolt server is remote, DOLT_BACKUP('add', ..., 'file:///local/path')
+	// sends the local filesystem path to the remote server, which tries to mkdir
+	// that path on its own filesystem. Fall back to JSONL export instead.
+	if isRemoteDoltServer() {
+		debug.Logf("backup: remote dolt server detected, falling back to JSONL export\n")
+		exportPath := filepath.Join(dir, "export.jsonl")
+		issueCount, memoryCount, err := exportToFile(ctx, exportPath, true)
+		if err != nil {
+			return nil, fmt.Errorf("JSONL backup export failed: %w", err)
+		}
+		debug.Logf("backup: JSONL export wrote %d issues and %d memories to %s\n",
+			issueCount, memoryCount, exportPath)
+
+		// Update watermarks
+		currentCommit, err := store.GetCurrentCommit(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current commit for state: %w", err)
+		}
+		state.LastDoltCommit = currentCommit
+		state.Timestamp = time.Now().UTC()
+
+		if err := saveBackupState(dir, state); err != nil {
+			return nil, err
+		}
+		return state, nil
 	}
 
 	bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
