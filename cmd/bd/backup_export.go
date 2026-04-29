@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -107,6 +108,36 @@ func atomicWriteFile(path string, data []byte) error {
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 	return nil
+}
+
+// isRemoteHost returns true if the given host string refers to a remote machine
+// (i.e., not localhost). Used to guard DOLT_BACKUP calls that send local
+// filesystem paths to the server via SQL.
+func isRemoteHost(host string) bool {
+	// TODO: implement remote host detection
+	_ = host
+	return false
+}
+
+// isRemoteDoltServerForDir checks whether the Dolt server configured in the
+// given beads directory is remote. Extracted for testability.
+func isRemoteDoltServerForDir(beadsDir string) bool {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return isRemoteHost(cfg.DoltServerHost)
+}
+
+// isRemoteDoltServer checks whether the configured Dolt server is remote.
+// DOLT_BACKUP commands send local filesystem paths to the server via SQL,
+// which fails when the server is on a different machine.
+func isRemoteDoltServer() bool {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return false
+	}
+	return isRemoteDoltServerForDir(beadsDir)
 }
 
 // runBackupExport performs a Dolt-native backup to .beads/backup/.
