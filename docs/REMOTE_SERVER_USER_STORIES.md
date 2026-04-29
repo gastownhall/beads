@@ -38,15 +38,20 @@ And the remote server pushes to the "backup" remote
 
 ```gherkin
 Given beads is connected to a remote dolt server
-When I run `bd backup export` without specifying a location
-Then beads errors with a clear message explaining that server mode
-  requires an explicit backup location
-And suggests: `bd backup export --output /path/to/backup.jsonl`
+When auto-backup runs (or any internal call to runBackupExport)
+Then beads detects it cannot use Dolt's filesystem backup mechanism
+And silently falls back to JSONL export at .beads/backup/export.jsonl
+And .beads/ is always local so this works without network issues
 
 Given beads is connected to a remote dolt server
-When I run `bd backup export --output ~/backups/beads.jsonl`
-Then beads exports issues as JSONL to the specified local path
+When I run `bd export -o ~/backups/beads.jsonl`
+Then beads exports issues as JSONL to the specified local path via SQL
 And does NOT attempt to use Dolt's filesystem backup mechanism
+
+Given beads is connected to a remote dolt server
+When I run `bd backup sync` with no cloud backup URL configured
+Then beads tells me filesystem backup is not supported in remote mode
+And suggests `bd export -o path` for JSONL or a cloud URL for Dolt backup
 
 Given beads is connected to a remote dolt server
 When I run `bd backup init /some/local/path`
@@ -97,7 +102,11 @@ And NOT a hang or raw stack trace
 Given config.yaml specifies host: mini2
 And BEADS_DOLT_CLI_DIR is also set
 When beads initializes
-Then [DECISION NEEDED: error at startup? CLI dir wins? remote wins with warning?]
+Then the remote host wins and BEADS_DOLT_CLI_DIR is ignored
+And a warning is printed: "BEADS_DOLT_CLI_DIR is set but ignored — connected to remote dolt server at mini2"
+# Decision: env var precedence (flags > env > config > defaults) applies generally,
+# but BEADS_DOLT_CLI_DIR is meaningless for remote servers (no local database),
+# so remote host takes functional precedence with a visible warning.
 
 Given beads is connected to a dolt server on localhost via SQL (not embedded mode)
 When I run `bd backup init /some/local/path`
@@ -113,7 +122,11 @@ Then it uses SQL (network) not filesystem (local)
 And it never sends local filesystem paths to the remote server
 And it never shells out to a local dolt CLI expecting a local database
 
-# Exception: .beads/ config, hooks, JSONL exports are always local operations
+# Exceptions (always local, never sent to remote server):
+#   .beads/ config and metadata
+#   .beads/backup/ (JSONL export destination)
+#   Git hooks
+#   JSONL export/import files
 ```
 
 ## Out of Scope (follow-up work)
@@ -122,4 +135,3 @@ And it never shells out to a local dolt CLI expecting a local database
 - Server version mismatch detection
 - Read-only SQL user handling
 - Federation peer sync in remote mode
-- Connection timeout tuning
