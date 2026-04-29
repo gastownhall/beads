@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -234,6 +235,94 @@ func TestCheckBackupInitRemoteGuard(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Errorf("unexpected error for url=%q isRemote=%v: %v", tt.url, tt.isRemote, err)
+			}
+		})
+	}
+}
+
+// TestCheckBackupSyncRemoteGuard verifies that bd backup sync on a remote
+// server returns a helpful error when no cloud backup URL is configured,
+// guiding the user toward `bd export -o` for JSONL export instead.
+//
+// User stories (docs/REMOTE_SERVER_USER_STORIES.md - Backup):
+//
+//	Given beads is connected to a remote dolt server
+//	When I run `bd backup sync` without a cloud backup destination
+//	Then beads errors with a clear message explaining that server mode
+//	  requires an explicit backup location
+//	And suggests: `bd export -o /path/to/backup.jsonl`
+func TestCheckBackupSyncRemoteGuard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		isRemote  bool
+		backupCfg *doltBackupConfig
+		wantErr   bool
+		wantMsg   string // substring expected in error message
+	}{
+		{
+			name:      "remote + no backup config = error",
+			isRemote:  true,
+			backupCfg: nil,
+			wantErr:   true,
+			wantMsg:   "bd export",
+		},
+		{
+			name:     "remote + file:// backup = error",
+			isRemote: true,
+			backupCfg: &doltBackupConfig{
+				BackupURL: "file:///mnt/backup",
+			},
+			wantErr: true,
+			wantMsg: "bd export",
+		},
+		{
+			name:     "remote + dolthub URL = ok",
+			isRemote: true,
+			backupCfg: &doltBackupConfig{
+				BackupURL: "https://doltremoteapi.dolthub.com/user/repo",
+			},
+			wantErr: false,
+		},
+		{
+			name:     "remote + aws URL = ok",
+			isRemote: true,
+			backupCfg: &doltBackupConfig{
+				BackupURL: "aws://bucket/path",
+			},
+			wantErr: false,
+		},
+		{
+			name:      "local + no backup config = ok (normal flow handles this)",
+			isRemote:  false,
+			backupCfg: nil,
+			wantErr:   false,
+		},
+		{
+			name:     "local + file:// backup = ok",
+			isRemote: false,
+			backupCfg: &doltBackupConfig{
+				BackupURL: "file:///mnt/backup",
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkBackupSyncRemoteGuard(tt.isRemote, tt.backupCfg)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for isRemote=%v backupCfg=%+v, got nil", tt.isRemote, tt.backupCfg)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for isRemote=%v backupCfg=%+v: %v", tt.isRemote, tt.backupCfg, err)
+			}
+			if tt.wantErr && err != nil && tt.wantMsg != "" {
+				if !strings.Contains(err.Error(), tt.wantMsg) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.wantMsg)
+				}
 			}
 		})
 	}
