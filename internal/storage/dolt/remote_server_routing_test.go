@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -157,6 +158,8 @@ func TestLocalServerPushStillRequiresCLIDir(t *testing.T) {
 	t.Logf("local server push error (expected): %v", err)
 }
 
+// --- Config conflict tests (BEADS_DOLT_CLI_DIR + remote server) ---
+
 // TestRemoteServerCLIDirConflictDetected verifies that when a store is
 // connected to a remote Dolt server AND BEADS_DOLT_CLI_DIR is set, the
 // conflict is detected: isRemoteServer() returns true and CLIDir() is
@@ -228,5 +231,104 @@ func TestNoWarningForRemoteServerWithoutCLIDir(t *testing.T) {
 	msg := warnCLIDirIgnoredForRemoteServer(s)
 	if msg != "" {
 		t.Errorf("expected no warning when BEADS_DOLT_CLI_DIR is not set, got: %s", msg)
+	}
+}
+
+// --- Remote-not-found error wrapping tests ---
+
+// TestIsRemoteNotFoundError verifies that the isRemoteNotFoundError helper
+// correctly detects Dolt's raw SQL errors for missing remotes.
+func TestIsRemoteNotFoundError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "unrelated error",
+			err:  fmt.Errorf("connection refused"),
+			want: false,
+		},
+		{
+			name: "remote not found lowercase",
+			err:  fmt.Errorf("remote 'origin' not found"),
+			want: true,
+		},
+		{
+			name: "remote not found in SQL wrapper",
+			err:  fmt.Errorf("Error 1105 (HY000): remote 'origin' not found"),
+			want: true,
+		},
+		{
+			name: "remote not found mixed case",
+			err:  fmt.Errorf("Remote not found: origin"),
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRemoteNotFoundError(tt.err)
+			if got != tt.want {
+				t.Errorf("isRemoteNotFoundError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWrapRemoteNotFoundError verifies that wrapRemoteNotFoundError returns
+// a user-friendly message when the error is a remote-not-found error, and
+// passes through other errors unchanged.
+func TestWrapRemoteNotFoundError(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		op           string
+		wantContain  string
+		wantPassThru bool
+	}{
+		{
+			name:        "wraps remote not found",
+			err:         fmt.Errorf("Error 1105 (HY000): remote 'origin' not found"),
+			op:          "push",
+			wantContain: "no remotes configured on the dolt server",
+		},
+		{
+			name:         "passes through unrelated error",
+			err:          fmt.Errorf("connection refused"),
+			op:           "push",
+			wantPassThru: true,
+		},
+		{
+			name:         "nil returns nil",
+			err:          nil,
+			op:           "push",
+			wantPassThru: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapRemoteNotFoundError(tt.err, tt.op)
+			if tt.wantPassThru {
+				if got != tt.err {
+					t.Errorf("expected error to pass through unchanged, got %v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("expected wrapped error, got nil")
+			}
+			if !strings.Contains(got.Error(), tt.wantContain) {
+				t.Errorf("wrapped error %q should contain %q", got.Error(), tt.wantContain)
+			}
+			// The original error should still be in the chain
+			if !strings.Contains(got.Error(), tt.err.Error()) {
+				t.Errorf("wrapped error %q should preserve original %q", got.Error(), tt.err.Error())
+			}
+		})
 	}
 }
