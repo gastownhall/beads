@@ -74,7 +74,14 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	applyResolvedConfig(beadsDir, fileCfg, cfg)
 	ApplyCLIAutoStart(beadsDir, cfg)
 
-	return New(ctx, cfg)
+	store, err := New(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if msg := warnCLIDirIgnoredForRemoteServer(store); msg != "" {
+		fmt.Fprint(os.Stderr, msg)
+	}
+	return store, nil
 }
 
 // NewFromConfigWithOptions creates a DoltStore with options from metadata.json.
@@ -120,7 +127,14 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	mode := doltserver.ResolveServerMode(beadsDir)
 	cfg.AutoStart = resolveAutoStart(cfg.AutoStart, autoStartCfg, mode)
 
-	return New(ctx, cfg)
+	store, err := New(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if msg := warnCLIDirIgnoredForRemoteServer(store); msg != "" {
+		fmt.Fprint(os.Stderr, msg)
+	}
+	return store, nil
 }
 
 // resolveAutoStart computes the effective AutoStart value, respecting a
@@ -181,6 +195,22 @@ func GetBackendFromConfig(beadsDir string) string {
 		return configfile.BackendDolt
 	}
 	return cfg.GetBackend()
+}
+
+// warnCLIDirIgnoredForRemoteServer returns a non-empty warning message when
+// BEADS_DOLT_CLI_DIR is set but the store is connected to a remote Dolt server.
+// In that scenario the env var is meaningless — there is no local database
+// directory — so we warn the user rather than silently ignoring it.
+// Returns "" when no warning is needed.
+func warnCLIDirIgnoredForRemoteServer(s *DoltStore) string {
+	if !s.isRemoteServer() {
+		return ""
+	}
+	if strings.TrimSpace(os.Getenv(EnvDoltCLIDir)) == "" {
+		return ""
+	}
+	return fmt.Sprintf("Warning: %s is set but ignored — connected to remote dolt server at %s\n",
+		EnvDoltCLIDir, s.serverHost)
 }
 
 // applyResolvedConfig merges metadata.json-derived defaults into a store config.
