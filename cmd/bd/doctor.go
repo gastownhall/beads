@@ -632,6 +632,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, agentDocsCheck)
 	// Don't fail overall check for missing docs, just warn
 
+	// Check 12a: AGENTS.md / CLAUDE.md user-authored divergence
+	agentDocDivergenceCheck := convertWithCategory(doctor.CheckAgentDocDivergence(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, agentDocDivergenceCheck)
+	// Don't fail overall check for divergence, just warn
+
 	// Check 13: Legacy beads slash commands in documentation
 	legacyDocsCheck := convertWithCategory(doctor.CheckLegacyBeadsSlashCommands(path), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, legacyDocsCheck)

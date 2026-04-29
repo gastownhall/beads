@@ -190,6 +190,178 @@ func CheckAgentDocumentation(repoPath string) DoctorCheck {
 	}
 }
 
+// stripBeadsIntegrationSection removes the <!-- BEGIN BEADS INTEGRATION ... -->
+// ... <!-- END BEADS INTEGRATION --> block (plus an optional trailing newline)
+// so the remaining content represents user-authored material. Returns the input
+// unchanged if no well-formed marker pair is found.
+func stripBeadsIntegrationSection(content string) string {
+	const beginPrefix = "<!-- BEGIN BEADS INTEGRATION"
+	const endMarker = "<!-- END BEADS INTEGRATION -->"
+
+	beginIdx := strings.Index(content, beginPrefix)
+	if beginIdx == -1 {
+		return content
+	}
+	endIdx := strings.Index(content, endMarker)
+	if endIdx == -1 || endIdx < beginIdx {
+		return content
+	}
+	end := endIdx + len(endMarker)
+	if end < len(content) && content[end] == '\n' {
+		end++
+	}
+	return content[:beginIdx] + content[end:]
+}
+
+// normalizeUserAuthored canonicalizes content for divergence comparison:
+// strips the managed beads section, normalizes line endings, and collapses
+// trailing whitespace. Leading/trailing blank lines are removed so cosmetic
+// reformatting (e.g. an extra newline at EOF) does not flag as divergence.
+func normalizeUserAuthored(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = stripBeadsIntegrationSection(content)
+	lines := strings.Split(content, "\n")
+	for i, ln := range lines {
+		lines[i] = strings.TrimRight(ln, " \t")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// sameInode reports whether two files refer to the same underlying inode
+// (hardlinked or one is a symlink resolving to the other). Falls back to
+// comparing resolved paths on platforms where syscall stat is unavailable.
+func sameInode(a, b string) (bool, error) {
+	resolvedA, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false, err
+	}
+	resolvedB, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false, err
+	}
+	if resolvedA == resolvedB {
+		return true, nil
+	}
+	infoA, err := os.Stat(resolvedA)
+	if err != nil {
+		return false, err
+	}
+	infoB, err := os.Stat(resolvedB)
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(infoA, infoB), nil
+}
+
+// CheckAgentDocDivergence detects when AGENTS.md and CLAUDE.md exist as
+// independent regular files whose user-authored regions (everything outside
+// the BEGIN/END BEADS INTEGRATION markers) have drifted apart. Hand-edits to
+// only one of the pair are a common source of inconsistency; the warning
+// recommends symlinking, regenerating via bd setup, or reconciling manually.
+//
+// Skipped when:
+//   - Either file is missing
+//   - The files share an inode (hardlink) or one is a symlink to the other
+//   - The user-authored content matches after normalization
+func CheckAgentDocDivergence(repoPath string) DoctorCheck {
+	agentsFile := config.SafeAgentsFile()
+	agentsPath := filepath.Join(repoPath, agentsFile)
+	claudePath := filepath.Join(repoPath, "CLAUDE.md")
+
+	agentsInfo, errA := os.Lstat(agentsPath)
+	claudeInfo, errB := os.Lstat(claudePath)
+	if errA != nil || errB != nil {
+		return DoctorCheck{
+			Name:    "Agent Doc Divergence",
+			Status:  StatusOK,
+			Message: "N/A (one or both files missing)",
+		}
+	}
+
+	// If either side is a symlink, treat the pair as intentionally linked
+	// and skip the divergence check.
+	if agentsInfo.Mode()&os.ModeSymlink != 0 || claudeInfo.Mode()&os.ModeSymlink != 0 {
+		return DoctorCheck{
+			Name:    "Agent Doc Divergence",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("%s and CLAUDE.md are linked", agentsFile),
+		}
+	}
+
+	// Hardlinked to the same inode — same file, no divergence possible.
+	if same, err := sameInode(agentsPath, claudePath); err == nil && same {
+		return DoctorCheck{
+			Name:    "Agent Doc Divergence",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("%s and CLAUDE.md share an inode", agentsFile),
+		}
+	}
+
+	agentsContent, err := os.ReadFile(agentsPath) // #nosec G304 - path under repoPath
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Agent Doc Divergence",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("Cannot read %s: %v", agentsFile, err),
+		}
+	}
+	claudeContent, err := os.ReadFile(claudePath) // #nosec G304 - path under repoPath
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Agent Doc Divergence",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("Cannot read CLAUDE.md: %v", err),
+		}
+	}
+
+	// Honor an explicit opt-out marker in either file. Some projects
+	// intentionally maintain distinct AGENTS.md and CLAUDE.md (different
+	// audiences, different reading orders). The marker lets them silence
+	// this check without losing the protection elsewhere.
+	const optOutMarker = "<!-- bd-doctor-divergence: ok -->"
+	if strings.Contains(string(agentsContent), optOutMarker) || strings.Contains(string(claudeContent), optOutMarker) {
+		return DoctorCheck{
+			Name:    "Agent Doc Divergence",
+			Status:  StatusOK,
+			Message: "Divergence check opted out via marker",
+		}
+	}
+
+	if normalizeUserAuthored(string(agentsContent)) == normalizeUserAuthored(string(claudeContent)) {
+		return DoctorCheck{
+			Name:    "Agent Doc Divergence",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("%s and CLAUDE.md user-authored content matches", agentsFile),
+		}
+	}
+
+	return DoctorCheck{
+		Name:    "Agent Doc Divergence",
+		Status:  StatusWarning,
+		Message: fmt.Sprintf("%s and CLAUDE.md user-authored content has diverged", agentsFile),
+		Detail: "Both files exist as independent regular files (not symlinked, different inodes),\n" +
+			"  but their content outside the <!-- BEGIN/END BEADS INTEGRATION --> markers differs.\n" +
+			"  Hand-edits to only one of the pair are a common cause.",
+		Fix: "Reconcile the two files using one of:\n" +
+			"\n" +
+			"  (a) Symlink one to the other so future edits stay in sync:\n" +
+			"      ln -sf " + agentsFile + " CLAUDE.md\n" +
+			"\n" +
+			"  (b) Regenerate the managed sections (preserves user-authored content\n" +
+			"      from AGENTS.md as the source of truth):\n" +
+			"      bd setup claude && bd setup codex\n" +
+			"\n" +
+			"  (c) Reconcile manually — diff the files and copy the intended\n" +
+			"      user-authored content into both:\n" +
+			"      diff " + agentsFile + " CLAUDE.md\n" +
+			"\n" +
+			"  (d) If the divergence is intentional (e.g. distinct audiences for\n" +
+			"      each file), opt out by adding this HTML comment anywhere in\n" +
+			"      either file:\n" +
+			"      <!-- bd-doctor-divergence: ok -->",
+	}
+}
+
 // CheckDatabaseConfig verifies that the configured database path matches what
 // actually exists on disk. For Dolt backends, data is on the server. For legacy
 // backends, this checks that .db files match the configuration.

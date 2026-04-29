@@ -461,3 +461,157 @@ func TestCheckFreshClone(t *testing.T) {
 		})
 	}
 }
+
+func TestStripBeadsIntegrationSection(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no markers — content unchanged",
+			in:   "# Header\n\nUser content.\n",
+			want: "# Header\n\nUser content.\n",
+		},
+		{
+			name: "legacy markers stripped with trailing newline",
+			in:   "# Header\n<!-- BEGIN BEADS INTEGRATION -->\nManaged body\n<!-- END BEADS INTEGRATION -->\nFooter\n",
+			want: "# Header\nFooter\n",
+		},
+		{
+			name: "v1 markers stripped",
+			in:   "Pre\n<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:abcd1234 -->\nbody\n<!-- END BEADS INTEGRATION -->\nPost\n",
+			want: "Pre\nPost\n",
+		},
+		{
+			name: "missing END marker — left untouched",
+			in:   "<!-- BEGIN BEADS INTEGRATION -->\nbody without end\n",
+			want: "<!-- BEGIN BEADS INTEGRATION -->\nbody without end\n",
+		},
+		{
+			name: "END before BEGIN — left untouched",
+			in:   "<!-- END BEADS INTEGRATION -->\nstuff\n<!-- BEGIN BEADS INTEGRATION -->\n",
+			want: "<!-- END BEADS INTEGRATION -->\nstuff\n<!-- BEGIN BEADS INTEGRATION -->\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripBeadsIntegrationSection(tt.in); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeUserAuthored(t *testing.T) {
+	a := "# Header\n\nUser content.\n\n<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:aaaa1111 -->\nbody A\n<!-- END BEADS INTEGRATION -->\n"
+	b := "# Header\r\n\r\nUser content.   \r\n<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:bbbb2222 -->\nbody B is different\n<!-- END BEADS INTEGRATION -->\n\n"
+	if normalizeUserAuthored(a) != normalizeUserAuthored(b) {
+		t.Errorf("expected normalized equality despite CRLF, trailing space, and managed-section differences\nA: %q\nB: %q", normalizeUserAuthored(a), normalizeUserAuthored(b))
+	}
+
+	c := "# Header\n\nUser content.\n"
+	d := "# Header\n\nDIFFERENT user content.\n"
+	if normalizeUserAuthored(c) == normalizeUserAuthored(d) {
+		t.Error("expected divergent user-authored content to differ after normalization")
+	}
+}
+
+func TestCheckAgentDocDivergence(t *testing.T) {
+	const managed = "<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:abcd1234 -->\nManaged body\n<!-- END BEADS INTEGRATION -->\n"
+
+	t.Run("missing files — N/A ok", func(t *testing.T) {
+		tmp := t.TempDir()
+		check := CheckAgentDocDivergence(tmp)
+		if check.Status != StatusOK {
+			t.Errorf("expected ok when files missing, got %s", check.Status)
+		}
+	})
+
+	t.Run("matching user-authored content — ok", func(t *testing.T) {
+		tmp := t.TempDir()
+		body := "# Project\n\nShared instructions.\n\n" + managed
+		writeFile(t, tmp, "AGENTS.md", body)
+		writeFile(t, tmp, "CLAUDE.md", body)
+		check := CheckAgentDocDivergence(tmp)
+		if check.Status != StatusOK {
+			t.Errorf("expected ok for matching content, got %s (msg=%s)", check.Status, check.Message)
+		}
+	})
+
+	t.Run("matching content with different managed sections — ok", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, tmp, "AGENTS.md", "# Project\n\nShared instructions.\n\n"+managed)
+		writeFile(t, tmp, "CLAUDE.md", "# Project\n\nShared instructions.\n\n<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:99999999 -->\nDifferent managed body\n<!-- END BEADS INTEGRATION -->\n")
+		check := CheckAgentDocDivergence(tmp)
+		if check.Status != StatusOK {
+			t.Errorf("expected ok when only managed sections differ, got %s", check.Status)
+		}
+	})
+
+	t.Run("diverged user-authored content — warning with fix", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, tmp, "AGENTS.md", "# Project\n\nOriginal instructions.\n\n"+managed)
+		writeFile(t, tmp, "CLAUDE.md", "# Project\n\nHand-edited divergent instructions.\n\n"+managed)
+		check := CheckAgentDocDivergence(tmp)
+		if check.Status != StatusWarning {
+			t.Fatalf("expected warning, got %s (msg=%s)", check.Status, check.Message)
+		}
+		if check.Fix == "" {
+			t.Error("expected fix message")
+		}
+		if !strings.Contains(check.Fix, "ln -sf") {
+			t.Error("expected fix to suggest symlink option")
+		}
+		if !strings.Contains(check.Fix, "bd setup claude") {
+			t.Error("expected fix to suggest bd setup claude")
+		}
+	})
+
+	t.Run("opt-out marker silences divergence — ok", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, tmp, "AGENTS.md", "# Agents\n\n<!-- bd-doctor-divergence: ok -->\n\nFor agents.\n\n"+managed)
+		writeFile(t, tmp, "CLAUDE.md", "# Claude\n\nFor Claude with totally different content.\n\n"+managed)
+		check := CheckAgentDocDivergence(tmp)
+		if check.Status != StatusOK {
+			t.Errorf("expected ok with opt-out marker, got %s (msg=%s)", check.Status, check.Message)
+		}
+	})
+
+	t.Run("symlinked pair — skipped as ok", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, tmp, "AGENTS.md", "# Project\n\nInstructions.\n\n"+managed)
+		if err := os.Symlink("AGENTS.md", filepath.Join(tmp, "CLAUDE.md")); err != nil {
+			t.Skipf("symlink not supported in this environment: %v", err)
+		}
+		check := CheckAgentDocDivergence(tmp)
+		if check.Status != StatusOK {
+			t.Errorf("expected ok for symlinked pair, got %s (msg=%s)", check.Status, check.Message)
+		}
+	})
+
+	t.Run("hardlinked pair — skipped as ok", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, tmp, "AGENTS.md", "# Project\n\nInstructions.\n\n"+managed)
+		if err := os.Link(filepath.Join(tmp, "AGENTS.md"), filepath.Join(tmp, "CLAUDE.md")); err != nil {
+			t.Skipf("hardlink not supported in this environment: %v", err)
+		}
+		check := CheckAgentDocDivergence(tmp)
+		if check.Status != StatusOK {
+			t.Errorf("expected ok for hardlinked pair, got %s (msg=%s)", check.Status, check.Message)
+		}
+	})
+}
+
+func writeFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if d := filepath.Dir(path); d != dir {
+		if err := os.MkdirAll(d, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}

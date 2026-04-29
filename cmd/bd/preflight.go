@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 )
@@ -120,6 +121,10 @@ func runChecks(jsonOutput, skipLint bool) {
 	// Run version sync check
 	versionResult := runVersionSyncCheck()
 	results = append(results, versionResult)
+
+	// Run AGENTS.md / CLAUDE.md divergence check
+	divergenceResult := runAgentDocDivergenceCheck()
+	results = append(results, divergenceResult)
 
 	// Calculate overall result
 	allPassed := true
@@ -507,6 +512,40 @@ func runVersionSyncCheck() CheckResult {
 		Name:    "Version sync",
 		Passed:  true,
 		Output:  fmt.Sprintf("Versions match: %s", goVersion),
+		Command: command,
+	}
+}
+
+// runAgentDocDivergenceCheck flags drift between AGENTS.md and CLAUDE.md
+// user-authored regions so the inconsistency is caught pre-PR rather than in
+// review.
+func runAgentDocDivergenceCheck() CheckResult {
+	command := "bd doctor (Agent Doc Divergence)"
+
+	repoRoot := git.GetRepoRoot()
+	if repoRoot == "" {
+		repoRoot = "."
+	}
+	check := doctor.CheckAgentDocDivergence(repoRoot)
+	if check.Status == doctor.StatusOK {
+		return CheckResult{
+			Name:    "AGENTS.md/CLAUDE.md in sync",
+			Passed:  true,
+			Command: command,
+		}
+	}
+	output := check.Message
+	if check.Detail != "" {
+		output += "\n" + check.Detail
+	}
+	if check.Fix != "" {
+		output += "\n" + check.Fix
+	}
+	return CheckResult{
+		Name:    "AGENTS.md/CLAUDE.md in sync",
+		Passed:  false,
+		Warning: true,
+		Output:  output,
 		Command: command,
 	}
 }

@@ -1,8 +1,14 @@
 # Agent Instructions
 
+<!-- bd-doctor-divergence: ok -->
+
 See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full instructions.
 
 This file exists for compatibility with tools that look for AGENTS.md.
+
+The marker above tells `bd doctor` that the intentional divergence between
+this file and `CLAUDE.md` (different audiences, different reading orders) is
+expected and should not be flagged.
 
 ## Key Sections
 
