@@ -156,3 +156,83 @@ func TestLocalServerPushStillRequiresCLIDir(t *testing.T) {
 	// local server) or a connection error. Both are acceptable.
 	t.Logf("local server push error (expected): %v", err)
 }
+
+// TestRemoteServerCLIDirConflictDetected verifies that when a store is
+// connected to a remote Dolt server AND BEADS_DOLT_CLI_DIR is set, the
+// conflict is detected: isRemoteServer() returns true and CLIDir() is
+// non-empty. The warning emitted at init time depends on this detection.
+func TestRemoteServerCLIDirConflictDetected(t *testing.T) {
+	t.Parallel()
+
+	t.Setenv(EnvDoltCLIDir, "/tmp/fake-dolt-dir")
+
+	s := &DoltStore{
+		serverHost: "mini2",
+		serverMode: true,
+	}
+
+	if !s.isRemoteServer() {
+		t.Fatal("expected isRemoteServer() = true for host 'mini2'")
+	}
+	if s.CLIDir() == "" {
+		t.Fatal("expected CLIDir() non-empty when BEADS_DOLT_CLI_DIR is set")
+	}
+
+	// The warnCLIDirIgnoredForRemoteServer helper should return a non-empty
+	// warning string when both conditions hold.
+	msg := warnCLIDirIgnoredForRemoteServer(s)
+	if msg == "" {
+		t.Error("expected non-empty warning when remote server and BEADS_DOLT_CLI_DIR are both set")
+	}
+	if !strings.Contains(msg, "BEADS_DOLT_CLI_DIR") {
+		t.Errorf("warning should mention BEADS_DOLT_CLI_DIR, got: %s", msg)
+	}
+	if !strings.Contains(msg, "mini2") {
+		t.Errorf("warning should mention the remote host, got: %s", msg)
+	}
+}
+
+// TestNoWarningForLocalServerWithCLIDir verifies that a local server with
+// BEADS_DOLT_CLI_DIR set does NOT trigger the warning.
+func TestNoWarningForLocalServerWithCLIDir(t *testing.T) {
+	t.Parallel()
+
+	t.Setenv(EnvDoltCLIDir, "/tmp/fake-dolt-dir")
+
+	s := &DoltStore{
+		serverHost: "127.0.0.1",
+		serverMode: true,
+	}
+
+	if s.isRemoteServer() {
+		t.Fatal("localhost should not be a remote server")
+	}
+
+	msg := warnCLIDirIgnoredForRemoteServer(s)
+	if msg != "" {
+		t.Errorf("expected no warning for local server, got: %s", msg)
+	}
+}
+
+// TestNoWarningForRemoteServerWithoutCLIDir verifies that a remote server
+// without BEADS_DOLT_CLI_DIR does NOT trigger the warning.
+func TestNoWarningForRemoteServerWithoutCLIDir(t *testing.T) {
+	t.Parallel()
+
+	// Ensure env var is NOT set (t.Setenv restores after test).
+	t.Setenv(EnvDoltCLIDir, "")
+
+	s := &DoltStore{
+		serverHost: "mini2",
+		serverMode: true,
+	}
+
+	if !s.isRemoteServer() {
+		t.Fatal("expected isRemoteServer() = true")
+	}
+
+	msg := warnCLIDirIgnoredForRemoteServer(s)
+	if msg != "" {
+		t.Errorf("expected no warning when BEADS_DOLT_CLI_DIR is not set, got: %s", msg)
+	}
+}
