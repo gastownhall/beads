@@ -37,7 +37,7 @@ var CategoryOrder = []string{
 // DoctorCheck represents a single diagnostic check result
 type DoctorCheck struct {
 	Name     string `json:"name"`
-	Status   string `json:"status"` // StatusOK, StatusWarning, or StatusError
+	Status   string `json:"status"` // StatusOK, StatusWarning, StatusError, or StatusSkip
 	Message  string `json:"message"`
 	Detail   string `json:"detail,omitempty"`
 	Fix      string `json:"fix,omitempty"`

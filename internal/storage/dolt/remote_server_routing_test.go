@@ -147,15 +147,11 @@ func TestLocalServerPushStillRequiresCLIDir(t *testing.T) {
 
 	err := s.pushToRemote(t.Context(), "origin", false)
 	if err == nil {
-		// Local external server with credentials and no CLI dir should error
-		// at the credential guard or fall through to SQL. Either way is OK —
-		// the key invariant is that remote servers bypass the guard.
-		t.Log("push returned nil — local server routed to SQL path (acceptable)")
-		return
+		t.Fatal("expected CLI-dir error for local external server with credentials and no CLI dir")
 	}
-	// The error should be the CLI-dir error (credentials present, no CLI dir,
-	// local server) or a connection error. Both are acceptable.
-	t.Logf("local server push error (expected): %v", err)
+	if !strings.Contains(err.Error(), "requires a local Dolt CLI database directory") {
+		t.Fatalf("expected CLI-dir guard error, got: %v", err)
+	}
 }
 
 // --- Config conflict tests (BEADS_DOLT_CLI_DIR + remote server) ---

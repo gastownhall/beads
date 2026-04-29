@@ -718,7 +718,7 @@ func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
 // the full database to it, preserving complete commit history.
 func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 	if s.isRemoteServer() {
-		return fmt.Errorf("filesystem backup is not supported for remote dolt servers (host=%s); use JSONL export (bd backup export) or a cloud backup URL instead", s.serverHost)
+		return fmt.Errorf("filesystem backup is not supported for remote dolt servers (host=%s); use JSONL export (bd export -o /path/to/backup.jsonl) or a cloud backup URL instead", s.serverHost)
 	}
 
 	info, err := os.Stat(dir)

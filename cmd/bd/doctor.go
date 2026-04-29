@@ -975,7 +975,7 @@ func printDiagnostics(result doctorResult) {
 	fmt.Printf("\nbd doctor v%s", result.CLIVersion)
 	skipSuffix := ""
 	if skipCount > 0 {
-		skipSuffix = fmt.Sprintf("  %s %d skipped", ui.RenderMuted("◌"), skipCount)
+		skipSuffix = fmt.Sprintf("  %s %d skipped", ui.RenderMuted("○"), skipCount)
 	}
 	fmt.Printf("  %s  %s %d passed  %s %d warnings  %s %d errors%s\n",
 		ui.RenderSeparator(),
@@ -1080,7 +1080,11 @@ func printDiagnostics(result doctorResult) {
 		}
 	} else {
 		fmt.Println()
-		fmt.Printf("%s\n", ui.RenderPass("✓ All checks passed"))
+		if skipCount > 0 {
+			fmt.Printf("%s\n", ui.RenderPass("✓ All applicable checks passed"))
+		} else {
+			fmt.Printf("%s\n", ui.RenderPass("✓ All checks passed"))
+		}
 		if !doctorVerbose {
 			fmt.Printf("%s\n", ui.RenderMuted("Run with --verbose to see all checks"))
 		}
@@ -1113,7 +1117,7 @@ func printAllChecks(checksByCategory map[string][]doctorCheck) {
 			case statusOK:
 				statusIcon = ui.RenderPassIcon()
 			case statusSkip:
-				statusIcon = ui.RenderMuted("◌")
+				statusIcon = ui.RenderMuted("○")
 			case statusWarning:
 				statusIcon = ui.RenderWarnIcon()
 			case statusError:
@@ -1142,7 +1146,7 @@ func printAllChecks(checksByCategory map[string][]doctorCheck) {
 			case statusOK:
 				statusIcon = ui.RenderPassIcon()
 			case statusSkip:
-				statusIcon = ui.RenderMuted("◌")
+				statusIcon = ui.RenderMuted("○")
 			case statusWarning:
 				statusIcon = ui.RenderWarnIcon()
 			case statusError:
