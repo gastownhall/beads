@@ -481,3 +481,13 @@ func init() {
 	backupCmd.AddCommand(backupSyncCmd)
 	backupCmd.AddCommand(backupRemoveCmd)
 }
+
+// checkBackupSyncRemoteGuard validates that a remote server backup sync has
+// a cloud-compatible destination configured. Returns an error with guidance
+// when the server is remote but no cloud backup URL is set.
+// TODO: implement (stub for red test bc72bff1)
+func checkBackupSyncRemoteGuard(isRemote bool, cfg *doltBackupConfig) error {
+	_ = isRemote
+	_ = cfg
+	return nil
+}
