@@ -41,6 +41,28 @@ and credit their design/tests.
 
 See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelines.
 
+## Storage Boundary
+
+Beads talks to storage through a driver interface (`dolthub/driver` for Dolt).
+Beads code should not reach across that boundary — no flocks, no engine
+introspection, no storage-engine-specific retry or crash-recovery logic in
+beads packages. Concurrency, locking, and crash-safety are the driver's job.
+
+If you find yourself adding storage-implementation details to beads code —
+especially anywhere on the public SDK surface (`OpenBestAvailable`, the
+`Storage` interface, return types crossing `pkg/`) — stop and reconsider.
+That is a signal the driver interface needs widening, not that beads needs
+more storage logic.
+
+**Roadmap target:** all storage interaction lives behind the driver. Beads
+stays storage-agnostic.
+
+**Filing storage issues is still encouraged** — but flag them clearly so
+they can be routed to the driver (`dolthub/driver`) rather than patched
+beads-side. Reflexive workarounds in beads (extra locks, retries, schema
+poking) are exactly the kind of cross-boundary leak this direction is
+removing. When in doubt, file the issue and ask which side owns the fix.
+
 ## Agent Warning: Interactive Commands
 
 **DO NOT use `bd edit`** - it opens an interactive editor ($EDITOR) which AI agents cannot use.
