@@ -228,7 +228,7 @@ func normalizeUserAuthored(content string) string {
 }
 
 // sameInode reports whether two files refer to the same underlying inode
-// (hardlinked or one is a symlink resolving to the other). Falls back to
+// (hard-linked or one is a symlink resolving to the other). Falls back to
 // comparing resolved paths on platforms where syscall stat is unavailable.
 func sameInode(a, b string) (bool, error) {
 	resolvedA, err := filepath.EvalSymlinks(a)
@@ -288,7 +288,7 @@ func CheckAgentDocDivergence(repoPath string) DoctorCheck {
 		}
 	}
 
-	// Hardlinked to the same inode — same file, no divergence possible.
+	// Hard-linked to the same inode — same file, no divergence possible.
 	if same, err := sameInode(agentsPath, claudePath); err == nil && same {
 		return DoctorCheck{
 			Name:    "Agent Doc Divergence",
