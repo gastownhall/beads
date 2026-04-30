@@ -128,7 +128,10 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		// cloud backup destination. File-based Dolt backups send paths to
 		// the server, which fails for remote machines.
 		if isRemoteDoltServer() {
-			cfg, _ := loadDoltBackupConfig()
+			cfg, err := loadDoltBackupConfig()
+			if err != nil {
+				return fmt.Errorf("failed to read backup config: %w", err)
+			}
 			if err := checkBackupSyncRemoteGuard(true, cfg); err != nil {
 				return err
 			}
