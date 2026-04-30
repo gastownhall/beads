@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`bd init --force`** — deprecated alias for `--reinit-local`. Continues to work for ≥2 releases, emits a `DeprecationWarning`, routes internally to `--reinit-local`. Use `--reinit-local` going forward. CI and scripts are unaffected for the duration of the deprecation window.
 
+### Fixed
+
+- **`bd close <id>` in contributor auto-routing mode** — `bd close` now resolves IDs through the same routing fallback as `bd show` and `bd update`. Previously `bd close` errored with `no issue found matching <id>` in workspaces with `routing.mode=auto`, `routing.contributor=<path>`, and `beads.role=contributor` — even for IDs that `bd create` had just returned, because the issue lived in the routed planning store while `bd close` only checked the local primary. Bulk close (`bd close <id1> <id2> ...`) is also fixed; per-call resolution now shares one routed-store handle to avoid the [GH#3586](https://github.com/gastownhall/beads/pull/3586) flock-deadlock pattern when multiple IDs route to the same target. Fixes [#3608](https://github.com/gastownhall/beads/issues/3608).
+
 ## [1.0.3] - 2026-04-24
 
 ### Fixed

@@ -13,7 +13,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
@@ -108,23 +107,30 @@ create, update, show, or close operation).`,
 			FatalErrorRespectJSON("--suggest-next only works when closing a single issue")
 		}
 
-		// Resolve partial IDs
-		var resolvedIDs []string
-		for _, id := range args {
-			resolved, err := utils.ResolvePartialID(ctx, store, id)
-			if err != nil {
-				FatalErrorRespectJSON("resolving ID %s: %v", id, err)
-			}
-			resolvedIDs = append(resolvedIDs, resolved)
+		// Resolve partial IDs with routing fallback (beads-0km).
+		results, cleanup, resolveErr := resolveCloseTargets(ctx, store, args)
+		defer cleanup()
+		if resolveErr != nil {
+			FatalErrorRespectJSON("%v", resolveErr)
 		}
+		resolvedIDs := make([]string, 0, len(results))
+		for _, r := range results {
+			resolvedIDs = append(resolvedIDs, r.ResolvedID)
+		}
+
+		// Track which routed stores we mutated so we can flush each in embedded mode.
+		// Deduped by pointer; the local store is added unconditionally below.
+		mutatedStores := map[storage.DoltStorage]struct{}{}
 
 		// Direct mode
 		closedIssues := []*types.Issue{}
 		closedCount := 0
 
-		for _, id := range resolvedIDs {
+		for i, id := range resolvedIDs {
+			result := results[i]
+			activeStore := result.Store
 			// Get issue for checks (nil issue is handled by validateIssueClosable)
-			issue, _ := store.GetIssue(ctx, id)
+			issue := result.Issue
 
 			if err := validateIssueClosable(id, issue, force); err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
@@ -133,7 +139,7 @@ create, update, show, or close operation).`,
 
 			// Epic close guard: prevent closing epics with open children (mw-local-4so.5.2)
 			if !force && issue != nil && issue.IssueType == types.TypeEpic {
-				openChildren := countEpicOpenChildren(ctx, id)
+				openChildren := countEpicOpenChildren(ctx, activeStore, id)
 				if openChildren > 0 {
 					fmt.Fprintf(os.Stderr, "cannot close epic %s: %d open child issue(s); close children first or use --force to override\n", id, openChildren)
 					continue
@@ -150,7 +156,7 @@ create, update, show, or close operation).`,
 
 			// Check if issue has open blockers (GH#962)
 			if !force {
-				blocked, blockers, err := store.IsBlocked(ctx, id)
+				blocked, blockers, err := activeStore.IsBlocked(ctx, id)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error checking blockers for %s: %v\n", id, err)
 					continue
@@ -161,10 +167,11 @@ create, update, show, or close operation).`,
 				}
 			}
 
-			if err := store.CloseIssue(ctx, id, reason, actor, session); err != nil {
+			if err := activeStore.CloseIssue(ctx, id, reason, actor, session); err != nil {
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
+			mutatedStores[activeStore] = struct{}{}
 
 			// Audit log the close (survives Dolt GC flatten)
 			oldStatus := "open"
@@ -175,11 +182,12 @@ create, update, show, or close operation).`,
 
 			closedCount++
 
-			// Auto-close parent molecule if all steps are now complete
-			autoCloseCompletedMolecule(ctx, store, id, actor, session)
+			// Auto-close parent molecule if all steps are now complete.
+			// Runs against the same store the step was closed in.
+			autoCloseCompletedMolecule(ctx, activeStore, id, actor, session)
 
 			// Re-fetch for display
-			closedIssue, _ := store.GetIssue(ctx, id)
+			closedIssue, _ := activeStore.GetIssue(ctx, id)
 
 			if jsonOutput {
 				if closedIssue != nil {
@@ -190,9 +198,18 @@ create, update, show, or close operation).`,
 			}
 		}
 
+		// Pick a store for post-close work (--suggest-next, --continue, --claim-next).
+		// All three flags are documented as single-issue paths; for the multi-id case
+		// we use the first resolved ID's store, which matches the common case where
+		// every ID routes to the same place.
+		postCloseStore := store
+		if len(results) > 0 && results[0].Store != nil {
+			postCloseStore = results[0].Store
+		}
+
 		// Handle --suggest-next flag in direct mode
 		if suggestNext && len(resolvedIDs) == 1 && closedCount > 0 {
-			unblocked, err := store.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
+			unblocked, err := postCloseStore.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
 			if err == nil && len(unblocked) > 0 {
 				if jsonOutput {
 					outputJSON(map[string]interface{}{
@@ -211,7 +228,7 @@ create, update, show, or close operation).`,
 		// Handle --continue flag
 		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
 			autoClaim := !noAuto
-			result, err := AdvanceToNextStep(ctx, store, resolvedIDs[0], autoClaim, actor)
+			result, err := AdvanceToNextStep(ctx, postCloseStore, resolvedIDs[0], autoClaim, actor)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
@@ -230,7 +247,7 @@ create, update, show, or close operation).`,
 		// Handle --claim-next flag
 		var claimedNextIssue *types.Issue
 		if claimNext && closedCount > 0 && !continueFlag {
-			readyIssues, err := store.GetReadyWork(ctx, types.WorkFilter{
+			readyIssues, err := postCloseStore.GetReadyWork(ctx, types.WorkFilter{
 				Status:     "open",
 				Limit:      1,
 				SortPolicy: types.SortPolicy("priority"),
@@ -239,9 +256,10 @@ create, update, show, or close operation).`,
 				fmt.Fprintf(os.Stderr, "Warning: could not get ready issues: %v\n", err)
 			} else if len(readyIssues) > 0 {
 				nextIssue := readyIssues[0]
-				err := store.ClaimIssue(ctx, nextIssue.ID, actor)
+				err := postCloseStore.ClaimIssue(ctx, nextIssue.ID, actor)
 				if err == nil {
 					claimedNextIssue = nextIssue
+					mutatedStores[postCloseStore] = struct{}{}
 					if jsonOutput {
 						// JSON handled below
 					} else {
@@ -269,9 +287,16 @@ create, update, show, or close operation).`,
 
 		// Embedded mode: flush Dolt commit. DoltStore commits
 		// inline during CloseIssue so this is only needed for EmbeddedDoltStore.
-		if isEmbeddedMode() && closedCount > 0 && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				FatalErrorRespectJSON("failed to commit: %v", err)
+		// With contributor auto-routing, the close lands in the routed store, not
+		// the local one — flush every store we actually mutated.
+		if isEmbeddedMode() && closedCount > 0 {
+			for s := range mutatedStores {
+				if s == nil {
+					continue
+				}
+				if _, err := s.CommitPending(ctx, actor); err != nil {
+					FatalErrorRespectJSON("failed to commit: %v", err)
+				}
 			}
 		}
 
@@ -453,10 +478,83 @@ func resolveReasonFile(cmd *cobra.Command, existingReason string) (string, bool,
 	return content, true, nil
 }
 
+// resolveCloseTargets resolves a batch of partial issue IDs for `bd close`,
+// preserving input order. For each ID it tries the local store first, then a
+// shared contributor-routed store, then explicit prefix routing via routes.jsonl.
+//
+// Why "shared": opening the routed embeddeddolt store more than once in the same
+// process deadlocks on its flock (same class as GH#3586 / beads-i4s). Per-id
+// routing in close.go would hit that for every multi-id close where the IDs all
+// route to the same target — i.e. the common case. We open at most one routed
+// handle and reuse it for every routed ID; the cleanup func releases it.
+//
+// Each returned RoutedResult.Store points to whichever store actually owns the
+// issue. The caller invokes cleanup() once when done; per-result Close() is a
+// no-op for routed-via-shared-handle entries because they don't own the handle.
+func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, ids []string) ([]*RoutedResult, func(), error) {
+	results := make([]*RoutedResult, 0, len(ids))
+	var sharedRouted storage.DoltStorage
+	var sharedRoutedTried bool
+	cleanup := func() {
+		for _, r := range results {
+			r.Close()
+		}
+		if sharedRouted != nil {
+			_ = sharedRouted.Close()
+		}
+	}
+	ensureShared := func() (storage.DoltStorage, error) {
+		if sharedRouted != nil {
+			return sharedRouted, nil
+		}
+		if sharedRoutedTried {
+			return nil, fmt.Errorf("no auto-routed store available")
+		}
+		sharedRoutedTried = true
+		rs, routed, err := openRoutedReadStore(ctx, localStore)
+		if err != nil {
+			return nil, err
+		}
+		if !routed {
+			return nil, fmt.Errorf("no auto-routed store available")
+		}
+		sharedRouted = rs
+		return rs, nil
+	}
+	for _, id := range ids {
+		// Local first.
+		if r, err := resolveAndGetFromStore(ctx, localStore, id, false); err == nil {
+			results = append(results, r)
+			continue
+		} else if !isNotFoundErr(err) {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, err)
+		}
+		// Shared routed store (contributor auto-routing).
+		if rs, rerr := ensureShared(); rerr == nil {
+			if r, err := resolveAndGetFromStore(ctx, rs, id, true); err == nil {
+				// Per-id RoutedResult does not own the shared handle; cleanup() does.
+				results = append(results, r)
+				continue
+			}
+		}
+		// Last resort: prefix routing opens its own store; per-result Close() handles it.
+		if r, err := resolveViaPrefixRouting(ctx, id); err == nil {
+			results = append(results, r)
+			continue
+		}
+		cleanup()
+		return nil, func() {}, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
+	}
+	return results, cleanup, nil
+}
+
 // countEpicOpenChildren returns the number of open (non-closed) children for an epic.
 // Uses GetDependentsWithMetadata to find parent-child relationships.
-func countEpicOpenChildren(ctx context.Context, epicID string) int {
-	dependents, err := store.GetDependentsWithMetadata(ctx, epicID)
+// Takes an explicit store so callers can route to the store actually holding the epic
+// (relevant for contributor auto-routing where the epic lives in the planning repo).
+func countEpicOpenChildren(ctx context.Context, s storage.DoltStorage, epicID string) int {
+	dependents, err := s.GetDependentsWithMetadata(ctx, epicID)
 	if err != nil {
 		return 0
 	}
