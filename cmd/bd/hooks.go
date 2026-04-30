@@ -753,8 +753,14 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 		}
 	}
 
-	// Create hooks directory if it doesn't exist
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	// Create hooks directory if it doesn't exist.
+	// Directories inside .beads/ use BeadsDirPerm (0700); git-managed hook
+	// dirs (.git/hooks, .beads-hooks) use 0755 so git can execute them.
+	hooksDirPerm := os.FileMode(0755)
+	if beadsHooks {
+		hooksDirPerm = config.BeadsDirPerm
+	}
+	if err := os.MkdirAll(hooksDir, hooksDirPerm); err != nil {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
