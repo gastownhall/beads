@@ -248,6 +248,7 @@ func Initialize() error {
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+	v.SetDefault("ai.base_url", "") // Override AI provider base URL (e.g. https://api.minimax.io/anthropic)
 
 	// Output configuration (GH#1384)
 	// Controls title display in command feedback messages.
@@ -677,6 +678,16 @@ func Set(key string, value interface{}) {
 // Override via: bd config set ai.model "model-name" or BD_AI_MODEL=model-name
 func DefaultAIModel() string {
 	return GetString("ai.model")
+}
+
+// DefaultAIBaseURL returns the configured AI provider base URL, or empty string to use the SDK default.
+// Override via: bd config set ai.base_url "https://api.minimax.io/anthropic" or BD_AI_BASE_URL=...
+// For MiniMax, set MINIMAX_BASE_URL env var (default: https://api.minimax.io/anthropic when MINIMAX_API_KEY is set).
+func DefaultAIBaseURL() string {
+	if url := os.Getenv("MINIMAX_BASE_URL"); url != "" {
+		return url
+	}
+	return GetString("ai.base_url")
 }
 
 // AllSettings returns all configuration settings as a map

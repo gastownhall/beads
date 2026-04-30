@@ -43,11 +43,18 @@ type haikuClient struct {
 }
 
 // newHaikuClient creates a new Haiku API client.
-// API key resolution order: ANTHROPIC_API_KEY env var > ai.api_key config > explicit apiKey parameter.
+// API key resolution order: ANTHROPIC_API_KEY env var > MINIMAX_API_KEY env var > ai.api_key config > explicit apiKey parameter.
+// Base URL resolution order: MINIMAX_BASE_URL env var > ai.base_url config > default when using MINIMAX_API_KEY (https://api.minimax.io/anthropic).
+// To use MiniMax models (e.g. MiniMax-M2.7), set MINIMAX_API_KEY and configure ai.model accordingly.
 func newHaikuClient(apiKey string) (*haikuClient, error) {
+	usingMiniMax := false
+
 	envKey := os.Getenv("ANTHROPIC_API_KEY")
 	if envKey != "" {
 		apiKey = envKey
+	} else if minimaxKey := os.Getenv("MINIMAX_API_KEY"); minimaxKey != "" {
+		apiKey = minimaxKey
+		usingMiniMax = true
 	} else if configKey := config.GetString("ai.api_key"); configKey != "" {
 		apiKey = configKey
 	}
@@ -55,7 +62,17 @@ func newHaikuClient(apiKey string) (*haikuClient, error) {
 		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY environment variable or ai.api_key in config", errAPIKeyRequired)
 	}
 
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
+
+	baseURL := config.DefaultAIBaseURL()
+	if baseURL == "" && usingMiniMax {
+		baseURL = "https://api.minimax.io/anthropic"
+	}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+
+	client := anthropic.NewClient(opts...)
 
 	tier1Tmpl, err := template.New("tier1").Parse(tier1PromptTemplate)
 	if err != nil {

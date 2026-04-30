@@ -20,6 +20,7 @@ func (timeoutErr) Temporary() bool { return true }
 
 func TestNewHaikuClient_RequiresAPIKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 
 	_, err := newHaikuClient("")
 	if err == nil {
@@ -49,6 +50,47 @@ func TestNewHaikuClient_EnvVarOverridesExplicitKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "test-key-from-env")
 
 	client, err := newHaikuClient("test-key-explicit")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestNewHaikuClient_MiniMaxAPIKeyUsedAsFallback(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+	t.Setenv("MINIMAX_BASE_URL", "")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestNewHaikuClient_AnthropicKeyTakesPrecedenceOverMiniMax(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestNewHaikuClient_MiniMaxBaseURLOverride(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+	t.Setenv("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
+
+	client, err := newHaikuClient("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

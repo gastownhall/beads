@@ -36,7 +36,7 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
@@ -93,8 +93,8 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 
 	// AI method requires API key
 	if method == "ai" {
-		if os.Getenv("ANTHROPIC_API_KEY") == "" && config.GetString("ai.api_key") == "" {
-			FatalError("--method ai requires ANTHROPIC_API_KEY environment variable or ai.api_key in config")
+		if os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("MINIMAX_API_KEY") == "" && config.GetString("ai.api_key") == "" {
+			FatalError("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
 		}
 	}
 
@@ -363,10 +363,25 @@ func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold floa
 	fmt.Fprintf(os.Stderr, "Analyzing %d candidate pairs with AI...\n", len(candidates))
 
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	usingMiniMax := false
 	if apiKey == "" {
-		apiKey = config.GetString("ai.api_key")
+		if minimaxKey := os.Getenv("MINIMAX_API_KEY"); minimaxKey != "" {
+			apiKey = minimaxKey
+			usingMiniMax = true
+		} else {
+			apiKey = config.GetString("ai.api_key")
+		}
 	}
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+
+	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	baseURL := config.DefaultAIBaseURL()
+	if baseURL == "" && usingMiniMax {
+		baseURL = "https://api.minimax.io/anthropic"
+	}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	client := anthropic.NewClient(opts...)
 
 	var pairs []duplicatePair
 
