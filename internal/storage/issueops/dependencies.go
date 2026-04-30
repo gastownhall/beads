@@ -358,6 +358,15 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID st
 	for _, d := range deps {
 		issue, ok := issueMap[d.depID]
 		if !ok {
+			// Cross-rig dependency: target issue lives in a different Dolt
+			// database. Emit a placeholder with just the ID so callers see the
+			// dep edge instead of silently dropping it. CLI consumers should
+			// render zero-value Issues as "(cross-rig)".
+			// See bd-mtc / hq-mtc for context.
+			results = append(results, &types.IssueWithDependencyMetadata{
+				Issue:          types.Issue{ID: d.depID},
+				DependencyType: types.DependencyType(d.depType),
+			})
 			continue
 		}
 		results = append(results, &types.IssueWithDependencyMetadata{
@@ -421,6 +430,11 @@ func GetDependentsWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID stri
 	for _, d := range deps {
 		issue, ok := issueMap[d.depID]
 		if !ok {
+			// Cross-rig dependent: see GetDependenciesWithMetadataInTx for rationale.
+			results = append(results, &types.IssueWithDependencyMetadata{
+				Issue:          types.Issue{ID: d.depID},
+				DependencyType: types.DependencyType(d.depType),
+			})
 			continue
 		}
 		results = append(results, &types.IssueWithDependencyMetadata{

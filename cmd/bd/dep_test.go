@@ -1469,3 +1469,121 @@ func TestDepListCrossRigRouting(t *testing.T) {
 
 	t.Log("Successfully resolved cross-rig dependencies via routing")
 }
+
+// TestDepListCrossRigDepTarget is a regression test for bd-mtc / hq-mtc.
+//
+// Scenario: gt-child1 lives in rig DB "gt" and has a `blocks` dep on hq-foo
+// which lives in town DB "hq". The dependency row exists in the "gt" DB
+// (`dependencies` table), but the target issue (hq-foo) is NOT in "gt" — it's
+// in "hq".
+//
+// Bug (before fix): GetDependenciesWithMetadata silently dropped the dep row
+// because the target was missing from the local DB → bd dep list said
+// "no dependencies" and gt convoy stage saw zero edges.
+//
+// Fix: storage layer now emits a placeholder IssueWithDependencyMetadata
+// (Issue with only ID set) so callers see the dep edge.
+func TestDepListCrossRigDepTarget(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	rigBeadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatalf("Failed to create rig beads dir: %v", err)
+	}
+	rigDBPath := filepath.Join(rigBeadsDir, "dolt")
+	rigStore := newTestStoreIsolatedDB(t, rigDBPath, "gt")
+	defer rigStore.Close()
+
+	// Create gt-child1 in this rig DB. NOTE: hq-foo is NOT created here —
+	// it represents an issue that lives in a different rig's DB entirely.
+	child := &types.Issue{
+		ID:        "gt-child1",
+		Title:     "Child Issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := rigStore.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child issue: %v", err)
+	}
+
+	// gt-child1 depends on hq-foo (which doesn't exist in this DB).
+	// This mirrors how cross-rig deps are stored in production.
+	dep := &types.Dependency{
+		IssueID:     "gt-child1",
+		DependsOnID: "hq-foo",
+		Type:        types.DepBlocks,
+	}
+	if err := rigStore.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("Failed to add cross-rig dependency: %v", err)
+	}
+
+	// Down direction: gt-child1 should report depending on hq-foo (placeholder).
+	deps, err := rigStore.GetDependenciesWithMetadata(ctx, "gt-child1")
+	if err != nil {
+		t.Fatalf("GetDependenciesWithMetadata failed: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("Expected 1 dependency (placeholder for hq-foo), got %d", len(deps))
+	}
+	if deps[0].ID != "hq-foo" {
+		t.Errorf("Expected dependency on hq-foo, got %s", deps[0].ID)
+	}
+	if string(deps[0].DependencyType) != string(types.DepBlocks) {
+		t.Errorf("Expected dep type %q, got %q", types.DepBlocks, deps[0].DependencyType)
+	}
+	// Placeholder identification: title and status should be zero-value.
+	if deps[0].Title != "" {
+		t.Errorf("Expected empty Title for cross-rig placeholder, got %q", deps[0].Title)
+	}
+	if deps[0].Status != "" {
+		t.Errorf("Expected empty Status for cross-rig placeholder, got %q", deps[0].Status)
+	}
+
+	// Up direction: hq-foo should report being depended on by gt-child1.
+	// The local issue (gt-child1) is fully populated, no placeholder needed.
+	dependents, err := rigStore.GetDependentsWithMetadata(ctx, "hq-foo")
+	if err != nil {
+		t.Fatalf("GetDependentsWithMetadata failed: %v", err)
+	}
+	if len(dependents) != 1 {
+		t.Fatalf("Expected 1 dependent of hq-foo, got %d", len(dependents))
+	}
+	if dependents[0].ID != "gt-child1" {
+		t.Errorf("Expected dependent gt-child1, got %s", dependents[0].ID)
+	}
+
+	// Up direction with cross-rig dependent: simulate hq-foo being depended on
+	// by an issue (gt-child2) that is local to this rig — we already covered
+	// that above. Now test the inverse: a dep row points FROM a missing local
+	// issue TO a local issue. This shouldn't happen in practice (you can't
+	// create a dep from a non-existent issue) but exercise the placeholder
+	// path on the dependents query just to be safe.
+	otherDep := &types.Dependency{
+		IssueID:     "hq-bar",    // doesn't exist locally
+		DependsOnID: "gt-child1", // exists locally
+		Type:        types.DepBlocks,
+	}
+	if err := rigStore.AddDependency(ctx, otherDep, "test"); err != nil {
+		// Some stores may reject this if they validate issue existence;
+		// that's fine. Skip the rest if so.
+		t.Logf("Could not insert cross-rig dependent row (storage validates): %v", err)
+		return
+	}
+	dependents2, err := rigStore.GetDependentsWithMetadata(ctx, "gt-child1")
+	if err != nil {
+		t.Fatalf("GetDependentsWithMetadata after cross-rig dependent failed: %v", err)
+	}
+	// Expect both: gt-child1 (no, that's self) — actually gt-child2 from above
+	// doesn't exist; we expect at least one entry containing hq-bar placeholder.
+	foundPlaceholder := false
+	for _, d := range dependents2 {
+		if d.ID == "hq-bar" && d.Title == "" && d.Status == "" {
+			foundPlaceholder = true
+		}
+	}
+	if !foundPlaceholder {
+		t.Errorf("Expected hq-bar placeholder dependent of gt-child1, got %+v", dependents2)
+	}
+}

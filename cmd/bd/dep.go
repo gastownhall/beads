@@ -780,6 +780,13 @@ Examples:
 			default:
 				idStr = iss.ID
 			}
+			// Cross-rig placeholder: storage layer emits zero-value Issue
+			// (empty Title and Status) when the dep target lives in another
+			// rig DB. Render with a marker so users see the edge.
+			if iss.Title == "" && iss.Status == "" {
+				fmt.Printf("  %s: (cross-rig) via %s\n", idStr, iss.DependencyType)
+				continue
+			}
 			fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
 				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
 		}

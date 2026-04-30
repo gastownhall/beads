@@ -174,6 +174,15 @@ func (s *DoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID str
 	for _, d := range deps {
 		issue, ok := issueMap[d.depID]
 		if !ok {
+			// Cross-rig dependency: target issue lives in a different Dolt
+			// database. Emit a placeholder with just the ID so callers see the
+			// dep edge instead of silently dropping it. The Title/Status fields
+			// are zero-value; CLI consumers should render these as "(cross-rig)".
+			// See bd-mtc / hq-mtc for context.
+			results = append(results, &types.IssueWithDependencyMetadata{
+				Issue:          types.Issue{ID: d.depID},
+				DependencyType: types.DependencyType(d.depType),
+			})
 			continue
 		}
 		results = append(results, &types.IssueWithDependencyMetadata{
