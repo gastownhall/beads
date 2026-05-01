@@ -905,6 +905,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if err != nil {
 				e.warn("Failed to create %s in %s: %v", issue.ID, e.Tracker.DisplayName(), err)
 				stats.Errors++
+				if isRateLimitedErr(err) {
+					e.warn("Aborting push to %s: provider rate limit hit (%s); %d issue(s) skipped — retry after the cooldown", e.Tracker.DisplayName(), formatRateLimitWait(err), len(issues)-stats.Created-stats.Updated-stats.Skipped-stats.Errors)
+					return stats, nil
+				}
 				continue
 			}
 
@@ -946,6 +950,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if _, err := e.Tracker.UpdateIssue(ctx, extID, pushIssue); err != nil {
 				e.warn("Failed to update %s in %s: %v", issue.ID, e.Tracker.DisplayName(), err)
 				stats.Errors++
+				if isRateLimitedErr(err) {
+					e.warn("Aborting push to %s: provider rate limit hit (%s); remaining issues skipped — retry after the cooldown", e.Tracker.DisplayName(), formatRateLimitWait(err))
+					return stats, nil
+				}
 				continue
 			}
 			stats.Updated++
