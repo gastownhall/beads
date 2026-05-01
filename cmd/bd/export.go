@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -63,15 +64,22 @@ func init() {
 func runExport(cmd *cobra.Command, args []string) error {
 	ctx := rootCtx
 
-	// Determine output destination
+	// Determine output destination. File output uses atomic writes
+	// (temp file + rename) so concurrent exports and crashes never
+	// leave a truncated or interleaved JSONL file.
 	var w io.Writer
+	var aw *atomicfile.Writer
 	if exportOutput != "" {
-		f, err := os.Create(exportOutput) //nolint:gosec // user-provided output path
+		var err error
+		aw, err = atomicfile.Create(exportOutput, 0o644)
 		if err != nil {
 			return fmt.Errorf("failed to create output file: %w", err)
 		}
-		defer f.Close()
-		w = f
+		defer func() {
+			// Abort is a no-op if Close was already called.
+			_ = aw.Abort()
+		}()
+		w = aw
 	} else {
 		w = os.Stdout
 	}
@@ -218,10 +226,10 @@ func runExport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Sync to disk if writing to file
-	if f, ok := w.(*os.File); ok && f != os.Stdout {
-		if err := f.Sync(); err != nil {
-			return fmt.Errorf("failed to sync output file: %w", err)
+	// Finalize atomic write if writing to file (fsync + rename).
+	if aw != nil {
+		if err := aw.Close(); err != nil {
+			return fmt.Errorf("failed to finalize export file: %w", err)
 		}
 	}
 
