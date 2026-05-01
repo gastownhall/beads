@@ -10,7 +10,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +27,7 @@ func NewClient(token, owner, repo string) *Client {
 		HTTPClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
+		Retry: DefaultRetryConfig(),
 	}
 }
 
@@ -40,6 +40,7 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 		Owner:      c.Owner,
 		Repo:       c.Repo,
 		HTTPClient: httpClient,
+		Retry:      c.Retry,
 	}
 }
 
@@ -52,6 +53,7 @@ func (c *Client) WithBaseURL(baseURL string) *Client {
 		Owner:      c.Owner,
 		Repo:       c.Repo,
 		HTTPClient: c.HTTPClient,
+		Retry:      c.Retry,
 	}
 }
 
@@ -71,8 +73,14 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 		reqBody = bytes.NewReader(jsonBody)
 	}
 
+	retry := c.Retry
+	if retry.MaxRetries == 0 && retry.BaseDelay == 0 && retry.SecondaryMinDelay == 0 {
+		retry = DefaultRetryConfig()
+	}
+
 	var lastErr error
-	for attempt := 0; attempt <= MaxRetries; attempt++ {
+	var lastRateLimit *RateLimitError
+	for attempt := 0; attempt <= retry.MaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create request: %w", err)
@@ -87,7 +95,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, MaxRetries+1, err)
+			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, retry.MaxRetries+1, err)
 			continue
 		}
 
@@ -96,7 +104,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 		_ = resp.Body.Close()
 		if err != nil {
-			lastErr = fmt.Errorf("failed to read response (attempt %d/%d): %w", attempt+1, MaxRetries+1, err)
+			lastErr = fmt.Errorf("failed to read response (attempt %d/%d): %w", attempt+1, retry.MaxRetries+1, err)
 			continue
 		}
 
@@ -104,39 +112,55 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 			return respBody, resp.Header, nil
 		}
 
-		// Retry on rate-limiting and server errors with exponential backoff.
-		retriable := resp.StatusCode == http.StatusTooManyRequests ||
-			resp.StatusCode == http.StatusForbidden || // GitHub returns 403 for secondary rate limits
-			resp.StatusCode == http.StatusInternalServerError ||
+		// Classify 403/429 as either a rate limit (retryable, typed error) or
+		// an auth failure (not retryable). Auth failures must surface
+		// immediately so the user sees the real cause instead of a generic
+		// "transient error 403 (attempt 4/4)" message.
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			if rlErr := classifyRateLimit(resp.Header, respBody, resp.StatusCode, urlStr); rlErr != nil {
+				lastRateLimit = rlErr
+				delay := computeRetryDelay(rlErr, attempt, retry)
+				lastErr = rlErr
+				select {
+				case <-ctx.Done():
+					return nil, nil, ctx.Err()
+				case <-time.After(delay):
+					if body != nil {
+						jsonBody, err := json.Marshal(body)
+						if err != nil {
+							lastErr = fmt.Errorf("retry marshal failed: %w", err)
+							continue
+						}
+						reqBody = bytes.NewReader(jsonBody)
+					}
+					continue
+				}
+			}
+			if resp.StatusCode == http.StatusForbidden {
+				return nil, nil, &AuthError{
+					StatusCode: resp.StatusCode,
+					Message:    extractGitHubMessage(respBody),
+					URL:        urlStr,
+				}
+			}
+		}
+
+		// Retry on transient server errors with exponential backoff + jitter.
+		retriable := resp.StatusCode == http.StatusInternalServerError ||
 			resp.StatusCode == http.StatusBadGateway ||
 			resp.StatusCode == http.StatusServiceUnavailable ||
 			resp.StatusCode == http.StatusGatewayTimeout
 
 		if retriable {
-			delay := RetryDelay * time.Duration(1<<attempt)
-			useServerDelay := false
-
-			// Use Retry-After header if present (no jitter — respect server-mandated delay)
-			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-				if seconds, err := strconv.Atoi(retryAfter); err == nil {
-					delay = time.Duration(seconds) * time.Second
-					useServerDelay = true
-				}
+			delay := exponentialBackoff(retry.BaseDelay, attempt, retry.MaxBackoff)
+			if half := int64(delay / 2); half > 0 {
+				delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
 			}
-
-			// Only add jitter to our own exponential backoff, not server-mandated delays
-			if !useServerDelay {
-				if half := int64(delay / 2); half > 0 {
-					delay += time.Duration(rand.Int64N(half)) //nolint:gosec // G404: jitter for retry backoff does not need crypto rand
-				}
-			}
-
-			lastErr = fmt.Errorf("transient error %d (attempt %d/%d)", resp.StatusCode, attempt+1, MaxRetries+1)
+			lastErr = fmt.Errorf("transient error %d (attempt %d/%d): %s", resp.StatusCode, attempt+1, retry.MaxRetries+1, extractGitHubMessage(respBody))
 			select {
 			case <-ctx.Done():
 				return nil, nil, ctx.Err()
 			case <-time.After(delay):
-				// Reset body reader for retry
 				if body != nil {
 					jsonBody, err := json.Marshal(body)
 					if err != nil {
@@ -152,7 +176,57 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 		return nil, nil, fmt.Errorf("API error: %s (status %d)", string(respBody), resp.StatusCode)
 	}
 
-	return nil, nil, fmt.Errorf("max retries (%d) exceeded: %w", MaxRetries+1, lastErr)
+	// Preserve the typed rate-limit error so callers (the bulk-push engine)
+	// can react to it via errors.As — the engine needs to pause the loop on
+	// a sustained rate limit, which a generic "max retries" error hides.
+	if lastRateLimit != nil {
+		return nil, nil, lastRateLimit
+	}
+	return nil, nil, fmt.Errorf("max retries (%d) exceeded: %w", retry.MaxRetries+1, lastErr)
+}
+
+// computeRetryDelay returns how long to wait before the next attempt for a
+// classified rate-limit response. Honors Retry-After when present (server
+// knows best); otherwise enforces SecondaryMinDelay for secondary limits and
+// sleeps until ResetAt for primary limits.
+func computeRetryDelay(rlErr *RateLimitError, attempt int, retry RetryConfig) time.Duration {
+	if rlErr.RetryAfter > 0 {
+		return rlErr.RetryAfter
+	}
+	exp := exponentialBackoff(retry.BaseDelay, attempt, retry.MaxBackoff)
+	switch rlErr.Kind {
+	case RateLimitPrimary:
+		if !rlErr.ResetAt.IsZero() {
+			if d := time.Until(rlErr.ResetAt); d > 0 {
+				return d
+			}
+		}
+		return exp
+	case RateLimitSecondary:
+		if exp < retry.SecondaryMinDelay {
+			return retry.SecondaryMinDelay
+		}
+		return exp
+	default:
+		return exp
+	}
+}
+
+// exponentialBackoff returns base * 2^attempt, capped at maxBackoff. A
+// zero or negative maxBackoff disables the cap.
+func exponentialBackoff(base time.Duration, attempt int, maxBackoff time.Duration) time.Duration {
+	if base <= 0 {
+		base = time.Second
+	}
+	// Guard against shift overflow on large attempt counts.
+	if attempt > 30 {
+		attempt = 30
+	}
+	d := base * time.Duration(1<<attempt)
+	if maxBackoff > 0 && d > maxBackoff {
+		return maxBackoff
+	}
+	return d
 }
 
 // nextPageURL extracts the next page URL from GitHub's Link header.
