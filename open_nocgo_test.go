@@ -27,7 +27,7 @@ func TestOpenBestAvailable_NoCGO_EmbeddedMode_ReturnsError(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, _, err := beads.OpenBestAvailable(ctx, beadsDir)
+	_, err := beads.OpenBestAvailable(ctx, beadsDir)
 	if err == nil {
 		t.Fatal("expected error for embedded mode without CGO")
 	}
@@ -45,7 +45,7 @@ func TestOpenBestAvailable_NoCGO_NoMetadata_ReturnsError(t *testing.T) {
 	// No metadata.json — embedded is the default, CGO required.
 
 	ctx := context.Background()
-	_, _, err := beads.OpenBestAvailable(ctx, beadsDir)
+	_, err := beads.OpenBestAvailable(ctx, beadsDir)
 	if err == nil {
 		t.Fatal("expected error for embedded mode without CGO")
 	}
@@ -85,7 +85,7 @@ func TestOpenBestAvailable_NoCGO_ServerMode_FailsWithoutServer(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, _, openErr := beads.OpenBestAvailable(ctx, beadsDir)
+	_, openErr := beads.OpenBestAvailable(ctx, beadsDir)
 	if openErr == nil {
 		t.Fatal("OpenBestAvailable (server mode) should fail when no server is running")
 	}

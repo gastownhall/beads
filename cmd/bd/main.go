@@ -1016,7 +1016,7 @@ var rootCmd = &cobra.Command{
 		// Skip auto-import when the user is explicitly running "bd import" —
 		// the import command handles JSONL files itself and auto-importing
 		// first would interfere (double-import / upsert confusion).
-		if store != nil && !useReadOnly && !globalFlag && cmd.Name() != "import" {
+		if store != nil && !useReadOnly && !globalFlag && cmd.Name() != "import" && cmd.Name() != "promote" {
 			maybeAutoImportJSONL(rootCtx, store, beadsDir)
 		}
 

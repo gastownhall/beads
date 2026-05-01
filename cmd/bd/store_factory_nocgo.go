@@ -20,7 +20,7 @@ func isEmbeddedMode() bool {
 
 // newDoltStore creates a server-mode storage backend. Embedded Dolt is not
 // available without CGO.
-func newDoltStore(ctx context.Context, cfg *dolt.Config, _ ...embeddeddolt.Option) (storage.DoltStorage, error) {
+func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
 	if !cfg.ServerMode {
 		return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 	}
