@@ -10,13 +10,25 @@ import (
 	"time"
 )
 
-// AuthError indicates a GitHub 403 that is NOT a rate limit — typically a
-// missing/expired token or insufficient scopes. Auth errors must not be
-// retried: the response will not change without operator intervention.
+// HTTP header names. Defined as constants to avoid silent typos in
+// rate-limit detection.
+const (
+	headerAccept             = "Accept"
+	headerAPIVersion         = "X-GitHub-Api-Version"
+	headerContentType        = "Content-Type"
+	headerRetryAfter         = "Retry-After"
+	headerRateLimitRemaining = "X-RateLimit-Remaining"
+	headerRateLimitReset     = "X-RateLimit-Reset"
+	headerRateLimitLimit     = "X-RateLimit-Limit"
+	headerRateLimitResource  = "X-RateLimit-Resource"
+)
+
+// AuthError indicates a GitHub 403/401 that is not a rate limit (bad token,
+// missing scopes, IP allowlist, etc.). Auth errors are not retried.
 type AuthError struct {
-	StatusCode int    // HTTP status (403 for auth, sometimes 401)
-	Message    string // GitHub "message" field from the JSON error body
-	URL        string // Request URL that triggered the error
+	StatusCode int
+	Message    string
+	URL        string
 }
 
 func (e *AuthError) Error() string {
@@ -26,22 +38,16 @@ func (e *AuthError) Error() string {
 	return fmt.Sprintf("github auth error (status %d)", e.StatusCode)
 }
 
-// RateLimitErrorKind distinguishes the GitHub rate-limit flavors that require
-// different client responses. Primary limits expose x-ratelimit-* headers and
-// reset on a known schedule; secondary limits do not, and require a
-// 60-second-minimum backoff per GitHub's published guidance.
+// RateLimitErrorKind distinguishes primary (header-driven) from secondary
+// (body-driven) GitHub rate limits, which require different backoff strategies.
 type RateLimitErrorKind int
 
 const (
-	// RateLimitPrimary is the documented 5000/hr (or similar) per-token cap.
-	// Signaled by x-ratelimit-remaining=0; the reset epoch is reliable.
+	// RateLimitPrimary is the documented per-token cap, signaled by
+	// X-RateLimit-Remaining=0 with a reliable reset epoch.
 	RateLimitPrimary RateLimitErrorKind = iota
-
-	// RateLimitSecondary covers the undocumented "abuse" / content-creation /
-	// concurrent-request limits. Signaled by a 403/429 whose body mentions
-	// "secondary rate limit" or "abuse", or by the presence of Retry-After
-	// without x-ratelimit-remaining=0. Per GitHub docs, clients should wait
-	// at least one minute when no Retry-After is provided.
+	// RateLimitSecondary covers abuse / content-creation / concurrency limits.
+	// GitHub recommends a 60-second minimum backoff when no Retry-After is sent.
 	RateLimitSecondary
 )
 
@@ -56,28 +62,22 @@ func (k RateLimitErrorKind) String() string {
 	}
 }
 
-// RateLimitError represents a GitHub-imposed rate limit. It carries enough
-// signal for the bulk-push engine to react appropriately — pause the loop,
-// honor a server-mandated delay, or surface a clear message to the user.
+// RateLimitError represents a GitHub-imposed rate limit.
 type RateLimitError struct {
 	Kind       RateLimitErrorKind
-	StatusCode int           // 403 or 429
-	RetryAfter time.Duration // From Retry-After header; 0 if not present
-	ResetAt    time.Time     // From x-ratelimit-reset; zero if not present
-	Remaining  int           // From x-ratelimit-remaining; -1 if not present
-	Limit      int           // From x-ratelimit-limit; -1 if not present
-	Resource   string        // From x-ratelimit-resource (e.g. "core", "search")
-	Message    string        // GitHub "message" field from the JSON error body
-	URL        string        // Request URL that triggered the error
+	StatusCode int
+	RetryAfter time.Duration // 0 if Retry-After was not present
+	ResetAt    time.Time     // zero if X-RateLimit-Reset was not present
+	Remaining  int           // -1 if absent
+	Limit      int           // -1 if absent
+	Resource   string
+	Message    string
+	URL        string
 }
 
-// RateLimitRetryAfter implements the tracker.RateLimitedError interface so
-// the bulk-push engine can detect a GitHub rate limit without importing this
-// package. Returns the most authoritative wait duration available:
-//
-//  1. Server-supplied Retry-After (highest priority)
-//  2. For primary limits, the time until ResetAt
-//  3. For secondary limits, the GitHub-recommended 60s minimum
+// RateLimitRetryAfter implements tracker.RateLimitedError. Returns
+// Retry-After if set, else time-until-reset for primary limits, else the
+// 60-second secondary minimum.
 func (e *RateLimitError) RateLimitRetryAfter() time.Duration {
 	if e.RetryAfter > 0 {
 		return e.RetryAfter
@@ -110,27 +110,17 @@ func (e *RateLimitError) Error() string {
 	return strings.Join(parts, ": ")
 }
 
-// RetryConfig controls retry behavior for the GitHub client. Zero values are
-// replaced with safe defaults inside NewClient.
+// RetryConfig controls retry behavior for the GitHub client.
 type RetryConfig struct {
-	// MaxRetries is the maximum number of retries (so the client makes up to
-	// MaxRetries+1 attempts total).
 	MaxRetries int
-
-	// BaseDelay is the starting exponential-backoff delay. Doubles per attempt.
-	BaseDelay time.Duration
-
-	// SecondaryMinDelay is the minimum delay between attempts when GitHub
-	// returns a secondary rate limit without a Retry-After header. Per
-	// docs.github.com this should be at least 60 seconds.
+	BaseDelay  time.Duration
+	// SecondaryMinDelay is the floor when GitHub returns a secondary rate
+	// limit without a Retry-After header. Per docs.github.com this should be
+	// at least 60 seconds.
 	SecondaryMinDelay time.Duration
-
-	// MaxBackoff caps the exponential backoff so a sustained outage doesn't
-	// extend an individual delay past this value.
-	MaxBackoff time.Duration
+	MaxBackoff        time.Duration
 }
 
-// DefaultRetryConfig returns the production retry configuration.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
 		MaxRetries:        5,
@@ -140,9 +130,8 @@ func DefaultRetryConfig() RetryConfig {
 	}
 }
 
-// classifyRateLimit inspects a response and returns a *RateLimitError if the
-// response represents a rate limit, or nil otherwise. It does not look at the
-// status code — caller is responsible for restricting this to 403/429.
+// classifyRateLimit returns a *RateLimitError if the response carries any
+// GitHub rate-limit signal. Caller must restrict invocation to 403/429.
 func classifyRateLimit(headers http.Header, body []byte, statusCode int, urlStr string) *RateLimitError {
 	if !isRateLimited(headers, body) {
 		return nil
@@ -150,17 +139,17 @@ func classifyRateLimit(headers http.Header, body []byte, statusCode int, urlStr 
 
 	rlErr := &RateLimitError{
 		StatusCode: statusCode,
-		Remaining:  parseHeaderInt(headers, "X-RateLimit-Remaining", -1),
-		Limit:      parseHeaderInt(headers, "X-RateLimit-Limit", -1),
-		Resource:   headers.Get("X-RateLimit-Resource"),
+		Remaining:  parseHeaderInt(headers, headerRateLimitRemaining, -1),
+		Limit:      parseHeaderInt(headers, headerRateLimitLimit, -1),
+		Resource:   headers.Get(headerRateLimitResource),
 		Message:    extractGitHubMessage(body),
 		URL:        urlStr,
 	}
 
-	if reset := parseHeaderInt(headers, "X-RateLimit-Reset", 0); reset > 0 {
+	if reset := parseHeaderInt(headers, headerRateLimitReset, 0); reset > 0 {
 		rlErr.ResetAt = time.Unix(int64(reset), 0)
 	}
-	if ra := headers.Get("Retry-After"); ra != "" {
+	if ra := headers.Get(headerRetryAfter); ra != "" {
 		if seconds, err := strconv.Atoi(ra); err == nil {
 			rlErr.RetryAfter = time.Duration(seconds) * time.Second
 		} else if t, err := http.ParseTime(ra); err == nil {
@@ -170,8 +159,8 @@ func classifyRateLimit(headers http.Header, body []byte, statusCode int, urlStr 
 		}
 	}
 
-	// Disambiguate primary vs. secondary. Primary is the only kind that sets
-	// x-ratelimit-remaining=0 — secondary limits never expose remaining=0.
+	// Primary limits set Remaining=0 and a reset epoch. Secondary limits
+	// never expose Remaining=0; everything else routes there.
 	if rlErr.Remaining == 0 {
 		rlErr.Kind = RateLimitPrimary
 	} else {
@@ -180,8 +169,6 @@ func classifyRateLimit(headers http.Header, body []byte, statusCode int, urlStr 
 	return rlErr
 }
 
-// parseHeaderInt parses a header value as an int, returning fallback on error
-// or absence.
 func parseHeaderInt(headers http.Header, key string, fallback int) int {
 	v := headers.Get(key)
 	if v == "" {
@@ -194,36 +181,35 @@ func parseHeaderInt(headers http.Header, key string, fallback int) int {
 	return n
 }
 
-// rateLimitBodyMarkers are case-insensitive substrings GitHub uses in the
-// JSON error body to indicate a secondary / abuse rate limit. Per
-// https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api,
-// these are the only reliable signal — secondary limits do NOT set
-// x-ratelimit-remaining=0.
+// rateLimitBodyMarkers are the documented substrings GitHub uses in its JSON
+// error message to indicate a secondary / abuse rate limit. Required because
+// secondary limits do NOT set X-RateLimit-Remaining=0, so headers alone are
+// not sufficient.
 var rateLimitBodyMarkers = []string{
 	"secondary rate limit",
 	"abuse",
-	"rate limit",
 }
 
-// isRateLimited reports whether a response carries any GitHub-recognized
-// rate-limit signal. It returns true when ANY of the following hold:
-//   - the Retry-After header is present (server explicitly asks us to wait),
-//   - x-ratelimit-remaining is "0" (primary limit exhausted),
-//   - the JSON error body matches one of rateLimitBodyMarkers.
-//
-// Used to disambiguate a rate-limited 403 (retryable) from an auth-failure
-// 403 (not retryable).
+// scanBytes caps body inspection to avoid lowercasing a 50MB response just
+// to detect a marker that would only ever appear in the first few hundred
+// bytes of a JSON error envelope.
+const scanBytes = 4096
+
 func isRateLimited(headers http.Header, body []byte) bool {
-	if headers.Get("Retry-After") != "" {
+	if headers.Get(headerRetryAfter) != "" {
 		return true
 	}
-	if headers.Get("X-RateLimit-Remaining") == "0" {
+	if headers.Get(headerRateLimitRemaining) == "0" {
 		return true
 	}
 	if len(body) == 0 {
 		return false
 	}
-	lower := bytes.ToLower(body)
+	head := body
+	if len(head) > scanBytes {
+		head = head[:scanBytes]
+	}
+	lower := bytes.ToLower(head)
 	for _, marker := range rateLimitBodyMarkers {
 		if bytes.Contains(lower, []byte(marker)) {
 			return true
@@ -233,17 +219,24 @@ func isRateLimited(headers http.Header, body []byte) bool {
 }
 
 // extractGitHubMessage returns the "message" field from a GitHub JSON error
-// body, or an empty string if it cannot be parsed. GitHub's standard error
-// shape is {"message": "...", "documentation_url": "..."}.
+// body, or a clamped raw-body fallback for non-JSON responses (e.g. CDN
+// error pages).
 func extractGitHubMessage(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	var env struct {
-		Message string `json:"message"`
+	if body[0] == '{' {
+		var env struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(body, &env); err == nil {
+			return env.Message
+		}
 	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return strings.TrimSpace(string(body))
+	const maxRaw = 200
+	s := strings.TrimSpace(string(body))
+	if len(s) > maxRaw {
+		return s[:maxRaw] + "…"
 	}
-	return env.Message
+	return s
 }

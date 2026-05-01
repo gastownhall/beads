@@ -6,33 +6,28 @@ import (
 	"time"
 )
 
-// RateLimitedError is implemented by errors returned from a Tracker when the
-// underlying provider has rate-limited the request. The push loop uses it to
-// distinguish "the server told us to slow down" from any other failure, so
-// it can stop hammering the API instead of cascading the same failure across
-// every remaining issue.
-//
-// Provider-specific error types (e.g. github.RateLimitError) implement this
-// interface via a method on their concrete type. The tracker package does not
-// import any provider package — it only relies on this duck-typed contract.
+// RateLimitedError is implemented by provider errors when the upstream API
+// has rate-limited the request. The push loop uses errors.As against this
+// interface to detect rate limiting without importing any provider package.
 type RateLimitedError interface {
 	error
-
-	// RateLimitRetryAfter returns how long the client should wait before
-	// retrying. Zero means "the server didn't tell us; assume default".
+	// RateLimitRetryAfter returns the wait before retrying. Zero means
+	// "the server didn't say".
 	RateLimitRetryAfter() time.Duration
 }
 
-// isRateLimitedErr reports whether err (or any wrapped cause) implements
-// RateLimitedError.
 func isRateLimitedErr(err error) bool {
 	var rl RateLimitedError
 	return errors.As(err, &rl)
 }
 
-// formatRateLimitWait returns a human-readable description of how long the
-// caller should wait before retrying the rate-limited operation. Returns
-// "unknown" when the underlying error did not specify.
+// warnRateLimitAbort emits the standard "we hit a provider rate limit, the
+// rest of the queue is left for next sync" message.
+func (e *Engine) warnRateLimitAbort(err error, remaining int) {
+	e.warn("Aborting push to %s: provider rate limit hit (%s); %d issue(s) skipped — retry after the cooldown",
+		e.Tracker.DisplayName(), formatRateLimitWait(err), remaining)
+}
+
 func formatRateLimitWait(err error) string {
 	var rl RateLimitedError
 	if !errors.As(err, &rl) {

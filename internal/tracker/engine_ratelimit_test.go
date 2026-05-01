@@ -11,22 +11,16 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// fakeRateLimitError satisfies the RateLimitedError interface used by the
-// push loop to detect provider-side rate limiting. We define it here (rather
-// than importing internal/github) to keep the tracker package free of any
-// dependency on a specific provider.
 type fakeRateLimitError struct {
 	retryAfter time.Duration
 	msg        string
 }
 
-func (e *fakeRateLimitError) Error() string { return e.msg }
-func (e *fakeRateLimitError) RateLimitRetryAfter() time.Duration {
-	return e.retryAfter
-}
+func (e *fakeRateLimitError) Error() string                      { return e.msg }
+func (e *fakeRateLimitError) RateLimitRetryAfter() time.Duration { return e.retryAfter }
 
-// countingMockTracker wraps mockTracker to count CreateIssue invocations
-// (including failures, which mockTracker.created does not capture).
+// countingMockTracker counts CreateIssue invocations including failures
+// (mockTracker.created only records successes).
 type countingMockTracker struct {
 	*mockTracker
 	createAttempts int32
@@ -41,12 +35,8 @@ func (m *countingMockTracker) CreateIssue(ctx context.Context, issue *types.Issu
 	return m.mockTracker.CreateIssue(ctx, issue)
 }
 
-// TestEnginePushAbortsLoopOnRateLimit asserts that when the underlying tracker
-// returns a RateLimitedError from CreateIssue, the push loop stops processing
-// the remaining queue instead of cascading the same failure across every
-// pending issue. This is the engine-side counterpart to the client fix:
-// without this, fixing the per-request retry math just produces a wall of
-// well-formatted rate-limit warnings instead of a wall of generic ones.
+// On a provider rate limit, the push loop must stop after the first failure
+// rather than re-running the same doomed request for every remaining issue.
 func TestEnginePushAbortsLoopOnRateLimit(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -66,15 +56,13 @@ func TestEnginePushAbortsLoopOnRateLimit(t *testing.T) {
 		}
 	}
 
-	mock := newMockTracker("test")
 	tracker := &countingMockTracker{
-		mockTracker: mock,
+		mockTracker: newMockTracker("test"),
 		failWith: &fakeRateLimitError{
 			retryAfter: 60 * time.Second,
 			msg:        "github secondary rate limit",
 		},
 	}
-
 	engine := NewEngine(tracker, store, "test-actor")
 
 	var warnings []string
@@ -85,28 +73,21 @@ func TestEnginePushAbortsLoopOnRateLimit(t *testing.T) {
 		t.Fatalf("Sync() error: %v", err)
 	}
 
-	attempts := atomic.LoadInt32(&tracker.createAttempts)
-	if attempts != 1 {
-		t.Errorf("expected push loop to abort after first rate-limit error: got %d CreateIssue attempts (want 1)", attempts)
+	if got := atomic.LoadInt32(&tracker.createAttempts); got != 1 {
+		t.Errorf("expected 1 CreateIssue attempt before abort, got %d", got)
 	}
-
-	// One create error is expected (the one we hit). The remaining N-1 should
-	// be reflected as skipped or simply not-attempted, NOT counted as errors —
-	// they were not actually rejected by the server.
 	if result.Stats.Errors > 1 {
 		t.Errorf("expected at most 1 error in stats, got %d", result.Stats.Errors)
 	}
 
-	// Should have emitted at least one warning that names the rate limit so the
-	// user understands why the push stopped early.
-	foundRateLimitWarning := false
+	found := false
 	for _, w := range warnings {
 		if strings.Contains(strings.ToLower(w), "rate limit") {
-			foundRateLimitWarning = true
+			found = true
 			break
 		}
 	}
-	if !foundRateLimitWarning {
+	if !found {
 		t.Errorf("expected a warning mentioning the rate limit, got: %v", warnings)
 	}
 }
