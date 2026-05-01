@@ -220,6 +220,46 @@ func TestDefaultSearchPaths_FallsBackToCwdFormulaDirWithoutBeadsProject(t *testi
 	}
 }
 
+func TestDefaultSearchPaths_IncludesCwdFormulaDirWithResolvedParentProject(t *testing.T) {
+	resetFormulaSearchTestContext(t)
+
+	root := t.TempDir()
+	parentFormulaDir := filepath.Join(root, ".beads", "formulas")
+	if err := os.MkdirAll(filepath.Join(root, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFormulaFixture(t, parentFormulaDir, "shared", "parent formula")
+
+	checkout := filepath.Join(root, "checkout")
+	checkoutFormulaDir := filepath.Join(checkout, ".beads", "formulas")
+	writeFormulaFixture(t, checkoutFormulaDir, "checkout-local", "checkout formula")
+
+	t.Chdir(checkout)
+	resetFormulaSearchCaches()
+
+	paths := DefaultSearchPaths()
+	if len(paths) < 2 {
+		t.Fatalf("DefaultSearchPaths() returned %d paths, want at least 2", len(paths))
+	}
+
+	gotResolved := canonicalTestPath(paths[0])
+	wantResolved := canonicalTestPath(parentFormulaDir)
+	if gotResolved != wantResolved {
+		t.Fatalf("DefaultSearchPaths()[0] = %q, want %q", gotResolved, wantResolved)
+	}
+
+	gotCwd := canonicalTestPath(paths[1])
+	wantCwd := canonicalTestPath(checkoutFormulaDir)
+	if gotCwd != wantCwd {
+		t.Fatalf("DefaultSearchPaths()[1] = %q, want %q", gotCwd, wantCwd)
+	}
+
+	parser := NewParser()
+	if _, err := parser.LoadByName("checkout-local"); err != nil {
+		t.Fatalf("LoadByName(checkout-local) failed: %v", err)
+	}
+}
+
 func TestValidate_ValidFormula(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",

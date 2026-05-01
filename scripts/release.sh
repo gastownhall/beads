@@ -128,9 +128,13 @@ if [ "$DRY_RUN" = true ]; then
     echo "Would create release molecule with:"
     echo "  bd mol wisp beads-release --var version=${VERSION}"
     echo ""
-    echo "The molecule has 29 steps:"
-    bd formula show beads-release 2>/dev/null | grep -E "^   [├└]" | head -15
-    echo "   ... (14 more steps)"
+    FORMULA_STEPS=$(bd formula show beads-release 2>/dev/null | grep -E "^   [├└]" || true)
+    STEP_COUNT=$(printf "%s\n" "$FORMULA_STEPS" | sed '/^$/d' | wc -l | tr -d ' ')
+    echo "The molecule has ${STEP_COUNT} steps:"
+    printf "%s\n" "$FORMULA_STEPS" | head -15
+    if [ "$STEP_COUNT" -gt 15 ]; then
+        echo "   ... ($((STEP_COUNT - 15)) more steps)"
+    fi
     echo ""
     echo -e "${BLUE}Why a molecule instead of a script?${NC}"
     echo "  • Each step is a ledger entry (your work history)"

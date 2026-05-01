@@ -79,7 +79,13 @@ func DefaultSearchPaths() []string {
 	// Project-level formulas via resolved beads directory.
 	if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
 		addPath(filepath.Join(beadsDir, "formulas"))
-	} else if cwd, err := os.Getwd(); err == nil {
+	}
+
+	// Checkout-local formulas should remain discoverable even when the active
+	// beads database resolves to a parent/shared .beads directory. This lets a
+	// repo ship workflow formulas under .beads/formulas without requiring every
+	// maintainer to copy them into ~/.beads.
+	if cwd, err := os.Getwd(); err == nil {
 		addPath(filepath.Join(cwd, ".beads", "formulas"))
 	}
 
