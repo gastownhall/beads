@@ -1,6 +1,6 @@
 # bd - Beads
 
-![bd — distributed graph issue tracker for AI agents. Persistent, structured memory that replaces messy markdown plans with a dependency-aware graph: hash IDs (bd-a3f8) prevent merge collisions, bd ready surfaces unblocked work, long-horizon tasks survive context windows. Powered by Dolt.](assets/hero.png)
+![bd — a memory upgrade for your coding agent. Animated demo: scattered markdown plans give way to a dependency graph of hash-based bd-IDs (bd-a3f8, bd-a3f8.1). bd ready surfaces unblocked work; bd update --claim atomically claims a task; closing one cascades downstream tasks from blocked to ready. Long-horizon work survives the session. Powered by Dolt.](assets/hero.gif)
 
 **Distributed graph issue tracker for AI agents, powered by [Dolt](https://github.com/dolthub/dolt).**
 
