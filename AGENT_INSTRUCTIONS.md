@@ -113,6 +113,14 @@ defer to the standard PR flow to keep changes reviewable.
 - When handling external contributor PRs, use fix-merge: checkout the PR
   branch locally, fix/rebase onto main, merge via PR, then close the PR
 
+### Maintainer PR Guidelines
+
+Before triaging, reviewing, landing, closing, or otherwise maintaining PRs,
+read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md). The
+maintainer policy is to maximize community throughput: find useful contributor
+value, absorb or transform it locally when practical, preserve attribution, and
+use request-changes only as a last resort.
+
 ### External Contributor PRs: Check Before You Build
 
 **Read [CONTRIBUTING.md](CONTRIBUTING.md)** — it contains promises we've made to contributors. Violating them damages trust and community.

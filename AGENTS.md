@@ -16,8 +16,15 @@ expected and should not be flagged.
 - **Development Guidelines** - Code standards and testing
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
 - **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs
+- **Maintainer PR Guidelines** - Read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md) before triaging, landing, or closing PRs
 
 ## PR Safety for Agents
+
+Before triaging, reviewing, landing, closing, or otherwise maintaining PRs, read
+[PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md). The maintainer
+policy is to maximize community throughput: find useful contributor value,
+absorb or transform it locally when practical, preserve attribution, and use
+request-changes only as a last resort.
 
 Before implementing work, opening a PR, or merging/closing a PR, run the PR
 preflight:
