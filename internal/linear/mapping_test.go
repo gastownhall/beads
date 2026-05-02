@@ -173,6 +173,18 @@ func TestDefaultMappingConfig(t *testing.T) {
 	if config.LabelTypeMap["feature"] != "feature" {
 		t.Errorf("LabelTypeMap[feature] = %s, want feature", config.LabelTypeMap["feature"])
 	}
+	if config.LabelTypeMap["decision"] != "decision" {
+		t.Errorf("LabelTypeMap[decision] = %s, want decision", config.LabelTypeMap["decision"])
+	}
+	if config.LabelTypeMap["spike"] != "spike" {
+		t.Errorf("LabelTypeMap[spike] = %s, want spike", config.LabelTypeMap["spike"])
+	}
+	if config.LabelTypeMap["story"] != "story" {
+		t.Errorf("LabelTypeMap[story] = %s, want story", config.LabelTypeMap["story"])
+	}
+	if config.LabelTypeMap["milestone"] != "milestone" {
+		t.Errorf("LabelTypeMap[milestone] = %s, want milestone", config.LabelTypeMap["milestone"])
+	}
 
 	// Check relation mappings
 	if config.RelationMap["blocks"] != "blocks" {
@@ -312,6 +324,10 @@ func TestLabelToIssueType(t *testing.T) {
 		{&Labels{Nodes: []Label{{Name: "feature"}}}, types.TypeFeature},
 		{&Labels{Nodes: []Label{{Name: "epic"}}}, types.TypeEpic},
 		{&Labels{Nodes: []Label{{Name: "chore"}}}, types.TypeChore},
+		{&Labels{Nodes: []Label{{Name: "decision"}}}, types.TypeDecision},
+		{&Labels{Nodes: []Label{{Name: "spike"}}}, types.TypeSpike},
+		{&Labels{Nodes: []Label{{Name: "story"}}}, types.TypeStory},
+		{&Labels{Nodes: []Label{{Name: "milestone"}}}, types.TypeMilestone},
 		{&Labels{Nodes: []Label{{Name: "random"}, {Name: "bug"}}}, types.TypeBug},
 		{&Labels{Nodes: []Label{{Name: "contains-bug-keyword"}}}, types.TypeBug},
 	}
@@ -335,6 +351,10 @@ func TestParseIssueType(t *testing.T) {
 		{"task", types.TypeTask},
 		{"epic", types.TypeEpic},
 		{"chore", types.TypeChore},
+		{"decision", types.TypeDecision},
+		{"spike", types.TypeSpike},
+		{"story", types.TypeStory},
+		{"milestone", types.TypeMilestone},
 		{"unknown", types.TypeTask}, // Default
 	}
 

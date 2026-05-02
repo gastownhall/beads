@@ -177,6 +177,10 @@ func DefaultMappingConfig() *MappingConfig {
 			"chore":       "chore",
 			"maintenance": "chore",
 			"task":        "task",
+			"decision":    "decision",
+			"spike":       "spike",
+			"story":       "story",
+			"milestone":   "milestone",
 		},
 		// Linear relation types to Beads dependency types
 		RelationMap: map[string]string{
@@ -482,6 +486,14 @@ func ParseIssueType(s string) types.IssueType {
 		return types.TypeEpic
 	case "chore":
 		return types.TypeChore
+	case "decision":
+		return types.TypeDecision
+	case "spike":
+		return types.TypeSpike
+	case "story":
+		return types.TypeStory
+	case "milestone":
+		return types.TypeMilestone
 	default:
 		return types.TypeTask
 	}
