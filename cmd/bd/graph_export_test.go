@@ -284,3 +284,49 @@ func TestDotEdgeStyle(t *testing.T) {
 		t.Errorf("related edge should have no style, got %q", related)
 	}
 }
+
+func TestMergeSubgraphsForHTML_SingleDOCTYPE(t *testing.T) {
+	// Not parallel: captureGraphOutput redirects global os.Stdout
+
+	// Create two disconnected subgraphs (separate components)
+	issueA := &types.Issue{
+		ID: "comp-a", Title: "Component A", Status: types.StatusOpen,
+		Priority: 1, IssueType: types.TypeTask,
+	}
+	issueB := &types.Issue{
+		ID: "comp-b", Title: "Component B", Status: types.StatusInProgress,
+		Priority: 2, IssueType: types.TypeTask,
+	}
+
+	sg1 := &TemplateSubgraph{
+		Root:     issueA,
+		Issues:   []*types.Issue{issueA},
+		IssueMap: map[string]*types.Issue{"comp-a": issueA},
+	}
+	sg2 := &TemplateSubgraph{
+		Root:     issueB,
+		Issues:   []*types.Issue{issueB},
+		IssueMap: map[string]*types.Issue{"comp-b": issueB},
+	}
+
+	merged := mergeSubgraphsForHTML([]*TemplateSubgraph{sg1, sg2})
+	layout := computeLayout(merged)
+
+	output := captureGraphOutput(func() {
+		renderGraphHTML(layout, merged)
+	})
+
+	// Must contain exactly one DOCTYPE declaration
+	count := strings.Count(output, "<!DOCTYPE html>")
+	if count != 1 {
+		t.Errorf("expected exactly 1 <!DOCTYPE html>, got %d", count)
+	}
+
+	// Both issues must appear in the single document
+	if !strings.Contains(output, "comp-a") {
+		t.Error("merged HTML should contain comp-a")
+	}
+	if !strings.Contains(output, "comp-b") {
+		t.Error("merged HTML should contain comp-b")
+	}
+}

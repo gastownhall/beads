@@ -474,4 +474,23 @@ func TestComputeLayout(t *testing.T) {
 				layout.Nodes["child-1"].Layer, layout.Nodes["epic-1"].Layer)
 		}
 	})
+
+	t.Run("nil root does not panic", func(t *testing.T) {
+		subgraph := &TemplateSubgraph{
+			Root:         nil,
+			Issues:       []*types.Issue{{ID: "orphan-1", Title: "Orphan"}},
+			Dependencies: []*types.Dependency{},
+			IssueMap:     map[string]*types.Issue{"orphan-1": {ID: "orphan-1", Title: "Orphan"}},
+		}
+		layout := computeLayout(subgraph)
+		if layout == nil {
+			t.Fatal("computeLayout returned nil")
+		}
+		if layout.RootID != "" {
+			t.Errorf("RootID = %q, want empty string for nil root", layout.RootID)
+		}
+		if len(layout.Nodes) != 1 {
+			t.Errorf("len(Nodes) = %d, want 1", len(layout.Nodes))
+		}
+	})
 }

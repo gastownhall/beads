@@ -208,11 +208,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				}
 				return
 			}
-			if isEmbeddedMode() {
-				if _, err := store.CommitPending(ctx, actor); err != nil {
-					FatalErrorRespectJSON("failed to commit: %v", err)
-				}
-			}
+			commandDidWrite.Store(true)
 			SetLastTouchedID(claimed.ID)
 			if jsonOutput {
 				outputJSON(buildReadyIssueOutput(ctx, activeStore, []*types.Issue{claimed}))

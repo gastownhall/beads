@@ -73,7 +73,8 @@ git push origin main
 
 This updates:
 - `cmd/bd/version.go`
-- `.claude-plugin/plugin.json`
+- `plugins/beads/.claude-plugin/plugin.json`
+- `plugins/beads/.codex-plugin/plugin.json`
 - `.claude-plugin/marketplace.json`
 - `integrations/beads-mcp/pyproject.toml`
 - `integrations/beads-mcp/src/beads_mcp/__init__.py`

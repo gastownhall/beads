@@ -85,21 +85,20 @@ func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localP
 	return result.Issues, nil
 }
 
-// importFromLocalJSONLFull imports issues and memories from a local JSONL file.
-// It detects memory records (lines with "_type":"memory") and imports them
-// via SetConfig, while routing regular issue records through the normal path.
-func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, localPath string) (*importLocalResult, error) {
+// parseJSONLFile reads a JSONL file and returns parsed issues and config
+// entries (memories). Pure function — no store I/O.
+func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 	//nolint:gosec // G304: path from user-provided CLI argument
-	data, err := os.ReadFile(localPath)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read JSONL file %s: %w", localPath, err)
+		return nil, nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	// Allow up to 64MB per line for large descriptions
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 	var issues []*types.Issue
-	var memories []memoryRecord
+	configEntries := make(map[string]string)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -110,7 +109,7 @@ func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, lo
 		// Peek at the record to check for _type field
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
 		}
 
 		// Check if this is a memory record
@@ -119,10 +118,10 @@ func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, lo
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, fmt.Errorf("failed to parse memory record: %w", err)
+					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
 				}
 				if mem.Key != "" && mem.Value != "" {
-					memories = append(memories, mem)
+					configEntries[kvPrefix+memoryPrefix+mem.Key] = mem.Value
 				}
 				continue
 			}
@@ -131,7 +130,7 @@ func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, lo
 		// Regular issue record
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
 		}
 		// Skip tombstone entries: these are deleted issues exported by older
 		// versions (pre-v0.50) with status "tombstone" and deleted_at set.
@@ -153,16 +152,27 @@ func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, lo
 		issues = append(issues, &issue)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+	}
+
+	return issues, configEntries, nil
+}
+
+// importFromLocalJSONLFull imports issues and memories from a local JSONL file.
+// It detects memory records (lines with "_type":"memory") and imports them
+// via SetConfig, while routing regular issue records through the normal path.
+func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, localPath string) (*importLocalResult, error) {
+	issues, configEntries, err := parseJSONLFile(localPath)
+	if err != nil {
+		return nil, err
 	}
 
 	result := &importLocalResult{}
 
 	// Import memories
-	for _, mem := range memories {
-		storageKey := kvPrefix + memoryPrefix + mem.Key
-		if err := store.SetConfig(ctx, storageKey, mem.Value); err != nil {
-			return nil, fmt.Errorf("failed to import memory %q: %w", mem.Key, err)
+	for key, value := range configEntries {
+		if err := store.SetConfig(ctx, key, value); err != nil {
+			return nil, fmt.Errorf("failed to import config %q: %w", key, err)
 		}
 		result.Memories++
 	}

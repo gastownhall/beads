@@ -55,12 +55,7 @@ Example:
 			_ = store.AddLabel(ctx, issue.ID, label, actor)
 		}
 
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedMode() {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				FatalError("failed to commit: %v", err)
-			}
-		}
+		commandDidWrite.Store(true)
 
 		// Output only the ID
 		fmt.Println(issue.ID)

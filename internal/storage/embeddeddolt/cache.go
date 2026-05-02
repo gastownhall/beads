@@ -20,17 +20,15 @@ type cacheEntry struct {
 }
 
 // Open returns a cached EmbeddedDoltStore for the given data directory, creating
-// one via New if no cached instance exists. Subsequent calls with the same
+// one via newStore if no cached instance exists. Subsequent calls with the same
 // resolved dataDir return the existing store and increment a reference count.
 //
 // Each Open must be paired with a Close. The underlying store is only truly
-// closed (flock released, resources freed) when the last reference calls Close.
+// closed when the last reference calls Close.
 //
-// This prevents the same-process deadlock that occurs when two code paths open
-// connectors against the same data directory: the embedded Dolt driver's
-// internal engine lock combined with infinite-backoff retry means the second
-// connector spins forever waiting for the first to release.
-func Open(ctx context.Context, beadsDir, database, branch string, opts ...Option) (*EmbeddedDoltStore, error) {
+// This prevents redundant engine initializations when multiple code paths open
+// connectors against the same data directory in the same process.
+func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
 	key, err := cacheKey(beadsDir)
 	if err != nil {
 		return nil, err
@@ -44,9 +42,8 @@ func Open(ctx context.Context, beadsDir, database, branch string, opts ...Option
 	}
 	cacheMu.Unlock()
 
-	// Slow path: create a new store outside the lock. New() acquires the
-	// flock and initializes the schema, which can take significant time.
-	s, err := newStore(ctx, beadsDir, database, branch, opts...)
+	// Slow path: create a new store outside the lock.
+	s, err := newStore(ctx, beadsDir, database, branch)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +53,7 @@ func Open(ctx context.Context, beadsDir, database, branch string, opts ...Option
 	if entry, ok := cache[key]; ok {
 		cacheMu.Unlock()
 		// Discard the store we just created; use the cached one.
-		_ = s.closeUnderlying()
+		_ = s.Close()
 		entry.refCount++
 		return entry.store, nil
 	}
@@ -67,7 +64,7 @@ func Open(ctx context.Context, beadsDir, database, branch string, opts ...Option
 
 // closeCached decrements the reference count for a cached store.
 // Returns true when the cache absorbed the close (refs remain, suppress real
-// close). Returns false when the caller must run closeUnderlying — either the
+// close). Returns false when the caller must run Close — either the
 // entry was evicted (last ref) or the store was never cached.
 func closeCached(s *EmbeddedDoltStore) bool {
 	cacheMu.Lock()

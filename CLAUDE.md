@@ -1,6 +1,6 @@
 # Instructions for AI Agents Working on Beads
 
-> **Reading order**: Architecture → `docs/CLAUDE.md` | Workflow → `AGENT_INSTRUCTIONS.md` | Quick ref → `AGENTS.md`
+> **Reading order**: Architecture → `docs/CLAUDE.md` | Workflow → `AGENT_INSTRUCTIONS.md` | PR maintenance → `PR_MAINTAINER_GUIDELINES.md` | Quick ref → `AGENTS.md`
 >
 > Run `bd prime` for AI-optimized context. Run `bd memories` to see persistent learnings.
 
@@ -157,7 +157,7 @@ Run `bd stats` to see overall progress.
 - **Examples**: Growing collection of agent integrations
 - **Documentation**: Comprehensive but can always improve
 - **MCP Server**: Available at `integrations/beads-mcp/`
-- **Claude Plugin**: Skills and hooks at `claude-plugin/`
+- **Claude/Codex Plugin**: Shared plugin package at `plugins/beads/`
 
 ## Common Tasks
 

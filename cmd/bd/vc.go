@@ -134,26 +134,17 @@ Examples:
 		}
 
 		// We are explicitly creating a Dolt commit; avoid redundant auto-commit in PersistentPostRun.
-		// Use CommitPending which calls CommitWithConfig internally — this stages ALL
-		// tables including config. The interface method Commit() intentionally skips
-		// config to prevent sweeping stale changes during auto-commits (GH#2455), but
-		// an explicit `bd vc commit` is a user action that should commit everything
-		// the user sees in `bd vc status`.
-		//
-		// Note: CommitPending generates its own descriptive commit message rather than
-		// using vcCommitMessage. The user's message is displayed in the output.
 		commandDidExplicitDoltCommit = true
-		committed, err := store.CommitPending(ctx, getActorWithGit())
-		if err != nil {
-			FatalErrorRespectJSON("failed to commit: %v", err)
-		}
-		if !committed {
-			if jsonOutput {
-				outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
-			} else {
-				fmt.Println("Nothing to commit")
+		if err := store.Commit(ctx, vcCommitMessage); err != nil {
+			if isDoltNothingToCommit(err) {
+				if jsonOutput {
+					outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
+				} else {
+					fmt.Println("Nothing to commit")
+				}
+				return
 			}
-			return
+			FatalErrorRespectJSON("failed to commit: %v", err)
 		}
 
 		// Get the new commit hash

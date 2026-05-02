@@ -139,12 +139,7 @@ func runShip(cmd *cobra.Command, args []string) {
 			"<this-project>", capability)
 	}
 
-	// Embedded mode: flush Dolt commit.
-	if isEmbeddedMode() && store != nil {
-		if _, err := store.CommitPending(ctx, actor); err != nil {
-			FatalError("failed to commit: %v", err)
-		}
-	}
+	commandDidWrite.Store(true)
 }
 
 func init() {

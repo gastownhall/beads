@@ -261,11 +261,8 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 		}
 	}
 
-	// Embedded mode: flush Dolt commit.
-	if isEmbeddedMode() && result.DeletedCount > 0 && store != nil {
-		if _, err := store.CommitPending(ctx, actor); err != nil {
-			FatalError("failed to commit: %v", err)
-		}
+	if result.DeletedCount > 0 {
+		commandDidWrite.Store(true)
 	}
 }
 

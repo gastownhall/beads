@@ -678,7 +678,7 @@ var createCmd = &cobra.Command{
 		// DoltHub remotes. Per-create pushes caused 22GB of git-remote-cache
 		// bloat with dozens of agents creating wisps constantly (hq-glw).
 		if repoPath != "." && targetStore != nil {
-			if _, err := targetStore.CommitPending(ctx, actor); err != nil {
+			if err := targetStore.Commit(ctx, fmt.Sprintf("bd: create (auto-commit) by %s", actor)); err != nil && !isDoltNothingToCommit(err) {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
 			}
 		}

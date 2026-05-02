@@ -174,6 +174,7 @@ func TestEmbeddedPromoteCLIConcurrent(t *testing.T) {
 
 	type workerResult struct {
 		worker int
+		out    string
 		err    error
 	}
 
@@ -190,8 +191,9 @@ func TestEmbeddedPromoteCLIConcurrent(t *testing.T) {
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
 			out, err := cmd.CombinedOutput()
+			r.out = string(out)
 			if err != nil {
-				r.err = fmt.Errorf("promote %s: %v\n%s", issueIDs[worker], err, out)
+				r.err = fmt.Errorf("promote %s: %v", issueIDs[worker], err)
 			}
 
 			results[worker] = r
@@ -199,30 +201,18 @@ func TestEmbeddedPromoteCLIConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	var successes int
+	// The driver handles concurrency internally — all workers should succeed.
 	for _, r := range results {
 		if r.err != nil {
-			if !strings.Contains(r.err.Error(), "one writer at a time") {
-				t.Errorf("worker %d failed: %v", r.worker, r.err)
-			}
-			continue
+			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
-		successes++
 	}
-	if successes == 0 {
-		t.Fatal("all workers failed; expected at least 1 success")
-	}
-	t.Logf("%d/%d workers succeeded (flock contention expected)", successes, numWorkers)
 
-	// Verify only successful workers' issues are permanent
-	for _, r := range results {
-		if r.err != nil {
-			continue
-		}
-		id := issueIDs[r.worker]
+	// Verify all issues are permanent.
+	for i, id := range issueIDs {
 		got := bdShow(t, bd, dir, id)
 		if got.Ephemeral {
-			t.Errorf("expected %s to be permanent after promote", id)
+			t.Errorf("expected %s (worker %d) to be permanent after promote", id, i)
 		}
 	}
 }

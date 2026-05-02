@@ -267,12 +267,8 @@ create, update, show, or close operation).`,
 			}
 		}
 
-		// Embedded mode: flush Dolt commit. DoltStore commits
-		// inline during CloseIssue so this is only needed for EmbeddedDoltStore.
-		if isEmbeddedMode() && closedCount > 0 && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				FatalErrorRespectJSON("failed to commit: %v", err)
-			}
+		if closedCount > 0 {
+			commandDidWrite.Store(true)
 		}
 
 		// Exit non-zero if no issues were actually closed (close guard

@@ -112,11 +112,7 @@ func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if isEmbeddedMode() && store != nil {
-		if _, err := store.CommitPending(rootCtx, actor); err != nil {
-			return fmt.Errorf("failed to commit: %w", err)
-		}
-	}
+	commandDidWrite.Store(true)
 
 	if jsonOutput {
 		result := map[string]interface{}{
@@ -236,11 +232,7 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 	}
 
 	// Successfully acquired.
-	if isEmbeddedMode() && store != nil {
-		if _, err := store.CommitPending(rootCtx, actor); err != nil {
-			return fmt.Errorf("failed to commit: %w", err)
-		}
-	}
+	commandDidWrite.Store(true)
 
 	if jsonOutput {
 		out := map[string]interface{}{
@@ -265,11 +257,7 @@ func runMergeSlotRelease(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if isEmbeddedMode() && store != nil {
-		if _, err := store.CommitPending(rootCtx, actor); err != nil {
-			return fmt.Errorf("failed to commit: %w", err)
-		}
-	}
+	commandDidWrite.Store(true)
 
 	if jsonOutput {
 		slotID := storage.MergeSlotID(rootCtx, store)

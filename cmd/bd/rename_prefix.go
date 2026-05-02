@@ -109,10 +109,8 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			if err := repairPrefixes(ctx, store, actor, newPrefix, issues, prefixes, dryRun); err != nil {
 				FatalError("failed to repair prefixes: %v", err)
 			}
-			if isEmbeddedMode() && !dryRun && store != nil {
-				if _, err := store.CommitPending(ctx, actor); err != nil {
-					FatalError("failed to commit: %v", err)
-				}
+			if !dryRun {
+				commandDidWrite.Store(true)
 			}
 			return
 		}
@@ -129,11 +127,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 				if err := store.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
 					FatalError("failed to update prefix: %v", err)
 				}
-				if isEmbeddedMode() && store != nil {
-					if _, err := store.CommitPending(ctx, actor); err != nil {
-						FatalError("failed to commit: %v", err)
-					}
-				}
+				commandDidWrite.Store(true)
 			}
 			return
 		}
@@ -172,12 +166,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			_ = enc.Encode(result) // Best effort: JSON encoding of simple struct does not fail in practice
 		}
 
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedMode() && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				FatalError("failed to commit: %v", err)
-			}
-		}
+		commandDidWrite.Store(true)
 	},
 }
 

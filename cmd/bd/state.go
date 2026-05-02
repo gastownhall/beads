@@ -222,12 +222,7 @@ The --reason flag provides context for the event bead (recommended).`,
 			FatalErrorRespectJSON("adding label: %v", err)
 		}
 
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedMode() && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				FatalErrorRespectJSON("failed to commit: %v", err)
-			}
-		}
+		commandDidWrite.Store(true)
 
 		if jsonOutput {
 			result := map[string]interface{}{

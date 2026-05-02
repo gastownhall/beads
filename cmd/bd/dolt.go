@@ -340,32 +340,15 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		}
 		msg, _ := cmd.Flags().GetString("message")
 		if msg == "" {
-			// No explicit message — use CommitPending which generates a
-			// descriptive summary of accumulated changes.
-			pc, ok := storage.UnwrapStore(st).(storage.PendingCommitter)
-			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: storage backend does not support pending commits\n")
-				os.Exit(1)
-			}
-			committed, err := pc.CommitPending(ctx, getActor())
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			if !committed {
+			msg = fmt.Sprintf("bd: dolt commit (auto-commit) by %s", getActor())
+		}
+		if err := st.Commit(ctx, msg); err != nil {
+			if isDoltNothingToCommit(err) {
 				fmt.Println("Nothing to commit.")
 				return
 			}
-		} else {
-			if err := st.Commit(ctx, msg); err != nil {
-				errLower := strings.ToLower(err.Error())
-				if strings.Contains(errLower, "nothing to commit") || strings.Contains(errLower, "no changes") {
-					fmt.Println("Nothing to commit.")
-					return
-				}
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
 		commandDidExplicitDoltCommit = true
 		fmt.Println("Committed.")

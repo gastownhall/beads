@@ -72,12 +72,7 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Warning: failed to add promotion comment to %s: %v\n", fullID, err)
 		}
 
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedMode() && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				FatalErrorRespectJSON("failed to commit: %v", err)
-			}
-		}
+		commandDidWrite.Store(true)
 
 		if jsonOutput {
 			updated, _ := store.GetIssue(ctx, fullID)

@@ -178,6 +178,26 @@ func TestTypeFromLabels(t *testing.T) {
 			wantType: "chore",
 		},
 		{
+			name:     "type::decision",
+			labels:   []string{"type::decision"},
+			wantType: "decision",
+		},
+		{
+			name:     "type::spike",
+			labels:   []string{"type::spike"},
+			wantType: "spike",
+		},
+		{
+			name:     "type::story",
+			labels:   []string{"type::story"},
+			wantType: "story",
+		},
+		{
+			name:     "type::milestone",
+			labels:   []string{"type::milestone"},
+			wantType: "milestone",
+		},
+		{
 			name:     "enhancement maps to feature",
 			labels:   []string{"type::enhancement"},
 			wantType: "feature",

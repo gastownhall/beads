@@ -294,6 +294,8 @@ This project uses AI agents for maintenance. We've established strict rules to p
 
 If any of this goes wrong, please open an issue — we take contributor experience seriously.
 
+Maintainers and agents follow [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md) when triaging, landing, transforming, or closing PRs.
+
 ### Refactoring Campaign PR Intake Checklist
 
 Before starting a rewrite, cleanup, or large refactoring pass, maintainers and agents must review open contributor PRs that touch the same area. Use this checklist to decide whether to merge, rebase, incorporate, or close each PR.

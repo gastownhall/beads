@@ -970,11 +970,18 @@ var rootCmd = &cobra.Command{
 		// other helper paths stay in lockstep with the main command path.
 		dolt.ApplyCLIAutoStart(beadsDir, doltCfg)
 
-		// Server mode defaults auto-commit to OFF because the server handles
-		// commits via its own transaction lifecycle; firing DOLT_COMMIT after
-		// every write under concurrent load causes 'database is read only' errors.
+		// Default auto-commit based on mode when the user hasn't set a value:
+		// - Server mode: OFF — the server handles commits via its own transaction
+		//   lifecycle; firing DOLT_COMMIT after every write under concurrent load
+		//   causes 'database is read only' errors.
+		// - Embedded mode: ON — each command writes to the working set and needs
+		//   a Dolt commit in PersistentPostRun to persist changes to history.
 		if strings.TrimSpace(doltAutoCommit) == "" {
-			doltAutoCommit = string(doltAutoCommitOff)
+			if isEmbeddedMode() {
+				doltAutoCommit = string(doltAutoCommitOn)
+			} else {
+				doltAutoCommit = string(doltAutoCommitOff)
+			}
 		}
 
 		doltCfg.Path = doltPath
@@ -1207,10 +1214,11 @@ func flushBatchCommitOnShutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	committed, commitErr := st.CommitPending(ctx, getActor())
-	if commitErr != nil {
-		fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", commitErr)
-	} else if committed {
+	if err := st.Commit(ctx, "bd: flush pending changes on shutdown"); err != nil {
+		if !isDoltNothingToCommit(err) {
+			fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", err)
+		}
+	} else {
 		fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
 	}
 }

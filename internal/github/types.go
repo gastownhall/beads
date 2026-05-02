@@ -248,6 +248,10 @@ var typeMapping = map[string]string{
 	"task":        "task",
 	"epic":        "epic",
 	"chore":       "chore",
+	"decision":    "decision",
+	"spike":       "spike",
+	"story":       "story",
+	"milestone":   "milestone",
 	"enhancement": "feature",
 }
 
