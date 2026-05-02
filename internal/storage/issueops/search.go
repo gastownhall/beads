@@ -100,13 +100,15 @@ func searchTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types
 		for i, issue := range issues {
 			ids[i] = issue.ID
 		}
-		labelMap, labelErr := GetLabelsForIssuesInTx(ctx, tx, ids, nil)
-		if labelErr != nil {
-			return nil, fmt.Errorf("search %s: hydrate labels: %w", tables.Main, labelErr)
-		}
-		for _, issue := range issues {
-			if labels, ok := labelMap[issue.ID]; ok {
-				issue.Labels = labels
+		if !filter.SkipLabels {
+			labelMap, labelErr := GetLabelsForIssuesInTx(ctx, tx, ids, nil)
+			if labelErr != nil {
+				return nil, fmt.Errorf("search %s: hydrate labels: %w", tables.Main, labelErr)
+			}
+			for _, issue := range issues {
+				if labels, ok := labelMap[issue.ID]; ok {
+					issue.Labels = labels
+				}
 			}
 		}
 
