@@ -37,7 +37,8 @@ Variable syntax (both work - we detect which side is the concrete value):
 
 Output locations (first writable wins):
   1. <resolved-beads-dir>/formulas/ (project-level, default)
-  2. ~/.beads/formulas/     (user-level, if project not writable)
+  2. <checkout-root>/.beads/formulas/ (repo-local formulas)
+  3. ~/.beads/formulas/     (user-level, if project not writable)
 
 Examples:
   bd mol distill bd-o5xe my-workflow

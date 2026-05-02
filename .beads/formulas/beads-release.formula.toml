@@ -8,7 +8,7 @@
 #   1. Prep & Push: preflight -> push-tag (polecat work)
 #   2. Gate: await-ci (async wait for release.yml)
 #   3. Verify: verify-github, verify-npm, verify-pypi (parallel)
-#   4. Install: local-install -> release-complete (fan-in)
+#   4. Install: local-install -> cleanup-stale-dolt-orphans -> release-complete
 
 formula = "beads-release"
 description = """
@@ -30,7 +30,7 @@ Phase 2 (Parallel Verification):
 
 Phase 3 (Installation):
   7. Local installation update
-  8. Daemon restart
+  8. Stale Dolt orphan cleanup
 
 ## Usage
 
@@ -48,6 +48,7 @@ until release.yml finishes. A new polecat (or the same one) resumes for Phases 2
 """
 type = "workflow"
 phase = "vapor"  # Ensures this runs as a wisp - bd pour will warn, gt sling --formula creates wisp
+pour = true      # Materialize release steps for checkpoint/resume visibility
 version = 1
 
 [vars.version]
@@ -760,21 +761,49 @@ All should show {{version}}.
 """
 
 [[steps]]
-id = "restart-daemons"
-title = "Restart daemons"
+id = "cleanup-stale-dolt-orphans"
+title = "Clean up stale Dolt orphans"
 needs = ["local-install"]
 description = """
-Restart bd daemons to pick up new version.
+Clean up orphaned local Dolt server processes left behind by older bd runs.
+The active canonical server, embedded mode, and external Dolt hosts are left alone.
 
 ```bash
-bd daemons killall
+STATUS_JSON=$(bd dolt status --json 2>/dev/null) || {
+  echo "Could not query Dolt status."
+  bd dolt status
+  exit 1
+}
+MODE=$(printf "%s\n" "$STATUS_JSON" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1)
+case "$MODE" in
+  embedded)
+    echo "Embedded Dolt mode; no server restart needed."
+    ;;
+  external)
+    echo "External Dolt mode; no local orphan cleanup needed."
+    ;;
+  "")
+    if ! printf "%s\n" "$STATUS_JSON" | grep -Eq '"(running|data_dir)"[[:space:]]*:'; then
+      echo "Dolt status JSON did not identify a mode or local server state."
+      bd dolt status
+      exit 1
+    fi
+    bd dolt killall
+    ;;
+  *)
+    echo "Unrecognized Dolt mode: $MODE"
+    bd dolt status
+    exit 1
+    ;;
+esac
 ```
 
-Daemons will auto-restart with new version on next bd command.
+This step only reaps orphaned local Dolt processes. It does not stop the
+canonical active server.
 
 Verify:
 ```bash
-bd daemons list
+bd dolt status
 ```
 """
 
@@ -806,7 +835,7 @@ needs the tag to exist, not the CI artifacts.
 [[steps]]
 id = "release-complete"
 title = "Release complete"
-needs = ["restart-daemons", "generate-newsletter"]
+needs = ["cleanup-stale-dolt-orphans", "generate-newsletter"]
 description = """
 Release v{{version}} is complete!
 
@@ -816,7 +845,7 @@ Summary:
 - CI artifacts built (via gate)
 - npm and PyPI packages verified
 - Local installation updated
-- Daemons restarted
+- Dolt servers refreshed if applicable
 - Newsletter generated
 
 Optional next steps:
