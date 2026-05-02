@@ -1,7 +1,13 @@
 package linear
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -168,5 +174,250 @@ func TestIsLinearExternalRef(t *testing.T) {
 	}
 }
 
-// Note: BuildStateCache and FindStateForBeadsStatus require API calls
-// and would need mocking to test. Skipping unit tests for those.
+func TestBatchCreateIssues_SingleBatch(t *testing.T) {
+	mutationCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mutationCount++
+		body, _ := io.ReadAll(r.Body)
+		var req GraphQLRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("failed to unmarshal request: %v", err)
+		}
+		if !strings.Contains(req.Query, "issueBatchCreate") {
+			t.Fatalf("expected issueBatchCreate mutation, got: %s", req.Query)
+		}
+
+		issues := make([]Issue, 0)
+		inputs := req.Variables["input"].([]interface{})
+		for i := range inputs {
+			issues = append(issues, Issue{
+				ID:         fmt.Sprintf("id-%d", i),
+				Identifier: fmt.Sprintf("TEAM-%d", i+1),
+				Title:      fmt.Sprintf("Issue %d", i+1),
+				URL:        fmt.Sprintf("https://linear.app/team/issue/TEAM-%d", i+1),
+			})
+		}
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"issueBatchCreate": map[string]interface{}{
+					"success": true,
+					"issues":  issues,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", "test-team").WithEndpoint(server.URL)
+	inputs := make([]IssueCreateInput, 50)
+	for i := range inputs {
+		inputs[i] = IssueCreateInput{
+			TeamID: "test-team",
+			Title:  fmt.Sprintf("Issue %d", i+1),
+		}
+	}
+
+	issues, err := client.BatchCreateIssues(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("BatchCreateIssues failed: %v", err)
+	}
+	if mutationCount != 1 {
+		t.Errorf("expected 1 mutation call, got %d", mutationCount)
+	}
+	if len(issues) != 50 {
+		t.Errorf("expected 50 issues, got %d", len(issues))
+	}
+}
+
+func TestBatchCreateIssues_Chunking(t *testing.T) {
+	mutationCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mutationCount++
+		body, _ := io.ReadAll(r.Body)
+		var req GraphQLRequest
+		json.Unmarshal(body, &req)
+
+		inputs := req.Variables["input"].([]interface{})
+		issues := make([]Issue, len(inputs))
+		for i := range inputs {
+			issues[i] = Issue{
+				ID:         fmt.Sprintf("id-%d-%d", mutationCount, i),
+				Identifier: fmt.Sprintf("TEAM-%d", i+1),
+				Title:      fmt.Sprintf("Issue %d", i+1),
+				URL:        fmt.Sprintf("https://linear.app/team/issue/TEAM-%d", i+1),
+			}
+		}
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"issueBatchCreate": map[string]interface{}{
+					"success": true,
+					"issues":  issues,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", "test-team").WithEndpoint(server.URL)
+	inputs := make([]IssueCreateInput, 120)
+	for i := range inputs {
+		inputs[i] = IssueCreateInput{
+			TeamID: "test-team",
+			Title:  fmt.Sprintf("Issue %d", i+1),
+		}
+	}
+
+	issues, err := client.BatchCreateIssues(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("BatchCreateIssues failed: %v", err)
+	}
+	if mutationCount != 3 {
+		t.Errorf("expected 3 batch calls (50+50+20), got %d", mutationCount)
+	}
+	if len(issues) != 120 {
+		t.Errorf("expected 120 issues, got %d", len(issues))
+	}
+}
+
+func TestBatchCreateIssues_FallbackOnFailure(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		body, _ := io.ReadAll(r.Body)
+		var req GraphQLRequest
+		json.Unmarshal(body, &req)
+
+		if strings.Contains(req.Query, "issueBatchCreate") {
+			// Batch call fails with success=false.
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"issueBatchCreate": map[string]interface{}{
+						"success": false,
+						"issues":  []Issue{},
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		if strings.Contains(req.Query, "issueCreate") {
+			// Single-issue fallback succeeds.
+			input := req.Variables["input"].(map[string]interface{})
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"issueCreate": map[string]interface{}{
+						"success": true,
+						"issue": Issue{
+							ID:         fmt.Sprintf("id-fallback-%d", callCount),
+							Identifier: fmt.Sprintf("TEAM-%d", callCount),
+							Title:      input["title"].(string),
+							URL:        fmt.Sprintf("https://linear.app/team/issue/TEAM-%d", callCount),
+						},
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", "test-team").WithEndpoint(server.URL)
+	inputs := []IssueCreateInput{
+		{TeamID: "test-team", Title: "Issue A"},
+		{TeamID: "test-team", Title: "Issue B"},
+		{TeamID: "test-team", Title: "Issue C"},
+		{TeamID: "test-team", Title: "Issue D"},
+		{TeamID: "test-team", Title: "Issue E"},
+	}
+
+	issues, err := client.BatchCreateIssues(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("BatchCreateIssues with fallback failed: %v", err)
+	}
+	if len(issues) != 5 {
+		t.Errorf("expected 5 issues from fallback, got %d", len(issues))
+	}
+	// 1 batch call + 5 individual creates = 6 total calls
+	if callCount != 6 {
+		t.Errorf("expected 6 total calls (1 batch + 5 single), got %d", callCount)
+	}
+}
+
+func TestBatchUpdateIssues_Chunking(t *testing.T) {
+	mutationCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mutationCount++
+		body, _ := io.ReadAll(r.Body)
+		var req GraphQLRequest
+		json.Unmarshal(body, &req)
+
+		ids := req.Variables["ids"].([]interface{})
+		issues := make([]Issue, len(ids))
+		for i, id := range ids {
+			issues[i] = Issue{
+				ID:         id.(string),
+				Identifier: fmt.Sprintf("TEAM-%d", i+1),
+				URL:        fmt.Sprintf("https://linear.app/team/issue/TEAM-%d", i+1),
+			}
+		}
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"issueBatchUpdate": map[string]interface{}{
+					"success": true,
+					"issues":  issues,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", "test-team").WithEndpoint(server.URL)
+	ids := make([]string, 120)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("uuid-%d", i)
+	}
+
+	updates := map[string]interface{}{"stateId": "done-state-id"}
+	issues, err := client.BatchUpdateIssues(context.Background(), ids, updates)
+	if err != nil {
+		t.Fatalf("BatchUpdateIssues failed: %v", err)
+	}
+	if mutationCount != 3 {
+		t.Errorf("expected 3 batch calls (50+50+20), got %d", mutationCount)
+	}
+	if len(issues) != 120 {
+		t.Errorf("expected 120 issues, got %d", len(issues))
+	}
+}
+
+func TestBatchCreateIssues_Empty(t *testing.T) {
+	client := NewClient("test-key", "test-team")
+	issues, err := client.BatchCreateIssues(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("expected no error for empty input, got: %v", err)
+	}
+	if issues != nil {
+		t.Errorf("expected nil result for empty input, got %d issues", len(issues))
+	}
+}
+
+func TestBatchUpdateIssues_Empty(t *testing.T) {
+	client := NewClient("test-key", "test-team")
+	issues, err := client.BatchUpdateIssues(context.Background(), nil, map[string]interface{}{"title": "x"})
+	if err != nil {
+		t.Fatalf("expected no error for empty input, got: %v", err)
+	}
+	if issues != nil {
+		t.Errorf("expected nil result for empty input, got %d issues", len(issues))
+	}
+}

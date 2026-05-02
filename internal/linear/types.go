@@ -305,3 +305,33 @@ type TeamsResponse struct {
 		Nodes []Team `json:"nodes"`
 	} `json:"teams"`
 }
+
+// BatchSize is the maximum number of issues per Linear batch mutation call.
+const BatchSize = 50
+
+// IssueBatchCreateResponse represents the response from issueBatchCreate mutation.
+type IssueBatchCreateResponse struct {
+	IssueBatchCreate struct {
+		Success bool    `json:"success"`
+		Issues  []Issue `json:"issues"`
+	} `json:"issueBatchCreate"`
+}
+
+// IssueBatchUpdateResponse represents the response from issueBatchUpdate mutation.
+type IssueBatchUpdateResponse struct {
+	IssueBatchUpdate struct {
+		Success bool    `json:"success"`
+		Issues  []Issue `json:"issues"`
+	} `json:"issueBatchUpdate"`
+}
+
+// IssueCreateInput holds the fields for creating an issue via batch mutation.
+type IssueCreateInput struct {
+	TeamID      string   `json:"teamId"`
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	Priority    int      `json:"priority,omitempty"`
+	StateID     string   `json:"stateId,omitempty"`
+	LabelIDs    []string `json:"labelIds,omitempty"`
+	ProjectID   string   `json:"projectId,omitempty"`
+}

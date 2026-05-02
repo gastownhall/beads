@@ -13,6 +13,8 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+var _ tracker.BatchPushTracker = (*Tracker)(nil)
+
 func init() {
 	tracker.Register("linear", func() tracker.IssueTracker {
 		return &Tracker{}
@@ -198,6 +200,148 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 
 	ti := linearToTrackerIssue(updated)
 	return &ti, nil
+}
+
+// BatchPush implements tracker.BatchPushTracker. It partitions issues into
+// creates and updates, uses issueBatchCreate for new issues (chunked at 50),
+// and falls back to per-issue UpdateIssue for updates (since issueBatchUpdate
+// applies the same fields to all IDs, which doesn't fit per-issue field diffs).
+func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*tracker.BatchPushResult, error) {
+	client := t.primaryClient()
+	if client == nil {
+		return nil, fmt.Errorf("no Linear client available")
+	}
+
+	cache, err := BuildStateCache(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("building state cache: %w", err)
+	}
+
+	result := &tracker.BatchPushResult{}
+
+	var toCreate []*types.Issue
+	var toUpdate []*types.Issue
+
+	for _, issue := range issues {
+		extRef := ""
+		if issue.ExternalRef != nil {
+			extRef = *issue.ExternalRef
+		}
+		if extRef == "" || !IsLinearExternalRef(extRef) {
+			toCreate = append(toCreate, issue)
+		} else {
+			toUpdate = append(toUpdate, issue)
+		}
+	}
+
+	// Batch create new issues.
+	if len(toCreate) > 0 {
+		var inputs []IssueCreateInput
+		inputToIssue := make(map[int]*types.Issue, len(toCreate))
+		for _, issue := range toCreate {
+			priority := PriorityToLinear(issue.Priority, t.config)
+			stateID, stateErr := ResolveStateIDForBeadsStatus(cache, issue.Status, t.config)
+			if stateErr != nil {
+				result.Errors = append(result.Errors, tracker.BatchPushError{
+					LocalID: issue.ID,
+					Message: fmt.Sprintf("resolving state for status %s: %v", issue.Status, stateErr),
+				})
+				continue
+			}
+
+			input := IssueCreateInput{
+				TeamID:      client.TeamID,
+				Title:       issue.Title,
+				Description: issue.Description,
+				Priority:    priority,
+				StateID:     stateID,
+			}
+			if client.ProjectID != "" {
+				input.ProjectID = client.ProjectID
+			}
+			inputToIssue[len(inputs)] = issue
+			inputs = append(inputs, input)
+		}
+
+		if len(inputs) > 0 {
+			created, createErr := client.BatchCreateIssues(ctx, inputs)
+			if createErr != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("batch create partial error: %v", createErr))
+			}
+			for i, li := range created {
+				localIssue := inputToIssue[i]
+				result.Created = append(result.Created, tracker.BatchPushItem{
+					LocalID:     localIssue.ID,
+					ExternalRef: li.URL,
+				})
+			}
+			// Record errors for inputs that didn't produce a result.
+			for idx := len(created); idx < len(inputs); idx++ {
+				localIssue := inputToIssue[idx]
+				if localIssue != nil {
+					result.Errors = append(result.Errors, tracker.BatchPushError{
+						LocalID: localIssue.ID,
+						Message: "not returned in batch create response",
+					})
+				}
+			}
+		}
+	}
+
+	// Update existing issues individually (each has different field values).
+	for _, issue := range toUpdate {
+		extRef := *issue.ExternalRef
+		externalID := ExtractLinearIdentifier(extRef)
+		if externalID == "" {
+			externalID = extRef
+		}
+
+		routeClient := t.clientForExternalID(ctx, externalID)
+		if routeClient == nil {
+			result.Errors = append(result.Errors, tracker.BatchPushError{
+				LocalID: issue.ID,
+				Message: fmt.Sprintf("cannot determine Linear team for %s", externalID),
+			})
+			continue
+		}
+
+		mapper := t.FieldMapper()
+		updates := mapper.IssueToTracker(issue)
+
+		stateID, stateErr := ResolveStateIDForBeadsStatus(cache, issue.Status, t.config)
+		if stateErr != nil {
+			result.Errors = append(result.Errors, tracker.BatchPushError{
+				LocalID: issue.ID,
+				Message: fmt.Sprintf("resolving state for status %s: %v", issue.Status, stateErr),
+			})
+			continue
+		}
+		if stateID != "" {
+			updates["stateId"] = stateID
+		}
+
+		// Use the internal UUID when available; FetchIssueByIdentifier resolves it.
+		issueUUID := externalID
+		if li, lookupErr := routeClient.FetchIssueByIdentifier(ctx, externalID); lookupErr == nil && li != nil {
+			issueUUID = li.ID
+		}
+
+		updated, updateErr := routeClient.UpdateIssue(ctx, issueUUID, updates)
+		if updateErr != nil {
+			result.Errors = append(result.Errors, tracker.BatchPushError{
+				LocalID: issue.ID,
+				Message: fmt.Sprintf("updating %s: %v", externalID, updateErr),
+			})
+			continue
+		}
+
+		result.Updated = append(result.Updated, tracker.BatchPushItem{
+			LocalID:     issue.ID,
+			ExternalRef: updated.URL,
+		})
+	}
+
+	return result, nil
 }
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
