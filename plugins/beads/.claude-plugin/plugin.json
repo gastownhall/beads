@@ -15,6 +15,9 @@
     "ai-workflow",
     "agent-memory"
   ],
+  "skills": "./skills/",
+  "commands": "./skills/beads/commands/",
+  "agents": "./skills/beads/agents/",
   "hooks": {
     "SessionStart": [
       {

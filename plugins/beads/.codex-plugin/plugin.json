@@ -1,0 +1,37 @@
+{
+  "name": "beads",
+  "version": "1.0.3",
+  "description": "AI-supervised issue tracking for coding workflows with agent skills.",
+  "author": {
+    "name": "Steve Yegge",
+    "url": "https://github.com/steveyegge"
+  },
+  "homepage": "https://github.com/gastownhall/beads",
+  "repository": "https://github.com/gastownhall/beads",
+  "license": "MIT",
+  "keywords": [
+    "issue-tracker",
+    "task-management",
+    "ai-workflow",
+    "agent-memory"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Beads",
+    "shortDescription": "Project task tracking with bd",
+    "longDescription": "Use Beads from Codex with CLI-first workflow guidance for durable project task tracking.",
+    "developerName": "Beads",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Skills",
+      "Task tracking"
+    ],
+    "websiteURL": "https://github.com/gastownhall/beads",
+    "defaultPrompt": [
+      "Use $beads to show ready work in this repo.",
+      "Use $beads to claim the top ready task and summarize it.",
+      "Use $beads to create a discovered-from follow-up."
+    ],
+    "brandColor": "#4F7CAC"
+  }
+}

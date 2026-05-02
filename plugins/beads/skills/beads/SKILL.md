@@ -10,7 +10,7 @@ allowed-tools: "Read,Bash(bd:*)"
 version: "0.60.0"
 author: "Steve Yegge <steve.yegge@gmail.com>"
 license: "MIT"
-compatible-with: claude-code
+compatible-with: [claude-code, codex]
 tags: [issue-tracking, task-management, multi-session, dependencies]
 ---
 
@@ -27,7 +27,7 @@ Graph-based issue tracker that survives conversation compaction. Provides persis
 | Multi-session, dependencies, compaction survival | Single-session linear tasks |
 | Dolt-backed team sync | Conversation-scoped |
 
-See [BOUNDARIES.md](${CLAUDE_SKILL_DIR}/resources/BOUNDARIES.md) for detailed comparison.
+See [BOUNDARIES.md](resources/BOUNDARIES.md) for detailed comparison.
 
 ## Prerequisites
 
@@ -68,7 +68,7 @@ Append `--json` to any command for structured output. Use `bd show <id> --long` 
 | `disk I/O error (522)` | Move `.beads/` off cloud-synced filesystem |
 | Status updates lag | Use server mode: `bd dolt start` |
 
-See [TROUBLESHOOTING.md](${CLAUDE_SKILL_DIR}/resources/TROUBLESHOOTING.md) for full details.
+See [TROUBLESHOOTING.md](resources/TROUBLESHOOTING.md) for full details.
 
 ## Examples
 
@@ -89,22 +89,22 @@ bd close <id> --reason "Implemented with refresh tokens" --json
 
 | Feature | CLI | Resource |
 |---------|-----|----------|
-| Molecules (templates) | `bd mol --help` | [MOLECULES.md](${CLAUDE_SKILL_DIR}/resources/MOLECULES.md) |
-| Chemistry (pour/wisp) | `bd pour`, `bd wisp` | [CHEMISTRY_PATTERNS.md](${CLAUDE_SKILL_DIR}/resources/CHEMISTRY_PATTERNS.md) |
-| Agent beads | `bd agent --help` | [AGENTS.md](${CLAUDE_SKILL_DIR}/resources/AGENTS.md) |
-| Async gates | `bd gate --help` | [ASYNC_GATES.md](${CLAUDE_SKILL_DIR}/resources/ASYNC_GATES.md) |
-| Worktrees | `bd worktree --help` | [WORKTREES.md](${CLAUDE_SKILL_DIR}/resources/WORKTREES.md) |
+| Molecules (templates) | `bd mol --help` | [MOLECULES.md](resources/MOLECULES.md) |
+| Chemistry (pour/wisp) | `bd pour`, `bd wisp` | [CHEMISTRY_PATTERNS.md](resources/CHEMISTRY_PATTERNS.md) |
+| Agent beads | `bd agent --help` | [AGENTS.md](resources/AGENTS.md) |
+| Async gates | `bd gate --help` | [ASYNC_GATES.md](resources/ASYNC_GATES.md) |
+| Worktrees | `bd worktree --help` | [WORKTREES.md](resources/WORKTREES.md) |
 
 ## Resources
 
 | Category | Files |
 |----------|-------|
-| **Getting Started** | [BOUNDARIES.md](${CLAUDE_SKILL_DIR}/resources/BOUNDARIES.md), [CLI_REFERENCE.md](${CLAUDE_SKILL_DIR}/resources/CLI_REFERENCE.md), [WORKFLOWS.md](${CLAUDE_SKILL_DIR}/resources/WORKFLOWS.md) |
-| **Core Concepts** | [DEPENDENCIES.md](${CLAUDE_SKILL_DIR}/resources/DEPENDENCIES.md), [ISSUE_CREATION.md](${CLAUDE_SKILL_DIR}/resources/ISSUE_CREATION.md), [PATTERNS.md](${CLAUDE_SKILL_DIR}/resources/PATTERNS.md) |
-| **Resilience** | [RESUMABILITY.md](${CLAUDE_SKILL_DIR}/resources/RESUMABILITY.md), [TROUBLESHOOTING.md](${CLAUDE_SKILL_DIR}/resources/TROUBLESHOOTING.md) |
-| **Advanced** | [MOLECULES.md](${CLAUDE_SKILL_DIR}/resources/MOLECULES.md), [CHEMISTRY_PATTERNS.md](${CLAUDE_SKILL_DIR}/resources/CHEMISTRY_PATTERNS.md), [AGENTS.md](${CLAUDE_SKILL_DIR}/resources/AGENTS.md), [ASYNC_GATES.md](${CLAUDE_SKILL_DIR}/resources/ASYNC_GATES.md), [WORKTREES.md](${CLAUDE_SKILL_DIR}/resources/WORKTREES.md) |
-| **Reference** | [STATIC_DATA.md](${CLAUDE_SKILL_DIR}/resources/STATIC_DATA.md), [INTEGRATION_PATTERNS.md](${CLAUDE_SKILL_DIR}/resources/INTEGRATION_PATTERNS.md) |
+| **Getting Started** | [BOUNDARIES.md](resources/BOUNDARIES.md), [CLI_REFERENCE.md](resources/CLI_REFERENCE.md), [WORKFLOWS.md](resources/WORKFLOWS.md) |
+| **Core Concepts** | [DEPENDENCIES.md](resources/DEPENDENCIES.md), [ISSUE_CREATION.md](resources/ISSUE_CREATION.md), [PATTERNS.md](resources/PATTERNS.md) |
+| **Resilience** | [RESUMABILITY.md](resources/RESUMABILITY.md), [TROUBLESHOOTING.md](resources/TROUBLESHOOTING.md) |
+| **Advanced** | [MOLECULES.md](resources/MOLECULES.md), [CHEMISTRY_PATTERNS.md](resources/CHEMISTRY_PATTERNS.md), [AGENTS.md](resources/AGENTS.md), [ASYNC_GATES.md](resources/ASYNC_GATES.md), [WORKTREES.md](resources/WORKTREES.md) |
+| **Reference** | [STATIC_DATA.md](resources/STATIC_DATA.md), [INTEGRATION_PATTERNS.md](resources/INTEGRATION_PATTERNS.md) |
 
 ## Validation
 
-If `bd --version` reports newer than `0.60.0`, this skill may be stale. Run `bd prime` for current CLI guidance — it auto-updates with each bd release and is the canonical source of truth ([ADR-0001](${CLAUDE_SKILL_DIR}/adr/0001-bd-prime-as-source-of-truth.md)).
+If `bd --version` reports newer than `0.60.0`, this skill may be stale. Run `bd prime` for current CLI guidance — it auto-updates with each bd release and is the canonical source of truth ([ADR-0001](adr/0001-bd-prime-as-source-of-truth.md)).

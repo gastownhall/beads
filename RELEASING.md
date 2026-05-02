@@ -139,8 +139,9 @@ This updates:
 - `cmd/bd/version.go` - CLI version constant
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
 - `integrations/beads-mcp/src/beads_mcp/__init__.py` - MCP Python version
-- `claude-plugin/.claude-plugin/plugin.json` - Plugin version
-- `.claude-plugin/marketplace.json` - Marketplace version
+- `plugins/beads/.claude-plugin/plugin.json` - Claude plugin version
+- `plugins/beads/.codex-plugin/plugin.json` - Codex plugin version
+- `.claude-plugin/marketplace.json` - Claude marketplace version
 - `npm-package/package.json` - npm package version
 - `cmd/bd/templates/hooks/*` - Git hook versions
 - `README.md` - Documentation version
@@ -310,24 +311,27 @@ pip install beads-mcp==0.22.0
 python -m beads_mcp --version
 ```
 
-## 5. Claude Code Marketplace Update
+## 5. Plugin Marketplace Update
 
-Update the Claude Code marketplace metadata files:
+Update the plugin marketplace metadata files:
 
 ```bash
 # Update .claude-plugin/marketplace.json
 # Change version to match current release
 vim .claude-plugin/marketplace.json
 
-# Update claude-plugin/.claude-plugin/plugin.json if needed
-vim claude-plugin/.claude-plugin/plugin.json
+# Update plugins/beads/.claude-plugin/plugin.json if needed
+vim plugins/beads/.claude-plugin/plugin.json
+
+# Update plugins/beads/.codex-plugin/plugin.json if needed
+vim plugins/beads/.codex-plugin/plugin.json
 
 # Commit changes
-git add .claude-plugin/ claude-plugin/.claude-plugin/
-git commit -m "chore: Update Claude Code marketplace to v0.22.0"
+git add .claude-plugin/ plugins/beads/.claude-plugin/ plugins/beads/.codex-plugin/
+git commit -m "chore: Update plugin marketplaces to v0.22.0"
 ```
 
-**Note:** These files define how beads appears in Claude Code's plugin marketplace. Version should match the release version.
+**Note:** These files define how beads appears in Claude Code and Codex plugin marketplaces. Version should match the release version.
 
 ## 6. npm Package Release
 

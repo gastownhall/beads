@@ -66,7 +66,7 @@ After skill updates:
 
 ```bash
 # Verify SKILL.md is within token budget
-wc -w claude-plugin/skills/beads/SKILL.md  # Target: 400-600 words
+wc -w plugins/beads/skills/beads/SKILL.md  # Target: 400-600 words
 
 # Verify links resolve
 # (Manual check: ensure all resource links in SKILL.md exist)

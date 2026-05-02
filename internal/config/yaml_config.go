@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -92,6 +93,87 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	return false
+}
+
+// secretKeyPatterns are substrings that identify a yaml-only key as containing
+// sensitive material that should not be written to git-tracked files.
+var secretKeyPatterns = []string{"api_key", "api-key", "secret", "token", "password"}
+
+// IsSecretKey returns true if the given config key holds sensitive material
+// (API keys, tokens, passwords) that should not be committed to git.
+func IsSecretKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, pattern := range secretKeyPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isGitTracked returns true if the file at path is tracked by git
+// (i.e., has been git-added). Uses `git ls-files --error-unmatch`.
+func isGitTracked(path string) bool {
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
+	cmd.Dir = filepath.Dir(path)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run() == nil
+}
+
+var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are environment variable names, not credentials.
+	"ai.api_key":     "ANTHROPIC_API_KEY",
+	"github.token":   "GITHUB_TOKEN",
+	"linear.api_key": "LINEAR_API_KEY",
+}
+
+// secretKeyEnvVarHint returns a suggested environment variable name for a
+// secret config key, e.g. "linear.api_key" -> "LINEAR_API_KEY".
+func secretKeyEnvVarHint(key string) string {
+	if envVar, ok := secretKeyEnvVarHints[key]; ok {
+		return envVar
+	}
+	return "BD_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
+}
+
+// CheckSecretKeyGitSafety checks whether writing key to the project's
+// config.yaml would expose a secret in git history. Returns a descriptive
+// error with remediation steps if so; nil otherwise. Non-secret keys always
+// return nil.
+func CheckSecretKeyGitSafety(key string) error {
+	configPath, err := findProjectConfigYaml()
+	if err != nil {
+		return nil // can't resolve path; let the write fail with its own error
+	}
+	return checkSecretGitTracked(configPath, key)
+}
+
+func checkSecretGitTracked(configPath, key string) error {
+	if !IsYamlOnlyKey(key) {
+		return nil
+	}
+	if !IsSecretKey(key) {
+		return nil
+	}
+	if !isGitTracked(configPath) {
+		return nil
+	}
+	envVar := secretKeyEnvVarHint(key)
+	return fmt.Errorf(
+		"refusing to write secret key %q to git-tracked config file %s\n\n"+
+			"This would expose your secret in git history. Instead:\n"+
+			"  export %s=\"your-key-here\"    # add to ~/.secrets or ~/.zshrc\n\n"+
+			"Or move config.yaml out of git tracking:\n"+
+			"  git rm --cached %s\n"+
+			"  echo \"config.yaml\" >> %s/.gitignore\n\n"+
+			"To override this check (e.g., for testing):\n"+
+			"  bd config set --force-git-tracked %s \"value\"",
+		key, configPath,
+		envVar,
+		configPath,
+		filepath.Dir(configPath),
+		key,
+	)
 }
 
 // keyAliases maps alternative key names to their canonical yaml form.

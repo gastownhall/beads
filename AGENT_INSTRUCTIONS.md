@@ -113,6 +113,14 @@ defer to the standard PR flow to keep changes reviewable.
 - When handling external contributor PRs, use fix-merge: checkout the PR
   branch locally, fix/rebase onto main, merge via PR, then close the PR
 
+### Maintainer PR Guidelines
+
+Before triaging, reviewing, landing, closing, or otherwise maintaining PRs,
+read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md). The
+maintainer policy is to maximize community throughput: find useful contributor
+value, absorb or transform it locally when practical, preserve attribution, and
+use request-changes only as a last resort.
+
 ### External Contributor PRs: Check Before You Build
 
 **Read [CONTRIBUTING.md](CONTRIBUTING.md)** — it contains promises we've made to contributors. Violating them damages trust and community.
@@ -401,8 +409,9 @@ git push origin main
 **Files updated automatically:**
 
 - `cmd/bd/version.go` - CLI version
-- `claude-plugin/.claude-plugin/plugin.json` - Plugin version
-- `.claude-plugin/marketplace.json` - Marketplace version
+- `plugins/beads/.claude-plugin/plugin.json` - Claude plugin version
+- `plugins/beads/.codex-plugin/plugin.json` - Codex plugin version
+- `.claude-plugin/marketplace.json` - Claude marketplace version
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
 - `README.md` - Documentation version
 - `PLUGIN.md` - Version requirements

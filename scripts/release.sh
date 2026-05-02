@@ -27,7 +27,7 @@ set -euo pipefail
 #
 # THE RELEASE MOLECULE
 #
-# The `beads-release` formula has 29 steps across 3 phases:
+# The `beads-release` formula defines the full release flow:
 #   Phase 1: Preflight → version bumps → git push (agent work)
 #   Gate:    Await CI completion (async, no polling)
 #   Phase 2: Verify GitHub/npm/PyPI releases (parallel)
@@ -80,7 +80,7 @@ Examples:
   ./scripts/release.sh 0.50.0 --dry-run # Preview only
 
 After running this script:
-  1. The release molecule (wisp) is created with all 29 steps
+  1. The release molecule (wisp) is created with the configured formula steps
   2. Hook it to start working: bd hook <mol-id>
   3. Or assign to an agent: bd sling <agent> --mol <mol-id>
   4. Watch progress: bd activity --follow
@@ -128,9 +128,13 @@ if [ "$DRY_RUN" = true ]; then
     echo "Would create release molecule with:"
     echo "  bd mol wisp beads-release --var version=${VERSION}"
     echo ""
-    echo "The molecule has 29 steps:"
-    bd formula show beads-release 2>/dev/null | grep -E "^   [├└]" | head -15
-    echo "   ... (14 more steps)"
+    FORMULA_STEPS=$(bd formula show beads-release 2>/dev/null | grep -E "^   [├└]" || true)
+    STEP_COUNT=$(printf "%s\n" "$FORMULA_STEPS" | sed '/^$/d' | wc -l | tr -d ' ')
+    echo "The molecule has ${STEP_COUNT} steps:"
+    printf "%s\n" "$FORMULA_STEPS" | head -15
+    if [ "$STEP_COUNT" -gt 15 ]; then
+        echo "   ... ($((STEP_COUNT - 15)) more steps)"
+    fi
     echo ""
     echo -e "${BLUE}Why a molecule instead of a script?${NC}"
     echo "  • Each step is a ledger entry (your work history)"

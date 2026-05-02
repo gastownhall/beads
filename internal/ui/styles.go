@@ -171,7 +171,7 @@ func initColors(isDark bool) {
 
 	// Command style - uses adaptive color for subtle contrast
 	CommandStyle = lipgloss.NewStyle().Foreground(
-		ld(lipgloss.Color("#5c6166"), lipgloss.Color("#bfbdb6")),
+		ld(lipgloss.Color("#bfbdb6"), lipgloss.Color("#5c6166")),
 	)
 }
 

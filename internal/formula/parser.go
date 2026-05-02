@@ -10,6 +10,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 )
 
 // Formula file extensions. TOML is preferred, JSON is legacy fallback.
@@ -79,8 +80,18 @@ func DefaultSearchPaths() []string {
 	// Project-level formulas via resolved beads directory.
 	if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
 		addPath(filepath.Join(beadsDir, "formulas"))
-	} else if cwd, err := os.Getwd(); err == nil {
-		addPath(filepath.Join(cwd, ".beads", "formulas"))
+	}
+
+	// Checkout-local formulas should remain discoverable even when the active
+	// beads database resolves to a parent/shared .beads directory. This lets a
+	// repo ship workflow formulas under .beads/formulas without requiring every
+	// maintainer to copy them into ~/.beads.
+	if cwd, err := os.Getwd(); err == nil {
+		checkoutRoot := cwd
+		if repoRoot := git.GetRepoRoot(); repoRoot != "" {
+			checkoutRoot = repoRoot
+		}
+		addPath(filepath.Join(checkoutRoot, ".beads", "formulas"))
 	}
 
 	// User-level formulas

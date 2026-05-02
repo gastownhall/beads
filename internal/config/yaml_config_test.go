@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -540,6 +541,182 @@ func TestValidateYamlConfigValue_SharedServer(t *testing.T) {
 	}
 	if err := validateYamlConfigValue("dolt.shared-server", "1"); err == nil {
 		t.Error("expected '1' to be invalid (not a boolean string)")
+	}
+}
+
+func TestIsSecretKey(t *testing.T) {
+	tests := []struct {
+		key      string
+		expected bool
+	}{
+		{"linear.api_key", true},
+		{"github.token", true},
+		{"some.password", true},
+		{"some.secret", true},
+		{"some.api-key", true},
+
+		{"no-db", false},
+		{"json", false},
+		{"routing.mode", false},
+		{"sync.remote", false},
+		{"linear.team_id", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			got := IsSecretKey(tt.key)
+			if got != tt.expected {
+				t.Errorf("IsSecretKey(%q) = %v, want %v", tt.key, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSecretKeyEnvVarHint(t *testing.T) {
+	tests := []struct {
+		key      string
+		expected string
+	}{
+		{"linear.api_key", "LINEAR_API_KEY"},
+		{"github.token", "GITHUB_TOKEN"},
+		{"ai.api_key", "ANTHROPIC_API_KEY"},
+		{"custom.secret-token", "BD_CUSTOM_SECRET_TOKEN"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			got := secretKeyEnvVarHint(tt.key)
+			if got != tt.expected {
+				t.Errorf("secretKeyEnvVarHint(%q) = %q, want %q", tt.key, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCheckSecretKeyGitSafety_RefusesGitTrackedSecret(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Initialize a git repo
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = tmpDir
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+
+	// Create .beads/config.yaml and git-add it
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("json: false\n"), 0644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+	gitAdd := exec.Command("git", "add", configPath)
+	gitAdd.Dir = tmpDir
+	if out, err := gitAdd.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+
+	// checkSecretGitTracked should refuse a secret key
+	err := checkSecretGitTracked(configPath, "linear.api_key")
+	if err == nil {
+		t.Fatal("expected error for secret key on git-tracked config, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to write secret key") {
+		t.Fatalf("expected 'refusing to write' error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "LINEAR_API_KEY") {
+		t.Fatalf("expected env var hint in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--force-git-tracked") {
+		t.Fatalf("expected --force-git-tracked hint in error, got: %v", err)
+	}
+}
+
+func TestCheckSecretKeyGitSafety_AllowsDatabaseBackedSecretKey(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = tmpDir
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("json: false\n"), 0644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+	gitAdd := exec.Command("git", "add", configPath)
+	gitAdd.Dir = tmpDir
+	if out, err := gitAdd.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+
+	// Secret-looking keys that are not YAML-backed do not write to config.yaml.
+	err := checkSecretGitTracked(configPath, "notion.token")
+	if err != nil {
+		t.Fatalf("expected no error for database-backed secret key, got: %v", err)
+	}
+}
+
+func TestCheckSecretKeyGitSafety_AllowsUntrackedConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Initialize a git repo but do NOT add config.yaml
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = tmpDir
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("json: false\n"), 0644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+
+	// checkSecretGitTracked should allow untracked config
+	err := checkSecretGitTracked(configPath, "linear.api_key")
+	if err != nil {
+		t.Fatalf("expected no error for untracked config, got: %v", err)
+	}
+}
+
+func TestCheckSecretKeyGitSafety_AllowsNonSecretKeyOnTrackedConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	gitInit := exec.Command("git", "init")
+	gitInit.Dir = tmpDir
+	if out, err := gitInit.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("json: false\n"), 0644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+	gitAdd := exec.Command("git", "add", configPath)
+	gitAdd.Dir = tmpDir
+	if out, err := gitAdd.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+
+	// Non-secret keys should always be allowed, even on tracked files
+	err := checkSecretGitTracked(configPath, "no-db")
+	if err != nil {
+		t.Fatalf("expected no error for non-secret key, got: %v", err)
 	}
 }
 
