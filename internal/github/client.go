@@ -113,6 +113,9 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 			if rlErr := classifyRateLimit(resp.Header, respBody, resp.StatusCode, urlStr); rlErr != nil {
 				lastRateLimit = rlErr
 				lastErr = rlErr
+				if attempt >= retry.MaxRetries {
+					continue
+				}
 				if err := sleep(ctx, computeRetryDelay(rlErr, attempt, retry)); err != nil {
 					return nil, nil, err
 				}

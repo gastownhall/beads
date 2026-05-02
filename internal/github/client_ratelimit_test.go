@@ -147,3 +147,44 @@ func TestDoRequest_Secondary403_ReturnsTypedErrorWithMinDelay(t *testing.T) {
 		t.Errorf("elapsed %v below SecondaryMinDelay floor %v", elapsed, min)
 	}
 }
+
+// When the final retry attempt also hits a rate limit, return the typed
+// *RateLimitError immediately instead of sleeping once more.
+func TestDoRequest_RateLimitFinalAttemptDoesNotSleep(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit. Please wait before you try again."}`))
+	}))
+	defer srv.Close()
+
+	c := fastRetryTestClient(srv.URL)
+	c.Retry.MaxRetries = 0
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, _, err := c.doRequest(ctx, http.MethodPost, srv.URL+"/repos/owner/repo/issues", map[string]string{"title": "x"})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected rate-limit error, got nil")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("expected 1 attempt, got %d", got)
+	}
+	var rlErr *RateLimitError
+	if !errors.As(err, &rlErr) {
+		t.Fatalf("expected *RateLimitError, got %T: %v", err, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("final attempt slept until context deadline instead of returning rate-limit error: %v", err)
+	}
+	if elapsed >= 100*time.Millisecond {
+		t.Errorf("final rate-limit attempt should return before context timeout, took %v", elapsed)
+	}
+}
