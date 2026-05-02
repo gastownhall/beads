@@ -1229,6 +1229,11 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 	line := fmt.Sprintf("%s: %s [P%d] (%s)",
 		idStr, node.Title, node.Priority, node.Status)
 
+	// Show edge type for non-root nodes (GH#3565)
+	if node.Depth > 0 && node.EdgeFromParent != "" {
+		line += " " + ui.RenderMuted(fmt.Sprintf("[%s]", node.EdgeFromParent))
+	}
+
 	// Add READY/BLOCKED indicator for root node
 	if node.Status == types.StatusOpen && node.Depth == 0 {
 		if isBlocked {

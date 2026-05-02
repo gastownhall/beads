@@ -1127,9 +1127,10 @@ func BuildReadyExplanation(
 // TreeNode represents a node in a dependency tree
 type TreeNode struct {
 	Issue
-	Depth     int    `json:"depth"`
-	ParentID  string `json:"parent_id"`
-	Truncated bool   `json:"truncated"`
+	Depth          int            `json:"depth"`
+	ParentID       string         `json:"parent_id"`
+	EdgeFromParent DependencyType `json:"edge_from_parent,omitempty"`
+	Truncated      bool           `json:"truncated"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.
