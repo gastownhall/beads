@@ -74,13 +74,14 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 #   git-repo: ""       # Separate git repo for backups (default: project repo)
 
 # Integration settings (access with 'bd config get/set')
-# These are stored in the database, not in this file:
-# - jira.url
-# - jira.project
-# - linear.url
-# - linear.api-key
-# - github.org
-# - github.repo
+# Non-secret keys (stored in the database):
+# - jira.url, jira.project
+# - linear.team_id
+# - github.org, github.repo
+#
+# Secret keys (stored in this file but prefer env vars to avoid git exposure):
+# - linear.api_key  → use LINEAR_API_KEY env var instead
+# - github.token    → use GITHUB_TOKEN env var instead
 `, prefixLine, noDbLine)
 
 	if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {

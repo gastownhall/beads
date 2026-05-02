@@ -641,8 +641,8 @@ Linear integration provides bidirectional sync between bd and Linear via GraphQL
 **Required configuration:**
 
 ```bash
-# API Key (can also use LINEAR_API_KEY environment variable)
-bd config set linear.api_key "lin_api_YOUR_API_KEY"
+# API Key (recommended: use environment variable to avoid git exposure)
+export LINEAR_API_KEY="lin_api_YOUR_API_KEY"  # add to ~/.secrets or ~/.zshrc
 
 # Team ID (find in Linear team settings or URL)
 bd config set linear.team_id "team-uuid-here"

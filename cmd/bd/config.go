@@ -75,6 +75,8 @@ Examples:
   bd config unset jira.url`,
 }
 
+var forceGitTracked bool
+
 var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
 	Short: "Set a configuration value",
@@ -104,6 +106,16 @@ var configSetCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Warning: %q is not a recognized config key. Use 'custom.*' for user-defined keys.\n", key)
 			}
 			fmt.Fprintf(os.Stderr, "Run 'bd config --help' for valid namespaces.\n")
+		}
+
+		// Refuse to write secret keys to git-tracked config files unless
+		// --force-git-tracked is set. This prevents accidental exposure of
+		// API keys and tokens in git history.
+		if !forceGitTracked {
+			if err := config.CheckSecretKeyGitSafety(key); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		// Check if this is a yaml-only key (startup settings like no-db, etc.)
@@ -667,6 +679,16 @@ Examples:
 			}
 		}
 
+		// Phase 3b: Check git-tracked secret safety for yaml keys
+		if !forceGitTracked {
+			for _, p := range yamlPairs {
+				if err := config.CheckSecretKeyGitSafety(p.key); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+			}
+		}
+
 		// Phase 4: Write yaml-only keys
 		for _, p := range yamlPairs {
 			if err := config.SetYamlConfig(p.key, p.value); err != nil {
@@ -835,6 +857,9 @@ func levenshteinDistance(a, b string) int {
 }
 
 func init() {
+	configSetCmd.Flags().BoolVar(&forceGitTracked, "force-git-tracked", false, "Allow writing secret keys to git-tracked config files (use with caution)")
+	configSetManyCmd.Flags().BoolVar(&forceGitTracked, "force-git-tracked", false, "Allow writing secret keys to git-tracked config files (use with caution)")
+
 	configCmd.AddCommand(configSetCmd)
 	configCmd.AddCommand(configSetManyCmd)
 	configCmd.AddCommand(configGetCmd)
