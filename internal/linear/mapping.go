@@ -462,8 +462,12 @@ func LabelToIssueType(labels *Labels, config *MappingConfig) types.IssueType {
 			return ParseIssueType(issueType)
 		}
 
-		// Check if label contains any mapped keyword
+		// Check if label contains any broad legacy keyword. New issue types are
+		// exact-only to avoid labels like "history" being inferred as "story".
 		for keyword, issueType := range config.LabelTypeMap {
+			if !allowsSubstringLabelType(keyword, issueType) {
+				continue
+			}
 			if strings.Contains(labelName, keyword) {
 				return ParseIssueType(issueType)
 			}
@@ -471,6 +475,20 @@ func LabelToIssueType(labels *Labels, config *MappingConfig) types.IssueType {
 	}
 
 	return types.TypeTask // Default
+}
+
+func allowsSubstringLabelType(keyword, issueType string) bool {
+	switch keyword {
+	case "decision", "spike", "story", "milestone":
+		return false
+	}
+
+	switch ParseIssueType(issueType) {
+	case types.TypeDecision, types.TypeSpike, types.TypeStory, types.TypeMilestone:
+		return false
+	default:
+		return true
+	}
 }
 
 // ParseIssueType converts an issue type string to types.IssueType.
