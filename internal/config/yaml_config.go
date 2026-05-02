@@ -121,7 +121,7 @@ func isGitTracked(path string) bool {
 	return cmd.Run() == nil
 }
 
-var secretKeyEnvVarHints = map[string]string{
+var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are environment variable names, not credentials.
 	"ai.api_key":     "ANTHROPIC_API_KEY",
 	"github.token":   "GITHUB_TOKEN",
 	"linear.api_key": "LINEAR_API_KEY",
