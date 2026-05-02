@@ -88,6 +88,9 @@ type Engine struct {
 
 	// warnings collects warning messages during a Sync() call for inclusion in SyncResult.
 	warnings []string
+
+	// historyItems collects per-issue outcomes during a Sync() call for the audit log.
+	historyItems []SyncHistoryItem
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
@@ -101,18 +104,23 @@ func NewEngine(tracker IssueTracker, store storage.Storage, actor string) *Engin
 
 // Sync performs a complete synchronization operation based on the given options.
 func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error) {
+	startedAt := time.Now().UTC()
+	syncRunID := NewSyncRunID()
+
 	ctx, span := syncTracer.Start(ctx, "tracker.sync",
 		trace.WithAttributes(
 			attribute.String("sync.tracker", e.Tracker.DisplayName()),
 			attribute.Bool("sync.pull", opts.Pull || (!opts.Pull && !opts.Push)),
 			attribute.Bool("sync.push", opts.Push || (!opts.Pull && !opts.Push)),
 			attribute.Bool("sync.dry_run", opts.DryRun),
+			attribute.String("sync.run_id", syncRunID),
 		),
 	)
 	defer span.End()
 
 	result := &SyncResult{Success: true}
 	e.warnings = nil
+	e.historyItems = nil
 
 	// Default to bidirectional if neither specified
 	if !opts.Pull && !opts.Push {
@@ -196,6 +204,12 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	}
 
 	result.Warnings = e.warnings
+
+	// Persist audit log entry for non-dry-run syncs.
+	if !opts.DryRun {
+		e.recordHistory(ctx, syncRunID, startedAt, opts, result)
+	}
+
 	return result, nil
 }
 
@@ -472,8 +486,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				return syncIssueLabels(ctx, tx, existing.ID, conv.Issue.Labels, e.Actor)
 			}); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
+				e.recordItem(existing.ID, extIssue.Identifier, "failed", err.Error())
 				continue
 			}
+			e.recordItem(existing.ID, extIssue.Identifier, "updated", "")
 			stats.Updated++
 		} else {
 			// Create new issue
@@ -483,8 +499,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 			if err := e.Store.CreateIssue(ctx, conv.Issue, e.Actor); err != nil {
 				e.warn("Failed to create issue for %s: %v", extIssue.Identifier, err)
+				e.recordItem(conv.Issue.ID, extIssue.Identifier, "failed", err.Error())
 				continue
 			}
+			e.recordItem(conv.Issue.ID, extIssue.Identifier, "created", "")
 			stats.Created++
 		}
 	}
@@ -904,6 +922,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			created, err := e.Tracker.CreateIssue(ctx, pushIssue)
 			if err != nil {
 				e.warn("Failed to create %s in %s: %v", issue.ID, e.Tracker.DisplayName(), err)
+				e.recordItem(issue.ID, "", "failed", err.Error())
 				stats.Errors++
 				continue
 			}
@@ -914,9 +933,8 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if err := e.Store.UpdateIssue(ctx, issue.ID, updates, e.Actor); err != nil {
 				e.warn("Failed to update external_ref for %s: %v", issue.ID, err)
 				stats.Errors++
-				// Note: issue WAS created externally, so we still count Created
-				// but also flag the error so the user knows the link is broken
 			}
+			e.recordItem(issue.ID, created.Identifier, "created", "")
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue
@@ -945,9 +963,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 
 			if _, err := e.Tracker.UpdateIssue(ctx, extID, pushIssue); err != nil {
 				e.warn("Failed to update %s in %s: %v", issue.ID, e.Tracker.DisplayName(), err)
+				e.recordItem(issue.ID, extID, "failed", err.Error())
 				stats.Errors++
 				continue
 			}
+			e.recordItem(issue.ID, extID, "updated", "")
 			stats.Updated++
 		} else {
 			stats.Skipped++
@@ -1364,6 +1384,57 @@ func buildIssueIDSet(ids []string) map[string]bool {
 		set[id] = true
 	}
 	return set
+}
+
+// recordHistory persists the sync run and per-issue items to the audit log.
+// Errors are logged as warnings — audit log failure must not fail the sync itself.
+func (e *Engine) recordHistory(ctx context.Context, syncRunID string, startedAt time.Time, opts SyncOptions, result *SyncResult) {
+	provider, ok := e.Store.(dbProvider)
+	if !ok || provider.DB() == nil {
+		return
+	}
+	db := provider.DB()
+
+	entry := &SyncHistoryEntry{
+		SyncRunID:     syncRunID,
+		StartedAt:     startedAt,
+		CompletedAt:   time.Now().UTC(),
+		Tracker:       e.Tracker.DisplayName(),
+		Direction:     syncDirection(opts),
+		DryRun:        opts.DryRun,
+		IssuesCreated: result.Stats.Created,
+		IssuesUpdated: result.Stats.Updated,
+		IssuesSkipped: result.Stats.Skipped,
+		IssuesFailed:  result.Stats.Errors,
+		Conflicts:     result.Stats.Conflicts,
+		Success:       result.Success,
+		ErrorMessage:  result.Error,
+		Actor:         e.Actor,
+	}
+
+	if err := RecordSyncHistory(ctx, db, entry); err != nil {
+		e.warn("Failed to record sync history: %v", err)
+		return
+	}
+
+	if len(e.historyItems) > 0 {
+		for i := range e.historyItems {
+			e.historyItems[i].SyncRunID = syncRunID
+		}
+		if err := RecordSyncHistoryItems(ctx, db, e.historyItems); err != nil {
+			e.warn("Failed to record sync history items: %v", err)
+		}
+	}
+}
+
+// recordItem appends a per-issue outcome for the audit log.
+func (e *Engine) recordItem(beadID, externalID, outcome, errMsg string) {
+	e.historyItems = append(e.historyItems, SyncHistoryItem{
+		BeadID:       beadID,
+		ExternalID:   externalID,
+		Outcome:      outcome,
+		ErrorMessage: errMsg,
+	})
 }
 
 func (e *Engine) msg(format string, args ...interface{}) {
