@@ -17,7 +17,7 @@ var commentsCmd = &cobra.Command{
 	Long: `View or manage comments on an issue.
 
 Examples:
-  # List all comments on an issue
+  # List all comments on an issue (issue id is required — there is no "comments list")
   bd comments bd-123
 
   # List comments in JSON format
@@ -89,6 +89,24 @@ Examples:
 			}
 			fmt.Println()
 		}
+	},
+}
+
+// commentsMisplacedListCmd catches the reflexive "bd comments list" invocation (GH#3542).
+// Listing comments always requires an issue id: bd comments <issue-id>.
+var commentsMisplacedListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "Invalid — use bd comments <issue-id> to list comments",
+	Run: func(cmd *cobra.Command, args []string) {
+		FatalErrorRespectJSON(`"bd comments list" is not valid.
+
+To list comments on an issue, run:
+  bd comments <issue-id>
+
+Example:
+  bd comments bd-123
+
+See: bd comments --help`)
 	},
 }
 
@@ -171,6 +189,7 @@ Examples:
 }
 
 func init() {
+	commentsCmd.AddCommand(commentsMisplacedListCmd)
 	commentsCmd.AddCommand(commentsAddCmd)
 	commentsCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC")
 	commentsAddCmd.Flags().StringP("file", "f", "", "Read comment text from file")
