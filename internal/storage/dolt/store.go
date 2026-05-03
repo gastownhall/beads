@@ -1656,12 +1656,19 @@ func (s *DoltStore) Commit(ctx context.Context, message string) (retErr error) {
 	}
 	defer conn.Close()
 
-	// GH#2455: Stage all dirty tables EXCEPT config. Query dolt_status for
-	// dirty tables and stage each one individually, skipping config to avoid
-	// sweeping up stale issue_prefix changes from concurrent operations.
-	rows, err := conn.QueryContext(ctx, "SELECT table_name FROM dolt_status")
+	// GH#2455, GH#3529: Stage all dirty tables EXCEPT config and dolt-ignored
+	// tables. Query dolt_status with a dolt_ignore exclusion filter to avoid
+	// staging ignored tables (wisps, local_metadata, etc.) that would cause a
+	// "nothing to commit" warning on the Dolt server.
+	rows, err := conn.QueryContext(ctx, `
+		SELECT table_name FROM dolt_status s
+		WHERE s.table_name != 'config'
+		AND NOT EXISTS (
+			SELECT 1 FROM dolt_ignore di
+			WHERE di.ignored = 1
+			AND s.table_name LIKE di.pattern
+		)`)
 	if err != nil {
-		// If dolt_status fails, fall back to nothing (rare edge case).
 		return fmt.Errorf("failed to query dolt_status: %w", err)
 	}
 	var tables []string
@@ -1671,9 +1678,7 @@ func (s *DoltStore) Commit(ctx context.Context, message string) (retErr error) {
 			_ = rows.Close()
 			return fmt.Errorf("failed to scan dolt_status: %w", err)
 		}
-		if table != "config" {
-			tables = append(tables, table)
-		}
+		tables = append(tables, table)
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
@@ -1686,9 +1691,7 @@ func (s *DoltStore) Commit(ctx context.Context, message string) (retErr error) {
 
 	for _, table := range tables {
 		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
-			// Best effort: some tables may be dolt_ignore'd (e.g., wisps).
-			// DOLT_ADD fails for ignored tables; skip silently.
-			continue
+			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
 

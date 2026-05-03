@@ -111,7 +111,7 @@ var readOnlyCommands = map[string]bool{
 	"list":       true,
 	"ready":      true,
 	"show":       true,
-	"stats":      true,
+	"status":     true, // GH#3529: was "stats" (alias), but cmd.Name() returns "status"
 	"blocked":    true,
 	"count":      true,
 	"search":     true,
@@ -122,6 +122,8 @@ var readOnlyCommands = map[string]bool{
 	"ping":       true,
 	"backup":     true, // reads from Dolt, writes only to .beads/backup/
 	"export":     true, // reads from Dolt, writes JSONL to file/stdout
+	"memories":   true, // GH#3529: read-only listing of stored memories
+	"recall":     true, // GH#3529: read-only retrieval of a single memory
 }
 
 // isReadOnlyCommand returns true if the command only reads from the database.

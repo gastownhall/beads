@@ -98,11 +98,19 @@ func TestMaybeAutoPush_NilStore(t *testing.T) {
 
 func TestAutoPush_SkippedForReadOnlyCommands(t *testing.T) {
 	// Read-only commands should not trigger auto-push (GH#2191).
-	readOnly := []string{"list", "ready", "show", "stats", "blocked", "search", "graph"}
+	// GH#3529: use cmd.Name() values (first word of Use field), not aliases.
+	// "status" is the cmd.Name() for the statusCmd (alias "stats").
+	readOnly := []string{"list", "ready", "show", "status", "blocked", "search", "graph", "memories", "recall"}
 	for _, cmd := range readOnly {
 		if !isReadOnlyCommand(cmd) {
 			t.Errorf("isReadOnlyCommand(%q) = false, want true", cmd)
 		}
+	}
+
+	// Verify aliases are NOT what gets checked (cmd.Name() returns
+	// the Use field name, not the alias).
+	if isReadOnlyCommand("stats") {
+		t.Error("isReadOnlyCommand(\"stats\") = true; map should use \"status\" (cmd.Name()), not the alias")
 	}
 
 	writeCmds := []string{"create", "update", "close", "import"}

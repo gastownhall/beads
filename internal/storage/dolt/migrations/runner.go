@@ -49,14 +49,21 @@ func RunCompatMigrations(db *sql.DB) error {
 		}
 	}
 
-	// Only stage and commit when compat migrations actually produced changes.
-	// Previously, DOLT_COMMIT was called unconditionally, causing a
-	// "nothing to commit" WARNING on the server for every bd invocation
-	// (94% of server log lines in one reported case). GH#3366.
+	// Only stage and commit when compat migrations actually produced committable
+	// changes. Exclude dolt-ignored tables (wisps, local_metadata, etc.) that
+	// appear in dolt_status but can never be staged — attempting to commit when
+	// only ignored tables are dirty produces a "nothing to commit" WARNING on
+	// the Dolt server. GH#3366, GH#3529.
 	var dirtyCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM dolt_status").Scan(&dirtyCount); err != nil {
-		// dolt_status might not be available (e.g. older servers); fall through
-		// to the original behavior as a safe fallback.
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM dolt_status s
+		WHERE NOT EXISTS (
+			SELECT 1 FROM dolt_ignore di
+			WHERE di.ignored = 1
+			AND s.table_name LIKE di.pattern
+		)`).Scan(&dirtyCount); err != nil {
+		// dolt_status/dolt_ignore might not be available (e.g. older servers);
+		// fall through to the original behavior as a safe fallback.
 		dirtyCount = 1
 	}
 	if dirtyCount == 0 {
