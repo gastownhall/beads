@@ -881,6 +881,7 @@ func (c *Client) UpdateIssue(ctx context.Context, issueID string, updates map[st
 
 	return &updateResp.IssueUpdate.Issue, nil
 }
+
 // BatchCreateIssues creates multiple issues in Linear using the issueBatchCreate mutation.
 // Inputs are chunked into groups of BatchSize (50).
 //

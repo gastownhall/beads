@@ -440,7 +440,7 @@ func TestBatchPush_DuplicateTitlesFallbackToSingleCreate(t *testing.T) {
 						"issue": map[string]interface{}{
 							"id": fmt.Sprintf("single-uuid-%d", singleCreateCount), "identifier": fmt.Sprintf("TEAM-%d", singleCreateCount),
 							"title": input["title"], "description": input["description"],
-							"url": fmt.Sprintf("https://linear.app/team/issue/TEAM-%d", singleCreateCount),
+							"url":      fmt.Sprintf("https://linear.app/team/issue/TEAM-%d", singleCreateCount),
 							"priority": 0, "state": map[string]interface{}{"id": "state-open", "name": "Backlog", "type": "backlog"},
 							"createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
 						},
