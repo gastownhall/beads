@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -137,6 +138,19 @@ func init() {
 	rootCmd.AddCommand(worktreeCmd)
 }
 
+// repairWorktreeBeadsPermissions applies FixBeadsDirPermissions to worktreePath/.beads when
+// the directory exists. Git worktree checkout can leave tracked .beads/ at permissive modes.
+func repairWorktreeBeadsPermissions(worktreePath string) {
+	beadsDir := filepath.Join(worktreePath, ".beads")
+	if fixed, err := config.FixBeadsDirPermissions(beadsDir); err != nil {
+		if !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Warning: could not fix worktree .beads permissions: %v\n", err)
+		}
+	} else if fixed && !jsonOutput {
+		fmt.Fprintf(os.Stderr, "Fixed .beads permissions to %04o\n", config.BeadsDirPerm)
+	}
+}
+
 func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	CheckReadonly("worktree create")
 	ctx := context.Background()
@@ -183,6 +197,10 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to create worktree: %w\n%s", err, string(output))
 		}
 	}
+
+	// Tracked .beads/ checked out by git worktree add can inherit umask defaults (0755).
+	// Align with bd init / GH#3391 so agent loops do not hit permission warnings (GH#3593).
+	repairWorktreeBeadsPermissions(worktreePath)
 
 	// Add to .gitignore if worktree is inside repo root
 	if strings.HasPrefix(worktreePath, repoRoot+string(os.PathSeparator)) {
