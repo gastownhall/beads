@@ -267,13 +267,27 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 		return nil, fmt.Errorf("issue %s not found", issueID)
 	}
 
-	subgraph := &TemplateSubgraph{
-		Root:     root,
-		Issues:   []*types.Issue{root},
-		IssueMap: map[string]*types.Issue{root.ID: root},
+	// Pre-load all dependency records in a single bulk query to avoid N+1.
+	// We use these both for BFS traversal (finding connected issues) and
+	// for populating the subgraph's Dependencies slice.
+	allDepsMap, err := s.GetAllDependencyRecords(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load dependency records: %w", err)
 	}
 
-	// BFS to find all connected issues (via any dependency type).
+	// Build bidirectional adjacency from dependency records for in-memory BFS.
+	// forward: issueID -> []dependsOnID (outgoing edges)
+	// reverse: dependsOnID -> []issueID (incoming edges / dependents)
+	forward := make(map[string][]string)
+	reverse := make(map[string][]string)
+	for sourceID, deps := range allDepsMap {
+		for _, dep := range deps {
+			forward[sourceID] = append(forward[sourceID], dep.DependsOnID)
+			reverse[dep.DependsOnID] = append(reverse[dep.DependsOnID], sourceID)
+		}
+	}
+
+	// BFS to find all connected issue IDs (via any dependency type).
 	// Traverse both directions: dependents AND dependencies (GH#2145).
 	queue := []string{root.ID}
 	visited := map[string]bool{root.ID: true}
@@ -282,41 +296,48 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 		currentID := queue[0]
 		queue = queue[1:]
 
-		// Get issues that depend on this one (dependents)
-		dependents, err := s.GetDependents(ctx, currentID)
-		if err != nil {
-			continue
-		}
-		for _, dep := range dependents {
-			if !visited[dep.ID] {
-				visited[dep.ID] = true
-				subgraph.Issues = append(subgraph.Issues, dep)
-				subgraph.IssueMap[dep.ID] = dep
-				queue = append(queue, dep.ID)
+		for _, neighborID := range forward[currentID] {
+			if !visited[neighborID] {
+				visited[neighborID] = true
+				queue = append(queue, neighborID)
 			}
 		}
-
-		// Get issues this one depends on (dependencies)
-		dependencies, err := s.GetDependencies(ctx, currentID)
-		if err != nil {
-			continue
-		}
-		for _, dep := range dependencies {
-			if !visited[dep.ID] {
-				visited[dep.ID] = true
-				subgraph.Issues = append(subgraph.Issues, dep)
-				subgraph.IssueMap[dep.ID] = dep
-				queue = append(queue, dep.ID)
+		for _, neighborID := range reverse[currentID] {
+			if !visited[neighborID] {
+				visited[neighborID] = true
+				queue = append(queue, neighborID)
 			}
 		}
 	}
 
-	// Load all dependencies within the subgraph
-	for _, issue := range subgraph.Issues {
-		deps, err := s.GetDependencyRecords(ctx, issue.ID)
-		if err != nil {
-			continue
+	// Fetch all connected issues in one batch
+	var idsToFetch []string
+	for id := range visited {
+		if id != root.ID {
+			idsToFetch = append(idsToFetch, id)
 		}
+	}
+
+	subgraph := &TemplateSubgraph{
+		Root:     root,
+		Issues:   []*types.Issue{root},
+		IssueMap: map[string]*types.Issue{root.ID: root},
+	}
+
+	if len(idsToFetch) > 0 {
+		issues, fetchErr := s.GetIssuesByIDs(ctx, idsToFetch)
+		if fetchErr != nil {
+			return nil, fmt.Errorf("failed to fetch connected issues: %w", fetchErr)
+		}
+		for _, issue := range issues {
+			subgraph.Issues = append(subgraph.Issues, issue)
+			subgraph.IssueMap[issue.ID] = issue
+		}
+	}
+
+	// Populate dependencies from the pre-loaded map — only include those within the subgraph
+	for _, issue := range subgraph.Issues {
+		deps := allDepsMap[issue.ID]
 		for _, dep := range deps {
 			// Resolve external deps via routing (bd-k0pfm)
 			if strings.HasPrefix(dep.DependsOnID, "external:") {
@@ -328,7 +349,6 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 						if routeErr == nil && result != nil && result.Issue != nil {
 							subgraph.Issues = append(subgraph.Issues, result.Issue)
 							subgraph.IssueMap[result.Issue.ID] = result.Issue
-							// Rewrite dep to use the resolved issue ID
 							dep.DependsOnID = result.Issue.ID
 							result.Close()
 						} else {
@@ -359,18 +379,12 @@ func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*Templ
 		return nil, fmt.Errorf("no database connection")
 	}
 
-	// Get all open issues (open, in_progress, blocked)
-	// We need to make multiple calls since IssueFilter takes a single status
-	var allIssues []*types.Issue
-	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked} {
-		statusCopy := status
-		issues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-			Status: &statusCopy,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to search issues: %w", err)
-		}
-		allIssues = append(allIssues, issues...)
+	// Get all open issues (open, in_progress, blocked) in a single query
+	allIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
+		Statuses: []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
 
 	if len(allIssues) == 0 {
@@ -383,13 +397,15 @@ func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*Templ
 		issueMap[issue.ID] = issue
 	}
 
-	// Load all dependencies between these issues
+	// Load all dependencies in a single bulk query instead of per-issue N+1
+	allDepsMap, err := s.GetAllDependencyRecords(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load dependency records: %w", err)
+	}
+
 	allDeps := make([]*types.Dependency, 0)
 	for _, issue := range allIssues {
-		deps, err := s.GetDependencyRecords(ctx, issue.ID)
-		if err != nil {
-			continue
-		}
+		deps := allDepsMap[issue.ID]
 		for _, dep := range deps {
 			// Resolve external deps via routing (bd-k0pfm)
 			if strings.HasPrefix(dep.DependsOnID, "external:") {
