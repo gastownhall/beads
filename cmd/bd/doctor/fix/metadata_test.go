@@ -1,12 +1,16 @@
 package fix
 
 import (
+	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
@@ -251,6 +255,120 @@ func TestReconcileAuthoritativeServerMetadata_ErrorsOnAmbiguousProjectIDMatch(t 
 	}
 }
 
+func TestReconcileAuthoritativeServerMetadata_SoleCandidateFallback(t *testing.T) {
+	cfg := &configfile.Config{
+		DoltMode:     configfile.DoltModeServer,
+		DoltDatabase: "wrong_db",
+		// No ProjectID — triggers sole-candidate fallback
+	}
+
+	changed, msg, err := reconcileAuthoritativeServerMetadata(cfg, []serverDatabaseMetadata{
+		{Name: "only_db", HasSchema: true, ProjectID: "discovered-proj"},
+	})
+	if err != nil {
+		t.Fatalf("reconcileAuthoritativeServerMetadata error: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected repair to change metadata")
+	}
+	if cfg.DoltDatabase != "only_db" {
+		t.Fatalf("DoltDatabase = %q, want %q", cfg.DoltDatabase, "only_db")
+	}
+	if cfg.ProjectID != "discovered-proj" {
+		t.Fatalf("ProjectID = %q, want %q", cfg.ProjectID, "discovered-proj")
+	}
+	if !strings.Contains(msg, "only server database") {
+		t.Fatalf("unexpected msg: %q", msg)
+	}
+}
+
+func TestReconcileAuthoritativeServerMetadata_NoChangeWhenAlreadyCorrect(t *testing.T) {
+	cfg := &configfile.Config{
+		DoltMode:     configfile.DoltModeServer,
+		DoltDatabase: "correct_db",
+		ProjectID:    "proj-123",
+	}
+
+	changed, msg, err := reconcileAuthoritativeServerMetadata(cfg, []serverDatabaseMetadata{
+		{Name: "correct_db", HasSchema: true, ProjectID: "proj-123"},
+	})
+	if err != nil {
+		t.Fatalf("reconcileAuthoritativeServerMetadata error: %v", err)
+	}
+	if changed {
+		t.Fatalf("expected no change, got msg: %q", msg)
+	}
+}
+
+func TestReconcileAuthoritativeServerMetadata_BackfillsEmptyProjectID(t *testing.T) {
+	cfg := &configfile.Config{
+		DoltMode:     configfile.DoltModeServer,
+		DoltDatabase: "shared_db",
+		// No ProjectID
+	}
+
+	changed, msg, err := reconcileAuthoritativeServerMetadata(cfg, []serverDatabaseMetadata{
+		{Name: "shared_db", HasSchema: true, ProjectID: "server-id"},
+		{Name: "other_db", HasSchema: true, ProjectID: "other-id"},
+	})
+	if err != nil {
+		t.Fatalf("reconcileAuthoritativeServerMetadata error: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected repair to change metadata")
+	}
+	if cfg.ProjectID != "server-id" {
+		t.Fatalf("ProjectID = %q, want %q", cfg.ProjectID, "server-id")
+	}
+	if !strings.Contains(msg, "backfilled") {
+		t.Fatalf("expected backfill message, got: %q", msg)
+	}
+}
+
+func TestResolveAuthoritativeServerMetadata_DryRunDoesNotSave(t *testing.T) {
+	dir := setupTestWorkspace(t)
+	beadsDir := filepath.Join(dir, ".beads")
+	cfg := &configfile.Config{
+		DoltMode:     configfile.DoltModeServer,
+		DoltDatabase: "wrong_db",
+		ProjectID:    "proj-123",
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	origList := listServerMetadataDatabases
+	listServerMetadataDatabases = func(_ string, _ *configfile.Config) ([]serverDatabaseMetadata, error) {
+		return []serverDatabaseMetadata{
+			{Name: "canonical_db", HasSchema: true, ProjectID: "proj-123"},
+		}, nil
+	}
+	defer func() { listServerMetadataDatabases = origList }()
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	resultCfg, msg, err := ResolveAuthoritativeServerMetadata(dir, false)
+	if err != nil {
+		t.Fatalf("ResolveAuthoritativeServerMetadata failed: %v", err)
+	}
+	if !strings.HasPrefix(msg, "would ") {
+		t.Fatalf("dry-run msg should start with 'would ', got: %q", msg)
+	}
+
+	// Verify the on-disk config was NOT changed
+	loaded, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("failed to reload config: %v", err)
+	}
+	if loaded.DoltDatabase != "wrong_db" {
+		t.Fatalf("on-disk DoltDatabase changed to %q during dry-run", loaded.DoltDatabase)
+	}
+	// But the returned config should reflect the repair
+	if resultCfg.DoltDatabase != "canonical_db" {
+		t.Fatalf("returned DoltDatabase = %q, want %q", resultCfg.DoltDatabase, "canonical_db")
+	}
+}
+
 func TestResolveAuthoritativeServerMetadata_RunsInSharedServerModeWithoutServerDoltMode(t *testing.T) {
 	dir := setupTestWorkspace(t)
 	beadsDir := filepath.Join(dir, ".beads")
@@ -273,5 +391,32 @@ func TestResolveAuthoritativeServerMetadata_RunsInSharedServerModeWithoutServerD
 	}
 	if !called {
 		t.Fatal("expected shared-server metadata probe to run")
+	}
+}
+
+func TestIsExpectedProbeError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil", nil, true},
+		{"ErrNoRows", sql.ErrNoRows, true},
+		{"table not exist (1146)", &mysql.MySQLError{Number: 1146, Message: "Table doesn't exist"}, true},
+		{"unknown database (1049)", &mysql.MySQLError{Number: 1049, Message: "Unknown database"}, true},
+		{"unknown column (1054)", &mysql.MySQLError{Number: 1054, Message: "Unknown column"}, true},
+		{"access denied (1045)", &mysql.MySQLError{Number: 1045, Message: "Access denied"}, false},
+		{"access denied for db (1044)", &mysql.MySQLError{Number: 1044, Message: "Access denied for user"}, false},
+		{"generic error", errors.New("connection reset"), false},
+		{"wrapped ErrNoRows", fmt.Errorf("wrapped: %w", sql.ErrNoRows), true},
+		{"wrapped access denied", fmt.Errorf("wrapped: %w", &mysql.MySQLError{Number: 1045}), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isExpectedProbeError(tt.err)
+			if got != tt.expected {
+				t.Errorf("isExpectedProbeError(%v) = %v, want %v", tt.err, got, tt.expected)
+			}
+		})
 	}
 }

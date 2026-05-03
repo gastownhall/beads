@@ -3,11 +3,13 @@ package fix
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -426,16 +428,25 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 		}
 		meta := serverDatabaseMetadata{Name: dbName}
 
+		// Escape backticks in database name to prevent SQL injection (` → ``)
+		safeName := strings.ReplaceAll(dbName, "`", "``")
+
 		var count int
-		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", dbName)).Scan(&count); err == nil {
+		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
+		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", safeName)).Scan(&count); err == nil {
 			meta.HasSchema = true
+		} else if !isExpectedProbeError(err) {
+			return nil, fmt.Errorf("probing database %q for schema: %w", dbName, err)
 		}
 
 		var projectID string
+		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
 		if err := db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT value FROM `%s`.metadata WHERE `key` = '_project_id' LIMIT 1", dbName),
+			fmt.Sprintf("SELECT value FROM `%s`.metadata WHERE `key` = '_project_id' LIMIT 1", safeName),
 		).Scan(&projectID); err == nil {
 			meta.ProjectID = projectID
+		} else if !isExpectedProbeError(err) {
+			return nil, fmt.Errorf("probing database %q for project_id: %w", dbName, err)
 		}
 
 		databases = append(databases, meta)
@@ -444,6 +455,31 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 		return nil, err
 	}
 	return databases, nil
+}
+
+// isExpectedProbeError returns true for errors that indicate the table/row
+// simply doesn't exist — safe to treat as "not present". Permission errors,
+// connection failures, and other unexpected errors should be propagated so
+// that reconciliation doesn't act on an incomplete inventory.
+func isExpectedProbeError(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1049: // Unknown database
+			return true
+		case 1146: // Table doesn't exist
+			return true
+		case 1054: // Unknown column
+			return true
+		}
+	}
+	return false
 }
 
 func openServerCatalogDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
