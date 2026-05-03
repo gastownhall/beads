@@ -71,6 +71,24 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	}
 
 	// Fallback for non-embedded stores: multi-call path (original behavior).
+	//
+	// Confirm the database is genuinely empty before printing the
+	// progress message and running the import. The embedded path's
+	// jsonlImporter handles this internally inside its single
+	// transaction, but the non-embedded fallback historically printed
+	// the "auto-importing N bytes... into empty database" message
+	// unconditionally — so every command that reached this branch on
+	// a populated store kept emitting the message and re-running the
+	// import (idempotent for issues but still spammy and wasteful).
+	// Mirrors the embedded path's gating.
+	if stats, statsErr := s.GetStatistics(ctx); statsErr != nil || stats == nil || stats.TotalIssues > 0 {
+		// Either the store has data (no upgrade-recovery import needed)
+		// or we couldn't determine emptiness; in both cases skip the
+		// import to avoid duplicate writes and spurious messages. Users
+		// can still run `bd init --from-jsonl` to force a re-import.
+		return
+	}
+
 	fmt.Fprintf(os.Stderr, "auto-importing %d bytes from %s into empty database...\n", info.Size(), jsonlPath)
 
 	result, err := importFromLocalJSONLFull(ctx, s, jsonlPath)
