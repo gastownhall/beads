@@ -402,6 +402,26 @@ func TestInstallClaudeUsesPrimeForClaudeHooks(t *testing.T) {
 	}
 }
 
+func TestClaudeSettingsUsesRemovedSyncCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"empty", "{}", false},
+		{"bd prime only", `{"hooks":{"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}]}}`, false},
+		{"bd sync hook", `{"hooks":{"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"bd sync"}]}]}}`, true},
+		{"bd sync with suffix", `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"bd sync --flush-only"}]}]}}`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := claudeSettingsUsesRemovedSyncCommand([]byte(tt.raw)); got != tt.want {
+				t.Fatalf("claudeSettingsUsesRemovedSyncCommand() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHasBeadsHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 

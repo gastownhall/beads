@@ -204,6 +204,64 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 	return nil
 }
 
+// claudeSettingsUsesRemovedSyncCommand reports whether any hook command references
+// bd sync (removed as a real command; GH#3546).
+func claudeSettingsUsesRemovedSyncCommand(data []byte) bool {
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false
+	}
+	hooks, ok := settings["hooks"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, raw := range hooks {
+		eventHooks, ok := raw.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, hook := range eventHooks {
+			hookMap, ok := hook.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			cmds, ok := hookMap["hooks"].([]interface{})
+			if !ok {
+				continue
+			}
+			for _, c := range cmds {
+				cmdMap, ok := c.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				command, _ := cmdMap["command"].(string)
+				if strings.Contains(command, "bd sync") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func warnIfClaudeHooksUseRemovedSync(env claudeEnv) {
+	paths := []string{
+		projectSettingsPath(env.projectDir),
+		globalSettingsPath(env.homeDir),
+		legacyProjectSettingsPath(env.projectDir),
+	}
+	for _, p := range paths {
+		data, err := env.readFile(p)
+		if err != nil {
+			continue
+		}
+		if !claudeSettingsUsesRemovedSyncCommand(data) {
+			continue
+		}
+		_, _ = fmt.Fprintf(env.stderr, "Warning: %s contains a hook using removed \"bd sync\". Run bd setup claude to refresh hooks (bd prime / bd dolt push), or edit settings manually.\n", p)
+	}
+}
+
 // CheckClaude checks if Claude integration is installed
 func CheckClaude() {
 	env, err := claudeEnvProvider()
@@ -218,6 +276,8 @@ func CheckClaude() {
 }
 
 func checkClaude(env claudeEnv) error {
+	warnIfClaudeHooksUseRemovedSync(env)
+
 	projectSettings := projectSettingsPath(env.projectDir)
 	globalSettings := globalSettingsPath(env.homeDir)
 	legacySettings := legacyProjectSettingsPath(env.projectDir)
