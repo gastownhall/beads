@@ -174,6 +174,36 @@ func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
 	}
 }
 
+func TestPrimeStartsWithTruncationDirective(t *testing.T) {
+	defer stubIsEphemeralBranch(false)()
+	defer stubPrimeHasGitRemote(true)()
+
+	for _, mcpMode := range []bool{false, true} {
+		var buf bytes.Buffer
+		if err := outputPrimeContext(&buf, mcpMode, false); err != nil {
+			t.Fatalf("outputPrimeContext failed: %v", err)
+		}
+		if !strings.HasPrefix(buf.String(), primeTruncationDirective) {
+			t.Fatalf("prime output should start with truncation directive; got %q", buf.String()[:min(120, buf.Len())])
+		}
+	}
+}
+
+func TestPrimeMemoriesOnlyNoMemories(t *testing.T) {
+	var buf bytes.Buffer
+	if err := outputPrimeContextWithOptions(&buf, false, false, true); err != nil {
+		t.Fatalf("outputPrimeContextWithOptions failed: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.HasPrefix(output, primeTruncationDirective) {
+		t.Fatal("memories-only output should start with truncation directive")
+	}
+	if strings.Contains(output, "Essential Commands") {
+		t.Fatalf("memories-only output should not include the full workflow guide: %s", output)
+	}
+}
+
 func TestPrimeContextUsesWorkspaceLanguage(t *testing.T) {
 	defer stubIsEphemeralBranch(false)()
 	defer stubPrimeHasGitRemote(true)()

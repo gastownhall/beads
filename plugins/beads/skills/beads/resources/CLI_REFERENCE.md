@@ -6,6 +6,7 @@
 ## Quick Navigation
 
 - [Health & Status](#health--status)
+- [Agent Context & Memory](#agent-context--memory)
 - [Basic Operations](#basic-operations)
 - [Issue Management](#issue-management)
 - [Dependencies & Labels](#dependencies--labels)
@@ -63,10 +64,45 @@ bd prime                       # Auto-detects MCP vs CLI mode
 bd prime --full                # Force full CLI output
 bd prime --mcp                 # Force minimal MCP output
 bd prime --stealth             # No git operations mode
+bd prime --memories-only       # Print persistent memories only
 bd prime --export              # Dump default content for customization
 ```
 
+`bd prime` starts with a truncation warning for hosts that cap hook output. If your agent sees a persisted-output path, read that full file before continuing; memories and session rules may be below the preview cutoff.
+
 **Customization:** Place `.beads/PRIME.md` to override default output.
+
+## Agent Context & Memory
+
+### Prime
+
+`bd prime` prints AI-optimized workflow context. Claude Code and Gemini hooks can run it automatically at session start and before compaction; hookless agents can run it manually when they need the current workflow rules.
+
+```bash
+bd prime                       # Auto-detect MCP vs CLI mode
+bd prime --full                # Force full CLI command guide
+bd prime --mcp                 # Force minimal MCP-oriented context
+bd prime --stealth             # Omit git operations from close protocol
+bd prime --memories-only       # Print persistent memories only
+bd prime --export              # Dump default PRIME.md content for customization
+```
+
+Customize the default context by placing a `.beads/PRIME.md` file in the project or `~/.config/beads/PRIME.md` globally.
+
+### Persistent Memories
+
+Use memories for durable project facts that should survive account rotations and context compaction. Do not use `MEMORY.md` files for this purpose.
+
+```bash
+bd remember "always run auth tests with TEST_DB=postgres"
+bd remember "auth module uses JWT, not server sessions" --key auth-jwt
+bd memories                    # List all memories
+bd memories auth               # Search memory keys and values
+bd recall auth-jwt             # Print one full memory
+bd forget auth-jwt             # Delete one memory
+```
+
+Memories are injected by `bd prime`. For low-token hooks, use `bd prime --memories-only`.
 
 ## Basic Operations
 

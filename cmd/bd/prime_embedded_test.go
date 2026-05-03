@@ -82,6 +82,23 @@ func TestEmbeddedPrime(t *testing.T) {
 		if !strings.Contains(primeOut, "race") {
 			t.Errorf("expected memory content in prime output: %s", primeOut[:min(500, len(primeOut))])
 		}
+		memoryIdx := strings.Index(primeOut, "prime-test-mem")
+		sessionIdx := strings.Index(primeOut, "SESSION CLOSE PROTOCOL")
+		if memoryIdx == -1 || sessionIdx == -1 || memoryIdx > sessionIdx {
+			t.Errorf("expected memories before session protocol in prime output")
+		}
+	})
+
+	// ===== Memories Only =====
+
+	t.Run("prime_memories_only", func(t *testing.T) {
+		out := bdPrime(t, bd, dir, "--memories-only")
+		if !strings.Contains(out, "prime-test-mem") {
+			t.Errorf("expected memory content in --memories-only output: %s", out)
+		}
+		if strings.Contains(out, "Essential Commands") {
+			t.Errorf("expected --memories-only to omit full command guide: %s", out)
+		}
 	})
 }
 
