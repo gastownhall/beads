@@ -714,6 +714,7 @@ var rootCmd = &cobra.Command{
 			"doctor",
 			"dolt", // bare "bd dolt" shows help only; subcommands handled below
 			"fish",
+			"formula", // parser-only subcommands; add a store-needed guard before adding DB-backed formula subcommands
 			"help",
 			"hook", // manages its own store lifecycle (#1719)
 			"hooks",
