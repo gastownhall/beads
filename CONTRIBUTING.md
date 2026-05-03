@@ -415,8 +415,8 @@ By contributing, you agree that your contributions will be licensed under the MI
 
 ## Code of Conduct
 
-Be respectful and professional in all interactions. We're here to build something great together.
+This project is governed by [The Agentic Covenant](CODE_OF_CONDUCT.md). All contributors — human and agent-operated — are expected to uphold these standards.
 
 ---
 
-Thank you for contributing to bd! 🎉
+Thank you for contributing to bd!
