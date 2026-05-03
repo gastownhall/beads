@@ -97,6 +97,27 @@ func TestRenderSectionMinimal(t *testing.T) {
 	}
 }
 
+func TestCodexSectionBody(t *testing.T) {
+	body := CodexSectionBody()
+	if body == "" {
+		t.Fatal("CodexSectionBody returned empty string")
+	}
+	for _, want := range []string{
+		"## Beads Issue Tracker",
+		"`beads` skill",
+		"bd ready",
+		"bd prime",
+		"bd remember",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("CodexSectionBody missing %q", want)
+		}
+	}
+	if strings.Contains(body, "BEGIN BEADS") || strings.Contains(body, "END BEADS") {
+		t.Error("CodexSectionBody should not include managed markers")
+	}
+}
+
 func TestRenderSectionHashStability(t *testing.T) {
 	// Same profile should produce same hash
 	s1 := RenderSection(ProfileFull)

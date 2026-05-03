@@ -908,7 +908,7 @@ bd dolt push  # Force immediate sync, bypass debounce
 ```bash
 # Setup editor integration (choose based on your editor)
 bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md (universal standard)
-bd setup codex    # Codex CLI - installs Beads skill + .agents/AGENTS.md guidance
+bd setup codex    # Codex CLI - installs Beads skill + AGENTS.md guidance
 bd setup mux      # Mux - creates/updates AGENTS.md
 bd setup claude   # Claude Code - installs hooks + manages CLAUDE.md (minimal profile)
 bd setup gemini   # Gemini CLI - installs hooks + manages GEMINI.md (minimal profile)
@@ -944,12 +944,12 @@ bd setup gemini --project    # Install for this project only
 bd setup gemini --stealth    # Use stealth mode (flush only, no git operations)
 bd setup mux --project       # Also install .mux/AGENTS.md workspace layer
 bd setup mux --global        # Also install ~/.mux/AGENTS.md global layer
-bd setup codex --global      # Install global skill + ~/.agents/AGENTS.md guidance
+bd setup codex --global      # Install global skill + global AGENTS.md guidance
 ```
 
 **What each setup does:**
 - **Factory.ai** (`bd setup factory`): Creates or updates AGENTS.md with beads workflow instructions (full profile — works with multiple AI tools using the AGENTS.md standard)
-- **Codex CLI** (`bd setup codex`): Creates or updates `.agents/skills/beads/` with the Beads agent skill and adds generated guidance to `.agents/AGENTS.md`; use `--global` for `~/.agents/`
+- **Codex CLI** (`bd setup codex`): Creates or updates `.agents/skills/beads/` with the Beads agent skill and adds generated guidance to project `AGENTS.md`; use `--global` for `~/.agents/skills/beads/` and `$CODEX_HOME/AGENTS.md` when `CODEX_HOME` is set, otherwise `~/.codex/AGENTS.md`
 - **Mux** (`bd setup mux`): Creates or updates AGENTS.md with beads workflow instructions for Mux workspaces (full profile)
 - **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events and manages a minimal-profile beads section in `CLAUDE.md`
 - **Gemini CLI** (`bd setup gemini`): Adds hooks to Gemini's settings.json that run `bd prime` on SessionStart and PreCompress events and manages a minimal-profile beads section in `GEMINI.md`

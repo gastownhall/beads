@@ -34,6 +34,9 @@ var (
 //go:embed defaults/beads-section-minimal.md
 var beadsSectionMinimal string
 
+//go:embed defaults/beads-section-codex.md
+var beadsSectionCodex string
+
 // SectionMeta holds metadata parsed from a BEGIN BEADS INTEGRATION marker.
 type SectionMeta struct {
 	Version int
@@ -70,6 +73,12 @@ func RenderSectionWithOpts(profile Profile, opts RenderOpts) string {
 	hash := computeHash(body)
 	beginMarker := fmt.Sprintf("<!-- BEGIN BEADS INTEGRATION v:%d profile:%s hash:%s -->", MarkerVersion, profile, hash)
 	return beginMarker + "\n" + body + "\n<!-- END BEADS INTEGRATION -->\n"
+}
+
+// CodexSectionBody returns the setup-managed Codex guidance body without
+// Codex-specific markers.
+func CodexSectionBody() string {
+	return normalizeEmbeddedMarkdown(beadsSectionCodex)
 }
 
 // ReplaceSection replaces an existing beads integration section in content with a
@@ -188,7 +197,7 @@ func templateBodyWithOpts(profile Profile, opts RenderOpts) string {
 	var body string
 	switch profile {
 	case ProfileMinimal:
-		body = strings.TrimRight(beadsSectionMinimal, "\n")
+		body = normalizeEmbeddedMarkdown(beadsSectionMinimal)
 	default:
 		// Full profile uses the same body as the legacy beads-section.md
 		// Strip the existing markers from the embedded content. Normalize CRLF→LF
@@ -207,6 +216,10 @@ func templateBodyWithOpts(profile Profile, opts RenderOpts) string {
 	}
 
 	return body
+}
+
+func normalizeEmbeddedMarkdown(content string) string {
+	return strings.TrimRight(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 }
 
 // stripDoltPushReferences removes "bd dolt push" directives from the template body.

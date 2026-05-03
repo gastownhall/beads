@@ -280,7 +280,7 @@ bd init --quiet
 bd setup claude   # Claude Code - installs SessionStart/PreCompact hooks
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
-bd setup codex    # Codex CLI - installs Beads skill + .agents/AGENTS.md guidance
+bd setup codex    # Codex CLI - installs Beads skill + AGENTS.md guidance
 bd setup mux      # Mux - creates/updates AGENTS.md
 ```
 

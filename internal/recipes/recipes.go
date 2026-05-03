@@ -86,7 +86,7 @@ var BuiltinRecipes = map[string]Recipe{
 	},
 	"codex": {
 		Name:        "Codex CLI",
-		Path:        ".agents/AGENTS.md",
+		Path:        "AGENTS.md",
 		Type:        TypeSection,
 		Description: "Codex CLI skill guidance",
 	},

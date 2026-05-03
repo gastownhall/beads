@@ -35,6 +35,9 @@ func newCodexTestEnv(t *testing.T) (codexEnv, *bytes.Buffer, *bytes.Buffer) {
 			return atomicWriteFile(path, data)
 		},
 		removeFile: os.Remove,
+		getenv: func(string) string {
+			return ""
+		},
 	}
 	return env, stdout, stderr
 }
@@ -71,8 +74,11 @@ func TestInstallCodexCreatesProjectSkillAndInstructions(t *testing.T) {
 	if !strings.Contains(content, codexBeginMarker) || !strings.Contains(content, "`beads` skill") {
 		t.Fatalf("expected managed Codex skill guidance in %s", instructionsPath)
 	}
-	if _, err := os.Stat(filepath.Join(env.projectDir, "AGENTS.md")); !os.IsNotExist(err) {
-		t.Fatal("root AGENTS.md should not be created by Codex setup")
+	if !strings.Contains(content, "bd ready") || !strings.Contains(content, "bd remember") {
+		t.Fatalf("expected managed Codex guidance to include Beads workflow reminders")
+	}
+	if instructionsPath != filepath.Join(env.projectDir, "AGENTS.md") {
+		t.Fatalf("project instructions path = %s, want root AGENTS.md", instructionsPath)
 	}
 }
 
@@ -87,8 +93,37 @@ func TestInstallCodexGlobalCreatesGlobalSkillAndInstructions(t *testing.T) {
 	if _, err := os.Stat(codexInstructionsPath(env, true)); err != nil {
 		t.Fatalf("expected global Codex instructions: %v", err)
 	}
+	if got, want := codexInstructionsPath(env, true), filepath.Join(env.homeDir, ".codex", "AGENTS.md"); got != want {
+		t.Fatalf("global instructions path = %s, want %s", got, want)
+	}
 	if _, err := os.Stat(agentSkillPath(env.projectDir)); !os.IsNotExist(err) {
 		t.Fatal("global setup should not create project skill")
+	}
+	if _, err := os.Stat(filepath.Join(env.homeDir, ".agents", "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatal("global setup should not create ~/.agents/AGENTS.md")
+	}
+}
+
+func TestInstallCodexGlobalRespectsCodexHome(t *testing.T) {
+	env, _, _ := newCodexTestEnv(t)
+	codexHome := filepath.Join(env.homeDir, "custom-codex-home")
+	env.getenv = func(key string) string {
+		if key == codexHomeEnvVar {
+			return codexHome
+		}
+		return ""
+	}
+	if err := installCodex(env, true); err != nil {
+		t.Fatalf("installCodex global returned error: %v", err)
+	}
+	if got, want := codexInstructionsPath(env, true), filepath.Join(codexHome, "AGENTS.md"); got != want {
+		t.Fatalf("global instructions path = %s, want %s", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(codexHome, "AGENTS.md")); err != nil {
+		t.Fatalf("expected CODEX_HOME instructions: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(env.homeDir, ".codex", "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatal("global setup should not write ~/.codex/AGENTS.md when CODEX_HOME is set")
 	}
 }
 

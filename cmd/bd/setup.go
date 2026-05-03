@@ -36,8 +36,8 @@ include cursor, claude, gemini, aider, factory, codex, mux, opencode, junie, win
 
 Examples:
   bd setup cursor          # Install Cursor IDE integration
-  bd setup codex           # Install Codex skill + .agents/AGENTS.md guidance
-  bd setup codex --global  # Install global Codex skill + ~/.agents/AGENTS.md guidance
+  bd setup codex           # Install Codex skill + AGENTS.md guidance
+  bd setup codex --global  # Install global Codex skill + global AGENTS.md guidance
   bd setup mux --project   # Install Mux workspace layer (.mux/AGENTS.md)
   bd setup mux --global    # Install Mux global layer (~/.mux/AGENTS.md)
   bd setup mux --project --global  # Install both Mux layers
@@ -406,7 +406,7 @@ func init() {
 	setupCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if integration is installed")
 	setupCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove the integration")
 	setupCmd.Flags().BoolVar(&setupProject, "project", false, "Install for this project only (gemini/mux)")
-	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (claude/codex/mux; writes to ~/.claude/settings.json, ~/.agents/AGENTS.md, or ~/.mux/AGENTS.md)")
+	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (claude/codex/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, or ~/.mux/AGENTS.md)")
 	setupCmd.Flags().BoolVar(&setupStealth, "stealth", false, "Use stealth mode (claude/gemini)")
 
 	rootCmd.AddCommand(setupCmd)
