@@ -632,7 +632,17 @@ bd config set jira.status_map.closed "Done"
 bd config set jira.type_map.bug "Bug"
 bd config set jira.type_map.feature "Story"
 bd config set jira.type_map.task "Task"
+
+# Set Jira custom fields on pushed issues
+bd config set jira.custom_fields.customfield_10042 '{"value":"AI Platform"}'
+bd config set jira.custom_fields.Story.customfield_10042 '{"value":"AI Platform"}'
 ```
+
+`jira.custom_fields.<field>` applies to every issue pushed to Jira.
+`jira.custom_fields.<JiraType>.<field>` applies only when the mapped Jira issue
+type matches `<JiraType>`; per-type fields override global fields with the same
+field key. Values beginning with `{` or `[` are sent as JSON, which is useful
+for select-like fields. Other values are sent as strings.
 
 ### Example: Linear Integration
 
