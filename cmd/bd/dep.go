@@ -1120,16 +1120,19 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 		root = tree[0]
 	}
 
-	// Check if root has open children (meaning it's blocked, not ready)
+	// Check if root has open blocking dependencies (GH#3565).
+	// Only genuine blockers (blocks, conditional-blocks, waits-for) count;
+	// parent-child, related, discovered-from, etc. do not block.
 	if root != nil {
-		hasOpenChildren := false
+		hasOpenBlockers := false
 		for _, child := range children[root.ID] {
-			if child.Status == types.StatusOpen || child.Status == types.StatusInProgress {
-				hasOpenChildren = true
+			if (child.Status == types.StatusOpen || child.Status == types.StatusInProgress) &&
+				child.EdgeFromParent.IsBlockingEdge() {
+				hasOpenBlockers = true
 				break
 			}
 		}
-		r.rootBlocked = hasOpenChildren
+		r.rootBlocked = hasOpenBlockers
 	}
 
 	// Render recursively from root

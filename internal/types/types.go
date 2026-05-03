@@ -839,6 +839,13 @@ func (d DependencyType) AffectsReadyWork() bool {
 	return d == DepBlocks || d == DepParentChild || d == DepConditionalBlocks || d == DepWaitsFor
 }
 
+// IsBlockingEdge returns true if this dependency type represents a hard blocker.
+// Unlike AffectsReadyWork, this excludes parent-child (structural, not blocking).
+// Used by dep tree rendering to decide whether the [BLOCKED] badge applies.
+func (d DependencyType) IsBlockingEdge() bool {
+	return d == DepBlocks || d == DepConditionalBlocks || d == DepWaitsFor
+}
+
 // WaitsForMeta holds metadata for waits-for dependencies (fanout gates).
 // Stored as JSON in the Dependency.Metadata field.
 type WaitsForMeta struct {
