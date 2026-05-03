@@ -17,15 +17,27 @@ type jsonlImporter interface {
 	ImportJSONLData(ctx context.Context, issues []*types.Issue, configEntries map[string]string, actor string) (int, error)
 }
 
+// fallbackImporter is the function maybeAutoImportJSONL invokes for stores
+// that do not implement jsonlImporter (server-mode dolt). It exists as a
+// package-level variable so tests can substitute a counter and verify the
+// top-level emptiness guard prevents the fallback path from running on a
+// non-empty database. Production builds always use importFromLocalJSONLFull.
+var fallbackImporter = importFromLocalJSONLFull
+
 // maybeAutoImportJSONL checks whether the database is empty and a
 // issues.jsonl file exists in beadsDir. When both conditions are true it
 // auto-imports the JSONL data so users upgrading from pre-0.56 (which used
 // .beads/dolt/) to 1.0+ (which uses .beads/embeddeddolt/) don't appear to
 // lose their issues.  See GH#2994.
 //
-// When the store implements jsonlImporter (embedded mode), the emptiness
-// check and import happen in a single transaction with no DOLT_COMMIT —
-// the caller's PersistentPostRun auto-commit handles the Dolt commit.
+// The top-level emptiness guard (GetStatistics) protects BOTH the
+// embedded fast-path and the server-mode fallback. The embedded
+// jsonlImporter has its own in-transaction emptiness check as a
+// concurrency-safe second line of defense; the fallback path's
+// importFromLocalJSONLFull uses INSERT … ON DUPLICATE KEY UPDATE
+// semantics under the hood, so without this guard a stale
+// issues.jsonl would be re-imposed on top of live Dolt rows on
+// every command, clobbering recent partial-update writes.
 //
 // The function is best-effort: failures are logged as warnings but do not
 // prevent the store from being used.
@@ -35,6 +47,18 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	info, err := os.Stat(jsonlPath)
 	if err != nil || info.Size() == 0 {
 		return // no JSONL file or empty — nothing to import
+	}
+
+	// Top-level emptiness guard (covers both embedded and fallback paths).
+	// Without this, the fallback path silently re-imposes stale JSONL on
+	// top of live Dolt rows via UPSERT semantics on every invocation.
+	stats, err := s.GetStatistics(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to check issue count: %v\n", err)
+		return
+	}
+	if stats.TotalIssues > 0 {
+		return // database is not empty — nothing to do
 	}
 
 	// Parse the JSONL file without touching the store.
@@ -73,7 +97,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	// Fallback for non-embedded stores: multi-call path (original behavior).
 	fmt.Fprintf(os.Stderr, "auto-importing %d bytes from %s into empty database...\n", info.Size(), jsonlPath)
 
-	result, err := importFromLocalJSONLFull(ctx, s, jsonlPath)
+	result, err := fallbackImporter(ctx, s, jsonlPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
 		fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)
