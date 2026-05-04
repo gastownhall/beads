@@ -62,6 +62,10 @@ func testMainInner(m *testing.M) int {
 	// Previously each test set/unset this env var via ensureTestMode(),
 	// which raced under t.Parallel().
 	_ = os.Setenv("BEADS_TEST_MODE", "1")
+	// AD-01 (be-c5p): opt the cmd/bd test process into the dedicated
+	// test-server lane so dolt.New's database-name firewall allows
+	// testdb_*, benchdb_*, etc. on the spawned test container.
+	_ = os.Setenv("BEADS_TEST_SERVER", "1")
 
 	// Clear BEADS_DIR to prevent tests from accidentally picking up the project's
 	// .beads directory via git repo detection when there's a redirect file.

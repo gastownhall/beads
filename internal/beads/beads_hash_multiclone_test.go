@@ -23,6 +23,8 @@ var testDoltPort int
 
 func TestMain(m *testing.M) {
 	os.Setenv("BEADS_TEST_MODE", "1")
+	// AD-01 (be-c5p): allow integration tests to connect to the test container.
+	os.Setenv("BEADS_TEST_SERVER", "1")
 
 	// Start an isolated Dolt server so integration tests don't hit production.
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {

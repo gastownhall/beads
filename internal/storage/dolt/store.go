@@ -57,6 +57,23 @@ const EnvDoltCLIDir = "BEADS_DOLT_CLI_DIR"
 // testDatabasePrefixes are name prefixes that indicate a test database.
 // Used by isTestDatabaseName to prevent test databases from being created
 // on the production Dolt server (Clown Shows #12-#18).
+//
+// Origin of each prefix:
+//   - testdb_     : applyConfigDefaults derives this for BEADS_TEST_MODE=1
+//     without an explicit Database (FNV hash of cfg.Path).
+//   - beads_test  : convention for hand-written integration tests.
+//   - beads_pt    : property-test fixtures.
+//   - beads_vr    : version-roundtrip / migration fixtures.
+//   - doctest_    : `bd doctor` self-check fixtures.
+//   - doctortest_ : older `bd doctor` fixture name (kept for back-compat).
+//   - benchdb_    : per-bench scratch DBs (cmd/bd/dolt.go uniqueBenchDBName,
+//     format `benchdb_<pid>_<8 hex>`). Added by AD-01 (be-c5p).
+//
+// This list is the firewall side of the test/prod split. Two sibling lists
+// must converge with it (be-avn): cmd/bd/dolt.go:staleDatabasePrefixes (used
+// by `bd dolt clean-databases`) and the formula-side `gc dolt cleanup`
+// stale-prefix list. Any prefix added here must be mirrored to those lists,
+// or stale fixtures will leak past clean-up.
 var testDatabasePrefixes = []string{
 	"testdb_",
 	"beads_test",
@@ -64,6 +81,7 @@ var testDatabasePrefixes = []string{
 	"beads_vr",
 	"doctest_",
 	"doctortest_",
+	"benchdb_",
 }
 
 // isTestDatabaseName returns true if the database name matches known test patterns.
@@ -75,6 +93,67 @@ func isTestDatabaseName(name string) bool {
 		}
 	}
 	return false
+}
+
+// productionPortReasons returns human-readable labels for each rule that
+// flags cfg.ServerPort as a production port. An empty slice means the port
+// is not detected as production.
+//
+// Detection sources, in order:
+//  1. cfg.ServerPort == DefaultSQLPort (legacy default 3307).
+//  2. BEADS_PRODUCTION_PORT env var, parsed to int, matches cfg.ServerPort.
+//  3. cfg.BeadsDir/dolt-server.port file present and contains cfg.ServerPort.
+//
+// Rule 3 deliberately does not fall back to filepath.Dir(cfg.Path) when
+// BeadsDir is empty — the port-resolution chain in applyConfigDefaults
+// already does that fallback for resolution purposes, but using it here
+// would treat any cfg.Path under a directory that happens to contain a
+// stray dolt-server.port file (e.g. /tmp/dolt-server.port from a leaked
+// dev server) as production. Test fixtures commonly set cfg.Path under
+// /tmp without a real BeadsDir; only an explicitly set BeadsDir is
+// considered authoritative for the production check.
+//
+// All rules read deterministic state (constant, env, on-disk port file).
+// No state is mutated. Multiple rules can match; the panic message lists all.
+func productionPortReasons(cfg *Config) []string {
+	if cfg == nil || cfg.ServerPort <= 0 {
+		return nil
+	}
+	var reasons []string
+	if cfg.ServerPort == DefaultSQLPort {
+		reasons = append(reasons, fmt.Sprintf("port %d == DefaultSQLPort", cfg.ServerPort))
+	}
+	if env := os.Getenv("BEADS_PRODUCTION_PORT"); env != "" {
+		if p, err := strconv.Atoi(env); err == nil && p > 0 && p == cfg.ServerPort {
+			reasons = append(reasons, fmt.Sprintf("BEADS_PRODUCTION_PORT=%d matches", p))
+		}
+	}
+	if cfg.BeadsDir != "" {
+		if p := doltserver.ReadPortFile(cfg.BeadsDir); p > 0 && p == cfg.ServerPort {
+			reasons = append(reasons, fmt.Sprintf("%s/%s contains %d", cfg.BeadsDir, doltserver.PortFileName, p))
+		}
+	}
+	return reasons
+}
+
+// isProductionPort reports whether cfg.ServerPort matches any production-port
+// indicator. Pure at call time — port resolution itself happens earlier in
+// applyConfigDefaults; this helper only inspects already-resolved state.
+//
+// BEADS_TEST_SERVER=1 unconditionally short-circuits this to false: the
+// operator has explicitly opted into the dedicated test-server lane (e.g.
+// a per-test container, an external test port). The two AD-01 defenses
+// (production-port guard in applyConfigDefaults/New and the database-name
+// firewall in New) both honor this opt-in so a single env var toggles
+// the entire test/prod split rather than each layer checking
+// independently.
+//
+// See productionPortReasons for the three detection sources.
+func isProductionPort(cfg *Config) bool {
+	if os.Getenv("BEADS_TEST_SERVER") == "1" {
+		return false
+	}
+	return len(productionPortReasons(cfg)) > 0
 }
 
 // autoStartRefs tracks in-process reference counts for auto-started dolt
@@ -909,8 +988,11 @@ func applyConfigDefaults(cfg *Config) {
 	//
 	// Test mode guard: force port 1 (immediate fail) if we'd hit production
 	// or have no port, to prevent test databases leaking onto production.
+	// Production-port detection is generalized via isProductionPort so cities
+	// using non-3307 ports (BEADS_PRODUCTION_PORT or dolt-server.port) are
+	// covered too.
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
-		if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
+		if cfg.ServerPort == 0 || isProductionPort(cfg) {
 			cfg.ServerPort = 1
 		}
 	}
@@ -941,17 +1023,71 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	applyConfigDefaults(cfg)
 
 	// Hard guard: tests must NEVER connect to the production Dolt server.
-	// If BEADS_TEST_MODE=1 and we're about to hit the default prod port,
-	// something upstream forgot to set BEADS_DOLT_SERVER_PORT. Panic immediately
-	// so the test fails loudly instead of silently polluting prod.
-	if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.ServerPort == DefaultSQLPort {
-		panic(fmt.Sprintf(
-			"BEADS_TEST_MODE=1 but connecting to prod port %d — set BEADS_DOLT_SERVER_PORT or use test helpers (database=%q, path=%q)",
-			DefaultSQLPort, cfg.Database, cfg.Path,
-		))
+	// applyConfigDefaults rewrites a production port to 1 in BEADS_TEST_MODE=1
+	// for fail-loud-but-continue behavior; this panic is defense-in-depth for
+	// any path that bypasses or post-edits the rewrite. Generalized via
+	// isProductionPort so non-3307 production deployments are covered.
+	if os.Getenv("BEADS_TEST_MODE") == "1" && isProductionPort(cfg) {
+		panic(buildTestModeProductionPortPanic(cfg))
+	}
+
+	// Database-name firewall: refuse to open a test-named database on any
+	// server unless the operator opted in via BEADS_TEST_SERVER=1. This is
+	// the second of two AD-01 defenses (the first is the production-port
+	// guard above). Returning an error (not panic) lets tests assert on it.
+	if isTestDatabaseName(cfg.Database) && os.Getenv("BEADS_TEST_SERVER") != "1" {
+		addr := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+		if cfg.ServerSocket != "" {
+			addr = cfg.ServerSocket
+		}
+		return nil, fmt.Errorf(
+			"refusing to connect test database %q to server %s: "+
+				"set BEADS_TEST_SERVER=1 on a dedicated test server, "+
+				"or use test helpers in internal/storage/dolt/testserver",
+			cfg.Database, addr)
 	}
 
 	return newServerMode(ctx, cfg)
+}
+
+// buildTestModeProductionPortPanic returns the multi-line panic message for
+// the BEADS_TEST_MODE=1 + production-port hard-guard. Format follows
+// AD-01 Wireframe 1: scannable header + database/path/server fields,
+// list of detection rules that matched, and a fix block naming each
+// supported escape hatch.
+func buildTestModeProductionPortPanic(cfg *Config) string {
+	addr := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+	if cfg.ServerSocket != "" {
+		addr = cfg.ServerSocket
+	}
+	reasons := productionPortReasons(cfg)
+	if len(reasons) == 0 {
+		// Should be unreachable (caller checks isProductionPort first), but
+		// keep the message coherent if it ever hits.
+		reasons = []string{"production-port heuristic matched"}
+	}
+	var rules strings.Builder
+	for _, r := range reasons {
+		rules.WriteString("    - ")
+		rules.WriteString(r)
+		rules.WriteString("\n")
+	}
+	return fmt.Sprintf(
+		"refusing to connect: BEADS_TEST_MODE=1 but resolved server port is production\n\n"+
+			"  database: %s\n"+
+			"  path:     %s\n"+
+			"  server:   %s\n"+
+			"  detected as production via:\n"+
+			"%s"+
+			"  fix:\n"+
+			"    - point BEADS_DOLT_SERVER_PORT at a non-production port (test server)\n"+
+			"    - or use test helpers in internal/storage/dolt/testserver\n"+
+			"    - or set BEADS_TEST_SERVER=1 on the spawned test server's env",
+		cfg.Database,
+		cfg.Path,
+		addr,
+		rules.String(),
+	)
 }
 
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
@@ -1366,7 +1502,9 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// FIREWALL: Never create test databases on the production server.
 	// This is the last line of defense against test pollution (Clown Shows #12-#18).
 	// Pattern-based, not env-var-based — env vars can be misconfigured or missing.
-	if isTestDatabaseName(cfg.Database) && cfg.ServerPort == DefaultSQLPort {
+	// Production-port detection generalized via isProductionPort so non-3307
+	// production deployments are covered (AD-01).
+	if isTestDatabaseName(cfg.Database) && isProductionPort(cfg) {
 		_ = db.Close()
 		return nil, "", fmt.Errorf(
 			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
