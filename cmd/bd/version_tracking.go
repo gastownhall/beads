@@ -192,6 +192,18 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		ctx = context.Background()
 	}
 
+	// Read-only probe: if the DB is already at the current version, skip the
+	// writeable open. The writeable path triggers syncCLIRemotesToSQL, which
+	// can be slow against multi-database server roots. (be-1he)
+	if roStore, roErr := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true}); roErr == nil {
+		dbVersion, _ := roStore.GetLocalMetadata(ctx, "bd_version")
+		_ = roStore.Close()
+		if dbVersion == Version {
+			debug.Logf("auto-migrate: database already at version %s (ro probe)", Version)
+			return
+		}
+	}
+
 	store, err := dolt.NewFromConfig(ctx, beadsDir)
 	if err != nil {
 		// Failed to open database - skip migration

@@ -1,6 +1,7 @@
 package doltutil
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/remotecache"
@@ -21,6 +23,11 @@ func cliRemoteLock(dbPath string) *sync.Mutex {
 	lock, _ := cliRemoteLocks.LoadOrStore(dbPath, &sync.Mutex{})
 	return lock.(*sync.Mutex)
 }
+
+// listCLIRemotesTimeout caps `dolt remote -v` wallclock. A real repo responds
+// in ~130ms; >1s indicates the broken-parent-dir failure mode that takes ~12s
+// to error out. (be-1he)
+const listCLIRemotesTimeout = 2 * time.Second
 
 // ShellQuote returns s wrapped in single quotes with any embedded single
 // quotes escaped, making it safe to interpolate into a shell command string.
@@ -83,7 +90,9 @@ func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 // directory. This is a read-only guard for deciding whether CLI push/pull/fetch
 // can safely run from that directory; remote mutation still goes through SQL.
 func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
-	cmd := exec.Command("dolt", "remote", "-v") // #nosec G204 -- fixed command
+	ctx, cancel := context.WithTimeout(context.Background(), listCLIRemotesTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "dolt", "remote", "-v") // #nosec G204 -- fixed command
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
