@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -49,20 +50,18 @@ func migrateTableToUUID(db *sql.DB, table string) error {
 	// Uses SHOW COLUMNS instead of information_schema to avoid
 	// "no root value found in session" errors in Dolt server mode
 	// when the session working set is not fully initialized (GH#2051).
-	//nolint:gosec // G201: table is from hardcoded list
-	rows, err := db.Query(fmt.Sprintf("SHOW COLUMNS FROM `%s` WHERE Field = 'id'", table))
-	if err != nil {
-		return fmt.Errorf("check column type: %w", err)
-	}
-	defer rows.Close()
-
-	if !rows.Next() {
-		return nil // No id column — nothing to migrate
-	}
-
 	var field, colType, nullable, key string
 	var defaultVal, extra sql.NullString
-	if err := rows.Scan(&field, &colType, &nullable, &key, &defaultVal, &extra); err != nil {
+	// QueryRow releases the single pooled connection after Scan. Leaving a
+	// SHOW COLUMNS result set open here self-deadlocks embedded mode, which
+	// runs with MaxOpenConns(1), when the migration immediately performs DDL.
+	//nolint:gosec // G201: table is from hardcoded list
+	err = db.QueryRow(fmt.Sprintf("SHOW COLUMNS FROM `%s` WHERE Field = 'id'", table)).
+		Scan(&field, &colType, &nullable, &key, &defaultVal, &extra)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // No id column — nothing to migrate
+	}
+	if err != nil {
 		return fmt.Errorf("scan column info: %w", err)
 	}
 

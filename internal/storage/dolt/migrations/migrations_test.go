@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -438,5 +439,55 @@ func TestMigrateInfraToWisps_SchemaEvolution(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("Expected 0 issues, got %d", count)
+	}
+}
+
+func TestMigrateUUIDPrimaryKeys_DoesNotDeadlockWithSingleConnection(t *testing.T) {
+	db := openTestDoltBranch(t)
+
+	_, err := db.Exec("DROP TABLE IF EXISTS events")
+	if err != nil {
+		t.Fatalf("drop events: %v", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE events (
+			id BIGINT NOT NULL AUTO_INCREMENT,
+			issue_id VARCHAR(255) NOT NULL,
+			event_type VARCHAR(32) NOT NULL,
+			actor VARCHAR(255) NOT NULL,
+			old_value TEXT,
+			new_value TEXT,
+			comment TEXT,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			KEY idx_events_created_at (created_at),
+			KEY idx_events_issue (issue_id)
+		)
+	`)
+	if err != nil {
+		t.Fatalf("create old-shape events table: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- MigrateUUIDPrimaryKeys(db)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("MigrateUUIDPrimaryKeys failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("MigrateUUIDPrimaryKeys timed out with MaxOpenConns=1; SHOW COLUMNS rows likely remained open across DDL")
+	}
+
+	var tableName, createStmt string
+	if err := db.QueryRow("SHOW CREATE TABLE `events`").Scan(&tableName, &createStmt); err != nil {
+		t.Fatalf("SHOW CREATE TABLE events: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(createStmt), "`id` char(36) not null") {
+		t.Fatalf("events.id was not migrated to CHAR(36): %s", createStmt)
 	}
 }
