@@ -481,6 +481,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				updates["metadata"] = raw
 			}
 
+			beforeVals := snapshotIssueFields(existing)
+			itemStart := time.Now()
 			if err := e.Store.RunInTransaction(ctx, fmt.Sprintf("bd: pull update %s", existing.ID), func(tx storage.Transaction) error {
 				if err := tx.UpdateIssue(ctx, existing.ID, updates, e.Actor); err != nil {
 					return err
@@ -488,20 +490,41 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				return syncIssueLabels(ctx, tx, existing.ID, conv.Issue.Labels, e.Actor)
 			}); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
+				stats.Items = append(stats.Items, SyncItemDetail{
+					BeadID: existing.ID, ExternalID: extIssue.Identifier, Direction: "pull",
+					Outcome: OutcomeFailed, DurationMs: time.Since(itemStart).Milliseconds(),
+					ErrorMsg: err.Error(),
+				})
 				continue
 			}
 			stats.Updated++
+			stats.Items = append(stats.Items, SyncItemDetail{
+				BeadID: existing.ID, ExternalID: extIssue.Identifier, Direction: "pull",
+				Outcome: OutcomeUpdated, DurationMs: time.Since(itemStart).Milliseconds(),
+				BeforeValues: beforeVals, AfterValues: snapshotIssueFields(conv.Issue),
+			})
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				conv.Issue.Metadata = raw
 			}
+			itemStart := time.Now()
 			if err := e.Store.CreateIssue(ctx, conv.Issue, e.Actor); err != nil {
 				e.warn("Failed to create issue for %s: %v", extIssue.Identifier, err)
+				stats.Items = append(stats.Items, SyncItemDetail{
+					BeadID: conv.Issue.ID, ExternalID: extIssue.Identifier, Direction: "pull",
+					Outcome: OutcomeFailed, DurationMs: time.Since(itemStart).Milliseconds(),
+					ErrorMsg: err.Error(),
+				})
 				continue
 			}
 			stats.Created++
+			stats.Items = append(stats.Items, SyncItemDetail{
+				BeadID: conv.Issue.ID, ExternalID: extIssue.Identifier, Direction: "pull",
+				Outcome: OutcomeCreated, DurationMs: time.Since(itemStart).Milliseconds(),
+				AfterValues: snapshotIssueFields(conv.Issue),
+			})
 		}
 	}
 
@@ -856,6 +879,7 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			stats.Skipped += len(batchResult.Skipped)
 			stats.Errors += len(batchResult.Errors)
 			stats.Warnings = append(stats.Warnings, batchResult.Warnings...)
+			stats.Items = batchPushResultToItems(batchResult)
 			for _, item := range batchResult.Errors {
 				if item.LocalID != "" {
 					e.warn("Failed to push %s in %s: %s", item.LocalID, e.Tracker.DisplayName(), item.Message)
@@ -917,8 +941,14 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 
 		if willCreate {
 			// Create in external tracker
+			itemStart := time.Now()
 			created, err := e.Tracker.CreateIssue(ctx, pushIssue)
+			itemDur := time.Since(itemStart).Milliseconds()
 			if err != nil {
+				stats.Items = append(stats.Items, SyncItemDetail{
+					BeadID: issue.ID, Direction: "push", Outcome: OutcomeFailed,
+					DurationMs: itemDur, ErrorMsg: err.Error(),
+				})
 				if isRateLimitExhausted(err) {
 					return stats, fmt.Errorf("sync aborted: %w", err)
 				}
@@ -937,10 +967,12 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if err := e.Store.UpdateIssue(ctx, issue.ID, updates, e.Actor); err != nil {
 				e.warn("Failed to update external_ref for %s: %v", issue.ID, err)
 				stats.Errors++
-				// Note: issue WAS created externally, so we still count Created
-				// but also flag the error so the user knows the link is broken
 			}
 			stats.Created++
+			stats.Items = append(stats.Items, SyncItemDetail{
+				BeadID: issue.ID, ExternalID: created.Identifier, Direction: "push",
+				Outcome: OutcomeCreated, DurationMs: itemDur,
+			})
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue
 			extID := e.Tracker.ExtractIdentifier(extRef)
@@ -960,16 +992,30 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
 						if e.PushHooks.ContentEqual(issue, extIssue) {
 							stats.Skipped++
+							stats.Items = append(stats.Items, SyncItemDetail{
+								BeadID: issue.ID, ExternalID: extID, Direction: "push",
+								Outcome: OutcomeSkipped,
+							})
 							continue
 						}
 					} else if !extIssue.UpdatedAt.Before(issue.UpdatedAt) {
-						stats.Skipped++ // Default: external is same or newer
+						stats.Skipped++
+						stats.Items = append(stats.Items, SyncItemDetail{
+							BeadID: issue.ID, ExternalID: extID, Direction: "push",
+							Outcome: OutcomeSkipped,
+						})
 						continue
 					}
 				}
 			}
 
+			itemStart := time.Now()
 			if _, err := e.Tracker.UpdateIssue(ctx, extID, pushIssue); err != nil {
+				itemDur := time.Since(itemStart).Milliseconds()
+				stats.Items = append(stats.Items, SyncItemDetail{
+					BeadID: issue.ID, ExternalID: extID, Direction: "push",
+					Outcome: OutcomeFailed, DurationMs: itemDur, ErrorMsg: err.Error(),
+				})
 				if isRateLimitExhausted(err) {
 					return stats, fmt.Errorf("sync aborted: %w", err)
 				}
@@ -982,6 +1028,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				continue
 			}
 			stats.Updated++
+			stats.Items = append(stats.Items, SyncItemDetail{
+				BeadID: issue.ID, ExternalID: extID, Direction: "push",
+				Outcome: OutcomeUpdated, DurationMs: time.Since(itemStart).Milliseconds(),
+			})
 		} else {
 			stats.Skipped++
 		}
@@ -1411,4 +1461,58 @@ func (e *Engine) warn(format string, args ...interface{}) {
 	if e.OnWarning != nil {
 		e.OnWarning(msg)
 	}
+}
+
+// batchPushResultToItems converts a BatchPushResult to SyncItemDetail records.
+func batchPushResultToItems(result *BatchPushResult) []SyncItemDetail {
+	if result == nil {
+		return nil
+	}
+	items := make([]SyncItemDetail, 0, len(result.Created)+len(result.Updated)+len(result.Skipped)+len(result.Errors))
+	for _, c := range result.Created {
+		items = append(items, SyncItemDetail{
+			BeadID: c.LocalID, ExternalID: c.ExternalRef, Direction: "push", Outcome: OutcomeCreated,
+		})
+	}
+	for _, u := range result.Updated {
+		items = append(items, SyncItemDetail{
+			BeadID: u.LocalID, ExternalID: u.ExternalRef, Direction: "push", Outcome: OutcomeUpdated,
+		})
+	}
+	for _, s := range result.Skipped {
+		items = append(items, SyncItemDetail{
+			BeadID: s, Direction: "push", Outcome: OutcomeSkipped,
+		})
+	}
+	for _, e := range result.Errors {
+		items = append(items, SyncItemDetail{
+			BeadID: e.LocalID, Direction: "push", Outcome: OutcomeFailed, ErrorMsg: e.Message,
+		})
+	}
+	return items
+}
+
+// snapshotIssueFields captures the key fields of an issue for before/after comparison.
+func snapshotIssueFields(issue *types.Issue) map[string]string {
+	if issue == nil {
+		return nil
+	}
+	m := map[string]string{
+		"title":      issue.Title,
+		"status":     string(issue.Status),
+		"priority":   fmt.Sprintf("%d", issue.Priority),
+		"issue_type": string(issue.IssueType),
+		"assignee":   issue.Assignee,
+	}
+	if issue.Description != "" {
+		if len(issue.Description) > 200 {
+			m["description"] = issue.Description[:200] + "..."
+		} else {
+			m["description"] = issue.Description
+		}
+	}
+	if issue.ExternalRef != nil {
+		m["external_ref"] = *issue.ExternalRef
+	}
+	return m
 }
