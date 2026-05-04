@@ -118,6 +118,53 @@ func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, 
 	return result, nil
 }
 
+// resolveTwinID resolves the second of two paired IDs in a single command,
+// reusing the routed store opened by the first resolveIDWithRouting call
+// when both IDs live in the same database. This avoids re-opening (and
+// deadlocking on) the same embeddeddolt file lock — see GH#3586.
+//
+// Resolution order:
+//  1. fromStore (when it differs from localStore — the common case where
+//     both IDs are in the same auto-routed or prefix-routed target).
+//  2. localStore.
+//  3. routes.jsonl prefix routing — opens a different DB, no lock conflict.
+//  4. Contributor auto-routing — only attempted when no routed store is
+//     already held (fromStore == localStore), to avoid re-opening the same
+//     auto-routed DB that fromStore points at.
+//
+// Behavior matches resolveIDWithRouting: cleanup must be deferred by the
+// caller; it is a no-op in the common case where no new store is opened.
+func resolveTwinID(
+	ctx context.Context,
+	localStore storage.DoltStorage,
+	fromStore storage.DoltStorage,
+	id string,
+) (resolvedID string, cleanup func(), err error) {
+	noop := func() {}
+
+	if fromStore != nil && fromStore != localStore {
+		if r, lookupErr := resolveAndGetFromStore(ctx, fromStore, id, true); lookupErr == nil {
+			return r.ResolvedID, noop, nil
+		}
+	}
+
+	if r, lookupErr := resolveAndGetFromStore(ctx, localStore, id, false); lookupErr == nil {
+		return r.ResolvedID, noop, nil
+	}
+
+	if r, prefixErr := resolveViaPrefixRouting(ctx, id); prefixErr == nil && r != nil {
+		return r.ResolvedID, func() { r.Close() }, nil
+	}
+
+	if fromStore == nil || fromStore == localStore {
+		if r, autoErr := resolveViaAutoRouting(ctx, localStore, id); autoErr == nil && r != nil {
+			return r.ResolvedID, func() { r.Close() }, nil
+		}
+	}
+
+	return "", noop, fmt.Errorf("resolving issue ID %s: no issue found matching %q", id, id)
+}
+
 // prefixRoute represents a prefix-to-path routing rule from routes.jsonl.
 type prefixRoute struct {
 	Prefix string `json:"prefix"` // Issue ID prefix (e.g., "hr-")

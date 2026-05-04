@@ -130,7 +130,7 @@ Examples:
 			}
 			defer fromCleanup()
 
-			toID, _, toCleanup, err := resolveIDWithRouting(ctx, store, blockerID)
+			toID, toCleanup, err := resolveTwinID(ctx, store, fromStore, blockerID)
 			if err != nil {
 				FatalErrorRespectJSON("%v", err)
 			}
@@ -294,7 +294,7 @@ Examples:
 			}
 		} else {
 			var toCleanup func()
-			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
+			toID, toCleanup, err = resolveTwinID(ctx, store, fromStore, dependsOnArg)
 			if err != nil {
 				// Cross-prefix deps: if the target has a different prefix than
 				// the source, skip resolution and pass the raw ID through.
@@ -814,7 +814,7 @@ var depRemoveCmd = &cobra.Command{
 			}
 		} else {
 			var toCleanup func()
-			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, args[1])
+			toID, toCleanup, err = resolveTwinID(ctx, store, fromStore, args[1])
 			if err != nil {
 				// Cross-prefix deps: if the target has a different prefix than
 				// the source, skip resolution and pass the raw ID through.

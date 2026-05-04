@@ -38,7 +38,7 @@ Examples:
 		}
 		defer fromCleanup()
 
-		toID, _, toCleanup, err := resolveIDWithRouting(ctx, store, id2)
+		toID, toCleanup, err := resolveTwinID(ctx, store, fromStore, id2)
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
