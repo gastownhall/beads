@@ -45,10 +45,15 @@ jobs:
         working-directory: website
         run: npm run build
 
-      - name: Prepare link check (map baseUrl /beads/ to build output)
+      - name: Prepare link check route aliases
         run: |
-          mkdir -p website/link-check-root
-          ln -s "$PWD/website/build" website/link-check-root/beads
+          rm -rf website/link-check-root
+          mkdir -p website/link-check-root/beads
+          cp -a website/build/. website/link-check-root/beads/
+          find website/link-check-root/beads -type f -name '*.html' ! -name 'index.html' -print0 |
+            while IFS= read -r -d '' file; do
+              ln -sf "$(basename "$file")" "${file%.html}"
+            done
 
       - name: Check internal links
         uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2
