@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -400,18 +399,6 @@ func TestDetectBootstrapAction_InitWhenOriginHasNoDoltRef(t *testing.T) {
 
 	if plan.Action != "init" {
 		t.Errorf("action = %q, want %q (no dolt ref on origin)", plan.Action, "init")
-	}
-}
-
-func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
 	}
 }
 
