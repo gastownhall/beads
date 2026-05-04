@@ -6,7 +6,7 @@ Common questions about bd (beads) and how to use it effectively.
 
 ### What is bd?
 
-bd is a lightweight, git-based issue tracker designed for AI coding agents. It provides dependency-aware task management with automatic sync across machines via git.
+bd is a lightweight, version-controlled issue tracker designed for AI coding agents. It provides dependency-aware task management with built-in sync across machines, so agents and humans can collaborate from the same task graph.
 
 ### Why not just use GitHub Issues?
 
@@ -22,7 +22,7 @@ GitHub Issues + gh CLI can approximate some features, but fundamentally cannot r
    - bd: `bd ready` computes transitive blocking offline in ~10ms, no network required
    - GH: No built-in "ready" concept; would require custom GraphQL + sync service + ongoing maintenance
 
-3. **Git-First, Offline, Branch-Scoped Task Memory**
+3. **Offline-First, Branch-Scoped Task Memory**
    - bd: Works offline, issues live on branches, hash IDs prevent collisions on merge
    - GH: Cloud-first, requires network/auth, global per-repo, no branch-scoped task state
 
@@ -38,7 +38,7 @@ GitHub Issues + gh CLI can approximate some features, but fundamentally cannot r
    - bd: Consistent `--json` on all commands, dedicated MCP server with auto workspace detection
    - GH: Mixed JSON/text output, GraphQL requires custom queries, no agent-focused MCP layer
 
-**When to use each:** GitHub Issues excels for human teams in web UI with cross-repo dashboards and integrations. bd excels for AI agents needing offline, git-synchronized task memory with graph semantics and deterministic queries.
+**When to use each:** GitHub Issues excels for human teams in web UI with cross-repo dashboards and integrations. bd excels for AI agents needing offline, version-controlled task memory with graph semantics and deterministic queries.
 
 See [GitHub issue #125](https://github.com/gastownhall/beads/issues/125) for detailed comparison.
 
@@ -48,7 +48,7 @@ Taskwarrior is excellent for personal task management, but bd is built for AI ag
 
 - **Explicit agent semantics**: `discovered-from` dependency type, `bd ready` for queue management
 - **JSON-first design**: Every command has `--json` output
-- **Git-native sync**: No sync server setup required
+- **Built-in sync**: Version-controlled storage with native push/pull, no separate sync server to run
 - **Dolt merge**: Cell-level merge with AI-resolvable conflicts
 - **SQL database**: Full SQL queries against Dolt database
 
@@ -371,13 +371,13 @@ Yes! Each agent can:
 2. Assign issues: `bd update <id> --assignee agent-name`
 3. Start work (as assigned agent): `bd update <id> --status in_progress`
 4. Create discovered work: `bd create "Found issue" --deps discovered-from:<parent-id>`
-5. Sync via git commits
+5. Sync via `bd dolt push` / `bd dolt pull`
 
 Note: In orchestrated workflows, assignment is usually done by an orchestrator.
 If the issue is already assigned, start with `bd update <id> --status in_progress`.
 If an agent picks work directly, use atomic `bd update <id> --claim --assignee agent-name`.
 
-bd's git-based sync means agents work independently and merge their changes like developers do.
+bd's version-controlled storage means agents work independently and merge their changes like developers do, with cell-level merge resolving most conflicts automatically.
 
 ### Does bd work offline?
 
@@ -385,7 +385,7 @@ Yes! bd is designed for offline-first operation:
 
 - All queries run against local Dolt database
 - No network required for any commands
-- Sync happens via git push/pull when you're online
+- Sync happens via `bd dolt push` / `bd dolt pull` when you're online
 - Full functionality available without internet
 
 This makes bd ideal for:
