@@ -619,6 +619,87 @@ func TestIsDoltServerMode_NoEnvRespectsMetadata(t *testing.T) {
 	}
 }
 
+func TestIsDoltServerMode_ConfigYamlServer(t *testing.T) {
+	// Clear all env vars that affect server mode detection
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	// Set up a config.yaml with dolt.mode: server
+	configDir := t.TempDir()
+	configYaml := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configYaml,
+		[]byte("dolt.mode: server\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", configDir)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	cfg := &Config{Backend: BackendDolt}
+	if !cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = false with config.yaml dolt.mode: server, want true")
+	}
+}
+
+func TestIsDoltServerMode_ConfigYamlEmbedded(t *testing.T) {
+	// Clear all env vars that affect server mode detection
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	// Set up a config.yaml with dolt.mode: embedded
+	configDir := t.TempDir()
+	configYaml := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configYaml,
+		[]byte("dolt.mode: embedded\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", configDir)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	cfg := &Config{Backend: BackendDolt}
+	if cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = true with config.yaml dolt.mode: embedded, want false")
+	}
+}
+
+func TestIsDoltServerMode_MetadataEmbeddedNotOverriddenByConfigYaml(t *testing.T) {
+	// If metadata.json explicitly says embedded, config.yaml dolt.mode: server
+	// must NOT override it. Project-local metadata takes priority over
+	// user-global config.yaml.
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	// config.yaml says server
+	configDir := t.TempDir()
+	configYaml := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configYaml,
+		[]byte("dolt.mode: server\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", configDir)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	// metadata.json says embedded
+	cfg := &Config{Backend: BackendDolt, DoltMode: "embedded"}
+	if cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = true, want false: metadata.json embedded should not be overridden by config.yaml server")
+	}
+}
+
 func TestGlobalDoltDatabase_RoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
