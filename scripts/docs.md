@@ -8,6 +8,29 @@ The `scripts` directory contains build and release automation utilities for the 
 
 Key scripts include version bumping, installation helpers that inject git information at build time, and release coordination across GitHub, Homebrew, PyPI, and npm.
 
+## generate-cli-docs.sh
+
+Generates maintained CLI reference docs from the live Cobra command tree exposed by `bd help`.
+
+### Usage
+
+```bash
+# Regenerate checked-in CLI docs using a temporary no-cgo build
+./scripts/generate-cli-docs.sh
+
+# Regenerate/check against an existing binary
+./scripts/generate-cli-docs.sh ./bd
+./scripts/generate-cli-docs.sh --check ./bd
+```
+
+### Outputs
+
+- `docs/CLI_REFERENCE.md` from `bd help --all`
+- `website/docs/cli-reference/*.md` from `bd help --list` and `bd help --doc <command>`
+- `website/versioned_docs/version-1.0.0/cli-reference/*.md` so the published default docs and llms artifact source stay in sync
+
+`scripts/check-doc-flags.sh` runs the `--check` mode in CI and fails when live top-level commands are missing from generated docs.
+
 ### How it fits into the larger codebase
 
 - **Build Integration**: The `install.sh` script is referenced in documentation and release processes as the primary user-facing installation mechanism. It integrates directly with the Go build system to ensure full version information is embedded.

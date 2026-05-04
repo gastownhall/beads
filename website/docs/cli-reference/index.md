@@ -1,185 +1,125 @@
 ---
 id: index
 title: CLI Reference
-sidebar_position: 1
+sidebar_position: 0
 ---
 
 # CLI Reference
 
-Complete reference for all `bd` commands.
+<!-- AUTO-GENERATED: do not edit manually -->
+Generated from `bd help --list` and `bd help --doc <command>`.
 
-## Command Structure
-
-```bash
-bd [global-flags] <command> [command-flags] [arguments]
-```
-
-### Global Flags
-
-| Flag | Description |
-|------|-------------|
-| `--db <path>` | Use specific database file |
-| `--json` | Output in JSON format |
-| `--quiet` | Suppress non-essential output |
-| `--verbose` | Verbose output |
-| `--version` | Show version |
-| `--help` | Show help |
-
-## Command Categories
-
-### Essential Commands
-
-Most frequently used:
-
-| Command | Description |
-|---------|-------------|
-| `bd create` | Create new issue |
-| `bd list` | List issues with filters |
-| `bd show` | Show issue details |
-| `bd update` | Update issue fields |
-| `bd close` | Close an issue |
-| `bd ready` | Show unblocked work |
-| `bd dolt push` | Push changes to Dolt remote |
-| `bd dolt pull` | Pull changes from Dolt remote |
-
-### Issue Management
-
-| Command | Description |
-|---------|-------------|
-| `bd create` | Create issue |
-| `bd show` | Show details |
-| `bd update` | Update fields |
-| `bd close` | Close issue |
-| `bd delete` | Delete issue |
-| `bd reopen` | Reopen closed issue |
-
-### Dependencies
-
-| Command | Description |
-|---------|-------------|
-| `bd dep add` | Add dependency |
-| `bd dep remove` | Remove dependency |
-| `bd dep tree` | Show dependency tree |
-| `bd dep cycles` | Detect circular dependencies |
-| `bd blocked` | Show blocked issues |
-| `bd ready` | Show unblocked issues |
-
-### Labels & Comments
-
-| Command | Description |
-|---------|-------------|
-| `bd label add` | Add label to issue |
-| `bd label remove` | Remove label |
-| `bd label list` | List all labels |
-| `bd comment add` | Add comment |
-| `bd comment list` | List comments |
-
-### Sync & Export
-
-| Command | Description |
-|---------|-------------|
-| `bd dolt push` | Push changes to Dolt remote |
-| `bd dolt pull` | Pull changes from Dolt remote |
-| `bd export` | Export data to JSONL |
-| `bd migrate` | Migrate database schema |
-
-### System
-
-| Command | Description |
-|---------|-------------|
-| `bd init` | Initialize beads in project |
-| `bd info` | Show system info |
-| `bd version` | Show version |
-| `bd config` | Manage configuration |
-| `bd doctor` | Check system health |
-| `bd hooks` | Manage git hooks |
-
-### Workflows
-
-| Command | Description |
-|---------|-------------|
-| `bd pour` | Instantiate formula as molecule |
-| `bd wisp` | Create ephemeral wisp |
-| `bd mol` | Manage molecules |
-| `bd pin` | Pin work to agent |
-| `bd hook` | Show pinned work |
-
-## Quick Reference
-
-### Creating Issues
+This reference covers all 106 live top-level `bd` commands. Regenerate it with:
 
 ```bash
-# Basic
-bd create "Title" -t task -p 2
-
-# With description
-bd create "Title" --description="Details here" -t bug -p 1
-
-# With labels
-bd create "Title" -l "backend,urgent"
-
-# As child of epic
-bd create "Subtask" --parent bd-42
-
-# With discovered-from link
-bd create "Found bug" --deps discovered-from:bd-42
-
-# JSON output
-bd create "Title" --json
+./scripts/generate-cli-docs.sh
 ```
 
-### Querying Issues
+## Commands
 
-```bash
-# All open issues
-bd list --status open
-
-# High priority bugs
-bd list --status open --priority 0,1 --type bug
-
-# With specific labels
-bd list --label-any urgent,critical
-
-# JSON output
-bd list --json
-```
-
-### Working with Dependencies
-
-```bash
-# Add: bd-2 depends on bd-1
-bd dep add bd-2 bd-1
-
-# View tree
-bd dep tree bd-2
-
-# Find cycles
-bd dep cycles
-
-# What's ready to work?
-bd ready
-
-# What's blocked?
-bd blocked
-```
-
-### Syncing
-
-```bash
-# Push changes to Dolt remote
-bd dolt push
-
-# Pull changes from Dolt remote
-bd dolt pull
-
-# Export to file
-bd export -o backup.jsonl
-```
-
-## See Also
-
-- [Essential Commands](/cli-reference/essential)
-- [Issue Commands](/cli-reference/issues)
-- [Dependency Commands](/cli-reference/dependencies)
-- [Label Commands](/cli-reference/labels)
-- [Sync Commands](/cli-reference/sync)
+- [`bd admin`](./admin.md)
+- [`bd ado`](./ado.md)
+- [`bd assign`](./assign.md)
+- [`bd audit`](./audit.md)
+- [`bd backup`](./backup.md)
+- [`bd batch`](./batch.md)
+- [`bd blocked`](./blocked.md)
+- [`bd bootstrap`](./bootstrap.md)
+- [`bd branch`](./branch.md)
+- [`bd children`](./children.md)
+- [`bd close`](./close.md)
+- [`bd comment`](./comment.md)
+- [`bd comments`](./comments.md)
+- [`bd compact`](./compact.md)
+- [`bd completion`](./completion.md)
+- [`bd config`](./config.md)
+- [`bd context`](./context.md)
+- [`bd cook`](./cook.md)
+- [`bd count`](./count.md)
+- [`bd create`](./create.md)
+- [`bd create-form`](./create-form.md)
+- [`bd defer`](./defer.md)
+- [`bd delete`](./delete.md)
+- [`bd dep`](./dep.md)
+- [`bd diff`](./diff.md)
+- [`bd doctor`](./doctor.md)
+- [`bd dolt`](./dolt.md)
+- [`bd duplicate`](./duplicate.md)
+- [`bd duplicates`](./duplicates.md)
+- [`bd edit`](./edit.md)
+- [`bd epic`](./epic.md)
+- [`bd export`](./export.md)
+- [`bd federation`](./federation.md)
+- [`bd find-duplicates`](./find-duplicates.md)
+- [`bd flatten`](./flatten.md)
+- [`bd forget`](./forget.md)
+- [`bd formula`](./formula.md)
+- [`bd gate`](./gate.md)
+- [`bd gc`](./gc.md)
+- [`bd github`](./github.md)
+- [`bd gitlab`](./gitlab.md)
+- [`bd graph`](./graph.md)
+- [`bd history`](./history.md)
+- [`bd hooks`](./hooks.md)
+- [`bd human`](./human.md)
+- [`bd import`](./import.md)
+- [`bd info`](./info.md)
+- [`bd init`](./init.md)
+- [`bd init-safety`](./init-safety.md)
+- [`bd jira`](./jira.md)
+- [`bd kv`](./kv.md)
+- [`bd label`](./label.md)
+- [`bd linear`](./linear.md)
+- [`bd link`](./link.md)
+- [`bd lint`](./lint.md)
+- [`bd list`](./list.md)
+- [`bd mail`](./mail.md)
+- [`bd memories`](./memories.md)
+- [`bd merge-slot`](./merge-slot.md)
+- [`bd migrate`](./migrate.md)
+- [`bd mol`](./mol.md)
+- [`bd note`](./note.md)
+- [`bd notion`](./notion.md)
+- [`bd onboard`](./onboard.md)
+- [`bd orphans`](./orphans.md)
+- [`bd ping`](./ping.md)
+- [`bd preflight`](./preflight.md)
+- [`bd prime`](./prime.md)
+- [`bd priority`](./priority.md)
+- [`bd promote`](./promote.md)
+- [`bd prune`](./prune.md)
+- [`bd purge`](./purge.md)
+- [`bd q`](./q.md)
+- [`bd query`](./query.md)
+- [`bd quickstart`](./quickstart.md)
+- [`bd ready`](./ready.md)
+- [`bd recall`](./recall.md)
+- [`bd remember`](./remember.md)
+- [`bd rename`](./rename.md)
+- [`bd rename-prefix`](./rename-prefix.md)
+- [`bd reopen`](./reopen.md)
+- [`bd repo`](./repo.md)
+- [`bd restore`](./restore.md)
+- [`bd rules`](./rules.md)
+- [`bd search`](./search.md)
+- [`bd set-state`](./set-state.md)
+- [`bd setup`](./setup.md)
+- [`bd ship`](./ship.md)
+- [`bd show`](./show.md)
+- [`bd sql`](./sql.md)
+- [`bd stale`](./stale.md)
+- [`bd state`](./state.md)
+- [`bd status`](./status.md)
+- [`bd statuses`](./statuses.md)
+- [`bd supersede`](./supersede.md)
+- [`bd swarm`](./swarm.md)
+- [`bd tag`](./tag.md)
+- [`bd todo`](./todo.md)
+- [`bd types`](./types.md)
+- [`bd undefer`](./undefer.md)
+- [`bd update`](./update.md)
+- [`bd upgrade`](./upgrade.md)
+- [`bd vc`](./vc.md)
+- [`bd version`](./version.md)
+- [`bd where`](./where.md)
+- [`bd worktree`](./worktree.md)

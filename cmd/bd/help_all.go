@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 )
@@ -25,8 +28,11 @@ func registerHelpAllFlag() {
 	// Cobra lazily creates the help command. We need to find it.
 	for _, cmd := range rootCmd.Commands() {
 		if cmd.Name() == "help" {
+			if cmd.Flags().Lookup("all") != nil {
+				return
+			}
 			cmd.Flags().BoolVar(&helpAllFlag, "all", false, "Show help for all commands in a single document")
-			cmd.Flags().StringVar(&helpDocFlag, "doc", "", "Generate markdown docs for a single command (use - for stdout)")
+			cmd.Flags().StringVar(&helpDocFlag, "doc", "", "Generate markdown docs for a single command")
 			cmd.Flags().BoolVar(&helpListFlag, "list", false, "List all available commands")
 
 			// Wrap the existing Run to check --all, --doc, and --list first
@@ -39,7 +45,15 @@ func registerHelpAllFlag() {
 				}
 				if helpDocFlag != "" {
 					// Handle --doc flag: generate single command docs
-					writeSingleCommandDoc(os.Stdout, rootCmd, helpDocFlag)
+					cmdPath := helpDocFlag
+					if len(args) > 0 {
+						cmdPath = strings.Join(append([]string{helpDocFlag}, args...), " ")
+					}
+					if err := writeSingleCommandDoc(os.Stdout, rootCmd, cmdPath); err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						fmt.Fprintf(os.Stderr, "Available commands: %s\n", strings.Join(availableCommandNames(rootCmd), " "))
+						os.Exit(1)
+					}
 					return
 				}
 				if helpAllFlag {
@@ -107,14 +121,14 @@ func writeAllHelp(w io.Writer, root *cobra.Command) {
 		fmt.Fprintf(w, "### %s\n\n", grp.title)
 		for _, cmd := range grp.commands {
 			anchor := "bd-" + strings.ReplaceAll(cmd.Name(), "-", "-")
-			fmt.Fprintf(w, "- [bd %s](#%s) — %s\n", cmd.Name(), anchor, cmd.Short)
+			fmt.Fprintf(w, "- [bd %s](#%s) — %s\n", cmd.Name(), anchor, escapeMDXText(cmd.Short))
 			// Include subcommands in TOC
 			for _, sub := range cmd.Commands() {
 				if !sub.IsAvailableCommand() {
 					continue
 				}
 				subAnchor := "bd-" + cmd.Name() + "-" + strings.ReplaceAll(sub.Name(), "-", "-")
-				fmt.Fprintf(w, "  - [bd %s %s](#%s) — %s\n", cmd.Name(), sub.Name(), subAnchor, sub.Short)
+				fmt.Fprintf(w, "  - [bd %s %s](#%s) — %s\n", cmd.Name(), sub.Name(), subAnchor, escapeMDXText(sub.Short))
 			}
 		}
 		fmt.Fprintf(w, "\n")
@@ -149,9 +163,9 @@ func writeCommandHelp(w io.Writer, cmd *cobra.Command, parentPath string, depth 
 
 	// Description
 	if cmd.Long != "" {
-		fmt.Fprintf(w, "%s\n\n", cmd.Long)
+		fmt.Fprintf(w, "%s\n\n", escapeMDXText(cmd.Long))
 	} else if cmd.Short != "" {
-		fmt.Fprintf(w, "%s\n\n", cmd.Short)
+		fmt.Fprintf(w, "%s\n\n", escapeMDXText(cmd.Short))
 	}
 
 	// Usage
@@ -223,39 +237,41 @@ var sidebarPositionMap = map[string]int{
 
 // writeSingleCommandDoc generates markdown documentation for a single command
 // with Docusaurus frontmatter for website integration.
-func writeSingleCommandDoc(w io.Writer, root *cobra.Command, cmdName string) {
+func writeSingleCommandDoc(w io.Writer, root *cobra.Command, cmdName string) error {
 	// Find the command (handle nested commands like "mol pour")
 	cmd := findCommand(root, cmdName)
 	if cmd == nil {
-		fmt.Fprintf(os.Stderr, "Error: command not found: %s\n", cmdName)
-		fmt.Fprintf(os.Stderr, "Available commands: ")
-		for _, c := range root.Commands() {
-			if c.IsAvailableCommand() {
-				fmt.Fprintf(os.Stderr, "%s ", c.Name())
-			}
-		}
-		fmt.Fprintln(os.Stderr)
-		os.Exit(1)
+		return fmt.Errorf("Error: command not found: %s", cmdName)
 	}
+
+	docCommand := strings.TrimSpace(strings.TrimPrefix(commandPath(cmd), root.Name()))
+	docCommand = strings.TrimSpace(docCommand)
+	if docCommand == "" {
+		return errors.New("Error: cannot generate docs for root command")
+	}
+	docID := commandDocID(docCommand)
 
 	// Get sidebar position (default to 999 if not in map)
 	position := 999
-	if pos, ok := sidebarPositionMap[cmdName]; ok {
+	if pos, ok := sidebarPositionMap[docCommand]; ok {
 		position = pos
 	}
 
 	// Generate Docusaurus frontmatter
 	fmt.Fprintf(w, "---\n")
-	fmt.Fprintf(w, "id: %s\n", cmdName)
-	fmt.Fprintf(w, "title: bd %s\n", cmdName)
+	fmt.Fprintf(w, "id: %s\n", docID)
+	fmt.Fprintf(w, "title: bd %s\n", docCommand)
+	fmt.Fprintf(w, "slug: /cli-reference/%s\n", docID)
 	fmt.Fprintf(w, "sidebar_position: %d\n", position)
 	fmt.Fprintf(w, "---\n")
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "<!-- AUTO-GENERATED: do not edit manually -->\n")
-	fmt.Fprintf(w, "Generated from `bd help --doc %s` (bd version %s)\n\n", cmdName, Version)
+	fmt.Fprintf(w, "Generated from `bd help --doc %s` (bd version %s)\n\n", docCommand, Version)
 
 	// Generate the command help (using h2 for single command)
-	writeCommandHelp(w, cmd, "bd", 2)
+	parentPath := strings.TrimSuffix(commandPath(cmd), " "+cmd.Name())
+	writeCommandHelp(w, cmd, parentPath, 2)
+	return nil
 }
 
 // findCommand finds a command by name in the command tree.
@@ -301,9 +317,58 @@ func findDirectCommand(parent *cobra.Command, name string) *cobra.Command {
 // listAllCommands prints all available commands, one per line.
 // Used by the generate-cli-docs.sh script.
 func listAllCommands(w io.Writer, root *cobra.Command) {
+	for _, name := range availableCommandNames(root) {
+		fmt.Fprintln(w, name)
+	}
+}
+
+func availableCommandNames(root *cobra.Command) []string {
+	names := make([]string, 0, len(root.Commands()))
 	for _, cmd := range root.Commands() {
 		if cmd.IsAvailableCommand() {
-			fmt.Fprintln(w, cmd.Name())
+			names = append(names, cmd.Name())
 		}
 	}
+	sort.Strings(names)
+	return names
+}
+
+func commandPath(cmd *cobra.Command) string {
+	path := cmd.CommandPath()
+	if path == "" {
+		return cmd.Name()
+	}
+	return path
+}
+
+func commandDocID(commandPath string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(commandPath) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	id := strings.Trim(b.String(), "-")
+	if id == "" {
+		return "command"
+	}
+	return id
+}
+
+func escapeMDXText(s string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		"{", "&#123;",
+		"}", "&#125;",
+	)
+	return replacer.Replace(s)
 }

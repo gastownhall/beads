@@ -64,7 +64,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Build bd
-        run: go build -tags gms_pure_go -o bd ./cmd/bd/
+        run: CGO_ENABLED=0 go build -tags gms_pure_go -o bd ./cmd/bd/
 
       - name: Validate docs against CLI
         run: ./scripts/check-doc-flags.sh ./bd
