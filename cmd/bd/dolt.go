@@ -430,9 +430,10 @@ var doltStatusCmd = &cobra.Command{
 In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
-hosted servers (dolt_mode=server with a remote dolt_server_host), pings
-the configured endpoint via SQL and reports reachability, server version,
-and database.`,
+managed servers — either a remote dolt_server_host or a local server
+managed outside bd (dolt.auto-start: false, e.g. an orchestrator-shared
+sql-server) — pings the configured endpoint via SQL and reports
+reachability, server version, and database.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -443,11 +444,28 @@ and database.`,
 			return
 		}
 
-		// For externally-hosted Dolt servers (non-local host with
-		// dolt_mode=server), the local PID file is meaningless — ping the
-		// configured endpoint via SQL instead (bd-q35w).
-		if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && cfg != nil &&
-			cfg.IsDoltServerMode() && !isLocalHost(cfg.GetDoltServerHost()) {
+		// For externally-managed Dolt servers, the local PID file is
+		// meaningless or absent — ping the configured endpoint via SQL
+		// instead. Two flavors qualify:
+		//   - non-local host (Hosted Dolt, remote shared sql-server, bd-q35w)
+		//   - local host with auto-start disabled (an orchestrator or
+		//     systemd manages the server lifecycle, be-0eyj)
+		//
+		// IsAutoStartDisabled reads the active (globally-bound) config and
+		// BEADS_DOLT_AUTO_START env, not the per-beadsDir cfg loaded just
+		// below. That coupling is intentional and consistent with every
+		// other call site of IsAutoStartDisabled in this package — both
+		// resolve against the same active workspace at command time.
+		cfg, cfgErr := configfile.Load(beadsDir)
+		if cfgErr != nil {
+			// Don't silently swallow. A corrupted or missing metadata.json
+			// would otherwise mask the externally-managed routing for both
+			// the remote-host and auto-start-disabled-local cases, falling
+			// through to the PID-file path with a misleading "not running"
+			// — which is the exact failure mode this PR addresses.
+			fmt.Fprintf(os.Stderr, "Warning: cannot load .beads config (%v); falling back to PID-file status path\n", cfgErr)
+		}
+		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled()) {
 			runExternalDoltStatus(beadsDir, cfg)
 			return
 		}
@@ -459,28 +477,60 @@ and database.`,
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-
-		if jsonOutput {
-			outputJSON(state)
-			return
-		}
-
-		if state == nil || !state.Running {
-			cfg := doltserver.DefaultConfig(serverDir)
-			fmt.Println("Dolt server: not running")
-			fmt.Printf("  Expected port: %d\n", cfg.Port)
-			return
-		}
-
-		fmt.Println("Dolt server: running")
-		fmt.Printf("  PID:  %d\n", state.PID)
-		fmt.Printf("  Port: %d\n", state.Port)
-		fmt.Printf("  Data: %s\n", state.DataDir)
-		fmt.Printf("  Logs: %s\n", doltserver.LogPath(serverDir))
-		if doltserver.IsSharedServerMode() {
-			fmt.Println("  Mode: shared server")
-		}
+		renderLocalDoltStatus(state, serverDir)
 	},
+}
+
+// renderLocalDoltStatus writes the bd-managed (local PID-file) status of
+// the Dolt server to stdout, honoring jsonOutput. Extracted from the
+// doltStatusCmd Run closure so the bd-managed output path is unit-testable
+// without requiring a live dolt sql-server (the externally-managed path
+// is exercised by TestRunExternalDoltStatus_Unreachable).
+func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
+	if jsonOutput {
+		outputJSON(state)
+		return
+	}
+	if state == nil || !state.Running {
+		cfg := doltserver.DefaultConfig(serverDir)
+		fmt.Println("Dolt server: not running")
+		fmt.Printf("  Expected port: %d\n", cfg.Port)
+		return
+	}
+	fmt.Println("Dolt server: running")
+	fmt.Printf("  PID:  %d\n", state.PID)
+	fmt.Printf("  Port: %d\n", state.Port)
+	fmt.Printf("  Data: %s\n", state.DataDir)
+	fmt.Printf("  Logs: %s\n", doltserver.LogPath(serverDir))
+	if doltserver.IsSharedServerMode() {
+		fmt.Println("  Mode: shared server")
+	}
+}
+
+// shouldUseExternalDoltStatus reports whether bd dolt status should treat
+// the server as externally-managed and probe via SQL instead of consulting
+// the local PID file. Returns true when:
+//   - dolt_mode=server with a non-local host (Hosted Dolt, remote shared
+//     sql-server) — the PID file is on a different machine.
+//   - dolt_mode=server with a local host but bd auto-start is disabled —
+//     the server lifecycle is owned by something outside bd (e.g. an
+//     orchestrator or systemd unit), so no bd PID file exists. Without
+//     this branch, status reports "not running" even when bd CRUD
+//     commands successfully connect to the server (be-0eyj).
+//
+// When false, the caller falls back to the PID-file path that reports
+// PID, port, log path, and data directory for bd-managed servers.
+//
+// autoStartDisabled is passed in (rather than read here) so the predicate
+// is pure and unit-testable without manipulating package-level config.
+func shouldUseExternalDoltStatus(cfg *configfile.Config, autoStartDisabled bool) bool {
+	if cfg == nil || !cfg.IsDoltServerMode() {
+		return false
+	}
+	if !isLocalHost(cfg.GetDoltServerHost()) {
+		return true
+	}
+	return autoStartDisabled
 }
 
 // isLocalHost reports whether host refers to this machine. Used to

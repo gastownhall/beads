@@ -1289,3 +1289,265 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 		}
 	})
 }
+
+// TestShouldUseExternalDoltStatus covers the routing predicate for
+// `bd dolt status`. The predicate decides whether to ping the configured
+// SQL endpoint (externally-managed server) or read the local PID file
+// (bd-managed server). Three scenarios qualify as externally-managed:
+// non-local hosts, and local hosts where bd does not own the lifecycle
+// (auto-start disabled — be-0eyj). Other configurations should keep the
+// PID-file path so bd-managed servers continue to report PID/log/data.
+func TestShouldUseExternalDoltStatus(t *testing.T) {
+	tests := []struct {
+		name              string
+		cfg               *configfile.Config
+		autoStartDisabled bool
+		want              bool
+	}{
+		{
+			name:              "nil config falls back to PID-file path",
+			cfg:               nil,
+			autoStartDisabled: false,
+			want:              false,
+		},
+		{
+			name: "embedded mode never uses external status",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "embedded",
+			},
+			autoStartDisabled: true, // even with auto-start off
+			want:              false,
+		},
+		{
+			name: "server mode + remote host always uses external status",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "dolt.example.com",
+			},
+			autoStartDisabled: false,
+			want:              true,
+		},
+		{
+			name: "server mode + remote host + auto-start disabled",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "192.168.1.50",
+			},
+			autoStartDisabled: true,
+			want:              true,
+		},
+		{
+			name: "server mode + local host + auto-start enabled keeps PID-file path",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "127.0.0.1",
+			},
+			autoStartDisabled: false,
+			want:              false,
+		},
+		{
+			name: "server mode + local host + auto-start disabled routes to external (be-0eyj)",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "127.0.0.1",
+			},
+			autoStartDisabled: true,
+			want:              true,
+		},
+		{
+			name: "server mode + empty host (defaults to local) + auto-start disabled",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "server",
+				// DoltServerHost empty → defaults to 127.0.0.1
+			},
+			autoStartDisabled: true,
+			want:              true,
+		},
+		{
+			name: "server mode + localhost literal + auto-start disabled",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "localhost",
+			},
+			autoStartDisabled: true,
+			want:              true,
+		},
+	}
+
+	// Make sure ambient env doesn't perturb cfg.IsDoltServerMode() lookups.
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldUseExternalDoltStatus(tc.cfg, tc.autoStartDisabled)
+			if got != tc.want {
+				t.Errorf("shouldUseExternalDoltStatus = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderLocalDoltStatus exercises the bd-managed (PID-file) output
+// path that doltStatusCmd takes when bd owns the server lifecycle. The
+// externally-managed path is covered by TestRunExternalDoltStatus_Unreachable;
+// this test closes the test-plan gap noted in the PR #3550 review by
+// asserting that the preserved local path still reports PID/Port/Data/Logs
+// (text mode) and a State-shaped JSON payload distinct from the external
+// {"mode":"external", ...} shape.
+func TestRenderLocalDoltStatus(t *testing.T) {
+	// Clear ambient mode/host so DefaultConfig and IsSharedServerMode are
+	// deterministic regardless of how the test runner is invoked.
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	// Pin the expected port so the not-running text branch is host-agnostic.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "13306")
+
+	t.Run("nil state prints not running with expected port", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = false
+
+		serverDir := t.TempDir()
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(nil, serverDir)
+			return nil
+		})
+
+		for _, want := range []string{
+			"Dolt server: not running",
+			"Expected port: 13306",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected output to contain %q, got:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("Running:false prints not running", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = false
+
+		serverDir := t.TempDir()
+		state := &doltserver.State{Running: false}
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(state, serverDir)
+			return nil
+		})
+
+		if !strings.Contains(out, "Dolt server: not running") {
+			t.Errorf("expected 'not running', got:\n%s", out)
+		}
+	})
+
+	t.Run("Running:true prints PID/Port/Data/Logs", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = false
+
+		serverDir := t.TempDir()
+		state := &doltserver.State{
+			Running: true,
+			PID:     12345,
+			Port:    28231,
+			DataDir: "/tmp/data",
+		}
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(state, serverDir)
+			return nil
+		})
+
+		for _, want := range []string{
+			"Dolt server: running",
+			"PID:  12345",
+			"Port: 28231",
+			"Data: /tmp/data",
+			"Logs:",
+			"dolt-server.log",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected output to contain %q, got:\n%s", want, out)
+			}
+		}
+		// Without BEADS_DOLT_SHARED_SERVER set, the shared-server line
+		// must NOT appear — guards against accidental coupling.
+		if strings.Contains(out, "Mode: shared server") {
+			t.Errorf("did not expect shared-server line in non-shared mode, got:\n%s", out)
+		}
+	})
+
+	t.Run("Running:true under shared-server mode adds Mode line", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = false
+
+		serverDir := t.TempDir()
+		state := &doltserver.State{
+			Running: true,
+			PID:     1,
+			Port:    2,
+			DataDir: serverDir,
+		}
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(state, serverDir)
+			return nil
+		})
+
+		if !strings.Contains(out, "Mode: shared server") {
+			t.Errorf("expected shared-server line under BEADS_DOLT_SHARED_SERVER=1, got:\n%s", out)
+		}
+	})
+
+	t.Run("json output produces State-shaped payload (no mode=external)", func(t *testing.T) {
+		orig := jsonOutput
+		defer func() { jsonOutput = orig }()
+		jsonOutput = true
+
+		serverDir := t.TempDir()
+		state := &doltserver.State{
+			Running: true,
+			PID:     7777,
+			Port:    28231,
+			DataDir: "/var/data",
+		}
+		out := captureStdout(t, func() error {
+			renderLocalDoltStatus(state, serverDir)
+			return nil
+		})
+
+		var result map[string]any
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("expected valid JSON, got error %v, raw: %s", err, out)
+		}
+
+		if result["running"] != true {
+			t.Errorf("running = %v, want true", result["running"])
+		}
+		if v, _ := result["pid"].(float64); int(v) != 7777 {
+			t.Errorf("pid = %v, want 7777", result["pid"])
+		}
+		if v, _ := result["port"].(float64); int(v) != 28231 {
+			t.Errorf("port = %v, want 28231", result["port"])
+		}
+		if result["data_dir"] != "/var/data" {
+			t.Errorf("data_dir = %v, want /var/data", result["data_dir"])
+		}
+		// Crucial: the bd-managed path must NOT report mode=external —
+		// that is the externally-managed shape introduced in this PR for
+		// the SQL-probe routing only.
+		if result["mode"] == "external" {
+			t.Errorf("did not expect mode=external on bd-managed path, got:\n%s", out)
+		}
+	})
+}
