@@ -49,7 +49,7 @@ bd dolt remote add origin git+ssh://git@github.com/org/repo.git
 bd dolt remote add origin https://github.com/org/repo.git
 
 # Other options: DoltHub, S3, GCS, local path
-# See DOLT-BACKEND.md for all remote types
+# See DOLT.md for all remote types
 ```
 
 ### 4. Push your issues
@@ -247,8 +247,7 @@ bd dolt start
 ## See Also
 
 - [QUICKSTART.md](QUICKSTART.md) — Getting started with beads
-- [DOLT.md](DOLT.md) — Dolt backend details, server modes, federation
-- [DOLT-BACKEND.md](DOLT-BACKEND.md) — Remote types, sync modes, advanced usage
+- [DOLT.md](DOLT.md) — Dolt backend details: server modes, federation, remotes, advanced usage
 - [INSTALLING.md](INSTALLING.md) — Installation for all platforms
 
 ## Attribution

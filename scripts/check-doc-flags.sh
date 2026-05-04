@@ -170,7 +170,7 @@ if [ $ERRORS -gt 0 ]; then
     echo "FAILED: $ERRORS stale reference category(ies) found"
     echo ""
     echo "To fix: update the referenced docs to use current CLI commands."
-    echo "See docs/DOLT-BACKEND.md for current sync workflow."
+    echo "See docs/DOLT.md for current sync workflow."
     exit 1
 else
     echo "PASSED: All documentation references are consistent with CLI"

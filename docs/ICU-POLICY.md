@@ -172,5 +172,5 @@ No fork, no replace directive, no upstream patch required. The tradeoff is that 
 ## See Also
 
 - [INSTALLING.md](INSTALLING.md) -- user-facing build dependency docs
-- [DOLT-BACKEND.md](DOLT-BACKEND.md) -- embedded Dolt architecture
+- [DOLT.md](DOLT.md) -- embedded Dolt architecture
 - [CONTRIBUTING.md](../CONTRIBUTING.md) -- contributor guidelines
