@@ -47,11 +47,24 @@ func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force boo
 	return nil
 }
 
-// DirToFileURL resolves dir to an absolute path and returns a file:// URL.
+// DirToFileURL resolves dir to an absolute realpath and returns a
+// file:// URL.
+//
+// Symlinks are resolved via filepath.EvalSymlinks so the URL works
+// on filesystem views that only expose the realpath (e.g. a Dolt
+// SQL server inside a container with a bind-mount of the resolved
+// path, where the operator's pwd traverses a host-side symlink).
+// EvalSymlinks errors (e.g. dangling symlink, non-existent target)
+// are tolerated: the function falls back to the un-resolved
+// absolute path, preserving the pre-patch behavior on paths that
+// can't be resolved.
 func DirToFileURL(dir string) (string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute path: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
 	}
 	return "file://" + abs, nil
 }
