@@ -975,7 +975,11 @@ func TestEmbeddedInit(t *testing.T) {
 }
 
 // TestEmbeddedInitConcurrent verifies the exclusive flock prevents concurrent
-// writers. Exactly one process should succeed; the rest get the lock error.
+// writers. Exactly one process should succeed; the rest get a lock error,
+// either from the bd-level flock ("one writer at a time") or — when a late
+// starter acquires the flock cleanly after another process has already exited
+// but before Dolt's on-disk LOCK has cleared — from Dolt's internal lock check.
+// Both are evidence the flock is doing its job: no concurrent corruption.
 func TestEmbeddedInitConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
@@ -1024,7 +1028,8 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 		}
 		if r.err == nil {
 			successes++
-		} else if strings.Contains(r.out, "one writer at a time") {
+		} else if strings.Contains(r.out, "one writer at a time") ||
+			strings.Contains(r.out, "locked by another dolt process") {
 			lockErrors++
 		} else {
 			t.Errorf("process %d failed with unexpected error: %v\n%s", r.idx, r.err, r.out)
