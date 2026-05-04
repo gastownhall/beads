@@ -160,9 +160,9 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 			// Record token usage and latency.
 			modelAttr := attribute.String("bd.ai.model", h.model)
 			if aiMetrics.inputTokens != nil {
-				aiMetrics.inputTokens.Add(ctx, message.Usage.InputTokens, metric.WithAttributes(modelAttr))
-				aiMetrics.outputTokens.Add(ctx, message.Usage.OutputTokens, metric.WithAttributes(modelAttr))
-				aiMetrics.duration.Record(ctx, ms, metric.WithAttributes(modelAttr))
+				aiMetrics.inputTokens.Add(ctx, message.Usage.InputTokens, telemetry.WithMergedAttrs(modelAttr))
+				aiMetrics.outputTokens.Add(ctx, message.Usage.OutputTokens, telemetry.WithMergedAttrs(modelAttr))
+				aiMetrics.duration.Record(ctx, ms, telemetry.WithMergedAttrs(modelAttr))
 			}
 			span.SetAttributes(
 				attribute.Int64("bd.ai.input_tokens", message.Usage.InputTokens),

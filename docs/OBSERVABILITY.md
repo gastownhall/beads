@@ -17,33 +17,89 @@ docker compose up -d
 
 ## Configuration
 
-One variable is enough. Add it to your shell profile or workspace `.env`:
+Telemetry is **explicit opt-in**. Set `BD_OTEL_ENABLED=true` and configure the
+exporter via standard OpenTelemetry SDK environment variables — both go in
+your shell profile or workspace `.env`:
 
 ```bash
-export BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push
+export BD_OTEL_ENABLED=true
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:8428/opentelemetry/api/v1/push
 ```
 
-Every `bd` command will then automatically push its metrics.
+A standard `OTEL_*` variable alone will not turn bd telemetry on — `bd` won't
+auto-activate from a machine-global `OTEL_*` setting that was set for some
+other instrumented tool.
 
 ### Shell profile (recommended)
 
 ```bash
 # ~/.zshrc or ~/.bashrc
-export BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push
+export BD_OTEL_ENABLED=true
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:8428/opentelemetry/api/v1/push
 ```
 
 ### Environment variables
 
 | Variable | Example | Description |
 |----------|---------|-------------|
-| `BD_OTEL_METRICS_URL` | `http://localhost:8428/opentelemetry/api/v1/push` | Push metrics to VictoriaMetrics. Activates telemetry. |
-| `BD_OTEL_STDOUT` | `true` | Write spans and metrics to stderr (dev/debug). Also activates telemetry. |
+| `BD_OTEL_ENABLED` | `true` | **Master switch.** Activates telemetry. Without it, the variables below are ignored. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `http://localhost:8428/opentelemetry/api/v1/push` | Push metrics to an OTLP HTTP receiver. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `http://localhost:9428/insert/opentelemetry/v1/logs` | Push logs to an OTLP HTTP receiver (reserved for future log export). |
+| `OTEL_TRACES_EXPORTER` | `console` | Write spans to stderr (dev/debug). |
+| `OTEL_METRICS_EXPORTER` | `console` | Write metrics to stderr (dev/debug). |
+| `OTEL_SERVICE_NAME` | `bd` | Override the `service.name` resource attribute. |
+| `OTEL_RESOURCE_ATTRIBUTES` | `deployment.environment=workstation,team=infra` | Extend or override resource attributes (comma-separated `key=value`). |
+| `OTEL_SDK_DISABLED` | `true` | Force telemetry off even when `BD_OTEL_ENABLED=true` is set. |
+
+### Resource attributes
+
+Every metric and span carries the OTel resource describing the bd process:
+
+| Attribute | Value | Notes |
+|-----------|-------|-------|
+| `service.name` | `bd` | Override with `OTEL_SERVICE_NAME`. |
+| `service.version` | bd version | |
+| `bd.prefix` | configured `issue_prefix` | Auto-stamped from the project's issue prefix (e.g. `myproject`, `infra`). Also stamped as a measurement attribute on every emitted metric — see below. |
+
+Add anything else via `OTEL_RESOURCE_ATTRIBUTES`.
+
+### Per-project metric partitioning (`bd_prefix` label)
+
+`bd.prefix` is stamped on every emitted metric measurement, not only on the
+resource. Why both: in the OTel→Prometheus translation, resource attributes
+land on the `target_info` series and need a `target_info * on(job, instance)
+group_left(bd_prefix) ...` join to be queryable on the metric itself — a
+join that fails when the SDK doesn't emit an `instance` label, which it
+often doesn't for short-lived CLI processes. Stamping the attribute on each
+measurement makes `bd_prefix` a first-class Prom label on every series:
+
+```promql
+bd_storage_operations_total{bd_prefix="myproj"}
+sum by (bd_prefix) (rate(bd_db_retry_count_total[5m]))
+```
+
+No join needed. All `bd_*` metrics listed below carry `bd_prefix`.
 
 ### Local debug mode
 
 ```bash
-BD_OTEL_STDOUT=true bd list
+BD_OTEL_ENABLED=true OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=console bd list
 ```
+
+### Legacy environment variables (deprecated)
+
+The earlier `BD_OTEL_*` data variables are honored for backwards
+compatibility. Setting any of them activates telemetry on its own (no
+`BD_OTEL_ENABLED=true` required) and translates to the standard OTLP equivalent
+— a legacy value wins over a pre-existing `OTEL_*` value so a machine-global
+`OTEL_*` setting cannot silently redirect bd telemetry. Each `bd` invocation
+that sees one logs a one-line deprecation warning to stderr:
+
+| Legacy | Standard equivalent |
+|--------|---------------------|
+| `BD_OTEL_METRICS_URL` | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` |
+| `BD_OTEL_LOGS_URL` | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` |
+| `BD_OTEL_STDOUT=true` | `OTEL_TRACES_EXPORTER=console` + `OTEL_METRICS_EXPORTER=console` |
 
 ## Verification
 
@@ -51,15 +107,21 @@ BD_OTEL_STDOUT=true bd list
 bd list   # triggers metrics → visible in VictoriaMetrics
 ```
 
-Verification query in Grafana (VictoriaMetrics datasource):
+Verification queries in Grafana (VictoriaMetrics datasource):
 
 ```promql
-bd_storage_operations_total
+bd_storage_operations_total                              # all projects
+bd_storage_operations_total{bd_prefix="myproj"}          # one project
+sum by (bd_prefix) (rate(bd_storage_operations_total[5m])) # split per project
 ```
 
 ---
 
 ## Metrics
+
+> Every metric below carries `bd_prefix` (the project's issue prefix) as a
+> Prom label in addition to the per-metric attributes shown. Filter or split
+> dashboards with `{bd_prefix="..."}` directly — no `target_info` join needed.
 
 ### Storage (`bd_storage_*`)
 
@@ -98,7 +160,7 @@ bd_storage_operations_total
 
 ## Traces (spans)
 
-Spans are only exported when `BD_OTEL_STDOUT=true` — there is no trace backend in the recommended local stack.
+Spans are only exported when `OTEL_TRACES_EXPORTER=console` — there is no trace backend in the recommended local stack.
 
 | Span | Source | Description |
 |------|--------|-------------|
@@ -140,8 +202,9 @@ The `hook.stdout` / `hook.stderr` events carry two attributes: `output` (the tex
 ```
 cmd/bd/main.go
   └─ telemetry.Init()
-      ├─ BD_OTEL_STDOUT=true  → TracerProvider stdout + MeterProvider stdout
-      └─ BD_OTEL_METRICS_URL  → MeterProvider HTTP → VictoriaMetrics
+      ├─ OTEL_TRACES_EXPORTER=console        → TracerProvider stdout
+      ├─ OTEL_METRICS_EXPORTER=console       → MeterProvider stdout
+      └─ OTEL_EXPORTER_OTLP_METRICS_ENDPOINT → MeterProvider HTTP → VictoriaMetrics
 
 internal/storage/dolt/        → bd_db_* metrics + dolt.* spans
 internal/storage/ephemeral/   → ephemeral.* spans
@@ -151,5 +214,6 @@ internal/compact/             → bd_ai_* metrics + anthropic.* spans
 internal/telemetry/storage.go → bd_storage_* metrics (SDK wrapper)
 ```
 
-When neither variable is set, `telemetry.Init()` installs **no-op** providers:
-hot paths execute only no-op calls with no memory allocation.
+When no OpenTelemetry SDK environment variable selects an exporter,
+`telemetry.Init()` installs **no-op** providers: hot paths execute only no-op
+calls with no memory allocation.

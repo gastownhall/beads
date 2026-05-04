@@ -1,20 +1,46 @@
 // Package telemetry provides OpenTelemetry integration for beads.
 //
-// Telemetry is opt-in: set BD_OTEL_METRICS_URL or BD_OTEL_STDOUT=true to activate.
-// No overhead when neither variable is set.
+// Telemetry is explicit opt-in: nothing is exported unless BD_OTEL_ENABLED=true
+// (or a legacy BD_OTEL_* variable) is set. No overhead when off — bd will not
+// auto-activate from a machine-global OTEL_* variable that was set for some
+// other instrumented tool.
 //
 // # Configuration
 //
-//	BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push
-//	    Push metrics to VictoriaMetrics (or any OTLP HTTP receiver).
-//	    Presence of this variable enables telemetry.
+//	BD_OTEL_ENABLED=true
+//	    Master switch. Activates telemetry; without it the standard OTEL_*
+//	    variables below are ignored.
 //
-//	BD_OTEL_LOGS_URL=http://localhost:9428/insert/opentelemetry/v1/logs
-//	    Push logs to VictoriaLogs (reserved for future log export).
+// Once activated, beads honors the standard OpenTelemetry SDK environment
+// variables:
 //
-//	BD_OTEL_STDOUT=true
-//	    Write spans and metrics to stderr (dev/debug mode).
-//	    Also activates telemetry when set alone.
+//	OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:8428/opentelemetry/api/v1/push
+//	    Push metrics to an OTLP HTTP receiver (e.g. VictoriaMetrics).
+//
+//	OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://localhost:9428/insert/opentelemetry/v1/logs
+//	    Push logs to an OTLP HTTP receiver (reserved for future log export).
+//
+//	OTEL_TRACES_EXPORTER=console
+//	OTEL_METRICS_EXPORTER=console
+//	    Write spans / metrics to stderr (dev/debug mode).
+//
+//	OTEL_SERVICE_NAME=bd
+//	OTEL_RESOURCE_ATTRIBUTES=key=value,...
+//	    Override or extend resource attributes (service.name, service.version,
+//	    bd.prefix, deployment.environment, ...).
+//
+//	OTEL_SDK_DISABLED=true
+//	    Force telemetry off even when BD_OTEL_ENABLED=true is set.
+//
+// # Legacy environment variables
+//
+// The earlier BD_OTEL_* variables remain honored for backwards compatibility
+// and take precedence over their OTEL_* equivalents. A deprecation warning is
+// logged when any are detected:
+//
+//	BD_OTEL_METRICS_URL → OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+//	BD_OTEL_LOGS_URL    → OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+//	BD_OTEL_STDOUT=true → OTEL_TRACES_EXPORTER=console + OTEL_METRICS_EXPORTER=console
 //
 // # Recommended local stack
 //
@@ -29,9 +55,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/metric"
@@ -49,39 +78,105 @@ const instrumentationScope = "github.com/steveyegge/beads"
 var shutdownFns []func(context.Context) error
 
 // Enabled reports whether telemetry is active.
-// True when BD_OTEL_METRICS_URL is set or BD_OTEL_STDOUT=true.
+//
+// Active when explicitly opted in (BD_OTEL_ENABLED=true) or when a legacy
+// BD_OTEL_* variable is set, and not disabled via OTEL_SDK_DISABLED=true.
+// Standard OTEL_* variables on their own do not activate telemetry — they
+// configure it once an opt-in is in effect, so a machine-global OTEL_* setting
+// for some other instrumented tool can't silently turn bd telemetry on.
 func Enabled() bool {
+	if strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true") {
+		return false
+	}
+	return strings.EqualFold(os.Getenv("BD_OTEL_ENABLED"), "true") || hasLegacySelector()
+}
+
+func hasLegacySelector() bool {
 	return os.Getenv("BD_OTEL_METRICS_URL") != "" ||
-		os.Getenv("BD_OTEL_STDOUT") == "true"
+		os.Getenv("BD_OTEL_LOGS_URL") != "" ||
+		strings.EqualFold(os.Getenv("BD_OTEL_STDOUT"), "true")
+}
+
+// translateLegacyEnv copies any BD_OTEL_* environment variable into its
+// standard OTEL_* equivalent, unconditionally — a legacy value wins over a
+// pre-existing standard value so an unrelated machine-global OTEL_* setting
+// cannot silently redirect bd telemetry. Returns one human-readable mapping
+// string for each legacy variable found.
+func translateLegacyEnv() []string {
+	var mappings []string
+	if u := os.Getenv("BD_OTEL_METRICS_URL"); u != "" {
+		_ = os.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", u)
+		mappings = append(mappings, "BD_OTEL_METRICS_URL → OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+	}
+	if u := os.Getenv("BD_OTEL_LOGS_URL"); u != "" {
+		_ = os.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", u)
+		mappings = append(mappings, "BD_OTEL_LOGS_URL → OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+	}
+	if strings.EqualFold(os.Getenv("BD_OTEL_STDOUT"), "true") {
+		_ = os.Setenv("OTEL_TRACES_EXPORTER", "console")
+		_ = os.Setenv("OTEL_METRICS_EXPORTER", "console")
+		mappings = append(mappings, "BD_OTEL_STDOUT=true → OTEL_TRACES_EXPORTER=console + OTEL_METRICS_EXPORTER=console")
+	}
+	return mappings
+}
+
+// buildResource assembles the OTel Resource describing this bd process.
+//
+// Defaults are merged with the host/process detectors and finally with the
+// FromEnv detector, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES can
+// override anything set by the caller. prefix, when non-empty, is stamped as
+// bd.prefix — the issue prefix is the project-level identifier in beads (it
+// shows in every issue ID), so dashboards split on it. The dolt database name
+// is deliberately not used: it's an implementation detail that is often
+// "beads" for everyone, whereas the prefix is unique per project.
+func buildResource(ctx context.Context, serviceName, version, prefix string) (*resource.Resource, error) {
+	attrs := []attribute.KeyValue{
+		semconv.ServiceNameKey.String(serviceName),
+		semconv.ServiceVersionKey.String(version),
+	}
+	if prefix != "" {
+		attrs = append(attrs, attribute.String("bd.prefix", prefix))
+	}
+	return resource.New(ctx,
+		resource.WithAttributes(attrs...),
+		resource.WithHost(),
+		resource.WithProcess(),
+		resource.WithFromEnv(),
+	)
 }
 
 // Init configures OTel providers.
-// When neither BD_OTEL_METRICS_URL nor BD_OTEL_STDOUT is set, installs no-op
-// providers and returns immediately (zero overhead path).
+// When no OpenTelemetry SDK environment variable selects an exporter or
+// endpoint, installs no-op providers and returns immediately (zero overhead).
 //
-// Traces are exported only when BD_OTEL_STDOUT=true (stdout, for local debugging).
-// Metrics are exported to BD_OTEL_METRICS_URL and/or stdout.
-func Init(ctx context.Context, serviceName, version string) error {
+// Traces are exported only when OTEL_TRACES_EXPORTER=console (stdout, for
+// local debugging); there is no remote trace backend.
+// Metrics are exported to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and/or stdout.
+//
+// prefix, when non-empty, is stamped as the bd.prefix resource attribute
+// so metrics from bd processes bound to different beads projects can be
+// distinguished by dashboard queries.
+func Init(ctx context.Context, serviceName, version, prefix string) error {
+	captureBaseAttrs(prefix)
+
+	if mappings := translateLegacyEnv(); len(mappings) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"warning: BD_OTEL_* environment variables are deprecated. Replace with BD_OTEL_ENABLED=true plus the standard OpenTelemetry SDK variables. Translated for this run: %s\n",
+			strings.Join(mappings, "; "))
+	}
+
 	if !Enabled() {
 		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		otel.SetMeterProvider(metricnoop.NewMeterProvider())
 		return nil
 	}
 
-	res, err := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String(serviceName),
-			semconv.ServiceVersionKey.String(version),
-		),
-		resource.WithHost(),
-		resource.WithProcess(),
-	)
+	res, err := buildResource(ctx, serviceName, version, prefix)
 	if err != nil {
 		return fmt.Errorf("telemetry: resource: %w", err)
 	}
 
-	// Traces: stdout only (local debug). No remote trace backend in the default stack.
-	if os.Getenv("BD_OTEL_STDOUT") == "true" {
+	if strings.EqualFold(os.Getenv("OTEL_TRACES_EXPORTER"), "console") {
 		tp, err := buildTraceProvider(ctx, res)
 		if err != nil {
 			return fmt.Errorf("telemetry: trace provider: %w", err)
@@ -92,7 +187,6 @@ func Init(ctx context.Context, serviceName, version string) error {
 		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 	}
 
-	// Metrics: VictoriaMetrics (HTTP) and/or stdout.
 	mp, err := buildMetricProvider(ctx, res)
 	if err != nil {
 		return fmt.Errorf("telemetry: metric provider: %w", err)
@@ -118,7 +212,7 @@ func buildTraceProvider(_ context.Context, res *resource.Resource) (*sdktrace.Tr
 func buildMetricProvider(ctx context.Context, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
 	opts := []sdkmetric.Option{sdkmetric.WithResource(res)}
 
-	if os.Getenv("BD_OTEL_STDOUT") == "true" {
+	if strings.EqualFold(os.Getenv("OTEL_METRICS_EXPORTER"), "console") {
 		exp, err := stdoutmetric.New()
 		if err != nil {
 			return nil, err
@@ -128,8 +222,8 @@ func buildMetricProvider(ctx context.Context, res *resource.Resource) (*sdkmetri
 		))
 	}
 
-	if url := os.Getenv("BD_OTEL_METRICS_URL"); url != "" {
-		exp, err := buildOTLPMetricExporter(ctx, url)
+	if otlpMetricsEndpointSet() {
+		exp, err := otlpmetrichttp.New(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("otlp metric exporter: %w", err)
 		}
@@ -139,6 +233,11 @@ func buildMetricProvider(ctx context.Context, res *resource.Resource) (*sdkmetri
 	}
 
 	return sdkmetric.NewMeterProvider(opts...), nil
+}
+
+func otlpMetricsEndpointSet() bool {
+	return os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") != "" ||
+		os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
 }
 
 // Tracer returns a tracer with the given instrumentation name (or the global scope).
