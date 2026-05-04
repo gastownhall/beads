@@ -634,6 +634,14 @@ bd config set jira.type_map.feature "Story"
 bd config set jira.type_map.task "Task"
 ```
 
+Jira pull sync imports ticket relationships when the linked tickets are also
+available locally or included in the same pull result:
+
+- Jira parent/subtask hierarchy becomes `parent-child` dependencies.
+- Jira "blocks" links become `blocks` dependencies, with direction preserved.
+- Jira duplicate links become `duplicates` dependencies.
+- Other Jira issue links become `related` dependencies.
+
 ### Example: Linear Integration
 
 Linear integration provides bidirectional sync between bd and Linear via GraphQL API.

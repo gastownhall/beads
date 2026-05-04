@@ -180,8 +180,11 @@ func (m *jiraFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueC
 		issue.ExternalRef = &ref
 	}
 
+	deps := jiraIssueDependencies(ji)
+
 	return &tracker.IssueConversion{
-		Issue: issue,
+		Issue:        issue,
+		Dependencies: deps,
 	}
 }
 
@@ -253,4 +256,86 @@ func extractBrowseURL(ji *Issue) string {
 		return ji.Self[:idx] + "/browse/" + ji.Key
 	}
 	return ""
+}
+
+func jiraIssueDependencies(ji *Issue) []tracker.DependencyInfo {
+	if ji == nil || strings.TrimSpace(ji.Key) == "" {
+		return nil
+	}
+
+	currentKey := strings.TrimSpace(ji.Key)
+	var deps []tracker.DependencyInfo
+	seen := make(map[string]struct{})
+
+	addDep := func(from, to, depType string, source tracker.DependencySource) {
+		from = strings.TrimSpace(from)
+		to = strings.TrimSpace(to)
+		depType = strings.TrimSpace(depType)
+		if from == "" || to == "" || from == to || depType == "" {
+			return
+		}
+		key := from + "\x00" + to + "\x00" + depType
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		deps = append(deps, tracker.DependencyInfo{
+			FromExternalID: from,
+			ToExternalID:   to,
+			Type:           depType,
+			Source:         source,
+		})
+	}
+
+	if ji.Fields.Parent != nil {
+		addDep(currentKey, ji.Fields.Parent.Key, string(types.DepParentChild), tracker.DependencySourceParent)
+	}
+
+	for _, subtask := range ji.Fields.Subtasks {
+		addDep(subtask.Key, currentKey, string(types.DepParentChild), tracker.DependencySourceParent)
+	}
+
+	for _, link := range ji.Fields.IssueLinks {
+		if link.OutwardIssue != nil {
+			from, to, depType := jiraLinkDependency(currentKey, link.OutwardIssue.Key, linkPhrase(link.Type, true))
+			addDep(from, to, depType, tracker.DependencySourceRelation)
+		}
+		if link.InwardIssue != nil {
+			from, to, depType := jiraLinkDependency(currentKey, link.InwardIssue.Key, linkPhrase(link.Type, false))
+			addDep(from, to, depType, tracker.DependencySourceRelation)
+		}
+	}
+
+	return deps
+}
+
+func linkPhrase(linkType *IssueLinkType, outward bool) string {
+	if linkType == nil {
+		return ""
+	}
+	if outward {
+		return linkType.Outward
+	}
+	return linkType.Inward
+}
+
+func jiraLinkDependency(currentKey, linkedKey, phrase string) (string, string, string) {
+	normalized := strings.ToLower(strings.TrimSpace(phrase))
+	switch {
+	case normalized == "":
+		return currentKey, linkedKey, string(types.DepRelated)
+	case strings.Contains(normalized, "block"):
+		if strings.Contains(normalized, "blocked by") || strings.Contains(normalized, "is blocked") {
+			return currentKey, linkedKey, string(types.DepBlocks)
+		}
+		return linkedKey, currentKey, string(types.DepBlocks)
+	case strings.Contains(normalized, "duplicate") || strings.Contains(normalized, "clone"):
+		return currentKey, linkedKey, string(types.DepDuplicates)
+	case strings.Contains(normalized, "parent of"):
+		return linkedKey, currentKey, string(types.DepParentChild)
+	case strings.Contains(normalized, "child of") || strings.Contains(normalized, "subtask of"):
+		return currentKey, linkedKey, string(types.DepParentChild)
+	default:
+		return currentKey, linkedKey, string(types.DepRelated)
+	}
 }
