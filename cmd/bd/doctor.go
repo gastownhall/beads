@@ -612,17 +612,34 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, claudeHookCheck)
 	// Don't fail overall check for incomplete hooks, just warn
 
-	// Check 11c: bd prime output verification
+	// Check 11c: Copilot CLI integration
+	copilotCheck := convertWithCategory(doctor.CheckCopilot(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, copilotCheck)
+	// Don't fail overall check for missing Copilot integration, just warn on broken installs
+
+	// Check 11d: Copilot hook file health
+	copilotHooksHealthCheck := convertWithCategory(doctor.CheckCopilotHooksHealth(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, copilotHooksHealthCheck)
+	if copilotHooksHealthCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
+	// Check 11e: Copilot hook completeness (sessionStart + preCompact)
+	copilotHookCheck := convertWithCategory(doctor.CheckCopilotHookCompleteness(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, copilotHookCheck)
+	// Don't fail overall check for incomplete hooks, just warn
+
+	// Check 11f: bd prime output verification
 	bdPrimeOutputCheck := convertWithCategory(doctor.VerifyPrimeOutput(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeOutputCheck)
 	// Don't fail overall check for prime output issues, just warn
 
-	// Check 11e: bd in PATH (needed for Claude hooks to work)
+	// Check 11g: bd in PATH (needed for Claude/Copilot hooks to work)
 	bdPathCheck := convertWithCategory(doctor.CheckBdInPath(), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPathCheck)
 	// Don't fail overall check for missing bd in PATH, just warn
 
-	// Check 11f: Documentation bd prime references match installed version
+	// Check 11h: Documentation bd prime references match installed version
 	bdPrimeDocsCheck := convertWithCategory(doctor.CheckDocumentationBdPrimeReference(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeDocsCheck)
 	// Don't fail overall check for doc mismatch, just warn

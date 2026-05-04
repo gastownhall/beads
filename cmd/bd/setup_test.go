@@ -104,6 +104,9 @@ func TestListRecipes_NoWorkspaceShowsBuiltinOnlyNote(t *testing.T) {
 	if !strings.Contains(out, "cursor") {
 		t.Fatalf("expected built-in recipes in output, got:\n%s", out)
 	}
+	if !strings.Contains(out, "copilot") {
+		t.Fatalf("expected copilot recipe in output, got:\n%s", out)
+	}
 	if strings.Contains(out, "myeditor") {
 		t.Fatalf("unexpected orphan custom recipe in output:\n%s", out)
 	}
@@ -183,5 +186,68 @@ func TestRunRecipe_BuiltinFileRecipeWorksWithoutWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, ".beads")); !os.IsNotExist(err) {
 		t.Fatalf("expected no local .beads directory to be created, got err=%v", err)
+	}
+}
+
+func TestRunRecipe_CopilotGlobalWorksWithoutWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	out := captureStdout(t, func() error {
+		runRecipe("copilot")
+		return nil
+	})
+
+	if !strings.Contains(out, "global instructions installed") {
+		t.Fatalf("expected global copilot install output, got:\n%s", out)
+	}
+
+	if _, err := os.Stat(filepath.Join(homeDir, ".copilot", "copilot-instructions.md")); err != nil {
+		t.Fatalf("expected global copilot instructions: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, ".copilot", "hooks", "beads-copilot.json")); err != nil {
+		t.Fatalf("expected global copilot hooks: %v", err)
+	}
+}
+
+func TestRunRecipe_CopilotProjectWorksWithoutWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+	setupProject = true
+
+	out := captureStdout(t, func() error {
+		runRecipe("copilot")
+		return nil
+	})
+
+	if !strings.Contains(out, "project integration installed") {
+		t.Fatalf("expected project copilot install output, got:\n%s", out)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmpDir, ".github", "copilot-instructions.md")); err != nil {
+		t.Fatalf("expected project copilot instructions: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".github", "hooks", "beads-copilot.json")); err != nil {
+		t.Fatalf("expected project copilot hooks: %v", err)
 	}
 }

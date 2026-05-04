@@ -278,6 +278,7 @@ bd init --quiet
 
 # 3. Setup editor integration (choose one)
 bd setup claude   # Claude Code - installs SessionStart/PreCompact hooks
+bd setup copilot  # GitHub Copilot CLI - installs global ~/.copilot/copilot-instructions.md + ~/.copilot/hooks/
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
 bd setup codex    # Codex CLI - creates/updates AGENTS.md
@@ -299,6 +300,8 @@ bd setup mux      # Mux - creates/updates AGENTS.md
 **Verify installation:**
 ```bash
 bd setup claude --check   # Check Claude Code integration
+bd setup copilot --check  # Check global GitHub Copilot CLI instructions
+bd setup copilot --project --check  # Check project GitHub Copilot CLI hooks + instructions
 bd setup cursor --check   # Check Cursor integration
 bd setup aider --check    # Check Aider integration
 bd setup codex --check    # Check Codex integration
@@ -369,6 +372,21 @@ For VS Code with GitHub Copilot:
 4. **Reload VS Code**
 
 See [COPILOT_INTEGRATION.md](COPILOT_INTEGRATION.md) for complete setup guide.
+
+### GitHub Copilot CLI
+
+For the GitHub Copilot CLI terminal integration:
+
+```bash
+bd setup copilot           # Global instructions
+bd setup copilot --project # Project instructions + hooks
+```
+
+The default command manages `~/.copilot/copilot-instructions.md` and `~/.copilot/hooks/beads-copilot.json`.
+
+Project mode manages `.github/copilot-instructions.md` and installs repository-local hooks in `.github/hooks/beads-copilot.json`.
+
+See [COPILOT_CLI_INTEGRATION.md](COPILOT_CLI_INTEGRATION.md) for the full guide.
 
 ### MCP Server (Alternative - for MCP-only environments)
 
