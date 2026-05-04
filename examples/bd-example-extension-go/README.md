@@ -1,6 +1,6 @@
 # BD Extension Example (Go)
 
-This example demonstrates how to extend bd with custom tables for application-specific orchestration, following the patterns described in [EXTENDING.md](../../docs/EXTENDING.md).
+This example demonstrates how to extend bd with custom tables for application-specific orchestration.
 
 ## What This Example Shows
 
@@ -224,8 +224,6 @@ This pattern is used in production by:
 - **CI/CD Systems**: Build tracking and artifact management
 - **Task Runners**: Parallel execution with dependency resolution
 
-See [EXTENDING.md](../../EXTENDING.md) for more patterns and the VC implementation example.
-
 ## Next Steps
 
 1. **Add Your Own Tables**: Extend the schema with application-specific tables
@@ -236,6 +234,5 @@ See [EXTENDING.md](../../EXTENDING.md) for more patterns and the VC implementati
 
 ## See Also
 
-- [EXTENDING.md](../../EXTENDING.md) - Complete extension guide
 - [../../README.md](../../README.md) - bd documentation
 - [QUICKSTART.md](../../docs/QUICKSTART.md) - Quick start tutorial

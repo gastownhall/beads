@@ -194,6 +194,6 @@ func (s *VCStorage) ClaimWork(ctx context.Context, executorID string) (*beads.Is
 
 ## See Also
 
-- [EXTENDING.md](../../EXTENDING.md) - Detailed extension guide
+- [bd-example-extension-go](../bd-example-extension-go/README.md) - Working extension example
 - [beads.go](../../beads.go) - Public API source
 - [internal/storage/storage.go](../../internal/storage/storage.go) - Storage interface
