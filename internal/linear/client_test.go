@@ -187,10 +187,22 @@ func TestBatchCreateIssues_SingleBatch(t *testing.T) {
 		if !strings.Contains(req.Query, "issueBatchCreate") {
 			t.Fatalf("expected issueBatchCreate mutation, got: %s", req.Query)
 		}
+		// Validate the correct GraphQL variable shape: IssueBatchCreateInput
+		// wraps the array in an "issues" field.
+		if !strings.Contains(req.Query, "IssueBatchCreateInput!") {
+			t.Fatalf("mutation must declare $input as IssueBatchCreateInput!, got: %s", req.Query)
+		}
+		inputWrapper, ok := req.Variables["input"].(map[string]interface{})
+		if !ok {
+			t.Fatal("expected input variable to be an object with 'issues' field")
+		}
+		inputArr, ok := inputWrapper["issues"].([]interface{})
+		if !ok {
+			t.Fatal("expected input.issues to be an array")
+		}
 
 		issues := make([]Issue, 0)
-		inputs := req.Variables["input"].([]interface{})
-		for i := range inputs {
+		for i := range inputArr {
 			issues = append(issues, Issue{
 				ID:         fmt.Sprintf("id-%d", i),
 				Identifier: fmt.Sprintf("TEAM-%d", i+1),
@@ -240,7 +252,8 @@ func TestBatchCreateIssues_Chunking(t *testing.T) {
 		var req GraphQLRequest
 		json.Unmarshal(body, &req)
 
-		inputs := req.Variables["input"].([]interface{})
+		inputWrapper := req.Variables["input"].(map[string]interface{})
+		inputs := inputWrapper["issues"].([]interface{})
 		issues := make([]Issue, len(inputs))
 		for i := range inputs {
 			issues[i] = Issue{

@@ -414,7 +414,8 @@ func TestBatchPush_DuplicateTitlesFallbackToSingleCreate(t *testing.T) {
 			})
 		case strings.Contains(req.Query, "issueBatchCreate"):
 			batchCreateCount++
-			inputs := req.Variables["input"].([]interface{})
+			inputWrapper := req.Variables["input"].(map[string]interface{})
+			inputs := inputWrapper["issues"].([]interface{})
 			var issues []interface{}
 			for i, inp := range inputs {
 				m := inp.(map[string]interface{})
