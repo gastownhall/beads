@@ -45,8 +45,13 @@ func TestMigration0032ToleratesMissingAppliedAtColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runMigrations returned error for already-missing applied_at: %v", err)
 	}
-	if applied != 1 {
-		t.Fatalf("applied migrations = %d, want 1", applied)
+	// runMigrations returns len(pending), which is every embedded migration
+	// with version > 31. Derive the expected count from LatestVersion() so
+	// adding new migrations doesn't break this test (it's about 0032's
+	// tolerance, not the total migration count).
+	wantApplied := LatestVersion() - 31
+	if applied != wantApplied {
+		t.Fatalf("applied migrations = %d, want %d", applied, wantApplied)
 	}
 	if !recorded {
 		t.Fatal("migration 0032 was not recorded after already-missing applied_at")

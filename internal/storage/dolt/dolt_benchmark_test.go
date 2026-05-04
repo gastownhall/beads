@@ -11,23 +11,36 @@ package dolt
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// setupBenchStore creates a store for benchmarks
-func setupBenchStore(b *testing.B) (*DoltStore, func()) {
-	b.Helper()
+// setupBenchStore creates a store for benchmarks.
+//
+// Each call uses a unique per-invocation database name so accumulated row
+// state from a prior bench sample cannot saturate the shared Dolt server —
+// addresses the testcontainer i/o timeouts observed at 10K-scale in
+// be-nu4.4.1 / be-s54 when all samples reused "benchdb". Cleanup drops the
+// database so the container's memory footprint does not grow unbounded
+// across `-count=N` samples.
+//
+// Accepts testing.TB so the regression test in TestBenchDBPurgeDoesNotLeak
+// can drive the bench setup/teardown from a *testing.T context.
+func setupBenchStore(tb testing.TB) (*DoltStore, func()) {
+	tb.Helper()
 
 	if _, err := os.LookupEnv("DOLT_PATH"); err != false {
 		// Check if dolt binary exists
 		if _, err := os.Stat("/usr/local/bin/dolt"); os.IsNotExist(err) {
 			if _, err := os.Stat("/usr/bin/dolt"); os.IsNotExist(err) {
-				b.Skip("Dolt not installed, skipping benchmark")
+				tb.Skip("Dolt not installed, skipping benchmark")
 			}
 		}
 	}
@@ -35,35 +48,70 @@ func setupBenchStore(b *testing.B) (*DoltStore, func()) {
 	ctx := context.Background()
 	tmpDir, err := os.MkdirTemp("", "dolt-bench-*")
 	if err != nil {
-		b.Fatalf("failed to create temp dir: %v", err)
+		tb.Fatalf("failed to create temp dir: %v", err)
 	}
+
+	dbName := uniqueBenchDBName()
 
 	cfg := &Config{
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        "benchdb",
+		Database:        dbName,
 		CreateIfMissing: true,
 	}
 
 	store, err := New(ctx, cfg)
 	if err != nil {
 		os.RemoveAll(tmpDir)
-		b.Fatalf("failed to create Dolt store: %v", err)
+		tb.Fatalf("failed to create Dolt store: %v", err)
 	}
 
 	if err := store.SetConfig(ctx, "issue_prefix", "bench"); err != nil {
 		store.Close()
 		os.RemoveAll(tmpDir)
-		b.Fatalf("failed to set prefix: %v", err)
+		tb.Fatalf("failed to set prefix: %v", err)
 	}
 
 	cleanup := func() {
+		dropBenchDB(tb, store, dbName)
 		store.Close()
 		os.RemoveAll(tmpDir)
 	}
 
 	return store, cleanup
+}
+
+// uniqueBenchDBName returns a database name unique to this process+sample.
+// MySQL identifiers are <= 64 chars; hex encoding of 8 random bytes + pid
+// fits well inside that bound.
+func uniqueBenchDBName() string {
+	buf := make([]byte, 8)
+	if _, err := cryptorand.Read(buf); err != nil {
+		// Fall back to timestamp+pid if crypto/rand fails.
+		return fmt.Sprintf("benchdb_%d_%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return fmt.Sprintf("benchdb_%d_%s", os.Getpid(), hex.EncodeToString(buf))
+}
+
+// dropBenchDB issues DROP DATABASE to keep the shared Dolt server from
+// accumulating sample data across `-count=N` iterations. Logs (does not
+// fail) if the drop errors — a stuck drop should not mask the benchmark
+// result the caller already recorded.
+//
+// DROP only marks the database as dropped; the on-disk dir lingers in
+// .dolt_dropped_databases/ until purged. Without the PURGE step below,
+// repeated bench samples leak GBs of disk (be-pq5).
+func dropBenchDB(tb testing.TB, store *DoltStore, dbName string) {
+	tb.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := store.db.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName)); err != nil {
+		tb.Logf("drop bench database %q: %v", dbName, err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_PURGE_DROPPED_DATABASES()"); err != nil {
+		tb.Logf("purge dropped databases after drop %q: %v", dbName, err)
+	}
 }
 
 // =============================================================================
@@ -1189,3 +1237,189 @@ func BenchmarkGetIssuesByIDs_SmallNLargeW_10_10K(b *testing.B) {
 func BenchmarkGetIssuesByIDs_SmallNLargeW_100_5K(b *testing.B) {
 	benchmarkGetIssuesByIDsSmallN(b, 5000, 100)
 }
+
+// =============================================================================
+// Date-index benchmarks (be-eei / D4v2)
+// =============================================================================
+
+// seedForSummaryBench populates the store with N issues: roughly equal splits
+// across priority/status/type and 25% wisp share, so the benchmark exercises
+// both the issues and wisps tables plus label hydration.
+//
+// Inlined from D3 (be-nu4.3.2, commit 5023e0e1) so this D4v2 commit lands
+// without dragging the D3 ancestor along. The canonical definition lives in
+// that commit. REMOVE this inlined copy when D3 lands on main — the D3
+// commit will introduce the same function and Go will fail to compile on
+// the duplicate. Resolution at that time: delete this block.
+func seedForSummaryBench(b *testing.B, store *DoltStore, totalN int) {
+	b.Helper()
+	ctx := context.Background()
+	numWisps := totalN / 4
+	numPerms := totalN - numWisps
+
+	// Batch creates to keep setup fast.
+	const batch = 500
+	statuses := []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusClosed}
+	types_ := []types.IssueType{types.TypeTask, types.TypeBug, types.TypeFeature, types.TypeEpic}
+
+	for start := 0; start < numPerms; start += batch {
+		end := start + batch
+		if end > numPerms {
+			end = numPerms
+		}
+		chunk := make([]*types.Issue, 0, end-start)
+		for i := start; i < end; i++ {
+			iss := &types.Issue{
+				ID:        fmt.Sprintf("sum-perm-%d", i),
+				Title:     fmt.Sprintf("summary perm %d", i),
+				Status:    statuses[i%len(statuses)],
+				Priority:  i % 5,
+				IssueType: types_[i%len(types_)],
+				Assignee:  fmt.Sprintf("user-%d", i%7),
+			}
+			chunk = append(chunk, iss)
+		}
+		if err := store.CreateIssues(ctx, chunk, "bench"); err != nil {
+			b.Fatalf("create perms batch %d: %v", start, err)
+		}
+		// Tag a subset of perms with labels so label hydration has work to do.
+		for _, iss := range chunk {
+			if len(iss.ID)%2 == 0 {
+				if err := store.AddLabel(ctx, iss.ID, "perf", "bench"); err != nil {
+					b.Fatalf("add label: %v", err)
+				}
+			}
+		}
+	}
+
+	// Wisps must be created individually (CreateIssues path routes them based on Ephemeral).
+	for i := 0; i < numWisps; i++ {
+		iss := &types.Issue{
+			Title:     fmt.Sprintf("summary wisp %d", i),
+			Status:    types.StatusOpen,
+			Priority:  i % 5,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		if err := store.CreateIssue(ctx, iss, "bench"); err != nil {
+			b.Fatalf("create wisp %d: %v", i, err)
+		}
+	}
+}
+
+// FR-5 read benchmarks. bd stale → GetStaleIssues ultimately runs
+// `WHERE status IN (...) AND updated_at < ?` on issues (issueops/stale.go);
+// migration 0033 adds composite idx_issues_status_updated_at so the planner
+// should take an index range scan instead of the pre-D4v2 full scan.
+// EXPLAIN capture for the PR lives in migration_0033_test.go.
+func benchmarkGetStaleIssues(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	filter := types.StaleFilter{Days: 30, Limit: 50}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.GetStaleIssues(ctx, filter); err != nil {
+			b.Fatalf("GetStaleIssues: %v", err)
+		}
+	}
+}
+
+func BenchmarkGetStaleIssues_1K(b *testing.B)  { benchmarkGetStaleIssues(b, 1000) }
+func BenchmarkGetStaleIssues_10K(b *testing.B) { benchmarkGetStaleIssues(b, 10000) }
+func BenchmarkGetStaleIssues_50K(b *testing.B) { benchmarkGetStaleIssues(b, 50000) }
+
+// bd query updated>7d style shapes. Baseline measurement for bare date
+// predicates — D4v2 (be-eei) does not serve bare updated_at without a
+// status filter (composite is status-leading prefix only), so this query
+// is expected to full-scan. The benchmark is kept to document the gap and
+// to detect unintended regressions from the composite change.
+func benchmarkSearchIssuesDateRange(b *testing.B, totalN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, totalN)
+
+	ctx := context.Background()
+	// "Updated in the last 7 days" — typical bd query date predicate.
+	cutoff := time.Now().AddDate(0, 0, -7)
+	filter := types.IssueFilter{UpdatedAfter: &cutoff}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := store.SearchIssues(ctx, "", filter); err != nil {
+			b.Fatalf("SearchIssues date range: %v", err)
+		}
+	}
+}
+
+func BenchmarkSearchIssues_UpdatedAfter_1K(b *testing.B) {
+	benchmarkSearchIssuesDateRange(b, 1000)
+}
+func BenchmarkSearchIssues_UpdatedAfter_10K(b *testing.B) {
+	benchmarkSearchIssuesDateRange(b, 10000)
+}
+func BenchmarkSearchIssues_UpdatedAfter_50K(b *testing.B) {
+	benchmarkSearchIssuesDateRange(b, 50000)
+}
+
+// Write-regression gate. be-eei §8 guardrail 5: <= 10% regression in
+// CreateIssue / UpdateIssue at 10K existing rows vs pre-D4v2 HEAD, measured
+// at -count>=5 with benchstat -geomean. The variants below seed N rows then
+// measure a single write so each operation pays the full per-row
+// index-maintenance cost. D4v2 swaps one single-column status index for a
+// composite and adds one standalone defer_until index — net +1 index
+// relative to pre-0033 HEAD, projected ~+4.4% CreateIssue regression.
+
+func benchmarkCreateIssueWithExisting(b *testing.B, existingN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, existingN)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		issue := &types.Issue{
+			Title:       fmt.Sprintf("Write regression %d-%d", existingN, i),
+			Description: "Write regression probe",
+			Status:      types.StatusOpen,
+			Priority:    (i % 4) + 1,
+			IssueType:   types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "bench"); err != nil {
+			b.Fatalf("CreateIssue: %v", err)
+		}
+	}
+}
+
+func BenchmarkCreateIssue_Existing1K(b *testing.B)  { benchmarkCreateIssueWithExisting(b, 1000) }
+func BenchmarkCreateIssue_Existing10K(b *testing.B) { benchmarkCreateIssueWithExisting(b, 10000) }
+
+func benchmarkUpdateIssueWithExisting(b *testing.B, existingN int) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	seedForSummaryBench(b, store, existingN)
+
+	ctx := context.Background()
+	// Target a stable seeded row — seedForSummaryBench creates permanent
+	// issues with IDs shaped "sum-perm-<n>".
+	targetID := "sum-perm-0"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		updates := map[string]interface{}{
+			"description": fmt.Sprintf("Update %d", i),
+		}
+		if err := store.UpdateIssue(ctx, targetID, updates, "bench"); err != nil {
+			b.Fatalf("UpdateIssue: %v", err)
+		}
+	}
+}
+
+func BenchmarkUpdateIssue_Existing1K(b *testing.B)  { benchmarkUpdateIssueWithExisting(b, 1000) }
+func BenchmarkUpdateIssue_Existing10K(b *testing.B) { benchmarkUpdateIssueWithExisting(b, 10000) }
