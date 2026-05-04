@@ -52,20 +52,36 @@ func TestEmbeddedAutoImportJSONLNoExplicitCommit(t *testing.T) {
 		t.Fatalf("writing issues.jsonl: %v", err)
 	}
 
-	// Run "bd list --json" — triggers maybeAutoImportJSONL in pre-run,
-	// auto-commit in post-run.
+	// Trigger auto-import via a write command. bd list is registered as
+	// read-only in cmd/bd/main.go's dispatcher and skips
+	// maybeAutoImportJSONL entirely — using it here would leave the
+	// destination empty and the test would assert against zero issues.
+	// bd create runs maybeAutoImportJSONL in PersistentPreRun (which
+	// stages the imported issues in the Dolt working set without an
+	// explicit DOLT_COMMIT), performs its own create write into the same
+	// working set, and then explicitly calls store.Commit at the end of
+	// cmd/bd/create.go — that single commit picks up both the auto-import
+	// and the new issue. PersistentPostRun's maybeAutoCommit is then a
+	// no-op (nothing left to commit).
+	bdCreate(t, bd, dstDir, "post-import marker", "--type", "task")
 	issues := bdListJSON(t, bd, dstDir)
-	if len(issues) != 3 {
-		t.Fatalf("expected 3 imported issues, got %d", len(issues))
+	if len(issues) != 4 {
+		t.Fatalf("expected 4 issues (3 imported + 1 created post-import), got %d", len(issues))
 	}
 
-	// Verify commit count: should be exactly 2 (init + post-run auto-commit).
-	// If the old code path were used, there would be 3 (init + auto-import
-	// DOLT_COMMIT + post-run auto-commit).
+	// Verify auto-import did NOT issue its own DOLT_COMMIT. The
+	// single-transaction import sets commandDidWrite and defers the commit
+	// to PersistentPostRun, so the auto-import and the post-run write
+	// (the bd create above) coalesce into one Dolt commit. The exact total
+	// depends on init detail (2-3 init commits + 1 coalesced post-run);
+	// what we want to forbid is a separate auto-import commit appearing
+	// alongside the post-run commit. The "auto-import: ... (upgrade
+	// recovery, GH#2994)" message is only used when the function calls
+	// s.Commit explicitly (the fallback path) — its absence proves the
+	// embedded path used the deferred-commit flow.
 	logOut := bdDolt(t, bd, dstDir, "log")
-	commitCount := strings.Count(logOut, "commit ")
-	if commitCount > 2 {
-		t.Errorf("expected at most 2 Dolt commits (init + auto-commit), got %d;\nlog:\n%s", commitCount, logOut)
+	if strings.Contains(logOut, "auto-import:") && strings.Contains(logOut, "upgrade recovery, GH#2994") {
+		t.Errorf("embedded auto-import path issued an explicit DOLT_COMMIT; expected the commit to be deferred to PersistentPostRun;\nlog:\n%s", logOut)
 	}
 }
 
