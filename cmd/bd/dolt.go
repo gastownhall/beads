@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -277,7 +278,13 @@ For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
 variables for authentication.
 
 Use --remote to pull from a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').`,
+The remote must already exist (see 'bd dolt remote add').
+
+Use --verbose to stream transfer output from the dolt binary in real time,
+showing actual progress as objects are received. This requires a local dolt
+CLI directory (the default for SSH/git-protocol remotes). For SQL-based
+remotes (Hosted Dolt, DoltHub), --verbose is not supported and the flag is
+silently ignored.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
 		st := getStore()
@@ -285,7 +292,41 @@ The remote must already exist (see 'bd dolt remote add').`,
 			fmt.Fprintf(os.Stderr, "Error: no store available\n")
 			os.Exit(1)
 		}
+		verbose, _ := cmd.Flags().GetBool("verbose")
 		remote, _ := cmd.Flags().GetString("remote")
+
+		if verbose {
+			if locator, ok := storage.UnwrapStore(st).(storage.StoreLocator); ok {
+				if cliDir := locator.CLIDir(); cliDir != "" {
+					if remote != "" {
+						fmt.Printf("Pulling from Dolt remote %q...\n", remote)
+					} else {
+						fmt.Println("Pulling from Dolt remote...")
+					}
+					if err := doltPullStreaming(ctx, cliDir, remote); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+						if isRemoteNotFoundErr(err) {
+							if remote != "" {
+								fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
+								fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")
+								fmt.Fprintln(os.Stderr, "Use 'bd dolt remote list' to see configured remotes.")
+							} else {
+								printNoRemoteGuidance()
+							}
+						} else if isDivergedHistoryErr(err) {
+							printDivergedHistoryGuidance("pull")
+						}
+						os.Exit(1)
+					}
+					fmt.Println("Pull complete.")
+					return
+				}
+			}
+			// CLIDir unavailable: --verbose is not supported for this remote type.
+			// Fall through to the standard (silent) pull path.
+			fmt.Fprintln(os.Stderr, "Note: --verbose is not supported for SQL-based remotes; proceeding without transfer output.")
+		}
+
 		if remote != "" {
 			fmt.Printf("Pulling from Dolt remote %q...\n", remote)
 			if err := st.PullRemote(ctx, remote); err != nil {
@@ -316,6 +357,66 @@ The remote must already exist (see 'bd dolt remote add').`,
 		}
 		fmt.Println("Pull complete.")
 	},
+}
+
+// doltPullStreaming runs dolt pull as a subprocess with stdout and stderr
+// piped directly to the terminal, so transfer progress is visible in real time.
+// Used by --verbose to surface genuine feedback from the dolt binary rather
+// than a synthetic progress indicator.
+//
+// Remote and branch are always passed explicitly to avoid "no tracking
+// information" errors (dolt pull with no args fails when branch tracking is
+// not configured in repo_state.json, which is the default for beads databases).
+// When remote is empty, it is resolved from repo_state.json.
+func doltPullStreaming(ctx context.Context, cliDir, remote string) error {
+	if remote == "" {
+		remote = doltDefaultRemote(cliDir)
+	}
+	branch := doltActiveBranch(ctx, cliDir)
+	args := []string{"pull", remote}
+	if branch != "" {
+		args = append(args, branch)
+	}
+	c := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command, remote is a validated flag value
+	c.Dir = cliDir
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
+}
+
+// doltActiveBranch returns the currently checked-out branch in the dolt
+// database at dir. Returns empty string if the branch cannot be determined.
+func doltActiveBranch(ctx context.Context, dir string) string {
+	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	c := exec.CommandContext(tctx, "dolt", "branch", "--show-current")
+	c.Dir = dir
+	out, err := c.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// doltDefaultRemote reads the first configured remote name from repo_state.json
+// in the dolt database at dir. Returns "origin" if the file cannot be read or
+// no remotes are configured.
+func doltDefaultRemote(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, ".dolt", "repo_state.json"))
+	if err != nil {
+		return "origin"
+	}
+	const marker = `"remotes": {"`
+	idx := strings.Index(string(data), marker)
+	if idx == -1 {
+		return "origin"
+	}
+	rest := string(data)[idx+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end <= 0 {
+		return "origin"
+	}
+	return rest[:end]
 }
 
 var doltCommitCmd = &cobra.Command{
@@ -1185,6 +1286,7 @@ func init() {
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
+	doltPullCmd.Flags().Bool("verbose", false, "Stream transfer output from dolt in real time (SSH/git-protocol remotes only)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltRemoteRemoveCmd.Flags().Bool("force", false, "Force remove even when SQL and CLI URLs conflict")
