@@ -17,7 +17,7 @@
   ],
   "skills": "./skills/",
   "commands": "./skills/beads/commands/",
-  "agents": "./skills/beads/agents/",
+  "agents": ["./skills/beads/agents/task-agent.md"],
   "hooks": {
     "SessionStart": [
       {
