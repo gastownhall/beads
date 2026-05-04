@@ -30,6 +30,7 @@ bd ready                              # Show issues ready to work (no blockers)
 bd list --status=open                 # List all open issues
 bd create --title="..." --type=task  # Create new issue
 bd update <id> --claim               # Claim work atomically
+bd unclaim <id>                    # Release stuck issue (agent crashed)
 bd close <id>                         # Mark complete
 bd dep add <issue> <depends-on>       # Add dependency (issue depends on depends-on)
 bd dolt push                               # Sync with git remote

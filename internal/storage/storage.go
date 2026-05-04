@@ -45,6 +45,7 @@ type Storage interface {
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
 	ReopenIssue(ctx context.Context, id string, reason string, actor string) error
+	UnclaimIssue(ctx context.Context, id string, actor string) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	DeleteIssue(ctx context.Context, id string) error

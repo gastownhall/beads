@@ -9,6 +9,8 @@
 1. Install `bd` — see [Installation](INSTALLING.md) or the [site installation page](https://gastownhall.github.io/beads/getting-started/installation).
 2. In your project: `bd init`
 3. Create work: `bd create "My task" -p 1` then `bd ready`
+4. Claim work: `bd update <id> --claim`
+5. **Stuck?** If an agent crashes mid-work: `bd unclaim <id>` to release the stuck issue
 
 For dependencies, sync, Notion, migrations, and maintenance, use the [full Quick Start](https://gastownhall.github.io/beads/getting-started/quickstart) linked above.
 
