@@ -94,7 +94,7 @@ bd dolt push
 bd dolt pull
 ```
 
-When a teammate clones the repo, `bd bootstrap` auto-detects the existing database. See [Sync](/cli-reference/sync) for details.
+When a teammate clones the repo, `bd bootstrap` auto-detects the existing database. See [`bd dolt`](/cli-reference/dolt) for sync commands.
 
 ## Track Progress
 
@@ -110,6 +110,6 @@ bd doctor     # Health check
 - Add labels: `bd create "Task" -l "backend,urgent"`
 - Filter ready work: `bd ready --priority 1`
 - Check graph integrity: `bd graph check`
-- Gates for PR/CI sync: [Dependencies](/cli-reference/dependencies)
+- Gates for PR/CI sync: [`bd gate`](/cli-reference/gate)
 - IDE integration: [IDE Setup](/getting-started/ide-setup)
 - Full command list: [CLI Reference](/cli-reference)

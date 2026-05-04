@@ -24,11 +24,17 @@ curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/inst
 cd your-project
 bd init
 
-# Tell your agent
-echo "Use 'bd' for task tracking" >> AGENTS.md
+# Optional: install richer instructions for your agent
+bd setup codex    # Codex CLI - creates/updates AGENTS.md
+bd setup claude   # Claude Code - installs hooks/settings
+bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md
 ```
 
 **Note:** Beads is a CLI tool you install once and use everywhere. You don't need to clone this repository into your project.
+
+`bd init` creates or updates `AGENTS.md` by default so agents can discover the beads workflow. It skips agent files only when you pass `--skip-agents` or `--stealth`, or when you configure a custom agent file. Use `bd setup --list` to see supported integrations, including `bd setup codex`, `bd setup factory`, `bd setup claude`, `bd setup mux`, `bd setup cursor`, and more. See [Agent and IDE setup](docs/SETUP.md).
+
+Manual copy-paste is only for unsupported agents, existing projects where you cannot rerun `bd init`/`bd setup`, or custom instruction files. In those cases, run `bd onboard` and paste the printed snippet into the file your agent reads.
 
 ## 🛠 Features
 

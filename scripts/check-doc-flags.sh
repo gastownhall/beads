@@ -6,7 +6,7 @@
 # 2. Scanning docs for `bd <command> --<flag>` patterns
 # 3. Flagging any that don't exist in the CLI
 #
-# Also checks for references to known-removed commands (bd sync, bd import).
+# Also checks for references to known-removed commands.
 #
 # Usage: ./scripts/check-doc-flags.sh [bd-binary]
 #
@@ -56,29 +56,6 @@ if [ -n "$SYNC_REFS" ]; then
     ERRORS=$((ERRORS + 1))
 else
     echo "PASS: No stale 'bd sync' references"
-fi
-
-# bd import (removed)
-IMPORT_REFS=$(grep -rn 'bd import\b' \
-    "$PROJECT_ROOT"/docs/*.md \
-    "$PROJECT_ROOT"/AGENT_INSTRUCTIONS.md \
-    "$PROJECT_ROOT"/AGENTS.md \
-    "$PROJECT_ROOT"/README.md \
-    "$PROJECT_ROOT"/npm-package/*.md \
-    "$PROJECT_ROOT"/integrations/*/README.md \
-    "$PROJECT_ROOT"/website/docs/**/*.md \
-    "$PROJECT_ROOT"/plugins/beads/skills/beads/commands/*.md \
-    "$PROJECT_ROOT"/plugins/beads/skills/beads/resources/*.md \
-    2>/dev/null \
-    | grep -v 'CHANGELOG\|removed\|was removed\|has been removed\|no longer\|deprecated\|REMOVED\|DISCOVERY' \
-    || true)
-
-if [ -n "$IMPORT_REFS" ]; then
-    echo "FAIL: Found references to removed 'bd import' command:"
-    echo "$IMPORT_REFS" | head -20
-    ERRORS=$((ERRORS + 1))
-else
-    echo "PASS: No stale 'bd import' references"
 fi
 
 echo ""
@@ -133,33 +110,66 @@ fi
 
 echo ""
 
-# --- Check 4: CLI_REFERENCE.md freshness (if help --all available) ---
-echo "=== Check 4: CLI_REFERENCE.md freshness ==="
+# --- Check 4: CLI command docs coverage and freshness ---
+echo "=== Check 4: CLI command docs coverage and freshness ==="
 
 CLI_REF="$PROJECT_ROOT/docs/CLI_REFERENCE.md"
 if [ -f "$CLI_REF" ]; then
     TMPDIR_CHECK=$(mktemp -d)
     trap "rm -rf $TMPDIR_CHECK" EXIT
-    if timeout 30 $BD help --all > "$TMPDIR_CHECK/help-all.md" 2>/dev/null; then
-        # Extract top-level command names from help output
-        grep -oP '## bd [a-z][-a-z]*$' "$TMPDIR_CHECK/help-all.md" \
-            | sed 's/## bd //' | sort -u > "$TMPDIR_CHECK/help-cmds.txt"
-        # Extract command names referenced in CLI_REFERENCE.md
-        grep -oP '\bbd [a-z][-a-z]+\b' "$CLI_REF" \
-            | sed 's/^bd //' | sort -u > "$TMPDIR_CHECK/doc-cmds.txt"
+    if timeout 30 "$BD" help --list > "$TMPDIR_CHECK/help-cmds.txt" 2>/dev/null; then
+        sort -u "$TMPDIR_CHECK/help-cmds.txt" -o "$TMPDIR_CHECK/help-cmds.txt"
 
-        MISSING=$(comm -23 "$TMPDIR_CHECK/help-cmds.txt" "$TMPDIR_CHECK/doc-cmds.txt" || true)
-        if [ -n "$MISSING" ]; then
-            echo "INFO: Commands in CLI not mentioned in CLI_REFERENCE.md (may be OK):"
-            echo "$MISSING" | head -10
+        grep -oE '\bbd [a-z][a-z0-9-]*\b' "$CLI_REF" \
+            | sed 's/^bd //' | sort -u > "$TMPDIR_CHECK/cli-reference-cmds.txt" || true
+
+        MISSING_CLI_REF=$(comm -23 "$TMPDIR_CHECK/help-cmds.txt" "$TMPDIR_CHECK/cli-reference-cmds.txt" || true)
+        if [ -n "$MISSING_CLI_REF" ]; then
+            echo "FAIL: Live CLI commands missing from docs/CLI_REFERENCE.md:"
+            echo "$MISSING_CLI_REF" | sed 's/^/  bd /' | head -50
+            ERRORS=$((ERRORS + 1))
         else
-            echo "PASS: CLI_REFERENCE.md covers all CLI commands"
+            echo "PASS: docs/CLI_REFERENCE.md covers all live top-level CLI commands"
+        fi
+
+        WEBSITE_DIRS=(
+            "$PROJECT_ROOT/website/docs/cli-reference"
+            "$PROJECT_ROOT/website/versioned_docs/version-1.0.0/cli-reference"
+        )
+        for dir in "${WEBSITE_DIRS[@]}"; do
+            if [ ! -d "$dir" ]; then
+                continue
+            fi
+            grep -rhoE '\bbd [a-z][a-z0-9-]*\b' "$dir"/*.md \
+                | sed 's/^bd //' | sort -u > "$TMPDIR_CHECK/website-cmds.txt" || true
+
+            MISSING_WEBSITE=$(comm -23 "$TMPDIR_CHECK/help-cmds.txt" "$TMPDIR_CHECK/website-cmds.txt" || true)
+            if [ -n "$MISSING_WEBSITE" ]; then
+                echo "FAIL: Live CLI commands missing from ${dir#$PROJECT_ROOT/}:"
+                echo "$MISSING_WEBSITE" | sed 's/^/  bd /' | head -50
+                ERRORS=$((ERRORS + 1))
+            else
+                echo "PASS: ${dir#$PROJECT_ROOT/} covers all live top-level CLI commands"
+            fi
+        done
+
+        if [ -x "$PROJECT_ROOT/scripts/generate-cli-docs.sh" ]; then
+            if "$PROJECT_ROOT/scripts/generate-cli-docs.sh" --check "$BD"; then
+                echo "PASS: Generated CLI docs are fresh"
+            else
+                ERRORS=$((ERRORS + 1))
+            fi
+        else
+            echo "FAIL: scripts/generate-cli-docs.sh is missing"
+            ERRORS=$((ERRORS + 1))
         fi
     else
-        echo "SKIP: bd help --all timed out or unavailable"
+        echo "FAIL: bd help --list timed out or unavailable"
+        ERRORS=$((ERRORS + 1))
     fi
 else
-    echo "SKIP: docs/CLI_REFERENCE.md not found"
+    echo "FAIL: docs/CLI_REFERENCE.md not found"
+    ERRORS=$((ERRORS + 1))
 fi
 
 echo ""
@@ -169,8 +179,10 @@ echo "=== Summary ==="
 if [ $ERRORS -gt 0 ]; then
     echo "FAILED: $ERRORS stale reference category(ies) found"
     echo ""
-    echo "To fix: update the referenced docs to use current CLI commands."
-    echo "See docs/DOLT-BACKEND.md for current sync workflow."
+    echo "To fix:"
+    echo "  1. Update stale prose references to use current CLI commands."
+    echo "  2. Regenerate CLI docs with: ./scripts/generate-cli-docs.sh $BD"
+    echo "  3. Re-run: ./scripts/check-doc-flags.sh $BD"
     exit 1
 else
     echo "PASSED: All documentation references are consistent with CLI"

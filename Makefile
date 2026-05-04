@@ -183,7 +183,9 @@ fmt-check:
 	@echo "All Go files are properly formatted"
 
 # Validate documentation references against actual CLI flags
-check-docs: build
+check-docs:
+	@echo "Building bd for docs checks..."
+	@CGO_ENABLED=0 go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 	@./scripts/check-doc-flags.sh ./bd
 
 # Clean build artifacts and benchmark profiles
