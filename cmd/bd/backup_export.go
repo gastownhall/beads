@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -109,6 +110,38 @@ func atomicWriteFile(path string, data []byte) error {
 	return nil
 }
 
+// isRemoteHost returns true if the given host string refers to a remote machine
+// (i.e., not localhost). Used to guard DOLT_BACKUP calls that send local
+// filesystem paths to the server via SQL.
+func isRemoteHost(host string) bool {
+	switch host {
+	case "", "127.0.0.1", "localhost", "::1", "[::1]":
+		return false
+	}
+	return true
+}
+
+// isRemoteDoltServerForDir checks whether the Dolt server configured in the
+// given beads directory is remote. Extracted for testability.
+func isRemoteDoltServerForDir(beadsDir string) bool {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return false
+	}
+	return isRemoteHost(cfg.DoltServerHost)
+}
+
+// isRemoteDoltServer checks whether the configured Dolt server is remote.
+// DOLT_BACKUP commands send local filesystem paths to the server via SQL,
+// which fails when the server is on a different machine.
+func isRemoteDoltServer() bool {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return false
+	}
+	return isRemoteDoltServerForDir(beadsDir)
+}
+
 // runBackupExport performs a Dolt-native backup to .beads/backup/.
 // Returns the updated state.
 func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
@@ -132,6 +165,33 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 			debug.Logf("backup: no changes since last backup (commit %s)\n", truncateHash(currentCommit))
 			return state, nil
 		}
+	}
+
+	// When the Dolt server is remote, DOLT_BACKUP('add', ..., 'file:///local/path')
+	// sends the local filesystem path to the remote server, which tries to mkdir
+	// that path on its own filesystem. Fall back to JSONL export instead.
+	if isRemoteDoltServer() {
+		debug.Logf("backup: remote dolt server detected, falling back to JSONL export\n")
+		exportPath := filepath.Join(dir, "export.jsonl")
+		issueCount, memoryCount, err := exportToFile(ctx, exportPath, true)
+		if err != nil {
+			return nil, fmt.Errorf("JSONL backup export failed: %w", err)
+		}
+		debug.Logf("backup: JSONL export wrote %d issues and %d memories to %s\n",
+			issueCount, memoryCount, exportPath)
+
+		// Update watermarks
+		currentCommit, err := store.GetCurrentCommit(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current commit for state: %w", err)
+		}
+		state.LastDoltCommit = currentCommit
+		state.Timestamp = time.Now().UTC()
+
+		if err := saveBackupState(dir, state); err != nil {
+			return nil, err
+		}
+		return state, nil
 	}
 
 	bs, ok := storage.UnwrapStore(store).(storage.BackupStore)

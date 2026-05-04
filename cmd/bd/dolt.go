@@ -805,7 +805,7 @@ func findRemoteURL(remotes []storage.RemoteInfo, name string) string {
 	return ""
 }
 
-func listRemoteSurfaces(ctx context.Context, st storage.RemoteStore, dbPath string, embedded bool) (
+func listRemoteSurfaces(ctx context.Context, st storage.RemoteStore, dbPath string, embedded bool, serverHost ...string) (
 	sqlRemotes []storage.RemoteInfo,
 	sqlErr error,
 	cliRemotes []storage.RemoteInfo,
@@ -816,6 +816,11 @@ func listRemoteSurfaces(ctx context.Context, st storage.RemoteStore, dbPath stri
 		// Embedded mode holds an exclusive flock while the store is open. Running
 		// `dolt remote` as a subprocess against the same directory can block on
 		// that flock, so treat the SQL-visible remotes as the shared surface.
+		return sqlRemotes, sqlErr, sqlRemotes, nil
+	}
+	// Remote Dolt servers have no local dolt directory — CLI remotes would
+	// always fail. Return SQL remotes for both surfaces (same as embedded).
+	if len(serverHost) > 0 && !isLocalHost(serverHost[0]) {
 		return sqlRemotes, sqlErr, sqlRemotes, nil
 	}
 	if strings.TrimSpace(dbPath) == "" {
@@ -1307,40 +1312,30 @@ func showDoltConfig(testConnection bool) {
 	fmt.Println("\nRemotes:")
 	ctx := context.Background()
 	st := getStore()
-	var sqlRemotes []string
 	if st != nil {
-		if remotes, err := st.ListRemotes(ctx); err == nil {
-			for _, r := range remotes {
-				sqlRemotes = append(sqlRemotes, fmt.Sprintf("  %-16s %s", r.Name, r.URL))
+		sqlRemotes, _, cliRemotes, cliErr := listRemoteSurfaces(ctx, st, dbDir, embedded, showHost)
+		if len(sqlRemotes) == 0 && (cliErr != nil || len(cliRemotes) == 0) {
+			fmt.Println("  (none)")
+		} else {
+			// Show SQL remotes
+			for _, r := range sqlRemotes {
+				fmt.Printf("  %-16s %s\n", r.Name, r.URL)
 			}
-		}
-	}
-	cliRemotes, cliErr := doltutil.ListCLIRemotes(dbDir)
-	if len(sqlRemotes) == 0 && (cliErr != nil || len(cliRemotes) == 0) {
-		fmt.Println("  (none)")
-	} else {
-		// Show SQL remotes
-		if len(sqlRemotes) > 0 {
-			for _, line := range sqlRemotes {
-				fmt.Println(line)
-			}
-		}
-		// Flag CLI-only remotes
-		if cliErr == nil {
-			sqlNames := map[string]bool{}
-			if st != nil {
-				if remotes, err := st.ListRemotes(ctx); err == nil {
-					for _, r := range remotes {
-						sqlNames[r.Name] = true
+			// Flag CLI-only remotes
+			if cliErr == nil {
+				sqlNames := map[string]bool{}
+				for _, r := range sqlRemotes {
+					sqlNames[r.Name] = true
+				}
+				for _, r := range cliRemotes {
+					if !sqlNames[r.Name] {
+						fmt.Printf("  %-16s %s  %s\n", r.Name, r.URL, ui.RenderWarn("[CLI only]"))
 					}
 				}
 			}
-			for _, r := range cliRemotes {
-				if !sqlNames[r.Name] {
-					fmt.Printf("  %-16s %s  %s\n", r.Name, r.URL, ui.RenderWarn("[CLI only]"))
-				}
-			}
 		}
+	} else {
+		fmt.Println("  (none)")
 	}
 
 	// Show config sources

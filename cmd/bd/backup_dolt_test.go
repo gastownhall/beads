@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -198,6 +199,132 @@ func TestDirSize(t *testing.T) {
 	// "hello" = 5 bytes, "world!" = 6 bytes = 11 total
 	if size != 11 {
 		t.Errorf("dirSize = %d, want 11", size)
+	}
+}
+
+// TestCheckBackupInitRemoteGuard verifies that a local filesystem path is
+// rejected when the Dolt server is remote. DoltHub/cloud URLs should pass.
+//
+// User story (docs/REMOTE_SERVER_USER_STORIES.md - Backup):
+//
+//	Given beads is connected to a remote dolt server
+//	When I run `bd backup init /some/local/path`
+//	Then beads does NOT send that local path to the remote server
+//	And instead tells me this operation isn't supported in remote mode
+func TestCheckBackupInitRemoteGuard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		url      string
+		isRemote bool
+		wantErr  bool
+	}{
+		{name: "file URL + remote = error", url: "file:///mnt/backup", isRemote: true, wantErr: true},
+		{name: "file URL + local = ok", url: "file:///mnt/backup", isRemote: false, wantErr: false},
+		{name: "dolthub URL + remote = ok", url: "https://doltremoteapi.dolthub.com/user/repo", isRemote: true, wantErr: false},
+		{name: "aws URL + remote = ok", url: "aws://bucket/path", isRemote: true, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkBackupInitRemoteGuard(tt.url, tt.isRemote)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for url=%q isRemote=%v, got nil", tt.url, tt.isRemote)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for url=%q isRemote=%v: %v", tt.url, tt.isRemote, err)
+			}
+		})
+	}
+}
+
+// TestCheckBackupSyncRemoteGuard verifies that bd backup sync on a remote
+// server returns a helpful error when no cloud backup URL is configured,
+// guiding the user toward `bd export -o` for JSONL export instead.
+//
+// User stories (docs/REMOTE_SERVER_USER_STORIES.md - Backup):
+//
+//	Given beads is connected to a remote dolt server
+//	When I run `bd backup sync` without a cloud backup destination
+//	Then beads errors with a clear message explaining that server mode
+//	  requires an explicit backup location
+//	And suggests: `bd export -o /path/to/backup.jsonl`
+func TestCheckBackupSyncRemoteGuard(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		isRemote  bool
+		backupCfg *doltBackupConfig
+		wantErr   bool
+		wantMsg   string // substring expected in error message
+	}{
+		{
+			name:      "remote + no backup config = error",
+			isRemote:  true,
+			backupCfg: nil,
+			wantErr:   true,
+			wantMsg:   "bd export",
+		},
+		{
+			name:     "remote + file:// backup = error",
+			isRemote: true,
+			backupCfg: &doltBackupConfig{
+				BackupURL: "file:///mnt/backup",
+			},
+			wantErr: true,
+			wantMsg: "bd export",
+		},
+		{
+			name:     "remote + dolthub URL = ok",
+			isRemote: true,
+			backupCfg: &doltBackupConfig{
+				BackupURL: "https://doltremoteapi.dolthub.com/user/repo",
+			},
+			wantErr: false,
+		},
+		{
+			name:     "remote + aws URL = ok",
+			isRemote: true,
+			backupCfg: &doltBackupConfig{
+				BackupURL: "aws://bucket/path",
+			},
+			wantErr: false,
+		},
+		{
+			name:      "local + no backup config = ok (normal flow handles this)",
+			isRemote:  false,
+			backupCfg: nil,
+			wantErr:   false,
+		},
+		{
+			name:     "local + file:// backup = ok",
+			isRemote: false,
+			backupCfg: &doltBackupConfig{
+				BackupURL: "file:///mnt/backup",
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkBackupSyncRemoteGuard(tt.isRemote, tt.backupCfg)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error for isRemote=%v backupCfg=%+v, got nil", tt.isRemote, tt.backupCfg)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error for isRemote=%v backupCfg=%+v: %v", tt.isRemote, tt.backupCfg, err)
+			}
+			if tt.wantErr && err != nil && tt.wantMsg != "" {
+				if !strings.Contains(err.Error(), tt.wantMsg) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.wantMsg)
+				}
+			}
+		})
 	}
 }
 

@@ -54,6 +54,28 @@ func isBranchTrackingError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "did not specify a branch")
 }
 
+// isRemoteNotFoundError returns true if the error indicates that a Dolt
+// push/pull failed because the named remote does not exist on the server.
+// This typically happens when CALL DOLT_PUSH or DOLT_PULL targets a remote
+// that was never added to the server's dolt_remotes table.
+func isRemoteNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "remote") && strings.Contains(msg, "not found")
+}
+
+// wrapRemoteNotFoundError checks whether err is a remote-not-found error and,
+// if so, wraps it with a user-friendly message. Non-matching errors (including
+// nil) are returned unchanged.
+func wrapRemoteNotFoundError(err error, op string) error {
+	if err == nil || !isRemoteNotFoundError(err) {
+		return err
+	}
+	return fmt.Errorf("%s: no remotes configured on the dolt server; configure a remote on the server first: %w", op, err)
+}
+
 // isSerializationError returns true if the error is a Dolt/MySQL serialization
 // failure that guarantees the transaction was rolled back. Safe to retry.
 //   - 1213 (ER_LOCK_DEADLOCK): concurrent transactions conflict at commit time

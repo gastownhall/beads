@@ -98,6 +98,40 @@ func TestListRemoteSurfacesServerUsesCLI(t *testing.T) {
 	}
 }
 
+// TestListRemoteSurfacesRemoteServerSkipsCLI verifies that when connected to a
+// remote Dolt server (non-localhost), listRemoteSurfaces skips CLI remotes and
+// returns SQL remotes for both surfaces — just like embedded mode. A remote
+// server has no local dolt directory, so shelling out to `dolt remote -v` would
+// always fail. (GH#3576)
+func TestListRemoteSurfacesRemoteServerSkipsCLI(t *testing.T) {
+	oldList := listDoltCLIRemotes
+	defer func() { listDoltCLIRemotes = oldList }()
+
+	called := false
+	listDoltCLIRemotes = func(string) ([]storage.RemoteInfo, error) {
+		called = true
+		return []storage.RemoteInfo{{Name: "cli", URL: "file:///cli"}}, nil
+	}
+
+	remote := storage.RemoteInfo{Name: "origin", URL: "https://doltremoteapi.dolthub.com/org/repo"}
+	sqlRemotes, sqlErr, cliRemotes, cliErr := listRemoteSurfaces(
+		context.Background(),
+		fakeRemoteStore{remotes: []storage.RemoteInfo{remote}},
+		"/nonexistent/dolt/dir",
+		false,         // not embedded
+		"mini2.local", // remote server host
+	)
+	if sqlErr != nil || cliErr != nil {
+		t.Fatalf("unexpected errors: sql=%v cli=%v", sqlErr, cliErr)
+	}
+	if called {
+		t.Fatal("remote server surface lookup must not shell out to dolt CLI")
+	}
+	if len(sqlRemotes) != 1 || len(cliRemotes) != 1 || sqlRemotes[0] != remote || cliRemotes[0] != remote {
+		t.Fatalf("remote server surfaces = sql:%v cli:%v, want both %v", sqlRemotes, cliRemotes, remote)
+	}
+}
+
 func TestDoltShowConfigNotInRepo(t *testing.T) {
 	// Change to a temp dir without .beads
 	tmpDir := t.TempDir()
