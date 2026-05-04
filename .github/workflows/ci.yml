@@ -41,6 +41,44 @@ jobs:
       - run: ./scripts/check-build-tags.sh
       - run: ./scripts/check-go-install-guidance.sh
 
+  # Lock in the cgo-test-contamination fix (mybd-ycx / GH#3683 follow-up).
+  # cmd/bd carries a mix of cgo-only test helpers (embedded Dolt, sql.DB) and
+  # pure-Go tests. Untagged test files that reach for cgo-only helpers break
+  # the entire package's CGO_ENABLED=0 compile, silently neutering pure-Go
+  # tests (the original symptom in PR #3704). This job compiles the cmd/bd
+  # test binary with CGO_ENABLED=0 and runs the pure-Go subset, so a
+  # regression that re-introduces cgo coupling fails fast.
+  check-cmd-bd-puregeo-tests:
+    name: Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build cmd/bd (CGO_ENABLED=0, gms_pure_go)
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags gms_pure_go -o /tmp/bd-puregeo ./cmd/bd
+
+      - name: Compile cmd/bd test binary (CGO_ENABLED=0, gms_pure_go)
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -c -o /tmp/bd-cmd-puregeo-test ./cmd/bd
+
+      - name: Run pure-Go cmd/bd test subset (CGO_ENABLED=0)
+        env:
+          CGO_ENABLED: "0"
+        # Restrict to tests that exercise pure-Go code paths. Tests that
+        # need a Dolt store skip themselves at runtime when no test server
+        # is available; the goal here is to catch compile-time contamination,
+        # not run the full suite.
+        run: |
+          go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
+
   # Fast check to ensure all version files are in sync
   check-version-consistency:
     name: Check version consistency
