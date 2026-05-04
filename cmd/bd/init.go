@@ -112,7 +112,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			fmt.Fprintf(os.Stderr, "  bd init\n\n")
 			fmt.Fprintf(os.Stderr, "To import issues from an existing JSONL export:\n")
 			fmt.Fprintf(os.Stderr, "  bd init --from-jsonl\n\n")
-			fmt.Fprintf(os.Stderr, "See: https://github.com/steveyegge/beads/blob/main/docs/DOLT-BACKEND.md\n")
+			fmt.Fprintf(os.Stderr, "See: https://github.com/steveyegge/beads/blob/main/docs/DOLT.md\n")
 			os.Exit(1)
 		} else if backendFlag != "" && backendFlag != "dolt" {
 			FatalError("unknown backend %q: only \"dolt\" is supported", backendFlag)

@@ -441,7 +441,7 @@ This handles the entire release workflow automatically, including waiting ~5 min
 6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
 7. Verify: `brew update && brew upgrade beads && bd version`
 
-See [docs/RELEASING.md](docs/RELEASING.md) for complete manual instructions.
+See [RELEASING.md](RELEASING.md) for complete manual instructions.
 
 ## Checking GitHub Issues and PRs
 
