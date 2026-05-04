@@ -117,6 +117,7 @@ var readOnlyCommands = map[string]bool{
 	"search":     true,
 	"graph":      true,
 	"duplicates": true,
+	"prove":      true,
 	"comments":   true, // list comments (not add)
 	"current":    true, // bd sync mode current
 	"ping":       true,
