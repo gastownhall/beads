@@ -1386,28 +1386,22 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			fmt.Printf("      %s\n\n", ui.RenderAccent("bd backup restore"))
 		}
 
-		// Run limited diagnostics to verify init succeeded.
-		// Skipped in embedded mode: diagnostics use dolt.NewFromConfigWithOptions
-		// which auto-starts a dolt sql-server. Embedded init already validates
-		// the database via initSchema.
-		if !isEmbeddedMode() {
-			doctorResult := runInitDiagnostics(cwd)
-			hasIssues := false
+		doctorResult := runInitDiagnostics(cwd)
+		hasIssues := false
+		for _, check := range doctorResult.Checks {
+			if check.Status != statusOK {
+				hasIssues = true
+				break
+			}
+		}
+		if hasIssues {
+			fmt.Printf("%s Setup incomplete. Some issues were detected:\n", ui.RenderWarn("⚠"))
 			for _, check := range doctorResult.Checks {
 				if check.Status != statusOK {
-					hasIssues = true
-					break
+					fmt.Printf("  • %s: %s\n", check.Name, check.Message)
 				}
 			}
-			if hasIssues {
-				fmt.Printf("%s Setup incomplete. Some issues were detected:\n", ui.RenderWarn("⚠"))
-				for _, check := range doctorResult.Checks {
-					if check.Status != statusOK {
-						fmt.Printf("  • %s: %s\n", check.Name, check.Message)
-					}
-				}
-				fmt.Printf("\nRun %s to see details and fix these issues.\n\n", ui.RenderAccent("bd doctor --fix"))
-			}
+			fmt.Printf("\nRun %s to see details and fix these issues.\n\n", ui.RenderAccent("bd doctor --fix"))
 		}
 	},
 }

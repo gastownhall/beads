@@ -776,6 +776,21 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 
+	t.Run("post_init_diagnostics_are_clean", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "diag")
+
+		result := runInitDiagnostics(dir)
+		if !result.OverallOK {
+			t.Fatalf("expected embedded init diagnostics to pass, got overall_ok=false: %+v", result.Checks)
+		}
+
+		for _, check := range result.Checks {
+			if check.Status != statusOK {
+				t.Fatalf("expected check %q to be ok after embedded init, got %s: %s", check.Name, check.Status, check.Message)
+			}
+		}
+	})
+
 	t.Run("metadata_json", func(t *testing.T) {
 		_, beadsDir, _ := bdInit(t, bd, "--prefix", "mj")
 		cfg, err := configfile.Load(beadsDir)
