@@ -24,11 +24,24 @@ curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/inst
 cd your-project
 bd init
 
-# Tell your agent
-echo "Use 'bd' for task tracking" >> AGENTS.md
+# Install instructions for your agent
+bd setup codex      # Codex CLI / AGENTS.md
+bd setup claude     # Claude Code hooks + CLAUDE.md
+bd setup factory    # AGENTS.md standard for compatible tools
 ```
 
 **Note:** Beads is a CLI tool you install once and use everywhere. You don't need to clone this repository into your project.
+
+If your agent is not covered by `bd setup`, add this minimal `AGENTS.md` section:
+
+```markdown
+This project uses bd (beads) for issue tracking.
+
+- Run `bd prime` for workflow context and command guidance.
+- Use `bd ready`, `bd show <id>`, `bd update <id> --claim`, and `bd close <id>`.
+- Use `bd remember "insight"` for persistent project memory; do not create MEMORY.md files.
+- Do not use markdown TODO lists for task tracking.
+```
 
 ## 🛠 Features
 
@@ -48,6 +61,8 @@ echo "Use 'bd' for task tracking" >> AGENTS.md
 | `bd update <id> --claim` | Atomically claim a task (sets assignee + in_progress). |
 | `bd dep add <child> <parent>` | Link tasks (blocks, related, parent-child). |
 | `bd show <id>` | View task details and audit trail. |
+| `bd prime` | Print agent workflow context and persistent memories. |
+| `bd remember "insight"` | Store project memory that `bd prime` injects later. |
 
 ## 🔗 Hierarchy & Workflow
 

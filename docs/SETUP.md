@@ -267,9 +267,12 @@ bd setup claude --project --stealth
 
 The hooks call `bd prime` which:
 1. Outputs workflow context for Claude to read
-2. Syncs any pending changes
-3. Ensures Claude always knows how to use beads
-4. Follows resolved workspace semantics, so `bd where` is the right diagnostic check when local `./.beads` is absent
+2. Prints persistent memories near the top so hook-output previews do not hide them
+3. Starts with a truncation warning telling agents to read the full persisted hook output when the host caps previews
+4. Ensures Claude always knows how to use beads
+5. Follows resolved workspace semantics, so `bd where` is the right diagnostic check when local `./.beads` is absent
+
+For low-token hooks that only need durable project facts, use `bd prime --memories-only`.
 
 This is more context-efficient than MCP tools (~1-2k tokens vs 10-50k for MCP schemas).
 
@@ -331,8 +334,11 @@ bd setup gemini --project --stealth
 
 The hooks call `bd prime` which:
 1. Outputs workflow context for Gemini to read
-2. Syncs any pending changes
-3. Ensures Gemini always knows how to use beads
+2. Prints persistent memories near the top so hook-output previews do not hide them
+3. Starts with a truncation warning telling agents to read the full persisted hook output when the host caps previews
+4. Ensures Gemini always knows how to use beads
+
+For low-token hooks that only need durable project facts, use `bd prime --memories-only`.
 
 This works identically to Claude Code integration, using Gemini CLI's hook system (SessionStart and PreCompress events).
 
