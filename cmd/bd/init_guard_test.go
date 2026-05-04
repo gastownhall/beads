@@ -217,6 +217,10 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 		if err != nil && !strings.Contains(err.Error(), "already initialized") {
 			t.Errorf("expected 'already initialized' message, got: %v", err)
 		}
+		// GH#3684: must suggest --reinit-local, not deprecated --force
+		if err != nil && strings.Contains(err.Error(), "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", err)
+		}
 	})
 
 	t.Run("embedded_mode_no_embeddeddolt_dir_allows_init", func(t *testing.T) {
@@ -277,6 +281,10 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 		if err != nil && !strings.Contains(err.Error(), "already initialized") {
 			t.Errorf("expected 'already initialized' message, got: %v", err)
 		}
+		// GH#3684: must suggest --reinit-local, not deprecated --force
+		if err != nil && strings.Contains(err.Error(), "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", err)
+		}
 	})
 
 	t.Run("embedded_metadata_ignores_ambient_shared_server_mode", func(t *testing.T) {
@@ -310,6 +318,10 @@ func TestInitGuard_FreshCloneWithMetadataJSON(t *testing.T) {
 		if err != nil && !strings.Contains(err.Error(), "already initialized") {
 			t.Errorf("expected 'already initialized' message, got: %v", err)
 		}
+		// GH#3684: must suggest --reinit-local, not deprecated --force
+		if err != nil && strings.Contains(err.Error(), "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", err)
+		}
 	})
 
 	t.Run("no_metadata_json_allows_init", func(t *testing.T) {
@@ -341,6 +353,69 @@ func TestInitGuardServerMessage_NoForceAsAction(t *testing.T) {
 	if strings.Contains(msg, "bd init --force to") {
 		t.Errorf("message must NOT suggest 'bd init --force to ...' as an action:\n%s", msg)
 	}
+}
+
+// GH#3684: Regression — init "already initialized" messages must suggest
+// --reinit-local (not the deprecated --force) for the reinit path.
+func TestCheckExistingBeadsData_SuggestsReinitLocal(t *testing.T) {
+	t.Run("embedded_dolt", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+
+		// Write metadata.json with embedded dolt mode
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := map[string]interface{}{
+			"database": "dolt", "backend": "dolt", "dolt_mode": "embedded",
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create embeddeddolt/<db>/.dolt/ to simulate existing DB
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Fatal("expected error for existing database")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "--reinit-local") {
+			t.Errorf("message must suggest --reinit-local, got:\n%s", msg)
+		}
+		if strings.Contains(msg, "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", msg)
+		}
+	})
+
+	t.Run("sqlite_db_file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create a fake beads.db file (no metadata.json → falls through to SQLite check)
+		if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), []byte("fake"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Fatal("expected error for existing database file")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "--reinit-local") {
+			t.Errorf("message must suggest --reinit-local, got:\n%s", msg)
+		}
+		if strings.Contains(msg, "init --force") {
+			t.Errorf("message must NOT suggest deprecated --force, got:\n%s", msg)
+		}
+	})
 }
 
 // GH#2338, GH#2327: Regression — error messages must always include enough
