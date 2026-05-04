@@ -1,5 +1,7 @@
 # bd - Beads
 
+![bd — a memory upgrade for your coding agent. Animated demo: scattered markdown plans give way to a dependency graph of hash-based bd-IDs (bd-a3f8, bd-a3f8.1). bd ready surfaces unblocked work; bd update --claim atomically claims a task; closing one cascades downstream tasks from blocked to ready. Long-horizon work survives the session. Powered by Dolt.](assets/hero.gif)
+
 **Distributed graph issue tracker for AI agents, powered by [Dolt](https://github.com/dolthub/dolt).**
 
 **Platforms:** macOS, Linux, Windows, FreeBSD
