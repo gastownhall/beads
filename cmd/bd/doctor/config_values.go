@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -416,7 +417,7 @@ func checkDatabaseConfigValues(repoPath string) []string {
 	return checkDatabaseConfigValuesWithStore(store)
 }
 
-func checkDatabaseConfigValuesWithStore(store *dolt.DoltStore) []string {
+func checkDatabaseConfigValuesWithStore(store storage.DoltStorage) []string {
 	var issues []string
 	ctx := context.Background()
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -44,7 +45,7 @@ func GetSuppressedChecksWithStore(ss *SharedStore) map[string]bool {
 	return getSuppressedChecksFromStore(store)
 }
 
-func getSuppressedChecksFromStore(store *dolt.DoltStore) map[string]bool {
+func getSuppressedChecksFromStore(store storage.DoltStorage) map[string]bool {
 	suppressed := make(map[string]bool)
 
 	ctx := context.Background()

@@ -17,8 +17,85 @@ func TestSharedStore_NilSafe(t *testing.T) {
 	if ss.BeadsDir() != "" {
 		t.Error("expected empty beadsDir from nil SharedStore")
 	}
+	if ss.IsEmbedded() {
+		t.Error("nil SharedStore should not report embedded")
+	}
+	if ss.RawDB() != nil {
+		t.Error("nil SharedStore should return nil RawDB")
+	}
 	// Close should not panic on nil
 	ss.Close()
+}
+
+// TestSharedStore_EmbeddedModeDoesNotOpen verifies that NewSharedStore in
+// embedded mode records the mode but does NOT open the Dolt engine.
+// Opening the engine would hold the exclusive flock for the lifetime of the
+// doctor run, deadlocking subprocesses that the doctor itself spawns
+// (e.g. `bd prime` via VerifyPrimeOutput).
+func TestSharedStore_EmbeddedModeDoesNotOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an initialized embedded-mode repo: metadata.json + the
+	// embedded data directory.
+	metadata := []byte(`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"test"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "test"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ss := NewSharedStore(tmpDir)
+	defer ss.Close()
+
+	if !ss.IsEmbedded() {
+		t.Fatal("expected IsEmbedded=true for embedded-mode config")
+	}
+	if ss.Store() != nil {
+		t.Error("embedded-mode SharedStore must not open the engine")
+	}
+	if ss.RawDB() != nil {
+		t.Error("embedded-mode SharedStore must not hold a raw DB")
+	}
+
+	// The lock file must remain free — no flock should have been acquired.
+	lockPath := filepath.Join(beadsDir, "embeddeddolt", ".lock")
+	if _, err := os.Stat(lockPath); err == nil {
+		t.Log("lock file exists (OK — only checking nobody holds it)")
+	}
+}
+
+// TestCheckDatabaseVersionWithStore_EmbeddedMode verifies that DB-backed
+// checks emit a clear "skipped in embedded mode" diagnostic instead of
+// a misleading "Unable to open database" error.
+func TestCheckDatabaseVersionWithStore_EmbeddedMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"test"}`)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "test"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ss := NewSharedStore(tmpDir)
+	defer ss.Close()
+
+	check := CheckDatabaseVersionWithStore(ss, "0.61.0")
+	if check.Status != "ok" {
+		t.Errorf("embedded-mode DB check must be OK (skipped), got status=%q message=%q", check.Status, check.Message)
+	}
+	if check.Message == "" || check.Message == "Unable to open database" {
+		t.Errorf("embedded-mode DB check must not report 'Unable to open database' — got %q", check.Message)
+	}
 }
 
 func TestSharedStore_NoDatabase(t *testing.T) {

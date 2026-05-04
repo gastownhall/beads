@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"gopkg.in/yaml.v3"
 )
@@ -94,6 +95,9 @@ func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorChe
 	beadsDir := sharedStoreBeadsDir(ss)
 	store := ss.Store()
 	if store == nil {
+		if ss.IsEmbedded() {
+			return embeddedSkippedCheck("Database", "embedded engine not opened by doctor to avoid subprocess deadlock")
+		}
 		if !sharedStoreNeedsLocalDoltDir(beadsDir) {
 			return DoctorCheck{
 				Name:    "Database",
@@ -104,7 +108,7 @@ func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorChe
 			}
 		}
 
-		doltPath := getDatabasePath(beadsDir)
+		doltPath := resolveDatabasePath(beadsDir)
 		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 			return DoctorCheck{
 				Name:    "Database",
@@ -125,7 +129,7 @@ func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorChe
 	return checkDatabaseVersionWithStore(store, cliVersion)
 }
 
-func checkDatabaseVersionWithStore(store *dolt.DoltStore, cliVersion string) DoctorCheck {
+func checkDatabaseVersionWithStore(store storage.DoltStorage, cliVersion string) DoctorCheck {
 	ctx := context.Background()
 	dbVersion, err := store.GetLocalMetadata(ctx, "bd_version")
 	if err != nil {
@@ -198,6 +202,9 @@ func CheckSchemaCompatibility(path string) DoctorCheck {
 func CheckSchemaCompatibilityWithStore(ss *SharedStore) DoctorCheck {
 	store := ss.Store()
 	if store == nil {
+		if ss.IsEmbedded() {
+			return embeddedSkippedCheck("Schema Compatibility", "embedded engine not opened by doctor to avoid subprocess deadlock")
+		}
 		return DoctorCheck{
 			Name:    "Schema Compatibility",
 			Status:  StatusOK,
@@ -207,7 +214,7 @@ func CheckSchemaCompatibilityWithStore(ss *SharedStore) DoctorCheck {
 	return checkSchemaCompatibilityWithStore(store)
 }
 
-func checkSchemaCompatibilityWithStore(store *dolt.DoltStore) DoctorCheck {
+func checkSchemaCompatibilityWithStore(store storage.DoltStorage) DoctorCheck {
 	ctx := context.Background()
 	// Exercise core tables/views.
 	if _, err := store.GetStatistics(ctx); err != nil {
@@ -269,6 +276,9 @@ func CheckDatabaseIntegrity(path string) DoctorCheck {
 func CheckDatabaseIntegrityWithStore(ss *SharedStore) DoctorCheck {
 	store := ss.Store()
 	if store == nil {
+		if ss.IsEmbedded() {
+			return embeddedSkippedCheck("Database Integrity", "embedded engine not opened by doctor to avoid subprocess deadlock")
+		}
 		return DoctorCheck{
 			Name:    "Database Integrity",
 			Status:  StatusOK,
@@ -278,7 +288,7 @@ func CheckDatabaseIntegrityWithStore(ss *SharedStore) DoctorCheck {
 	return checkDatabaseIntegrityWithStore(store)
 }
 
-func checkDatabaseIntegrityWithStore(store *dolt.DoltStore) DoctorCheck {
+func checkDatabaseIntegrityWithStore(store storage.DoltStorage) DoctorCheck {
 	ctx := context.Background()
 	// Minimal checks: metadata + statistics. If these work, the store is at least readable.
 	if _, err := store.GetLocalMetadata(ctx, "bd_version"); err != nil {
@@ -383,7 +393,19 @@ func CheckProjectIdentityWithStore(ss *SharedStore, path string) DoctorCheck {
 
 	store := ss.Store()
 	if store == nil {
-		doltPath := getDatabasePath(beadsDir)
+		if ss.IsEmbedded() {
+			if hasLocalID {
+				return DoctorCheck{
+					Name:     "Project Identity",
+					Status:   StatusOK,
+					Message:  "Skipped in embedded mode (metadata.json has project_id)",
+					Detail:   "Run 'bd doctor --check=validate' to verify the database-side _project_id",
+					Category: CategoryData,
+				}
+			}
+			return embeddedSkippedCheck("Project Identity", "metadata.json lacks project_id and embedded engine not opened by doctor")
+		}
+		doltPath := resolveDatabasePath(beadsDir)
 		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
 			return DoctorCheck{
 				Name:     "Project Identity",
@@ -416,7 +438,7 @@ func checkProjectIdentityNoStore(_ *configfile.Config, hasLocalID bool) DoctorCh
 	}
 }
 
-func checkProjectIdentityWithStore(store *dolt.DoltStore, cfg *configfile.Config) DoctorCheck {
+func checkProjectIdentityWithStore(store storage.DoltStorage, cfg *configfile.Config) DoctorCheck {
 	hasLocalID := cfg.ProjectID != ""
 	ctx := context.Background()
 
@@ -468,15 +490,46 @@ func FixDatabaseConfig(path string) error {
 	return fix.DatabaseConfig(path)
 }
 
-// getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
-// When dolt_data_dir is configured (e.g. ext4 redirect for WSL), the database lives
-// outside .beads/dolt/ — this function resolves the correct location.
+// getDatabasePath returns the server-mode database directory path, respecting
+// dolt_data_dir (which redirects the location on e.g. ext4 for WSL).
+//
+// This is the legacy server-mode location (.beads/dolt/<db>). In embedded
+// mode the database actually lives at .beads/embeddeddolt/<db> — callers
+// that need the real on-disk path for both modes should use
+// resolveDatabasePath instead.
 func getDatabasePath(beadsDir string) string {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
 		return filepath.Join(beadsDir, "dolt") // fallback to default
 	}
 	return cfg.DatabasePath(beadsDir)
+}
+
+// resolveDatabasePath returns the actual on-disk database directory for the
+// configured mode: server-mode uses .beads/dolt/ (or dolt_data_dir), embedded
+// mode uses .beads/embeddeddolt/<database>. Use this when an os.Stat presence
+// check must work in both modes.
+//
+// When metadata.json is missing, falls back to whichever legacy directory
+// already exists on disk (.beads/dolt/ wins for compatibility with pre-
+// embedded-default repos).
+func resolveDatabasePath(beadsDir string) string {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		doltPath := filepath.Join(beadsDir, "dolt")
+		if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
+			return doltPath
+		}
+		return filepath.Join(beadsDir, "embeddeddolt")
+	}
+	if cfg.IsDoltServerMode() {
+		return cfg.DatabasePath(beadsDir)
+	}
+	database := cfg.GetDoltDatabase()
+	if database == "" {
+		database = configfile.DefaultDoltDatabase
+	}
+	return filepath.Join(beadsDir, "embeddeddolt", database)
 }
 
 // isNoDbModeConfigured checks if no-db: true is set in config.yaml
@@ -538,6 +591,14 @@ func CheckDatabaseSize(path string) DoctorCheck {
 func CheckDatabaseSizeWithStore(ss *SharedStore) DoctorCheck {
 	store := ss.Store()
 	if store == nil {
+		if ss.IsEmbedded() {
+			return DoctorCheck{
+				Name:    "Large Database",
+				Status:  StatusOK,
+				Message: "Skipped in embedded mode",
+				Detail:  "Pruning suggestions are advisory; re-check under server mode or via 'bd stats'",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Large Database",
 			Status:  StatusOK,
@@ -547,7 +608,7 @@ func CheckDatabaseSizeWithStore(ss *SharedStore) DoctorCheck {
 	return checkDatabaseSizeWithStore(store)
 }
 
-func checkDatabaseSizeWithStore(store *dolt.DoltStore) DoctorCheck {
+func checkDatabaseSizeWithStore(store storage.DoltStorage) DoctorCheck {
 	ctx := context.Background()
 
 	// Read threshold from config (default 5000, 0 = disabled)

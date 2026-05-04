@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -46,20 +47,26 @@ func CheckIDFormat(path string) DoctorCheck {
 
 // CheckIDFormatWithStore checks ID format using a shared store (GH#2636).
 func CheckIDFormatWithStore(ss *SharedStore) DoctorCheck {
-	store := ss.Store()
-	if store == nil {
+	db := ss.RawDB()
+	if db == nil {
+		if ss.IsEmbedded() {
+			return embeddedSkippedCheck("Issue IDs", "raw SQL access requires a server-mode store; embedded skipped in full doctor run")
+		}
 		return DoctorCheck{
 			Name:    "Issue IDs",
 			Status:  StatusOK,
 			Message: "No issues yet (will use hash-based IDs)",
 		}
 	}
-	return checkIDFormatWithStore(store)
+	return checkIDFormatDB(db)
 }
 
 func checkIDFormatWithStore(store *dolt.DoltStore) DoctorCheck {
+	return checkIDFormatDB(store.UnderlyingDB())
+}
+
+func checkIDFormatDB(db *sql.DB) DoctorCheck {
 	ctx := context.Background()
-	db := store.UnderlyingDB()
 
 	// Get sample of issues to check ID format (up to 10 for pattern analysis)
 	rows, err := db.QueryContext(ctx, "SELECT id FROM issues ORDER BY created_at LIMIT 10")
@@ -144,19 +151,25 @@ func CheckDependencyCycles(path string) DoctorCheck {
 
 // CheckDependencyCyclesWithStore checks for cycles using a shared store (GH#2636).
 func CheckDependencyCyclesWithStore(ss *SharedStore) DoctorCheck {
-	store := ss.Store()
-	if store == nil {
+	db := ss.RawDB()
+	if db == nil {
+		if ss.IsEmbedded() {
+			return embeddedSkippedCheck("Dependency Cycles", "raw SQL access requires a server-mode store; embedded skipped in full doctor run")
+		}
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
 			Status:  StatusOK,
 			Message: "N/A (no database)",
 		}
 	}
-	return checkDependencyCyclesWithStore(store)
+	return checkDependencyCyclesDB(db)
 }
 
 func checkDependencyCyclesWithStore(store *dolt.DoltStore) DoctorCheck {
-	db := store.UnderlyingDB()
+	return checkDependencyCyclesDB(store.UnderlyingDB())
+}
+
+func checkDependencyCyclesDB(db *sql.DB) DoctorCheck {
 
 	// Query for cycles using simplified SQL (CONCAT for Dolt/MySQL compatibility)
 	query := `
@@ -351,6 +364,9 @@ func CheckRepoFingerprint(path string) DoctorCheck {
 func CheckRepoFingerprintWithStore(ss *SharedStore, path string) DoctorCheck {
 	store := ss.Store()
 	if store == nil {
+		if ss.IsEmbedded() {
+			return embeddedSkippedCheck("Repo Fingerprint", "embedded engine not opened by doctor to avoid subprocess deadlock")
+		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusOK,
@@ -360,7 +376,7 @@ func CheckRepoFingerprintWithStore(ss *SharedStore, path string) DoctorCheck {
 	return checkRepoFingerprintWithStore(store, path)
 }
 
-func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorCheck {
+func checkRepoFingerprintWithStore(store storage.DoltStorage, path string) DoctorCheck {
 	ctx := context.Background()
 
 	storedRepoID, err := store.GetMetadata(ctx, "repo_id")

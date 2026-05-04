@@ -1,16 +1,19 @@
 package doctor
 
 import (
-	"context"
-	"os"
+	"database/sql"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
-// SharedStore holds a single DoltStore open for the duration of a doctor run,
-// preventing the infinite Dolt server restart loop that occurs when each check
-// opens and closes its own store (GH#2636).
+// SharedStore holds a single read-only storage.DoltStorage open for the
+// duration of a doctor run, preventing the infinite Dolt server restart loop
+// that occurs when each check opens and closes its own store (GH#2636).
+//
+// In server mode, the underlying store is a *dolt.DoltStore. In embedded mode
+// (the default), it is a *embeddeddolt.EmbeddedDoltStore. Both satisfy
+// storage.DoltStorage.
 //
 // Usage:
 //
@@ -18,12 +21,71 @@ import (
 //	defer ss.Close()
 //	store := ss.Store() // may be nil if DB doesn't exist or can't open
 //
-// Check functions that accept a *dolt.DoltStore parameter should use the
+// Check functions that accept a storage.DoltStorage parameter should use the
 // shared store when available, falling back to opening their own store when
 // called standalone (e.g., from tests or one-off checks).
 type SharedStore struct {
-	store    *dolt.DoltStore
+	store    storage.DoltStorage
 	beadsDir string
+	// rawDB is a long-lived raw *sql.DB handle for checks that need direct
+	// SQL access (e.g., validation.go, integrity.go, multirepo.go). In server
+	// mode this is the dolt.DoltStore's UnderlyingDB. In embedded mode it is
+	// a dedicated sql.DB opened via embeddeddolt.OpenSQL (may be nil when the
+	// store failed to open).
+	rawDB      *sql.DB
+	rawCleanup func() error
+	isEmbedded bool
+}
+
+// Store returns the shared DoltStorage, or nil if the database couldn't be opened.
+func (ss *SharedStore) Store() storage.DoltStorage {
+	if ss == nil {
+		return nil
+	}
+	return ss.store
+}
+
+// BeadsDir returns the resolved .beads directory path.
+func (ss *SharedStore) BeadsDir() string {
+	if ss == nil {
+		return ""
+	}
+	return ss.beadsDir
+}
+
+// RawDB returns a raw *sql.DB handle for direct SQL queries, or nil if no
+// database is available. Callers must NOT close the returned DB — SharedStore
+// manages its lifetime.
+//
+// Prefer the typed methods on Store() when possible. Use RawDB only for
+// diagnostic queries that cannot be expressed through the DoltStorage interface.
+func (ss *SharedStore) RawDB() *sql.DB {
+	if ss == nil {
+		return nil
+	}
+	return ss.rawDB
+}
+
+// IsEmbedded reports whether the shared store is backed by an embedded Dolt engine.
+// Checks that require server-mode connectivity can gate on this.
+func (ss *SharedStore) IsEmbedded() bool {
+	return ss != nil && ss.isEmbedded
+}
+
+// Close closes the underlying store and raw DB. Safe to call multiple times.
+func (ss *SharedStore) Close() {
+	if ss == nil {
+		return
+	}
+	if ss.rawCleanup != nil {
+		_ = ss.rawCleanup()
+		ss.rawCleanup = nil
+	}
+	ss.rawDB = nil
+	if ss.store != nil {
+		_ = ss.store.Close()
+		ss.store = nil
+	}
 }
 
 func beadsDirFromSharedStore(path string, ss *SharedStore) string {
@@ -45,51 +107,26 @@ func sharedStoreNeedsLocalDoltDir(beadsDir string) bool {
 	return err != nil || cfg == nil || !cfg.IsDoltServerMode()
 }
 
-// NewSharedStore opens a single read-only DoltStore for the given repo path.
-// If the database doesn't exist or can't be opened, Store() will return nil.
-// The caller MUST call Close() when done (typically via defer).
-func NewSharedStore(path string) *SharedStore {
-	beadsDir := ResolveBeadsDirForRepo(path)
-	ss := &SharedStore{beadsDir: beadsDir}
-
-	if sharedStoreNeedsLocalDoltDir(beadsDir) {
-		doltPath := getDatabasePath(beadsDir)
-		if _, err := os.Stat(doltPath); os.IsNotExist(err) {
-			return ss // No database, store stays nil
-		}
+// sharedStoreIsEmbeddedConfig reports whether the persisted config selects
+// embedded mode (either explicitly via dolt_mode=embedded, or implicitly by
+// the absence of server-mode settings).
+func sharedStoreIsEmbeddedConfig(beadsDir string) bool {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return true // default: embedded
 	}
-
-	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
-	if err != nil {
-		return ss // Can't open, store stays nil
-	}
-
-	ss.store = store
-	return ss
+	return !cfg.IsDoltServerMode()
 }
 
-// Store returns the shared DoltStore, or nil if the database couldn't be opened.
-func (ss *SharedStore) Store() *dolt.DoltStore {
-	if ss == nil {
-		return nil
+// embeddedSkippedCheck builds a standard "skipped in embedded mode" DoctorCheck.
+// Used by DB-backed checks that cannot run without an open store and whose
+// open path would deadlock subprocess-spawning checks.
+func embeddedSkippedCheck(name, detail string) DoctorCheck {
+	return DoctorCheck{
+		Name:    name,
+		Status:  StatusOK,
+		Message: "Skipped in embedded mode",
+		Detail:  detail,
+		Fix:     "Run targeted checks with 'bd doctor --check=validate' (or pollution/artifacts/conventions) for DB-backed diagnostics",
 	}
-	return ss.store
-}
-
-// BeadsDir returns the resolved .beads directory path.
-func (ss *SharedStore) BeadsDir() string {
-	if ss == nil {
-		return ""
-	}
-	return ss.beadsDir
-}
-
-// Close closes the underlying DoltStore. Safe to call multiple times.
-func (ss *SharedStore) Close() {
-	if ss == nil || ss.store == nil {
-		return
-	}
-	_ = ss.store.Close()
-	ss.store = nil
 }

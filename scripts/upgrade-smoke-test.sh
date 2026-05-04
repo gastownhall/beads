@@ -9,7 +9,7 @@ set -euo pipefail
 #   1. Issue data (issues created before upgrade are visible after)
 #   2. Storage mode (embedded stays embedded, shared stays shared)
 #   3. Role config (beads.role git config is not cleared or changed)
-#   4. Doctor health (bd doctor quick passes after upgrade)
+#   4. Doctor health (bd doctor --check-health passes after upgrade)
 #   5. Mutations (bd update after upgrade persists correctly)
 #
 # Usage:
@@ -270,11 +270,14 @@ else
     pass "Data migration check skipped (old binary could not write issues)"
 fi
 
-# Doctor check
-if cand doctor quick 2>/dev/null; then
-    pass "bd doctor quick passes"
+# Doctor check — `--check-health` is the lightweight health check;
+# bare `doctor quick` was never a real subcommand (it was silently treated
+# as a path argument and only "passed" because embedded mode short-circuited
+# with exit 0).
+if cand doctor --check-health 2>/dev/null; then
+    pass "bd doctor --check-health passes"
 else
-    fail "bd doctor quick fails after upgrade"
+    fail "bd doctor --check-health fails after upgrade"
 fi
 
 rm -rf "$WS"

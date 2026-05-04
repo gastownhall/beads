@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -133,7 +134,7 @@ func getRoleFromDatabase(path string) string {
 }
 
 // getRoleFromStore checks for role in the database config using a provided store.
-func getRoleFromStore(store *dolt.DoltStore) string {
+func getRoleFromStore(store storage.DoltStorage) string {
 	if store == nil {
 		return ""
 	}
