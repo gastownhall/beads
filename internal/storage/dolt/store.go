@@ -1048,6 +1048,17 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					"  dolt sql-server --socket %s\n"+
 					"Auto-start is not supported in socket mode.",
 					cfg.ServerSocket, cfg.ServerSocket)
+			} else if !isLocalHost(cfg.ServerHost) {
+				// External (non-localhost) server: bd does not
+				// manage it; "bd dolt start" would be wrong advice
+				// (GH#3518). Suggest verifying the external server
+				// instead.
+				hint = fmt.Sprintf("Configured Dolt server at %s:%d is unreachable.\n"+
+					"Verify the external server is running and reachable from this host:\n"+
+					"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check",
+					cfg.ServerHost, cfg.ServerPort,
+					cfg.ServerHost, cfg.ServerPort,
+					cfg.ServerHost, cfg.ServerPort)
 			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
 				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
 					"Start the server manually:\n  bd dolt start"

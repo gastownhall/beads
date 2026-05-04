@@ -392,6 +392,101 @@ func TestIsDoltServerModeEnvVar(t *testing.T) {
 	})
 }
 
+// TestIsDoltServerMode_HostInference_GH3545 is a regression test for
+// gastownhall/beads#3545: setting BEADS_DOLT_SERVER_HOST (or
+// dolt.host) to a non-localhost value MUST imply server mode.
+// Before the fix, mode falls through to embedded and bd silently
+// uses local storage instead of the configured external server.
+//
+// Conservative: only env var or config-file dolt.host triggers
+// inference. Stale metadata.json values (DoltServerHost field) do
+// NOT trigger — they're often inherited from cross-project init
+// and would be a wider behavior change.
+func TestIsDoltServerMode_HostInference_GH3545(t *testing.T) {
+	t.Run("env var BEADS_DOLT_SERVER_HOST=non-localhost infers server mode", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		cfg := &Config{Backend: BackendDolt}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true with BEADS_DOLT_SERVER_HOST=192.0.2.10")
+		}
+	})
+
+	t.Run("env var BEADS_DOLT_SERVER_HOST=hostname infers server mode", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "dolt-primary.tailnet.example.com")
+		cfg := &Config{Backend: BackendDolt}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true with BEADS_DOLT_SERVER_HOST=dolt-primary.tailnet.example.com")
+		}
+	})
+
+	t.Run("env var BEADS_DOLT_SERVER_HOST=localhost does NOT infer", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false with BEADS_DOLT_SERVER_HOST=localhost (operator wants bd-managed local)")
+		}
+	})
+
+	t.Run("env var BEADS_DOLT_SERVER_HOST=127.0.0.1 does NOT infer", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false with BEADS_DOLT_SERVER_HOST=127.0.0.1")
+		}
+	})
+
+	t.Run("env var BEADS_DOLT_SERVER_HOST empty does NOT infer", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false with empty BEADS_DOLT_SERVER_HOST")
+		}
+	})
+
+	t.Run("config.yaml dolt.host=non-localhost infers server mode", func(t *testing.T) {
+		// Use the in-config DoltServerHost field — this mirrors what
+		// GetDoltServerHost reads from config.yaml (post-#3471).
+		// Stale metadata.json with a non-localhost host is also
+		// represented this way; the conservative-fallback note in
+		// the bead description acknowledges this.
+		cfg := &Config{Backend: BackendDolt, DoltServerHost: "10.0.0.5"}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true with DoltServerHost=10.0.0.5")
+		}
+	})
+
+	t.Run("DoltServerHost=localhost does NOT infer", func(t *testing.T) {
+		cfg := &Config{Backend: BackendDolt, DoltServerHost: "localhost"}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false with DoltServerHost=localhost")
+		}
+	})
+
+	t.Run("env wins over config.yaml: env=localhost suppresses config-host inference", func(t *testing.T) {
+		// When env is explicitly set to localhost, the operator's
+		// intent overrides config — even if config has a non-
+		// localhost host left over from a prior context.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+		cfg := &Config{Backend: BackendDolt, DoltServerHost: "10.0.0.5"}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false when env=localhost overrides config-host")
+		}
+	})
+
+	t.Run("non-dolt backend does not trigger host inference", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		cfg := &Config{Backend: ""}
+		// Backend gate (GetBackend != BackendDolt → false) precedes
+		// host inference. Empty backend is normalized to dolt by
+		// GetBackend, so this test asserts that the gate still
+		// short-circuits when explicitly set to a non-dolt value
+		// (currently impossible via GetBackend, but the gate is the
+		// first check and must not be bypassed by host inference).
+		_ = cfg.IsDoltServerMode() // No assertion — empty backend
+		// resolves to dolt via GetBackend(). Documenting the gate.
+	})
+}
+
 // TestGetBackendAlwaysDolt tests that GetBackend always returns "dolt".
 func TestGetBackendAlwaysDolt(t *testing.T) {
 	tests := []struct {

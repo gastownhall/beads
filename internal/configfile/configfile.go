@@ -237,7 +237,12 @@ const (
 // Checks (in priority order):
 //  1. BEADS_DOLT_SERVER_MODE=1 env var
 //  2. BEADS_DOLT_SHARED_SERVER env var (shared-server implies server mode)
-//  3. dolt_mode field in metadata.json
+//  3. Explicit non-localhost host in env or DoltServerHost (GH#3545):
+//     setting BEADS_DOLT_SERVER_HOST or dolt.host to a non-localhost
+//     value implies server mode. Without this inference, operators
+//     who configure a remote host but forget the mode flag silently
+//     fall through to embedded storage.
+//  4. dolt_mode field in metadata.json
 //
 // Runtime env vars take precedence over persisted metadata.json to prevent
 // stale dolt_mode=embedded from overriding active server intent (GH#2949).
@@ -253,7 +258,44 @@ func (c *Config) IsDoltServerMode() bool {
 	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
 		return true
 	}
+	if c.hasExplicitNonLocalhostHost() {
+		return true
+	}
 	return strings.ToLower(c.DoltMode) == DoltModeServer
+}
+
+// hasExplicitNonLocalhostHost reports whether the Dolt server host is
+// configured (via env var or in-struct DoltServerHost) to a non-
+// localhost value.
+//
+// Env var BEADS_DOLT_SERVER_HOST is the highest-priority signal — when
+// set, it alone determines the answer (env-empty short-circuits to
+// false; the operator's empty value is honored as "no override").
+//
+// Otherwise the in-struct DoltServerHost is consulted; this corresponds
+// to dolt.host in config.yaml or DoltServerHost in metadata.json (the
+// two share the same struct field after Load). Reading config.yaml
+// directly here is deliberately avoided to keep this method side-effect
+// free; callers that need config.yaml semantics should use
+// GetDoltServerHost.
+func (c *Config) hasExplicitNonLocalhostHost() bool {
+	if h, set := os.LookupEnv("BEADS_DOLT_SERVER_HOST"); set {
+		return h != "" && !isLocalHostStr(h)
+	}
+	return c.DoltServerHost != "" && !isLocalHostStr(c.DoltServerHost)
+}
+
+// isLocalHostStr reports whether host refers to the local machine, for
+// the purposes of mode inference. Mirrors the helpers in cmd/bd/dolt.go
+// and internal/storage/dolt/store.go; kept private to this package to
+// limit the blast radius of GH#3545's fix — consolidating the three
+// definitions is a separate cleanup.
+func isLocalHostStr(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
+		return true
+	}
+	return false
 }
 
 // GetDoltMode returns the Dolt connection mode, defaulting to server.
