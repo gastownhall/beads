@@ -122,7 +122,7 @@ bd edit <id> --notes            # Edit notes
 bd edit <id> --acceptance       # Edit acceptance criteria
 ```
 
-### Close/Reopen Issues
+### Close/Reopen/Unclaim Issues
 
 ```bash
 # Complete work (supports multiple IDs)
@@ -130,6 +130,9 @@ bd close <id> [<id>...] --reason "Done" --json
 
 # Reopen closed issues (supports multiple IDs)
 bd reopen <id> [<id>...] --reason "Reopening" --json
+
+# Release a claimed issue (clears assignee, resets status to open)
+bd unclaim <id> [<id>...] --reason "Agent crashed" --json
 ```
 
 ### View Issues

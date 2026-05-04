@@ -151,6 +151,17 @@ func (s *InstrumentedStorage) ReopenIssue(ctx context.Context, id string, reason
 	return err
 }
 
+func (s *InstrumentedStorage) UnclaimIssue(ctx context.Context, id string, actor string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.actor", actor),
+	}
+	ctx, span, t := s.op(ctx, "UnclaimIssue", attrs...)
+	err := s.inner.UnclaimIssue(ctx, id, actor)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
 func (s *InstrumentedStorage) UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error {
 	attrs := []attribute.KeyValue{
 		attribute.String("bd.issue.id", id),

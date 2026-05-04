@@ -39,6 +39,7 @@ bd create "Found bug" --description="Details" --deps discovered-from:bd-42 --jso
 bd update <id> --claim               # Claim work atomically
 bd update <id> --priority 1          # Change priority
 bd close <id> --reason "Completed"   # Mark complete
+bd unclaim <id>                    # Release stuck issue (agent crashed)
 ` + "```" + `
 
 ### Dependencies

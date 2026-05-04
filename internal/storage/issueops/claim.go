@@ -88,6 +88,9 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 			return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 		}
 		if assignee != "" && assignee != actor {
+			if currentStatus == types.StatusOpen {
+				return nil, fmt.Errorf("issue already assigned to %q. Use `bd unclaim %s` to release it before re-claiming", assignee, id)
+			}
 			return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
 		}
 		return nil, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, currentStatus)

@@ -33,6 +33,15 @@ func (s *EmbeddedDoltStore) ClaimReadyIssue(ctx context.Context, filter types.Wo
 	return claimed, err
 }
 
+// UnclaimIssue atomically unclaims an issue by clearing the assignee
+// and resetting status to "open". Records an "unclaimed" event.
+// Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
+func (s *EmbeddedDoltStore) UnclaimIssue(ctx context.Context, id string, actor string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.UnclaimIssueInTx(ctx, tx, id, actor)
+	})
+}
+
 // UpdateIssue updates fields on an issue.
 // Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {

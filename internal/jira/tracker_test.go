@@ -620,8 +620,9 @@ func (s *configStore) SlotSet(_ context.Context, _, _, _, _ string) error    { r
 func (s *configStore) SlotGet(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }
-func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error { return nil }
-func (s *configStore) Close() error                                      { return nil }
+func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error        { return nil }
+func (s *configStore) Close() error                                             { return nil }
+func (s *configStore) UnclaimIssue(_ context.Context, _ string, _ string) error { return nil }
 
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	var capturedJQL string

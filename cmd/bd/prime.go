@@ -497,6 +497,7 @@ git push                    # Push to remote
 - ` + "`bd create --title=\"Summary of this issue\" --description=\"Why this issue exists and what needs to be done\" --type=task|bug|feature --priority=2`" + ` - New issue
   - Priority: 0-4 or P0-P4 (0=critical, 2=medium, 4=backlog). NOT "high"/"medium"/"low"
 - ` + "`bd update <id> --claim`" + ` - Claim work
+- ` + "`bd unclaim <id>`" + ` - Release stuck issue (agent crashed)
 - ` + "`bd update <id> --assignee=username`" + ` - Assign to someone
 - ` + "`bd update <id> --title/--description/--notes/--design`" + ` - Update fields inline
 - ` + "`bd close <id>`" + ` - Mark complete
