@@ -35,12 +35,18 @@ func resolveSyncRemoteFromDir(beadsDir string) string {
 // Silently no-ops if the file is clean or the commit fails (e.g. hooks,
 // nothing to commit). Used by bd dolt remote add/remove to keep the
 // working tree clean after persisting sync.remote.
+//
+// The commit runs with --no-verify so the beads pre-commit hook (which
+// shells out to `bd export`) does not re-enter bd while the parent
+// `bd dolt remote add/remove` process still holds the embedded Dolt flock
+// — that re-entry deadlocks the whole process tree (GH#3340). Same
+// rationale as init.go's bootstrap commit.
 func commitBeadsConfig(msg string) {
 	addCmd := exec.Command("git", "add", ".beads/config.yaml")
 	if err := addCmd.Run(); err != nil {
 		return
 	}
-	commitCmd := exec.Command("git", "commit", "-m", msg) //nolint:gosec // G702: msg is from internal callers only, not user input
+	commitCmd := exec.Command("git", "commit", "--no-verify", "-m", msg) //nolint:gosec // G702: msg is from internal callers only, not user input
 	if out, err := commitCmd.CombinedOutput(); err != nil {
 		// "nothing to commit" is normal if the file was already staged
 		if !strings.Contains(string(out), "nothing to commit") {
