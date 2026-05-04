@@ -746,6 +746,73 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 	}
 }
 
+// TestSquashWispMoleculeClearsRootEphemeral verifies that squashing a wisp
+// molecule (root with Ephemeral=true) clears the root's Ephemeral flag in
+// addition to auto-closing it. Without this, auto-export keeps re-emitting
+// the closed root as ephemeral=true on every export cycle, accumulating
+// duplicate JSONL rows.
+func TestSquashWispMoleculeClearsRootEphemeral(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Wisp molecule: root is ephemeral too (created via `bd mol wisp`).
+	root := &types.Issue{
+		Title:     "Wisp Molecule Root",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Ephemeral: true,
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create ephemeral root: %v", err)
+	}
+
+	child := &types.Issue{
+		Title:     "Wisp Step",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: root.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add dependency: %v", err)
+	}
+
+	result, err := squashMolecule(ctx, s, root, []*types.Issue{child}, false, "", "test")
+	if err != nil {
+		t.Fatalf("squashMolecule failed: %v", err)
+	}
+	if !result.WispSquash {
+		t.Error("expected WispSquash=true for ephemeral root")
+	}
+
+	closed, err := s.GetIssue(ctx, root.ID)
+	if err != nil {
+		t.Fatalf("Failed to get root after squash: %v", err)
+	}
+	if closed.Status != types.StatusClosed {
+		t.Errorf("root status = %v, want closed", closed.Status)
+	}
+	if closed.Ephemeral {
+		t.Errorf("root Ephemeral should be false after squash, got true (issue: closed wisp roots leak as duplicate JSONL rows on every export)")
+	}
+}
+
 // =============================================================================
 // Spawn --attach Tests (bd-f7p1)
 // =============================================================================
