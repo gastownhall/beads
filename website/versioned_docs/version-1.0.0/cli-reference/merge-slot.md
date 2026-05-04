@@ -6,7 +6,7 @@ sidebar_position: 999
 ---
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc merge-slot` (bd version 1.0.3)
+Generated from `bd help --doc merge-slot`
 
 ## bd merge-slot
 

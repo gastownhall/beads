@@ -6,7 +6,7 @@ sidebar_position: 10
 ---
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc create` (bd version 1.0.3)
+Generated from `bd help --doc create`
 
 ## bd create
 

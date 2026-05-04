@@ -6,7 +6,7 @@ sidebar_position: 70
 ---
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc delete` (bd version 1.0.3)
+Generated from `bd help --doc delete`
 
 ## bd delete
 

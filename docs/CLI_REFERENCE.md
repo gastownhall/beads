@@ -1,6 +1,6 @@
 # bd — Complete Command Reference
 
-Generated from `bd help --all` (bd version 1.0.3)
+Reference for bd Latest. Generated from `bd help --all`.
 
 ## Table of Contents
 

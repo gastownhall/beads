@@ -6,7 +6,7 @@ sidebar_position: 400
 ---
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc init` (bd version 1.0.3)
+Generated from `bd help --doc init`
 
 ## bd init
 

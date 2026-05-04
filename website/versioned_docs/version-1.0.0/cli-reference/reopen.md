@@ -6,7 +6,7 @@ sidebar_position: 80
 ---
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc reopen` (bd version 1.0.3)
+Generated from `bd help --doc reopen`
 
 ## bd reopen
 

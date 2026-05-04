@@ -56,6 +56,7 @@ trim_trailing_blank_lines() {
 generate_index() {
     local out_dir="$1"
     local commands_file="$2"
+    local version_label="$3"
     local count
     count="$(wc -l < "$commands_file" | tr -d ' ')"
 
@@ -69,7 +70,7 @@ sidebar_position: 0
 # CLI Reference
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Generated from \`bd help --list\` and \`bd help --doc <command>\`.
+Reference for bd ${version_label}. Generated from \`bd help --list\` and \`bd help --doc <command>\`.
 
 This reference covers all ${count} live top-level \`bd\` commands. Regenerate it with:
 
@@ -91,10 +92,11 @@ EOF
 generate_cli_dir() {
     local out_dir="$1"
     local commands_file="$2"
+    local version_label="$3"
 
     mkdir -p "$out_dir"
     rm -f "$out_dir"/*.md
-    generate_index "$out_dir" "$commands_file"
+    generate_index "$out_dir" "$commands_file" "$version_label"
 
     while IFS= read -r cmd; do
         local doc_id
@@ -113,11 +115,24 @@ generate_all() {
     "$BD" help --all > "$root/docs/CLI_REFERENCE.md"
     trim_trailing_blank_lines "$root/docs/CLI_REFERENCE.md"
 
-    generate_cli_dir "$root/website/docs/cli-reference" "$commands_file"
+    generate_cli_dir "$root/website/docs/cli-reference" "$commands_file" "Latest"
 
-    local versioned_root="$PROJECT_ROOT/website/versioned_docs/version-1.0.0"
-    if [ -d "$versioned_root" ]; then
-        generate_cli_dir "$root/website/versioned_docs/version-1.0.0/cli-reference" "$commands_file"
+    # Versioned snapshots: parse the semver tag from the directory name
+    # (e.g. "version-1.0.0" -> "v1.0.0") so a release bump alone produces
+    # zero diff on the dev tree.
+    local versioned_parent="$PROJECT_ROOT/website/versioned_docs"
+    if [ -d "$versioned_parent" ]; then
+        local versioned_dir
+        for versioned_dir in "$versioned_parent"/version-*; do
+            [ -d "$versioned_dir" ] || continue
+            local dir_name
+            dir_name="$(basename "$versioned_dir")"
+            local version_tag="v${dir_name#version-}"
+            generate_cli_dir \
+                "$root/website/versioned_docs/$dir_name/cli-reference" \
+                "$commands_file" \
+                "$version_tag"
+        done
     fi
 
     rm -f "$commands_file"
@@ -136,9 +151,15 @@ if [ "$CHECK_MODE" -eq 1 ]; then
         exit 1
     fi
 
-    for rel in \
-        website/docs/cli-reference \
-        website/versioned_docs/version-1.0.0/cli-reference; do
+    check_dirs=("website/docs/cli-reference")
+    if [ -d "$PROJECT_ROOT/website/versioned_docs" ]; then
+        for vdir in "$PROJECT_ROOT/website/versioned_docs"/version-*; do
+            [ -d "$vdir" ] || continue
+            check_dirs+=("website/versioned_docs/$(basename "$vdir")/cli-reference")
+        done
+    fi
+
+    for rel in "${check_dirs[@]}"; do
         if [ -d "$PROJECT_ROOT/$rel" ]; then
             if ! diff -qr "$PROJECT_ROOT/$rel" "$TMP_OUTPUT_DIR/$rel" >/dev/null; then
                 echo "FAIL: $rel is out of sync with live CLI help."

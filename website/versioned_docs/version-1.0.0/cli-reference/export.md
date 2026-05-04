@@ -6,7 +6,7 @@ sidebar_position: 220
 ---
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc export` (bd version 1.0.3)
+Generated from `bd help --doc export`
 
 ## bd export
 

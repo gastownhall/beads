@@ -73,7 +73,7 @@ func registerHelpAllFlag() {
 // generated from the live Cobra command tree.
 func writeAllHelp(w io.Writer, root *cobra.Command) {
 	fmt.Fprintf(w, "# bd — Complete Command Reference\n\n")
-	fmt.Fprintf(w, "Generated from `bd help --all` (bd version %s)\n\n", Version)
+	fmt.Fprintf(w, "Reference for bd Latest. Generated from `bd help --all`.\n\n")
 
 	// Collect commands grouped by their GroupID
 	type group struct {
@@ -266,7 +266,7 @@ func writeSingleCommandDoc(w io.Writer, root *cobra.Command, cmdName string) err
 	fmt.Fprintf(w, "---\n")
 	fmt.Fprintf(w, "\n")
 	fmt.Fprintf(w, "<!-- AUTO-GENERATED: do not edit manually -->\n")
-	fmt.Fprintf(w, "Generated from `bd help --doc %s` (bd version %s)\n\n", docCommand, Version)
+	fmt.Fprintf(w, "Generated from `bd help --doc %s`\n\n", docCommand)
 
 	// Generate the command help (using h2 for single command)
 	parentPath := strings.TrimSuffix(commandPath(cmd), " "+cmd.Name())
