@@ -168,7 +168,11 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 
 	// Dolt versioning for permanent issues.
 	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
+	tables := []string{"issues"}
+	if result.EventRecorded {
+		tables = append(tables, "events")
+	}
+	for _, table := range tables {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
 	commitMsg := fmt.Sprintf("bd: update %s", id)

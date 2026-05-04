@@ -770,6 +770,43 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("update_suppress_history_skips_event_row", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Compact history test", "--type", "task")
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		cfg, _ := configfile.Load(beadsDir)
+		database := ""
+		if cfg != nil {
+			database = cfg.GetDoltDatabase()
+		}
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		var eventsBefore int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM events WHERE issue_id = ?", issue.ID).Scan(&eventsBefore); err != nil {
+			cleanup()
+			t.Fatalf("count events before: %v", err)
+		}
+		cleanup()
+		bdUpdate(t, bd, dir, issue.ID, "--description", "after", "--suppress-history")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Description != "after" {
+			t.Fatalf("expected description 'after', got %q", got.Description)
+		}
+		db, cleanup, err = embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL reopen: %v", err)
+		}
+		defer cleanup()
+		var eventsAfter int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM events WHERE issue_id = ?", issue.ID).Scan(&eventsAfter); err != nil {
+			t.Fatalf("count events after: %v", err)
+		}
+		if eventsAfter != eventsBefore {
+			t.Fatalf("events after = %d, want %d", eventsAfter, eventsBefore)
+		}
+	})
+
 	t.Run("update_description_body_alias", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Body alias test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--body", "via body flag")

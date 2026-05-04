@@ -63,9 +63,14 @@ func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.
 
 func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	_, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
-	return err
+	result, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
+	if err != nil {
+		return err
+	}
+	if result.EventRecorded {
+		t.dirty.MarkDirty("events")
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {

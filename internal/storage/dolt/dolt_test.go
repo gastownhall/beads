@@ -1043,6 +1043,51 @@ func TestDoltStoreEvents(t *testing.T) {
 	}
 }
 
+func TestDoltStoreSuppressHistorySkipsUpdateEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-suppress-history",
+		Title:       "Issue with compact history",
+		Description: "before",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	eventsBefore, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents before: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+		"description":                    "after",
+		storage.UpdateKeySuppressHistory: true,
+	}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue suppress history: %v", err)
+	}
+	got, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue after: %v", err)
+	}
+	if got.Description != "after" {
+		t.Fatalf("Description = %q, want after", got.Description)
+	}
+	eventsAfter, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents after: %v", err)
+	}
+	if len(eventsAfter) != len(eventsBefore) {
+		t.Fatalf("event count = %d, want %d", len(eventsAfter), len(eventsBefore))
+	}
+}
+
 func TestDoltStoreDeleteIssue(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

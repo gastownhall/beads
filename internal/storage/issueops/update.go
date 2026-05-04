@@ -116,8 +116,30 @@ func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) t
 
 // UpdateResult holds the result of an UpdateIssueInTx call.
 type UpdateResult struct {
-	OldIssue *types.Issue
-	IsWisp   bool
+	OldIssue          *types.Issue
+	IsWisp            bool
+	HistorySuppressed bool
+	EventRecorded     bool
+}
+
+func suppressHistoryRequested(updates map[string]interface{}) bool {
+	raw, ok := updates[storage.UpdateKeySuppressHistory]
+	if !ok {
+		return false
+	}
+	flag, ok := raw.(bool)
+	return ok && flag
+}
+
+func materialUpdates(updates map[string]interface{}) map[string]interface{} {
+	filtered := make(map[string]interface{}, len(updates))
+	for key, value := range updates {
+		if key == storage.UpdateKeySuppressHistory {
+			continue
+		}
+		filtered[key] = value
+	}
+	return filtered
 }
 
 // UpdateIssueInTx performs the full update SQL logic within a transaction.
@@ -126,6 +148,9 @@ type UpdateResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+	historySuppressed := suppressHistoryRequested(updates)
+	updates = materialUpdates(updates)
+
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
@@ -213,16 +238,19 @@ func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 		return nil, fmt.Errorf("failed to update issue: %w", err)
 	}
 
-	// Record event.
-	oldData, _ := json.Marshal(oldIssue)
-	newData, _ := json.Marshal(updates)
-	eventType := DetermineEventType(oldIssue, updates)
+	eventRecorded := false
+	if !historySuppressed {
+		oldData, _ := json.Marshal(oldIssue)
+		newData, _ := json.Marshal(updates)
+		eventType := DetermineEventType(oldIssue, updates)
 
-	if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
-		return nil, fmt.Errorf("failed to record event: %w", err)
+		if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
+			return nil, fmt.Errorf("failed to record event: %w", err)
+		}
+		eventRecorded = true
 	}
 
-	return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
+	return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, HistorySuppressed: historySuppressed, EventRecorded: eventRecorded}, nil
 }
 
 // RecordFullEventInTable records an event with both old and new values.

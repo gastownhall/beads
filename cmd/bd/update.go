@@ -240,6 +240,9 @@ create, update, show, or close operation).`,
 		if historyChanged {
 			updates["no_history"] = false
 		}
+		if suppressHistory, _ := cmd.Flags().GetBool("suppress-history"); suppressHistory {
+			updates[storage.UpdateKeySuppressHistory] = true
+		}
 		// Metadata flag (GH#1413)
 		if cmd.Flags().Changed("metadata") {
 			metadataValue, _ := cmd.Flags().GetString("metadata")
@@ -619,6 +622,7 @@ func init() {
 	updateCmd.Flags().Bool("persistent", false, "Mark issue as persistent (promote wisp to regular issue)")
 	updateCmd.Flags().Bool("no-history", false, "Mark issue as no-history (skip Dolt commits, not GC-eligible)")
 	updateCmd.Flags().Bool("history", false, "Clear no-history flag (re-enable Dolt commit history)")
+	updateCmd.Flags().Bool("suppress-history", false, "Apply this update without recording a durable event row")
 	// Metadata flag (GH#1413)
 	updateCmd.Flags().String("metadata", "", "Set custom metadata (JSON string or @file.json to read from file)")
 	// Incremental metadata edits (GH#1406)

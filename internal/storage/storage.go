@@ -33,6 +33,11 @@ var ErrNotInitialized = errors.New("database not initialized")
 // ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
 var ErrPrefixMismatch = errors.New("prefix mismatch")
 
+// UpdateKeySuppressHistory is a reserved update-map key that applies the
+// requested field changes while suppressing durable update-history event rows.
+// Current-state persistence semantics remain unchanged.
+const UpdateKeySuppressHistory = "suppress_history"
+
 // Storage is the interface satisfied by *dolt.DoltStore.
 // Consumers depend on this interface rather than on the concrete type so that
 // alternative implementations (mocks, proxies, etc.) can be substituted.
