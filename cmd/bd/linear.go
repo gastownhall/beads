@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -14,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/linear"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -109,6 +112,9 @@ Team Selection:
   Falls back to linear.team_id for backward compatibility.
   Push requires explicit --team when multiple teams are configured.
 
+Pull Options:
+  --milestones       Reconstruct Linear project milestones as local epic parents
+
 Type Filtering (--push only):
   --type task,feature       Only sync issues of these types
   --exclude-type wisp       Exclude issues of these types
@@ -169,6 +175,7 @@ func init() {
 	linearSyncCmd.Flags().Bool("prefer-linear", false, "Prefer Linear version on conflicts")
 	linearSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
 	linearSyncCmd.Flags().Bool("update-refs", true, "Update external_ref after creating Linear issues")
+	linearSyncCmd.Flags().Bool("milestones", false, "Reconstruct Linear project milestones as local epic parents when pulling")
 	linearSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
 	linearSyncCmd.Flags().StringSlice("type", nil, "Only sync issues of these types (can be repeated)")
 	linearSyncCmd.Flags().StringSlice("exclude-type", nil, "Exclude issues of these types (can be repeated)")
@@ -194,6 +201,7 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	preferLocal, _ := cmd.Flags().GetBool("prefer-local")
 	preferLinear, _ := cmd.Flags().GetBool("prefer-linear")
 	createOnly, _ := cmd.Flags().GetBool("create-only")
+	milestones, _ := cmd.Flags().GetBool("milestones")
 	state, _ := cmd.Flags().GetString("state")
 	typeFilters, _ := cmd.Flags().GetStringSlice("type")
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
@@ -276,6 +284,9 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	if preferLocal && preferLinear {
 		FatalError("cannot use both --prefer-local and --prefer-linear")
 	}
+	if milestones && push && !pull {
+		FatalError("--milestones only applies when pulling from Linear")
+	}
 
 	if err := ensureStoreActive(); err != nil {
 		FatalError("database not available: %v", err)
@@ -313,7 +324,11 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	// Set up Linear-specific pull hooks
-	engine.PullHooks = buildLinearPullHooks(ctx)
+	engine.PullHooks = buildLinearPullHooks(ctx, linearPullHookOptions{
+		Milestones: milestones,
+		DryRun:     dryRun,
+		Actor:      actor,
+	})
 
 	// Build sync options from CLI flags
 	opts := tracker.SyncOptions{
@@ -415,16 +430,31 @@ func linearPullDependencySources(includeRelations bool) []tracker.DependencySour
 	return []tracker.DependencySource{tracker.DependencySourceParent}
 }
 
+type linearPullHookOptions struct {
+	Milestones bool
+	DryRun     bool
+	Actor      string
+}
+
 // buildLinearPullHooks creates PullHooks for Linear-specific pull behavior.
-func buildLinearPullHooks(ctx context.Context) *tracker.PullHooks {
+func buildLinearPullHooks(ctx context.Context, opts linearPullHookOptions) *tracker.PullHooks {
+	return buildLinearPullHooksForStore(ctx, store, opts)
+}
+
+func buildLinearPullHooksForStore(ctx context.Context, st storage.Storage, opts linearPullHookOptions) *tracker.PullHooks {
 	idMode := getLinearIDMode(ctx)
 	hashLength := getLinearHashLength(ctx)
 
 	hooks := &tracker.PullHooks{}
+	hookActor := opts.Actor
+	if hookActor == "" {
+		hookActor = actor
+	}
 
-	if idMode == "hash" {
+	var generateID func(context.Context, *types.Issue) error
+	if idMode == "hash" && st != nil {
 		// Pre-load existing IDs for collision avoidance
-		existingIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+		existingIssues, err := st.SearchIssues(ctx, "", types.IssueFilter{})
 		usedIDs := make(map[string]bool)
 		if err == nil {
 			for _, issue := range existingIssues {
@@ -439,13 +469,13 @@ func buildLinearPullHooks(ctx context.Context) *tracker.PullHooks {
 		prefix := config.GetString("issue-prefix")
 		if prefix == "" {
 			var err error
-			prefix, err = store.GetConfig(ctx, "issue_prefix")
+			prefix, err = st.GetConfig(ctx, "issue_prefix")
 			if err != nil || prefix == "" {
 				prefix = "bd"
 			}
 		}
 
-		hooks.GenerateID = func(_ context.Context, issue *types.Issue) error {
+		generateID = func(_ context.Context, issue *types.Issue) error {
 			ids := []*types.Issue{issue}
 			idOpts := linear.IDGenerationOptions{
 				BaseLength: hashLength,
@@ -459,9 +489,218 @@ func buildLinearPullHooks(ctx context.Context) *tracker.PullHooks {
 			usedIDs[issue.ID] = true
 			return nil
 		}
+		hooks.GenerateID = generateID
+	}
+
+	if opts.Milestones && st != nil {
+		hooks.AfterConvert = func(ctx context.Context, extIssue *tracker.TrackerIssue, conv *tracker.IssueConversion, ref string, _ *types.Issue, syncOpts tracker.SyncOptions) error {
+			li, ok := extIssue.Raw.(*linear.Issue)
+			if !ok || li == nil || li.ProjectMilestone == nil {
+				return nil
+			}
+			if syncOpts.DryRun || opts.DryRun {
+				return nil
+			}
+			milestoneRef, err := ensureLinearMilestoneEpic(ctx, st, li.ProjectMilestone, hookActor, generateID)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(ref) == "" {
+				return fmt.Errorf("missing external ref for Linear issue %s", extIssue.Identifier)
+			}
+			conv.Dependencies = append(conv.Dependencies, tracker.DependencyInfo{
+				FromExternalID: ref,
+				ToExternalID:   milestoneRef,
+				Type:           string(types.DepParentChild),
+				Source:         tracker.DependencySourceParent,
+			})
+			return nil
+		}
 	}
 
 	return hooks
+}
+
+const linearMilestoneExternalRefPrefix = "linear:project-milestone:"
+
+func linearMilestoneExternalRef(id string) string {
+	return linearMilestoneExternalRefPrefix + strings.TrimSpace(id)
+}
+
+func isLinearMilestoneExternalRef(ref string) bool {
+	return strings.HasPrefix(strings.TrimSpace(ref), linearMilestoneExternalRefPrefix)
+}
+
+func ensureLinearMilestoneEpic(ctx context.Context, st storage.Storage, ms *linear.ProjectMilestone, actor string, generateID func(context.Context, *types.Issue) error) (string, error) {
+	milestoneID := strings.TrimSpace(ms.ID)
+	if milestoneID == "" {
+		return "", fmt.Errorf("Linear project milestone is missing id")
+	}
+	title := strings.TrimSpace(ms.Name)
+	if title == "" {
+		title = milestoneID
+	}
+	description := ms.Description
+	ref := linearMilestoneExternalRef(milestoneID)
+
+	metadata, err := mergedLinearMilestoneMetadata(nil, ms)
+	if err != nil {
+		return "", err
+	}
+
+	existing, err := findLinearMilestoneEpic(ctx, st, ref, milestoneID, title)
+	if err != nil {
+		return "", err
+	}
+	if existing != nil {
+		updates := map[string]interface{}{}
+		if existing.Title != title {
+			updates["title"] = title
+		}
+		if existing.Description != description {
+			updates["description"] = description
+		}
+		if existing.IssueType != types.TypeEpic {
+			updates["issue_type"] = string(types.TypeEpic)
+		}
+		if existing.ExternalRef == nil || strings.TrimSpace(*existing.ExternalRef) != ref {
+			updates["external_ref"] = ref
+		}
+		mergedMetadata, err := mergedLinearMilestoneMetadata(existing.Metadata, ms)
+		if err != nil {
+			return "", err
+		}
+		if string(existing.Metadata) != string(mergedMetadata) {
+			updates["metadata"] = mergedMetadata
+		}
+		if len(updates) > 0 {
+			if err := st.UpdateIssue(ctx, existing.ID, updates, actor); err != nil {
+				return "", fmt.Errorf("updating Linear milestone epic %s: %w", existing.ID, err)
+			}
+		}
+		return ref, nil
+	}
+
+	externalRef := ref
+	epic := &types.Issue{
+		Title:       title,
+		Description: description,
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeEpic,
+		ExternalRef: &externalRef,
+		Metadata:    metadata,
+	}
+	if generateID != nil {
+		if err := generateID(ctx, epic); err != nil {
+			return "", fmt.Errorf("generating Linear milestone epic ID: %w", err)
+		}
+	}
+	if err := st.CreateIssue(ctx, epic, actor); err != nil {
+		return "", fmt.Errorf("creating Linear milestone epic %q: %w", title, err)
+	}
+	return ref, nil
+}
+
+func findLinearMilestoneEpic(ctx context.Context, st storage.Storage, ref, milestoneID, title string) (*types.Issue, error) {
+	if existing, err := st.GetIssueByExternalRef(ctx, ref); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
+
+	issues, err := st.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("searching local issues for Linear milestone %s: %w", milestoneID, err)
+	}
+	for _, issue := range issues {
+		if issueHasLinearMilestoneID(issue, milestoneID) {
+			return issue, nil
+		}
+	}
+
+	for _, issue := range issues {
+		if issue.IssueType != types.TypeEpic || !strings.EqualFold(strings.TrimSpace(issue.Title), title) {
+			continue
+		}
+		ref := ""
+		if issue.ExternalRef != nil {
+			ref = strings.TrimSpace(*issue.ExternalRef)
+		}
+		if ref == "" {
+			return issue, nil
+		}
+	}
+	return nil, nil
+}
+
+func mergedLinearMilestoneMetadata(existing json.RawMessage, ms *linear.ProjectMilestone) (json.RawMessage, error) {
+	data := make(map[string]interface{})
+	if len(existing) > 0 {
+		trimmed := strings.TrimSpace(string(existing))
+		if trimmed != "" && trimmed != "null" {
+			if err := json.Unmarshal(existing, &data); err != nil {
+				return nil, fmt.Errorf("existing milestone metadata is not a JSON object: %w", err)
+			}
+		}
+	}
+
+	linearMeta, _ := data["linear"].(map[string]interface{})
+	if linearMeta == nil {
+		linearMeta = make(map[string]interface{})
+	}
+	linearMeta["kind"] = "project_milestone"
+	linearMeta["project_milestone"] = map[string]interface{}{
+		"id":          strings.TrimSpace(ms.ID),
+		"name":        ms.Name,
+		"description": ms.Description,
+		"progress":    ms.Progress,
+		"targetDate":  ms.TargetDate,
+	}
+	data["linear"] = linearMeta
+
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling Linear milestone metadata: %w", err)
+	}
+	return json.RawMessage(raw), nil
+}
+
+func issueHasLinearMilestoneID(issue *types.Issue, milestoneID string) bool {
+	if issue == nil || len(issue.Metadata) == 0 {
+		return false
+	}
+	var data struct {
+		Linear struct {
+			Kind             string `json:"kind"`
+			ProjectMilestone struct {
+				ID string `json:"id"`
+			} `json:"project_milestone"`
+		} `json:"linear"`
+	}
+	if err := json.Unmarshal(issue.Metadata, &data); err != nil {
+		return false
+	}
+	return data.Linear.Kind == "project_milestone" &&
+		strings.TrimSpace(data.Linear.ProjectMilestone.ID) == strings.TrimSpace(milestoneID)
+}
+
+func isLinearMilestoneIssue(issue *types.Issue) bool {
+	if issue == nil {
+		return false
+	}
+	if issue.ExternalRef != nil && isLinearMilestoneExternalRef(*issue.ExternalRef) {
+		return true
+	}
+	var data struct {
+		Linear struct {
+			Kind string `json:"kind"`
+		} `json:"linear"`
+	}
+	if len(issue.Metadata) == 0 || json.Unmarshal(issue.Metadata, &data) != nil {
+		return false
+	}
+	return data.Linear.Kind == "project_milestone"
 }
 
 // buildLinearPushHooks creates PushHooks for Linear-specific push behavior.
@@ -494,6 +733,9 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 			return id, id != ""
 		},
 		ShouldPush: func(issue *types.Issue) bool {
+			if isLinearMilestoneIssue(issue) {
+				return false
+			}
 			if projectID, _ := store.GetConfig(ctx, "linear.project_id"); projectID != "" {
 				if issue.ExternalRef == nil || strings.TrimSpace(*issue.ExternalRef) == "" {
 					if !allowProjectCreates {

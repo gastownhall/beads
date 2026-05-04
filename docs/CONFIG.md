@@ -742,6 +742,9 @@ bd linear sync --pull-if-stale --threshold 5m
 # Pull issues and Linear relations as bd dependencies
 bd linear sync --pull --relations
 
+# Pull and rebuild Linear project milestones as local epic parents
+bd linear sync --pull --milestones
+
 # Push only (export to Linear)
 bd linear sync --push
 

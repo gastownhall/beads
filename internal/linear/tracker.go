@@ -672,6 +672,14 @@ func linearToTrackerIssue(li *Issue) tracker.TrackerIssue {
 		ti.ParentInternalID = li.Parent.ID
 	}
 
+	if li.ProjectMilestone != nil {
+		ti.Metadata = map[string]interface{}{
+			"linear": map[string]interface{}{
+				"project_milestone": li.ProjectMilestone,
+			},
+		}
+	}
+
 	if t, err := time.Parse(time.RFC3339, li.CreatedAt); err == nil {
 		ti.CreatedAt = t
 	}

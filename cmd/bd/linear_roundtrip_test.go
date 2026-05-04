@@ -464,6 +464,150 @@ func TestLinearRoundTripCoreFields(t *testing.T) {
 	}
 }
 
+func TestLinearPullMilestonesCreatesEpicHierarchy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+	teamID := "test-team-uuid"
+
+	targetStore, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mock := newMockLinearServer(teamID, "MOCK")
+	server := httptest.NewServer(mock)
+	defer server.Close()
+
+	for k, v := range map[string]string{
+		"linear.api_key":      "test-api-key",
+		"linear.team_id":      teamID,
+		"linear.api_endpoint": server.URL,
+		"issue_prefix":        "bd",
+	} {
+		if err := targetStore.SetConfig(ctx, k, v); err != nil {
+			t.Fatalf("SetConfig(%s): %v", k, err)
+		}
+	}
+
+	milestone := &linear.ProjectMilestone{
+		ID:          "milestone-1",
+		Name:        "M7: Team-Ready",
+		Description: "Everything the team needs before handoff.",
+		Progress:    60.61,
+		TargetDate:  "2026-05-12",
+	}
+	now := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+
+	mock.mu.Lock()
+	mock.issues["uuid-1"] = &linear.Issue{
+		ID:               "uuid-1",
+		Identifier:       "MOCK-1",
+		Title:            "Build checklist",
+		Description:      "Create the readiness checklist.",
+		URL:              "https://linear.app/mock/issue/MOCK-1",
+		Priority:         2,
+		State:            &linear.State{ID: "state-started", Name: "In Progress", Type: "started"},
+		ProjectMilestone: milestone,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	mock.issues["uuid-2"] = &linear.Issue{
+		ID:               "uuid-2",
+		Identifier:       "MOCK-2",
+		Title:            "Write docs",
+		Description:      "Document the handoff process.",
+		URL:              "https://linear.app/mock/issue/MOCK-2",
+		Priority:         3,
+		State:            &linear.State{ID: "state-unstarted", Name: "Todo", Type: "unstarted"},
+		ProjectMilestone: milestone,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	mock.mu.Unlock()
+
+	lt := &linear.Tracker{}
+	lt.SetTeamIDs([]string{teamID})
+	if err := lt.Init(ctx, targetStore); err != nil {
+		t.Fatalf("Tracker.Init: %v", err)
+	}
+
+	pullEngine := tracker.NewEngine(lt, targetStore, "test-actor")
+	pullEngine.PullHooks = buildLinearPullHooksForStore(ctx, targetStore, linearPullHookOptions{
+		Milestones: true,
+		Actor:      "test-actor",
+	})
+
+	pullResult, err := pullEngine.Sync(ctx, tracker.SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Pull sync failed: %v", err)
+	}
+	if pullResult.Stats.Created != 2 {
+		t.Fatalf("expected 2 Linear issues pulled, got created=%d", pullResult.Stats.Created)
+	}
+
+	epicRef := linearMilestoneExternalRef("milestone-1")
+	epic, err := targetStore.GetIssueByExternalRef(ctx, epicRef)
+	if err != nil {
+		t.Fatalf("GetIssueByExternalRef(%s): %v", epicRef, err)
+	}
+	if epic.Title != milestone.Name {
+		t.Errorf("epic title = %q, want %q", epic.Title, milestone.Name)
+	}
+	if epic.Description != milestone.Description {
+		t.Errorf("epic description = %q, want %q", epic.Description, milestone.Description)
+	}
+	if epic.IssueType != types.TypeEpic {
+		t.Errorf("epic type = %q, want %q", epic.IssueType, types.TypeEpic)
+	}
+
+	all, err := targetStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 local issues (1 epic + 2 tasks), got %d", len(all))
+	}
+
+	for _, ref := range []string{
+		"https://linear.app/mock/issue/MOCK-1",
+		"https://linear.app/mock/issue/MOCK-2",
+	} {
+		issue, err := targetStore.GetIssueByExternalRef(ctx, ref)
+		if err != nil {
+			t.Fatalf("GetIssueByExternalRef(%s): %v", ref, err)
+		}
+		deps, err := targetStore.GetDependenciesWithMetadata(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("GetDependenciesWithMetadata(%s): %v", issue.ID, err)
+		}
+		foundParent := false
+		for _, dep := range deps {
+			if dep.ID == epic.ID && dep.DependencyType == types.DepParentChild {
+				foundParent = true
+				break
+			}
+		}
+		if !foundParent {
+			t.Errorf("issue %s is not parented to milestone epic %s", issue.ID, epic.ID)
+		}
+	}
+
+	pushHooks := buildLinearPushHooksForTest(ctx, lt)
+	if !pushHooks.ShouldPush(&types.Issue{
+		Title:       "normal",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		ExternalRef: strPtr(""),
+	}) {
+		t.Fatal("expected normal issue to be pushable")
+	}
+	if pushHooks.ShouldPush(epic) {
+		t.Fatal("milestone epic should be excluded from Linear push")
+	}
+}
+
 // TestLinearRoundTripRelationships is a spec test documenting that parent-child
 // hierarchy, blocking dependencies, and issue type do not survive a push→pull
 // round-trip because the Linear push path does not yet send these fields.
@@ -509,6 +653,9 @@ func buildLinearPushHooksForTest(ctx context.Context, lt *linear.Tracker) *track
 			}
 			id := sc.FindStateForBeadsStatus(status)
 			return id, id != ""
+		},
+		ShouldPush: func(issue *types.Issue) bool {
+			return !isLinearMilestoneIssue(issue)
 		},
 	}
 }

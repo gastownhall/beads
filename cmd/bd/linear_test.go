@@ -1137,6 +1137,13 @@ func TestLinearClientFetchIssues(t *testing.T) {
 									{"id": "label-1", "name": "bug"}
 								]
 							},
+							"projectMilestone": {
+								"id": "milestone-1",
+								"name": "M7: Team-Ready",
+								"description": "Team-ready milestone",
+								"progress": 60.61,
+								"targetDate": "2026-05-12"
+							},
 							"createdAt": "2025-01-15T10:00:00Z",
 							"updatedAt": "2025-01-16T10:00:00Z"
 						},
@@ -1195,6 +1202,9 @@ func TestLinearClientFetchIssues(t *testing.T) {
 	}
 	if issue1.State.Type != "started" {
 		t.Errorf("expected state type 'started', got %s", issue1.State.Type)
+	}
+	if issue1.ProjectMilestone == nil || issue1.ProjectMilestone.ID != "milestone-1" {
+		t.Fatalf("expected projectMilestone milestone-1, got %#v", issue1.ProjectMilestone)
 	}
 }
 

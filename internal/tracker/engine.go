@@ -55,6 +55,12 @@ type PullHooks struct {
 	// Called on the raw TrackerIssue before conversion to beads format.
 	// If nil, all issues are imported.
 	ShouldImport func(issue *TrackerIssue) bool
+
+	// AfterConvert is called after the external issue has been converted to
+	// a beads issue, transformed, and assigned an ID, but before it is stored.
+	// Hooks may mutate the conversion, for example by adding dependencies that
+	// should be created after all pulled issues have been saved.
+	AfterConvert func(ctx context.Context, extIssue *TrackerIssue, conv *IssueConversion, ref string, existing *types.Issue, opts SyncOptions) error
 }
 
 // PushHooks contains optional callbacks that customize push (export) behavior.
@@ -445,6 +451,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			// Without this guard, pull silently overwrites local changes
 			// before conflict detection can compare timestamps.
 			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
+				stats.Skipped++
+				continue
+			}
+		}
+
+		if e.PullHooks != nil && e.PullHooks.AfterConvert != nil {
+			if err := e.PullHooks.AfterConvert(ctx, &extIssue, conv, ref, existing, opts); err != nil {
+				e.warn("Failed to prepare %s: %v", extIssue.Identifier, err)
 				stats.Skipped++
 				continue
 			}
@@ -1241,11 +1255,14 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 			continue
 		}
 		ref := strings.TrimSpace(*candidate.ExternalRef)
-		if ref == "" || !e.Tracker.IsExternalRef(ref) {
+		if ref == "" {
 			continue
 		}
 		if _, exists := byExternal[ref]; !exists {
 			byExternal[ref] = candidate
+		}
+		if !e.Tracker.IsExternalRef(ref) {
+			continue
 		}
 		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
 		if identifier != "" {

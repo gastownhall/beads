@@ -780,6 +780,13 @@ func TestLinearToTrackerIssue(t *testing.T) {
 		UpdatedAt:   "2026-01-16T14:30:00Z",
 		Assignee:    &User{ID: "user-1", Name: "Alice", Email: "alice@example.com"},
 		State:       &State{Type: "started", Name: "In Progress"},
+		ProjectMilestone: &ProjectMilestone{
+			ID:          "milestone-1",
+			Name:        "M7: Team-Ready",
+			Description: "Team-ready milestone",
+			Progress:    60.61,
+			TargetDate:  "2026-05-12",
+		},
 	}
 
 	ti := linearToTrackerIssue(li)
@@ -798,6 +805,21 @@ func TestLinearToTrackerIssue(t *testing.T) {
 	}
 	if ti.Raw != li {
 		t.Error("Raw should reference original linear.Issue")
+	}
+	var meta struct {
+		Linear struct {
+			ProjectMilestone ProjectMilestone `json:"project_milestone"`
+		} `json:"linear"`
+	}
+	raw, err := json.Marshal(ti.Metadata)
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if meta.Linear.ProjectMilestone.ID != "milestone-1" {
+		t.Errorf("ProjectMilestone.ID = %q, want milestone-1", meta.Linear.ProjectMilestone.ID)
 	}
 }
 

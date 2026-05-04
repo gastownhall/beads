@@ -2249,6 +2249,66 @@ func TestEngineCreateDependenciesResolvesBareIdentifierFromExternalRef(t *testin
 	}
 }
 
+func TestEngineCreateDependenciesResolvesSyntheticExternalRef(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issues := []*types.Issue{
+		{ID: "bd-linear-child", Title: "Child", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+		{ID: "bd-linear-milestone", Title: "Milestone", Status: types.StatusOpen, IssueType: types.TypeEpic, Priority: 2},
+	}
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue error: %v", err)
+		}
+	}
+	if err := store.UpdateIssue(ctx, "bd-linear-child", map[string]interface{}{"external_ref": "https://linear.app/team/issue/TEAM-101/child-title"}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue child external_ref: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, "bd-linear-milestone", map[string]interface{}{"external_ref": "linear:project-milestone:milestone-1"}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue milestone external_ref: %v", err)
+	}
+
+	lt := &mockExternalRefTracker{
+		mockTracker: newMockTracker("linear"),
+		isRef: func(ref string) bool {
+			return strings.Contains(ref, "linear.app/") && strings.Contains(ref, "/issue/")
+		},
+		extract: func(ref string) string {
+			parts := strings.Split(ref, "/issue/")
+			if len(parts) != 2 {
+				return ref
+			}
+			return strings.Split(parts[1], "/")[0]
+		},
+	}
+	engine := NewEngine(lt, store, "test-actor")
+
+	errCount := engine.createDependencies(ctx, []DependencyInfo{
+		{
+			FromExternalID: "https://linear.app/team/issue/TEAM-101",
+			ToExternalID:   "linear:project-milestone:milestone-1",
+			Type:           string(types.DepParentChild),
+		},
+	})
+	if errCount != 0 {
+		t.Fatalf("createDependencies returned errCount=%d, warnings=%v", errCount, engine.warnings)
+	}
+
+	depRecords, err := store.GetDependencyRecords(ctx, "bd-linear-child")
+	if err != nil {
+		t.Fatalf("GetDependencyRecords error: %v", err)
+	}
+	if len(depRecords) != 1 {
+		t.Fatalf("expected 1 dependency record, got %d", len(depRecords))
+	}
+	if depRecords[0].DependsOnID != "bd-linear-milestone" || depRecords[0].Type != types.DepParentChild {
+		t.Fatalf("dependency = %s -> %s (%s), want bd-linear-child -> bd-linear-milestone (%s)",
+			depRecords[0].IssueID, depRecords[0].DependsOnID, depRecords[0].Type, types.DepParentChild)
+	}
+}
+
 func TestEnginePullCreatesDependenciesForUnchangedIssues(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

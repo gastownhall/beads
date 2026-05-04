@@ -481,7 +481,10 @@ func runLinearPull(cmd *cobra.Command, args []string) {
 	engine := tracker.NewEngine(lt, store, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-	engine.PullHooks = buildLinearPullHooks(ctx)
+	engine.PullHooks = buildLinearPullHooks(ctx, linearPullHookOptions{
+		DryRun: dryRun,
+		Actor:  actor,
+	})
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Pull:              true,
