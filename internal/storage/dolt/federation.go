@@ -196,6 +196,12 @@ func (s *DoltStore) migrateServerRootRemotes(cliDir string) []storage.RemoteInfo
 	if _, err := os.Stat(filepath.Join(rootDir, ".dolt")); err != nil {
 		return nil
 	}
+	// `dolt remote -v` requires a real repo; without repo_state.json it takes
+	// ~12s to fail. Multi-database server roots have only sql-server.info, so
+	// skip them. (be-1he)
+	if _, err := os.Stat(filepath.Join(rootDir, ".dolt", "repo_state.json")); err != nil {
+		return nil
+	}
 	rootRemotes, err := doltutil.ListCLIRemotes(rootDir)
 	if err != nil || len(rootRemotes) == 0 {
 		return nil

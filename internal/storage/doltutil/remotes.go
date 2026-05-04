@@ -1,13 +1,20 @@
 package doltutil
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 )
+
+// listCLIRemotesTimeout caps `dolt remote -v` wallclock. A real repo responds
+// in ~130ms; >1s indicates the broken-parent-dir failure mode that takes ~12s
+// to error out. (be-1he)
+const listCLIRemotesTimeout = 2 * time.Second
 
 // ShellQuote returns s wrapped in single quotes with any embedded single
 // quotes escaped, making it safe to interpolate into a shell command string.
@@ -37,7 +44,9 @@ func IsGitProtocolURL(url string) bool {
 
 // ListCLIRemotes parses `dolt remote -v` output from the given database directory.
 func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
-	cmd := exec.Command("dolt", "remote", "-v") // #nosec G204 -- fixed command
+	ctx, cancel := context.WithTimeout(context.Background(), listCLIRemotesTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "dolt", "remote", "-v") // #nosec G204 -- fixed command
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
