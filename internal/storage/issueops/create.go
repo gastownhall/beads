@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -30,9 +31,17 @@ func NewBatchContext(ctx context.Context, tx *sql.Tx, opts storage.BatchCreateOp
 	if err != nil {
 		return nil, fmt.Errorf("failed to get custom types: %w", err)
 	}
-	configPrefix, err := ReadConfigPrefix(ctx, tx)
-	if err != nil {
-		return nil, err
+	// YAML config.yaml issue-prefix takes precedence over Dolt config table.
+	// This allows per-project prefixes when sharing a single Dolt database.
+	var configPrefix string
+	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
+		configPrefix = strings.TrimSuffix(yamlPrefix, "-")
+	} else {
+		var err error
+		configPrefix, err = ReadConfigPrefix(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var allowedPrefixes string
 	_ = tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "allowed_prefixes").Scan(&allowedPrefixes)
