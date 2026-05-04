@@ -282,6 +282,10 @@ func squashMolecule(ctx context.Context, s storage.DoltStorage, root *types.Issu
 			if err := tx.CloseIssue(ctx, root.ID, reason, actorName, ""); err != nil {
 				return fmt.Errorf("failed to close wisp root %s: %w", root.ID, err)
 			}
+			// Clear ephemeral so the closed root stops being re-emitted by every wisp-table export cycle.
+			if err := tx.UpdateIssue(ctx, root.ID, map[string]interface{}{"wisp": false}, actorName); err != nil {
+				return fmt.Errorf("failed to clear ephemeral flag on root %s: %w", root.ID, err)
+			}
 			result.WispSquash = true
 		}
 
