@@ -197,6 +197,16 @@ func (s *EmbeddedDoltStore) ResolveConflicts(ctx context.Context, table string, 
 
 const defaultRemote = "origin"
 
+// remoteAuthUser returns the username to authenticate with the remote, read
+// from DOLT_REMOTE_USER. When set, push/pull/fetch invocations pass --user so
+// the in-process Dolt server authenticates against the remotesapi (which
+// otherwise rejects with CLONE_ADMIN). DOLT_REMOTE_PASSWORD is read by Dolt
+// itself from the same process environment. Returns "" when no auth is
+// configured (typical for git+ssh, file://, or unauthenticated remotes).
+func remoteAuthUser() string {
+	return os.Getenv("DOLT_REMOTE_USER")
+}
+
 func (s *EmbeddedDoltStore) RemoveRemote(ctx context.Context, name string) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.RemoveRemote(ctx, db, name)
@@ -215,46 +225,46 @@ func (s *EmbeddedDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteIn
 
 func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Push(ctx, db, defaultRemote, s.branch)
+		return versioncontrolops.Push(ctx, db, defaultRemote, s.branch, remoteAuthUser())
 	})
 }
 
 func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Pull(ctx, db, defaultRemote, s.branch)
+		return versioncontrolops.Pull(ctx, db, defaultRemote, s.branch, remoteAuthUser())
 	})
 }
 
 func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.ForcePush(ctx, db, defaultRemote, s.branch)
+		return versioncontrolops.ForcePush(ctx, db, defaultRemote, s.branch, remoteAuthUser())
 	})
 }
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		if force {
-			return versioncontrolops.ForcePush(ctx, db, remote, s.branch)
+			return versioncontrolops.ForcePush(ctx, db, remote, s.branch, remoteAuthUser())
 		}
-		return versioncontrolops.Push(ctx, db, remote, s.branch)
+		return versioncontrolops.Push(ctx, db, remote, s.branch, remoteAuthUser())
 	})
 }
 
 func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Pull(ctx, db, remote, s.branch)
+		return versioncontrolops.Pull(ctx, db, remote, s.branch, remoteAuthUser())
 	})
 }
 
 func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Fetch(ctx, db, peer)
+		return versioncontrolops.Fetch(ctx, db, peer, remoteAuthUser())
 	})
 }
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
 	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Push(ctx, db, peer, s.branch)
+		return versioncontrolops.Push(ctx, db, peer, s.branch, remoteAuthUser())
 	})
 }
 
@@ -267,7 +277,7 @@ func (s *EmbeddedDoltStore) PullFrom(ctx context.Context, peer string) ([]storag
 
 	var conflicts []storage.Conflict
 	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		if pullErr := versioncontrolops.Pull(ctx, db, peer, s.branch); pullErr != nil {
+		if pullErr := versioncontrolops.Pull(ctx, db, peer, s.branch, remoteAuthUser()); pullErr != nil {
 			// Check if the error is due to merge conflicts.
 			c, conflictErr := versioncontrolops.GetConflicts(ctx, db)
 			if conflictErr == nil && len(c) > 0 {
