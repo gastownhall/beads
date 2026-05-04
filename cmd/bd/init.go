@@ -1550,7 +1550,7 @@ To use the existing database:
 
 If the database is genuinely corrupt and unrecoverable:
   bd export > backup.jsonl              # Back up first!
-  bd init --force --prefix %s           # Then reinitialize
+  bd init --reinit-local --prefix %s    # Then reinitialize
 
 Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				}
@@ -1611,7 +1611,7 @@ To use the existing database:
 
 If the database is genuinely corrupt and unrecoverable:
   bd export > backup.jsonl              # Back up first!
-  bd init --force --prefix %s           # Then reinitialize
+  bd init --reinit-local --prefix %s    # Then reinitialize
 
 Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 		}
@@ -1640,7 +1640,7 @@ To use the existing database:
 
 If the database is genuinely corrupt and unrecoverable:
   bd export > backup.jsonl              # Back up first!
-  bd init --force --prefix %s           # Then reinitialize
+  bd init --reinit-local --prefix %s    # Then reinitialize
 
 Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent("bd list"), prefix)
 		}
@@ -1660,7 +1660,7 @@ To use the existing database:
 
 If the database is genuinely corrupt and unrecoverable:
   bd export > backup.jsonl              # Back up first!
-  bd init --force --prefix %s           # Then reinitialize
+  bd init --reinit-local --prefix %s    # Then reinitialize
 
 Aborting.`, ui.RenderWarn("⚠"), dbPath, ui.RenderAccent("bd list"), prefix)
 	}
