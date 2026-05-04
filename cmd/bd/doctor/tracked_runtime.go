@@ -14,6 +14,9 @@ import (
 //
 // Each entry is matched against the relative path within .beads/ using
 // filepath.Match or prefix matching for directory patterns (trailing /).
+//
+// Note: interactions.jsonl is intentionally omitted — it may be versioned
+// per bd audit policy (see `bd audit` help text).
 var trackedRuntimePatterns = []string{
 	// Lock files
 	"*.lock",
@@ -34,7 +37,6 @@ var trackedRuntimePatterns = []string{
 	".exclusive-lock",
 
 	// Runtime state
-	"interactions.jsonl",
 	"push-state.json",
 	"export-state.json",
 	"sync-state.json",

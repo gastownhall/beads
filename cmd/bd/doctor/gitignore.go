@@ -23,9 +23,6 @@ last-touched
 # Daemon runtime (lock, log, pid)
 daemon.*
 
-# Interactions log (runtime, not versioned)
-interactions.jsonl
-
 # Push state (runtime, per-machine)
 push-state.json
 
@@ -114,7 +111,6 @@ var requiredPatterns = []string{
 	"dolt-server.port",
 	"dolt-server.activity",
 	"daemon.*",
-	"interactions.jsonl",
 	"*.lock",
 	"*.corrupt.backup/",
 	".beads-credential-key",
