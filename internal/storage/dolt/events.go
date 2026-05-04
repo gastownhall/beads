@@ -10,7 +10,10 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// AddComment adds a comment event to an issue
+// AddComment adds a comment event to an issue.
+// Permanent issue comments create a Dolt commit so the change reaches push
+// targets and does not leave the working set dirty in server mode. Wisp
+// comments live in dolt_ignore'd tables and skip DOLT_COMMIT.
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -21,7 +24,13 @@ func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment stri
 	if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if s.isActiveWisp(ctx, issueID) {
+		return nil
+	}
+	return s.doltAddAndCommit(ctx, []string{"events"}, fmt.Sprintf("bd: comment %s", issueID))
 }
 
 // GetEvents retrieves events for an issue
@@ -54,6 +63,9 @@ func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text s
 
 // ImportIssueComment adds a comment during import, preserving the original timestamp.
 // This prevents comment timestamp drift across import/export cycles.
+// Permanent issue comments create a Dolt commit so the change reaches push
+// targets and does not leave the working set dirty in server mode. Wisp
+// comments live in dolt_ignore'd tables and skip DOLT_COMMIT.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	var result *types.Comment
 	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
@@ -61,7 +73,16 @@ func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, tex
 		result, err = issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
 		return err
 	})
-	return result, err
+	if err != nil {
+		return result, err
+	}
+	if s.isActiveWisp(ctx, issueID) {
+		return result, nil
+	}
+	if err := s.doltAddAndCommit(ctx, []string{"comments"}, fmt.Sprintf("bd: comment add %s", issueID)); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // GetIssueComments retrieves all comments for an issue
