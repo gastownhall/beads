@@ -30,8 +30,32 @@ Memory records (lines with "_type":"memory") are automatically detected and
 imported as persistent memories (equivalent to 'bd remember'). This makes
 'bd export | bd import' a full round-trip for both issues and memories.
 
-Each JSONL line should map to an issue with at minimum "title". Optional
-fields: description, issue_type (type), priority, acceptance_criteria.
+Each JSONL line should map to an issue. The importer accepts every field
+'bd export' emits — see 'bd export' output for the canonical schema. Only
+"title" is required; everything else is optional.
+
+Common fields:
+  title                  Required. Short summary.
+  description            Long-form body.
+  design, notes,         Additional content sections.
+    acceptance_criteria
+  issue_type             bug | feature | task | epic | chore | ...
+  priority               0-4 (0 = critical). 0 is preserved (no omitempty).
+  status                 open | in_progress | blocked | closed | ...
+                         (rows with status "tombstone" are skipped)
+  assignee, owner,       Ownership metadata.
+    created_by
+  labels                 Array of strings.
+  dependencies           Array of {issue_id, depends_on_id, type, ...}.
+  comments               Array of comment objects.
+  external_ref,          Cross-system identifiers (e.g. "gh-9").
+    source_system
+  due_at, defer_until    RFC3339 timestamps for scheduling.
+  metadata               Arbitrary JSON object preserved verbatim.
+
+Timestamps (created_at, updated_at, started_at, closed_at) are preserved
+when present in the JSONL and otherwise filled in by the importer. The
+legacy "wisp" boolean is accepted as an alias for "ephemeral".
 
 EXAMPLES:
   bd import                        # Import from .beads/issues.jsonl
