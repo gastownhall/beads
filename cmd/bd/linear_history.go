@@ -245,4 +245,3 @@ func parseDateArg(s string) (time.Time, error) {
 	}
 	return time.Time{}, fmt.Errorf("expected YYYY-MM-DD or RFC3339 format, got %q", s)
 }
-
