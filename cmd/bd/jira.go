@@ -26,6 +26,8 @@ Configuration:
   bd config set jira.username "your_email@company.com"  # For Jira Cloud
   bd config set jira.push_prefix "hippo"       # Only push hippo-* issues to Jira
   bd config set jira.push_prefix "proj1,proj2" # Multiple prefixes (comma-separated)
+  bd config set jira.custom_fields.customfield_10042 '{"value":"AI Platform"}'
+  bd config set jira.custom_fields.Story.customfield_10042 '{"value":"AI Platform"}'
 
 Environment variables (alternative to config):
   JIRA_API_TOKEN  - Jira API token

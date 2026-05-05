@@ -264,6 +264,109 @@ func TestFieldMapperIssueToTracker(t *testing.T) {
 	}
 }
 
+func TestFieldMapperIssueToTrackerIncludesGlobalCustomFields(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		customFields: map[string]interface{}{
+			"customfield_10042": "AI Platform",
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	if fields["customfield_10042"] != "AI Platform" {
+		t.Errorf("customfield_10042 = %v, want %q", fields["customfield_10042"], "AI Platform")
+	}
+}
+
+func TestFieldMapperIssueToTrackerIncludesJSONObjectCustomField(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		customFields: map[string]interface{}{
+			"customfield_10042": map[string]interface{}{"value": "AI Platform"},
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	field, ok := fields["customfield_10042"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("customfield_10042 type = %T, want map[string]interface{}", fields["customfield_10042"])
+	}
+	if field["value"] != "AI Platform" {
+		t.Errorf("customfield_10042.value = %v, want %q", field["value"], "AI Platform")
+	}
+}
+
+func TestFieldMapperIssueToTrackerAppliesPerTypeCustomFields(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		typeCustomFields: map[string]map[string]interface{}{
+			"Story": {
+				"Team": "AI Platform",
+			},
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	if fields["Team"] != "AI Platform" {
+		t.Errorf("Team = %v, want %q", fields["Team"], "AI Platform")
+	}
+}
+
+func TestFieldMapperIssueToTrackerPerTypeCustomFieldsOverrideGlobal(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		customFields: map[string]interface{}{
+			"Team": "Global Team",
+		},
+		typeCustomFields: map[string]map[string]interface{}{
+			"story": {
+				"Team": "Story Team",
+			},
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	if fields["Team"] != "Story Team" {
+		t.Errorf("Team = %v, want %q", fields["Team"], "Story Team")
+	}
+}
+
+func TestFieldMapperIssueToTrackerIgnoresNonMatchingPerTypeCustomFields(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		typeCustomFields: map[string]map[string]interface{}{
+			"Epic": {
+				"Team": "AI Platform",
+			},
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	if _, ok := fields["Team"]; ok {
+		t.Errorf("Team = %v, want unset for non-matching type", fields["Team"])
+	}
+}
+
 func TestFieldMapperDescriptionV3UsesADF(t *testing.T) {
 	mapper := &jiraFieldMapper{apiVersion: "3"}
 	issue := &types.Issue{Title: "T", Description: "Hello world"}
@@ -815,6 +918,133 @@ func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
 	}
 	if tr.priorityMap["2"] != "Normal" {
 		t.Errorf("priorityMap[\"2\"] = %q, want %q", tr.priorityMap["2"], "Normal")
+	}
+}
+
+func TestInitLoadsCustomFieldsFromAllConfig(t *testing.T) {
+	store := &configStore{
+		data: map[string]string{
+			"jira.url":                                  "https://example.atlassian.net",
+			"jira.project":                              "PROJ",
+			"jira.api_token":                            "token123",
+			"jira.custom_fields.Team":                   "Global Team",
+			"jira.custom_fields.customfield_10042":      `{"value":"AI Platform"}`,
+			"jira.custom_fields.Story.Team":             "Story Team",
+			"jira.custom_fields.Initiative.customfield": "Initiative Value",
+		},
+	}
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), store); err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	if tr.customFields == nil {
+		t.Fatal("customFields should not be nil after Init with jira.custom_fields.* config")
+	}
+	if tr.customFields["Team"] != "Global Team" {
+		t.Errorf("customFields[\"Team\"] = %v, want %q", tr.customFields["Team"], "Global Team")
+	}
+	field, ok := tr.customFields["customfield_10042"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("customFields[\"customfield_10042\"] type = %T, want map[string]interface{}", tr.customFields["customfield_10042"])
+	}
+	if field["value"] != "AI Platform" {
+		t.Errorf("customFields[\"customfield_10042\"].value = %v, want %q", field["value"], "AI Platform")
+	}
+
+	if tr.typeCustomFields == nil {
+		t.Fatal("typeCustomFields should not be nil after Init with per-type jira.custom_fields.* config")
+	}
+	if tr.typeCustomFields["Story"]["Team"] != "Story Team" {
+		t.Errorf("typeCustomFields[\"Story\"][\"Team\"] = %v, want %q", tr.typeCustomFields["Story"]["Team"], "Story Team")
+	}
+	if tr.typeCustomFields["Initiative"]["customfield"] != "Initiative Value" {
+		t.Errorf("typeCustomFields[\"Initiative\"][\"customfield\"] = %v, want %q", tr.typeCustomFields["Initiative"]["customfield"], "Initiative Value")
+	}
+
+	mapper := tr.FieldMapper()
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+	if fields["Team"] != "Story Team" {
+		t.Errorf("FieldMapper Team = %v, want per-type override %q", fields["Team"], "Story Team")
+	}
+	field, ok = fields["customfield_10042"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("FieldMapper customfield_10042 type = %T, want map[string]interface{}", fields["customfield_10042"])
+	}
+	if field["value"] != "AI Platform" {
+		t.Errorf("FieldMapper customfield_10042.value = %v, want %q", field["value"], "AI Platform")
+	}
+}
+
+func TestParseJiraCustomFieldValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		check func(t *testing.T, got interface{})
+	}{
+		{
+			name:  "string",
+			value: " AI Platform ",
+			check: func(t *testing.T, got interface{}) {
+				if got != "AI Platform" {
+					t.Errorf("got = %v, want %q", got, "AI Platform")
+				}
+			},
+		},
+		{
+			name:  "object",
+			value: `{"value":"AI Platform"}`,
+			check: func(t *testing.T, got interface{}) {
+				field, ok := got.(map[string]interface{})
+				if !ok {
+					t.Fatalf("got type = %T, want map[string]interface{}", got)
+				}
+				if field["value"] != "AI Platform" {
+					t.Errorf("got.value = %v, want %q", field["value"], "AI Platform")
+				}
+			},
+		},
+		{
+			name:  "array",
+			value: `[{"id":"10042"}]`,
+			check: func(t *testing.T, got interface{}) {
+				values, ok := got.([]interface{})
+				if !ok {
+					t.Fatalf("got type = %T, want []interface{}", got)
+				}
+				if len(values) != 1 {
+					t.Fatalf("len(got) = %d, want 1", len(values))
+				}
+				field, ok := values[0].(map[string]interface{})
+				if !ok {
+					t.Fatalf("got[0] type = %T, want map[string]interface{}", values[0])
+				}
+				if field["id"] != "10042" {
+					t.Errorf("got[0].id = %v, want %q", field["id"], "10042")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseJiraCustomFieldValue(tt.value)
+			if err != nil {
+				t.Fatalf("parseJiraCustomFieldValue error: %v", err)
+			}
+			tt.check(t, got)
+		})
+	}
+}
+
+func TestParseJiraCustomFieldValueInvalidJSON(t *testing.T) {
+	if _, err := parseJiraCustomFieldValue(`{"value":`); err == nil {
+		t.Fatal("parseJiraCustomFieldValue should reject invalid JSON object values")
 	}
 }
 

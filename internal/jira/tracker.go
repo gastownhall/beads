@@ -2,6 +2,7 @@ package jira
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -21,14 +22,16 @@ func init() {
 
 // Tracker implements tracker.IssueTracker for Jira.
 type Tracker struct {
-	client      *Client
-	store       storage.Storage
-	jiraURL     string
-	projectKeys []string          // one or more project keys (first is primary)
-	apiVersion  string            // "2" or "3" (default: "3")
-	statusMap   map[string]string // beads status → Jira status name (from jira.status_map.* config)
-	typeMap     map[string]string // beads type → Jira type (from jira.type_map.* config)
-	priorityMap map[string]string // beads priority → Jira priority name (from jira.priority_map.* config)
+	client           *Client
+	store            storage.Storage
+	jiraURL          string
+	projectKeys      []string                          // one or more project keys (first is primary)
+	apiVersion       string                            // "2" or "3" (default: "3")
+	statusMap        map[string]string                 // beads status → Jira status name (from jira.status_map.* config)
+	typeMap          map[string]string                 // beads type → Jira type (from jira.type_map.* config)
+	priorityMap      map[string]string                 // beads priority → Jira priority name (from jira.priority_map.* config)
+	customFields     map[string]interface{}            // Jira field name/id → value (from jira.custom_fields.* config)
+	typeCustomFields map[string]map[string]interface{} // Jira issue type → Jira field name/id → value
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -122,6 +125,41 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 		}
 		if len(priorityMap) > 0 {
 			t.priorityMap = priorityMap
+		}
+
+		const customFieldPrefix = "jira.custom_fields."
+		customFields := make(map[string]interface{})
+		typeCustomFields := make(map[string]map[string]interface{})
+		for key, val := range allConfig {
+			if !strings.HasPrefix(key, customFieldPrefix) || val == "" {
+				continue
+			}
+
+			suffix := strings.TrimPrefix(key, customFieldPrefix)
+			if suffix == "" {
+				continue
+			}
+
+			parsed, err := parseJiraCustomFieldValue(val)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", key, err)
+			}
+
+			parts := strings.SplitN(suffix, ".", 2)
+			if len(parts) == 2 {
+				if typeCustomFields[parts[0]] == nil {
+					typeCustomFields[parts[0]] = make(map[string]interface{})
+				}
+				typeCustomFields[parts[0]][parts[1]] = parsed
+				continue
+			}
+			customFields[suffix] = parsed
+		}
+		if len(customFields) > 0 {
+			t.customFields = customFields
+		}
+		if len(typeCustomFields) > 0 {
+			t.typeCustomFields = typeCustomFields
 		}
 	}
 
@@ -272,7 +310,14 @@ func (t *Tracker) applyTransition(ctx context.Context, key string, status types.
 }
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
-	return &jiraFieldMapper{apiVersion: t.apiVersion, statusMap: t.statusMap, typeMap: t.typeMap, priorityMap: t.priorityMap}
+	return &jiraFieldMapper{
+		apiVersion:       t.apiVersion,
+		statusMap:        t.statusMap,
+		typeMap:          t.typeMap,
+		priorityMap:      t.priorityMap,
+		customFields:     t.customFields,
+		typeCustomFields: t.typeCustomFields,
+	}
 }
 
 func (t *Tracker) IsExternalRef(ref string) bool {
@@ -299,6 +344,21 @@ func (t *Tracker) getConfig(ctx context.Context, key, envVar string) (string, er
 		}
 	}
 	return "", nil
+}
+
+func parseJiraCustomFieldValue(value string) (interface{}, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+			return nil, err
+		}
+		return parsed, nil
+	}
+	return trimmed, nil
 }
 
 // jiraToTrackerIssue converts a Jira API Issue to the generic TrackerIssue format.
