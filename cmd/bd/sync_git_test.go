@@ -170,6 +170,8 @@ func TestGitURLToDoltRemote(t *testing.T) {
 		{"git@github.com:org/repo.git", "git+ssh://git@github.com/org/repo.git"},
 		{"git+https://github.com/org/repo.git", "git+https://github.com/org/repo.git"},
 		{"git+ssh://git@github.com/org/repo.git", "git+ssh://git@github.com/org/repo.git"},
+		{"C:/Users/alice/repos/beads.git", "git+C:/Users/alice/repos/beads.git"},
+		{`D:\repos\beads.git`, `git+D:\repos\beads.git`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

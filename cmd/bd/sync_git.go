@@ -110,12 +110,24 @@ func gitURLToDoltRemote(url string) string {
 	if strings.HasPrefix(url, "ssh://") {
 		return "git+" + url
 	}
+	if isWindowsDrivePath(url) {
+		return "git+" + url
+	}
 	// SCP-style: git@github.com:org/repo.git → git+ssh://git@github.com/org/repo.git
 	if idx := strings.Index(url, ":"); idx > 0 && !strings.Contains(url[:idx], "/") {
 		return "git+ssh://" + url[:idx] + "/" + url[idx+1:]
 	}
 	// Fallback: just prepend git+
 	return "git+" + url
+}
+
+func isWindowsDrivePath(path string) bool {
+	if len(path) < 3 || path[1] != ':' {
+		return false
+	}
+	drive := path[0]
+	return ((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) &&
+		(path[2] == '/' || path[2] == '\\')
 }
 
 // gitBranchHasUpstream checks if a specific branch has an upstream configured.
