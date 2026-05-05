@@ -36,6 +36,5 @@ CREATE TABLE IF NOT EXISTS linear_sync_items (
     error_message TEXT DEFAULT '',
     INDEX idx_sync_items_run (sync_run_id),
     INDEX idx_sync_items_bead (bead_id),
-    INDEX idx_sync_items_outcome (outcome),
-    CONSTRAINT fk_sync_items_run FOREIGN KEY (sync_run_id) REFERENCES linear_sync_runs(sync_run_id) ON DELETE CASCADE
+    INDEX idx_sync_items_outcome (outcome)
 );
