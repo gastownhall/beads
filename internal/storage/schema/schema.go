@@ -35,6 +35,47 @@ func defaultStderr() io.Writer {
 	return io.Discard
 }
 
+// progressOut is where migration progress lines are written. Defaults to
+// os.Stderr so that JSON pipelines on stdout (e.g. bd list --json | jq) are
+// not polluted. Unexported so tests in this package can swap it without
+// leaking a setter into production API.
+var progressOut io.Writer = os.Stderr
+
+const largeRigThreshold = 10000
+
+// issueRowCounter returns the current issues-table row count, or an error if
+// the table is unreachable (fresh install → table doesn't exist yet). The
+// caller uses the error as the "no warning" signal. Variable so tests in this
+// package that exercise runMigrations against a non-DB mock can stub out the
+// query without panicking on QueryRowContext.
+var issueRowCounter = func(ctx context.Context, db DBConn) (int64, error) {
+	var n int64
+	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&n)
+	return n, err
+}
+
+// emitLargeRigNotice writes the one-line large-rig warning to out when the
+// issues count exceeds largeRigThreshold. An error from the counter is
+// treated as "fresh install / table missing" and suppresses the warning —
+// see be-8ja for the UX rationale.
+func emitLargeRigNotice(out io.Writer, count int64, err error) {
+	if err != nil || count <= largeRigThreshold {
+		return
+	}
+	fmt.Fprintf(out, "Large rig detected (%d issues). This migration may take up to 90 seconds; do not interrupt.\n", count)
+}
+
+// humanMigrationName turns "0033_add_date_indexes.up.sql" into
+// "add_date_indexes" for the progress line.
+func humanMigrationName(filename string) string {
+	s := strings.TrimSuffix(filename, ".up.sql")
+	parts := strings.SplitN(s, "_", 2)
+	if len(parts) < 2 {
+		return s
+	}
+	return parts[1]
+}
+
 // DBConn is the minimal interface satisfied by *sql.DB, *sql.Tx, and *sql.Conn.
 // It provides query and exec methods needed by the migration runner.
 type DBConn interface {
