@@ -1,0 +1,21 @@
+# Loop.count — fixed-iteration loop.
+#
+# A step with `loop.count = N` is replaced at cook time by N copies of its
+# `loop.body`. Each copy gets the iteration index baked into its step ID:
+# the body step `work` becomes `process.iter1.work`, `process.iter2.work`,
+# `process.iter3.work`. The smoke harness asserts those three IDs exist.
+formula = "loop-count"
+description = "Loop.count: expand body 3 times into .iter1.work, .iter2.work, .iter3.work."
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "process"
+title = "Process items"
+
+[steps.loop]
+count = 3
+
+[[steps.loop.body]]
+id = "work"
+title = "Do unit of work"
