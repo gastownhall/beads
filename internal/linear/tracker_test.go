@@ -35,6 +35,24 @@ func teamStatesResp(teamID, stateID, stateName, stateType string) map[string]int
 	}
 }
 
+// teamLabelsEmptyResp builds a paginated TeamLabels GraphQL response with no labels.
+func teamLabelsEmptyResp(teamID string) map[string]interface{} {
+	return map[string]interface{}{
+		"data": map[string]interface{}{
+			"team": map[string]interface{}{
+				"id": teamID,
+				"labels": map[string]interface{}{
+					"nodes": []interface{}{},
+					"pageInfo": map[string]interface{}{
+						"hasNextPage": false,
+						"endCursor":   "",
+					},
+				},
+			},
+		},
+	}
+}
+
 // issueByIdentifierResp builds the JSON body for an IssueByIdentifier GraphQL response.
 func issueByIdentifierResp(id, identifier, title, description string, priority int, stateID, stateName, stateType string) map[string]interface{} {
 	return map[string]interface{}{
@@ -78,6 +96,8 @@ func TestBatchPush_SkipsUnchangedIssue(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			// Remote issue has the same title, empty description, priority 0 (no
 			// priority), and "backlog" state — matching the local issue exactly.
@@ -150,6 +170,8 @@ func TestBatchPush_ForceBypassesSkip(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			// Return the same content as local (would be skipped without force).
 			json.NewEncoder(w).Encode(issueByIdentifierResp(
@@ -217,6 +239,8 @@ func TestBatchPush_BatchCreateMappingByTitle(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "issueBatchCreate"):
 			// Return the two issues in REVERSE order to expose index-based mapping bugs.
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -306,6 +330,8 @@ func TestBatchPush_PerTeamStateCache(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-2", "t2-state-open", "Ready", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-2"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			// Return the issue with DIFFERENT title so PushFieldsEqual = false and we proceed.
 			json.NewEncoder(w).Encode(issueByIdentifierResp(
@@ -340,6 +366,8 @@ func TestBatchPush_PerTeamStateCache(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "t1-state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			// Team-1 does not own this issue; return an empty result.
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -403,6 +431,8 @@ func TestBatchPush_DuplicateTitlesFallbackToSingleCreate(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "FindByDescription"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
@@ -509,6 +539,8 @@ func TestBatchPush_AmbiguousBatchFailureSearchesMarkers(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "issueBatchCreate"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
@@ -901,7 +933,7 @@ func TestCreateIssueNoDoubleFormatDescription(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 
-		if strings.Contains(req.Query, "TeamStates") || strings.Contains(req.Query, "team(") {
+		if strings.Contains(req.Query, "TeamStates") {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
 					"team": map[string]interface{}{
@@ -914,6 +946,11 @@ func TestCreateIssueNoDoubleFormatDescription(t *testing.T) {
 					},
 				},
 			})
+			return
+		}
+
+		if strings.Contains(req.Query, "TeamLabels") {
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 			return
 		}
 
