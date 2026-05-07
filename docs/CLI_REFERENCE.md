@@ -244,6 +244,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd formula](#bd-formula) — Manage workflow formulas
   - [bd formula convert](#bd-formula-convert) — Convert formula from JSON to TOML
   - [bd formula list](#bd-formula-list) — List available formulas
+  - [bd formula schema](#bd-formula-schema) — Show the formula primitive index (every exported struct in types.go)
   - [bd formula show](#bd-formula-show) — Show formula details
 - [bd github](#bd-github) — GitHub integration commands
   - [bd github pull](#bd-github-pull) — Pull specific items from GitHub
@@ -5697,8 +5698,16 @@ Search paths (in order):
   4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
 
 Commands:
-  list   List available formulas from all search paths
-  show   Show formula details, steps, and composition rules
+  list    List available formulas from all search paths
+  show    Show formula details, steps, and composition rules
+  schema  Show the formula primitive index (alias: primitives)
+
+Discovering primitives:
+  bd formula schema                 # list every primitive an agent can write
+  bd formula schema loop            # show LoopSpec fields, types, and tags
+  bd formula primitives on_complete # alias; same handler as 'schema'
+  examples/formulas/primitives/     # curated, smoke-tested fixtures
+  website/docs/workflows/formulas.md  # narrative reference
 
 ```
 bd formula
@@ -5747,6 +5756,9 @@ Search paths (in order of priority):
 
 Formulas in earlier paths shadow those with the same name in later paths.
 
+To list the formula primitives an agent can write inside a .formula.toml,
+use 'bd formula schema' (alias: 'bd formula primitives').
+
 Examples:
   bd formula list
   bd formula list --json
@@ -5763,6 +5775,29 @@ bd formula list [flags]
       --type string   Filter by type (workflow, expansion, aspect, convoy)
 ```
 
+#### bd formula schema
+
+Show the formula primitive index — every exported struct an agent can write
+in a .formula.toml/.formula.json, with field names, types, and tags.
+
+The index is generated from internal/formula/types.go via go:generate; the
+struct definitions are the source of truth, so this list cannot drift.
+
+Examples:
+  bd formula schema                 # list every primitive
+  bd formula schema loop            # show LoopSpec fields
+  bd formula primitives on_complete # alias; shows OnCompleteSpec
+  bd formula schema --json          # machine-readable index
+
+Curated example fixtures for each wired primitive live in
+examples/formulas/primitives/ (with a smoke harness that proves they work).
+
+```
+bd formula schema [primitive]
+```
+
+**Aliases:** primitives
+
 #### bd formula show
 
 Show detailed information about a formula.
@@ -5773,6 +5808,9 @@ Displays:
   - Steps with dependencies
   - Composition rules (extends, aspects, expansions)
   - Bond points for external composition
+
+To inspect the structure of an individual primitive (e.g. LoopSpec, Gate)
+rather than a user-authored formula, use 'bd formula schema &lt;primitive&gt;'.
 
 Examples:
   bd formula show shiny
