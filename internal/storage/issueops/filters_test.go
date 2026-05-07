@@ -288,6 +288,99 @@ func TestBuildIssueFilterClauses_ExcludeLabelsWithInclude(t *testing.T) {
 	}
 }
 
+// TestBuildIssueFilterClauses_LabelPattern covers be-ucslk4: the LabelPattern
+// field on IssueFilter was previously set by the cobra layer but never
+// consumed by BuildIssueFilterClauses, so --label-pattern silently returned
+// the full set instead of filtering. This test pins the SQL emission so the
+// regression cannot recur.
+func TestBuildIssueFilterClauses_LabelPattern(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{LabelPattern: "tech-*"}
+	clauses, args, err := BuildIssueFilterClauses("", filter, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause for LabelPattern, got %d: %v", len(clauses), clauses)
+	}
+	if !strings.Contains(clauses[0], "label LIKE ? ESCAPE '|'") {
+		t.Errorf("expected LIKE ESCAPE clause, got %q", clauses[0])
+	}
+	if !strings.Contains(clauses[0], "FROM labels") {
+		t.Errorf("expected subquery against labels table, got %q", clauses[0])
+	}
+	if len(args) != 1 || args[0] != "tech-%" {
+		t.Errorf("expected glob 'tech-*' converted to LIKE 'tech-%%', got %v", args)
+	}
+}
+
+func TestBuildIssueFilterClauses_LabelPatternWispsTable(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{LabelPattern: "back*"}
+	clauses, _, err := BuildIssueFilterClauses("", filter, WispsFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause, got %d", len(clauses))
+	}
+	if !strings.Contains(clauses[0], "FROM wisp_labels") {
+		t.Errorf("expected subquery against wisp_labels table, got %q", clauses[0])
+	}
+}
+
+// TestBuildIssueFilterClauses_LabelRegex covers be-ucslk4 for the regex
+// variant: --label-regex was likewise being dropped on the floor.
+func TestBuildIssueFilterClauses_LabelRegex(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{LabelRegex: "needs-.*"}
+	clauses, args, err := BuildIssueFilterClauses("", filter, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause for LabelRegex, got %d: %v", len(clauses), clauses)
+	}
+	if !strings.Contains(clauses[0], "label REGEXP ?") {
+		t.Errorf("expected REGEXP clause, got %q", clauses[0])
+	}
+	if len(args) != 1 || args[0] != "needs-.*" {
+		t.Errorf("expected regex passed through verbatim, got %v", args)
+	}
+}
+
+func TestGlobToLikePattern(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "trailing star", in: "tech-*", want: "tech-%"},
+		{name: "surrounding stars", in: "*foo*", want: "%foo%"},
+		{name: "question mark", in: "v?", want: "v_"},
+		{name: "literal percent", in: "5%", want: "5|%"},
+		{name: "literal underscore", in: "snake_case", want: "snake|_case"},
+		{name: "literal pipe", in: "a|b", want: "a||b"},
+		{name: "no metachars", in: "needs-pm", want: "needs-pm"},
+		{name: "empty", in: "", want: ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := globToLikePattern(tc.in)
+			if got != tc.want {
+				t.Errorf("globToLikePattern(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildIssueFilterClauses_DateFilters(t *testing.T) {
 	t.Parallel()
 
