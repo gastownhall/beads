@@ -153,6 +153,10 @@ type MappingConfig struct {
 	// RelationMap maps Linear relation types to Beads dependency types.
 	// Key is Linear relation type, value is Beads dependency type.
 	RelationMap map[string]string
+
+	// CustomStatuses holds typed entries from status.custom (beads config).
+	// Used for push-time state_map validation and matching non-built-in statuses.
+	CustomStatuses []types.CustomStatus
 }
 
 // DefaultMappingConfig returns sensible default mappings.
@@ -231,6 +235,16 @@ func LoadMappingConfig(loader ConfigLoader) *MappingConfig {
 	}
 
 	for key, value := range allConfig {
+		if key == "status.custom" {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				if custom, err := types.ParseCustomStatusConfig(value); err == nil {
+					config.CustomStatuses = custom
+				}
+			}
+			continue
+		}
+
 		// Parse priority mappings: linear.priority_map.<linear_priority>
 		if strings.HasPrefix(key, "linear.priority_map.") {
 			linearPriority := strings.TrimPrefix(key, "linear.priority_map.")
@@ -338,7 +352,14 @@ func stateMapMatchesStatus(mapped string, status types.Status) bool {
 	if normalizedMapped == normalizedStatus {
 		return true
 	}
-	if status.IsValid() && ParseBeadsStatus(mapped) == status {
+	parsed := ParseBeadsStatus(mapped)
+	if parsed == status {
+		// ParseBeadsStatus returns StatusOpen for unrecognized strings; do not
+		// treat those as matching built-in open (avoids false "ambiguous mapping"
+		// when state_map values are custom status names like "review").
+		if parsed == types.StatusOpen && normalizedMapped != "open" {
+			return false
+		}
 		return true
 	}
 	return false

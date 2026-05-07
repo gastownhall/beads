@@ -613,6 +613,7 @@ func TestLoadMappingConfig(t *testing.T) {
 			"linear.state_map.custom":     "in_progress",
 			"linear.label_type_map.story": "feature",
 			"linear.relation_map.parent":  "parent-child",
+			"status.custom":               "review:active",
 		},
 	}
 
@@ -644,6 +645,10 @@ func TestLoadMappingConfig(t *testing.T) {
 	// Check that defaults are preserved
 	if config.StateMap["started"] != "in_progress" {
 		t.Errorf("StateMap[started] = %s, want in_progress (default preserved)", config.StateMap["started"])
+	}
+
+	if len(config.CustomStatuses) != 1 || config.CustomStatuses[0].Name != "review" {
+		t.Fatalf("CustomStatuses = %#v, want one entry named review", config.CustomStatuses)
 	}
 }
 
@@ -897,6 +902,54 @@ func TestLoadMappingConfigParsesOutboundStateMap(t *testing.T) {
 	// Defaults still empty for unset keys.
 	if got, ok := config.OutboundStateMap["closed"]; ok {
 		t.Errorf("OutboundStateMap[closed] = %q, want unset", got)
+	}
+}
+
+// Regression GH#3754: explicit state_map values that are custom status names
+// must not parse as StatusOpen and create phantom matches for beads "open".
+func TestResolveStateIDForBeadsStatusCustomValueDoesNotFalseMatchOpen(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			{ID: "state-review", Name: "In Review", Type: "unstarted"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["todo"] = "open"
+	config.ExplicitStateMap["in review"] = "review"
+
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusOpen, config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus(open) error = %v", err)
+	}
+	if got != "state-todo" {
+		t.Fatalf("ResolveStateIDForBeadsStatus(open) = %q, want state-todo", got)
+	}
+
+	got2, err := ResolveStateIDForBeadsStatus(cache, types.Status("review"), config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus(review) error = %v", err)
+	}
+	if got2 != "state-review" {
+		t.Fatalf("ResolveStateIDForBeadsStatus(review) = %q, want state-review", got2)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusDeferredExplicitMapping(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-icebox", Name: "Icebox", Type: "unstarted"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["icebox"] = "deferred"
+
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusDeferred, config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus() error = %v", err)
+	}
+	if got != "state-icebox" {
+		t.Fatalf("ResolveStateIDForBeadsStatus() = %q, want state-icebox", got)
 	}
 }
 
