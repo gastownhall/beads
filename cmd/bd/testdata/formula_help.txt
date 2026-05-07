@@ -1,0 +1,19 @@
+# Test that bd formula --help surfaces the primitive-discoverability pointers.
+#
+# Failure of any of these assertions means an agent reading 'bd formula --help'
+# would not be told that 'bd formula schema' / 'bd formula primitives' /
+# examples/formulas/primitives/ exist. That is the exact failure mode GH#3621
+# is closing, so this test is the regression gate.
+bd formula --help
+stdout 'bd formula schema'
+stdout 'bd formula primitives'
+stdout 'examples/formulas/primitives/'
+stdout 'website/docs/workflows/formulas.md'
+
+# The list and show subcommands also point at the schema index so agents
+# arriving via either subcommand find the primitive surface.
+bd formula list --help
+stdout 'bd formula schema'
+
+bd formula show --help
+stdout 'bd formula schema'
