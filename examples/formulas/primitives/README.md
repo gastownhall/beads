@@ -15,16 +15,20 @@ and exercises exactly one primitive.
 | `condition.formula.toml`      | `Step.condition`   | Variable-driven step inclusion at cook time. |
 | `gate-timer.formula.toml`     | `Step.gate`        | Sibling `gate`-typed issue with `await_type` blocks the target step. |
 
-For the full primitive index — every exported struct an agent can write
-inside a `.formula.toml`/`.formula.json`, with field types and tags —
+For the full schema index - every exported struct declared in
+`internal/formula/types.go`, with field types and tags -
 run:
 
 ```sh
-bd formula schema                 # list every primitive
+bd formula schema                 # list every declared schema struct
 bd formula schema loop            # show LoopSpec fields
-bd formula primitives on_complete # alias
+bd formula primitives gate        # alias
 bd formula schema --json          # machine-readable
 ```
+
+Treat `bd formula schema` as structural reference. Treat this directory
+as the verified authoring surface: every fixture here is smoke-tested for
+an observable parse-to-cook effect.
 
 ## Smoke harness
 

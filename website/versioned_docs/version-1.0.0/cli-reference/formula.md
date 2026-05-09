@@ -24,13 +24,13 @@ Search paths (in order):
 Commands:
   list    List available formulas from all search paths
   show    Show formula details, steps, and composition rules
-  schema  Show the formula primitive index (alias: primitives)
+  schema  Show the formula schema index (alias: primitives)
 
 Discovering primitives:
-  bd formula schema                 # list every primitive an agent can write
+  bd formula schema                 # list every declared formula struct
   bd formula schema loop            # show LoopSpec fields, types, and tags
-  bd formula primitives on_complete # alias; same handler as 'schema'
-  examples/formulas/primitives/     # curated, smoke-tested fixtures
+  bd formula primitives gate        # alias; same handler as 'schema'
+  examples/formulas/primitives/     # curated, smoke-tested wired fixtures
   website/docs/workflows/formulas.md  # narrative reference
 
 ```
@@ -80,7 +80,7 @@ Search paths (in order of priority):
 
 Formulas in earlier paths shadow those with the same name in later paths.
 
-To list the formula primitives an agent can write inside a .formula.toml,
+To list the declared formula schema structs an agent can write inside a .formula.toml,
 use 'bd formula schema' (alias: 'bd formula primitives').
 
 Examples:
@@ -101,19 +101,20 @@ bd formula list [flags]
 
 ### bd formula schema
 
-Show the formula primitive index — every exported struct an agent can write
+Show the formula schema index: every exported struct declared
 in a .formula.toml/.formula.json, with field names, types, and tags.
 
 The index is generated from internal/formula/types.go via go:generate; the
-struct definitions are the source of truth, so this list cannot drift.
+struct definitions are the source of truth, so this list cannot drift. It is
+structural reference, not proof that every declared runtime behavior is wired.
 
 Examples:
-  bd formula schema                 # list every primitive
+  bd formula schema                 # list every declared schema struct
   bd formula schema loop            # show LoopSpec fields
-  bd formula primitives on_complete # alias; shows OnCompleteSpec
+  bd formula primitives gate        # alias; shows Gate fields
   bd formula schema --json          # machine-readable index
 
-Curated example fixtures for each wired primitive live in
+Curated smoke-tested fixtures for wired primitives live in
 examples/formulas/primitives/ (with a smoke harness that proves they work).
 
 ```

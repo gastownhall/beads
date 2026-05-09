@@ -13,20 +13,21 @@ import (
 var formulaSchemaCmd = &cobra.Command{
 	Use:     "schema [primitive]",
 	Aliases: []string{"primitives"},
-	Short:   "Show the formula primitive index (every exported struct in types.go)",
-	Long: `Show the formula primitive index — every exported struct an agent can write
+	Short:   "Show the formula schema index (every exported struct in types.go)",
+	Long: `Show the formula schema index: every exported struct declared
 in a .formula.toml/.formula.json, with field names, types, and tags.
 
 The index is generated from internal/formula/types.go via go:generate; the
-struct definitions are the source of truth, so this list cannot drift.
+struct definitions are the source of truth, so this list cannot drift. It is
+structural reference, not proof that every declared runtime behavior is wired.
 
 Examples:
-  bd formula schema                 # list every primitive
+  bd formula schema                 # list every declared schema struct
   bd formula schema loop            # show LoopSpec fields
-  bd formula primitives on_complete # alias; shows OnCompleteSpec
+  bd formula primitives gate        # alias; shows Gate fields
   bd formula schema --json          # machine-readable index
 
-Curated example fixtures for each wired primitive live in
+Curated smoke-tested fixtures for wired primitives live in
 examples/formulas/primitives/ (with a smoke harness that proves they work).`,
 	Args: cobra.MaximumNArgs(1),
 	Run:  runFormulaSchema,
@@ -46,12 +47,13 @@ func runFormulaSchemaList() {
 		return
 	}
 
-	fmt.Printf("Formula primitives (%d):\n\n", len(formula.Primitives))
+	fmt.Printf("Formula schema structs (%d):\n\n", len(formula.Primitives))
 	for _, p := range formula.Primitives {
 		fmt.Printf("  %-18s %s\n", p.Name, firstDocLine(p.Doc))
 	}
-	fmt.Printf("\n%s\n", ui.RenderMuted("Show fields:  bd formula schema <name>"))
-	fmt.Printf("%s\n", ui.RenderMuted("Examples:     examples/formulas/primitives/"))
+	fmt.Printf("\n%s\n", ui.RenderMuted("Show fields:       bd formula schema <name>"))
+	fmt.Printf("%s\n", ui.RenderMuted("Wired examples:    examples/formulas/primitives/"))
+	fmt.Printf("%s\n", ui.RenderMuted("Note: schema output is structural; smoke-tested examples are the verified authoring surface."))
 }
 
 func runFormulaSchemaShow(name string) {

@@ -256,24 +256,10 @@ The `max` field is required for `until` loops to prevent unbounded iteration.
 
 ## Runtime Expansion (on_complete)
 
-Steps can trigger dynamic work when they complete using `on_complete` with `for_each`:
-
-```toml
-[[steps]]
-id = "survey"
-title = "Survey available workers"
-
-[steps.on_complete]
-for_each = "output.workers"
-bond = "worker-arm"
-parallel = true
-
-[steps.on_complete.vars]
-worker_name = "{item.name}"
-rig = "{item.rig}"
-```
-
-This creates a new molecule from the `worker-arm` formula for each item in the `output.workers` array. Use `sequential = true` instead of `parallel` to run them one at a time.
+`on_complete` is present in the formula schema, but runtime expansion is
+not wired end to end in the current release. Do not author new formulas
+that depend on `on_complete` creating follow-up molecules until the
+runtime implementation ships with a smoke-tested primitive example.
 
 ## Formula Inheritance
 
