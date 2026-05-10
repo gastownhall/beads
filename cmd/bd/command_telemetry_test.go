@@ -73,7 +73,7 @@ func TestCommandSpanAttrs_EmptyArgs(t *testing.T) {
 // contract: the function must always return a non-nil context and span.
 func TestStartCommandTelemetry_DisabledStillReturnsSpan(t *testing.T) {
 	clearTelemetryEnv(t)
-	ctx, span := startCommandTelemetry(context.Background(), "ready", "1.0.0", []string{"--json"}, nil)
+	ctx, span := startCommandTelemetry(context.Background(), "ready", "1.0.0", "bd", []string{"--json"}, nil)
 	if ctx == nil {
 		t.Fatal("startCommandTelemetry returned nil context")
 	}

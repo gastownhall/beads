@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -168,16 +169,16 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 
 	conn, err := s.db.Conn(ctx)
 	acquireMs := float64(time.Since(acquireStart).Microseconds()) / 1000.0
-	doltMetrics.connAcquireMs.Record(ctx, acquireMs)
+	doltMetrics.connAcquireMs.Record(ctx, acquireMs, telemetry.WithMergedAttrs())
 
 	// Detect pool-wait: if WaitCount increased, the pool was exhausted and
 	// this caller had to wait for a connection to become available.
 	if err == nil {
 		statsAfter := s.db.Stats()
 		if statsAfter.WaitCount > statsBefore.WaitCount {
-			doltMetrics.poolWaitCount.Add(ctx, statsAfter.WaitCount-statsBefore.WaitCount)
+			doltMetrics.poolWaitCount.Add(ctx, statsAfter.WaitCount-statsBefore.WaitCount, telemetry.WithMergedAttrs())
 			waitMs := float64(statsAfter.WaitDuration-statsBefore.WaitDuration) / float64(time.Millisecond)
-			doltMetrics.poolWaitMs.Record(ctx, waitMs)
+			doltMetrics.poolWaitMs.Record(ctx, waitMs, telemetry.WithMergedAttrs())
 		}
 	}
 
@@ -317,7 +318,7 @@ func (s *DoltStore) beginIgnoredTxOnBranch(ctx context.Context, branch string) (
 
 	// Fallback: a dedicated single-connection pool, paying the fresh dial the
 	// borrow path exists to avoid.
-	doltMetrics.ignoredTxFreshPool.Add(ctx, 1)
+	doltMetrics.ignoredTxFreshPool.Add(ctx, 1, telemetry.WithMergedAttrs())
 	db, err := sql.Open("mysql", s.connStr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open ignored tx connection: %w", err)

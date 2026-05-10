@@ -49,6 +49,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -772,7 +773,7 @@ func (s *DoltStore) withCircuitWrite(ctx context.Context, op func(context.Contex
 		return op(ctx)
 	}
 	if s.breaker != nil && !s.breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1)
+		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
 		return ErrCircuitOpen
 	}
 	err := op(context.WithValue(ctx, circuitWriteContextKey{}, struct{}{}))
@@ -785,7 +786,7 @@ func (s *DoltStore) withCircuitWrite(ctx context.Context, op func(context.Contex
 func (s *DoltStore) withRetryClassified(ctx context.Context, op func() error, retryable func(error) bool) error {
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if !circuitWriteManaged(ctx) && s.breaker != nil && !s.breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1)
+		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
 		return ErrCircuitOpen
 	}
 
@@ -796,7 +797,7 @@ func (s *DoltStore) withRetryClassified(ctx context.Context, op func() error, re
 		return s.classifyManagedRetry(ctx, op(), retryable)
 	}, backoff.WithContext(bo, ctx))
 	if attempts > 1 {
-		doltMetrics.retryCount.Add(ctx, int64(attempts-1))
+		doltMetrics.retryCount.Add(ctx, int64(attempts-1), telemetry.WithMergedAttrs())
 	}
 	return err
 }
@@ -845,7 +846,7 @@ func (s *DoltStore) recordRetryFailure(ctx context.Context, err error) error {
 	}
 	s.breaker.RecordFailure()
 	if s.breaker.State() == circuitOpen {
-		doltMetrics.circuitTrips.Add(ctx, 1)
+		doltMetrics.circuitTrips.Add(ctx, 1, telemetry.WithMergedAttrs())
 		return backoff.Permanent(fmt.Errorf("%w (circuit breaker tripped)", err))
 	}
 	return nil
@@ -936,7 +937,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Current number of open connections (in-use + idle)"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().OpenConnections))
+			o.Observe(int64(db.Stats().OpenConnections), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -944,7 +945,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Connections currently in use"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().InUse))
+			o.Observe(int64(db.Stats().InUse), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -952,7 +953,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Idle connections in pool"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().Idle))
+			o.Observe(int64(db.Stats().Idle), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -960,7 +961,7 @@ func (s *DoltStore) registerPoolGauges() {
 		metric.WithDescription("Maximum number of open connections (pool limit)"),
 		metric.WithUnit("{connection}"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().MaxOpenConnections))
+			o.Observe(int64(db.Stats().MaxOpenConnections), telemetry.WithMergedAttrs())
 			return nil
 		}),
 	)
@@ -1088,7 +1089,7 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	// withRetry from here would multiply retries and could replay a write after
 	// an indeterminate commit.
 	if !circuitWriteManaged(ctx) && s.breaker != nil && !s.breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1)
+		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
 		return ErrCircuitOpen
 	}
 
@@ -1110,8 +1111,8 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 		// land. This is the only 1105 replayed, and withRetryTx is the boundary
 		// that recreates the complete SQL transaction on every attempt.
 		if isDoltAutocommitRollbackError(err) {
-			doltMetrics.serializationErrors.Add(ctx, 1)
-			doltMetrics.writeRetries.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "serialization")))
+			doltMetrics.serializationErrors.Add(ctx, 1, telemetry.WithMergedAttrs())
+			doltMetrics.writeRetries.Add(ctx, 1, telemetry.WithMergedAttrs(attribute.String("type", "serialization")))
 			return err
 		}
 		// A commit result marked indeterminate may have landed before its
@@ -1123,19 +1124,19 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 		// Serialization failures (1213/1205) guarantee a server-side rollback,
 		// so the write never landed — safe to replay at any phase.
 		if isSerializationError(err) {
-			doltMetrics.serializationErrors.Add(ctx, 1)
-			doltMetrics.writeRetries.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "serialization")))
+			doltMetrics.serializationErrors.Add(ctx, 1, telemetry.WithMergedAttrs())
+			doltMetrics.writeRetries.Add(ctx, 1, telemetry.WithMergedAttrs(attribute.String("type", "serialization")))
 			return err // retryable
 		}
 		// Connection failures reaching this branch happened before commit;
 		// withWriteTx marks ambiguous commit response loss with the public
 		// ErrCommitIndeterminate sentinel above.
 		if isRetryableError(err) {
-			doltMetrics.writeRetries.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "connection")))
+			doltMetrics.writeRetries.Add(ctx, 1, telemetry.WithMergedAttrs(attribute.String("type", "connection")))
 			if s.breaker != nil && isConnectionError(err) {
 				s.breaker.RecordFailure()
 				if s.breaker.State() == circuitOpen {
-					doltMetrics.circuitTrips.Add(ctx, 1)
+					doltMetrics.circuitTrips.Add(ctx, 1, telemetry.WithMergedAttrs())
 					return backoff.Permanent(fmt.Errorf("%w (circuit breaker tripped)", err))
 				}
 			}
@@ -1671,7 +1672,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if breaker != nil && !breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1)
+		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
 		return nil, ErrCircuitOpen
 	}
 
@@ -3186,7 +3187,7 @@ func (s *DoltStore) recordDoltPublicationFailure(ctx context.Context, err error)
 	}
 	s.breaker.RecordFailure()
 	if s.breaker.State() == circuitOpen {
-		doltMetrics.circuitTrips.Add(ctx, 1)
+		doltMetrics.circuitTrips.Add(ctx, 1, telemetry.WithMergedAttrs())
 		return fmt.Errorf("%w (circuit breaker tripped)", err)
 	}
 	return err

@@ -203,7 +203,7 @@ func TestEnabled_SDKDisabledOverridesEverything(t *testing.T) {
 
 func TestBuildResource_DefaultServiceName(t *testing.T) {
 	clearAllEnv(t)
-	res, err := buildResource(context.Background(), "bd", "1.0.0")
+	res, err := buildResource(context.Background(), "bd", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("buildResource: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestBuildResource_DefaultServiceName(t *testing.T) {
 func TestBuildResource_OTELServiceNameOverridesDefault(t *testing.T) {
 	clearAllEnv(t)
 	t.Setenv("OTEL_SERVICE_NAME", "bd-assistant")
-	res, err := buildResource(context.Background(), "bd", "1.0.0")
+	res, err := buildResource(context.Background(), "bd", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("buildResource: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestBuildResource_OTELServiceNameOverridesDefault(t *testing.T) {
 func TestBuildResource_OTELResourceAttributesMerged(t *testing.T) {
 	clearAllEnv(t)
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=workstation,team=infra")
-	res, err := buildResource(context.Background(), "bd", "1.0.0")
+	res, err := buildResource(context.Background(), "bd", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("buildResource: %v", err)
 	}
@@ -275,7 +275,7 @@ func resetTelemetryState(t *testing.T) {
 func TestInit_NoOpWhenDisabled(t *testing.T) {
 	clearAllEnv(t)
 	resetTelemetryState(t)
-	if err := Init(context.Background(), "bd", "v0.0.0"); err != nil {
+	if err := Init(context.Background(), "bd", "v0.0.0", ""); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 }
@@ -293,7 +293,7 @@ func TestInit_LegacyEnvActivatesAndWarns(t *testing.T) {
 	os.Stderr = w
 	t.Cleanup(func() { os.Stderr = origStderr })
 
-	if err := Init(context.Background(), "bd", "v0.0.0"); err != nil {
+	if err := Init(context.Background(), "bd", "v0.0.0", ""); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	_ = w.Close()
@@ -326,7 +326,7 @@ func TestInit_StdoutExporters(t *testing.T) {
 		os.Stdout = origStdout
 	})
 
-	if err := Init(context.Background(), "bd", "v0.0.0"); err != nil {
+	if err := Init(context.Background(), "bd", "v0.0.0", ""); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 }
