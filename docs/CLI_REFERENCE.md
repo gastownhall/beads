@@ -100,10 +100,17 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd backup restore](#bd-backup-restore) — Restore database from a Dolt backup
   - [bd backup status](#bd-backup-status) — Show last backup status
   - [bd backup sync](#bd-backup-sync) — Push database to configured Dolt backup
-- [bd branch](#bd-branch) — List or create branches
+- [bd branch](#bd-branch) — List, create, or delete branches
+- [bd checkout](#bd-checkout) — Switch to a different branch
 - [bd export](#bd-export) — Export issues to JSONL format
-- [bd federation](#bd-federation) — Manage peer-to-peer federation (requires CGO)
+- [bd federation](#bd-federation) — Manage peer-to-peer federation with other workspaces
+  - [bd federation add-peer](#bd-federation-add-peer) — Add a federation peer with optional SQL credentials
+  - [bd federation list-peers](#bd-federation-list-peers) — List configured federation peers
+  - [bd federation remove-peer](#bd-federation-remove-peer) — Remove a federation peer
+  - [bd federation status](#bd-federation-status) — Show federation sync status
+  - [bd federation sync](#bd-federation-sync) — Synchronize with a peer town
 - [bd import](#bd-import) — Import issues from a JSONL file or stdin into the database
+- [bd merge](#bd-merge) — Merge a branch into the current branch
 - [bd restore](#bd-restore) — Restore the pre-compaction content of a compacted issue
 - [bd vc](#bd-vc) — Version control operations
   - [bd vc commit](#bd-vc-commit) — Create a commit with all staged changes
@@ -2332,17 +2339,40 @@ bd backup sync
 
 ### bd branch
 
-List all branches or create a new branch.
+List all branches, create a new branch, or delete an existing branch.
 
 This command requires the Dolt storage backend. Without arguments,
 it lists all branches. With an argument, it creates a new branch.
+With -d, it deletes the named branch.
 
 Examples:
   bd branch                    # List all branches
   bd branch feature-xyz        # Create a new branch named feature-xyz
+  bd branch -d feature-xyz     # Delete branch feature-xyz
 
 ```
-bd branch [name]
+bd branch [name] [flags]
+```
+
+**Flags:**
+
+```
+  -d, --delete   Delete the named branch
+```
+
+### bd checkout
+
+Switch the Dolt database to a different branch.
+
+This command requires the Dolt storage backend. The target branch
+must already exist (create one with 'bd branch &lt;name&gt;').
+
+Examples:
+  bd checkout main             # Switch to the main branch
+  bd checkout feature-xyz      # Switch to feature-xyz branch
+
+```
+bd checkout <branch>
 ```
 
 ### bd export
@@ -2388,17 +2418,114 @@ bd export [flags]
 
 ### bd federation
 
-Federation commands require CGO and the Dolt storage backend.
-
-This binary was built without CGO support. To use federation features:
-  1. Use pre-built binaries from GitHub releases, or
-  2. Build from source with CGO enabled
+Manage peer-to-peer federation between Dolt-backed beads databases.
 
 Federation enables synchronized issue tracking across multiple workspaces,
 each maintaining their own Dolt database while sharing updates via remotes.
 
+Requires the Dolt storage backend.
+
 ```
 bd federation
+```
+
+#### bd federation add-peer
+
+Add a new federation peer remote with optional SQL user authentication.
+
+The URL can be:
+  - dolthub://org/repo      DoltHub hosted repository
+  - host:port/database      Direct dolt sql-server connection
+  - file:///path/to/repo    Local file path (for testing)
+
+Credentials are encrypted and stored locally. They are used automatically
+when syncing with the peer. If --user is provided without --password,
+you will be prompted for the password interactively.
+
+Examples:
+  bd federation add-peer town-beta dolthub://acme/town-beta-beads
+  bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
+  bd federation add-peer partner https://partner.example.com/beads --user admin --password secret
+
+```
+bd federation add-peer <name> <url> [flags]
+```
+
+**Flags:**
+
+```
+  -p, --password string      SQL password (prompted if --user set without --password)
+      --sovereignty string   Sovereignty tier (T1, T2, T3, T4)
+  -u, --user string          SQL username for authentication
+```
+
+#### bd federation list-peers
+
+List configured federation peers
+
+```
+bd federation list-peers
+```
+
+#### bd federation remove-peer
+
+Remove a federation peer
+
+```
+bd federation remove-peer <name>
+```
+
+#### bd federation status
+
+Show synchronization status with peer towns.
+
+Displays:
+  - Configured peers and their URLs
+  - Commits ahead/behind each peer
+  - Whether there are unresolved conflicts
+
+Examples:
+  bd federation status                    # Status for all peers
+  bd federation status --peer town-beta   # Status for specific peer
+
+```
+bd federation status [--peer name] [flags]
+```
+
+**Flags:**
+
+```
+      --peer string   Specific peer to check
+```
+
+#### bd federation sync
+
+Pull from and push to peer towns.
+
+Without --peer, syncs with all configured peers.
+With --peer, syncs only with the specified peer.
+
+Handles merge conflicts using the configured strategy:
+  --strategy ours    Keep local changes on conflict
+  --strategy theirs  Accept remote changes on conflict
+
+If no strategy is specified and conflicts occur, the sync will pause
+and report which tables have conflicts for manual resolution.
+
+Examples:
+  bd federation sync                      # Sync with all peers
+  bd federation sync --peer town-beta     # Sync with specific peer
+  bd federation sync --strategy theirs    # Auto-resolve using remote values
+
+```
+bd federation sync [--peer name] [flags]
+```
+
+**Flags:**
+
+```
+      --peer string       Specific peer to sync with
+      --strategy string   Conflict resolution strategy (ours|theirs)
 ```
 
 ### bd import
@@ -2477,6 +2604,28 @@ bd import [file|-] [flags]
       --dedup          Skip lines whose title matches an existing open issue
       --dry-run        Show what would be imported without importing
   -i, --input string   Read JSONL from a specific file
+```
+
+### bd merge
+
+Merge the specified branch into the current branch.
+
+If there are merge conflicts, they will be reported. You can resolve
+conflicts automatically with --strategy ours|theirs.
+
+Examples:
+  bd merge feature-xyz                    # Merge feature-xyz into current branch
+  bd merge feature-xyz --strategy ours    # Merge, preferring our changes on conflict
+  bd merge feature-xyz --strategy theirs  # Merge, preferring their changes on conflict
+
+```
+bd merge <branch> [flags]
+```
+
+**Flags:**
+
+```
+      --strategy string   Conflict resolution strategy: 'ours' or 'theirs'
 ```
 
 ### bd restore
