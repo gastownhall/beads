@@ -919,8 +919,32 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 		})
 	}
 
+	// Pre-compute the waits_for spawner so we can dedupe against needs below.
+	// When waits_for has no explicit `from:`, it infers its spawner from
+	// needs[0] — and `needs` would otherwise emit a DepBlocks edge on the same
+	// (source, target) pair that `waits_for` emits a DepWaitsFor edge on.
+	// Storage rejects the duplicate. The DepWaitsFor edge subsumes the
+	// blocking semantics, so we skip the redundant DepBlocks for that
+	// specific target (GH#3783).
+	var waitsForSpec *formula.WaitsForSpec
+	var waitsForSpawnerStepID string
+	if step.WaitsFor != "" {
+		waitsForSpec = formula.ParseWaitsFor(step.WaitsFor)
+		if waitsForSpec != nil {
+			waitsForSpawnerStepID = waitsForSpec.SpawnerID
+			if waitsForSpawnerStepID == "" && len(step.Needs) > 0 {
+				waitsForSpawnerStepID = step.Needs[0]
+			}
+		}
+	}
+
 	// Process needs field - simpler alias for sibling dependencies
 	for _, needID := range step.Needs {
+		if needID == waitsForSpawnerStepID {
+			// This target is also the waits_for spawner; the DepWaitsFor edge
+			// emitted below subsumes the blocking semantics for this pair.
+			continue
+		}
 		needIssueID, ok := idMapping[needID]
 		if !ok {
 			continue // Will be caught during validation
@@ -934,24 +958,12 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 	}
 
 	// Process waits_for field - fanout gate dependency
-	if step.WaitsFor != "" {
-		waitsForSpec := formula.ParseWaitsFor(step.WaitsFor)
-		if waitsForSpec != nil {
-			// Determine spawner ID
-			spawnerStepID := waitsForSpec.SpawnerID
-			if spawnerStepID == "" && len(step.Needs) > 0 {
-				// Infer spawner from first need
-				spawnerStepID = step.Needs[0]
-			}
-
-			if spawnerStepID != "" {
-				if spawnerIssueID, ok := idMapping[spawnerStepID]; ok {
-					// Spawner identity is the depends_on_id; metadata carries
-					// the gate.
-					if dep, err := types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate); err == nil {
-						*deps = append(*deps, dep)
-					}
-				}
+	if waitsForSpec != nil && waitsForSpawnerStepID != "" {
+		if spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]; ok {
+			// Spawner identity is the depends_on_id; metadata carries
+			// the gate.
+			if dep, err := types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate); err == nil {
+				*deps = append(*deps, dep)
 			}
 		}
 	}
