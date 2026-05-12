@@ -24,6 +24,9 @@ func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter type
 			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(results) > 0 {
+			if capErr := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); capErr != nil {
+				return nil, capErr
+			}
 			return results, nil
 		}
 		// Fall through: wisps table doesn't exist or returned no results
@@ -72,6 +75,15 @@ func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter type
 		}
 	}
 
+	// Apply the defensive cap on the merged result set. searchTableInTx already
+	// over-fetches by one (LIMIT MaxRows+1) so this check is sufficient — but
+	// when issues and wisps are merged, the combined count can exceed the cap
+	// even though neither leg did individually. Check after merge so the cap
+	// reflects the row count actually returned to the caller.
+	if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
+	}
+
 	return results, nil
 }
 
@@ -101,8 +113,8 @@ func searchTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types
 
 	// Pattern A: full 47-column scan (used for unlimited queries or when NoIDShrink is set).
 	limitSQL := ""
-	if filter.Limit > 0 {
-		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
+	if eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows); eff > 0 {
+		limitSQL = fmt.Sprintf(" LIMIT %d", eff)
 	}
 
 	selectSQL := "SELECT "
@@ -264,5 +276,37 @@ func hydrateIssues(ctx context.Context, tx *sql.Tx, issues []*types.Issue, table
 		}
 	}
 
+	return nil
+}
+
+// EffectiveSearchLimit returns the SQL LIMIT to apply given a caller-supplied
+// Limit and a defensive MaxRows cap. Semantics (architecture be-jp5s D1/R-03):
+//
+//   - limit=0, maxRows=0: returns 0 (no LIMIT clause; unlimited)
+//   - limit=N, maxRows=0: returns N (today's --limit behavior)
+//   - limit=0, maxRows=M: returns M+1 (detect overage at cap+1)
+//   - limit=N, maxRows=M: returns N if N<=M, else M+1
+//
+// Callers issue LIMIT cap+1 specifically so that EnforceMaxRowsCap can detect
+// overage by comparing len(scanned rows) to MaxRows. The returned int is the
+// LIMIT value; treat 0 as "do not emit a LIMIT clause".
+func EffectiveSearchLimit(limit, maxRows int) int {
+	if maxRows > 0 {
+		if limit == 0 || limit > maxRows {
+			return maxRows + 1
+		}
+	}
+	return limit
+}
+
+// EnforceMaxRowsCap returns *ErrTooManyRows when found exceeds maxRows.
+// maxRows<=0 disables the cap; the function returns nil. source is the
+// attribution string surfaced in the error message (see ErrTooManyRows).
+// Call this after scanning rows from a query that used EffectiveSearchLimit
+// to size LIMIT.
+func EnforceMaxRowsCap(found, maxRows int, source string) error {
+	if maxRows > 0 && found > maxRows {
+		return &ErrTooManyRows{Found: found, Cap: maxRows, Source: source}
+	}
 	return nil
 }
