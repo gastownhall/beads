@@ -16,6 +16,42 @@ import (
 // ScanIssueFrom below scans it positionally and must stay in agreement.
 const IssueSelectColumns = sqlbuild.IssueSelectColumns
 
+// IssueSelectColumnsLite is the column list for lite issue hydration. It mirrors
+// IssueSelectColumns in order, minus the heavy TEXT columns enumerated in
+// HeavyDropList. Used when a caller opts in via types.IssueFilter.Lite=true to
+// skip materializing large text bodies on listing paths.
+//
+// metadata is intentionally retained — it is small and read by routing.
+const IssueSelectColumnsLite = `id, content_hash, title,
+	       status, priority, issue_type, assignee, estimated_minutes,
+	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
+	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
+	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
+	       await_type, await_id, timeout_ns,
+	       mol_type,
+	       event_kind, actor, target,
+	       due_at, defer_until,
+	       work_type, source_system, metadata`
+
+// HeavyDropList enumerates the columns omitted from IssueSelectColumnsLite.
+// Test-only: the schema-parity test asserts
+//
+//	cols(IssueSelectColumnsLite) ∪ HeavyDropList == cols(IssueSelectColumns)
+//
+// so every future column added to IssueSelectColumns must be classified
+// explicitly — either into IssueSelectColumnsLite (small, routing/listing
+// reads it) or into HeavyDropList (large body, fetch via GetIssue when
+// needed). Production code paths reference IssueSelectColumns or
+// IssueSelectColumnsLite directly; do not consume this list at runtime.
+var HeavyDropList = []string{
+	"description",
+	"design",
+	"acceptance_criteria",
+	"notes",
+	"waiters",
+	"payload",
+}
+
 // IssueScanner is the common interface between *sql.Row and *sql.Rows,
 // allowing a single scan function to work with both single-row and
 // multi-row query results.
@@ -185,6 +221,153 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		issue.HeartbeatAt = &heartbeatAt.Time
 	}
 
+	return &issue, nil
+}
+
+// ScanIssueLiteFrom scans a lite issue from any source implementing IssueScanner.
+// The caller must ensure the query selected exactly IssueSelectColumnsLite in
+// order. Heavy text fields (Description, Design, AcceptanceCriteria, Notes,
+// Payload, Waiters) are NOT read from the row and remain zero-valued on the
+// returned issue. The returned issue has IsLitePartial=true so downstream code
+// can detect the partial hydration.
+func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
+	var issue types.Issue
+	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
+	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
+	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
+	var createdBy sql.NullString
+	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
+	var contentHash, sourceRepo, closeReason sql.NullString
+	var workType, sourceSystem sql.NullString
+	var sender, wispType, molType, eventKind, actor, target sql.NullString
+	var awaitType, awaitID sql.NullString
+	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
+	var metadata sql.NullString
+
+	dests := []any{
+		&issue.ID, &contentHash, &issue.Title,
+		&issue.Status,
+		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
+		&createdAtStr, &createdBy, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
+		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
+		&awaitType, &awaitID, &timeoutNs,
+		&molType,
+		&eventKind, &actor, &target,
+		&dueAt, &deferUntil,
+		&workType, &sourceSystem, &metadata,
+	}
+	dests = append(dests, extra...)
+	if err := s.Scan(dests...); err != nil {
+		return nil, err
+	}
+
+	if createdAtStr.Valid {
+		issue.CreatedAt = ParseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		issue.UpdatedAt = ParseTimeString(updatedAtStr.String)
+	}
+
+	if contentHash.Valid {
+		issue.ContentHash = contentHash.String
+	}
+	if startedAt.Valid {
+		issue.StartedAt = &startedAt.Time
+	}
+	if closedAt.Valid {
+		issue.ClosedAt = &closedAt.Time
+	}
+	if estimatedMinutes.Valid {
+		mins := int(estimatedMinutes.Int64)
+		issue.EstimatedMinutes = &mins
+	}
+	if assignee.Valid {
+		issue.Assignee = assignee.String
+	}
+	if createdBy.Valid {
+		issue.CreatedBy = createdBy.String
+	}
+	if owner.Valid {
+		issue.Owner = owner.String
+	}
+	if externalRef.Valid {
+		issue.ExternalRef = &externalRef.String
+	}
+	if specID.Valid {
+		issue.SpecID = specID.String
+	}
+	if compactedAt.Valid {
+		issue.CompactedAt = &compactedAt.Time
+	}
+	if compactedAtCommit.Valid {
+		issue.CompactedAtCommit = &compactedAtCommit.String
+	}
+	if originalSize.Valid {
+		issue.OriginalSize = int(originalSize.Int64)
+	}
+	if sourceRepo.Valid {
+		issue.SourceRepo = sourceRepo.String
+	}
+	if closeReason.Valid {
+		issue.CloseReason = closeReason.String
+	}
+	if sender.Valid {
+		issue.Sender = sender.String
+	}
+	if ephemeral.Valid && ephemeral.Int64 != 0 {
+		issue.Ephemeral = true
+	}
+	if noHistory.Valid && noHistory.Int64 != 0 {
+		issue.NoHistory = true
+	}
+	if wispType.Valid {
+		issue.WispType = types.WispType(wispType.String)
+	}
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
+	}
+	if isTemplate.Valid && isTemplate.Int64 != 0 {
+		issue.IsTemplate = true
+	}
+	if awaitType.Valid {
+		issue.AwaitType = awaitType.String
+	}
+	if awaitID.Valid {
+		issue.AwaitID = awaitID.String
+	}
+	if timeoutNs.Valid {
+		issue.Timeout = time.Duration(timeoutNs.Int64)
+	}
+	if molType.Valid {
+		issue.MolType = types.MolType(molType.String)
+	}
+	if eventKind.Valid {
+		issue.EventKind = eventKind.String
+	}
+	if actor.Valid {
+		issue.Actor = actor.String
+	}
+	if target.Valid {
+		issue.Target = target.String
+	}
+	if dueAt.Valid {
+		issue.DueAt = &dueAt.Time
+	}
+	if deferUntil.Valid {
+		issue.DeferUntil = &deferUntil.Time
+	}
+	if workType.Valid {
+		issue.WorkType = types.WorkType(workType.String)
+	}
+	if sourceSystem.Valid {
+		issue.SourceSystem = sourceSystem.String
+	}
+	if metadata.Valid && metadata.String != "" && metadata.String != "{}" {
+		issue.Metadata = []byte(metadata.String)
+	}
+
+	issue.IsLitePartial = true
 	return &issue, nil
 }
 
