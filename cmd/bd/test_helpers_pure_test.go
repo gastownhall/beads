@@ -85,8 +85,13 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
 // This helper ensures viper is reset after the test completes, preventing state pollution
 // (e.g., repo config values leaking into JSONL export tests).
+//
+// Tests automatically opt out of <module-root>/.beads/config.yaml via
+// BEADS_TEST_IGNORE_REPO_CONFIG; tests that want the repo config must override
+// before calling this helper.
 func initConfigForTest(t *testing.T) {
 	t.Helper()
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	config.ResetForTesting()
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
