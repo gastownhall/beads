@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -1091,6 +1092,18 @@ Examples:
 			tree = filterTreeByStatus(tree, types.Status(statusFilter))
 		}
 
+		// Apply defensive row cap (be-x42v) on the final tree-node count.
+		// Tree walks have no IssueFilter to thread through, so the cap is
+		// enforced at the CLI layer instead of in storage.
+		if maxRows, maxRowsSource := resolveMaxRows(cmd); maxRows > 0 && len(tree) > maxRows {
+			handleMaxRowsError(&issueops.ErrTooManyRows{
+				Found:  len(tree),
+				Cap:    maxRows,
+				Source: maxRowsSource,
+			})
+		}
+
+		// Handle format presets (json handled earlier, near flag read)
 		if formatStr == "mermaid" {
 			outputMermaidTree(tree, args[0])
 			return nil
@@ -1559,6 +1572,8 @@ func init() {
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
 	depTreeCmd.Flags().String("status", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
+	// Defensive row cap (be-x42v): applied to TreeNode count after the tree is built.
+	addMaxRowsFlag(depTreeCmd)
 	// Note: --type flag intentionally omitted from depTreeCmd — TreeNode lacks
 	// dependency type info so filtering is not possible. Use 'bd dep list --type' instead.
 

@@ -132,6 +132,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				}
 			}
 		}
+		maxRows, maxRowsSource := resolveMaxRows(cmd)
 		filter := types.WorkFilter{
 			Status:           "open", // Only show open issues, not in_progress (matches bd list --ready)
 			Type:             issueType,
@@ -144,6 +145,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			IncludeDeferred:  includeDeferred,  // GH#820: respect --include-deferred flag
 			IncludeEphemeral: includeEphemeral, // bd-i5k5x: allow ephemeral issues (e.g., merge-requests)
 			ExcludeTypes:     excludeTypes,
+			MaxRows:          maxRows,
+			MaxRowsSource:    maxRowsSource,
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
@@ -205,6 +208,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			claimed, err := activeStore.ClaimReadyIssue(ctx, filter, actor)
 			if err != nil {
+				handleMaxRowsError(err)
 				return HandleErrorRespectJSON("%v", err)
 			}
 			if claimed == nil {
@@ -272,6 +276,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)
 		if err != nil {
+			handleMaxRowsError(err)
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -769,6 +774,8 @@ func init() {
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(readyCmd)
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
 	rootCmd.AddCommand(blockedCmd)

@@ -1493,6 +1493,15 @@ type WorkFilter struct {
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
 
 	Offset int
+
+	// MaxRows enforces a hard upper bound on the row count returned. Mirrors
+	// IssueFilter.MaxRows so bd ready honors --max-rows / BEADS_MAX_ROWS
+	// symmetrically with bd list. 0 (the default) disables the cap.
+	MaxRows int
+
+	// MaxRowsSource attributes which knob set MaxRows. Expected values:
+	// "--max-rows", "BEADS_MAX_ROWS", or "" (library users with no source).
+	MaxRowsSource string
 }
 
 // StaleFilter is used to filter stale issue queries

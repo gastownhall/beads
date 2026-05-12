@@ -65,6 +65,8 @@ func init() {
 	findDuplicatesCmd.Flags().StringP("status", "s", "", "Filter by status (default: non-closed)")
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(findDuplicatesCmd)
 	rootCmd.AddCommand(findDuplicatesCmd)
 }
 
@@ -104,7 +106,12 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	filter := types.IssueFilter{}
+	// Fetch issues
+	maxRows, maxRowsSource := resolveMaxRows(cmd)
+	filter := types.IssueFilter{
+		MaxRows:       maxRows,
+		MaxRowsSource: maxRowsSource,
+	}
 	if status != "" && status != "all" {
 		s := types.Status(status)
 		filter.Status = &s
@@ -116,6 +123,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 
 	issues, err := store.SearchIssues(rootCtx, "", filter)
 	if err != nil {
+		handleMaxRowsError(err)
 		return HandleErrorRespectJSON("fetching issues: %v", err)
 	}
 	issues = filterClosedIfNoStatus(issues, status)

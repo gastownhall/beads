@@ -79,9 +79,13 @@ Examples:
 			cutoffDays := gcOlderThan
 			cutoffTime := time.Now().UTC().AddDate(0, 0, -cutoffDays)
 			statusClosed := types.StatusClosed
+			// gc is a scripted internal sweep — opt out of BEADS_MAX_ROWS
+			// (designer §4.1) so a misconfigured env doesn't abort the sweep.
 			filter := types.IssueFilter{
-				Status:       &statusClosed,
-				ClosedBefore: &cutoffTime,
+				Status:        &statusClosed,
+				ClosedBefore:  &cutoffTime,
+				MaxRows:       0,
+				MaxRowsSource: "",
 			}
 
 			closedIssues, err := store.SearchIssues(ctx, "", filter)

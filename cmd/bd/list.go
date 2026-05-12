@@ -62,6 +62,8 @@ func readyWorkFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 		ExcludeTypes:   filter.ExcludeTypes,
 		MetadataFields: filter.MetadataFields,
 		HasMetadataKey: filter.HasMetadataKey,
+		MaxRows:        filter.MaxRows,
+		MaxRowsSource:  filter.MaxRowsSource,
 	}
 	if filter.IssueType != nil {
 		wf.Type = string(*filter.IssueType)
@@ -501,6 +503,9 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
+	maxRows, maxRowsSource := resolveMaxRows(cmd)
+	filter.MaxRows = maxRows
+	filter.MaxRowsSource = maxRowsSource
 
 	ctx := rootCtx
 
@@ -528,6 +533,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", withFetchOneExtra(filter))
 		}
 		if err != nil {
+			handleMaxRowsError(err)
 			return HandleError("%v", err)
 		}
 		sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
@@ -558,12 +564,14 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		var err error
 		issues, err = activeStore.GetReadyWork(ctx, wf)
 		if err != nil {
+			handleMaxRowsError(err)
 			return HandleError("%v", err)
 		}
 	} else {
 		var err error
 		issues, err = activeStore.SearchIssues(ctx, "", withFetchOneExtra(filter))
 		if err != nil {
+			handleMaxRowsError(err)
 			return HandleError("%v", err)
 		}
 	}
@@ -764,6 +772,9 @@ func init() {
 
 	// Ready filter: show only issues ready to be worked on (bd-ihu31)
 	listCmd.Flags().Bool("ready", false, "Show only ready issues (no active blockers, same semantics as bd ready)")
+
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(listCmd)
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

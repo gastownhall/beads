@@ -103,8 +103,10 @@ Examples:
 		}
 
 		if graphAll {
-			subgraphs, err := loadAllGraphSubgraphs(ctx, store)
+			maxRows, maxRowsSource := resolveMaxRows(cmd)
+			subgraphs, err := loadAllGraphSubgraphs(ctx, store, maxRows, maxRowsSource)
 			if err != nil {
+				handleMaxRowsError(err)
 				return HandleErrorRespectJSON("loading all issues: %v", err)
 			}
 			return renderGraphAllSubgraphs(subgraphs)
@@ -311,6 +313,8 @@ func init() {
 	graphCmd.Flags().BoolVar(&graphDOT, "dot", false, "Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)")
 	graphCmd.Flags().BoolVar(&graphHTML, "html", false, "Output self-contained interactive HTML (redirect to file)")
 	graphCmd.Flags().BoolVar(&graphOpen, "open", false, "Show only open issues (filters out closed/deferred), forces compact layer format")
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(graphCmd)
 	graphCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(graphCmd)
 	graphCmd.AddCommand(graphCheckCmd)
@@ -418,8 +422,10 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 }
 
 // loadAllGraphSubgraphs loads all open issues and groups them by connected component
-// Each component is a subgraph of issues that share dependencies
-func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*TemplateSubgraph, error) {
+// Each component is a subgraph of issues that share dependencies. The defensive
+// row cap (be-x42v) is propagated to each per-status SearchIssues call so any
+// single status that exceeds the cap returns the typed error directly.
+func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage, maxRows int, maxRowsSource string) ([]*TemplateSubgraph, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -430,7 +436,9 @@ func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*Templ
 	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked} {
 		statusCopy := status
 		issues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-			Status: &statusCopy,
+			Status:        &statusCopy,
+			MaxRows:       maxRows,
+			MaxRowsSource: maxRowsSource,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to search issues: %w", err)
