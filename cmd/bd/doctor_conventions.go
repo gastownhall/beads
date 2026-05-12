@@ -92,8 +92,15 @@ func runConventionsLint() []doctorCheck {
 
 	ctx := rootCtx
 	openStatus := types.StatusOpen
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Status: &openStatus})
+	// Env-only cap (designer §4): operator opt-in via BEADS_MAX_ROWS.
+	maxRows, maxRowsSource := resolveMaxRowsEnvOnly()
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		Status:        &openStatus,
+		MaxRows:       maxRows,
+		MaxRowsSource: maxRowsSource,
+	})
 	if err != nil {
+		handleMaxRowsError(err)
 		return []doctorCheck{{
 			Name:     "conventions.lint",
 			Status:   statusWarning,

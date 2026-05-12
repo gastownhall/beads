@@ -71,8 +71,12 @@ Examples:
 				issues = append(issues, issue)
 			}
 		} else {
-			// Lint all matching issues
-			filter := types.IssueFilter{}
+			// Lint all matching issues (env-only cap; designer §4 doctor family).
+			maxRows, maxRowsSource := resolveMaxRowsEnvOnly()
+			filter := types.IssueFilter{
+				MaxRows:       maxRows,
+				MaxRowsSource: maxRowsSource,
+			}
 
 			// Default to open issues unless --status specified
 			if statusFilter == "" || statusFilter == "open" {
@@ -91,6 +95,7 @@ Examples:
 			var err error
 			issues, err = store.SearchIssues(ctx, "", filter)
 			if err != nil {
+				handleMaxRowsError(err)
 				FatalError("%v", err)
 			}
 		}

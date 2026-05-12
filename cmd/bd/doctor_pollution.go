@@ -21,9 +21,15 @@ func runPollutionCheck(_ string, clean bool, yes bool) {
 
 	ctx := rootCtx
 
-	// Get all issues
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	// Get all issues (env-only cap via BEADS_MAX_ROWS; designer §4: doctor
+	// family is env opt-in, no operator-facing flag).
+	maxRows, maxRowsSource := resolveMaxRowsEnvOnly()
+	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		MaxRows:       maxRows,
+		MaxRowsSource: maxRowsSource,
+	})
 	if err != nil {
+		handleMaxRowsError(err)
 		FatalError("fetching issues: %v", err)
 	}
 

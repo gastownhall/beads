@@ -69,8 +69,8 @@ func buildReadyWorkPredicates(ctx context.Context, tx *sql.Tx, filter types.Work
 	args = append(args, orderBy.Args...)
 
 	var limitSQL string
-	if filter.Limit > 0 {
-		limitSQL = fmt.Sprintf("LIMIT %d", filter.Limit)
+	if eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows); eff > 0 {
+		limitSQL = fmt.Sprintf("LIMIT %d", eff)
 	}
 
 	return &readyWorkPredicates{
@@ -130,6 +130,12 @@ func GetReadyWorkInTx(
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// Apply the defensive cap on the row count returned to the caller.
+	// LIMIT cap+1 was issued above so a count of cap+1 indicates overage.
+	if err := EnforceMaxRowsCap(len(ordered), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
 	}
 
 	return ordered, nil

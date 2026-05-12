@@ -231,7 +231,12 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 
 	configured := jiraURL != "" && len(projectKeys) > 0
 
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	// jira sync is a round-trip path — opt out of BEADS_MAX_ROWS
+	// (designer §4.1) so a misconfigured env doesn't abort partway.
+	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		MaxRows:       0,
+		MaxRowsSource: "",
+	})
 	if err != nil {
 		FatalError("%v", err)
 	}
