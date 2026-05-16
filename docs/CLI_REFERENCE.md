@@ -102,7 +102,12 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd backup sync](#bd-backup-sync) — Push database to configured Dolt backup
 - [bd branch](#bd-branch) — List or create branches
 - [bd export](#bd-export) — Export issues to JSONL format
-- [bd federation](#bd-federation) — Manage peer-to-peer federation (requires CGO)
+- [bd federation](#bd-federation) — Manage peer-to-peer federation with other workspaces
+  - [bd federation add-peer](#bd-federation-add-peer) — Add a federation peer with optional SQL credentials
+  - [bd federation list-peers](#bd-federation-list-peers) — List configured federation peers
+  - [bd federation remove-peer](#bd-federation-remove-peer) — Remove a federation peer
+  - [bd federation status](#bd-federation-status) — Show federation sync status
+  - [bd federation sync](#bd-federation-sync) — Synchronize with a peer town
 - [bd import](#bd-import) — Import issues from a JSONL file or stdin into the database
 - [bd restore](#bd-restore) — Restore the pre-compaction content of a compacted issue
 - [bd vc](#bd-vc) — Version control operations
@@ -922,6 +927,7 @@ bd list [flags]
       --label-regex string           Filter by label regex pattern (e.g., 'tech-(debt|legacy)')
   -n, --limit int                    Limit results (default 50, use 0 for unlimited) (default 50)
       --long                         Show detailed multi-line output for each issue
+      --max-rows int                 Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol-type string              Filter by molecule type: swarm, patrol, or work
       --no-assignee                  Filter issues with no assignee
@@ -1613,6 +1619,7 @@ bd find-duplicates [flags]
 
 ```
   -n, --limit int         Maximum number of pairs to show (default 50)
+      --max-rows int      Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --method string     Detection method: mechanical, ai (default "mechanical")
       --model string      AI model to use (only with --method ai; default from config ai.model)
   -s, --status string     Filter by status (default: non-closed)
@@ -1931,6 +1938,7 @@ bd dep tree [issue-id] [flags]
       --direction string   Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'
       --format string      Output format: 'mermaid' for Mermaid.js flowchart
   -d, --max-depth int      Maximum tree depth to display (safety limit) (default 50)
+      --max-rows int       Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --reverse            Show dependent tree (deprecated: use --direction=up)
       --show-all-paths     Show all paths to nodes (no deduplication for diamond dependencies)
       --status string      Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)
@@ -2067,11 +2075,12 @@ bd graph [issue-id] [flags]
 **Flags:**
 
 ```
-      --all       Show graph for all open issues
-      --box       ASCII boxes showing layers
-      --compact   Tree format, one line per issue, more scannable
-      --dot       Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)
-      --html      Output self-contained interactive HTML (redirect to file)
+      --all            Show graph for all open issues
+      --box            ASCII boxes showing layers
+      --compact        Tree format, one line per issue, more scannable
+      --dot            Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)
+      --html           Output self-contained interactive HTML (redirect to file)
+      --max-rows int   Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
 ```
 
 #### bd graph check
@@ -2388,17 +2397,114 @@ bd export [flags]
 
 ### bd federation
 
-Federation commands require CGO and the Dolt storage backend.
-
-This binary was built without CGO support. To use federation features:
-  1. Use pre-built binaries from GitHub releases, or
-  2. Build from source with CGO enabled
+Manage peer-to-peer federation between Dolt-backed beads databases.
 
 Federation enables synchronized issue tracking across multiple workspaces,
 each maintaining their own Dolt database while sharing updates via remotes.
 
+Requires the Dolt storage backend.
+
 ```
 bd federation
+```
+
+#### bd federation add-peer
+
+Add a new federation peer remote with optional SQL user authentication.
+
+The URL can be:
+  - dolthub://org/repo      DoltHub hosted repository
+  - host:port/database      Direct dolt sql-server connection
+  - file:///path/to/repo    Local file path (for testing)
+
+Credentials are encrypted and stored locally. They are used automatically
+when syncing with the peer. If --user is provided without --password,
+you will be prompted for the password interactively.
+
+Examples:
+  bd federation add-peer town-beta dolthub://acme/town-beta-beads
+  bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
+  bd federation add-peer partner https://partner.example.com/beads --user admin --password secret
+
+```
+bd federation add-peer <name> <url> [flags]
+```
+
+**Flags:**
+
+```
+  -p, --password string      SQL password (prompted if --user set without --password)
+      --sovereignty string   Sovereignty tier (T1, T2, T3, T4)
+  -u, --user string          SQL username for authentication
+```
+
+#### bd federation list-peers
+
+List configured federation peers
+
+```
+bd federation list-peers
+```
+
+#### bd federation remove-peer
+
+Remove a federation peer
+
+```
+bd federation remove-peer <name>
+```
+
+#### bd federation status
+
+Show synchronization status with peer towns.
+
+Displays:
+  - Configured peers and their URLs
+  - Commits ahead/behind each peer
+  - Whether there are unresolved conflicts
+
+Examples:
+  bd federation status                    # Status for all peers
+  bd federation status --peer town-beta   # Status for specific peer
+
+```
+bd federation status [--peer name] [flags]
+```
+
+**Flags:**
+
+```
+      --peer string   Specific peer to check
+```
+
+#### bd federation sync
+
+Pull from and push to peer towns.
+
+Without --peer, syncs with all configured peers.
+With --peer, syncs only with the specified peer.
+
+Handles merge conflicts using the configured strategy:
+  --strategy ours    Keep local changes on conflict
+  --strategy theirs  Accept remote changes on conflict
+
+If no strategy is specified and conflicts occur, the sync will pause
+and report which tables have conflicts for manual resolution.
+
+Examples:
+  bd federation sync                      # Sync with all peers
+  bd federation sync --peer town-beta     # Sync with specific peer
+  bd federation sync --strategy theirs    # Auto-resolve using remote values
+
+```
+bd federation sync [--peer name] [flags]
+```
+
+**Flags:**
+
+```
+      --peer string       Specific peer to sync with
+      --strategy string   Conflict resolution strategy (ours|theirs)
 ```
 
 ### bd import
@@ -6796,6 +6902,7 @@ bd ready [flags]
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
   -n, --limit int                    Maximum issues to show (use 0 for unlimited) (default 100)
+      --max-rows int                 Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol string                   Filter to steps within a specific molecule
       --mol-type string              Filter by molecule type: swarm, patrol, or work
