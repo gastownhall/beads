@@ -167,6 +167,7 @@ bd dep tree [issue-id] [flags]
       --direction string   Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'
       --format string      Output format: 'mermaid' for Mermaid.js flowchart
   -d, --max-depth int      Maximum tree depth to display (safety limit) (default 50)
+      --max-rows int       Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --reverse            Show dependent tree (deprecated: use --direction=up)
       --show-all-paths     Show all paths to nodes (no deduplication for diamond dependencies)
       --status string      Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)
