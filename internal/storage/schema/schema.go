@@ -19,10 +19,21 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"golang.org/x/term"
 )
 
-// stderr is the writer for migration progress messages. Overridable in tests.
-var stderr io.Writer = os.Stderr
+// stderr is the writer for migration progress messages. Defaults to os.Stderr
+// when stderr is a terminal so humans see progress, and to io.Discard otherwise
+// so the lines don't pollute machine-parsed output (tests, CI, piped callers).
+// Overridable in tests.
+var stderr io.Writer = defaultStderr()
+
+func defaultStderr() io.Writer {
+	if term.IsTerminal(int(os.Stderr.Fd())) {
+		return os.Stderr
+	}
+	return io.Discard
+}
 
 // DBConn is the minimal interface satisfied by *sql.DB, *sql.Tx, and *sql.Conn.
 // It provides query and exec methods needed by the migration runner.
