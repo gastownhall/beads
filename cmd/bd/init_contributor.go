@@ -309,9 +309,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 	}
 	planningPath := filepath.Join(homeDir, ".beads-planning")
 
-	createdPlanning := false
 	if _, err := os.Stat(planningPath); os.IsNotExist(err) {
-		createdPlanning = true
 		if err := os.MkdirAll(planningPath, 0750); err != nil {
 			return fmt.Errorf("failed to create planning repo: %w", err)
 		}
@@ -357,9 +355,6 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		fmt.Printf("  %s Planning repo: %s\n", ui.RenderPass("✓"), planningPath)
 		fmt.Printf("  %s Issues will route to planning repo (routing.mode=auto)\n", ui.RenderPass("✓"))
 		fmt.Printf("  %s Sync remote set to upstream\n", ui.RenderPass("✓"))
-		if createdPlanning {
-			fmt.Printf("  %s Added .beads/ to planning repo\n", ui.RenderPass("✓"))
-		}
 		fmt.Printf("\n  To use maintainer mode instead: bd init --role=maintainer\n")
 	}
 	return nil
