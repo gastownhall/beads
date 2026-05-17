@@ -1189,7 +1189,7 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	stderr = &buf
 	defer func() { stderr = orig }()
 
-	n, err := runMigrations(context.Background(), &mockDB{}, 0)
+	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 0)
 	if err != nil {
 		t.Fatalf("runMigrations: %v", err)
 	}
@@ -1204,5 +1204,30 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
 	if len(lines) != n {
 		t.Errorf("expected %d stderr lines, got %d", n, len(lines))
+	}
+}
+
+// TestRunMigrationsUsesProvidedSource verifies that runMigrations operates on
+// the supplied migrationSource rather than always falling back to mainSource.
+// Regression test for the bug where ignoredSource.migrate() silently ran main
+// migrations and left ignored_schema_migrations empty (no wisp tables).
+func TestRunMigrationsUsesProvidedSource(t *testing.T) {
+	orig := stderr
+	stderr = &bytes.Buffer{}
+	defer func() { stderr = orig }()
+
+	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 0)
+	if err != nil {
+		t.Fatalf("runMigrations(mainSource): %v", err)
+	}
+	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 0)
+	if err != nil {
+		t.Fatalf("runMigrations(ignoredSource): %v", err)
+	}
+	if main == 0 || ignored == 0 {
+		t.Fatalf("expected non-zero counts; main=%d ignored=%d", main, ignored)
+	}
+	if main == ignored {
+		t.Errorf("runMigrations ignored its source argument: main and ignored both returned %d", main)
 	}
 }
