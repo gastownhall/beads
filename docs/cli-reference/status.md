@@ -21,10 +21,13 @@ Use cases:
   - Onboarding for new contributors
   - Integration with shell prompts or CI/CD
   - Daily standup reference
+  - Fast CI status checks that don't need blocked-count accuracy
 
 Examples:
   bd status                    # Show summary with activity
   bd status --no-activity      # Skip git activity (faster)
+  bd status --no-blocked       # Skip slow blocked-count scan (faster)
+  bd stats --no-blocked --json # JSON output without blocked count
   bd status --json             # JSON format output
   bd status --assigned         # Show issues assigned to current user
   bd stats                     # Alias for bd status
@@ -40,5 +43,6 @@ bd status [flags]
 ```
       --all           Show all issues (default behavior)
       --assigned      Show issues assigned to current user
-      --no-activity   Skip git activity tracking (faster)
+      --no-activity   Skip git activity summary (faster)
+      --no-blocked    Skip blocked-count computation (faster on large rigs)
 ```
