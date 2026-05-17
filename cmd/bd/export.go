@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,6 +57,8 @@ var (
 	exportScrub           bool
 	exportNoMemories      bool
 	exportIncludeMemories bool
+	exportExcludeOwners   []string
+	exportVerbose         bool
 )
 
 func init() {
@@ -66,6 +69,8 @@ func init() {
 	exportCmd.Flags().BoolVar(&exportIncludeMemories, "include-memories", false, "Include persistent memories (from 'bd remember') in the export")
 	exportCmd.Flags().BoolVar(&exportNoMemories, "no-memories", false, "Exclude persistent memories (deprecated: now the default)")
 	_ = exportCmd.Flags().MarkHidden("no-memories")
+	exportCmd.Flags().StringArrayVar(&exportExcludeOwners, "exclude-owner", nil, "Exclude issues created by this identity (repeatable; also reads export.exclude_owners config)")
+	exportCmd.Flags().BoolVar(&exportVerbose, "verbose", false, "Print filtered issue count when owners are excluded")
 	rootCmd.AddCommand(exportCmd)
 }
 
@@ -143,6 +148,16 @@ func runExport(cmd *cobra.Command, args []string) error {
 	// Scrub test/pollution records if requested
 	if exportScrub {
 		issues = filterOutPollution(issues)
+	}
+
+	// Owner-keyed filtering: exclude issues by created_by identity.
+	// Merges --exclude-owner flag values with export.exclude_owners config.
+	ownerExcludes := buildOwnerExcludeSet(ctx, exportExcludeOwners)
+	filteredOwnerCount := 0
+	if len(ownerExcludes) > 0 {
+		before := len(issues)
+		issues = filterOutOwners(issues, ownerExcludes)
+		filteredOwnerCount = before - len(issues)
 	}
 
 	if len(issues) == 0 && exportNoMemories {
@@ -260,6 +275,9 @@ func runExport(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Fprintf(os.Stderr, "Exported %d issues to %s\n", count, exportOutput)
 		}
+		if exportVerbose && filteredOwnerCount > 0 {
+			fmt.Fprintf(os.Stderr, "  (%d filtered as personal by owner exclusion)\n", filteredOwnerCount)
+		}
 	}
 
 	return nil
@@ -295,4 +313,43 @@ func filterOutPollution(issues []*types.Issue) []*types.Issue {
 		}
 	}
 	return clean
+}
+
+// buildOwnerExcludeSet merges --exclude-owner flag values with the
+// export.exclude_owners (and legacy export.exclude_owner) config entries.
+// Returns the combined set as a map for O(1) lookup.
+func buildOwnerExcludeSet(ctx context.Context, flagOwners []string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, o := range flagOwners {
+		if o != "" {
+			set[o] = struct{}{}
+		}
+	}
+	if store == nil {
+		return set
+	}
+	// List form: export.exclude_owners (comma-separated stored value)
+	if val, err := store.GetConfig(ctx, "export.exclude_owners"); err == nil && val != "" {
+		for _, o := range strings.Split(val, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				set[o] = struct{}{}
+			}
+		}
+	}
+	// Scalar shorthand: export.exclude_owner
+	if val, err := store.GetConfig(ctx, "export.exclude_owner"); err == nil && val != "" {
+		set[strings.TrimSpace(val)] = struct{}{}
+	}
+	return set
+}
+
+// filterOutOwners removes issues whose created_by identity is in the exclude set.
+func filterOutOwners(issues []*types.Issue, exclude map[string]struct{}) []*types.Issue {
+	var keep []*types.Issue
+	for _, issue := range issues {
+		if _, excluded := exclude[issue.CreatedBy]; !excluded {
+			keep = append(keep, issue)
+		}
+	}
+	return keep
 }

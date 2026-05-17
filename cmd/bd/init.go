@@ -1366,6 +1366,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// Auto-configure contributor routing for fork repos (bd-umbf Child 1).
+		// Non-interactive, idempotent; only fires when upstream remote detected
+		// and routing.contributor is not already set.
+		if !contributor && isGitRepo() {
+			if err := autoConfigureForkContributor(ctx, store, quiet, ""); err != nil && !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure fork contributor routing: %v\n", err)
+			}
+		}
+
 		// Run team wizard if --team flag is set
 		if team {
 			if err := runTeamWizard(ctx, store); err != nil {
