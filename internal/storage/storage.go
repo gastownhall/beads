@@ -356,6 +356,14 @@ type MergeSlotResult struct {
 	Position int
 }
 
+// FastStatisticsStore provides a statistics method that skips the blocked-count
+// traversal for callers that don't need it (e.g. bd stats --no-blocked).
+type FastStatisticsStore interface {
+	// GetStatisticsNoBlocked returns aggregate counts without the blocked-set
+	// computation (computeBlockedIDs). BlockedIssues is nil in the result.
+	GetStatisticsNoBlocked(ctx context.Context) (*types.Statistics, error)
+}
+
 // DoltStorage is the full interface for Dolt-backed stores, composing the core
 // Storage interface with all capability sub-interfaces. Both DoltStore and
 // EmbeddedDoltStore satisfy this interface.
@@ -373,6 +381,7 @@ type DoltStorage interface {
 	ConfigMetadataStore
 	CompactionStore
 	AdvancedQueryStore
+	FastStatisticsStore
 }
 
 // RawDBAccessor provides raw *sql.DB access for diagnostics and migrations.

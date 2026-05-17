@@ -191,7 +191,8 @@ func (s *testSuite) ucStatsEmpty() {
 	s.Require().NoError(err)
 	s.Equal(0, stats.TotalIssues)
 	s.Equal(0, stats.ReadyIssues)
-	s.Equal(0, stats.BlockedIssues)
+	s.Require().NotNil(stats.BlockedIssues)
+	s.Equal(0, *stats.BlockedIssues)
 }
 
 func (s *testSuite) ucStatsAggregates() {
@@ -230,7 +231,8 @@ func (s *testSuite) ucStatsReadyDerived() {
 	stats, err := uc.GetStatistics(s.Ctx())
 	s.Require().NoError(err)
 	s.Equal(2, stats.OpenIssues)
-	s.Equal(1, stats.BlockedIssues)
+	s.Require().NotNil(stats.BlockedIssues)
+	s.Equal(1, *stats.BlockedIssues)
 	s.Equal(1, stats.ReadyIssues, "UC must surface ready = open - blocked")
 }
 

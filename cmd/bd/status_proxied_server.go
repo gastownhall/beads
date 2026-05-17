@@ -31,7 +31,8 @@ func runStatusProxiedServer(ctx context.Context, showAssigned, noActivity bool) 
 		recentActivity = getGitActivity(24)
 	}
 
-	return renderStatus(stats, recentActivity)
+	// Proxied server mode doesn't support --no-blocked; always render the full count.
+	return renderStatus(stats, recentActivity, false)
 }
 
 func proxiedAssignedStatistics(ctx context.Context, uw uow.UnitOfWork, assignee string) (*types.Statistics, error) {

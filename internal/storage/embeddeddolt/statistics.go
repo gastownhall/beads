@@ -25,8 +25,8 @@ func (s *EmbeddedDoltStore) GetStatistics(ctx context.Context) (*types.Statistic
 		`).Scan(&blockedCount); err != nil {
 			return err
 		}
-		stats.BlockedIssues = blockedCount
-		stats.ReadyIssues = stats.OpenIssues - stats.BlockedIssues
+		stats.BlockedIssues = &blockedCount
+		stats.ReadyIssues = stats.OpenIssues - blockedCount
 		if stats.ReadyIssues < 0 {
 			stats.ReadyIssues = 0
 		}
@@ -35,5 +35,19 @@ func (s *EmbeddedDoltStore) GetStatistics(ctx context.Context) (*types.Statistic
 	if err != nil {
 		return nil, fmt.Errorf("embeddeddolt: get statistics: %w", err)
 	}
+	return stats, nil
+}
+
+// GetStatisticsNoBlocked returns aggregate counts without the blocked-set traversal.
+// BlockedIssues is nil in the result. Use for bd stats --no-blocked fast path.
+func (s *EmbeddedDoltStore) GetStatisticsNoBlocked(ctx context.Context) (*types.Statistics, error) {
+	stats := &types.Statistics{}
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return issueops.ScanIssueCountsInTx(ctx, tx, stats)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("embeddeddolt: get statistics: %w", err)
+	}
+	// BlockedIssues stays nil; ReadyIssues not computable without blocked set.
 	return stats, nil
 }
