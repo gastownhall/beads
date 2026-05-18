@@ -126,26 +126,33 @@ func runMigratePersonal(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = planningStore.Close() }()
 
-	// Migrate each issue: insert into planning DB, delete from project DB
-	moved := 0
+	// Phase 1: Copy all issues to planning DB. No deletes yet — if any copy
+	// fails we abort before touching the project DB.
 	for _, issue := range personal {
-		if err := migrateOneIssue(ctx, store, planningStore, issue, identity); err != nil {
-			return fmt.Errorf("failed to migrate issue %s: %w", issue.ID, err)
+		if err := copyIssueToPlanningDB(ctx, store, planningStore, issue, identity); err != nil {
+			return fmt.Errorf("failed to copy issue %s to planning DB: %w", issue.ID, err)
 		}
-		moved++
+	}
+
+	// Phase 2: Delete all from project DB in a single transaction.
+	ids := make([]string, len(personal))
+	for i, issue := range personal {
+		ids[i] = issue.ID
+	}
+	if _, err := store.DeleteIssues(ctx, ids, false, false, false); err != nil {
+		return fmt.Errorf("failed to delete migrated issues from project DB: %w", err)
 	}
 
 	fmt.Printf("\n%s Moved %d %s to %s\n",
 		ui.RenderPass("✓"),
-		moved,
-		pluralIssue(moved),
+		len(personal),
+		pluralIssue(len(personal)),
 		ui.RenderAccent(planningPath))
 	return nil
 }
 
-// migrateOneIssue copies issue (with labels, deps, comments) to dst and deletes from src.
-func migrateOneIssue(ctx context.Context, src, dst storage.DoltStorage, issue *types.Issue, actor string) error {
-	// Insert into planning DB
+// copyIssueToPlanningDB copies issue (with labels, deps, comments) to dst. Does not delete from src.
+func copyIssueToPlanningDB(ctx context.Context, src, dst storage.DoltStorage, issue *types.Issue, actor string) error {
 	if err := dst.CreateIssue(ctx, issue, actor); err != nil {
 		return fmt.Errorf("insert into planning DB: %w", err)
 	}
@@ -165,8 +172,7 @@ func migrateOneIssue(ctx context.Context, src, dst storage.DoltStorage, issue *t
 	deps, err := src.GetDependencyRecords(ctx, issue.ID)
 	if err == nil {
 		for _, dep := range deps {
-			addErr := dst.AddDependency(ctx, dep, actor)
-			if addErr != nil {
+			if addErr := dst.AddDependency(ctx, dep, actor); addErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to copy dependency %s→%s: %v\n", dep.IssueID, dep.DependsOnID, addErr)
 			}
 		}
@@ -180,11 +186,6 @@ func migrateOneIssue(ctx context.Context, src, dst storage.DoltStorage, issue *t
 				fmt.Fprintf(os.Stderr, "Warning: failed to copy comment for %s: %v\n", issue.ID, addErr)
 			}
 		}
-	}
-
-	// Delete from project DB
-	if err := src.DeleteIssue(ctx, issue.ID); err != nil {
-		return fmt.Errorf("delete from project DB: %w", err)
 	}
 
 	return nil
