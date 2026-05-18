@@ -1,21 +1,29 @@
-# Release Gate: be-jewoem — reference-aware bd prune
+# Release Gate: be-jewoem + bd-umbf — reference-aware prune + contributor namespace isolation
 
 **PR**: https://github.com/gastownhall/beads/pull/4023  
 **Branch**: `feat/be-jewoem-be-u2mw2x-reference-aware-prune` (quad341/beads)  
-**Gate evaluated**: 2026-05-17  
+**Gate first evaluated**: 2026-05-17 (be-jewoem/be-u2mw2x scope)  
+**Gate updated**: 2026-05-18 (bd-umbf Children 1-3 added to branch)
 
 ---
 
 ## Criterion 1: Review PASS
 
-| Reviewer | Verdict | Date |
-|----------|---------|------|
-| beads/reviewer | **PASS** | 2026-05-17 |
+| Scope | Reviewer | Verdict | Date |
+|-------|----------|---------|------|
+| be-jewoem/be-u2mw2x reference-aware prune | beads/reviewer | **PASS** | 2026-05-17 |
+| bd-umbf Children 1-3 (be-c7696f, be-3c5a0f, be-bbj) | beads/reviewer | **request-changes** | 2026-05-17 |
 
-Source: bead `be-xbwp` notes — "REVIEW VERDICT: pass"  
-Findings: None blocking. Second-pass (gemini) disabled per current rig config.
+Source: bead `be-xbwp` notes (be-jewoem/be-u2mw2x scope) — "REVIEW VERDICT: pass"  
+Source: bead `be-72b53f` notes (bd-umbf scope) — "REVIEW VERDICT: request-changes"
 
-**→ PASS**
+bd-umbf blocker resolution status (as of 2026-05-18):
+- B1 (doc freshness CI fail): **RESOLVED** — commit e7fbf9b37 regen'd CLI docs; CI now PASS
+- B2 (ubuntu-latest CI fail): **RESOLVED** — commit 11d232215 fixed build; CI now PASS
+- B3 (missing tests): **PENDING** — needs-tests beads filed for validator (TestBdInit_ForkAutoContributor*, TestMigratePersonal_*)
+- B4 (no transaction on delete path): **RESOLVED** — commit 11d232215 separates copy/delete phases; DeleteIssues batches delete
+
+**→ ON HOLD** (bd-umbf B3 pending validator; be-jewoem/be-u2mw2x scope PASS)
 
 ---
 
@@ -39,7 +47,10 @@ Note on AC-6: Reviewer acknowledged integration-test gap and filed be-zkzw as fo
 
 ## Criterion 3: Tests Pass
 
-CI run on `feat/be-jewoem-be-u2mw2x-reference-aware-prune` (run 26001972966):
+**Initial CI run** on `feat/be-jewoem-be-u2mw2x-reference-aware-prune` (run 26001972966) — be-jewoem/be-u2mw2x scope only:  
+All shards PASS after doc-freshness fix (commit e15c4c464).
+
+**Latest CI run** (run 26009209774) — includes bd-umbf commits be787e4b5, 9ed33b68d, 11d232215, e7fbf9b37:
 
 | Suite | Result |
 |-------|--------|
@@ -47,6 +58,7 @@ CI run on `feat/be-jewoem-be-u2mw2x-reference-aware-prune` (run 26001972966):
 | Lint | PASS |
 | Check build-tag policy | PASS |
 | Check cmd/bd pure-Go tests compile | PASS |
+| Check doc flags freshness | PASS |
 | Check formatting | PASS |
 | Check version consistency | PASS |
 | Test (Embedded Dolt Cmd 1–20/20) | PASS |
@@ -56,11 +68,8 @@ CI run on `feat/be-jewoem-be-u2mw2x-reference-aware-prune` (run 26001972966):
 | Test (Windows smoke) | PASS |
 | Test Nix Flake | PASS |
 | Upgrade smokes (v1.0.0–v1.0.4) | PASS |
-| Check doc flags freshness | **FAIL → FIXED** |
 
-Doc flags failure: `--ignore-references` flag was present in compiled binary but absent from committed CLI reference docs. Root cause: docs regen was omitted from the PR branch. Fixed in this gate commit by running `./scripts/generate-cli-docs.sh` with a fresh `CGO_ENABLED=0 -tags gms_pure_go` binary built from PR HEAD.
-
-**→ PASS** (after this commit)
+**→ PASS** (all CI green as of 2026-05-18)
 
 ---
 
@@ -85,7 +94,7 @@ No HIGH findings in review bead be-xbwp.
 
 Merge base with `origin/main`: `c72581c8b` (Merge pull request #4017 from coffeegoddd/db/schema-lock — already merged to main).
 
-Branch is 3 feature commits + gate commit ahead of main. No conflicts with origin/main.
+Branch is 7 commits ahead of main (3 be-jewoem/be-u2mw2x + 1 gate + 3 bd-umbf fix/docs commits). No conflicts with origin/main.
 
 **→ PASS**
 
@@ -95,11 +104,11 @@ Branch is 3 feature commits + gate commit ahead of main. No conflicts with origi
 
 | Criterion | Result |
 |-----------|--------|
-| 1. Review PASS | **PASS** |
-| 2. Acceptance criteria | **PASS** (AC-6 deferred to be-zkzw) |
-| 3. Tests pass | **PASS** |
+| 1. Review PASS | **ON HOLD** — bd-umbf B3 (tests) pending validator |
+| 2. Acceptance criteria | **PASS** (be-jewoem AC-6 deferred to be-zkzw; bd-umbf AC pending tests) |
+| 3. Tests pass | **PASS** (CI all green) |
 | 4. No HIGH findings | **PASS** |
 | 5. Branch clean | **PASS** |
 | 6. Clean divergence from main | **PASS** |
 
-**Overall: PASS — PR ready for human merge.**
+**Overall: ON HOLD — awaiting validator to write TestBdInit_ForkAutoContributor* and TestMigratePersonal_* tests (needs-tests beads filed 2026-05-18). All CI green; other blockers resolved.**
