@@ -78,6 +78,7 @@ This reference covers all 108 live top-level `bd` commands. Regenerate it with:
 - [`bd merge-slot`](./merge-slot.md)
 - [`bd metrics`](./metrics.md)
 - [`bd migrate`](./migrate.md)
+- [`bd migrate-personal`](./migrate-personal.md)
 - [`bd mol`](./mol.md)
 - [`bd note`](./note.md)
 - [`bd notion`](./notion.md)
