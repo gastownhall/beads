@@ -3,7 +3,8 @@
 **PR**: https://github.com/gastownhall/beads/pull/4023  
 **Branch**: `feat/be-jewoem-be-u2mw2x-reference-aware-prune` (quad341/beads)  
 **Gate first evaluated**: 2026-05-17 (be-jewoem/be-u2mw2x scope)  
-**Gate updated**: 2026-05-18 (bd-umbf Children 1-3 added to branch)
+**Gate updated**: 2026-05-18 (bd-umbf Children 1-3 added to branch)  
+**Gate updated**: 2026-05-19 (PR #4023 description refreshed to cover full bd-umbf scope; CI confirmed all green on run 26010362625)
 
 ---
 
@@ -17,10 +18,12 @@
 Source: bead `be-xbwp` notes (be-jewoem/be-u2mw2x scope) — "REVIEW VERDICT: pass"  
 Source: bead `be-72b53f` notes (bd-umbf scope) — "REVIEW VERDICT: request-changes"
 
-bd-umbf blocker resolution status (as of 2026-05-18):
+bd-umbf blocker resolution status (as of 2026-05-19):
 - B1 (doc freshness CI fail): **RESOLVED** — commit e7fbf9b37 regen'd CLI docs; CI now PASS
 - B2 (ubuntu-latest CI fail): **RESOLVED** — commit 11d232215 fixed build; CI now PASS
-- B3 (missing tests): **PENDING** — needs-tests beads filed for validator (TestBdInit_ForkAutoContributor*, TestMigratePersonal_*)
+- B3 (missing tests): **PENDING** — validator nudged 2026-05-19; awaiting be-de99a6 + be-f9a104 close with test commits
+  - be-de99a6 additionally blocked by PR #4028 (be-7daa14) landing first (tests must validate final output)
+  - be-f9a104: TestExportExcludeOwner_* + TestMigratePersonal_* (no upstream dependency)
 - B4 (no transaction on delete path): **RESOLVED** — commit 11d232215 separates copy/delete phases; DeleteIssues batches delete
 
 **→ ON HOLD** (bd-umbf B3 pending validator; be-jewoem/be-u2mw2x scope PASS)
