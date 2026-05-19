@@ -208,6 +208,29 @@ func TestEmbeddedImport(t *testing.T) {
 			t.Errorf("expected 'Updated Title' after upsert, got: %s", stdout.String())
 		}
 	})
+
+	t.Run("prefix_sync", func(t *testing.T) {
+		// Simulate a stale DB: init with --prefix bd (DB has issue_prefix=bd),
+		// then overwrite config.yaml with issue-prefix: be. bd import must sync
+		// the DB to match config.yaml (be-llaf).
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "bd")
+
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: be\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		jsonlPath := filepath.Join(t.TempDir(), "prefix-sync.jsonl")
+		now := time.Now().UTC()
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "bd-sync1", Title: "Prefix Sync Issue", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		})
+
+		bdImport(t, bd, dir, jsonlPath)
+
+		if val := readBack(t, beadsDir, "bd", "issue_prefix", false); val != "be" {
+			t.Errorf("issue_prefix after import: got %q, want %q", val, "be")
+		}
+	})
 }
 
 func TestEmbeddedImportConcurrent(t *testing.T) {
