@@ -828,9 +828,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					}
 					syncFromRemote = false
 				} else {
-					fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %v\n", syncURL, err)
-					fmt.Fprintf(os.Stderr, "Hint: verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.\n")
-					os.Exit(1)
+					FatalErrorWithHint(fmt.Sprintf("failed to clone remote %q: %v", syncURL, err), "verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.")
 				}
 			} else {
 				bootstrappedFromRemote = true
@@ -886,8 +884,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		initLock, err := acquireEmbeddedLock(beadsDir, initServerMode || initProxiedServer)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			FatalError("%v", err)
 		}
 		defer initLock.Unlock()
 
@@ -909,8 +906,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				state, _ := doltserver.IsRunning(sharedDir)
 				if state == nil || !state.Running {
 					if _, startErr := doltserver.Start(sharedDir); startErr != nil {
-						fmt.Fprintf(os.Stderr, "Error: failed to start shared Dolt server: %v\n", startErr)
-						os.Exit(1)
+						FatalError("failed to start shared Dolt server: %v", startErr)
 					}
 					if !quiet {
 						fmt.Printf("  %s Shared Dolt server started\n", ui.RenderPass("✓"))
@@ -974,8 +970,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 				os.Exit(1)
 			}
-			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to open Dolt store: %v", err)
 		}
 
 		// Initialize global database schema and config in shared-server mode.

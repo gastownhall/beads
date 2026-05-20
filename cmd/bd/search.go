@@ -212,12 +212,10 @@ Examples:
 			for _, mf := range metadataFieldFlags {
 				k, v, ok := strings.Cut(mf, "=")
 				if !ok || k == "" {
-					fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field: expected key=value, got %q\n", mf)
-					os.Exit(1)
+					FatalError("invalid --metadata-field: expected key=value, got %q", mf)
 				}
 				if err := storage.ValidateMetadataKey(k); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field key: %v\n", err)
-					os.Exit(1)
+					FatalError("invalid --metadata-field key: %v", err)
 				}
 				filter.MetadataFields[k] = v
 			}
@@ -225,8 +223,7 @@ Examples:
 		hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
 		if hasMetadataKey != "" {
 			if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --has-metadata-key: %v\n", err)
-				os.Exit(1)
+				FatalError("invalid --has-metadata-key: %v", err)
 			}
 			filter.HasMetadataKey = hasMetadataKey
 		}

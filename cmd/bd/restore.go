@@ -41,22 +41,17 @@ This is read-only and does not modify the database.`,
 
 		// Check if issue is compacted
 		if issue.CompactionLevel == 0 {
-			fmt.Fprintf(os.Stderr, "Error: issue %s is not compacted\n", issueID)
-			fmt.Fprintf(os.Stderr, "Hint: only compacted issues need restoration\n")
-			os.Exit(1)
+			FatalErrorWithHint(fmt.Sprintf("issue %s is not compacted", issueID), "only compacted issues need restoration")
 		}
 
 		// Query Dolt history for the pre-compaction version
 		history, err := store.History(ctx, issueID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to query history: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to query history: %v", err)
 		}
 
 		if len(history) == 0 {
-			fmt.Fprintf(os.Stderr, "Error: no history found for issue %s\n", issueID)
-			fmt.Fprintf(os.Stderr, "Hint: issue may have been compacted before Dolt history was available\n")
-			os.Exit(1)
+			FatalErrorWithHint(fmt.Sprintf("no history found for issue %s", issueID), "issue may have been compacted before Dolt history was available")
 		}
 
 		// Find the pre-compaction version: the history entry with the most content.
@@ -72,9 +67,7 @@ This is read-only and does not modify the database.`,
 		}
 
 		if best == nil || bestSize <= issueContentSize(issue) {
-			fmt.Fprintf(os.Stderr, "Error: no pre-compaction version found in Dolt history\n")
-			fmt.Fprintf(os.Stderr, "Hint: issue may have been compacted before Dolt history was available\n")
-			os.Exit(1)
+			FatalErrorWithHint("no pre-compaction version found in Dolt history", "issue may have been compacted before Dolt history was available")
 		}
 
 		if jsonOutput {

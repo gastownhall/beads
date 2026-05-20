@@ -93,9 +93,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	if strings.Contains(filepath.Clean(cwd), string(filepath.Separator)+".beads"+string(filepath.Separator)) ||
 		strings.HasSuffix(filepath.Clean(cwd), string(filepath.Separator)+".beads") {
-		fmt.Fprintf(os.Stderr, "Error: cannot initialize bd inside a .beads directory\n")
-		fmt.Fprintf(os.Stderr, "Current directory: %s\n", cwd)
-		os.Exit(1)
+		FatalErrorWithHint("cannot initialize bd inside a .beads directory", fmt.Sprintf("Current directory: %s", cwd))
 	}
 
 	if !hasExplicitBeadsDir {

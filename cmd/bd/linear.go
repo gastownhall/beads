@@ -873,8 +873,7 @@ func runLinearTeams(cmd *cobra.Command, args []string) {
 
 	client, err := buildLinearClient(ctx, "")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		FatalError("%v", err)
 	}
 
 	teams, err := client.FetchTeams(ctx)

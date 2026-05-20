@@ -50,9 +50,7 @@ func registerHelpAllFlag() {
 						cmdPath = strings.Join(append([]string{helpDocFlag}, args...), " ")
 					}
 					if err := writeSingleCommandDoc(os.Stdout, rootCmd, cmdPath); err != nil {
-						fmt.Fprintln(os.Stderr, err)
-						fmt.Fprintf(os.Stderr, "Available commands: %s\n", strings.Join(availableCommandNames(rootCmd), " "))
-						os.Exit(1)
+						FatalErrorWithHint(err.Error(), fmt.Sprintf("Available commands: %s", strings.Join(availableCommandNames(rootCmd), " ")))
 					}
 					return
 				}

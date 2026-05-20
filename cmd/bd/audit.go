@@ -59,12 +59,10 @@ var auditRecordCmd = &cobra.Command{
 		if auditRecordStdin || (stdinPiped && noFieldsProvided) {
 			b, err := io.ReadAll(os.Stdin)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to read stdin: %v\n", err)
-				os.Exit(1)
+				FatalError("failed to read stdin: %v", err)
 			}
 			if err := json.Unmarshal(b, &e); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid JSON on stdin: %v\n", err)
-				os.Exit(1)
+				FatalError("invalid JSON on stdin: %v", err)
 			}
 			// Allow --actor to override/augment stdin.
 			if actor != "" {
@@ -72,8 +70,7 @@ var auditRecordCmd = &cobra.Command{
 			}
 		} else {
 			if auditRecordKind == "" {
-				fmt.Fprintf(os.Stderr, "Error: --kind is required\n")
-				os.Exit(1)
+				FatalError("--kind is required")
 			}
 			e = audit.Entry{
 				Kind:     auditRecordKind,
@@ -93,8 +90,7 @@ var auditRecordCmd = &cobra.Command{
 
 		id, err := audit.Append(&e)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			FatalError("%v", err)
 		}
 
 		if jsonOutput {
@@ -116,8 +112,7 @@ var auditLabelCmd = &cobra.Command{
 	Run: func(_ *cobra.Command, args []string) {
 		parentID := args[0]
 		if auditLabelValue == "" {
-			fmt.Fprintf(os.Stderr, "Error: --label is required\n")
-			os.Exit(1)
+			FatalError("--label is required")
 		}
 		e := audit.Entry{
 			Kind:     "label",
@@ -129,8 +124,7 @@ var auditLabelCmd = &cobra.Command{
 
 		id, err := audit.Append(&e)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			FatalError("%v", err)
 		}
 
 		if jsonOutput {
