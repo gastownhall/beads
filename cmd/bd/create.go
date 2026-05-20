@@ -703,9 +703,9 @@ var createCmd = &cobra.Command{
 		} else if silent {
 			fmt.Println(issue.ID)
 		} else {
-			fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
-			fmt.Printf("  Priority: P%d\n", issue.Priority)
-			fmt.Printf("  Status: %s\n", issue.Status)
+			debug.PrintNormal("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
+			debug.PrintNormal("  Priority: P%d\n", issue.Priority)
+			debug.PrintNormal("  Status: %s\n", issue.Status)
 
 			maybeShowTip(store)
 		}

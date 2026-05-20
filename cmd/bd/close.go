@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -182,7 +183,7 @@ the flags appear in the command line.`,
 					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
-				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
 			}
 		}
 
@@ -254,14 +255,14 @@ the flags appear in the command line.`,
 					if jsonOutput {
 						// JSON handled below
 					} else {
-						fmt.Printf("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(nextIssue.ID, nextIssue.Title), nextIssue.Priority)
+						debug.PrintNormal("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(nextIssue.ID, nextIssue.Title), nextIssue.Priority)
 					}
 					SetLastTouchedID(nextIssue.ID)
 				} else {
 					fmt.Fprintf(os.Stderr, "Warning: could not claim next issue %s: %v\n", nextIssue.ID, err)
 				}
 			} else if !jsonOutput {
-				fmt.Printf("\n%s No ready issues available to claim.\n", ui.RenderWarn("✨"))
+				debug.PrintNormal("\n%s No ready issues available to claim.\n", ui.RenderWarn("✨"))
 			}
 		}
 
@@ -531,7 +532,7 @@ func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, clos
 	}
 
 	if !jsonOutput {
-		fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
+		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
 	}
 }
 
