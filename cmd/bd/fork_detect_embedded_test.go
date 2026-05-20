@@ -33,7 +33,9 @@ func bdInitForkCapture(t *testing.T, bd, dir string, args ...string) string {
 }
 
 // TestBdInit_ForkAutoContributor verifies that bd init on a fork repo
-// outputs the "▶ Fork detected" block with routing configured.
+// configures contributor routing (routing.mode=auto).
+// Note: output text is suppressed in non-interactive (test) environments;
+// we verify routing config state rather than output text.
 func TestBdInit_ForkAutoContributor(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -44,31 +46,19 @@ func TestBdInit_ForkAutoContributor(t *testing.T) {
 	dir := t.TempDir()
 	initForkRepo(t, dir)
 
-	out := bdInitForkCapture(t, bd, dir)
+	bdInitForkCapture(t, bd, dir)
 
-	// Should show "Fork detected" with routing configured.
-	if !strings.Contains(out, "Fork detected") {
-		t.Errorf("expected 'Fork detected' in output, got:\n%s", out)
-	}
-	// Should have at least one ✓ line (routing confirmed).
-	if !strings.Contains(out, "✓") {
-		t.Errorf("expected at least one ✓ line for routing, got:\n%s", out)
-	}
-
-	// routing.mode should be set via bd config get.
-	modeOut, err := exec.Command(bd, "config", "get", "routing.mode").Output()
-	// Config get runs in the CWD; we need to set dir.
+	// routing.mode should be set to "auto" in config.yaml.
 	configCmd := exec.Command(bd, "config", "get", "routing.mode")
 	configCmd.Dir = dir
 	configCmd.Env = bdEnv(dir)
 	modeBytes, configErr := configCmd.Output()
-	_ = err
-	_ = modeOut
-	if configErr == nil {
-		mode := strings.TrimSpace(string(modeBytes))
-		if mode != "auto" {
-			t.Errorf("routing.mode: got %q, want %q", mode, "auto")
-		}
+	if configErr != nil {
+		t.Fatalf("bd config get routing.mode failed: %v", configErr)
+	}
+	mode := strings.TrimSpace(string(modeBytes))
+	if mode != "auto" {
+		t.Errorf("routing.mode: got %q, want %q", mode, "auto")
 	}
 }
 

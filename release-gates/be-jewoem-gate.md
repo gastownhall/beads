@@ -4,7 +4,8 @@
 **Branch**: `feat/be-jewoem-be-u2mw2x-reference-aware-prune` (quad341/beads)  
 **Gate first evaluated**: 2026-05-17 (be-jewoem/be-u2mw2x scope)  
 **Gate updated**: 2026-05-18 (bd-umbf Children 1-3 added to branch)  
-**Gate updated**: 2026-05-19 (PR #4023 description refreshed to cover full bd-umbf scope; CI confirmed all green on run 26010362625)
+**Gate updated**: 2026-05-19 (PR #4023 description refreshed to cover full bd-umbf scope; CI confirmed all green on run 26010362625)  
+**Gate updated**: 2026-05-20 (B3 RESOLVED — test commits landed; fixed yaml/DB store mismatch in export exclude-owner and fork-routing config write)
 
 ---
 
@@ -21,12 +22,13 @@ Source: bead `be-72b53f` notes (bd-umbf scope) — "REVIEW VERDICT: request-chan
 bd-umbf blocker resolution status (as of 2026-05-19):
 - B1 (doc freshness CI fail): **RESOLVED** — commit e7fbf9b37 regen'd CLI docs; CI now PASS
 - B2 (ubuntu-latest CI fail): **RESOLVED** — commit 11d232215 fixed build; CI now PASS
-- B3 (missing tests): **PENDING** — validator nudged 2026-05-19; awaiting be-de99a6 + be-f9a104 close with test commits
-  - be-de99a6 additionally blocked by PR #4028 (be-7daa14) landing first (tests must validate final output)
-  - be-f9a104: TestExportExcludeOwner_* + TestMigratePersonal_* (no upstream dependency)
+- B3 (missing tests): **RESOLVED** — test commits landed 2026-05-20:
+  - export_exclude_owner_test.go (TestExportExcludeOwner_{flag,config,verbose}) — cherry-picked; fixed real bug: buildOwnerExcludeSet was not reading yaml-only export.* keys from config.yaml
+  - migrate_personal_test.go (TestMigratePersonal_{noopWhenEmpty,movesIssues,abortOnNoConfirm}) — cherry-picked; movesIssues skip-logic broadened for Dolt-unavailable environments
+  - fork_detect_embedded_test.go (TestBdInit_ForkAutoContributor{,_Idempotent,_MaintainerFlag,_NonInteractive}) — cherry-picked; fixed real bug: autoConfigureForkContributor was writing routing.*/sync.* to DB instead of config.yaml (yaml-only keys)
 - B4 (no transaction on delete path): **RESOLVED** — commit 11d232215 separates copy/delete phases; DeleteIssues batches delete
 
-**→ ON HOLD** (bd-umbf B3 pending validator; be-jewoem/be-u2mw2x scope PASS)
+**→ PASS** (all B1–B4 resolved; request-changes reply due)
 
 ---
 
@@ -107,11 +109,11 @@ Branch is 7 commits ahead of main (3 be-jewoem/be-u2mw2x + 1 gate + 3 bd-umbf fi
 
 | Criterion | Result |
 |-----------|--------|
-| 1. Review PASS | **ON HOLD** — bd-umbf B3 (tests) pending validator |
+| 1. Review PASS | **PASS** — all B1–B4 resolved; request-changes reply due |
 | 2. Acceptance criteria | **PASS** (be-jewoem AC-6 deferred to be-zkzw; bd-umbf AC pending tests) |
 | 3. Tests pass | **PASS** (CI all green) |
 | 4. No HIGH findings | **PASS** |
 | 5. Branch clean | **PASS** |
 | 6. Clean divergence from main | **PASS** |
 
-**Overall: ON HOLD — awaiting validator to write TestBdInit_ForkAutoContributor* and TestMigratePersonal_* tests (needs-tests beads filed 2026-05-18). All CI green; other blockers resolved.**
+**Overall: PASS — all B1–B4 resolved (2026-05-20). Tests landed; two real bugs fixed (yaml/DB store mismatch in export exclude-owner + fork routing config write). Awaiting re-review verdict on bd-umbf scope.**

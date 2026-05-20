@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/atomicfile"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -325,18 +326,30 @@ func buildOwnerExcludeSet(ctx context.Context, flagOwners []string) map[string]s
 			set[o] = struct{}{}
 		}
 	}
-	if store == nil {
-		return set
-	}
-	// List form: export.exclude_owners (comma-separated stored value)
-	if val, err := store.GetConfig(ctx, "export.exclude_owners"); err == nil && val != "" {
+	// export.* keys are YAML-only (config.IsYamlOnlyKey returns true for the
+	// "export." prefix), so bd config set stores them in config.yaml rather than
+	// the database. Read from YAML first, then fall back to the database for any
+	// instance that was written directly to the store.
+	addOwners := func(val string) {
 		for _, o := range strings.Split(val, ",") {
 			if o = strings.TrimSpace(o); o != "" {
 				set[o] = struct{}{}
 			}
 		}
 	}
-	// Scalar shorthand: export.exclude_owner
+	if val := config.GetYamlConfig("export.exclude_owners"); val != "" {
+		addOwners(val)
+	}
+	if val := config.GetYamlConfig("export.exclude_owner"); val != "" {
+		set[strings.TrimSpace(val)] = struct{}{}
+	}
+	if store == nil {
+		return set
+	}
+	// Also read from database for any value stored there directly.
+	if val, err := store.GetConfig(ctx, "export.exclude_owners"); err == nil && val != "" {
+		addOwners(val)
+	}
 	if val, err := store.GetConfig(ctx, "export.exclude_owner"); err == nil && val != "" {
 		set[strings.TrimSpace(val)] = struct{}{}
 	}

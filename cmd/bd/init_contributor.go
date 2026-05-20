@@ -282,9 +282,9 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		return nil
 	}
 
-	// Already configured: idempotent re-init. Check both DB config and YAML
-	// config — a YAML-configured contributor setup would be missed by DB-only check.
-	if existing, err := store.GetConfig(ctx, "routing.contributor"); err == nil && existing != "" {
+	// Already configured: idempotent re-init. routing.* is yaml-only, so read
+	// from config.yaml rather than the database.
+	if existing := config.GetYamlConfig("routing.contributor"); existing != "" {
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
 			fmt.Printf("    Contributor routing already configured → %s\n", existing)
@@ -331,13 +331,15 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		}
 	}
 
-	if err := store.SetConfig(ctx, "routing.mode", "auto"); err != nil {
+	// routing.* and sync.* are yaml-only keys — write to config.yaml, not the
+	// database, so that 'bd config get routing.mode' can read them back.
+	if err := config.SetYamlConfig("routing.mode", "auto"); err != nil {
 		return fmt.Errorf("failed to set routing.mode: %w", err)
 	}
-	if err := store.SetConfig(ctx, "routing.contributor", planningPath); err != nil {
+	if err := config.SetYamlConfig("routing.contributor", planningPath); err != nil {
 		return fmt.Errorf("failed to set routing.contributor: %w", err)
 	}
-	if err := store.SetConfig(ctx, "sync.remote", "upstream"); err != nil {
+	if err := config.SetYamlConfig("sync.remote", "upstream"); err != nil {
 		return fmt.Errorf("failed to set sync.remote: %w", err)
 	}
 
