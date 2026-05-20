@@ -1370,7 +1370,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Non-interactive, idempotent; only fires when upstream remote detected
 		// and routing.contributor is not already set.
 		if !contributor && isGitRepo() {
-			if err := autoConfigureForkContributor(ctx, store, quiet || nonInteractive, roleFlag); err != nil && !quiet {
+			if err := autoConfigureForkContributor(quiet || nonInteractive, roleFlag); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure fork contributor routing: %v\n", err)
 			}
 		}

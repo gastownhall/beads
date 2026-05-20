@@ -266,7 +266,7 @@ Created by: bd init --contributor
 // autoConfigureForkContributor configures contributor routing when bd init
 // detects a fork (upstream remote present) and routing is not yet set.
 // Non-interactive and idempotent. roleFlag is the --role flag value (if any).
-func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage, quiet bool, roleFlag string) error {
+func autoConfigureForkContributor(quiet bool, roleFlag string) error {
 	isFork, upstreamURL := detectForkSetup()
 	if !isFork {
 		return nil
