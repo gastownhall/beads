@@ -176,12 +176,25 @@ func (cb *circuitBreaker) Allow() bool {
 	}
 }
 
-// probe performs a quick TCP dial to check if the Dolt server is reachable.
+// probe performs a quick TCP health check against the Dolt server.
+// Drains the MySQL handshake before closing to avoid TCP RST that dolt
+// interprets as an aborted MySQL handshake (gh-3875-wait-ready-rst-flood).
 func (cb *circuitBreaker) probe() bool {
 	addr := net.JoinHostPort(cb.host, fmt.Sprintf("%d", cb.port))
 	conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
 	if err != nil {
 		return false
+	}
+	// Drain the MySQL handshake packet so Close() sends FIN, not RST.
+	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	buf := make([]byte, 1024)
+	if _, readErr := conn.Read(buf); readErr == nil {
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+		for {
+			if _, e := conn.Read(buf); e != nil {
+				break
+			}
+		}
 	}
 	_ = conn.Close()
 	return true

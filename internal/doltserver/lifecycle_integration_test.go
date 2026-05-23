@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -452,6 +453,223 @@ func TestLifecycle_ConcurrentIsRunningStart(t *testing.T) {
 	}
 
 	// Cleanup.
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	reg.Deregister(state.PID)
+}
+
+// TestLifecycle_IdleStability verifies the dolt sql-server survives an idle
+// period of 90 seconds without crashing. This directly reproduces the field
+// report where dolt 2.0.3 on Windows silently crashes during idle (event
+// scheduler or auto-GC background job kills the process).
+//
+// If this test fails sporadically (server found dead during idle wait), it
+// confirms the background-worker crash hypothesis. Skip with -short for CI
+// where 90s idle is too long. See: gh-3874-dolt-idle-crash.
+func TestLifecycle_IdleStability(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if p, err := os.FindProcess(state.PID); err == nil {
+		reg.Register(p)
+	}
+	t.Logf("Server PID=%d, waiting 90s for idle stability", state.PID)
+
+	// Verify server is alive at intervals during idle
+	const idleDuration = 90 * time.Second
+	const checkInterval = 15 * time.Second
+	deadline := time.Now().Add(idleDuration)
+
+	// Connect once at the start so we have a live SQL connection
+	db := connectMySQL(t, state.Port)
+	defer db.Close()
+
+	var lastCheck time.Time
+	for time.Now().Before(deadline) {
+		time.Sleep(checkInterval)
+		lastCheck = time.Now()
+
+		// Verify OS process alive
+		if !integration.IsProcessAlive(state.PID) {
+			t.Fatalf("dolt process (PID %d) died during idle at %v (elapsed %v)",
+				state.PID, lastCheck, lastCheck.Sub(time.Now().Add(-idleDuration)))
+		}
+
+		// Verify SQL engine alive via existing connection
+		var one int
+		if err := db.QueryRow("SELECT 1").Scan(&one); err != nil {
+			t.Fatalf("SQL ping failed at %v (elapsed %v): %v — "+
+				"SQL engine crashed while OS process survived",
+				lastCheck, lastCheck.Sub(time.Now().Add(-idleDuration)), err)
+		}
+		if one != 1 {
+			t.Errorf("SELECT 1 returned %d, expected 1", one)
+		}
+	}
+	t.Logf("Server survived %v idle with %d SQL checks",
+		idleDuration, int(idleDuration/checkInterval))
+
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	reg.Deregister(state.PID)
+}
+
+// TestLifecycle_ConnectionBurstSurvival verifies the dolt server survives a
+// burst of rapid TCP connect+disconnect cycles, simulating what waitForReady
+// does during startup (up to 20 Dial+Close in 10s).
+//
+// The field report shows "Cannot send HandshakeV10 packet: connection aborted"
+// errors in the log when beads connects and immediately closes TCP connections.
+// Dolt interprets each Close()'s TCP RST as an aborted MySQL handshake.
+// After ~60 such events over ~60 seconds, dolt's SQL engine silently dies.
+//
+// This test sends 100 rapid connect+close cycles and verifies the server stays
+// alive and processes SQL normally after. See: gh-3875-wait-ready-rst-flood.
+func TestLifecycle_ConnectionBurstSurvival(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if p, err := os.FindProcess(state.PID); err == nil {
+		reg.Register(p)
+	}
+	t.Logf("Server PID=%d on port %d", state.PID, state.Port)
+
+	// Phase 1: Send 100 rapid TCP connect+close cycles (simulating waitForReady + breaker probes)
+	const burstSize = 100
+	burstStart := time.Now()
+	for i := 0; i < burstSize; i++ {
+		conn, dialErr := net.DialTimeout("tcp",
+			net.JoinHostPort("127.0.0.1", strconv.Itoa(state.Port)),
+			500*time.Millisecond)
+		if dialErr != nil {
+			t.Fatalf("TCP dial %d/%d failed: %v", i+1, burstSize, dialErr)
+		}
+		// Read a few bytes so dolt starts the MySQL handshake
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+		buf := make([]byte, 4)
+		_, _ = conn.Read(buf)
+		_ = conn.Close()
+		// Small delay so dolt has time to process each connection
+		time.Sleep(10 * time.Millisecond)
+	}
+	burstElapsed := time.Since(burstStart)
+	t.Logf("Sent %d TCP connect+close cycles in %v (avg %v per cycle)",
+		burstSize, burstElapsed, burstElapsed/burstSize)
+
+	// Verify OS process survived
+	if !integration.IsProcessAlive(state.PID) {
+		t.Fatalf("Server process died during connection burst")
+	}
+
+	// Verify SQL engine survived
+	db := connectMySQL(t, state.Port)
+	defer db.Close()
+	var one int
+	if err := db.QueryRow("SELECT 1").Scan(&one); err != nil {
+		t.Fatalf("SQL engine dead after connection burst: %v", err)
+	}
+	if one != 1 {
+		t.Errorf("SELECT 1 returned %d, expected 1", one)
+	}
+	t.Log("SQL engine healthy after connection burst")
+
+	// Phase 2: Verify the server still works for real operations
+	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS burst_test (id INT PRIMARY KEY)"); err != nil {
+		t.Fatalf("CREATE TABLE after burst: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO burst_test VALUES (1), (2), (3)"); err != nil {
+		t.Fatalf("INSERT after burst: %v", err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM burst_test").Scan(&count); err != nil {
+		t.Fatalf("SELECT COUNT after burst: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 rows, got %d", count)
+	}
+	t.Log("Server functional after connection burst")
+
+	if err := doltserver.Stop(beadsDir); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	reg.Deregister(state.PID)
+}
+
+// TestLifecycle_CombinedTCPProbeSurvival combines the two real crash triggers
+// from the field report: 100 burst connections followed by 90s idle wait.
+// This tests the cumulative effect: many RST-provoking connections weaken
+// the server, then idle background workers finish it off.
+func TestLifecycle_CombinedTCPProbeSurvival(t *testing.T) {
+	beadsDir := setupLifecycleTestDir(t)
+	reg := integration.NewProcessRegistry(t)
+	diag := integration.NewDiagnostics(t, beadsDir)
+	diag.CaptureOnFailure()
+
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if p, err := os.FindProcess(state.PID); err == nil {
+		reg.Register(p)
+	}
+	t.Logf("Server PID=%d on port %d", state.PID, state.Port)
+
+	// Phase 1: Connection burst
+	const burstSize = 100
+	for i := 0; i < burstSize; i++ {
+		conn, dialErr := net.DialTimeout("tcp",
+			net.JoinHostPort("127.0.0.1", strconv.Itoa(state.Port)),
+			500*time.Millisecond)
+		if dialErr != nil {
+			t.Fatalf("TCP dial %d/%d failed: %v", i+1, burstSize, dialErr)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+		buf := make([]byte, 4)
+		_, _ = conn.Read(buf)
+		_ = conn.Close()
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Log("Phase 1: connection burst complete")
+
+	// Verify server survived burst
+	if !integration.IsProcessAlive(state.PID) {
+		t.Fatal("Server died during connection burst")
+	}
+
+	// Phase 2: 60s idle wait
+	// Only run idle wait when not -short
+	if !testing.Short() {
+		const idleDuration = 60 * time.Second
+		db := connectMySQL(t, state.Port)
+		defer db.Close()
+
+		for remaining := idleDuration; remaining > 0; remaining -= 15 * time.Second {
+			time.Sleep(15 * time.Second)
+			if !integration.IsProcessAlive(state.PID) {
+				t.Fatalf("Server died during idle at %v remaining", remaining)
+			}
+			var one int
+			if err := db.QueryRow("SELECT 1").Scan(&one); err != nil {
+				t.Fatalf("SQL engine died during idle: %v", err)
+			}
+		}
+		t.Log("Phase 2: idle wait complete")
+	}
+
 	if err := doltserver.Stop(beadsDir); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}

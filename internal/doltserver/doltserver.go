@@ -705,6 +705,35 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 // trace, debug, info, warning, error, fatal.
 const doltServerLogLevel = "warning"
 
+// doltServerConfigFileName is the YAML config file written by Start and passed
+// to `dolt sql-server --config`. It disables background workers (event_scheduler,
+// auto_gc) that are known to crash on Windows, and sets log_level and listener
+// host/port. See gh-3874-dolt-background-workers-default-on.
+const doltServerConfigFileName = "dolt-server-config.yaml"
+
+// doltServerConfigTmpl is the minimal YAML config template for dolt sql-server.
+//
+// Dolt's --config flag overrides ALL other CLI args (host, port, log_level,
+// behavior), so these fields must all be present when using this approach.
+//
+// The behavior section disables background workers that crash on Windows:
+//   - event_scheduler: OFF — prevents background event scheduler from crashing
+//   - auto_gc_behavior.enable: false — prevents auto-GC from crashing
+//
+// Host and port are filled with FormatInt because the listener config must
+// match the ephemeral port allocated by Start's TOCTOU retry loop.
+func buildDoltServerConfigYAML(host string, port int, logLevel string) string {
+	return fmt.Sprintf(`log_level: %s
+behavior:
+  event_scheduler: "OFF"
+  auto_gc_behavior:
+    enable: false
+listener:
+  host: %q
+  port: %d
+`, logLevel, host, port)
+}
+
 // buildDoltServerArgs returns the argv passed to `dolt` (excluding argv[0]/
 // the binary itself). It is factored out of Start so it can be asserted on
 // in unit tests without spawning a real server.
@@ -738,6 +767,44 @@ func buildDoltServerArgs(host string, port int, debug bool, profDir string) []st
 		args = append(args, "--loglevel="+doltServerLogLevel)
 	}
 	return args
+}
+
+// buildDoltServerArgsWithConfig returns the argv passed to `dolt` (excluding
+// argv[0]) when using a YAML config file. Dolt's --config flag overrides ALL
+// other sql-server CLI args (-H, -P, --loglevel), so those MUST be omitted.
+// Global dolt flags (--prof, --prof-path) are preserved since they are parsed
+// before the subcommand.
+//
+// The YAML config file must have been written by writeServerConfigFile and
+// contain the matching host, port, log_level, and behavior overrides.
+func buildDoltServerArgsWithConfig(host string, port int, debug bool, profDir, configFile string) []string {
+	var args []string
+	if debug {
+		args = append(args, "--prof", "cpu", "--prof-path", profDir)
+	}
+	args = append(args,
+		"sql-server",
+		"--config", configFile,
+	)
+	return args
+}
+
+// configPath returns the path to the YAML config file for the dolt sql-server,
+// written alongside the PID and port files in the beadsDir.
+func configPath(beadsDir string) string {
+	return filepath.Join(beadsDir, doltServerConfigFileName)
+}
+
+// writeServerConfigFile writes the YAML config file for dolt sql-server,
+// overriding listener host/port and disabling background workers.
+// Returns the path to the config file. The caller is responsible for cleanup.
+func writeServerConfigFile(beadsDir, host string, port int) (string, error) {
+	yamlContent := buildDoltServerConfigYAML(host, port, doltServerLogLevel)
+	path := configPath(beadsDir)
+	if err := os.WriteFile(path, []byte(yamlContent), 0600); err != nil {
+		return "", fmt.Errorf("writing server config: %w", err)
+	}
+	return path, nil
 }
 
 // Start explicitly starts a dolt sql-server for the project.
@@ -876,7 +943,14 @@ func Start(beadsDir string) (*State, error) {
 				actualPort = p
 			}
 
-			cmd := exec.Command(doltBin, buildDoltServerArgs(cfg.Host, actualPort, debug, profDir)...) //nolint:gosec // doltBin is resolved from PATH, not user input
+			// start dolt sql-server using YAML config (disables background workers)
+			configFile, cfgErr := writeServerConfigFile(beadsDir, cfg.Host, actualPort)
+			if cfgErr != nil {
+				lastErr = cfgErr
+				break
+			}
+
+			cmd := exec.Command(doltBin, buildDoltServerArgsWithConfig(cfg.Host, actualPort, debug, profDir, configFile)...) //nolint:gosec // doltBin is resolved from PATH, not user input
 			cmd.Dir = doltDir
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
@@ -1246,18 +1320,38 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 	)
 }
 
-// waitForReady polls TCP until the server accepts connections.
+// waitForReady polls until the server accepts TCP connections.
+// Drains the MySQL handshake before closing to avoid TCP RST that dolt
+// interprets as aborted MySQL handshakes (gh-3875-wait-ready-rst-flood).
+//
+// The old implementation called Dial() + Close() which sent TCP RST.
+// Now we read the MySQL handshake data before closing, allowing the TCP
+// stack to send a clean FIN handshake instead.
 func waitForReady(host string, port int, timeout time.Duration) error {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond) //nolint:gosec // G704: addr is built from internal host+port, not user input
-		if err == nil {
-			_ = conn.Close()
-			return nil
+		if err != nil {
+			time.Sleep(500 * time.Millisecond)
+			continue
 		}
-		time.Sleep(500 * time.Millisecond)
+
+		// Drain the MySQL handshake packet so Close() sends FIN, not RST.
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		buf := make([]byte, 1024)
+		if _, readErr := conn.Read(buf); readErr == nil {
+			// Got MySQL data — drain any remaining bytes.
+			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+			for {
+				if _, e := conn.Read(buf); e != nil {
+					break
+				}
+			}
+		}
+		_ = conn.Close()
+		return nil
 	}
 
 	return fmt.Errorf("timeout after %s waiting for server at %s", timeout, addr)
