@@ -50,6 +50,10 @@ type Storage interface {
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error)
+	// SearchIssueIDs is a narrow-projection variant of SearchIssues that
+	// returns only matching issue IDs. Use when full row hydration is wasted
+	// (e.g., partial-ID resolution in internal/utils/id_parser.go).
+	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
 
 	// Dependencies
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
@@ -326,6 +330,7 @@ type Transaction interface {
 	DeleteIssue(ctx context.Context, id string) error
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)                                    // For read-your-writes within transaction
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) // For read-your-writes within transaction
+	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)     // Narrow projection: returns ids only
 
 	// Dependency operations
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error

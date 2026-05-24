@@ -12,6 +12,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -995,11 +996,15 @@ func insertBenchIssues(ctx context.Context, tx *sql.Tx, table string, issues []*
 			if metadata == "" {
 				metadata = "{}"
 			}
-			placeholders = append(placeholders, "(?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 			args = append(args,
 				issue.ID,
 				issue.ContentHash,
 				issue.Title,
+				issue.Description,
+				issue.Design,
+				issue.AcceptanceCriteria,
+				issue.Notes,
 				issue.Status,
 				issue.Priority,
 				issue.IssueType,
@@ -1187,6 +1192,95 @@ func BenchmarkPerfResolvePartialIDInvalidInput_5K(b *testing.B) {
 			b.Fatal("ResolvePartialID invalid input unexpectedly succeeded")
 		}
 	}
+}
+
+// BenchmarkPerfIDProjectionVsHydration_5K isolates the value of the narrow
+// id-only projection (SearchIssueIDs) against the two hydration alternatives on
+// an identical, large result set. All three arms share the same WHERE clause
+// via issueops.searchInTx, so the only variable is projection + row hydration:
+//
+//   - SearchIssueIDs          — projects only `id`; no row structs, no labels.
+//   - SearchIssues+SkipLabels — full IssueSelectColumns scan into *types.Issue
+//     (description/design/notes/metadata/...), but skips the labels JOIN.
+//   - SearchIssues (full)     — full column scan plus label hydration.
+//
+// The narrow-vs-SkipLabels delta is the figure that justifies the projection
+// over simply reusing upstream's SkipLabels: SkipLabels suppresses labels but
+// still materializes every heavy TEXT column, which this fixture populates.
+func BenchmarkPerfIDProjectionVsHydration_5K(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const total = 5000
+	// Heavy TEXT payloads approximate real issues. The narrow projection never
+	// scans these columns; SkipLabels does not help with them.
+	bigText := strings.Repeat("lorem ipsum dolor sit amet consectetur ", 24) // ~936 B
+	bigJSON := json.RawMessage(`{"k":"` + strings.Repeat("v", 256) + `"}`)
+
+	issues := make([]*types.Issue, 0, total)
+	for i := 0; i < total; i++ {
+		issues = append(issues, &types.Issue{
+			ID:                 fmt.Sprintf("narrowbench-%05d", i),
+			Title:              fmt.Sprintf("narrowbench issue %05d", i),
+			Description:        bigText,
+			Design:             bigText,
+			AcceptanceCriteria: bigText,
+			Notes:              bigText,
+			Metadata:           bigJSON,
+			Status:             types.StatusOpen,
+			Priority:           (i % 4) + 1,
+			IssueType:          types.TypeTask,
+			Labels:             []string{"area-narrow", fmt.Sprintf("bucket-%03d", i%100)},
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	// "narrowbench" appears in every id and title, so id/title LIKE matches the
+	// full set — maximizing per-row hydration cost, the dimension under test.
+	const query = "narrowbench"
+
+	// Guard: all three arms must see the same cardinality, else the comparison
+	// would be measuring row count rather than projection.
+	if ids, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+		b.Fatalf("setup SearchIssueIDs: %v", err)
+	} else if len(ids) != total {
+		b.Fatalf("fixture: expected %d matches, got %d", total, len(ids))
+	}
+
+	b.Run("SearchIssueIDs_narrow", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssueIDs: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssueIDs: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_SkipLabels", func(b *testing.B) {
+		b.ReportAllocs()
+		filter := types.IssueFilter{SkipLabels: true}
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, filter); err != nil {
+				b.Fatalf("SearchIssues SkipLabels: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues SkipLabels: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_full", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssues full: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues full: got %d want %d", len(got), total)
+			}
+		}
+	})
 }
 
 func BenchmarkPerfAddDependencyCycleCheck_DiamondDAG(b *testing.B) {

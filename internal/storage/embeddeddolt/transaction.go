@@ -100,6 +100,11 @@ func (t *embeddedTransaction) SearchIssues(ctx context.Context, query string, fi
 	return issueops.SearchIssuesInTx(ctx, t.tx, query, filter)
 }
 
+// SearchIssueIDs returns matching IDs only via issueops.SearchIssueIDsInTx.
+func (t *embeddedTransaction) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	return issueops.SearchIssueIDsInTx(ctx, t.tx, query, filter)
+}
+
 func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	return t.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{})
 }

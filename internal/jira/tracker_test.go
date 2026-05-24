@@ -660,6 +660,9 @@ func (s *configStore) SearchIssuesWithCounts(_ context.Context, _ string, _ type
 func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
 	return nil, nil
 }
+func (s *configStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) ([]string, error) {
+	return nil, nil
+}
 func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
 	return nil
 }
