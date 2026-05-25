@@ -1084,6 +1084,16 @@ var doltRemoteAddCmd = &cobra.Command{
 			fmt.Fprintln(os.Stderr, "To re-enable remote sync: bd config unset dolt.local-only")
 			os.Exit(1)
 		}
+		allowGitOrigin, _ := cmd.Flags().GetBool("allow-git-origin")
+		if doltRemoteMatchesGitOrigin(args[1]) {
+			if !allowGitOrigin {
+				fmt.Fprintf(os.Stderr, "Error: refusing to add %q as a Dolt remote — this URL matches the git origin.\n", args[1])
+				fmt.Fprintln(os.Stderr, "  Hint: use --allow-git-origin to proceed anyway (e.g. monorepo layout).")
+				fmt.Fprintln(os.Stderr, "  Hint: or set dolt.local-only=true to disable remote sync entirely.")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Warning: %q matches the git origin — proceeding because --allow-git-origin is set.\n", args[1])
+		}
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
@@ -1253,6 +1263,8 @@ func init() {
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
+	doltRemoteRemoveCmd.Flags().Bool("force", false, "Force remove even when SQL and CLI URLs conflict")
+	doltRemoteAddCmd.Flags().Bool("allow-git-origin", false, "Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)")
 	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
 	doltRemoteCmd.AddCommand(doltRemoteListCmd)
 	doltRemoteCmd.AddCommand(doltRemoteRemoveCmd)
