@@ -151,6 +151,13 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 			return nil, fmt.Errorf("search wisps (merge): probe: %w", probeErr)
 		}
 		if empty {
+			// No wisps to merge, but the issues-only result set can still
+			// exceed the cap (the merge path below enforces it at line ~74;
+			// this early return must enforce it too, or the cap is silently
+			// skipped whenever the wisps table is empty).
+			if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
+				return nil, err
+			}
 			return results, nil
 		}
 		wispResults, wispErr := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
