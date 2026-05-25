@@ -791,7 +791,7 @@ func isRecognizedConfigKey(key string) bool {
 func rejectProtectedConfigKey(key string) (string, bool) {
 	switch key {
 	case "issue_prefix", "issue-prefix":
-		return "Error: issue_prefix cannot be set via 'bd config set'.\n" +
+		return "issue_prefix cannot be set via 'bd config set'.\n" +
 			"  - New project:       bd init --prefix <prefix>\n" +
 			"  - Fresh clone:       bd bootstrap\n" +
 			"  - Rename existing:   bd rename-prefix <new-prefix>", true
