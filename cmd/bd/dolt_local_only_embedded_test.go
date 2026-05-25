@@ -1,4 +1,4 @@
-//go:build embeddeddolt
+//go:build cgo
 
 package main
 
@@ -205,11 +205,11 @@ func TestDoltLocalOnly_ConfigRoundTrip(t *testing.T) {
 		t.Errorf("after set: push output = %q, want to mention dolt.local-only=true", out)
 	}
 
-	// Unset: key must be absent from config.
+	// Unset: key must be absent from config. bd config get returns "(not set ...)" for missing keys.
 	bdConfig(t, bd, dir, "unset", "dolt.local-only")
 	val := bdConfig(t, bd, dir, "get", "dolt.local-only")
-	if strings.TrimSpace(val) != "" {
-		t.Errorf("after unset: bd config get dolt.local-only = %q, want empty", val)
+	if !strings.Contains(val, "not set") {
+		t.Errorf("after unset: bd config get dolt.local-only = %q, want 'not set'", val)
 	}
 }
 
