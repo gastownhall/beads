@@ -151,14 +151,11 @@ func TestMergeReadyWispsPrefersWispOnCollision(t *testing.T) {
 	issuesCopy := &types.Issue{ID: "dup-id", Status: types.StatusOpen, Title: "issues copy"}
 	wispCopy := &types.Issue{ID: "dup-id", Status: types.StatusClosed, Title: "wisp canonical"}
 
-	got, err := mergeReadyWisps(
+	got := mergeReadyWisps(
 		[]*types.Issue{issuesCopy},
 		[]*types.Issue{wispCopy},
 		types.WorkFilter{},
 	)
-	if err != nil {
-		t.Fatalf("mergeReadyWisps error = %v, want no error on cross-table dup", err)
-	}
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1 (deduped)", len(got))
 	}
