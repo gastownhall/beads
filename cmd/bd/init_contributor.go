@@ -266,7 +266,7 @@ Created by: bd init --contributor
 // autoConfigureForkContributor configures contributor routing when bd init
 // detects a fork (upstream remote present) and routing is not yet set.
 // Non-interactive and idempotent. roleFlag is the --role flag value (if any).
-func autoConfigureForkContributor(quiet bool, roleFlag string) error {
+func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage, quiet bool, roleFlag string) error {
 	isFork, upstreamURL := detectForkSetup()
 	if !isFork {
 		return nil
@@ -282,9 +282,8 @@ func autoConfigureForkContributor(quiet bool, roleFlag string) error {
 		return nil
 	}
 
-	// Already configured: idempotent re-init. routing.* is yaml-only, so read
-	// from config.yaml rather than the database.
-	if existing := config.GetYamlConfig("routing.contributor"); existing != "" {
+	// Already configured: idempotent re-init.
+	if existing, err := store.GetConfig(ctx, "routing.contributor"); err == nil && existing != "" {
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
 			fmt.Printf("    Contributor routing already configured → %s\n", existing)
@@ -309,7 +308,9 @@ func autoConfigureForkContributor(quiet bool, roleFlag string) error {
 	}
 	planningPath := filepath.Join(homeDir, ".beads-planning")
 
+	createdPlanning := false
 	if _, err := os.Stat(planningPath); os.IsNotExist(err) {
+		createdPlanning = true
 		if err := os.MkdirAll(planningPath, 0750); err != nil {
 			return fmt.Errorf("failed to create planning repo: %w", err)
 		}
@@ -331,15 +332,13 @@ func autoConfigureForkContributor(quiet bool, roleFlag string) error {
 		}
 	}
 
-	// routing.* and sync.* are yaml-only keys — write to config.yaml, not the
-	// database, so that 'bd config get routing.mode' can read them back.
-	if err := config.SetYamlConfig("routing.mode", "auto"); err != nil {
+	if err := store.SetConfig(ctx, "routing.mode", "auto"); err != nil {
 		return fmt.Errorf("failed to set routing.mode: %w", err)
 	}
-	if err := config.SetYamlConfig("routing.contributor", planningPath); err != nil {
+	if err := store.SetConfig(ctx, "routing.contributor", planningPath); err != nil {
 		return fmt.Errorf("failed to set routing.contributor: %w", err)
 	}
-	if err := config.SetYamlConfig("sync.remote", "upstream"); err != nil {
+	if err := store.SetConfig(ctx, "sync.remote", "upstream"); err != nil {
 		return fmt.Errorf("failed to set sync.remote: %w", err)
 	}
 
@@ -357,6 +356,9 @@ func autoConfigureForkContributor(quiet bool, roleFlag string) error {
 		fmt.Printf("  %s Planning repo: %s\n", ui.RenderPass("✓"), planningPath)
 		fmt.Printf("  %s Issues will route to planning repo (routing.mode=auto)\n", ui.RenderPass("✓"))
 		fmt.Printf("  %s Sync remote set to upstream\n", ui.RenderPass("✓"))
+		if createdPlanning {
+			fmt.Printf("  %s Added .beads/ to planning repo\n", ui.RenderPass("✓"))
+		}
 		fmt.Printf("\n  To use maintainer mode instead: bd init --role=maintainer\n")
 	}
 	return nil
