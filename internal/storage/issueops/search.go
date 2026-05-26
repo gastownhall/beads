@@ -59,16 +59,20 @@ func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter type
 			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
 		}
 		if len(wispResults) > 0 {
-			seen := make(map[string]bool, len(results))
-			for _, issue := range results {
-				seen[issue.ID] = true
+			// Prefer the canonical wisp record when an ID exists in both tables.
+			// Cross-table dups are a transient data-integrity issue (be-iabdi);
+			// hard-erroring breaks every lookup city-wide.
+			wispByID := make(map[string]*types.Issue, len(wispResults))
+			for _, w := range wispResults {
+				wispByID[w.ID] = w
 			}
-			for _, issue := range wispResults {
-				if seen[issue.ID] {
-					return nil, fmt.Errorf("id %q exists in both issues and wisps", issue.ID)
+			var filtered []*types.Issue
+			for _, r := range results {
+				if wispByID[r.ID] == nil {
+					filtered = append(filtered, r)
 				}
-				results = append(results, issue)
 			}
+			results = append(filtered, wispResults...)
 		}
 	}
 

@@ -294,6 +294,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Untracked Files":
 			fmt.Printf("  ⚠ Untracked JSONL fix removed (Dolt-native storage)\n")
 			continue
+		case "Cross-Table Duplicates":
+			err = fix.CrossTableDuplicates(path, doctorVerbose)
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path, doctorVerbose)
 		case "Dependency Keys":

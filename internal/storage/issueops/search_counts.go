@@ -75,22 +75,25 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 		return finishSearchIssuesWithCounts(out, filter), nil
 	}
 
-	seen := make(map[string]struct{}, len(out))
-	for _, iwc := range out {
-		if iwc != nil && iwc.Issue != nil {
-			seen[iwc.Issue.ID] = struct{}{}
+	// Prefer the canonical wisp record when an ID exists in both tables (be-iabdi).
+	wispByID := make(map[string]struct{}, len(wisps))
+	for _, w := range wisps {
+		if w != nil && w.Issue != nil {
+			wispByID[w.Issue.ID] = struct{}{}
 		}
 	}
-	for _, w := range wisps {
-		if w == nil || w.Issue == nil {
+	var kept []*types.IssueWithCounts
+	for _, iwc := range out {
+		if iwc == nil || iwc.Issue == nil {
+			kept = append(kept, iwc)
 			continue
 		}
-		if _, dup := seen[w.Issue.ID]; dup {
-			return nil, fmt.Errorf("search issues with counts: id %q exists in both issues and wisps", w.Issue.ID)
+		if _, dup := wispByID[iwc.Issue.ID]; !dup {
+			kept = append(kept, iwc)
 		}
-		out = append(out, w)
 	}
-	return finishSearchIssuesWithCounts(out, filter), nil
+	kept = append(kept, wisps...)
+	return finishSearchIssuesWithCounts(kept, filter), nil
 }
 
 func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {

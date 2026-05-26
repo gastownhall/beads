@@ -453,9 +453,12 @@ func loadStatusByIDInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[stri
 					_ = rows.Close()
 					return nil, fmt.Errorf("scan status: %w", err)
 				}
-				if existingTable, exists := sourceByID[id]; exists {
-					_ = rows.Close()
-					return nil, fmt.Errorf("status id %q exists in both %s and %s", id, existingTable, issueTable)
+				if _, exists := sourceByID[id]; exists {
+					// Prefer wisps-table status on cross-table dup (be-iabdi).
+					// Tables iterate issues→wisps so the second encounter is always wisps.
+					sourceByID[id] = issueTable
+					statusByID[id] = status
+					continue
 				}
 				sourceByID[id] = issueTable
 				statusByID[id] = status

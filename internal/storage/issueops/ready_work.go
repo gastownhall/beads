@@ -136,21 +136,23 @@ func GetReadyWorkInTx(
 }
 
 func mergeReadyWisps(ordered []*types.Issue, wisps []*types.Issue, filter types.WorkFilter) ([]*types.Issue, error) {
-	seen := make(map[string]struct{}, len(ordered))
+	// Prefer the canonical wisp record when an ID exists in both tables (be-iabdi).
+	wispByID := make(map[string]*types.Issue, len(wisps))
+	for _, w := range wisps {
+		wispByID[w.ID] = w
+	}
+	var kept []*types.Issue
 	for _, issue := range ordered {
-		seen[issue.ID] = struct{}{}
-	}
-	for _, wisp := range wisps {
-		if _, exists := seen[wisp.ID]; exists {
-			return nil, fmt.Errorf("ready work id %q exists in both issues and wisps", wisp.ID)
+		if wispByID[issue.ID] == nil {
+			kept = append(kept, issue)
 		}
-		ordered = append(ordered, wisp)
 	}
-	sortReadyIssues(ordered, filter.SortPolicy)
-	if filter.Limit > 0 && len(ordered) > filter.Limit {
-		ordered = ordered[:filter.Limit]
+	kept = append(kept, wisps...)
+	sortReadyIssues(kept, filter.SortPolicy)
+	if filter.Limit > 0 && len(kept) > filter.Limit {
+		kept = kept[:filter.Limit]
 	}
-	return ordered, nil
+	return kept, nil
 }
 
 func getReadyWispsInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter, deferredChildIDs []string) ([]*types.Issue, error) {
