@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -383,6 +384,58 @@ func TestFederationSyncStatus(t *testing.T) {
 	if status.LocalAhead != -1 || status.LocalBehind != -1 {
 		t.Logf("Note: Status returned values for nonexistent peer (may be expected behavior)")
 	}
+}
+
+func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	peer := &storage.FederationPeer{
+		Name:        "peer-metadata-sync",
+		RemoteURL:   "file:///tmp/beads-no-such-federation-peer",
+		Sovereignty: "T2",
+	}
+	if err := store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+
+	if federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("add-peer should commit federation_peers metadata")
+	}
+
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE federation_peers SET sovereignty = ? WHERE name = ?", "T3", peer.Name,
+	); err != nil {
+		t.Fatalf("dirty federation peer metadata: %v", err)
+	}
+	if !federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("expected direct federation_peers update to dirty the working set")
+	}
+
+	_, err := store.Sync(ctx, peer.Name, "")
+	if err == nil {
+		t.Fatal("expected sync to fail for nonexistent file remote")
+	}
+	if federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("sync should commit pending federation_peers metadata before fetch/merge")
+	}
+}
+
+func federationStatusHasTable(t *testing.T, ctx context.Context, store *DoltStore, table string) bool {
+	t.Helper()
+
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = ?", table,
+	).Scan(&count); err != nil {
+		t.Fatalf("query dolt_status for %s: %v", table, err)
+	}
+	return count > 0
 }
 
 // TestFederationPushPullMethods tests PushTo and PullFrom

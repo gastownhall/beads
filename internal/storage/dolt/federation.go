@@ -311,6 +311,17 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		StartTime: time.Now(),
 	}
 
+	// Match PullFrom: federation metadata writes such as add-peer must not
+	// leave the working set dirty before fetch/merge.
+	if !s.readOnly {
+		if err := s.Commit(ctx, "auto-commit before sync"); err != nil {
+			if !isDoltNothingToCommit(err) {
+				result.Error = fmt.Errorf("failed to commit pending changes before sync: %w", err)
+				return result, result.Error
+			}
+		}
+	}
+
 	// Step 1: Fetch from peer
 	if err := s.Fetch(ctx, peer); err != nil {
 		result.Error = fmt.Errorf("fetch failed: %w", err)
