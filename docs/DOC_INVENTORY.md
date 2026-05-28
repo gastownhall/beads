@@ -47,6 +47,7 @@ Follow-up automation should replace marker-only checks with generated or
 |---|---|---|
 | `ADAPTIVE_IDS.md` | Keep | Behaviour doc for hash ID scaling; verify against ID generation code before changing numeric claims. |
 | `ADO_CONFIG.md` | Keep with freshness | ADO reference; marker points at ADO command/client code. |
+| `AGENT_SIGNING.md` | Keep | Maintainer/operator convention for agent comment and commit signatures. |
 | `adr/0001-multi-remote-approach.md` | Keep | ADR; historical decision record, not a live reference table. |
 | `adr/0002-init-safety-invariants.md` | Keep | ADR backing `RECOVERY.md` and init safety code. |
 | `ADVANCED.md` | Keep/revise as needed | User-facing advanced workflows; mixed command examples should defer to generated CLI reference when expanded. |

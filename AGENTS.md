@@ -143,7 +143,7 @@ cp -rf source dest          # NOT: cp -r source dest
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 
-<!-- BEGIN BEADS INTEGRATION -->
+<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.

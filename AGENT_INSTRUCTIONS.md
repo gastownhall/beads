@@ -88,6 +88,11 @@ git commit -m "Add retry logic for database locks (bd-xyz)"
 
 This enables `bd doctor` to detect **orphaned issues** - work that was committed but the issue wasn't closed. The doctor check cross-references open issues against git history to find these orphans.
 
+For agent-prepared commits, also include the
+`Agent-Signature:` trailer described in
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md). Use `unknown-model` or
+`unknown-reasoning` when reliable runtime metadata is unavailable.
+
 ### Git Workflow
 
 bd uses **Dolt** as its primary database. Changes are committed to Dolt history automatically (one Dolt commit per write command).
@@ -126,6 +131,9 @@ read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md). The
 maintainer policy is to maximize community throughput: find useful contributor
 value, absorb or transform it locally when practical, preserve attribution, and
 use request-changes only as a last resort.
+
+Sign agent-written GitHub comments and reviews using
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
 
 ### External Contributor PRs: Check Before You Build
 
@@ -283,6 +291,11 @@ echo 'Updated description with $variables' | bd update <id> --description=-
 # Or use --body-file for longer content
 bd create "Title" --body-file=description.md
 ```
+
+**GitHub body hygiene.** For GitHub PR, issue, comment, and review bodies,
+write Markdown to a file and pass it with `gh ... --body-file`. Run
+`scripts/gh-body-lint <body-file>` first to catch literal `\n` sequences and
+non-linking `GH#123` references.
 
 **Example agent session:**
 
