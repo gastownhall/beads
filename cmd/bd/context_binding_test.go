@@ -1,13 +1,18 @@
 package main
 
 import (
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/routing"
 )
 
 func writeTestConfigYAML(t *testing.T, beadsDir, contents string) {
@@ -17,6 +22,23 @@ func writeTestConfigYAML(t *testing.T, beadsDir, contents string) {
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(contents), 0o600); err != nil {
 		t.Fatalf("write config.yaml: %v", err)
+	}
+}
+
+func initGitRepoForContextTest(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	cmd := exec.Command("git", "init", "--quiet")
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	cmd = exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config hooks: %v\n%s", err, output)
 	}
 }
 
@@ -128,6 +150,55 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	}
 	if got := doltserver.DefaultConfig(targetBeadsDir).Port; got != 4242 {
 		t.Fatalf("DefaultConfig(target).Port = %d, want %d", got, 4242)
+	}
+}
+
+func TestDetectUserRoleForActiveRepoUsesSelectedBeadsDir(t *testing.T) {
+	callerDir := t.TempDir()
+	initGitRepoForContextTest(t, callerDir)
+
+	targetDir := t.TempDir()
+	initGitRepoForContextTest(t, targetDir)
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "")
+
+	cmd := exec.Command("git", "config", "beads.role", "maintainer")
+	cmd.Dir = targetDir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config beads.role: %v\n%s", err, output)
+	}
+
+	t.Chdir(callerDir)
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+	beads.ResetCaches()
+	t.Cleanup(beads.ResetCaches)
+
+	readStderr, writeStderr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writeStderr
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = readStderr.Close()
+		_ = writeStderr.Close()
+	})
+
+	role, err := detectUserRoleForActiveRepo()
+	_ = writeStderr.Close()
+	stderrOutput, readErr := io.ReadAll(readStderr)
+	if readErr != nil {
+		t.Fatalf("read stderr: %v", readErr)
+	}
+	if err != nil {
+		t.Fatalf("detectUserRoleForActiveRepo: %v", err)
+	}
+	if role != routing.Maintainer {
+		t.Fatalf("role = %q, want %q", role, routing.Maintainer)
+	}
+	if strings.Contains(string(stderrOutput), "beads.role not configured") {
+		t.Fatalf("unexpected role warning from caller cwd:\n%s", stderrOutput)
 	}
 }
 
