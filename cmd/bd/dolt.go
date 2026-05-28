@@ -413,10 +413,6 @@ variables for authentication.
 Use --remote to pull from a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').`,
 	Run: func(cmd *cobra.Command, args []string) {
-		if config.GetBool("no-push") {
-			fmt.Println("skipping pull: rig is local-only (no-push: true)")
-			return
-		}
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
