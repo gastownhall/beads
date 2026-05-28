@@ -49,6 +49,9 @@ type RenderOpts struct {
 	// HasRemote indicates whether a Dolt remote is configured.
 	// When false, "bd dolt push" is omitted from session-completion instructions.
 	HasRemote bool
+	// NoPush indicates the rig is declared local-only (no-push: true in config).
+	// When true, "bd dolt push" is omitted regardless of HasRemote.
+	NoPush bool
 }
 
 // DefaultRenderOpts returns opts that assume a remote is configured,
@@ -211,7 +214,7 @@ func templateBodyWithOpts(profile Profile, opts RenderOpts) string {
 		body = strings.TrimSuffix(body, "\n<!-- END BEADS INTEGRATION -->")
 	}
 
-	if !opts.HasRemote {
+	if !opts.HasRemote || opts.NoPush {
 		body = stripDoltPushReferences(body)
 	}
 
