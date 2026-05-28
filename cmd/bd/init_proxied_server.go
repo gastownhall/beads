@@ -404,6 +404,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				TemplatePath: agentsTemplate,
 				Profile:      agentsProfileStr,
 				HasRemote:    t.remoteURL != "",
+				NoPush:       config.GetBool("no-push"),
 			})
 			if err := t.fsUseCase.InstallClaudeProject(ctx, in.stealth); err != nil && !in.quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)

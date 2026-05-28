@@ -59,6 +59,7 @@ func defaultAgentsEnv() agentsEnv {
 var detectRenderOptsImpl = func() agents.RenderOpts {
 	return agents.RenderOpts{
 		HasRemote: config.GetString("sync.remote") != "" || config.GetString("sync.git-remote") != "",
+		NoPush:    config.GetBool("no-push"),
 	}
 }
 
