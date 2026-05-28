@@ -199,6 +199,7 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 	if cfg.BeadsDir == "" {
 		cfg.BeadsDir = beadsDir
 	}
+	ApplyLocalOnlyConfig(beadsDir, cfg)
 
 	// GH#2438: Warn if data-dir is set in server mode — it has no effect on
 	// which database the server uses and can cause silent DB context switches.
@@ -254,6 +255,26 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 				cfg.MaxOpenConns = n
 			}
 		}
+	}
+}
+
+// ApplyLocalOnlyConfig applies dolt.local-only from beads config to cfg.
+func ApplyLocalOnlyConfig(beadsDir string, cfg *Config) {
+	if cfg == nil || cfg.LocalOnly {
+		return
+	}
+	cfg.LocalOnly = resolveLocalOnly(beadsDir)
+}
+
+func resolveLocalOnly(beadsDir string) bool {
+	if config.GetBool("dolt.local-only") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(config.GetStringFromDir(beadsDir, "dolt.local-only"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

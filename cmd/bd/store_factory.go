@@ -46,6 +46,9 @@ func usesProxiedServer() bool {
 // newDoltStore creates a storage backend from an explicit config.
 // Used by bd init and PersistentPreRun.
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
+	if cfg != nil {
+		dolt.ApplyLocalOnlyConfig(cfg.BeadsDir, cfg)
+	}
 	if cfg.ProxiedServer {
 		// TODO: this should not be a store
 		// it should be a uow provider

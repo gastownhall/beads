@@ -203,6 +203,7 @@ type Config struct {
 	Remote         string // Default remote name (e.g., "origin")
 	Database       string // Database name within Dolt (default: "beads")
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
+	LocalOnly      bool   // Suppress runtime remote re-registration from CLI config
 
 	// Server connection options
 	ServerSocket   string // Unix domain socket path (overrides Host/Port when set)
@@ -1145,6 +1146,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	store.registerPoolGauges()
 
 	return store, nil
+}
+
+func shouldSyncCLIRemotesToSQL(readOnly, localOnly bool) bool {
+	return !readOnly && !localOnly
 }
 
 func shouldPersistResolvedPortFile() bool {

@@ -106,6 +106,29 @@ func TestResolveAutoStart(t *testing.T) {
 	}
 }
 
+func TestShouldSyncCLIRemotesToSQL(t *testing.T) {
+	tests := []struct {
+		name      string
+		readOnly  bool
+		localOnly bool
+		want      bool
+	}{
+		{name: "default writer syncs", want: true},
+		{name: "read only skips", readOnly: true, want: false},
+		{name: "local only skips", localOnly: true, want: false},
+		{name: "read only and local only skips", readOnly: true, localOnly: true, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSyncCLIRemotesToSQL(tc.readOnly, tc.localOnly); got != tc.want {
+				t.Fatalf("shouldSyncCLIRemotesToSQL(readOnly=%v, localOnly=%v) = %v, want %v",
+					tc.readOnly, tc.localOnly, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestApplyCLIAutoStart_RespectsExternalMode verifies that an external-mode
 // repo (metadata.json with explicit dolt_server_port) suppresses the CLI
 // auto-start path, preventing the shadow-database fallback when the
@@ -315,6 +338,39 @@ func TestApplyResolvedConfig(t *testing.T) {
 		}
 		if cfg.ServerUser != "custom" {
 			t.Fatalf("ServerUser override lost: %q", cfg.ServerUser)
+		}
+	})
+
+	t.Run("sets local only from config yaml", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  local-only: true\n"), 0o644); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+		fileCfg := &configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltDatabase: "beads_codex",
+		}
+		cfg := &Config{}
+
+		applyResolvedConfig(beadsDir, fileCfg, cfg)
+
+		if !cfg.LocalOnly {
+			t.Fatal("LocalOnly = false, want true from dolt.local-only config")
+		}
+	})
+
+	t.Run("preserves caller local only", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		fileCfg := &configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltDatabase: "beads_codex",
+		}
+		cfg := &Config{LocalOnly: true}
+
+		applyResolvedConfig(beadsDir, fileCfg, cfg)
+
+		if !cfg.LocalOnly {
+			t.Fatal("LocalOnly override lost")
 		}
 	})
 }

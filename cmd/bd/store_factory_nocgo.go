@@ -29,6 +29,9 @@ func usesProxiedServer() bool {
 }
 
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
+	if cfg != nil {
+		dolt.ApplyLocalOnlyConfig(cfg.BeadsDir, cfg)
+	}
 	if cfg.ProxiedServer {
 		// TODO: this should not be a store
 		// it should be a uow provider
