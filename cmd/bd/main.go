@@ -127,6 +127,7 @@ var readOnlyCommands = map[string]bool{
 	"blocked":    true,
 	"count":      true,
 	"search":     true,
+	"query":      true,
 	"graph":      true,
 	"duplicates": true,
 	"comments":   true, // list comments (not add)
