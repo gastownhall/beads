@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/routing"
 )
 
@@ -40,6 +41,32 @@ func initGitRepoForContextTest(t *testing.T, dir string) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git config hooks: %v\n%s", err, output)
 	}
+}
+
+func resetRepoContextCachesForTest(t *testing.T) {
+	t.Helper()
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
+}
+
+func safeTempDirForContextTest(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", ".tmp-context-*")
+	if err != nil {
+		t.Fatalf("mkdir safe temp dir: %v", err)
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("abs safe temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(absDir)
+	})
+	return absDir
 }
 
 type flagSnapshot struct {
@@ -154,6 +181,8 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 }
 
 func TestDetectUserRoleForActiveRepoUsesSelectedBeadsDir(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+
 	callerDir := t.TempDir()
 	initGitRepoForContextTest(t, callerDir)
 
@@ -170,8 +199,6 @@ func TestDetectUserRoleForActiveRepoUsesSelectedBeadsDir(t *testing.T) {
 
 	t.Chdir(callerDir)
 	t.Setenv("BEADS_DIR", targetBeadsDir)
-	beads.ResetCaches()
-	t.Cleanup(beads.ResetCaches)
 
 	readStderr, writeStderr, err := os.Pipe()
 	if err != nil {
@@ -199,6 +226,31 @@ func TestDetectUserRoleForActiveRepoUsesSelectedBeadsDir(t *testing.T) {
 	}
 	if strings.Contains(string(stderrOutput), "beads.role not configured") {
 		t.Fatalf("unexpected role warning from caller cwd:\n%s", stderrOutput)
+	}
+}
+
+func TestActiveRepoPathForRoutingFallsBackToBeadsDirParent(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+
+	targetDir := safeTempDirForContextTest(t)
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "")
+
+	t.Setenv("BEADS_DIR", targetBeadsDir)
+
+	if got := activeRepoPathForRouting(); got != targetDir {
+		t.Fatalf("activeRepoPathForRouting() = %q, want %q", got, targetDir)
+	}
+}
+
+func TestActiveRepoPathForRoutingFallsBackToCurrentDirectory(t *testing.T) {
+	resetRepoContextCachesForTest(t)
+
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_DIR", "")
+
+	if got := activeRepoPathForRouting(); got != "." {
+		t.Fatalf("activeRepoPathForRouting() = %q, want %q", got, ".")
 	}
 }
 
