@@ -226,6 +226,7 @@ func TestApplyConfigDefaults_TestModeUseSentinelPort(t *testing.T) {
 			os.Setenv("BEADS_DOLT_PORT", origPort)
 		}
 	}()
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
 
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Unsetenv("BEADS_DOLT_PORT")
@@ -251,6 +252,7 @@ func TestApplyConfigDefaults_TestModeWithPort(t *testing.T) {
 			os.Setenv("BEADS_DOLT_PORT", origPort)
 		}
 	}()
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
 
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Setenv("BEADS_DOLT_PORT", "13307")
@@ -294,6 +296,7 @@ func TestApplyConfigDefaults_TestModeBlocksProdPort(t *testing.T) {
 		}
 	}()
 
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Setenv("BEADS_DOLT_PORT", "3307") // Production port
 	os.Unsetenv("BEADS_TEST_SERVER")     // No test-server opt-in for this case.
@@ -326,7 +329,8 @@ func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
 		}
 	}()
 
-	os.Unsetenv("BEADS_TEST_MODE") // NOT in test mode
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
+	os.Unsetenv("BEADS_TEST_MODE")         // NOT in test mode
 	os.Setenv("BEADS_DOLT_PORT", "19999")
 
 	// Simulate metadata.json having set port to production default
@@ -358,6 +362,7 @@ func TestApplyConfigDefaults_ProductionFallback(t *testing.T) {
 		}
 	}()
 
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env
 	os.Unsetenv("BEADS_TEST_MODE")
 	os.Unsetenv("BEADS_DOLT_PORT")
 
