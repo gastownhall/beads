@@ -1,6 +1,7 @@
 package db
 
 import (
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -11,6 +12,7 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("RejectsSelfDependency", s.depInsertSelfDep)
 		s.Run("RejectsEmptyIDs", s.depInsertEmptyIDs)
 		s.Run("SameTypeIsIdempotentMetadataRefresh", s.depInsertIdempotentSameType)
+		s.Run("UsesDeterministicID", s.depInsertUsesDeterministicID)
 		s.Run("DifferentTypeIsRejected", s.depInsertConflictingType)
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
 		s.Run("ThreadIDPersists", s.depInsertThreadID)
@@ -61,6 +63,23 @@ func newDep(issueID, dependsOnID string, t types.DependencyType) *types.Dependen
 		DependsOnID: dependsOnID,
 		Type:        t,
 	}
+}
+
+// depInsertUsesDeterministicID guards the #4259 fix on the server-mode (use-case)
+// insert path: the row must carry the deterministic id derived from
+// (issue_id, target), not a random UUID — otherwise the table is merge-unsafe and,
+// after the DEFAULT (UUID()) is dropped, the insert fails outright.
+func (s *testSuite) depInsertUsesDeterministicID() {
+	s.seedIssueRow("bd-dep-det-a")
+	s.seedIssueRow("bd-dep-det-b")
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-dep-det-a", "bd-dep-det-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	var gotID string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT id FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+		"bd-dep-det-a", "bd-dep-det-b").Scan(&gotID))
+	s.Equal(depid.New("bd-dep-det-a", "bd-dep-det-b"), gotID)
 }
 
 func (s *testSuite) depInsertRoundTrip() {

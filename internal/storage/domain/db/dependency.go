@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -103,12 +104,15 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
 
+	// Deterministic id keyed on (issue_id, target), the same derivation as the
+	// embedded/issueops path, so server-mode (use-case) dependency creation stays
+	// merge-safe across clones and works once the DEFAULT (UUID()) is dropped (#4259).
 	//nolint:gosec // G201: table is one of two hardcoded constants; targetCol is from pickDepTargetColumn
 	if _, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, %s, type, created_at, created_by, metadata, thread_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, table, targetCol),
-		dep.IssueID, dep.DependsOnID, string(dep.Type),
+		depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, string(dep.Type),
 		time.Now().UTC(), actor, metadata, dep.ThreadID,
 	); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
