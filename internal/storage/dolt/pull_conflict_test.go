@@ -74,10 +74,10 @@ func TestPullAutoResolveMetadataConflicts(t *testing.T) {
 	// mergeErr may or may not be nil depending on Dolt version.
 
 	// Try auto-resolve.
-	resolved, resolveErr := store.tryAutoResolveMetadataConflicts(ctx, tx)
+	resolved, resolveErr := store.tryAutoResolveMergeConflicts(ctx, tx)
 	if resolveErr != nil {
 		_ = tx.Rollback()
-		t.Fatalf("tryAutoResolveMetadataConflicts error: %v (mergeErr: %v)", resolveErr, mergeErr)
+		t.Fatalf("tryAutoResolveMergeConflicts error: %v (mergeErr: %v)", resolveErr, mergeErr)
 	}
 	if !resolved {
 		_ = tx.Rollback()
@@ -168,7 +168,7 @@ func TestPullAutoResolveSkipsNonMetadataConflicts(t *testing.T) {
 	_, mergeErr := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", remoteBranch)
 
 	// Issues table conflict should NOT be auto-resolved.
-	resolved, resolveErr := store.tryAutoResolveMetadataConflicts(ctx, tx)
+	resolved, resolveErr := store.tryAutoResolveMergeConflicts(ctx, tx)
 	_ = tx.Rollback()
 
 	if mergeErr == nil && resolveErr == nil && !resolved {
@@ -179,7 +179,7 @@ func TestPullAutoResolveSkipsNonMetadataConflicts(t *testing.T) {
 
 	if resolveErr != nil {
 		// Error checking conflicts is acceptable for some Dolt versions.
-		t.Logf("tryAutoResolveMetadataConflicts returned error: %v", resolveErr)
+		t.Logf("tryAutoResolveMergeConflicts returned error: %v", resolveErr)
 		return
 	}
 

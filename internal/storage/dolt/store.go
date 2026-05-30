@@ -2382,7 +2382,7 @@ func (s *DoltStore) pullWithAutoResolve(ctx context.Context, query string, args 
 
 	// Check for merge conflicts regardless of whether DOLT_PULL errored.
 	// Some Dolt versions error on conflicts, others leave them in the working set.
-	resolved, resolveErr := s.tryAutoResolveMetadataConflicts(ctx, tx)
+	resolved, resolveErr := s.tryAutoResolveMergeConflicts(ctx, tx)
 	if resolveErr != nil {
 		_ = tx.Rollback()
 		if pullErr != nil {
@@ -2400,10 +2400,24 @@ func (s *DoltStore) pullWithAutoResolve(ctx context.Context, query string, args 
 	return tx.Commit()
 }
 
-// tryAutoResolveMetadataConflicts checks if all merge conflicts are on the metadata
-// table and resolves them with "theirs" strategy. Returns (true, nil) if all conflicts
-// were resolved, (false, nil) if non-metadata conflicts exist, or (false, err) on error.
-func (s *DoltStore) tryAutoResolveMetadataConflicts(ctx context.Context, tx *sql.Tx) (bool, error) {
+// tryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to
+// resolve without operator input, and returns (true, nil) only if ALL conflicts
+// were resolved. It handles two classes:
+//
+//   - metadata: machine-local rows (e.g. dolt_auto_push_*) that routinely diverge
+//     across clones (GH#2466). Resolved with "theirs".
+//   - dependencies: with deterministic ids (#4259) the same logical edge has the
+//     same primary key on every clone, so a same-PK conflict is the SAME edge.
+//     When the two sides differ only in audit columns (created_at, created_by,
+//     metadata, thread_id) — same edge, same type, present on both sides — the
+//     conflict is resolved with "theirs" (the remote's values win, which is
+//     convergent across clones pulling from the same remote). A conflict where the
+//     dependency type differs, or one side deleted the edge, is a real semantic
+//     conflict and is left for the operator.
+//
+// Any conflict on another table, or an unresolvable dependencies conflict, returns
+// (false, nil) so the caller fails the pull and the operator resolves it.
+func (s *DoltStore) tryAutoResolveMergeConflicts(ctx context.Context, tx *sql.Tx) (bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT `table`, num_conflicts FROM dolt_conflicts")
 	if err != nil {
 		return false, fmt.Errorf("failed to query conflicts: %w", err)
@@ -2431,27 +2445,75 @@ func (s *DoltStore) tryAutoResolveMetadataConflicts(ctx context.Context, tx *sql
 		return false, nil // No conflicts to resolve — error was something else
 	}
 
-	// Only auto-resolve if ALL conflicts are on the metadata table.
+	// Decide which conflicted tables are safe to auto-resolve. If any conflict is
+	// not safely resolvable, resolve nothing and let the pull fail.
+	var resolvable []string
 	for _, c := range conflicts {
-		if c.table != "metadata" {
+		switch c.table {
+		case "metadata":
+			resolvable = append(resolvable, "metadata")
+		case "dependencies":
+			auditOnly, err := s.dependencyConflictsAreAuditOnly(ctx, tx)
+			if err != nil {
+				return false, err
+			}
+			if !auditOnly {
+				return false, nil
+			}
+			resolvable = append(resolvable, "dependencies")
+		default:
 			return false, nil
 		}
 	}
 
-	// Resolve metadata conflicts with "theirs" — remote values win.
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')"); err != nil {
-		return false, fmt.Errorf("failed to resolve metadata conflicts: %w", err)
+	// Resolve each safe table with "theirs" and stage only that table (GH#2455).
+	// table is from the fixed allowlist above, never user input.
+	for _, table := range resolvable {
+		//nolint:gosec // G201: table is one of the hardcoded constants above.
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', '"+table+"')"); err != nil {
+			return false, fmt.Errorf("failed to resolve %s conflicts: %w", table, err)
+		}
+		//nolint:gosec // G201: table is one of the hardcoded constants above.
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD('"+table+"')"); err != nil {
+			return false, fmt.Errorf("failed to stage %s: %w", table, err)
+		}
 	}
-
-	// GH#2455: Stage only metadata (the table we resolved), not all dirty tables.
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD('metadata')"); err != nil {
-		return false, fmt.Errorf("failed to stage metadata: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve metadata merge conflicts (GH#2466)')"); err != nil {
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259)')"); err != nil {
 		return false, fmt.Errorf("failed to commit resolved conflicts: %w", err)
 	}
 
 	return true, nil
+}
+
+// dependencyConflictsAreAuditOnly reports whether every conflicted row in the
+// dependencies table is the SAME logical edge on both sides (deterministic id =>
+// same primary key => same issue_id+target) that differs only in audit columns.
+// It returns false if any conflicted row has a differing dependency type (a real
+// semantic conflict) or was deleted on one side (an add/delete conflict).
+func (s *DoltStore) dependencyConflictsAreAuditOnly(ctx context.Context, tx *sql.Tx) (bool, error) {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT our_id, their_id, our_type, their_type FROM dolt_conflicts_dependencies")
+	if err != nil {
+		return false, fmt.Errorf("query dependency conflicts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ourID, theirID, ourType, theirType sql.NullString
+		if err := rows.Scan(&ourID, &theirID, &ourType, &theirType); err != nil {
+			return false, fmt.Errorf("scan dependency conflict: %w", err)
+		}
+		// One side deleted the edge (add/delete conflict): leave for the operator.
+		if !ourID.Valid || !theirID.Valid {
+			return false, nil
+		}
+		// Same primary key already guarantees the same issue_id+target; a differing
+		// type is the only remaining way this is a real semantic conflict.
+		if ourType.Valid != theirType.Valid || ourType.String != theirType.String {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
 }
 
 // Branch creates a new branch
