@@ -469,8 +469,8 @@ func TestGitRemoteRoundTripAllTables(t *testing.T) {
 
 	// Dependency
 	runDoltSQL(t, setup.sourceDir,
-		`INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by) `+
-			`VALUES ('rt-child', 'rt-parent', 'blocks', NOW(), 'test')`)
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) `+
+			`VALUES (UUID(), 'rt-child', 'rt-parent', 'blocks', NOW(), 'test')`)
 
 	// Config
 	runDoltSQL(t, setup.sourceDir,

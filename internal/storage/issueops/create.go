@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -668,12 +669,15 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			if createdAt.IsZero() {
 				createdAt = time.Now().UTC()
 			}
+			// Deterministic id from (issue_id, target) keeps bulk-imported edges
+			// merge-safe across clones — two clones importing the same JSONL get the
+			// same primary key, not two random UUIDs that collide on uk_dep_* (#4259).
 			//nolint:gosec // G201: depTable is one of two hardcoded constants; target column from DepTargetKind.Column()
 			sqlResult, err := tx.ExecContext(ctx, fmt.Sprintf(`
-					INSERT INTO %s (issue_id, %s, type, created_by, created_at)
-					VALUES (?, ?, ?, ?, ?)
+					INSERT INTO %s (id, issue_id, %s, type, created_by, created_at)
+					VALUES (?, ?, ?, ?, ?, ?)
 					ON DUPLICATE KEY UPDATE type = type
-				`, depTable, kind.Column()), dep.IssueID, dep.DependsOnID, dep.Type, actor, createdAt)
+				`, depTable, kind.Column()), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, createdAt)
 			if err != nil {
 				return result, fmt.Errorf("failed to insert dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}

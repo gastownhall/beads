@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -206,11 +207,15 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return fmt.Errorf("failed to check existing dependency: %w", err)
 	}
 
+	// id is derived deterministically from the natural edge key (issue_id,
+	// target) so the same edge gets the same primary key on every clone and the
+	// dependencies table merges cleanly across Dolt clones (#4259). DependsOnID
+	// is the resolved target written into targetCol.
 	//nolint:gosec // G201: writeTable from WispTableRouting; targetCol from DepTargetKind.Column()
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, %s, type, created_at, created_by, metadata, thread_id)
-		VALUES (?, ?, ?, NOW(), ?, ?, ?)
-	`, writeTable, targetCol), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
+		INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
+		VALUES (?, ?, ?, ?, NOW(), ?, ?, ?)
+	`, writeTable, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return fmt.Errorf("failed to add dependency: %w", err)
 	}
 
@@ -465,11 +470,14 @@ func replaceDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column,
 		return fmt.Errorf("delete old dependency target: %w", err)
 	}
 	for _, row := range rows {
+		// The retargeted edge's natural key is (issue_id, newID): the switch above
+		// set exactly one typed target column to newID. Re-derive id from it so the
+		// rewritten row stays merge-safe and keeps a clone-stable primary key (#4259).
 		//nolint:gosec // table is hardcoded by callers.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, table), row.issueID, nullStringValue(row.issueTarget), nullStringValue(row.wispTarget), nullStringValue(row.external), row.depType, nullTimeValue(row.createdAt), nullStringValue(row.createdBy), nullStringValue(row.metadata), nullStringValue(row.threadID)); err != nil {
+			INSERT INTO %s (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, table), depid.New(row.issueID, newID), row.issueID, nullStringValue(row.issueTarget), nullStringValue(row.wispTarget), nullStringValue(row.external), row.depType, nullTimeValue(row.createdAt), nullStringValue(row.createdBy), nullStringValue(row.metadata), nullStringValue(row.threadID)); err != nil {
 			return fmt.Errorf("insert replacement dependency target: %w", err)
 		}
 	}

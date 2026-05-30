@@ -599,7 +599,7 @@ func TestCreateIssuesDuplicateSideTableInputsDoNotCommitDirtySideTables(t *testi
 		t.Fatalf("dirty comment insert: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx,
-		"INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, ?, ?)",
 		dirtyOwner.ID, dirtyTarget.ID, types.DepBlocks, createdAt.Add(2*time.Minute), "tester",
 	); err != nil {
 		t.Fatalf("dirty dependency insert: %v", err)

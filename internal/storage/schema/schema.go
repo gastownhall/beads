@@ -234,6 +234,17 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		return applied, fmt.Errorf("backfill custom tables: %w", err)
 	}
 
+	// #4259: rewrite any per-clone-random dependency ids (minted by 0043's
+	// DEFAULT (UUID()) before this fix) to the deterministic key, so independently
+	// migrated clones converge to byte-identical, merge-safe dependencies. Runs
+	// here, after the schema migrations (0050 has asserted the canonical schema),
+	// and only on a pass where migration work was needed.
+	rekeyed, err := rekeyDependencyIDs(ctx, db)
+	if err != nil {
+		return applied, fmt.Errorf("rekey dependency ids: %w", err)
+	}
+	backfilled = backfilled || rekeyed
+
 	if _, err := db.ExecContext(ctx, "REPLACE INTO dolt_ignore VALUES ('ignored_schema_migrations', true)"); err != nil {
 		return applied, fmt.Errorf("registering ignored_schema_migrations in dolt_ignore: %w", err)
 	}

@@ -222,9 +222,13 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 			return fmt.Errorf("delete copied labels for demoted issue %s: %w", id, err)
 		}
 
+		// Demotion is the inverse of promotion: carry id across so the wisp edge
+		// keeps the deterministic key its dependency had. Both tables key id on
+		// (issue_id, target), and wisp_dependencies.id also has no DEFAULT now, so
+		// the copy is both consistent and required (#4259).
 		if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
-		SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
+		INSERT IGNORE INTO wisp_dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
+		SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
 		FROM dependencies WHERE issue_id = ?
 	`, id); err != nil {
 			return fmt.Errorf("copy dependencies for demoted issue %s: %w", id, err)

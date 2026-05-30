@@ -455,7 +455,7 @@ func TestCheckChildParentDependenciesDB_BlockingDetected(t *testing.T) {
 
 	// Add blocking dependency: child depends on parent
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, ?, 'blocks', NOW(), 'test')`,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`,
 		childID, parent.ID)
 	if err != nil {
 		t.Fatalf("Failed to insert dependency: %v", err)
@@ -495,7 +495,7 @@ func TestCheckChildParentDependenciesDB_NonBlockingIgnored(t *testing.T) {
 
 	// Add parent-child type dependency (NOT blocking — should be ignored)
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, ?, 'parent-child', NOW(), 'test')`,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'test')`,
 		childID, parent.ID)
 	if err != nil {
 		t.Fatalf("Failed to insert dependency: %v", err)

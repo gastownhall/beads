@@ -114,6 +114,11 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	// rekeyDependencyIDs probes whether each edge table has an id column; this
+	// mocked world has no such table, so both probes return 0 and the re-key
+	// no-ops without scanning/updating rows.
+	expectColumnExists(mock, false)
+	expectColumnExists(mock, false)
 	mock.ExpectExec(regexp.QuoteMeta("REPLACE INTO dolt_ignore VALUES ('ignored_schema_migrations', true)")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS ignored_schema_migrations").
@@ -128,6 +133,15 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migrations')")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+func expectColumnExists(mock sqlmock.Sqlmock, present bool) {
+	n := 0
+	if present {
+		n = 1
+	}
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(n))
 }
 
 func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {

@@ -382,8 +382,8 @@ func (s *testSuite) depWispHasCycleCrossTable() {
 	// with depends_on_wisp_id set. We need to insert via raw SQL because our
 	// Insert path writes to depends_on_issue_id only.
 	_, err := s.Runner().ExecContext(s.Ctx(), `
-		INSERT INTO dependencies (issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
-		VALUES (?, ?, 'blocks', NOW(), 'tester', '{}')
+		INSERT INTO dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
 	`, "bd-dep-cx-a", "bd-dep-cx-s")
 	s.Require().NoError(err)
 	// s -> b: source s is wisp, target is permanent. Stored in wisp_dependencies.

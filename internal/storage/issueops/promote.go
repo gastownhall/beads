@@ -47,9 +47,14 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 		return fmt.Errorf("delete copied wisp labels for promoted wisp %s: %w", id, err)
 	}
 
+	// Carry id across promotion. Both tables derive id deterministically from the
+	// same (issue_id, target) key, so the wisp edge's id is exactly the id a
+	// direct dependency on that edge would get; copying it (rather than letting a
+	// DEFAULT mint a fresh random one) keeps the promoted edge merge-safe and is
+	// required now that dependencies.id has no DEFAULT (#4259).
 	if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO dependencies (issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
-		SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
+		INSERT IGNORE INTO dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
+		SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
 		FROM wisp_dependencies WHERE issue_id = ?
 	`, id); err != nil {
 		return fmt.Errorf("copy dependencies for promoted wisp %s: %w", id, err)
