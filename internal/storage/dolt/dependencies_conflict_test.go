@@ -152,3 +152,92 @@ func TestTryAutoResolveMergeConflicts_DependencyTypeConflictLeftAlone(t *testing
 		t.Error("expected a differing-type dependency conflict to be left unresolved")
 	}
 }
+
+// TestTryAutoResolveMergeConflicts_DependencyStaleIDLeftAlone verifies the resolver
+// does NOT treat a same-primary-key conflict as audit-only when the two sides are
+// actually different edges (different issue_id) that collide on one surrogate id —
+// the failure mode a stale post-rename id creates (#4259 finding 2). A same id is no
+// longer accepted as proof of a shared edge, so this must be left for the operator
+// rather than silently resolved with --theirs.
+func TestTryAutoResolveMergeConflicts_DependencyStaleIDLeftAlone(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	t.Cleanup(cleanup)
+
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+
+	db := store.db
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("get current branch: %v", err)
+	}
+
+	for _, id := range []string{"deps-x", "deps-y", "deps-z"} {
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, '', '', '', '', 'open', 2, 'task')",
+			id, id); err != nil {
+			t.Fatalf("seed issue %s: %v", id, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed issues')"); err != nil {
+		t.Fatalf("commit seed issues: %v", err)
+	}
+
+	// One surrogate id shared by two DIFFERENT edges — the stale-rename hazard.
+	sharedID := depid.New("deps-x", "deps-y")
+
+	// Current branch: the correct edge deps-x -> deps-y under sharedID.
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, 'deps-x', 'deps-y', 'blocks', NOW(), 'alice')",
+		sharedID); err != nil {
+		t.Fatalf("insert current edge: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'edge on current')"); err != nil {
+		t.Fatalf("commit edge on current: %v", err)
+	}
+
+	peerBranch := currentBranch + "_stalepeer"
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD~1')", peerBranch); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+	t.Cleanup(func() {
+		db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
+		db.ExecContext(ctx, "CALL DOLT_BRANCH('-D', ?)", peerBranch)
+	})
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peerBranch); err != nil {
+		t.Fatalf("checkout peer branch: %v", err)
+	}
+	// Peer branch: a DIFFERENT edge deps-z -> deps-y carrying the SAME stale id.
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, 'deps-z', 'deps-y', 'blocks', NOW(), 'bob')",
+		sharedID); err != nil {
+		t.Fatalf("insert peer edge: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'stale-id edge on peer')"); err != nil {
+		t.Fatalf("commit edge on peer: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch); err != nil {
+		t.Fatalf("checkout current branch: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("allow commit conflicts: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
+		t.Logf("merge returned: %v", err)
+	}
+
+	resolved, err := store.tryAutoResolveMergeConflicts(ctx, tx)
+	_ = tx.Rollback()
+	if err != nil {
+		t.Fatalf("resolver error: %v", err)
+	}
+	if resolved {
+		t.Error("expected a same-PK/different-issue_id (stale-id) conflict to be left for the operator")
+	}
+}

@@ -401,12 +401,78 @@ func UpdateIssueIDInDependenciesInTx(ctx context.Context, tx *sql.Tx, oldID, new
 			return fmt.Errorf("update issue target %s -> %s in %s: %w", oldID, newID, table, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx,
-		"UPDATE dependencies SET issue_id = ? WHERE issue_id = ?",
-		newID, oldID); err != nil {
-		return fmt.Errorf("update issue source %s -> %s in dependencies: %w", oldID, newID, err)
+	// Re-derive the deterministic primary key for rows whose SOURCE issue was
+	// renamed. dependencies.issue_id carries fk_dep_issue ... ON UPDATE CASCADE, so
+	// renaming the issues row (updateIssueIDInTx updates issues.id first) cascades
+	// issue_id from oldID to newID before we get here — but the cascade leaves the
+	// surrogate id at depid.New(oldID, target). A stale id re-forks the primary key
+	// across clones (#4259) and breaks the same-PK => same-edge invariant the pull
+	// conflict resolver relies on, so recompute it from the post-rename (newID, target).
+	if err := rekeyDependencySourceInTx(ctx, tx, oldID, newID); err != nil {
+		return fmt.Errorf("rekey dependency sources %s -> %s: %w", oldID, newID, err)
 	}
 	return nil
+}
+
+// rekeyDependencySourceInTx rewrites dependencies.id for every edge whose source
+// issue was renamed to newID so the stored id equals depid.New(newID, target). It
+// matches rows by both newID (the normal post-FK-cascade state) and oldID (defensive,
+// in case a caller reaches here before the cascade) and re-asserts issue_id = newID
+// so the row converges either way. Only rows whose id is actually stale are touched.
+func rekeyDependencySourceInTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	queryRows, err := tx.QueryContext(ctx, `
+		SELECT id, depends_on_issue_id, depends_on_wisp_id, depends_on_external
+		FROM dependencies
+		WHERE issue_id = ? OR issue_id = ?
+	`, newID, oldID)
+	if err != nil {
+		return fmt.Errorf("query dependency sources: %w", err)
+	}
+	type rekey struct{ oldRowID, newRowID string }
+	var rekeys []rekey
+	for queryRows.Next() {
+		var id string
+		var issueTarget, wispTarget, external sql.NullString
+		if err := queryRows.Scan(&id, &issueTarget, &wispTarget, &external); err != nil {
+			_ = queryRows.Close()
+			return fmt.Errorf("scan dependency source: %w", err)
+		}
+		target, ok := resolveDependencyTarget(issueTarget, wispTarget, external)
+		if !ok {
+			continue // ck_dep_one_target guarantees one target; skip defensively
+		}
+		if want := depid.New(newID, target); want != id {
+			rekeys = append(rekeys, rekey{oldRowID: id, newRowID: want})
+		}
+	}
+	_ = queryRows.Close()
+	if err := queryRows.Err(); err != nil {
+		return fmt.Errorf("iterate dependency sources: %w", err)
+	}
+	for _, rk := range rekeys {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE dependencies SET id = ?, issue_id = ? WHERE id = ?",
+			rk.newRowID, newID, rk.oldRowID); err != nil {
+			return fmt.Errorf("rekey dependency source id %s -> %s: %w", rk.oldRowID, rk.newRowID, err)
+		}
+	}
+	return nil
+}
+
+// resolveDependencyTarget returns the single non-null dependency target — the value
+// depid.New and the uk_dep_* unique keys treat as the edge's target — following the
+// same precedence as DepTargetExpr (issue, then wisp, then external).
+func resolveDependencyTarget(issueTarget, wispTarget, external sql.NullString) (string, bool) {
+	switch {
+	case issueTarget.Valid:
+		return issueTarget.String, true
+	case wispTarget.Valid:
+		return wispTarget.String, true
+	case external.Valid:
+		return external.String, true
+	default:
+		return "", false
+	}
 }
 
 func replaceDependencyTargetInTx(ctx context.Context, tx *sql.Tx, table, column, oldID, newID string) error {
