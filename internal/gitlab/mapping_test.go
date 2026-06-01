@@ -462,12 +462,12 @@ func TestIssueLinksToDependencies(t *testing.T) {
 		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 3", len(deps))
 	}
 
-	// Check blocks dependency
+	// Check blocks dependency: source 42 blocks target 43, so 43 depends on 42.
 	if deps[0].Type != "blocks" {
 		t.Errorf("deps[0].Type = %q, want \"blocks\"", deps[0].Type)
 	}
-	if deps[0].ToGitLabIID != 43 {
-		t.Errorf("deps[0].ToGitLabIID = %d, want 43", deps[0].ToGitLabIID)
+	if deps[0].FromGitLabIID != 43 || deps[0].ToGitLabIID != 42 {
+		t.Errorf("deps[0] = %d -> %d, want 43 -> 42", deps[0].FromGitLabIID, deps[0].ToGitLabIID)
 	}
 
 	// Check relates_to dependency
@@ -475,9 +475,12 @@ func TestIssueLinksToDependencies(t *testing.T) {
 		t.Errorf("deps[1].Type = %q, want \"related\"", deps[1].Type)
 	}
 
-	// Check is_blocked_by (reverse of blocks)
-	if deps[2].Type != "blocked_by" {
-		t.Errorf("deps[2].Type = %q, want \"blocked_by\"", deps[2].Type)
+	// Check is_blocked_by: source 42 is blocked by target 45, so 42 depends on 45.
+	if deps[2].Type != "blocks" {
+		t.Errorf("deps[2].Type = %q, want \"blocks\"", deps[2].Type)
+	}
+	if deps[2].FromGitLabIID != 42 || deps[2].ToGitLabIID != 45 {
+		t.Errorf("deps[2] = %d -> %d, want 42 -> 45", deps[2].FromGitLabIID, deps[2].ToGitLabIID)
 	}
 }
 
@@ -559,7 +562,7 @@ func TestIssueLinksToDependencies_AsTarget(t *testing.T) {
 	}
 }
 
-// TestissueLinksToDependencies_UnknownLinkType verifies unknown link types default to "related".
+// TestissueLinksToDependencies_UnknownLinkType verifies unknown link types are skipped.
 func TestIssueLinksToDependencies_UnknownLinkType(t *testing.T) {
 	config := DefaultMappingConfig()
 
@@ -573,13 +576,8 @@ func TestIssueLinksToDependencies_UnknownLinkType(t *testing.T) {
 
 	deps := issueLinksToDependencies(42, links, config)
 
-	if len(deps) != 1 {
-		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 1", len(deps))
-	}
-
-	// Unknown link types should default to "related"
-	if deps[0].Type != "related" {
-		t.Errorf("deps[0].Type = %q, want \"related\" for unknown link type", deps[0].Type)
+	if len(deps) != 0 {
+		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 0 for unknown link type", len(deps))
 	}
 }
 
@@ -598,13 +596,8 @@ func TestIssueLinksToDependencies_NilIssues(t *testing.T) {
 
 	deps := issueLinksToDependencies(42, links, config)
 
-	// Should still create a dependency but with ToGitLabIID = 0
-	if len(deps) != 1 {
-		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 1", len(deps))
-	}
-
-	if deps[0].ToGitLabIID != 0 {
-		t.Errorf("deps[0].ToGitLabIID = %d, want 0 (nil target)", deps[0].ToGitLabIID)
+	if len(deps) != 0 {
+		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 0 for nil target", len(deps))
 	}
 }
 

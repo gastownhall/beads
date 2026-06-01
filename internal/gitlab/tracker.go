@@ -30,6 +30,8 @@ var glShorthandPattern = regexp.MustCompile(`^gitlab:([1-9]\d*)$`)
 // milestoneIDPattern matches GitLab milestone URLs: .../-/milestones/5
 var milestoneIDPattern = regexp.MustCompile(`/-/milestones/(\d+)`)
 
+const gitLabMilestoneIdentifierPrefix = "milestone:"
+
 // Tracker implements tracker.IssueTracker for GitLab.
 type Tracker struct {
 	client      *Client
@@ -42,6 +44,9 @@ type Tracker struct {
 func (t *Tracker) Name() string         { return "gitlab" }
 func (t *Tracker) DisplayName() string  { return "GitLab" }
 func (t *Tracker) ConfigPrefix() string { return "gitlab" }
+
+// GitLabClient returns the underlying GitLab API client.
+func (t *Tracker) GitLabClient() *Client { return t.client }
 
 func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	t.store = store
@@ -169,6 +174,18 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.TrackerIssue, error) {
+	if milestoneIID, ok, err := parseMilestoneIdentifier(identifier); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		ms, err := t.client.FetchMilestoneByIID(ctx, milestoneIID)
+		if err != nil || ms == nil {
+			return nil, err
+		}
+		ti := milestoneToTrackerIssue(ms)
+		return ti, nil
+	}
+
 	iid, err := strconv.Atoi(identifier)
 	if err != nil {
 		return nil, fmt.Errorf("invalid GitLab IID %q: %w", identifier, err)
@@ -260,9 +277,23 @@ func (t *Tracker) createMilestone(ctx context.Context, issue *types.Issue) (*tra
 
 // updateMilestone updates a GitLab milestone for an epic bead.
 func (t *Tracker) updateMilestone(ctx context.Context, externalID string, issue *types.Issue) (*tracker.TrackerIssue, error) {
-	mid, err := strconv.Atoi(externalID)
+	mid, ok, err := parseMilestoneIdentifier(externalID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid milestone ID %q: %w", externalID, err)
+		return nil, err
+	}
+	if !ok {
+		mid, err = strconv.Atoi(externalID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid milestone ID %q: %w", externalID, err)
+		}
+	}
+	apiID := mid
+	msByIID, err := t.client.FetchMilestoneByIID(ctx, mid)
+	if err != nil {
+		return nil, fmt.Errorf("resolving milestone IID %d: %w", mid, err)
+	}
+	if msByIID != nil {
+		apiID = msByIID.ID
 	}
 
 	updates := map[string]interface{}{
@@ -275,7 +306,7 @@ func (t *Tracker) updateMilestone(ctx context.Context, externalID string, issue 
 		updates["state_event"] = "activate"
 	}
 
-	ms, err := t.client.UpdateMilestone(ctx, mid, updates)
+	ms, err := t.client.UpdateMilestone(ctx, apiID, updates)
 	if err != nil {
 		return nil, fmt.Errorf("updating milestone for epic: %w", err)
 	}
@@ -404,12 +435,21 @@ func (t *Tracker) findParentStoryGID(ctx context.Context, issueID string) string
 
 // milestoneToTrackerIssue converts a GitLab Milestone to a TrackerIssue.
 func milestoneToTrackerIssue(ms *Milestone) *tracker.TrackerIssue {
-	return &tracker.TrackerIssue{
-		ID:         strconv.Itoa(ms.ID),
-		Identifier: strconv.Itoa(ms.ID),
-		URL:        ms.WebURL,
-		Title:      ms.Title,
+	ti := &tracker.TrackerIssue{
+		ID:          strconv.Itoa(ms.ID),
+		Identifier:  strconv.Itoa(ms.ID),
+		URL:         ms.WebURL,
+		Title:       ms.Title,
+		Description: ms.Description,
+		State:       ms.State,
 	}
+	if ms.CreatedAt != nil {
+		ti.CreatedAt = *ms.CreatedAt
+	}
+	if ms.UpdatedAt != nil {
+		ti.UpdatedAt = *ms.UpdatedAt
+	}
+	return ti
 }
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
@@ -436,13 +476,25 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 	}
 	// Try milestone pattern first (more specific path)
 	if matches := milestoneIDPattern.FindStringSubmatch(ref); len(matches) >= 2 {
-		return matches[1]
+		return gitLabMilestoneIdentifierPrefix + matches[1]
 	}
 	// Fall back to issue pattern
 	if matches := issueIIDPattern.FindStringSubmatch(ref); len(matches) >= 2 {
 		return matches[1]
 	}
 	return ""
+}
+
+func parseMilestoneIdentifier(identifier string) (int, bool, error) {
+	if !strings.HasPrefix(identifier, gitLabMilestoneIdentifierPrefix) {
+		return 0, false, nil
+	}
+	raw := strings.TrimPrefix(identifier, gitLabMilestoneIdentifierPrefix)
+	iid, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, true, fmt.Errorf("invalid GitLab milestone identifier %q: %w", identifier, err)
+	}
+	return iid, true, nil
 }
 
 // IsMilestoneRef checks if an external_ref points to a milestone (not an issue).

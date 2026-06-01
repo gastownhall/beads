@@ -43,7 +43,7 @@ func DefaultMappingConfig() *MappingConfig {
 		LabelTypeMap: labelTypeMap,
 		RelationMap: map[string]string{
 			"blocks":        "blocks",
-			"is_blocked_by": "blocked_by",
+			"is_blocked_by": "blocks",
 			"relates_to":    "related",
 		},
 	}
@@ -227,44 +227,6 @@ func priorityToLabel(priority int) string {
 	default:
 		return "medium"
 	}
-}
-
-// issueLinksToDependencies converts GitLab IssueLinks to beads DependencyInfo.
-func issueLinksToDependencies(sourceIID int, links []IssueLink, config *MappingConfig) []DependencyInfo {
-	var deps []DependencyInfo
-
-	for _, link := range links {
-		var toIID int
-		var depType string
-
-		// Determine direction and target
-		if link.SourceIssue != nil && link.SourceIssue.IID == sourceIID {
-			// We are the source, target is the dependency
-			if link.TargetIssue != nil {
-				toIID = link.TargetIssue.IID
-			}
-		} else if link.TargetIssue != nil && link.TargetIssue.IID == sourceIID {
-			// We are the target, source is the dependency
-			if link.SourceIssue != nil {
-				toIID = link.SourceIssue.IID
-			}
-		}
-
-		// Map link type
-		if t, ok := config.RelationMap[link.LinkType]; ok {
-			depType = t
-		} else {
-			depType = "related"
-		}
-
-		deps = append(deps, DependencyInfo{
-			FromGitLabIID: sourceIID,
-			ToGitLabIID:   toIID,
-			Type:          depType,
-		})
-	}
-
-	return deps
 }
 
 // filterNonScopedLabels returns only labels without scoped prefixes.

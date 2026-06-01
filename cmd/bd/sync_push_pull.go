@@ -702,6 +702,7 @@ func runGitLabPush(cmd *cobra.Command, args []string) error {
 	engine := tracker.NewEngine(gt, store, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+	engine.PushHooks = buildGitLabPushHooks()
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Push:     true,
