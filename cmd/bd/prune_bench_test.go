@@ -28,6 +28,12 @@ func (m *mockRefStore) GetIssueComments(_ context.Context, _ string) ([]*types.C
 	return nil, nil
 }
 
+// GetCustomStatusesDetailed lets buildReferencedSet enumerate active custom
+// statuses; this fixture configures none.
+func (m *mockRefStore) GetCustomStatusesDetailed(_ context.Context) ([]types.CustomStatus, error) {
+	return nil, nil
+}
+
 // TestPruneLargeFixture asserts that buildReferencedSet completes in <5s on a
 // 10K-open-bead × ~5KB-body fixture (NFR-02 from be-5sn).
 func TestPruneLargeFixture(t *testing.T) {

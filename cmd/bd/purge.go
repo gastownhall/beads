@@ -109,16 +109,31 @@ func buildReferencedSet(ctx context.Context, st storage.DoltStorage, candidateID
 	sort.Strings(ids)
 	pat := regexp.MustCompile(`\b(` + strings.Join(ids, "|") + `)\b`)
 
-	notClosed := types.IssueFilter{
-		Statuses: []types.Status{
-			types.StatusOpen,
-			types.StatusInProgress,
-			types.StatusBlocked,
-			types.StatusDeferred,
-			types.StatusPinned,
-			types.StatusHooked,
-		},
+	// Scan every non-done bead: built-in active statuses plus any configured
+	// custom statuses whose category is not "done". A repo can define custom
+	// statuses (status.custom) in active/wip/frozen categories; a bead in such
+	// a status that cites a closed bead must protect it from prune exactly like
+	// a built-in open bead does. Reading custom statuses is required, not
+	// best-effort: if we cannot enumerate them we must not under-scan and risk
+	// deleting a referenced bead, so the error propagates and aborts the prune.
+	notClosedStatuses := []types.Status{
+		types.StatusOpen,
+		types.StatusInProgress,
+		types.StatusBlocked,
+		types.StatusDeferred,
+		types.StatusPinned,
+		types.StatusHooked,
 	}
+	customStatuses, err := st.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading custom statuses for reference scan: %w", err)
+	}
+	for _, cs := range customStatuses {
+		if cs.Category != types.CategoryDone {
+			notClosedStatuses = append(notClosedStatuses, types.Status(cs.Name))
+		}
+	}
+	notClosed := types.IssueFilter{Statuses: notClosedStatuses}
 	openBeads, err := st.SearchIssues(ctx, "", notClosed)
 	if err != nil {
 		return nil, err
