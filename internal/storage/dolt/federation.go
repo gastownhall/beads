@@ -180,6 +180,23 @@ func (s *DoltStore) syncCLIRemotesToSQL(ctx context.Context) {
 	}
 }
 
+// rootDirHasDoltRepo reports whether rootDir contains a dolt repository
+// initialized via `dolt init`. It is distinguished from a directory that
+// merely contains the sql-server's runtime files (e.g.
+// `.dolt/sql-server.info`).
+//
+// A real dolt repo always has `.dolt/repo_state.json` after `dolt init`.
+// The dolt sql-server, when its data_dir points at the server root, creates
+// only `.dolt/sql-server.info` for its own runtime state. The earlier check
+// `os.Stat(rootDir/.dolt)` could not distinguish the two and fell through
+// to a 5–7 s `dolt remote -v` walk that errored out with "not a valid
+// dolt repository" — wedging the gascity reconciler tick on every bd write
+// from the city root.
+func rootDirHasDoltRepo(rootDir string) bool {
+	_, err := os.Stat(filepath.Join(rootDir, ".dolt", "repo_state.json"))
+	return err == nil
+}
+
 // migrateServerRootRemotes checks the dolt server root directory (dbPath) for
 // remotes that should be propagated to the database CLI directory (CLIDir).
 // This handles GH#2118: users run `dolt remote add` in .beads/dolt/ (server root)
@@ -191,8 +208,7 @@ func (s *DoltStore) migrateServerRootRemotes(cliDir string) []storage.RemoteInfo
 	if rootDir == "" || rootDir == cliDir {
 		return nil
 	}
-	// Server root must have .dolt/ (from dolt init)
-	if _, err := os.Stat(filepath.Join(rootDir, ".dolt")); err != nil {
+	if !rootDirHasDoltRepo(rootDir) {
 		return nil
 	}
 	rootRemotes, err := doltutil.ListCLIRemotes(rootDir)
