@@ -3,10 +3,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -157,5 +159,117 @@ func TestMigratePersonal_abortOnNoConfirm(t *testing.T) {
 	if found == nil {
 		// Issue may have been migrated if the command doesn't prompt when no matching issues found.
 		t.Logf("note: abort test — issue may not have been found by migrate-personal")
+	}
+}
+
+// TestMigratePersonal_preservesComments is a regression test for the maphew
+// review of PR #4023 (be-e2nb): migrate-personal must copy comments as
+// structured rows (ImportIssueComment) so they survive in the planning repo.
+// The pre-fix code used AddComment, which records an event-style entry that
+// GetIssueComments never returns — silently dropping the migrated issue's
+// comments.
+func TestMigratePersonal_preservesComments(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "mpc")
+	planningDir := setupContributorRouting(t, bd, dir)
+
+	gitName, _ := exec.Command("git", "config", "--global", "user.name").Output()
+	actor := strings.TrimSpace(string(gitName))
+	if actor == "" {
+		actor = "Test"
+	}
+
+	issue := bdCreate(t, bd, dir, "Personal issue with a comment", "--actor", actor)
+	const commentText = "migrate-personal-must-preserve-this-comment"
+	bdComment(t, bd, dir, issue.ID, commentText)
+
+	out, err := bdMigratePersonal(t, bd, dir, "--yes")
+	if err != nil {
+		lout := strings.ToLower(out)
+		if strings.Contains(lout, "routing.contributor") ||
+			strings.Contains(lout, "no personal") ||
+			strings.Contains(lout, "dolt") ||
+			strings.Contains(lout, "cannot connect") ||
+			strings.Contains(lout, "server") {
+			t.Logf("migrate-personal: %v — output: %s", err, out)
+			t.Skip("skipping: Dolt unavailable for planning dir or no actor match")
+		}
+		t.Fatalf("bd migrate-personal failed: %v\noutput:\n%s", err, out)
+	}
+
+	// The comment must survive in the planning repo as a structured comment that
+	// `bd comments list` returns.
+	got := bdCommentList(t, bd, planningDir, issue.ID)
+	if !strings.Contains(got, commentText) {
+		t.Errorf("migrated issue %s lost its comment in the planning repo %s.\ncomments list output:\n%s",
+			issue.ID, planningDir, got)
+	}
+}
+
+// TestCopyIssueRelations_preservesCommentWithTimestamp is the in-process proof
+// for the maphew review of PR #4023 (be-e2nb). The full migrate-personal command
+// can't run in the embedded harness because its planning store uses the
+// server-based Dolt store, so this drives the helper directly against two
+// embedded stores: a comment must land in the destination as a structured row
+// (returned by GetIssueComments) preserving its original timestamp, not be lost
+// as an event-style AddComment entry.
+func TestCopyIssueRelations_preservesCommentWithTimestamp(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	// Two initialized embedded stores standing in for the project and planning
+	// DBs. Same prefix so the copied issue ID is valid in both.
+	_, srcBeads, _ := bdInit(t, bd, "--prefix", "mp")
+	_, dstBeads, _ := bdInit(t, bd, "--prefix", "mp")
+	src := openStore(t, srcBeads, "mp")
+	dst := openStore(t, dstBeads, "mp")
+
+	ctx := context.Background()
+
+	issue := &types.Issue{
+		ID:        "mp-100",
+		Title:     "Issue with a comment",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		CreatedBy: "alice",
+	}
+	if err := src.CreateIssue(ctx, issue, "alice"); err != nil {
+		t.Fatalf("seed src CreateIssue: %v", err)
+	}
+	origTS := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
+	if _, err := src.ImportIssueComment(ctx, issue.ID, "alice", "preserve me", origTS); err != nil {
+		t.Fatalf("seed src comment: %v", err)
+	}
+
+	// Phase 1a of runMigratePersonal creates the issue row in dst first.
+	if err := dst.CreateIssue(ctx, issue, "alice"); err != nil {
+		t.Fatalf("dst CreateIssue: %v", err)
+	}
+
+	// Code under test.
+	if err := copyIssueRelations(ctx, src, dst, issue, "alice"); err != nil {
+		t.Fatalf("copyIssueRelations: %v", err)
+	}
+
+	got, err := dst.GetIssueComments(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("dst.GetIssueComments: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("planning DB has %d structured comments, want 1 (event-style AddComment would yield 0)", len(got))
+	}
+	if got[0].Text != "preserve me" {
+		t.Errorf("comment text = %q, want %q", got[0].Text, "preserve me")
+	}
+	if !got[0].CreatedAt.Equal(origTS) {
+		t.Errorf("comment created_at = %v, want preserved %v (original timestamp dropped)", got[0].CreatedAt, origTS)
 	}
 }

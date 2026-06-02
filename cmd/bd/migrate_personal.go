@@ -126,21 +126,46 @@ func runMigratePersonal(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = planningStore.Close() }()
 
-	// Phase 1: Copy all issues to planning DB. No deletes yet — if any copy
-	// fails we abort before touching the project DB.
+	// Phase 1: Copy everything to the planning DB before touching the project
+	// DB. The copy is all-or-error — any failed step rolls back the planning-DB
+	// rows we created and aborts without deleting anything from the project DB,
+	// so a partial copy can never be mistaken for success and lose data
+	// (maphew review, be-e2nb).
+	//
+	// Phase 1a: create every issue row first, so same-prefix dependencies
+	// between two migrated issues resolve in phase 1b regardless of copy order.
+	var created []string
+	rollback := func() {
+		if len(created) > 0 {
+			_, _ = planningStore.DeleteIssues(ctx, created, false, false, false)
+		}
+	}
 	for _, issue := range personal {
-		if err := copyIssueToPlanningDB(ctx, store, planningStore, issue, identity); err != nil {
+		if err := planningStore.CreateIssue(ctx, issue, identity); err != nil {
+			rollback()
 			return fmt.Errorf("failed to copy issue %s to planning DB: %w", issue.ID, err)
+		}
+		created = append(created, issue.ID)
+	}
+
+	// Phase 1b: copy labels, dependency records, and comments for every issue.
+	for _, issue := range personal {
+		if err := copyIssueRelations(ctx, store, planningStore, issue, identity); err != nil {
+			rollback()
+			return fmt.Errorf("failed to copy %s to planning DB: %w", issue.ID, err)
 		}
 	}
 
-	// Phase 2: Delete all from project DB in a single transaction.
+	// Phase 2: Delete all from project DB in a single transaction. The planning
+	// copy is complete at this point. If the delete fails, the planning repo
+	// already holds the good copy and the project DB is untouched, so we tell
+	// the user to resolve the duplicate rather than silently losing data.
 	ids := make([]string, len(personal))
 	for i, issue := range personal {
 		ids[i] = issue.ID
 	}
 	if _, err := store.DeleteIssues(ctx, ids, false, false, false); err != nil {
-		return fmt.Errorf("failed to delete migrated issues from project DB: %w", err)
+		return fmt.Errorf("issues copied to planning repo %s but deleting them from the project DB failed; resolve the duplicate manually: %w", planningPath, err)
 	}
 
 	fmt.Printf("\n%s Moved %d %s to %s\n",
@@ -151,40 +176,44 @@ func runMigratePersonal(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// copyIssueToPlanningDB copies issue (with labels, deps, comments) to dst. Does not delete from src.
-func copyIssueToPlanningDB(ctx context.Context, src, dst storage.DoltStorage, issue *types.Issue, actor string) error {
-	if err := dst.CreateIssue(ctx, issue, actor); err != nil {
-		return fmt.Errorf("insert into planning DB: %w", err)
-	}
-
-	// Copy labels
+// copyIssueRelations copies the labels, dependency records, and comments for a
+// single issue from src to dst. The issue row itself must already exist in dst
+// (created in phase 1a of runMigratePersonal). Every step — including the reads
+// from src — is fatal on error so the caller can abort the migration before any
+// source data is deleted; a partial copy must never be mistaken for success
+// (maphew review, be-e2nb).
+func copyIssueRelations(ctx context.Context, src, dst storage.DoltStorage, issue *types.Issue, actor string) error {
 	labels, err := src.GetLabels(ctx, issue.ID)
-	if err == nil {
-		for _, label := range labels {
-			if addErr := dst.AddLabel(ctx, issue.ID, label, actor); addErr != nil {
-				// Non-fatal: log and continue
-				fmt.Fprintf(os.Stderr, "Warning: failed to copy label %q for %s: %v\n", label, issue.ID, addErr)
-			}
+	if err != nil {
+		return fmt.Errorf("read labels for %s: %w", issue.ID, err)
+	}
+	for _, label := range labels {
+		if err := dst.AddLabel(ctx, issue.ID, label, actor); err != nil {
+			return fmt.Errorf("copy label %q for %s: %w", label, issue.ID, err)
 		}
 	}
 
-	// Copy dependency records
 	deps, err := src.GetDependencyRecords(ctx, issue.ID)
-	if err == nil {
-		for _, dep := range deps {
-			if addErr := dst.AddDependency(ctx, dep, actor); addErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to copy dependency %s→%s: %v\n", dep.IssueID, dep.DependsOnID, addErr)
-			}
+	if err != nil {
+		return fmt.Errorf("read dependencies for %s: %w", issue.ID, err)
+	}
+	for _, dep := range deps {
+		if err := dst.AddDependency(ctx, dep, actor); err != nil {
+			return fmt.Errorf("copy dependency %s→%s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 	}
 
-	// Copy comments
 	comments, err := src.GetIssueComments(ctx, issue.ID)
-	if err == nil {
-		for _, c := range comments {
-			if addErr := dst.AddComment(ctx, issue.ID, c.Author, c.Text); addErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to copy comment for %s: %v\n", issue.ID, addErr)
-			}
+	if err != nil {
+		return fmt.Errorf("read comments for %s: %w", issue.ID, err)
+	}
+	for _, c := range comments {
+		// ImportIssueComment writes a structured comment row preserving the
+		// original author and created_at. AddComment would instead record an
+		// event-style entry that GetIssueComments never returns, silently
+		// dropping the comment from the migrated issue (maphew review, be-e2nb).
+		if _, err := dst.ImportIssueComment(ctx, issue.ID, c.Author, c.Text, c.CreatedAt); err != nil {
+			return fmt.Errorf("copy comment for %s: %w", issue.ID, err)
 		}
 	}
 
