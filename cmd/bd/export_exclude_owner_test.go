@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -147,5 +148,58 @@ func TestExportExcludeOwner_verbose(t *testing.T) {
 				t.Errorf("issue by 'eve' should be filtered with --verbose, appeared in export")
 			}
 		}
+	}
+}
+
+// TestAutoExportExcludeOwner_config is a regression test for the maphew review
+// of PR #4023 (be-e2nb): the export.exclude_owners safety net must also apply to
+// the git-committed auto-export (.beads/issues.jsonl), not only to manual
+// `bd export`. Before the fix, contributor/personal issues that the manual path
+// excludes could still leak into git history and PRs via auto-export.
+func TestAutoExportExcludeOwner_config(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "aeo")
+
+	// Enable auto-export with a tiny interval (defeats the default 60s throttle)
+	// and exclude owner 'alice' via config.
+	bdRunWithFlockRetry(t, bd, dir, "config", "set", "export.exclude_owners", "alice") //nolint:errcheck
+	bdRunWithFlockRetry(t, bd, dir, "config", "set", "export.interval", "1ms")         //nolint:errcheck
+	bdRunWithFlockRetry(t, bd, dir, "config", "set", "export.auto", "true")            //nolint:errcheck
+
+	// One issue by alice (excluded) and one by bob (kept). The bob create runs
+	// last, so the auto-export it triggers reflects the full DB state.
+	bdCreate(t, bd, dir, "Alice personal issue", "--actor", "alice")
+	bdCreate(t, bd, dir, "Bob team issue", "--actor", "bob")
+
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		t.Fatalf("auto-export did not write %s: %v", jsonlPath, err)
+	}
+
+	sawBob := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var iss types.Issue
+		if err := json.Unmarshal([]byte(line), &iss); err != nil {
+			continue
+		}
+		if iss.CreatedBy == "alice" {
+			t.Errorf("issue %s by 'alice' leaked into auto-export %s despite export.exclude_owners", iss.ID, jsonlPath)
+		}
+		if iss.CreatedBy == "bob" {
+			sawBob = true
+		}
+	}
+	if !sawBob {
+		t.Fatalf("auto-export %s did not contain bob's issue; the export may not have run, so the absence of alice would be inconclusive", jsonlPath)
 	}
 }

@@ -370,6 +370,16 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		return 0, 0, fmt.Errorf("failed to search issues: %w", err)
 	}
 
+	// Owner-exclusion safety net: auto-export writes the git-committed
+	// .beads/issues.jsonl, so the export.exclude_owners config (and legacy
+	// export.exclude_owner) must filter here too. Otherwise contributor/personal
+	// issues that the manual `bd export` path excludes can still leak into git
+	// history and PRs via auto-export (maphew review, be-e2nb). Auto-export has
+	// no --exclude-owner flag, so only config-sourced owners apply here.
+	if ownerExcludes := buildOwnerExcludeSet(ctx, nil); len(ownerExcludes) > 0 {
+		issues = filterOutOwners(issues, ownerExcludes)
+	}
+
 	if err := guardAutoExportOverwrite(path, infraTypeSet, includeMemories); err != nil {
 		return 0, 0, err
 	}
