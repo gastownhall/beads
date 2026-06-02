@@ -349,6 +349,35 @@ func TestReconcileAuthoritativeServerMetadata_SoleCandidateFallback(t *testing.T
 	}
 }
 
+func TestReconcileAuthoritativeServerMetadata_DoesNotAdoptSoleCandidateInSharedServerMode(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	cfg := &configfile.Config{
+		DoltMode:     configfile.DoltModeServer,
+		DoltDatabase: "wrong_db",
+		// No ProjectID; in shared-server mode this must not trigger candidate adoption.
+	}
+
+	changed, msg, err := reconcileAuthoritativeServerMetadata(cfg, []serverDatabaseMetadata{
+		{Name: "only_db", HasSchema: true, ProjectID: "other-project"},
+	})
+	if err != nil {
+		t.Fatalf("reconcileAuthoritativeServerMetadata error: %v", err)
+	}
+	if changed {
+		t.Fatalf("expected no change in shared-server mode, got msg: %q", msg)
+	}
+	if msg != "" {
+		t.Fatalf("expected empty msg when no change, got %q", msg)
+	}
+	if cfg.DoltDatabase != "wrong_db" {
+		t.Fatalf("DoltDatabase = %q, want unchanged %q", cfg.DoltDatabase, "wrong_db")
+	}
+	if cfg.ProjectID != "" {
+		t.Fatalf("ProjectID = %q, want empty", cfg.ProjectID)
+	}
+}
+
 func TestReconcileAuthoritativeServerMetadata_NoChangeWhenAlreadyCorrect(t *testing.T) {
 	cfg := &configfile.Config{
 		DoltMode:     configfile.DoltModeServer,

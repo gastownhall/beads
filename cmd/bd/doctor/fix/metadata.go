@@ -394,7 +394,10 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 		return true, fmt.Sprintf("repaired project_id: %s -> %s from database %q", from, current.ProjectID, current.Name), nil
 	}
 
-	if cfg.ProjectID == "" && len(schemaCandidates) == 1 {
+	// In shared-server mode, a sole schema candidate can belong to a different
+	// workspace. Without a local project_id anchor, auto-adopting that database
+	// can redirect this workspace to another project's data.
+	if cfg.ProjectID == "" && len(schemaCandidates) == 1 && !doltserver.IsSharedServerMode() {
 		candidate := schemaCandidates[0]
 		var repairs []string
 		if cfg.DoltDatabase != candidate.Name {
