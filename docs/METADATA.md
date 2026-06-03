@@ -42,28 +42,27 @@ Do not add a first-class helper such as `bd show <id> --execution` or
 issue gh-3541 determines whether schedulers or runners need these fields as a
 stable CLI surface.
 
-## Example: Verification Metadata
+## Example: Tracker Round-Trip Metadata
 
-Local verification queues are another example of metadata as an extension
-point. They may store slow-suite state in issue metadata. These keys describe
-the validation gate for a specific candidate commit:
+Tracker integrations map external issues into beads fields such as title,
+status, priority, type, labels, dependencies, and `external_ref`. When an
+integration needs to preserve tracker-specific fields that do not belong in the
+native beads schema, it can store those fields in issue metadata:
 
-| Key | Meaning |
-|-----|---------|
-| `verify_state` | Verification state: `queued`, `running`, `passed`, or `failed`. |
-| `verify_head` | Commit SHA that the verification result applies to. |
-| `verify_branch` | Branch name recorded when verification was queued. |
-| `verify_cmd` | Command run in the clean verification worktree. |
-| `verify_log` | Local path to the verifier log. |
-| `verify_result` | Compact result, such as `exit=0` or `exit=1`. |
-| `verify_enqueued_at` | UTC timestamp when the verification was queued. |
-| `verify_started_at` | UTC timestamp when the verification started. |
-| `verify_finished_at` | UTC timestamp when the verification finished. |
-| `verify_worktree` | Source or clean verification worktree path. |
-| `verify_runner` | Local verifier identity, usually `host:pid`. |
+```json
+{
+  "example_tracker": {
+    "board_id": "ENG",
+    "sprint_id": 42,
+    "remote_type": "story"
+  }
+}
+```
 
-Treat `verify_head` as the source of truth. A passing result gates that exact
-commit only; if the branch moves, enqueue verification again.
+This keeps beads' core issue model stable while allowing the integration to
+round-trip fields it understands. Prefer namespaced keys and keep
+tracker-specific policy in the integration. If a value becomes broadly useful
+to beads itself, revisit whether it deserves a native field.
 
 ## Reserved Key Prefixes
 
