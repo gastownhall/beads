@@ -1,3 +1,9 @@
+---
+id: uninstalling
+title: Uninstalling
+slug: /recovery/uninstalling
+---
+
 # Uninstalling Beads
 
 This guide explains how to remove beads from a repository or remove the `bd`

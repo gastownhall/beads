@@ -1582,6 +1582,954 @@ bd list --status open --priority 1 --type bug --json
 
 </document>
 
+<document path="docs/core-concepts/labels.md">
+
+
+# Labels in Beads
+
+Labels provide flexible, multi-dimensional categorization for issues beyond the structured fields (status, priority, type). Use labels for cross-cutting concerns, technical metadata, and contextual tagging without schema changes.
+
+## Design Philosophy
+
+**When to use labels vs. structured fields:**
+
+- **Structured fields** (status, priority, type) → Core workflow state
+  - Status: Where the issue is in the workflow (`open`, `in_progress`, `blocked`, `closed`)
+  - Priority: How urgent (0-4)
+  - Type: What kind of work (`bug`, `feature`, `task`, `epic`, `chore`)
+
+- **Labels** → Everything else
+  - Technical metadata (`backend`, `frontend`, `api`, `database`)
+  - Domain/scope (`auth`, `payments`, `search`, `analytics`)
+  - Effort estimates (`small`, `medium`, `large`)
+  - Quality gates (`needs-review`, `needs-tests`, `breaking-change`)
+  - Team/ownership (`team-infra`, `team-product`)
+  - Release tracking (`v1.0`, `v2.0`, `backport-candidate`)
+
+## Quick Start
+
+```bash
+# Add labels when creating issues
+bd create "Fix auth bug" -t bug -p 1 -l auth,backend,urgent
+
+# Add labels to existing issues
+bd label add bd-42 security
+bd label add bd-42 breaking-change
+
+# List issue labels
+bd label list bd-42
+
+# Remove a label
+bd label remove bd-42 urgent
+
+# List all labels in use
+bd label list-all
+
+# Filter by labels (AND - must have ALL)
+bd list --label backend,auth
+
+# Filter by labels (OR - must have AT LEAST ONE)
+bd list --label-any frontend,backend
+
+# Combine filters
+bd list --status open --priority 1 --label security
+```
+
+## Common Label Patterns
+
+### 1. Technical Component Labels
+
+Identify which part of the system:
+```bash
+backend
+frontend
+api
+database
+infrastructure
+cli
+ui
+mobile
+```
+
+**Example:**
+```bash
+bd create "Add GraphQL endpoint" -t feature -p 2 -l backend,api
+bd create "Update login form" -t task -p 2 -l frontend,auth,ui
+```
+
+### 2. Domain/Feature Area
+
+Group by business domain:
+```bash
+auth
+payments
+search
+analytics
+billing
+notifications
+reporting
+admin
+```
+
+**Example:**
+```bash
+bd list --label payments --status open  # All open payment issues
+bd list --label-any auth,security       # Security-related work
+```
+
+### 3. Size/Effort Estimates
+
+Quick effort indicators:
+```bash
+small     # < 1 day
+medium    # 1-3 days
+large     # > 3 days
+```
+
+**Example:**
+```bash
+# Find small quick wins
+bd ready --json | jq '.[] | select(.labels[] == "small")'
+```
+
+### 4. Quality Gates
+
+Track what's needed before closing:
+```bash
+needs-review
+needs-tests
+needs-docs
+breaking-change
+```
+
+**Example:**
+```bash
+bd label add bd-42 needs-review
+bd list --label needs-review --status in_progress
+```
+
+### 5. Release Management
+
+Track release targeting:
+```bash
+v1.0
+v2.0
+backport-candidate
+release-blocker
+```
+
+**Example:**
+```bash
+bd list --label v1.0 --status open    # What's left for v1.0?
+bd label add bd-42 release-blocker
+```
+
+### 6. Team/Ownership
+
+Indicate ownership or interest:
+```bash
+team-infra
+team-product
+team-mobile
+needs-triage
+help-wanted
+```
+
+**Example:**
+```bash
+bd list --assignee alice --label team-infra
+bd create "Memory leak in cache" -t bug -p 1 -l team-infra,help-wanted
+```
+
+### 7. Special Markers
+
+Process or workflow flags:
+```bash
+auto-generated     # Created by automation
+discovered-from    # Found during other work (also a dep type)
+technical-debt
+good-first-issue
+duplicate
+wontfix
+```
+
+**Example:**
+```bash
+bd create "TODO: Refactor parser" -t chore -p 3 -l technical-debt,auto-generated
+```
+
+## Filtering by Labels
+
+### AND Filtering (--label)
+All specified labels must be present:
+
+```bash
+# Issues that are BOTH backend AND urgent
+bd list --label backend,urgent
+
+# Open bugs that need review AND tests
+bd list --status open --type bug --label needs-review,needs-tests
+```
+
+### OR Filtering (--label-any)
+At least one specified label must be present:
+
+```bash
+# Issues in frontend OR backend
+bd list --label-any frontend,backend
+
+# Security or auth related
+bd list --label-any security,auth
+```
+
+### Combining AND/OR
+Mix both filters for complex queries:
+
+```bash
+# Backend issues that are EITHER urgent OR a blocker
+bd list --label backend --label-any urgent,release-blocker
+
+# Frontend work that needs BOTH review and tests, but in any component
+bd list --label needs-review,needs-tests --label-any frontend,ui,mobile
+```
+
+## Workflow Examples
+
+### Triage Workflow
+```bash
+# Create untriaged issue
+bd create "Crash on login" -t bug -p 1 -l needs-triage
+
+# During triage, add context
+bd label add bd-42 auth
+bd label add bd-42 backend
+bd label add bd-42 urgent
+bd label remove bd-42 needs-triage
+
+# Find untriaged issues
+bd list --label needs-triage
+```
+
+### Quality Gate Workflow
+```bash
+# Start work
+bd update bd-42 --claim
+
+# Mark quality requirements
+bd label add bd-42 needs-tests
+bd label add bd-42 needs-docs
+
+# Before closing, verify
+bd label list bd-42
+# ... write tests and docs ...
+bd label remove bd-42 needs-tests
+bd label remove bd-42 needs-docs
+
+# Close when gates satisfied
+bd close bd-42
+```
+
+### Release Planning
+```bash
+# Tag issues for v1.0
+bd label add bd-42 v1.0
+bd label add bd-43 v1.0
+bd label add bd-44 v1.0
+
+# Track v1.0 progress
+bd list --label v1.0 --status closed    # Done
+bd list --label v1.0 --status open      # Remaining
+bd stats  # Overall progress
+
+# Mark critical items
+bd label add bd-45 v1.0
+bd label add bd-45 release-blocker
+```
+
+### Component-Based Work Distribution
+```bash
+# Backend team picks up work
+bd ready --json | jq '.[] | select(.labels[]? == "backend")'
+
+# Frontend team finds small tasks
+bd list --status open --label frontend,small
+
+# Find help-wanted items for new contributors
+bd list --label help-wanted,good-first-issue
+```
+
+## Label Management
+
+### Listing Labels
+```bash
+# Labels on a specific issue
+bd label list bd-42
+
+# All labels in database with usage counts
+bd label list-all
+
+# JSON output for scripting
+bd label list-all --json
+```
+
+Output:
+```json
+[
+  {"label": "auth", "count": 5},
+  {"label": "backend", "count": 12},
+  {"label": "frontend", "count": 8}
+]
+```
+
+### Bulk Operations
+
+Add labels in batch during creation:
+```bash
+bd create "Issue" -l label1,label2,label3
+```
+
+Script to add label to multiple issues:
+```bash
+# Add "needs-review" to all in_progress issues
+bd list --status in_progress --json | jq -r '.[].id' | while read id; do
+  bd label add "$id" needs-review
+done
+```
+
+Remove label from multiple issues:
+```bash
+# Remove "urgent" from closed issues
+bd list --status closed --label urgent --json | jq -r '.[].id' | while read id; do
+  bd label remove "$id" urgent
+done
+```
+
+## Integration with Git Workflow
+
+Labels are stored in the Dolt database and synced automatically with all issue data:
+
+```bash
+# Make changes
+bd create "Fix bug" -l backend,urgent
+bd label add bd-42 needs-review
+
+# Changes are committed to Dolt history automatically
+# Sync with remotes when ready:
+bd dolt push
+
+# After pulling changes:
+bd dolt pull
+bd list --label backend  # Fresh data including labels
+```
+
+## Markdown Import/Export
+
+Labels are preserved when importing from markdown:
+
+```markdown
+# Fix Authentication Bug
+
+### Type
+bug
+
+### Priority
+1
+
+### Labels
+auth, backend, urgent, needs-review
+
+### Description
+Users can't log in after recent deployment.
+```
+
+```bash
+bd create -f issue.md
+# Creates issue with all four labels
+```
+
+## Best Practices
+
+### 1. Establish Conventions Early
+Document your team's label taxonomy:
+```bash
+# Add to project README or CONTRIBUTING.md
+- Use lowercase, hyphen-separated (e.g., `good-first-issue`)
+- Prefix team labels (e.g., `team-infra`, `team-product`)
+- Use consistent size labels (`small`, `medium`, `large`)
+```
+
+### 2. Don't Overuse Labels
+Labels are flexible, but too many can cause confusion. Prefer:
+- 5-10 core technical labels (`backend`, `frontend`, `api`, etc.)
+- 3-5 domain labels per project
+- Standard process labels (`needs-review`, `needs-tests`)
+- Release labels as needed
+
+### 3. Clean Up Unused Labels
+Periodically review:
+```bash
+bd label list-all
+# Remove obsolete labels from issues
+```
+
+### 4. Use Labels for Filtering, Not Search
+Labels are for categorization, not free-text search:
+- ✅ Good: `backend`, `auth`, `urgent`
+- ❌ Bad: `fix-the-login-bug`, `john-asked-for-this`
+
+### 5. Combine with Dependencies
+Labels + dependencies = powerful organization:
+```bash
+# Epic with labeled subtasks
+bd create "Auth system rewrite" -t epic -p 1 -l auth,v2.0
+bd create "Implement JWT" -t task -p 1 -l auth,backend --deps parent-child:bd-42
+bd create "Update login UI" -t task -p 1 -l auth,frontend --deps parent-child:bd-42
+
+# Find all v2.0 auth work
+bd list --label auth,v2.0
+```
+
+## AI Agent Usage
+
+Labels are especially useful for AI agents managing complex workflows:
+
+```bash
+# Auto-label discovered work
+bd create "Found TODO in auth.go" -t task -p 2 -l auto-generated,technical-debt
+
+# Filter for agent review
+bd list --label needs-review --status in_progress --json
+
+# Track automation metadata
+bd label add bd-42 ai-generated
+bd label add bd-42 needs-human-review
+```
+
+Example agent workflow:
+```bash
+# Agent discovers issues during refactor
+bd create "Extract validateToken function" -t chore -p 2 \
+  -l technical-debt,backend,auth,small \
+  --deps discovered-from:bd-10
+
+# Agent marks work for review
+bd update bd-42 --claim
+# ... agent does work ...
+bd label add bd-42 needs-review
+bd label add bd-42 ai-generated
+
+# Human reviews and approves
+bd label remove bd-42 needs-review
+bd label add bd-42 approved
+bd close bd-42
+```
+
+## Labels as State Cache
+
+Labels can cache operational state for fast queries, enabling patterns where beads track both immutable history (events) and current state (labels).
+
+### The Pattern
+
+**Convention:** `<dimension>:<value>`
+
+Examples:
+- `patrol:muted` / `patrol:active` - patrol suppression state
+- `mode:degraded` / `mode:normal` - operational mode
+- `status:idle` / `status:working` - worker status
+- `health:healthy` / `health:failing` - component health
+
+**Implementation:**
+1. Create an event bead (full context, immutable history)
+2. Update the role bead's labels (current state cache)
+
+```bash
+# Event: Full record of what happened and why
+bd create "Muted patrol: user requested during debugging" -t event \
+  -l event-type:patrol-muted,actor:observer,reason:user-request
+
+# State: Update the role bead's label to reflect current state
+bd label remove beads/observer patrol:active
+bd label add beads/observer patrol:muted
+```
+
+**Key principle:** Events are the source of truth. Labels are a cache for fast queries.
+
+### Why This Pattern?
+
+**Fast queries without event scanning:**
+```bash
+# Without labels-as-state: scan all events to find current patrol state
+bd list --type event | grep "patrol" | tail -1  # Slow, fragile
+
+# With labels-as-state: direct query
+bd show beads/observer | grep "patrol:"  # Instant
+```
+
+**History preserved:**
+```bash
+# When was patrol muted? Why? Who did it?
+bd list --label event-type:patrol-muted --type event
+```
+
+**State recovery:**
+```bash
+# If labels get corrupted, rebuild from events
+bd list --type event --label event-type:patrol-muted | tail -1
+# Then re-apply the label
+```
+
+### Common State Dimensions
+
+| Dimension | Values | Use Case |
+|-----------|--------|----------|
+| `patrol:` | `active`, `muted` | Patrol cycle suppression |
+| `mode:` | `normal`, `degraded`, `maintenance` | Operational mode |
+| `status:` | `idle`, `working`, `blocked` | Worker activity |
+| `health:` | `healthy`, `warning`, `failing` | Component health |
+| `lock:` | `unlocked`, `locked` | Exclusive access control |
+
+### State Transitions
+
+Always create an event before changing state labels:
+
+```bash
+# Function to transition state with audit trail
+transition_state() {
+  local role="$1"
+  local dimension="$2"
+  local old_value="$3"
+  local new_value="$4"
+  local reason="$5"
+
+  # Record the transition
+  bd create "State change: $dimension $old_value → $new_value" -t event \
+    -l "event-type:state-change,dimension:$dimension,from:$old_value,to:$new_value"
+
+  # Update the cache
+  bd label remove "$role" "$dimension:$old_value"
+  bd label add "$role" "$dimension:$new_value"
+}
+
+# Usage
+transition_state beads/observer patrol active muted "User debugging session"
+```
+
+### Querying State
+
+```bash
+# Current state of a role
+bd label list beads/observer | grep ":"
+
+# All roles in a specific state
+bd list --label patrol:muted
+
+# Roles NOT in expected state
+bd list --label-any mode:degraded,health:failing
+
+# History of state changes
+bd list --type event --label event-type:state-change
+```
+
+### Best Practices
+
+1. **Use namespaced dimensions** - Prefix with role type if ambiguous
+2. **Keep value sets small** - 2-4 values per dimension
+3. **Document valid values** - List allowed values in role docs
+4. **Always create events first** - Never update labels without history
+5. **Treat labels as ephemeral** - Rebuild from events if corrupted
+
+### Future Helpers
+
+The pattern suggests helper commands (see bd-7l67):
+```bash
+# Query current state
+bd state beads/observer patrol     # → "muted"
+
+# Transition with automatic event creation
+bd set-state beads/observer patrol=active --reason "Debugging complete"
+```
+
+Until helpers exist, use the manual pattern above.
+
+## Advanced Patterns
+
+### Component Matrix
+Track issues across multiple dimensions:
+```bash
+# Backend + auth + high priority
+bd list --label backend,auth --priority 1
+
+# Any frontend work that's small
+bd list --label-any frontend,ui --label small
+
+# Critical issues across all components
+bd list --priority 0 --label-any backend,frontend,infrastructure
+```
+
+### Sprint Planning
+```bash
+# Label issues for sprint
+for id in bd-42 bd-43 bd-44 bd-45; do
+  bd label add "$id" sprint-12
+done
+
+# Track sprint progress
+bd list --label sprint-12 --status closed    # Velocity
+bd list --label sprint-12 --status open      # Remaining
+bd stats | grep "In Progress"                # Current WIP
+```
+
+### Technical Debt Tracking
+```bash
+# Mark debt
+bd create "Refactor legacy parser" -t chore -p 3 -l technical-debt,large
+
+# Find debt to tackle
+bd list --label technical-debt --label small
+bd list --label technical-debt --priority 1  # High-priority debt
+```
+
+### Breaking Change Coordination
+```bash
+# Identify breaking changes
+bd label add bd-42 breaking-change
+bd label add bd-42 v2.0
+
+# Find all breaking changes for next major release
+bd list --label breaking-change,v2.0
+
+# Ensure they're documented
+bd list --label breaking-change --label needs-docs
+```
+
+## Operational State Pattern (Labels as Cache)
+
+For orchestration systems, labels can cache the current operational state of "role beads" (issues representing agents or system components). This enables fast state queries without scanning event history.
+
+### Convention: `<dimension>:<value>`
+
+Use colon-separated labels with a dimension prefix and value suffix:
+
+```
+patrol:muted      patrol:active
+mode:degraded     mode:normal
+status:idle       status:working
+health:healthy    health:failing
+```
+
+### The Pattern
+
+1. **Create an event bead** with full context (immutable, audit trail)
+2. **Update the role bead's labels** to reflect current state (fast lookup)
+
+```bash
+# 1. Record the event (source of truth)
+bd create "Muted patrol for agent-abc" -t event \
+  --parent agent-abc \
+  -d "Reason: investigating stuck worker. Expected duration: 30m"
+
+# 2. Update the cached state label
+bd label remove agent-abc patrol:active
+bd label add agent-abc patrol:muted
+```
+
+### Why This Pattern?
+
+**Events are source of truth. Labels are cache.**
+
+| Approach | Events Only | Labels as Cache |
+|----------|-------------|-----------------|
+| Query current state | Scan all events, find latest | `bd list --label patrol:muted` |
+| Query state history | Natural (all events exist) | Query events |
+| Audit trail | Complete | Complete (events still exist) |
+| Performance | O(n) events | O(1) label lookup |
+
+The pattern gives you both: complete history via events, fast queries via labels.
+
+### Example: Agent Role States
+
+```bash
+# Create a role bead for an agent
+bd create "witness-alpha" -t role -l patrol:active,mode:normal,health:healthy
+
+# Agent enters degraded mode
+bd create "Degraded: high error rate" -t event --parent witness-alpha \
+  -d "Error rate exceeded 5%. Reducing poll frequency."
+bd label remove witness-alpha mode:normal
+bd label add witness-alpha mode:degraded
+
+# Query current state
+bd list --label mode:degraded --type role  # All degraded roles
+
+# Agent recovers
+bd create "Recovered: error rate normal" -t event --parent witness-alpha
+bd label remove witness-alpha mode:degraded
+bd label add witness-alpha mode:normal
+```
+
+### Common Dimensions
+
+| Dimension | Values | Use Case |
+|-----------|--------|----------|
+| `patrol` | `active`, `muted`, `suspended` | Agent patrol cycles |
+| `mode` | `normal`, `degraded`, `maintenance` | Operational modes |
+| `status` | `idle`, `working`, `blocked` | Work state |
+| `health` | `healthy`, `warning`, `failing` | Health checks |
+| `sync` | `current`, `stale`, `syncing` | Sync state |
+
+### Best Practices
+
+1. **Always create the event first** - Labels are cache; events are truth
+2. **Remove old value before adding new** - Prevents dimension:value1 + dimension:value2 conflicts
+3. **Use consistent dimension names** - Establish team conventions early
+4. **Keep dimensions orthogonal** - patrol and mode are independent concerns
+
+### Querying State
+
+```bash
+# Find all muted patrols
+bd list --label patrol:muted
+
+# Find healthy agents in normal mode
+bd list --label health:healthy,mode:normal
+
+# Find any non-healthy agents
+bd list --label-any health:warning,health:failing
+
+# Get state for a specific role
+bd label list witness-alpha
+# Output: patrol:active, mode:normal, health:healthy
+```
+
+### Helper Commands
+
+For convenience, use these helpers:
+
+```bash
+# Query a specific dimension
+bd state witness-alpha patrol
+# Output: active
+
+# List all state dimensions
+bd state list witness-alpha
+# Output:
+#   patrol: active
+#   mode: normal
+#   health: healthy
+
+# Set state (creates event + updates label atomically)
+bd set-state witness-alpha patrol=muted --reason "Investigating issue"
+```
+
+The `set-state` command atomically:
+1. Creates an event bead with the reason (source of truth)
+2. Removes the old dimension label if present
+3. Adds the new dimension:value label (cache)
+
+See [CLI_REFERENCE.md](/cli-reference/set-state) for full command reference.
+
+## Troubleshooting
+
+### Labels Not Showing in List
+Labels require explicit fetching. The `bd list` command shows issues but not labels in human output (only in JSON).
+
+```bash
+# See labels in JSON
+bd list --json | jq '.[] | {id, labels}'
+
+# See labels for specific issue
+bd show bd-42 --json | jq '.labels'
+bd label list bd-42
+```
+
+### Label Filtering Not Working
+Check label names for exact matches (case-sensitive):
+```bash
+# These are different labels:
+bd label add bd-42 Backend    # Capital B
+bd list --label backend       # Won't match
+
+# List all labels to see exact names
+bd label list-all
+```
+
+### Syncing Labels
+Labels are stored in the Dolt database. If labels seem out of sync:
+```bash
+# Pull from Dolt remote
+bd dolt pull
+
+# Or run doctor to diagnose
+bd doctor
+```
+
+## See Also
+
+- [README.md](https://github.com/gastownhall/beads/blob/main/README.md) - Main documentation
+- [AGENTS.md](https://github.com/gastownhall/beads/blob/main/AGENTS.md) - AI agent integration guide
+- [ADVANCED.md](/reference/advanced) - Advanced features and configuration
+
+</document>
+
+<document path="docs/core-concepts/metadata.md">
+
+
+# Issue Metadata
+
+The `metadata` field on issues accepts arbitrary JSON. Any valid JSON value is stored as-is.
+
+Metadata is the preferred extension point for data that is specific to an
+integration, orchestrator, team workflow, or experimental automation. Before
+adding first-class fields, commands, or schema changes, check the
+[Project Charter](https://github.com/gastownhall/beads/blob/main/docs/PROJECT_CHARTER.md#schema-boundary).
+
+## Example: Agent Execution Metadata
+
+Agent execution hints are one example of using metadata to extend beads without
+adding new native database fields. Automation may store these hints so agents
+can make routing decisions without parsing prose. Agents enacting an issue
+should read metadata first, then use description and notes for scope and
+rationale:
+
+```bash
+bd show <id> --json | jq '.[0] | {id,title,metadata,description,notes}'
+```
+
+The current convention for execution hint keys is:
+
+| Key | Meaning |
+|-----|---------|
+| `execution_agent_type` | Suggested worker class, such as `explorer`, `worker`, or `mixed`. |
+| `execution_suggested_model` | Suggested model for the parent agent or spawned subagent. |
+| `execution_reasoning_effort` | Suggested reasoning effort, such as `low`, `medium`, `high`, or `xhigh`. |
+| `execution_mode` | Whether work should be local, delegated, or staged between delegated and local execution. |
+| `execution_parallel_group` | Grouping hint for work that can run alongside related tasks. |
+
+These keys are advisory metadata, not core issue fields. When a workflow uses
+them, they take precedence over free-form notes for execution routing. Notes
+remain useful for rationale, ownership, and exact prompts.
+
+Parent/orchestrator agents must consume these keys before spawning subagents.
+Model and reasoning effort are normally fixed at launch, so reading metadata
+after delegation is too late.
+
+Do not add a first-class helper such as `bd show <id> --execution` or
+`bd plan <id> --json` yet. Keep using the JSON/JQ snippet until upstream
+issue gh-3541 determines whether schedulers or runners need these fields as a
+stable CLI surface.
+
+## Example: Verification Metadata
+
+Local verification queues are another example of metadata as an extension
+point. They may store slow-suite state in issue metadata. These keys describe
+the validation gate for a specific candidate commit:
+
+| Key | Meaning |
+|-----|---------|
+| `verify_state` | Verification state: `queued`, `running`, `passed`, or `failed`. |
+| `verify_head` | Commit SHA that the verification result applies to. |
+| `verify_branch` | Branch name recorded when verification was queued. |
+| `verify_cmd` | Command run in the clean verification worktree. |
+| `verify_log` | Local path to the verifier log. |
+| `verify_result` | Compact result, such as `exit=0` or `exit=1`. |
+| `verify_enqueued_at` | UTC timestamp when the verification was queued. |
+| `verify_started_at` | UTC timestamp when the verification started. |
+| `verify_finished_at` | UTC timestamp when the verification finished. |
+| `verify_worktree` | Source or clean verification worktree path. |
+| `verify_runner` | Local verifier identity, usually `host:pid`. |
+
+Treat `verify_head` as the source of truth. A passing result gates that exact
+commit only; if the branch moves, enqueue verification again.
+
+## Reserved Key Prefixes
+
+| Prefix | Reserved For |
+|--------|------------|
+| `bd:` | Beads internal use |
+| `_` | Internal/private keys |
+
+Avoid these prefixes in user-defined keys to prevent conflicts with future Beads features.
+
+## Related
+
+- [Project Charter](https://github.com/gastownhall/beads/blob/main/docs/PROJECT_CHARTER.md) - Product scope and schema boundary
+- [#1416](https://github.com/gastownhall/beads/issues/1416) - Optional schema enforcement (future)
+
+</document>
+
+<document path="docs/core-concepts/sync-concepts.md">
+
+
+# Sync Concepts
+
+Beads issue data lives in Dolt. The local Dolt database is the source of truth
+for `bd list`, `bd show`, `bd ready`, and every write command.
+
+## The Wire Format
+
+Cross-machine sync uses Dolt remotes:
+
+```bash
+bd dolt push
+bd dolt pull
+```
+
+For normal git-hosted projects, the Dolt remote can be the same `origin` URL
+used for source code. Dolt stores issue history under `refs/dolt/data`, separate
+from source branches such as `refs/heads/main`.
+
+On new projects, `bd init` auto-detects `git remote get-url origin` and
+configures a Dolt remote named `origin`. The first `bd dolt push` publishes
+`refs/dolt/data`. Fresh clones should run `bd bootstrap` to clone that Dolt
+history. When bootstrap finds `refs/dolt/data` on git origin, it also wires
+that origin as the Dolt remote for future `bd dolt push` and `bd dolt pull`.
+
+## What JSONL Is For
+
+`.beads/issues.jsonl` is an export. It exists for viewers, interchange,
+migration, and backup. It is not the canonical cross-machine sync channel.
+
+Do not use routine `bd import .beads/issues.jsonl` as a replacement for
+`bd dolt pull`. JSONL import is upsert-only; it cannot infer that records absent
+from an export were deleted, pruned, or simply never exported.
+
+## Hooks
+
+The pre-commit hook refreshes `.beads/issues.jsonl` when `export.auto=true`.
+That keeps the export current for tools, but it does not push Dolt history.
+
+The post-merge and post-checkout hooks skip JSONL import when `sync.remote` is
+configured. For old projects with no Dolt remote, they may import JSONL as a
+compatibility fallback and print a warning that this is not durable sync.
+
+## Repair
+
+For projects initialized before automatic git-origin remote wiring, pick the
+machine with the authoritative local Dolt database first. Then run:
+
+```bash
+bd dolt remote list
+bd export -o .beads/issues.pre-remote.jsonl   # optional issue audit export
+bd dolt remote add origin <git-origin-url>
+bd dolt push
+```
+
+Use the Dolt-compatible git URL form when needed. For example,
+`git+ssh://git@github.com/org/repo.git` or
+`git+https://github.com/org/repo.git`. `bd dolt remote add origin ...`
+persists `sync.remote` into `.beads/config.yaml`; commit and push that config
+change so fresh clones can run `bd bootstrap`.
+
+Other machines should then run:
+
+```bash
+bd dolt pull
+# or, if the local database is stale or missing:
+bd bootstrap
+```
+
+</document>
+
 <document path="docs/architecture/index.md">
 
 
@@ -11959,6 +12907,138 @@ bd doctor
 
 </document>
 
+<document path="docs/recovery/uninstalling.md">
+
+
+# Uninstalling Beads
+
+This guide explains how to remove beads from a repository or remove the `bd`
+binary from a machine.
+
+## Before You Remove Data
+
+Removing `.beads/` permanently deletes the local Dolt database. If the issue
+history matters, make a Dolt-native backup first:
+
+```bash
+bd backup init /path/to/beads-backup
+bd backup sync
+```
+
+For review, migration, or interoperability, you can also write an issue-table
+export:
+
+```bash
+bd export -o ~/beads-issues-$(date +%Y%m%d).jsonl
+```
+
+`bd export` is not a complete restorable database backup. It does not preserve
+Dolt branches, commit history, working-set state, or non-issue tables.
+
+## Repository Reset
+
+Use `bd reset` from the repository root. It previews what will be removed by
+default:
+
+```bash
+bd reset
+```
+
+If the preview is correct, run:
+
+```bash
+bd reset --force
+```
+
+This removes beads-managed repository data such as:
+
+- the `.beads/` directory
+- beads-managed git hook sections
+- legacy beads sync worktrees under `.git/beads-worktrees/`
+
+## Remove Hooks Only
+
+To keep issue data but remove git hooks:
+
+```bash
+bd hooks uninstall
+```
+
+This is preferable to manually deleting hook files because beads preserves
+unrelated user hook content outside its managed hook markers.
+
+## Manual Cleanup
+
+Use manual cleanup only if `bd reset` is unavailable or cannot run in the
+repository.
+
+```bash
+# Stop a local Dolt server if one is running.
+bd dolt stop 2>/dev/null || true
+
+# Remove beads-managed hooks when bd hooks uninstall is unavailable.
+rm -f .git/hooks/pre-commit
+rm -f .git/hooks/prepare-commit-msg
+rm -f .git/hooks/post-merge
+rm -f .git/hooks/pre-push
+rm -f .git/hooks/post-checkout
+
+# Remove the local beads database and config.
+rm -rf .beads
+
+# Remove legacy sync-branch worktrees from older beads versions.
+rm -rf .git/beads-worktrees
+git worktree prune
+```
+
+If `.gitattributes` contains only beads merge-driver configuration, remove it.
+If it contains other project entries, edit out only the beads line.
+
+If beads-specific git config remains, remove it:
+
+```bash
+git config --unset beads.role 2>/dev/null || true
+git config --unset merge.beads.driver 2>/dev/null || true
+git config --unset merge.beads.name 2>/dev/null || true
+```
+
+## Remove the `bd` Binary
+
+The CLI is a standalone binary. Remove it according to how it was installed:
+
+```bash
+# Homebrew
+brew uninstall beads
+
+# Go install
+rm -f "$(which bd)"
+
+# Manual install location
+rm -f /usr/local/bin/bd
+```
+
+If you installed the MCP package separately, remove that package with the tool
+you used to install it.
+
+## Verify Removal
+
+```bash
+which bd
+test ! -e .beads
+bd hooks status 2>/dev/null || true
+git config --get merge.beads.driver
+```
+
+## Reinstall Later
+
+To initialize beads again:
+
+```bash
+bd init
+```
+
+</document>
+
 <document path="docs/reference/advanced.md">
 
 
@@ -12138,6 +13218,217 @@ In CI/CD environments, beads uses embedded mode by default (no server required):
 # Just run commands directly — no special flags needed
 bd list
 ```
+
+</document>
+
+<document path="docs/reference/antivirus.md">
+
+
+# Antivirus False Positives
+
+## Overview
+
+Some antivirus software may flag beads (`bd` or `bd.exe`) as malicious. This is a **false positive** - beads is a legitimate, open-source command-line tool for issue tracking.
+
+Beads release installers now verify downloaded archives against release `checksums.txt` before installation. For users who manually install binaries, checksum verification should be the first trust step before running `bd` or creating antivirus exclusions.
+
+## Why This Happens
+
+Go binaries (including beads) are sometimes flagged by antivirus software due to:
+
+1. **Heuristic detection**: Some malware is written in Go, causing antivirus ML models to flag Go-specific binary patterns as suspicious
+2. **Behavioral analysis**: CLI tools that modify files and interact with git may trigger behavioral detection
+3. **Unsigned binaries**: Without code signing, new executables may be treated with suspicion
+
+This is a **known industry-wide problem** affecting many legitimate Go projects. See the [Go project issues](https://github.com/golang/go/issues/16292) for examples.
+
+## Known Issues
+
+### Kaspersky Antivirus
+
+**Detection**: `PDM:Trojan.Win32.Generic`
+**Affected versions**: bd.exe v0.23.1 and potentially others
+**Component**: System Watcher (Proactive Defense Module)
+
+Kaspersky's PDM (Proactive Defense Module) uses behavioral analysis that commonly triggers false positives on Go executables.
+
+## Solutions for Users
+
+### Option 1: Verify File Integrity (Recommended First)
+
+Before running a downloaded binary or adding antivirus exclusions, verify the file is legitimate:
+
+1. Download beads from the [official GitHub releases](https://github.com/gastownhall/beads/releases)
+2. Verify the SHA256 checksum matches the `checksums.txt` file in the release
+3. If a release includes code signing, verify that signature too
+
+**Verify checksum (Windows PowerShell):**
+```powershell
+Get-FileHash bd.exe -Algorithm SHA256
+```
+
+**Verify checksum (macOS/Linux):**
+```bash
+shasum -a 256 bd
+```
+
+Compare the output with the checksum in `checksums.txt` from the release page.
+
+### Option 2: Add Exclusion (After Verification)
+
+Add beads to your antivirus exclusion list:
+
+**Kaspersky:**
+1. Open Kaspersky and go to Settings
+2. Navigate to Threats and Exclusions → Manage Exclusions
+3. Click Add → Add path to exclusion
+4. Add the directory containing `bd.exe` (e.g., `C:\Users\YourName\AppData\Local\bd\`)
+5. Select which components the exclusion applies to (scan, monitoring, etc.)
+
+**Windows Defender:**
+1. Open Windows Security
+2. Go to Virus & threat protection → Manage settings
+3. Scroll to Exclusions → Add or remove exclusions
+4. Add the beads installation directory or the specific `bd.exe` file
+
+**Other antivirus software:**
+- Look for "Exclusions", "Whitelist", or "Trusted Applications" settings
+- Add the beads installation directory or executable
+
+### Option 3: Report False Positive
+
+Help improve detection accuracy by reporting the false positive:
+
+**Kaspersky:**
+1. Visit [Kaspersky Threat Intelligence Portal](https://opentip.kaspersky.com/)
+2. Upload the `bd.exe` file for analysis
+3. Mark it as a false positive
+4. Reference: beads is open-source CLI tool (https://github.com/gastownhall/beads)
+
+**Windows Defender:**
+1. Go to [Microsoft Security Intelligence](https://www.microsoft.com/en-us/wdsi/filesubmission)
+2. Submit the file as a false positive
+3. Provide details about the legitimate software
+
+**Other vendors:**
+- Check their website for false positive submission forms
+- Most major vendors have a process for reviewing flagged files
+
+## For Developers/Distributors
+
+If you're building beads from source or distributing it:
+
+### Current Build Configuration
+
+Beads releases are built with multiple optimizations to reduce false positives:
+
+```yaml
+ldflags:
+  - -s -w  # Strip debug symbols and DWARF info
+```
+
+**Windows PE version info**: Release builds embed legitimate PE resource metadata
+(company name, product name, file description, version, copyright, and an
+application manifest) into the Windows binary using `go-winres`. This is one of the
+most effective measures against AV false positives — legitimate software almost
+always has PE metadata, and AV heuristics use its absence as a suspicion signal.
+
+These optimizations are applied automatically in official release builds.
+
+### Code Signing
+
+Windows releases are signed with an Authenticode certificate when available. Code signing:
+- Reduces false positive rates over time
+- Builds reputation with SmartScreen/antivirus vendors
+- Provides tamper verification
+
+**Verify a signed binary (Windows PowerShell):**
+```powershell
+# Check if the binary is signed
+Get-AuthenticodeSignature .\bd.exe
+
+# Expected output for signed binary:
+# SignerCertificate: [Certificate details]
+# Status: Valid
+```
+
+**Verify a signed binary (Linux/macOS with osslsigncode):**
+```bash
+# Install osslsigncode if not available
+# Ubuntu/Debian: apt-get install osslsigncode
+# macOS: brew install osslsigncode
+
+osslsigncode verify -in bd.exe
+```
+
+**Note:** Code signing requires an EV (Extended Validation) certificate, which involves a verification process. If a release is not signed, it means the certificate was not available at build time. Follow the checksum verification steps above to verify authenticity.
+
+### Alternative Build Methods
+
+Some users report success with:
+```bash
+go build -ldflags "-s -w" -o bd ./cmd/bd
+```
+
+However, results vary by antivirus vendor and version.
+
+## Frequently Asked Questions
+
+### Is beads safe to use?
+
+Yes. Beads is:
+- Open source (all code is auditable on [GitHub](https://github.com/gastownhall/beads))
+- Releases include checksums for verification
+- Used by developers worldwide
+- A simple CLI tool for issue tracking
+
+### Why don't you just fix the code to avoid detection?
+
+The issue isn't specific to beads' code - it's a characteristic of Go binaries in general. Changing code won't reliably prevent heuristic/behavioral detection. The proper solutions are:
+1. Code signing (builds trust over time)
+2. Whitelist applications with antivirus vendors
+3. User reports of false positives
+
+### Will this be fixed in future releases?
+
+We've implemented:
+- **Windows PE version info** embedded in binaries (company name, product name, version, manifest)
+- **Code signing infrastructure** for Windows releases (requires EV certificate)
+- **Build optimizations** to reduce heuristic triggers (`-s -w` ldflags)
+- **Documentation** for users to add exclusions and report false positives
+
+Still in progress:
+- Acquiring an EV code signing certificate
+- Submitting beads to antivirus vendor whitelists
+
+False positives may still occur with new releases until the certificate builds reputation with antivirus vendors. This typically takes several months of consistent signed releases.
+
+### Should I disable my antivirus?
+
+**No.** Instead:
+1. Verify release checksums before first run
+2. Keep your antivirus enabled for other threats
+3. Add beads to your antivirus exclusions only after verification if detections persist
+
+## Reporting Issues
+
+If you encounter a new antivirus false positive:
+
+1. Open an issue on [GitHub](https://github.com/gastownhall/beads/issues)
+2. Include:
+   - Antivirus software name and version
+   - Detection/threat name
+   - Beads version (`bd version`)
+   - Operating system
+
+This helps us track and address false positives across different antivirus vendors.
+
+## References
+
+- [Kaspersky False Positive Guide](https://support.kaspersky.com/1870)
+- [Go Binary False Positives Discussion](https://www.linkedin.com/pulse/go-false-positives-melle-boudewijns)
+- [Go Project Issue Tracker](https://github.com/golang/go/issues/16292)
+- [Kaspersky Community Forum](https://forum.kaspersky.com/topic/pdmtrojanwin32generic-54425/)
 
 </document>
 

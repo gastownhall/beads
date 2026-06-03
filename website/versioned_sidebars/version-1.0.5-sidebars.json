@@ -18,7 +18,10 @@
       "items": [
         "core-concepts/index",
         "core-concepts/issues",
-        "core-concepts/hash-ids"
+        "core-concepts/hash-ids",
+        "core-concepts/sync-concepts",
+        "core-concepts/labels",
+        "core-concepts/metadata"
       ]
     },
     {
@@ -65,7 +68,8 @@
         "recovery/database-corruption",
         "recovery/merge-conflicts",
         "recovery/circular-dependencies",
-        "recovery/sync-failures"
+        "recovery/sync-failures",
+        "recovery/uninstalling"
       ]
     },
     {
@@ -110,6 +114,7 @@
         "reference/git-integration",
         "reference/advanced",
         "reference/troubleshooting",
+        "reference/antivirus",
         "reference/faq"
       ]
     }

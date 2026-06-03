@@ -6,7 +6,12 @@ on:
       - main
     paths:
       - 'website/**'
+      - 'docs/ANTIVIRUS.md'
       - 'docs/COMMUNITY_TOOLS.md'
+      - 'docs/LABELS.md'
+      - 'docs/METADATA.md'
+      - 'docs/SYNC_CONCEPTS.md'
+      - 'docs/UNINSTALLING.md'
       - 'scripts/sync-website-docs.sh'
       - 'scripts/generate-llms-full.sh'
   workflow_dispatch:
