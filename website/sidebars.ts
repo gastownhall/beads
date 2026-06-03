@@ -102,6 +102,7 @@ const sidebars: SidebarsConfig = {
         'integrations/github-copilot',
       ],
     },
+    'community-tools',
     {
       type: 'category',
       label: 'Reference',

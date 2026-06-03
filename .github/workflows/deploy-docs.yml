@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - 'website/**'
+      - 'docs/COMMUNITY_TOOLS.md'
+      - 'scripts/sync-website-docs.sh'
       - 'scripts/generate-llms-full.sh'
   workflow_dispatch:
 

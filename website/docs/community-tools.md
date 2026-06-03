@@ -1,3 +1,9 @@
+---
+id: community-tools
+title: Community Tools
+slug: /community-tools
+---
+
 # Beads Community Tools
 
 A curated list of community-built UIs, extensions, and integrations for Beads. Ranked by activity and maturity.

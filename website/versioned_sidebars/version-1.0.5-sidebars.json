@@ -100,6 +100,7 @@
         "integrations/github-copilot"
       ]
     },
+    "community-tools",
     {
       "type": "category",
       "label": "Reference",

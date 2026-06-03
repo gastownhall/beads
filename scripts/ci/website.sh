@@ -25,12 +25,18 @@ generate_llms_full() {
     ./scripts/generate-llms-full.sh
 }
 
+sync_website_docs() {
+    cd "$REPO_ROOT"
+    ./scripts/sync-website-docs.sh
+}
+
 website_build() {
     cd "$WEBSITE_DIR"
     npm run build
 }
 
 ci_time "website npm ci" -- website_npm_ci
+ci_time "sync website docs" -- sync_website_docs
 ci_time "website typecheck" -- website_typecheck
 ci_time "generate llms-full" -- generate_llms_full
 ci_time "website build" -- website_build
