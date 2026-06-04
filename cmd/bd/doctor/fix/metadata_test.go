@@ -228,7 +228,7 @@ func TestReconcileAuthoritativeServerMetadata_UsesProjectIDToRepairDatabaseName(
 	}
 
 	changed, msg, err := reconcileAuthoritativeServerMetadata(cfg, []serverDatabaseMetadata{
-		{Name: "wrong_db", HasSchema: true, ProjectID: "other-proj"},
+		{Name: "wrong_db", HasSchema: true, ProjectID: ""},
 		{Name: "canonical_db", HasSchema: true, ProjectID: "proj-123"},
 	})
 	if err != nil {
@@ -242,6 +242,37 @@ func TestReconcileAuthoritativeServerMetadata_UsesProjectIDToRepairDatabaseName(
 	}
 	if !strings.Contains(msg, "canonical_db") || !strings.Contains(msg, "proj-123") {
 		t.Fatalf("unexpected repair message: %q", msg)
+	}
+}
+
+func TestReconcileAuthoritativeServerMetadata_ErrorsOnConflictingIdentitySignals(t *testing.T) {
+	cfg := &configfile.Config{
+		DoltMode:     configfile.DoltModeServer,
+		DoltDatabase: "current_db",
+		ProjectID:    "stale-local-id",
+	}
+
+	changed, msg, err := reconcileAuthoritativeServerMetadata(cfg, []serverDatabaseMetadata{
+		{Name: "current_db", HasSchema: true, ProjectID: "server-authoritative-id"},
+		{Name: "other_db", HasSchema: true, ProjectID: "stale-local-id"},
+	})
+	if err == nil {
+		t.Fatal("expected conflict error when project_id and configured database disagree")
+	}
+	if changed {
+		t.Fatal("changed = true, want false on conflict")
+	}
+	if msg != "" {
+		t.Fatalf("msg = %q, want empty on conflict", msg)
+	}
+	if !strings.Contains(err.Error(), "conflicting project identity") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DoltDatabase != "current_db" {
+		t.Fatalf("DoltDatabase mutated to %q, want %q", cfg.DoltDatabase, "current_db")
+	}
+	if cfg.ProjectID != "stale-local-id" {
+		t.Fatalf("ProjectID mutated to %q, want %q", cfg.ProjectID, "stale-local-id")
 	}
 }
 
