@@ -286,6 +286,8 @@ func gatherListInput(cmd *cobra.Command) listInput {
 		in.effectiveLimit = limit
 	case in.allFlag:
 		in.effectiveLimit = 0
+	case !ui.IsTerminal():
+		in.effectiveLimit = 0 // Piped stdout should not truncate (GH#4094)
 	case ui.IsAgentMode():
 		in.effectiveLimit = 20
 	}
