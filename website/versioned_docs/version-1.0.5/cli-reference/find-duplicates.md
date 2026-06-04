@@ -46,6 +46,7 @@ bd find-duplicates [flags]
 
 ```
   -n, --limit int         Maximum number of pairs to show (default 50)
+      --max-rows int      Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --method string     Detection method: mechanical, ai (default "mechanical")
       --model string      AI model to use (only with --method ai; default from config ai.model)
   -s, --status string     Filter by status (default: non-closed)

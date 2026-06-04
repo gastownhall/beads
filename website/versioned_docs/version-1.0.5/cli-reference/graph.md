@@ -46,11 +46,12 @@ bd graph [issue-id] [flags]
 **Flags:**
 
 ```
-      --all       Show graph for all open issues
-      --box       ASCII boxes showing layers
-      --compact   Tree format, one line per issue, more scannable
-      --dot       Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)
-      --html      Output self-contained interactive HTML (redirect to file)
+      --all            Show graph for all open issues
+      --box            ASCII boxes showing layers
+      --compact        Tree format, one line per issue, more scannable
+      --dot            Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)
+      --html           Output self-contained interactive HTML (redirect to file)
+      --max-rows int   Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
 ```
 
 ### bd graph check
