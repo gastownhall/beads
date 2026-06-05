@@ -5502,6 +5502,83 @@ bd info [flags]
 
 </document>
 
+<document path="docs/cli-reference/init-safety.md">
+
+
+<!-- AUTO-GENERATED: do not edit manually -->
+Generated from `bd help --doc init-safety`
+
+## bd init-safety
+
+bd init flag safety contract.
+
+Every bd init invocation resolves project_id from exactly one explicitly
+named source (local reinit, remote adoption, or a fresh mint). When the
+source is ambiguous, bd init refuses.
+
+FLAG SURFACE
+
+  bd init                       Mint a new identity. Bootstraps from
+                                origin if it has refs/dolt/data.
+
+  bd init --reinit-local        Re-initialize local .beads/ over existing
+                                local data. Does NOT authorize discarding
+                                remote history. If origin has Dolt data
+                                this will refuse — pair with
+                                --discard-remote to override.
+
+  bd init --reinit-local \      Discard the remote's Dolt history and
+      --discard-remote          replace it with the local reinit. First
+                                bd dolt push after this will be a
+                                history-replacing force-push.
+
+  bd init --force               Deprecated alias for --reinit-local.
+                                Kept working for ≥2 releases.
+
+ADOPTING A REMOTE
+
+  If you want to use the remote's existing history, use:
+
+      bd bootstrap
+
+  bd init will automatically suggest this when a remote is detected.
+
+DESTROY-TOKEN (non-interactive only)
+
+  When running with no TTY (CI, agents, piped input), --discard-remote
+  requires an explicit --destroy-token value. The token format is:
+
+      DESTROY-&lt;issue-prefix&gt;
+
+  For example, if your issue prefix is "bd", the token is "DESTROY-bd":
+
+      bd init --reinit-local --discard-remote --destroy-token=DESTROY-bd
+
+  In interactive (TTY) mode you confirm via a typed prompt instead. The
+  token is not echoed by bd's runtime error messages — this is a
+  deliberate guard against pattern-matched one-liners (see
+  docs/adr/0002-init-safety-invariants.md).
+
+EXIT CODES
+
+  10    refused: remote has Dolt history and you passed --force/--reinit-local
+        without --discard-remote
+  11    refused: existing local data and you declined the destroy confirm
+  12    refused: --discard-remote passed without a valid --destroy-token
+        (non-interactive mode)
+
+RECOVERY
+
+  If you hit a refusal, see docs/RECOVERY.md for step-by-step recovery
+  playbooks for each exit code.
+
+
+```
+bd init-safety
+```
+
+</document>
+
 <document path="docs/cli-reference/init.md">
 
 
@@ -5592,83 +5669,6 @@ bd init [flags]
       --skip-hooks                                     Skip git hooks installation
       --stealth                                        Enable stealth mode: global gitattributes and gitignore, no local repo tracking
       --team                                           Run team workflow setup wizard
-```
-
-</document>
-
-<document path="docs/cli-reference/init-safety.md">
-
-
-<!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc init-safety`
-
-## bd init-safety
-
-bd init flag safety contract.
-
-Every bd init invocation resolves project_id from exactly one explicitly
-named source (local reinit, remote adoption, or a fresh mint). When the
-source is ambiguous, bd init refuses.
-
-FLAG SURFACE
-
-  bd init                       Mint a new identity. Bootstraps from
-                                origin if it has refs/dolt/data.
-
-  bd init --reinit-local        Re-initialize local .beads/ over existing
-                                local data. Does NOT authorize discarding
-                                remote history. If origin has Dolt data
-                                this will refuse — pair with
-                                --discard-remote to override.
-
-  bd init --reinit-local \      Discard the remote's Dolt history and
-      --discard-remote          replace it with the local reinit. First
-                                bd dolt push after this will be a
-                                history-replacing force-push.
-
-  bd init --force               Deprecated alias for --reinit-local.
-                                Kept working for ≥2 releases.
-
-ADOPTING A REMOTE
-
-  If you want to use the remote's existing history, use:
-
-      bd bootstrap
-
-  bd init will automatically suggest this when a remote is detected.
-
-DESTROY-TOKEN (non-interactive only)
-
-  When running with no TTY (CI, agents, piped input), --discard-remote
-  requires an explicit --destroy-token value. The token format is:
-
-      DESTROY-&lt;issue-prefix&gt;
-
-  For example, if your issue prefix is "bd", the token is "DESTROY-bd":
-
-      bd init --reinit-local --discard-remote --destroy-token=DESTROY-bd
-
-  In interactive (TTY) mode you confirm via a typed prompt instead. The
-  token is not echoed by bd's runtime error messages — this is a
-  deliberate guard against pattern-matched one-liners (see
-  docs/adr/0002-init-safety-invariants.md).
-
-EXIT CODES
-
-  10    refused: remote has Dolt history and you passed --force/--reinit-local
-        without --discard-remote
-  11    refused: existing local data and you declined the destroy confirm
-  12    refused: --discard-remote passed without a valid --destroy-token
-        (non-interactive mode)
-
-RECOVERY
-
-  If you hit a refusal, see docs/RECOVERY.md for step-by-step recovery
-  playbooks for each exit code.
-
-
-```
-bd init-safety
 ```
 
 </document>
@@ -7915,34 +7915,6 @@ bd remember "<insight>" [flags]
 
 </document>
 
-<document path="docs/cli-reference/rename.md">
-
-
-<!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc rename`
-
-## bd rename
-
-Rename an issue from one ID to another.
-
-This updates:
-- The issue's primary ID
-- All references in other issues (descriptions, titles, notes, etc.)
-- Dependencies pointing to/from this issue
-- Labels, comments, and events
-
-Examples:
-  bd rename bd-w382l bd-dolt     # Rename to memorable ID
-  bd rename gt-abc123 gt-auth    # Use descriptive ID
-
-Note: The new ID must use a valid prefix for this database.
-
-```
-bd rename <old-id> <new-id>
-```
-
-</document>
-
 <document path="docs/cli-reference/rename-prefix.md">
 
 
@@ -7988,6 +7960,34 @@ bd rename-prefix <new-prefix> [flags]
 ```
       --dry-run   Preview changes without applying them
       --repair    Repair database with multiple prefixes by consolidating them
+```
+
+</document>
+
+<document path="docs/cli-reference/rename.md">
+
+
+<!-- AUTO-GENERATED: do not edit manually -->
+Generated from `bd help --doc rename`
+
+## bd rename
+
+Rename an issue from one ID to another.
+
+This updates:
+- The issue's primary ID
+- All references in other issues (descriptions, titles, notes, etc.)
+- Dependencies pointing to/from this issue
+- Labels, comments, and events
+
+Examples:
+  bd rename bd-w382l bd-dolt     # Rename to memorable ID
+  bd rename gt-abc123 gt-auth    # Use descriptive ID
+
+Note: The new ID must use a valid prefix for this database.
+
+```
+bd rename <old-id> <new-id>
 ```
 
 </document>
@@ -8539,40 +8539,6 @@ bd state list <issue-id>
 
 </document>
 
-<document path="docs/cli-reference/statuses.md">
-
-
-<!-- AUTO-GENERATED: do not edit manually -->
-Generated from `bd help --doc statuses`
-
-## bd statuses
-
-List all valid issue statuses and their categories.
-
-Built-in statuses (open, in_progress, blocked, etc.) are always valid.
-Additional statuses can be configured via status.custom:
-
-  bd config set status.custom "in_review:active,qa_testing:wip,on_hold:frozen"
-
-Categories control behavior:
-  active  — appears in 'bd ready' and default 'bd list'
-  wip     — excluded from 'bd ready', visible in default 'bd list'
-  done    — excluded from 'bd ready' and default 'bd list'
-  frozen  — excluded from 'bd ready' and default 'bd list'
-
-Statuses without a category (legacy format) are valid but excluded from 'bd ready'.
-
-Examples:
-  bd statuses            # List all statuses with icons and categories
-  bd statuses --json     # Output as JSON
-
-
-```
-bd statuses
-```
-
-</document>
-
 <document path="docs/cli-reference/status.md">
 
 
@@ -8615,6 +8581,40 @@ bd status [flags]
       --all           Show all issues (default behavior)
       --assigned      Show issues assigned to current user
       --no-activity   Skip git activity tracking (faster)
+```
+
+</document>
+
+<document path="docs/cli-reference/statuses.md">
+
+
+<!-- AUTO-GENERATED: do not edit manually -->
+Generated from `bd help --doc statuses`
+
+## bd statuses
+
+List all valid issue statuses and their categories.
+
+Built-in statuses (open, in_progress, blocked, etc.) are always valid.
+Additional statuses can be configured via status.custom:
+
+  bd config set status.custom "in_review:active,qa_testing:wip,on_hold:frozen"
+
+Categories control behavior:
+  active  — appears in 'bd ready' and default 'bd list'
+  wip     — excluded from 'bd ready', visible in default 'bd list'
+  done    — excluded from 'bd ready' and default 'bd list'
+  frozen  — excluded from 'bd ready' and default 'bd list'
+
+Statuses without a category (legacy format) are valid but excluded from 'bd ready'.
+
+Examples:
+  bd statuses            # List all statuses with icons and categories
+  bd statuses --json     # Output as JSON
+
+
+```
+bd statuses
 ```
 
 </document>
