@@ -202,7 +202,13 @@ bd dolt remote list
 Remove a Dolt remote
 
 ```
-bd dolt remote remove <name>
+bd dolt remote remove <name> [flags]
+```
+
+**Flags:**
+
+```
+      --force   Force remove even when SQL and CLI URLs conflict
 ```
 
 ### bd dolt set
