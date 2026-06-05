@@ -13,6 +13,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
@@ -687,6 +688,9 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 
 	if err := createConfigYaml(beadsDir, false, ""); err != nil {
 		return fmt.Errorf("create config.yaml: %w", err)
+	}
+	if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		return fmt.Errorf("create .beads/.gitignore: %w", err)
 	}
 
 	// Persist sync.remote so subsequent fresh clones (and bd bootstrap
