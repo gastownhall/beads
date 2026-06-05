@@ -690,7 +690,7 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 		return fmt.Errorf("create config.yaml: %w", err)
 	}
 	if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
-		return fmt.Errorf("create .beads/.gitignore: %w", err)
+		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 
 	// Persist sync.remote so subsequent fresh clones (and bd bootstrap

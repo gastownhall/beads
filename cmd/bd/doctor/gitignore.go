@@ -162,15 +162,49 @@ func CheckGitignore(repoPath string) DoctorCheck {
 }
 
 // EnsureGitignoreForBeadsDir writes the canonical .beads/.gitignore when it is
-// missing or outdated. It leaves an existing up-to-date file untouched so local
-// additions are preserved.
+// missing or outdated. If the file does not exist, it writes the full template.
+// If it exists but is outdated, it safely appends missing required patterns so
+// local additions are preserved.
 func EnsureGitignoreForBeadsDir(beadsDir string) error {
 	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- caller supplies the active .beads dir
-	if err == nil && len(missingGitignorePatterns(string(content))) == 0 {
+	if os.IsNotExist(err) {
+		return writeGitignoreTemplate(gitignorePath)
+	}
+	if err != nil {
+		return fmt.Errorf("read .beads/.gitignore: %w", err)
+	}
+
+	missing := missingGitignorePatterns(string(content))
+	if len(missing) == 0 {
 		return nil
 	}
-	return writeGitignoreTemplate(gitignorePath)
+
+	if info, err := os.Stat(gitignorePath); err == nil {
+		if info.Mode().Perm()&0200 == 0 {
+			if err := os.Chmod(gitignorePath, 0600); err != nil {
+				return fmt.Errorf("chmod .beads/.gitignore: %w", err)
+			}
+		}
+	}
+
+	existingContent := string(content)
+	newContent := existingContent
+	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
+		newContent += "\n"
+	}
+
+	newContent += "\n# Added by bd (missing required patterns)\n"
+	for _, pattern := range missing {
+		newContent += pattern + "\n"
+	}
+
+	if err := os.WriteFile(gitignorePath, []byte(newContent), 0600); err != nil {
+		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
+	}
+
+	return nil
 }
 
 // FixGitignore updates .beads/.gitignore to the current template.
