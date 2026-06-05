@@ -288,6 +288,115 @@ func TestCreateIssueIdempotentEmptyDescription(t *testing.T) {
 	}
 }
 
+func TestCreateIssueIdempotentOAuthAuthHeader(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(oauthTokenResponse{
+			AccessToken: "lin_oauth_test_token",
+			TokenType:   "Bearer",
+			ExpiresIn:   3600,
+			Scope:       "read write",
+		})
+	}))
+	defer tokenServer.Close()
+
+	searchCalls := 0
+	createCalls := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer lin_oauth_test_token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+
+		var req GraphQLRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(req.Query, "FindByDescription") {
+			searchCalls++
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"issues": map[string]interface{}{
+						"nodes":    []Issue{},
+						"pageInfo": map[string]interface{}{"hasNextPage": false, "endCursor": ""},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		if strings.Contains(req.Query, "issueCreate") {
+			createCalls++
+			input, _ := req.Variables["input"].(map[string]interface{})
+			description, _ := input["description"].(string)
+			resp := map[string]interface{}{
+				"data": map[string]interface{}{
+					"issueCreate": map[string]interface{}{
+						"success": true,
+						"issue": map[string]interface{}{
+							"id":          "oauth-new-uuid",
+							"identifier":  "TEAM-100",
+							"title":       input["title"],
+							"description": description,
+							"url":         "https://linear.app/team/issue/TEAM-100",
+							"priority":    input["priority"],
+							"state": map[string]interface{}{
+								"id":   "state-1",
+								"name": "Todo",
+								"type": "unstarted",
+							},
+							"createdAt": "2026-05-01T10:00:00Z",
+							"updatedAt": "2026-05-01T10:00:00Z",
+						},
+					},
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		t.Fatalf("unexpected query: %s", req.Query)
+	}))
+	defer apiServer.Close()
+
+	client := NewOAuthClient(OAuthConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-secret",
+		TokenURL:     tokenServer.URL,
+	}, "team-1").WithEndpoint(apiServer.URL)
+
+	marker := GenerateIdempotencyMarker("bead-oauth", "dev@test.com", 300)
+	issue, deduped, err := client.CreateIssueIdempotent(
+		context.Background(),
+		"OAuth Issue",
+		"oauth description",
+		1, "", nil,
+		marker,
+	)
+	if err != nil {
+		t.Fatalf("CreateIssueIdempotent failed for OAuth client: %v", err)
+	}
+	if deduped {
+		t.Error("expected deduped=false for fresh OAuth create")
+	}
+	if issue == nil || issue.Identifier != "TEAM-100" {
+		t.Fatalf("expected TEAM-100 issue, got %#v", issue)
+	}
+	if searchCalls != 1 {
+		t.Errorf("search calls = %d, want 1", searchCalls)
+	}
+	if createCalls != 1 {
+		t.Errorf("create calls = %d, want 1", createCalls)
+	}
+	if !strings.Contains(issue.Description, marker) {
+		t.Errorf("issue description should contain marker, got %q", issue.Description)
+	}
+}
+
 // recoveryHandler simulates an ambiguous create failure followed by a
 // successful dedup search. It models the scenario where issueCreate reaches
 // Linear (the issue is created) but the HTTP response is lost, so the next
