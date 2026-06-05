@@ -829,7 +829,11 @@ func (c *Client) createIssueSingleAttempt(ctx context.Context, title, descriptio
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", c.APIKey)
+	authValue, err := c.authHeader()
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", authValue)
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
