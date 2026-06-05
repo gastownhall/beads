@@ -33,6 +33,15 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("CountsBlockingEdgesOnly", s.depCountsBlocksOnly)
 		s.Run("ZeroCountsPresentInMap", s.depCountsZeroPresent)
 	})
+	s.Run("GetBlockingInfo", func() {
+		s.Run("EmptyInputReturnsEmptyMaps", s.depBlockingInfoEmpty)
+		s.Run("PopulatesBlockedByAndBlocks", s.depBlockingInfoBlockedByAndBlocks)
+		s.Run("ParentChildPopulatesParent", s.depBlockingInfoParent)
+		s.Run("ClosedBlockerFiltered", s.depBlockingInfoSkipsClosed)
+	})
+	s.Run("GetBlockingInfoAcrossIssuesAndWisps", func() {
+		s.Run("UnionsBothTables", s.depBlockingInfoAcrossUnions)
+	})
 	s.Run("Wisp", func() {
 		s.Run("InsertRoutesToWispDependencies", s.depWispInsertRouting)
 		s.Run("ListReadsFromWispDependencies", s.depWispListRouting)
@@ -391,10 +400,79 @@ func (s *testSuite) depWispHasCycleCrossTable() {
 	s.False(cycle, "wisp-target edges are intentionally not followed in cycle detection")
 }
 
+func (s *testSuite) depBlockingInfoEmpty() {
+	info, err := s.depRepo().GetBlockingInfo(s.Ctx(), nil, domain.DepListOpts{})
+	s.Require().NoError(err)
+	s.NotNil(info.BlockedBy)
+	s.NotNil(info.Blocks)
+	s.NotNil(info.Parent)
+	s.Empty(info.BlockedBy)
+	s.Empty(info.Blocks)
+	s.Empty(info.Parent)
+}
+
+func (s *testSuite) depBlockingInfoBlockedByAndBlocks() {
+	s.seedIssueRow("bd-bi-mid")
+	s.seedIssueRow("bd-bi-up")
+	s.seedIssueRow("bd-bi-down")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-bi-mid", "bd-bi-up", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-bi-down", "bd-bi-mid", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	info, err := r.GetBlockingInfo(s.Ctx(), []string{"bd-bi-mid"}, domain.DepListOpts{})
+	s.Require().NoError(err)
+	s.Equal([]string{"bd-bi-up"}, info.BlockedBy["bd-bi-mid"])
+	s.Equal([]string{"bd-bi-down"}, info.Blocks["bd-bi-mid"])
+	s.Empty(info.Parent)
+}
+
+func (s *testSuite) depBlockingInfoParent() {
+	s.seedIssueRow("bd-bi-child")
+	s.seedIssueRow("bd-bi-parent")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-bi-child", "bd-bi-parent", types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	info, err := r.GetBlockingInfo(s.Ctx(), []string{"bd-bi-child"}, domain.DepListOpts{})
+	s.Require().NoError(err)
+	s.Equal("bd-bi-parent", info.Parent["bd-bi-child"])
+	s.Empty(info.BlockedBy, "parent-child must not appear in BlockedBy")
+}
+
+func (s *testSuite) depBlockingInfoSkipsClosed() {
+	s.seedIssueRow("bd-bi-cls-mid")
+	s.seedIssueRow("bd-bi-cls-blocker")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-bi-cls-mid", "bd-bi-cls-blocker", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"UPDATE issues SET status = ? WHERE id = ?", string(types.StatusClosed), "bd-bi-cls-blocker")
+	s.Require().NoError(err)
+
+	info, err := r.GetBlockingInfo(s.Ctx(), []string{"bd-bi-cls-mid"}, domain.DepListOpts{})
+	s.Require().NoError(err)
+	s.Empty(info.BlockedBy["bd-bi-cls-mid"], "closed blockers should be filtered out")
+}
+
+func (s *testSuite) depBlockingInfoAcrossUnions() {
+	s.seedIssueRow("bd-bi-x-target")
+	s.seedIssueRow("bd-bi-x-permblocker")
+	s.seedWispRow("bd-bi-x-wispblocker")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-bi-x-target", "bd-bi-x-permblocker", types.DepBlocks), "tester",
+		domain.DepInsertOpts{}))
+	_, err := s.Runner().ExecContext(s.Ctx(), `
+		INSERT INTO wisp_dependencies (issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+		VALUES (?, ?, 'blocks', NOW(), 'tester', '{}')
+	`, "bd-bi-x-target", "bd-bi-x-wispblocker")
+	s.Require().NoError(err)
+
+	info, err := r.GetBlockingInfoAcrossIssuesAndWisps(s.Ctx(), []string{"bd-bi-x-target"})
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"bd-bi-x-permblocker", "bd-bi-x-wispblocker"}, info.BlockedBy["bd-bi-x-target"])
+}
+
 func (s *testSuite) depWispDirectBackEdge() {
-	// Direct back-edge in wisp_dependencies: source wisp s already blocks
-	// issue t; adding t -> s closes a 2-cycle. The fast path probes both
-	// tables, so this should be caught.
 	s.seedWispRow("bd-dep-wd-s")
 	s.seedIssueRow("bd-dep-wd-t")
 	r := s.depRepo()

@@ -1,6 +1,6 @@
 {
   "name": "beads",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "AI-supervised issue tracking for coding workflows with agent skills.",
   "author": {
     "name": "Steve Yegge",

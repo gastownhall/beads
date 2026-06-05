@@ -51,11 +51,7 @@ def resolve_workspace_root(path: str) -> str:
 
         local_beads = os.path.join(worktree_root, ".beads")
         main_beads = os.path.join(main_repo_root, ".beads")
-        if (
-            worktree_root != main_repo_root
-            and not os.path.isdir(local_beads)
-            and os.path.isdir(main_beads)
-        ):
+        if worktree_root != main_repo_root and not os.path.isdir(local_beads) and os.path.isdir(main_beads):
             return main_repo_root
 
         return worktree_root

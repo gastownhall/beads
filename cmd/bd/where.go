@@ -71,10 +71,12 @@ Examples:
 			result.DatabasePath = dbPath
 		}
 
-		// Prefer YAML when available, otherwise do a scoped read-only reopen
-		// using the already-resolved dbPath so we can preserve prefix output
-		// without paying the old worktree-discovery cost.
-		if prefix := config.GetString("issue-prefix"); prefix != "" {
+		// Prefer the active workspace YAML when available. Avoid process-global
+		// config here because `bd where` may be reporting a workspace selected
+		// by BEADS_DB/BEADS_DIR rather than the caller's current repository.
+		if prefix := config.GetStringFromDir(beadsDir, "issue-prefix"); prefix != "" {
+			result.Prefix = prefix
+		} else if prefix := config.GetStringFromDir(beadsDir, "issue_prefix"); prefix != "" {
 			result.Prefix = prefix
 		} else if dbPath != "" && shouldReadWherePrefixFromStore(beadsDir) {
 			_ = withStorage(getRootContext(), nil, dbPath, func(currentStore storage.DoltStorage) error {

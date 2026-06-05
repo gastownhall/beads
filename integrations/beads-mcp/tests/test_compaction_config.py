@@ -5,9 +5,13 @@ can be configured via environment variables.
 """
 
 import os
-import pytest
 import subprocess
 import sys
+from pathlib import Path
+
+import pytest
+
+MCP_ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestCompactionConfigEnvironmentVariables:
@@ -19,7 +23,7 @@ class TestCompactionConfigEnvironmentVariables:
         env = os.environ.copy()
         env.pop("BEADS_MCP_COMPACTION_THRESHOLD", None)
         env.pop("BEADS_MCP_PREVIEW_COUNT", None)
-        
+
         code = """
 import sys
 import os
@@ -37,9 +41,9 @@ print(f"preview={server.PREVIEW_COUNT}")
             env=env,
             capture_output=True,
             text=True,
-            cwd="/Users/stevey/src/dave/beads/integrations/beads-mcp"
+            cwd=MCP_ROOT,
         )
-        
+
         assert "threshold=20" in result.stdout
         assert "preview=5" in result.stdout
 
@@ -48,7 +52,7 @@ print(f"preview={server.PREVIEW_COUNT}")
         env = os.environ.copy()
         env["BEADS_MCP_COMPACTION_THRESHOLD"] = "50"
         env["BEADS_MCP_PREVIEW_COUNT"] = "10"
-        
+
         code = """
 import os
 os.environ['BEADS_MCP_COMPACTION_THRESHOLD'] = '50'
@@ -63,9 +67,9 @@ print(f"preview={server.PREVIEW_COUNT}")
             env=env,
             capture_output=True,
             text=True,
-            cwd="/Users/stevey/src/dave/beads/integrations/beads-mcp"
+            cwd=MCP_ROOT,
         )
-        
+
         assert "threshold=50" in result.stdout or "threshold=20" in result.stdout  # May be cached
         # Due to module caching, we test the function directly instead
 
@@ -74,12 +78,13 @@ print(f"preview={server.PREVIEW_COUNT}")
         # Save original env vars
         orig_threshold = os.environ.pop("BEADS_MCP_COMPACTION_THRESHOLD", None)
         orig_preview = os.environ.pop("BEADS_MCP_PREVIEW_COUNT", None)
-        
+
         try:
             # Import and call the function
             from beads_mcp.server import _get_compaction_settings
+
             threshold, preview = _get_compaction_settings()
-            
+
             assert threshold == 20
             assert preview == 5
         finally:
@@ -94,11 +99,12 @@ print(f"preview={server.PREVIEW_COUNT}")
         # Set custom values
         os.environ["BEADS_MCP_COMPACTION_THRESHOLD"] = "100"
         os.environ["BEADS_MCP_PREVIEW_COUNT"] = "15"
-        
+
         try:
             from beads_mcp.server import _get_compaction_settings
+
             threshold, preview = _get_compaction_settings()
-            
+
             assert threshold == 100
             assert preview == 15
         finally:
@@ -109,9 +115,10 @@ print(f"preview={server.PREVIEW_COUNT}")
     def test_get_compaction_settings_validates_threshold_minimum(self):
         """Test validation: threshold must be >= 1."""
         os.environ["BEADS_MCP_COMPACTION_THRESHOLD"] = "0"
-        
+
         try:
             from beads_mcp.server import _get_compaction_settings
+
             with pytest.raises(ValueError, match="BEADS_MCP_COMPACTION_THRESHOLD must be >= 1"):
                 _get_compaction_settings()
         finally:
@@ -121,9 +128,10 @@ print(f"preview={server.PREVIEW_COUNT}")
         """Test validation: preview_count must be >= 1."""
         os.environ["BEADS_MCP_COMPACTION_THRESHOLD"] = "20"
         os.environ["BEADS_MCP_PREVIEW_COUNT"] = "0"
-        
+
         try:
             from beads_mcp.server import _get_compaction_settings
+
             with pytest.raises(ValueError, match="BEADS_MCP_PREVIEW_COUNT must be >= 1"):
                 _get_compaction_settings()
         finally:
@@ -134,10 +142,13 @@ print(f"preview={server.PREVIEW_COUNT}")
         """Test validation: preview_count must be <= threshold."""
         os.environ["BEADS_MCP_COMPACTION_THRESHOLD"] = "10"
         os.environ["BEADS_MCP_PREVIEW_COUNT"] = "20"
-        
+
         try:
             from beads_mcp.server import _get_compaction_settings
-            with pytest.raises(ValueError, match="BEADS_MCP_PREVIEW_COUNT must be <= BEADS_MCP_COMPACTION_THRESHOLD"):
+
+            with pytest.raises(
+                ValueError, match="BEADS_MCP_PREVIEW_COUNT must be <= BEADS_MCP_COMPACTION_THRESHOLD"
+            ):
                 _get_compaction_settings()
         finally:
             os.environ.pop("BEADS_MCP_COMPACTION_THRESHOLD", None)
@@ -147,11 +158,12 @@ print(f"preview={server.PREVIEW_COUNT}")
         """Test edge case: preview_count == threshold."""
         os.environ["BEADS_MCP_COMPACTION_THRESHOLD"] = "5"
         os.environ["BEADS_MCP_PREVIEW_COUNT"] = "5"
-        
+
         try:
             from beads_mcp.server import _get_compaction_settings
+
             threshold, preview = _get_compaction_settings()
-            
+
             assert threshold == 5
             assert preview == 5
         finally:
@@ -162,11 +174,12 @@ print(f"preview={server.PREVIEW_COUNT}")
         """Test large custom values."""
         os.environ["BEADS_MCP_COMPACTION_THRESHOLD"] = "1000"
         os.environ["BEADS_MCP_PREVIEW_COUNT"] = "100"
-        
+
         try:
             from beads_mcp.server import _get_compaction_settings
+
             threshold, preview = _get_compaction_settings()
-            
+
             assert threshold == 1000
             assert preview == 100
         finally:
@@ -179,16 +192,16 @@ class TestCompactionConfigDocumentation:
 
     def test_environment_variables_documented_in_code(self):
         """Test that environment variables are documented in server.py comments."""
-        with open("/Users/stevey/src/dave/beads/integrations/beads-mcp/src/beads_mcp/server.py") as f:
+        with open(MCP_ROOT / "src" / "beads_mcp" / "server.py") as f:
             content = f.read()
-        
+
         assert "BEADS_MCP_COMPACTION_THRESHOLD" in content
         assert "BEADS_MCP_PREVIEW_COUNT" in content
 
     def test_environment_variables_documented_in_context_engineering_md(self):
         """Test that configuration is documented in CONTEXT_ENGINEERING.md."""
-        with open("/Users/stevey/src/dave/beads/integrations/beads-mcp/CONTEXT_ENGINEERING.md") as f:
+        with open(MCP_ROOT / "CONTEXT_ENGINEERING.md") as f:
             content = f.read()
-        
+
         # Should mention that settings are configurable or reference bd-4u2b
         assert "configurable" in content.lower() or "bd-4u2b" in content or "environment" in content.lower()

@@ -87,8 +87,12 @@ Examples:
 		if err != nil {
 			FatalErrorRespectJSON("adding comment: %v", err)
 		}
-
-		commandDidWrite.Store(true)
+		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+			Command:  "comment",
+			IssueIDs: []string{result.ResolvedID},
+		}); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
 
 		SetLastTouchedID(result.ResolvedID)
 

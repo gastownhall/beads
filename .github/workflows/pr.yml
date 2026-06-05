@@ -1,0 +1,566 @@
+name: PR
+
+on:
+  pull_request:
+    branches: [ main ]
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  build-artifacts:
+    name: Build Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+
+      - name: Run policy checks
+        run: make ci-pr-policy
+
+      - name: Run lint checks
+        run: make ci-pr-lint
+
+      - name: Build reusable Linux artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source ./.buildflags
+          go_version="$(go version)"
+          commit="$(git rev-parse HEAD)"
+          go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd-linux-gms-pure ./cmd/bd
+          chmod +x artifacts/bd-linux-gms-pure
+          (
+            cd artifacts
+            sha256sum bd-linux-gms-pure > SHA256SUMS
+          )
+          {
+            echo "commit=${commit}"
+            echo "go_version=${go_version}"
+            echo "build_tags=${BEADS_BUILD_TAGS}"
+            echo "artifact=bd-linux-gms-pure"
+          } > artifacts/build-manifest.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-build-artifacts
+          path: artifacts/
+          retention-days: 1
+          if-no-files-found: error
+
+  # Fast check: every `go build|test|run|generate|install` invocation in
+  # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
+  # regressions from re-entering the build (see docs/ICU-POLICY.md).
+  check-build-tags:
+    name: Check build-tag policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - run: ./scripts/check-build-tags.sh
+      - run: ./scripts/check-go-install-guidance.sh
+
+  # Lock in the cgo-test-contamination fix (mybd-ycx / GH#3683 follow-up).
+  # cmd/bd carries a mix of cgo-only test helpers (embedded Dolt, sql.DB) and
+  # pure-Go tests. Untagged test files that reach for cgo-only helpers break
+  # the entire package's CGO_ENABLED=0 compile, silently neutering pure-Go
+  # tests (the original symptom in PR #3704). This job compiles the cmd/bd
+  # test binary with CGO_ENABLED=0 and runs the pure-Go subset, so a
+  # regression that re-introduces cgo coupling fails fast.
+  check-cmd-bd-puregeo-tests:
+    name: Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build cmd/bd (CGO_ENABLED=0, gms_pure_go)
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags gms_pure_go -o /tmp/bd-puregeo ./cmd/bd
+
+      - name: Compile pure-Go test binaries (CGO_ENABLED=0, gms_pure_go)
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go test -tags gms_pure_go -c -o /tmp/bd-cmd-puregeo-test ./cmd/bd
+          go test -tags gms_pure_go -c -o /tmp/bd-embeddeddolt-puregeo-test ./internal/storage/embeddeddolt
+          go test -tags gms_pure_go -c -o /tmp/bd-tracker-puregeo-test ./internal/tracker
+
+      - name: Run pure-Go cmd/bd test subset (CGO_ENABLED=0)
+        env:
+          CGO_ENABLED: "0"
+        # Restrict to tests that exercise pure-Go code paths. Tests that
+        # need a Dolt store skip themselves at runtime when no test server
+        # is available; the goal here is to catch compile-time contamination,
+        # not run the full suite.
+        run: |
+          go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
+
+  # Fast check to ensure all version files are in sync
+  check-version-consistency:
+    name: Check version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Check all versions match
+        run: ./scripts/check-versions.sh
+
+  # Catch duplicate migration version numbers before any Go build.
+  # Two long-lived branches both claiming 'the next number' produce a silent
+  # under-apply when merged; this job fails at PR time with the conflicting
+  # filenames so it is caught before any test even compiles.
+  check-no-duplicate-migrations:
+    name: Check no duplicate migration versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Check for duplicate migration version numbers
+        run: |
+          dup=$(
+            find internal/storage/schema/migrations -maxdepth 1 -name '*.up.sql' -printf '%f\n' \
+              | sed 's/^\([0-9]*\)_.*/\1/' \
+              | sort | uniq -d
+          )
+          if [ -n "$dup" ]; then
+            echo "Duplicate migration version(s) detected: $dup"
+            echo "Conflicting files:"
+            while IFS= read -r v; do
+              find internal/storage/schema/migrations -name "${v}_*.up.sql" -print
+            done <<< "$dup"
+            echo "Renumber one of the colliding files before merging."
+            exit 1
+          fi
+
+  # Check documentation references match actual CLI flags
+  check-doc-flags:
+    name: Check doc flags freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build bd
+        run: CGO_ENABLED=0 go build -tags gms_pure_go -o bd ./cmd/bd/
+
+      - name: Validate docs against CLI
+        run: |
+          ./scripts/check-doc-flags.sh ./bd
+          ./scripts/check-doc-freshness.sh
+
+  # Fast check to catch accidental .beads/issues.jsonl changes from contributors
+  check-no-beads-changes:
+    name: Check for .beads changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for .beads/issues.jsonl changes
+        run: |
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^\.beads/issues\.jsonl$"; then
+            echo "This PR includes changes to .beads/issues.jsonl"
+            echo ""
+            echo "This file is the project's issue database and should not be modified in PRs."
+            echo ""
+            echo "To fix, run:"
+            echo "  git checkout origin/main -- .beads/issues.jsonl"
+            echo "  git commit --amend"
+            echo "  git push --force"
+            echo ""
+            exit 1
+          fi
+          echo "No .beads/issues.jsonl changes detected"
+
+  detect-package-gates:
+    name: Detect package gates
+    runs-on: ubuntu-latest
+    outputs:
+      mcp_package: ${{ steps.detect.outputs.mcp_package }}
+      npm_package: ${{ steps.detect.outputs.npm_package }}
+      website: ${{ steps.detect.outputs.website }}
+      reason: ${{ steps.detect.outputs.reason }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Decide package gates
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci/detect-package-gates.sh
+
+  package-mcp:
+    name: Package Gate (MCP)
+    runs-on: ubuntu-latest
+    needs: [detect-package-gates, build-artifacts]
+    steps:
+      - name: Check applicability
+        id: applicability
+        run: |
+          echo "run=${{ needs.detect-package-gates.outputs.mcp_package }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ needs.detect-package-gates.outputs.mcp_package }}" != "true" ]]; then
+            echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.applicability.outputs.run == 'true'
+
+      - name: Set up Python
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        if: steps.applicability.outputs.run == 'true'
+        run: python -m pip install uv==0.11.16
+
+      - name: Download build artifacts
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        if: steps.applicability.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Run MCP package gate
+        if: steps.applicability.outputs.run == 'true'
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: make ci-package-mcp
+
+  package-npm:
+    name: Package Gate (npm)
+    runs-on: ubuntu-latest
+    needs: [detect-package-gates, build-artifacts]
+    steps:
+      - name: Check applicability
+        id: applicability
+        run: |
+          echo "run=${{ needs.detect-package-gates.outputs.npm_package }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ needs.detect-package-gates.outputs.npm_package }}" != "true" ]]; then
+            echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.applicability.outputs.run == 'true'
+
+      - name: Set up Node.js
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+
+      - name: Download build artifacts
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        if: steps.applicability.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Run npm package gate
+        if: steps.applicability.outputs.run == 'true'
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: make ci-package-npm
+
+  package-website:
+    name: Package Gate (website)
+    runs-on: ubuntu-latest
+    needs: detect-package-gates
+    steps:
+      - name: Check applicability
+        id: applicability
+        run: |
+          echo "run=${{ needs.detect-package-gates.outputs.website }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ needs.detect-package-gates.outputs.website }}" != "true" ]]; then
+            echo "website package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: steps.applicability.outputs.run == 'true'
+
+      - name: Set up Node.js
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Run website package gate
+        if: steps.applicability.outputs.run == 'true'
+        run: make ci-website
+
+  pr-policy-wrapper:
+    name: PR Policy (wrapper timing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run PR policy wrapper
+        run: make ci-pr-policy
+
+  pr-core-wrapper:
+    name: PR Core (wrapper timing)
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Run PR core wrapper
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: make ci-pr-core
+
+  pr-lint-wrapper:
+    name: PR Lint (wrapper timing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+
+      - name: Run PR lint wrapper
+        run: make ci-pr-lint
+
+  # Focused job for the hexagonal storage layer (internal/storage/domain/* and
+  # internal/storage/uow). These packages back the proxied-server init path and
+  # also live behind the existing ./... matrix, but TestDomainDB requires the
+  # Dolt sql-server image cached locally (testcontainers checks `docker image
+  # inspect` and skips otherwise). Pulling the image up front guarantees the
+  # suite actually runs and surfaces failures here with a clear job name.
+  test-domain-uow:
+    name: Test (storage domain + uow)
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt CLI
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Verify dolt on PATH
+        run: dolt version
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Pull Dolt sql-server image
+        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
+        run: docker pull dolthub/dolt-sql-server:1.88.1
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Test domain + uow
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/...
+
+  fmt-check:
+    name: Check formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Check gofmt
+        run: make fmt-check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9
+        with:
+          version: latest
+          args: --timeout=5m --build-tags=gms_pure_go
+
+  ci-gate:
+    name: CI Gate / Required
+    runs-on: ubuntu-latest
+    needs:
+      - build-artifacts
+      - check-build-tags
+      - check-cmd-bd-puregeo-tests
+      - check-version-consistency
+      - check-no-duplicate-migrations
+      - check-doc-flags
+      - check-no-beads-changes
+      - detect-package-gates
+      - package-mcp
+      - package-npm
+      - package-website
+      - pr-policy-wrapper
+      - pr-core-wrapper
+      - pr-lint-wrapper
+      - test-domain-uow
+      - fmt-check
+      - lint
+    if: ${{ always() }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Evaluate CI gate
+        env:
+          CI_GATE_NAME: PR baseline gate
+          CI_GATE_REQUIRED: >-
+            BUILD_ARTIFACTS
+            CHECK_BUILD_TAGS
+            CHECK_CMD_BD_PUREGEO_TESTS
+            CHECK_VERSION_CONSISTENCY
+            CHECK_NO_DUPLICATE_MIGRATIONS
+            CHECK_DOC_FLAGS
+            CHECK_NO_BEADS_CHANGES
+            DETECT_PACKAGE_GATES
+            PACKAGE_MCP
+            PACKAGE_NPM
+            PACKAGE_WEBSITE
+            PR_POLICY_WRAPPER
+            PR_CORE_WRAPPER
+            PR_LINT_WRAPPER
+            TEST_DOMAIN_UOW
+            FMT_CHECK
+            LINT
+          BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
+          CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
+          CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
+          CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
+          CHECK_NO_DUPLICATE_MIGRATIONS: ${{ needs.check-no-duplicate-migrations.result }}
+          CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
+          CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
+          DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}
+          PACKAGE_MCP: ${{ needs.package-mcp.result }}
+          PACKAGE_NPM: ${{ needs.package-npm.result }}
+          PACKAGE_WEBSITE: ${{ needs.package-website.result }}
+          PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
+          PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
+          PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
+          TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
+          FMT_CHECK: ${{ needs.fmt-check.result }}
+          LINT: ${{ needs.lint.result }}
+        run: |
+          skipped_ok=""
+          if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
+            skipped_ok="CHECK_NO_BEADS_CHANGES"
+          fi
+          export CI_GATE_SKIPPED_OK="$skipped_ok"
+          bash .github/scripts/ci-gate.sh

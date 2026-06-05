@@ -16,9 +16,6 @@ import (
 )
 
 func TestInitCancel_E2E(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow E2E test in short mode")
-	}
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping SIGINT E2E test on Windows")
 	}

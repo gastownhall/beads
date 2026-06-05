@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,89 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage"
 )
-
-type fakeRemoteStore struct {
-	remotes []storage.RemoteInfo
-}
-
-func (f fakeRemoteStore) AddRemote(context.Context, string, string) error { return nil }
-func (f fakeRemoteStore) RemoveRemote(context.Context, string) error      { return nil }
-func (f fakeRemoteStore) HasRemote(context.Context, string) (bool, error) { return false, nil }
-func (f fakeRemoteStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
-	return f.remotes, nil
-}
-func (f fakeRemoteStore) Push(context.Context) error                     { return nil }
-func (f fakeRemoteStore) Pull(context.Context) error                     { return nil }
-func (f fakeRemoteStore) ForcePush(context.Context) error                { return nil }
-func (f fakeRemoteStore) PushRemote(context.Context, string, bool) error { return nil }
-func (f fakeRemoteStore) PullRemote(context.Context, string) error       { return nil }
-func (f fakeRemoteStore) Fetch(context.Context, string) error            { return nil }
-func (f fakeRemoteStore) PushTo(context.Context, string) error           { return nil }
-func (f fakeRemoteStore) PullFrom(context.Context, string) ([]storage.Conflict, error) {
-	return nil, nil
-}
-
-func TestListRemoteSurfacesEmbeddedSkipsCLI(t *testing.T) {
-	oldList := listDoltCLIRemotes
-	defer func() { listDoltCLIRemotes = oldList }()
-
-	called := false
-	listDoltCLIRemotes = func(string) ([]storage.RemoteInfo, error) {
-		called = true
-		return []storage.RemoteInfo{{Name: "cli", URL: "file:///cli"}}, nil
-	}
-
-	remote := storage.RemoteInfo{Name: "origin", URL: "file:///origin"}
-	sqlRemotes, sqlErr, cliRemotes, cliErr := listRemoteSurfaces(
-		context.Background(),
-		fakeRemoteStore{remotes: []storage.RemoteInfo{remote}},
-		"/unused",
-		true,
-	)
-	if sqlErr != nil || cliErr != nil {
-		t.Fatalf("unexpected errors: sql=%v cli=%v", sqlErr, cliErr)
-	}
-	if called {
-		t.Fatal("embedded remote surface lookup must not shell out to dolt CLI")
-	}
-	if len(sqlRemotes) != 1 || len(cliRemotes) != 1 || sqlRemotes[0] != remote || cliRemotes[0] != remote {
-		t.Fatalf("embedded surfaces = sql:%v cli:%v, want both %v", sqlRemotes, cliRemotes, remote)
-	}
-}
-
-func TestListRemoteSurfacesServerUsesCLI(t *testing.T) {
-	oldList := listDoltCLIRemotes
-	defer func() { listDoltCLIRemotes = oldList }()
-
-	cliRemote := storage.RemoteInfo{Name: "origin", URL: "file:///cli-origin"}
-	called := false
-	listDoltCLIRemotes = func(dbPath string) ([]storage.RemoteInfo, error) {
-		called = true
-		if dbPath != "/db/path" {
-			t.Fatalf("dbPath = %q, want /db/path", dbPath)
-		}
-		return []storage.RemoteInfo{cliRemote}, nil
-	}
-
-	sqlRemote := storage.RemoteInfo{Name: "origin", URL: "file:///sql-origin"}
-	sqlRemotes, sqlErr, cliRemotes, cliErr := listRemoteSurfaces(
-		context.Background(),
-		fakeRemoteStore{remotes: []storage.RemoteInfo{sqlRemote}},
-		"/db/path",
-		false,
-	)
-	if sqlErr != nil || cliErr != nil {
-		t.Fatalf("unexpected errors: sql=%v cli=%v", sqlErr, cliErr)
-	}
-	if !called {
-		t.Fatal("server-mode remote surface lookup should inspect CLI remotes")
-	}
-	if len(sqlRemotes) != 1 || sqlRemotes[0] != sqlRemote || len(cliRemotes) != 1 || cliRemotes[0] != cliRemote {
-		t.Fatalf("surfaces = sql:%v cli:%v", sqlRemotes, cliRemotes)
-	}
-}
 
 func TestDoltShowConfigNotInRepo(t *testing.T) {
 	// Change to a temp dir without .beads

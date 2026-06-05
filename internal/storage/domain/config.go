@@ -3,6 +3,8 @@ package domain
 import (
 	"context"
 	"fmt"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 type ConfigSQLRepository interface {
@@ -15,12 +17,19 @@ type ConfigSQLRepository interface {
 	GetCustomTypes(ctx context.Context) ([]string, error)
 	GetAllowedPrefixes(ctx context.Context) (string, error)
 	GetAdaptiveIDConfig(ctx context.Context) (AdaptiveIDConfig, error)
+
+	GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error)
+	GetInfraTypes(ctx context.Context) (map[string]bool, error)
 }
 
 type ConfigUseCase interface {
 	VerifyInit(ctx context.Context) (VerifyResult, error)
 	GetCustomTypes(ctx context.Context) ([]string, error)
 	LoadCreateContext(ctx context.Context) (CreateContext, error)
+
+	GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error)
+	GetInfraTypes(ctx context.Context) (map[string]bool, error)
+	IsInfraTypeCtx(ctx context.Context, t types.IssueType) (bool, error)
 }
 
 // CreateContext bundles the read-only config inputs that bd create needs
@@ -87,6 +96,30 @@ func (u *configUseCaseImpl) GetCustomTypes(ctx context.Context) ([]string, error
 		return nil, fmt.Errorf("GetCustomTypes: %w", err)
 	}
 	return out, nil
+}
+
+func (u *configUseCaseImpl) GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error) {
+	out, err := u.cfgRepo.GetCustomStatuses(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetCustomStatuses: %w", err)
+	}
+	return out, nil
+}
+
+func (u *configUseCaseImpl) GetInfraTypes(ctx context.Context) (map[string]bool, error) {
+	out, err := u.cfgRepo.GetInfraTypes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetInfraTypes: %w", err)
+	}
+	return out, nil
+}
+
+func (u *configUseCaseImpl) IsInfraTypeCtx(ctx context.Context, t types.IssueType) (bool, error) {
+	infra, err := u.GetInfraTypes(ctx)
+	if err != nil {
+		return false, err
+	}
+	return infra[string(t)], nil
 }
 
 func (u *configUseCaseImpl) LoadCreateContext(ctx context.Context) (CreateContext, error) {

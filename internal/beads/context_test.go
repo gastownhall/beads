@@ -971,9 +971,6 @@ func TestGitOutput(t *testing.T) {
 // TestGitCmd_WorktreeContext tests that GitCmd correctly operates on the main repo
 // even when running from a git worktree context (GH#2538).
 func TestGitCmd_WorktreeContext(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	t.Cleanup(func() {
 		ResetCaches()

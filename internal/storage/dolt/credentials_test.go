@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -46,6 +47,37 @@ func TestApplyS3ChecksumEnvToCmd(t *testing.T) {
 	cmd := exec.Command("dolt", "push") // #nosec G204 -- test command is not executed
 	(&remoteCredentials{username: "user", password: "pass"}).applyToCmd(cmd)
 	applyS3ChecksumEnvToCmd(cmd)
+
+	var gotChecksum, gotUser, gotPassword string
+	for _, e := range cmd.Env {
+		switch {
+		case strings.HasPrefix(e, awsResponseChecksumValidationEnv+"="):
+			gotChecksum = strings.TrimPrefix(e, awsResponseChecksumValidationEnv+"=")
+		case strings.HasPrefix(e, "DOLT_REMOTE_USER="):
+			gotUser = strings.TrimPrefix(e, "DOLT_REMOTE_USER=")
+		case strings.HasPrefix(e, "DOLT_REMOTE_PASSWORD="):
+			gotPassword = strings.TrimPrefix(e, "DOLT_REMOTE_PASSWORD=")
+		}
+	}
+
+	if gotChecksum != "when_required" {
+		t.Fatalf("%s = %q, want when_required", awsResponseChecksumValidationEnv, gotChecksum)
+	}
+	if gotUser != "user" || gotPassword != "pass" {
+		t.Fatalf("credential env = user:%q password:%q", gotUser, gotPassword)
+	}
+}
+
+func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
+	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
+	creds := &remoteCredentials{username: "user", password: "pass"}
+
+	cmd, cancel := prepareDoltCLITransferCommand(context.Background(), "/tmp/beads-cli", creds, true, "fetch", "peer")
+	defer cancel()
+
+	if cmd.Dir != "/tmp/beads-cli" {
+		t.Fatalf("command dir = %q, want /tmp/beads-cli", cmd.Dir)
+	}
 
 	var gotChecksum, gotUser, gotPassword string
 	for _, e := range cmd.Env {
@@ -596,276 +628,89 @@ func TestFederationPeerCredentialLifecycleLazyKeyInit(t *testing.T) {
 	}
 }
 
-// setupCredentialTestStore creates a DoltStore with a dolt-initialized CLI directory
-// and "origin" remote for credential routing tests. Requires dolt CLI.
-func setupCredentialTestStore(t *testing.T, remoteUser, remotePassword string, serverMode, setupRemote bool) *DoltStore {
-	return setupCredentialTestStoreWithURL(t, remoteUser, remotePassword, serverMode, setupRemote, "origin", "https://example.com/repo")
-}
-
-func setupCredentialTestStoreWithURL(t *testing.T, remoteUser, remotePassword string, serverMode, setupRemote bool, remoteName, remoteURL string) *DoltStore {
+// openCloudAuthTestStore opens a DoltStore against the shared test Dolt server
+// for cloud-auth routing tests. The returned store has serverMode=true and a
+// fresh empty database; callers should AddRemote to seed the SQL surface.
+func openCloudAuthTestStore(t *testing.T, dbSuffix string) *DoltStore {
 	t.Helper()
-	tmpDir := t.TempDir()
-	dbName := "testdb"
-	dbDir := filepath.Join(tmpDir, dbName)
+	ctx := context.Background()
+	dbName := fmt.Sprintf("test_cloud_auth_%s_%d", dbSuffix, testServerPort)
+	assertDatabaseNotExists(t, testServerPort, dbName)
+	t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
 
-	if setupRemote {
-		if err := os.MkdirAll(dbDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command("dolt", "init")
-		cmd.Dir = dbDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("dolt init failed: %s: %v", out, err)
-		}
-		cmd = exec.Command("dolt", "remote", "add", remoteName, remoteURL)
-		cmd.Dir = dbDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("dolt remote add failed: %s: %v", out, err)
-		}
+	store, err := New(ctx, &Config{
+		Path:            filepath.Join(t.TempDir(), "dolt"),
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testServerPort,
+		Database:        dbName,
+		MaxOpenConns:    1,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
-
-	return &DoltStore{
-		remoteUser:     remoteUser,
-		remotePassword: remotePassword,
-		serverMode:     serverMode,
-		dbPath:         tmpDir,
-		database:       dbName,
-		remote:         remoteName,
-	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
 
-// TestCredentialCLIRouting verifies the shouldUseCLIForCredentials guard that controls
-// CLI subprocess routing for Push, ForcePush, and Pull when credentials are set.
-// The guard is shared across all three operations (same insertion pattern in store.go).
-func TestCredentialCLIRouting(t *testing.T) {
+func ensureCloudAuthCLIDatabase(t *testing.T, store *DoltStore) {
+	t.Helper()
 	testutil.RequireDoltBinary(t)
 
-	tests := []struct {
-		name           string
-		remoteUser     string
-		remotePassword string
-		serverMode     bool
-		setupRemote    bool // if true, init dolt dir and add "origin" remote
-		wantCLI        bool
-	}{
-		// Positive cases: guard returns true → CLI routing for Push/ForcePush/Pull
-		{"credentials+serverMode+remote", "user", "pass", true, true, true},
-		{"password only", "", "pass", true, true, true},
-		// Negative cases: guard returns false → SQL fallback
-		{"no credentials", "", "", true, true, false},
-		{"no server mode (embedded)", "user", "pass", false, true, false},
-		{"no CLI remote", "user", "pass", true, false, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := setupCredentialTestStore(t, tt.remoteUser, tt.remotePassword, tt.serverMode, tt.setupRemote)
-			creds := store.mainRemoteCredentials()
-			got := store.shouldUseCLIForCredentials(context.Background(), store.remote, creds)
-			if got != tt.wantCLI {
-				t.Errorf("shouldUseCLIForCredentials() = %v, want %v", got, tt.wantCLI)
-			}
-		})
-	}
-}
-
-func TestCredentialCLIRoutingExternalServer(t *testing.T) {
-	// External server mode: credentials set but CLIDir points to a directory
-	// without the remote configured. Guard should return false (SQL fallback).
-	store := &DoltStore{
-		remoteUser:     "user",
-		remotePassword: "pass",
-		serverMode:     true,
-		dbPath:         t.TempDir(), // empty dir, no .dolt/
-		database:       "testdb",
-		remote:         "origin",
-	}
-	if store.shouldUseCLIForCredentials(context.Background(), store.remote, store.mainRemoteCredentials()) {
-		t.Error("expected false for external server mode (no CLI remote in CLIDir)")
-	}
-}
-
-func TestCredentialCLIRoutingNoRemote(t *testing.T) {
-	// When credentials are set but no CLI remote exists,
-	// shouldUseCLIForCredentials returns false, allowing
-	// fallthrough to the SQL path (withEnvCredentials).
-	store := &DoltStore{
-		remoteUser:     "user",
-		remotePassword: "pass",
-		serverMode:     true,
-		dbPath:         t.TempDir(),
-		database:       "nodb",
-		remote:         "origin",
-	}
-	if store.shouldUseCLIForCredentials(context.Background(), store.remote, store.mainRemoteCredentials()) {
-		t.Error("expected false when CLI remote does not exist")
-	}
-}
-
-func TestCredentialCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
-	testutil.RequireDoltBinary(t)
-
-	sharedRoot := t.TempDir()
-	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
-	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
-
-	database := "shared_credentials_db"
-	cliDir := filepath.Join(sharedRoot, "dolt", database)
+	cliDir := store.CLIDir()
 	if err := os.MkdirAll(cliDir, 0o755); err != nil {
-		t.Fatal(err)
+		t.Fatalf("create CLI dir: %v", err)
 	}
-
-	cmd := exec.Command("dolt", "init")
-	cmd.Dir = cliDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt init failed: %s: %v", out, err)
-	}
-
-	cmd = exec.Command("dolt", "remote", "add", "origin", "https://example.com/repo")
-	cmd.Dir = cliDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt remote add failed: %s: %v", out, err)
-	}
-
-	store := &DoltStore{
-		remoteUser:     "user",
-		remotePassword: "pass",
-		serverMode:     true,
-		beadsDir:       filepath.Join(t.TempDir(), ".beads"),
-		dbPath:         filepath.Join(t.TempDir(), ".beads", "dolt"),
-		database:       database,
-		remote:         "origin",
-	}
-
-	if !store.shouldUseCLIForCredentials(context.Background(), store.remote, store.mainRemoteCredentials()) {
-		t.Fatalf("expected shared-server credential routing to resolve CLI remote via %q, got CLIDir %q", cliDir, store.CLIDir())
+	if _, err := os.Stat(filepath.Join(cliDir, ".dolt")); os.IsNotExist(err) {
+		c := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com") // #nosec G204 -- fixed test command
+		c.Dir = cliDir
+		out, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("dolt init failed: %v\n%s", err, out)
+		}
 	}
 }
 
-func TestMatchingLocalRemoteCLIRouting(t *testing.T) {
-	tests := []struct {
-		name    string
-		remotes []storage.RemoteInfo
-		cliURL  string
-		remote  string
-		want    bool
-	}{
-		{
-			name:    "matching remote and url",
-			remotes: []storage.RemoteInfo{{Name: "origin", URL: "https://doltremoteapi.dolthub.com/org/repo"}},
-			cliURL:  "https://doltremoteapi.dolthub.com/org/repo",
-			remote:  "origin",
-			want:    true,
-		},
-		{
-			name:    "different url",
-			remotes: []storage.RemoteInfo{{Name: "origin", URL: "https://server.example/repo"}},
-			cliURL:  "https://local.example/repo",
-			remote:  "origin",
-			want:    false,
-		},
-		{
-			name:    "different remote",
-			remotes: []storage.RemoteInfo{{Name: "backup", URL: "https://doltremoteapi.dolthub.com/org/repo"}},
-			cliURL:  "https://doltremoteapi.dolthub.com/org/repo",
-			remote:  "origin",
-			want:    false,
-		},
-		{
-			name:    "missing cli remote",
-			remotes: []storage.RemoteInfo{{Name: "origin", URL: "https://doltremoteapi.dolthub.com/org/repo"}},
-			remote:  "origin",
-			want:    false,
-		},
-	}
+func addCloudAuthCLIRemote(t *testing.T, store *DoltStore, name, url string) {
+	t.Helper()
+	ensureCloudAuthCLIDatabase(t, store)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := shouldUseCLIForMatchingLocalRemote(tt.remotes, tt.cliURL, tt.remote)
-			if got != tt.want {
-				t.Fatalf("shouldUseCLIForMatchingLocalRemote() = %v, want %v", got, tt.want)
-			}
-		})
+	cliDir := store.CLIDir()
+	c := exec.Command("dolt", "remote", "add", name, url) // #nosec G204 -- fixed test command
+	c.Dir = cliDir
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dolt remote add %q failed: %v\n%s", name, err, out)
 	}
 }
 
-func TestCloudAuthCLIRoutingSharedServerUsesSharedDoltRoot(t *testing.T) {
-	testutil.RequireDoltBinary(t)
-
-	sharedRoot := t.TempDir()
-	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
-	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedRoot)
-	t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
-
-	database := "shared_cloud_auth_db"
-	cliDir := filepath.Join(sharedRoot, "dolt", database)
-	if err := os.MkdirAll(cliDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("dolt", "init")
-	cmd.Dir = cliDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt init failed: %s: %v", out, err)
-	}
-
-	cmd = exec.Command("dolt", "remote", "add", "origin", "az://account.blob.core.windows.net/container")
-	cmd.Dir = cliDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt remote add failed: %s: %v", out, err)
-	}
-
-	store := &DoltStore{
-		serverMode: true,
-		beadsDir:   filepath.Join(t.TempDir(), ".beads"),
-		dbPath:     filepath.Join(t.TempDir(), ".beads", "dolt"),
-		database:   database,
-		remote:     "origin",
-	}
-
-	if !store.shouldUseCLIForCloudAuth(store.remote) {
-		t.Fatalf("expected shared-server cloud-auth routing to resolve CLI remote via %q, got CLIDir %q", cliDir, store.CLIDir())
-	}
-}
-
-// TestFederationCredentialCLIRouting verifies the shouldUseCLIForPeerCredentials guard
-// that controls CLI subprocess routing for federation PushTo, PullFrom, and Fetch
-// when peer credentials are resolved from the federation_peers table.
-func TestFederationCredentialCLIRouting(t *testing.T) {
-	testutil.RequireDoltBinary(t)
-
-	tests := []struct {
-		name        string
-		serverMode  bool
-		setupRemote bool
-		credsEmpty  bool
-		wantCLI     bool
-	}{
-		{"peer credentials+serverMode+remote", true, true, false, true},
-		{"no peer credentials", true, true, true, false},
-		{"no server mode (embedded)", false, true, false, false},
-		{"no CLI remote for peer", true, false, false, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := setupCredentialTestStore(t, "", "", tt.serverMode, tt.setupRemote)
-
-			var creds *remoteCredentials
-			if !tt.credsEmpty {
-				creds = &remoteCredentials{username: "peeruser", password: "peerpass"}
-			} else {
-				creds = &remoteCredentials{}
+// clearCloudAuthEnv unsets all process env vars matching the cloud-auth scheme
+// prefixes so shouldUseCLIForCloudAuth tests are deterministic regardless of
+// the runner's ambient AWS_*/AZURE_*/etc. environment. Originals restored on
+// test cleanup.
+func clearCloudAuthEnv(t *testing.T) {
+	t.Helper()
+	prefixes := []string{"AZURE_STORAGE_", "AWS_", "GOOGLE_", "GCS_", "OCI_", "DOLT_REMOTE_"}
+	for _, e := range os.Environ() {
+		eq := strings.IndexByte(e, '=')
+		if eq < 0 {
+			continue
+		}
+		key := e[:eq]
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(key, prefix) {
+				k, v := key, os.Getenv(key)
+				_ = os.Unsetenv(k)
+				t.Cleanup(func() { _ = os.Setenv(k, v) })
+				break
 			}
-
-			got := store.shouldUseCLIForPeerCredentials(context.Background(), "origin", creds)
-			if got != tt.wantCLI {
-				t.Errorf("shouldUseCLIForPeerCredentials() = %v, want %v", got, tt.wantCLI)
-			}
-		})
+		}
 	}
 }
 
 func TestCloudAuthCLIRouting(t *testing.T) {
-	testutil.RequireDoltBinary(t)
+	skipIfNoServer(t)
+	clearCloudAuthEnv(t)
 
 	tests := []struct {
 		name      string
@@ -896,13 +741,18 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		// Structural negative: missing conditions → SQL fallback
 		{"no cloud env", "az://account.blob.core.windows.net/container", "", "", false},
 	}
-	for _, tt := range tests {
+	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := setupCredentialTestStoreWithURL(t, "", "", true, true, "origin", tt.remoteURL)
+			ctx := context.Background()
+			store := openCloudAuthTestStore(t, fmt.Sprintf("route_%d", i))
+			if err := store.AddRemote(ctx, "origin", tt.remoteURL); err != nil {
+				t.Fatalf("AddRemote: %v", err)
+			}
+			addCloudAuthCLIRemote(t, store, "origin", tt.remoteURL)
 			if tt.envKey != "" {
 				t.Setenv(tt.envKey, tt.envValue)
 			}
-			got := store.shouldUseCLIForCloudAuth(store.remote)
+			got := store.shouldUseCLIForCloudAuth(ctx, "origin")
 			if got != tt.wantCLI {
 				t.Errorf("shouldUseCLIForCloudAuth() = %v, want %v", got, tt.wantCLI)
 			}
@@ -911,20 +761,41 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 }
 
 func TestCloudAuthCLIRoutingStructural(t *testing.T) {
-	testutil.RequireDoltBinary(t)
-
+	clearCloudAuthEnv(t)
 	t.Run("embedded mode", func(t *testing.T) {
-		store := setupCredentialTestStoreWithURL(t, "", "", false, true, "origin", "az://account.blob.core.windows.net/container")
+		// serverMode=false short-circuits before any DB access, so no real
+		// store is required for this case.
+		store := &DoltStore{serverMode: false, remote: "origin"}
 		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
-		if store.shouldUseCLIForCloudAuth(store.remote) {
+		if store.shouldUseCLIForCloudAuth(context.Background(), store.remote) {
 			t.Error("expected false in embedded mode")
 		}
 	})
-	t.Run("no CLI remote", func(t *testing.T) {
-		store := setupCredentialTestStoreWithURL(t, "", "", true, false, "origin", "az://account.blob.core.windows.net/container")
+	t.Run("no remote configured", func(t *testing.T) {
+		skipIfNoServer(t)
+		store := openCloudAuthTestStore(t, "structural_no_remote")
 		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
-		if store.shouldUseCLIForCloudAuth(store.remote) {
-			t.Error("expected false when CLI remote not configured")
+		if store.shouldUseCLIForCloudAuth(context.Background(), "origin") {
+			t.Error("expected false when remote not configured")
+		}
+	})
+	t.Run("sql remote materializes local CLI remote", func(t *testing.T) {
+		skipIfNoServer(t)
+		store := openCloudAuthTestStore(t, "structural_sql_only")
+		remoteURL := "az://account.blob.core.windows.net/container"
+		if err := store.AddRemote(context.Background(), "origin", remoteURL); err != nil {
+			t.Fatalf("AddRemote: %v", err)
+		}
+		ensureCloudAuthCLIDatabase(t, store)
+		if got := doltutil.FindCLIRemote(store.CLIDir(), "origin"); got != "" {
+			t.Fatalf("precondition: local CLI remote = %q, want absent", got)
+		}
+		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
+		if !store.shouldUseCLIForCloudAuth(context.Background(), "origin") {
+			t.Error("expected true when SQL remote can be materialized into local CLI directory")
+		}
+		if got := doltutil.FindCLIRemote(store.CLIDir(), "origin"); !doltutil.RemoteURLsMatch(got, remoteURL) {
+			t.Errorf("local CLI remote = %q, want %q", got, remoteURL)
 		}
 	})
 }
@@ -933,47 +804,26 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 // DoltHub (primary) + Azure (backup) remotes. AZURE_STORAGE_ACCOUNT should
 // trigger CLI routing ONLY for the Azure remote, not the DoltHub remote.
 func TestPerRemoteCloudAuthHybrid(t *testing.T) {
-	testutil.RequireDoltBinary(t)
+	skipIfNoServer(t)
+	clearCloudAuthEnv(t)
 
-	tmpDir := t.TempDir()
-	dbName := "testdb"
-	dbDir := filepath.Join(tmpDir, dbName)
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
-		t.Fatal(err)
+	ctx := context.Background()
+	store := openCloudAuthTestStore(t, "hybrid")
+	if err := store.AddRemote(ctx, "primary", "dolthub://org/beads"); err != nil {
+		t.Fatalf("AddRemote primary: %v", err)
 	}
-	cmd := exec.Command("dolt", "init")
-	cmd.Dir = dbDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt init: %s: %v", out, err)
+	if err := store.AddRemote(ctx, "backup", "az://account.blob.core.windows.net/dolt/beads"); err != nil {
+		t.Fatalf("AddRemote backup: %v", err)
 	}
-	// Add two remotes: DoltHub primary + Azure backup
-	cmd = exec.Command("dolt", "remote", "add", "primary", "dolthub://org/beads")
-	cmd.Dir = dbDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt remote add primary: %s: %v", out, err)
-	}
-	cmd = exec.Command("dolt", "remote", "add", "backup", "az://account.blob.core.windows.net/dolt/beads")
-	cmd.Dir = dbDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt remote add backup: %s: %v", out, err)
-	}
-
-	store := &DoltStore{
-		serverMode: true,
-		dbPath:     tmpDir,
-		database:   dbName,
-		remote:     "primary",
-	}
+	addCloudAuthCLIRemote(t, store, "primary", "dolthub://org/beads")
+	addCloudAuthCLIRemote(t, store, "backup", "az://account.blob.core.windows.net/dolt/beads")
 
 	t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
 
-	// Azure remote should get CLI routing (AZURE_STORAGE_ env matches az:// scheme)
-	if !store.shouldUseCLIForCloudAuth("backup") {
+	if !store.shouldUseCLIForCloudAuth(ctx, "backup") {
 		t.Error("expected CLI routing for az:// remote when AZURE_STORAGE_ACCOUNT is set")
 	}
-
-	// DoltHub remote should NOT get CLI routing (AZURE_STORAGE_ does not match dolthub:// scheme)
-	if store.shouldUseCLIForCloudAuth("primary") {
+	if store.shouldUseCLIForCloudAuth(ctx, "primary") {
 		t.Error("expected SQL routing for dolthub:// remote when AZURE_STORAGE_ACCOUNT is set — per-remote resolution should prevent misrouting")
 	}
 }

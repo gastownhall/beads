@@ -69,7 +69,9 @@ WARNING: Skipping sync or backup publication causes stale state in multi-agent w
 
 - Full docs: https://gastownhall.github.io/beads/
 - CLI reference: https://gastownhall.github.io/beads/cli-reference
+- Sync concepts: https://gastownhall.github.io/beads/core-concepts/sync-concepts
 - Agent guide: https://gastownhall.github.io/beads/integrations/claude-code
+- Community tools: https://gastownhall.github.io/beads/community-tools
 - Complete LLM context: https://gastownhall.github.io/beads/llms-full.txt
 
 ## Links

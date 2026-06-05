@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -23,6 +24,8 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 
 		reopenedIssues := []*types.Issue{}
 		hasError := false
+		mutatedStores := map[storage.DoltStorage][]string{}
+		pendingCloseResults := []*RoutedResult{}
 		if store == nil {
 			FatalErrorWithHint("database not initialized",
 				diagHint())
@@ -51,6 +54,8 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				result.Close()
 				continue
 			}
+			mutatedStores[issueStore] = append(mutatedStores[issueStore], fullID)
+			pendingCloseResults = append(pendingCloseResults, result)
 			if jsonOutput {
 				updated, _ := issueStore.GetIssue(ctx, fullID)
 				if updated != nil {
@@ -63,10 +68,22 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				}
 				fmt.Printf("%s Reopened %s%s\n", ui.RenderAccent("↻"), fullID, reasonMsg)
 			}
-			result.Close()
 		}
 
-		commandDidWrite.Store(true)
+		for s, ids := range mutatedStores {
+			if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+				Command:  "reopen",
+				IssueIDs: ids,
+			}); err != nil {
+				for _, result := range pendingCloseResults {
+					result.Close()
+				}
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
+		}
+		for _, result := range pendingCloseResults {
+			result.Close()
+		}
 
 		if jsonOutput && len(reopenedIssues) > 0 {
 			outputJSON(reopenedIssues)

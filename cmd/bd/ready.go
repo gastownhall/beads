@@ -208,7 +208,12 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				}
 				return
 			}
-			commandDidWrite.Store(true)
+			if err := commitPendingIfEmbedded(ctx, activeStore, actor, doltAutoCommitParams{
+				Command:  "ready",
+				IssueIDs: []string{claimed.ID},
+			}); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
+			}
 			SetLastTouchedID(claimed.ID)
 			if jsonOutput {
 				outputJSON(buildReadyIssueOutput(ctx, activeStore, []*types.Issue{claimed}))

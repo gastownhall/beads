@@ -158,10 +158,11 @@ Examples:
 				warnIfCyclesExist(fromStore)
 			}
 
-			if !usesSQLServer() && fromStore != nil {
-				if err := fromStore.Commit(ctx, fmt.Sprintf("bd: dep add (auto-commit) by %s", actor)); err != nil && !isDoltNothingToCommit(err) {
-					FatalErrorRespectJSON("failed to commit: %v", err)
-				}
+			if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+				Command:  "dep add",
+				IssueIDs: []string{fromID, toID},
+			}); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
 			}
 
 			if jsonOutput {
@@ -340,10 +341,11 @@ Examples:
 			warnIfCyclesExist(fromStore)
 		}
 
-		if !usesSQLServer() && fromStore != nil {
-			if err := fromStore.Commit(ctx, fmt.Sprintf("bd: dep add (auto-commit) by %s", actor)); err != nil && !isDoltNothingToCommit(err) {
-				FatalErrorRespectJSON("failed to commit: %v", err)
-			}
+		if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+			Command:  "dep add",
+			IssueIDs: []string{fromID, toID},
+		}); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
 		}
 
 		if jsonOutput {
@@ -862,10 +864,11 @@ var depRemoveCmd = &cobra.Command{
 			FatalErrorRespectJSON("%v", err)
 		}
 
-		if !usesSQLServer() && fromStore != nil {
-			if err := fromStore.Commit(ctx, fmt.Sprintf("bd: dep remove (auto-commit) by %s", actor)); err != nil && !isDoltNothingToCommit(err) {
-				FatalErrorRespectJSON("failed to commit: %v", err)
-			}
+		if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+			Command:  "dep remove",
+			IssueIDs: []string{fullFromID, fullToID},
+		}); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
 		}
 
 		if jsonOutput {

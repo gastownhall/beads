@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -18,16 +18,12 @@ func IsEphemeralID(id string) bool {
 	return strings.Contains(id, "-wisp-")
 }
 
-// DefaultInfraTypes returns a copy of the built-in infrastructure types.
-// Delegates to storage.DefaultInfraTypes.
 func DefaultInfraTypes() []string {
-	return storage.DefaultInfraTypes()
+	return domain.DefaultInfraTypes()
 }
 
-// IsInfraType returns true if the issue type is infrastructure.
-// Delegates to storage.IsInfraType.
 func IsInfraType(t types.IssueType) bool {
-	return storage.IsInfraType(t)
+	return domain.IsInfraType(t)
 }
 
 // IsInfraTypeCtx returns true if the issue type is infrastructure, using the

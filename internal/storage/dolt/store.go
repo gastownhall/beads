@@ -246,6 +246,10 @@ type Config struct {
 	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).
 	AutoStart bool
 
+	// DisableAutoStart suppresses implicit server startup even when standalone
+	// defaults would enable it. Diagnostic paths use this to stay read-only.
+	DisableAutoStart bool
+
 	// MaxOpenConns overrides the connection pool size (0 = default 10).
 	// Set to 1 for branch isolation in tests (DOLT_CHECKOUT is session-level).
 	MaxOpenConns int
@@ -276,6 +280,10 @@ const (
 // SSH transfers can hang indefinitely on network issues or SSH key prompts;
 // this prevents the process from blocking forever.
 const cliExecTimeout = 5 * time.Minute
+
+func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, cliExecTimeout)
+}
 
 // fsckTimeout is the maximum time to wait for dolt fsck to verify the local
 // chunk store before a push. fsck reads local files only; 30 seconds is ample
@@ -1132,13 +1140,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// replaces the former branch-per-worker approach (BD_BRANCH).
 	store.branch = "main"
 
-	// GH#2315: Sync CLI remotes into SQL server on store open.
-	// After a server restart, dolt_remotes is empty (not persisted across sessions).
-	// CLI remotes survive in .dolt/config. Re-register them so DOLT_PUSH/DOLT_PULL work.
-	if !cfg.ReadOnly {
-		store.syncCLIRemotesToSQL(ctx)
-	}
-
 	// Register observable pool gauges for diagnosing shared-server degradation (GH#3140).
 	// These report sql.DB.Stats() on each OTel scrape — no-op when telemetry is off.
 	store.registerPoolGauges()
@@ -1904,35 +1905,115 @@ func (s *DoltStore) buildBatchCommitMessage(ctx context.Context, actor string) s
 	return msg
 }
 
-// isGitProtocolRemote checks whether the configured remote uses the git wire protocol
-// and is available for CLI-based push/pull. Git-protocol remotes (git+ssh://, ssh://,
-// git@host:path, git+https://, git://) are routed to CLI operations because the SQL
-// server may lack the git credentials, SSH keys, or credential helpers needed for
-// network I/O to external git hosts. Returns false when the remote exists only on
-// an externally-managed server's filesystem and not in the local dbPath.
-func (s *DoltStore) isGitProtocolRemote(ctx context.Context, remote string) bool {
-	// Check SQL remotes first
+// hasMatchingCLIRemote reports whether the local CLI directory contains the
+// same remote URL that SQL reports. CLI push/pull/fetch run from CLIDir, so
+// SQL visibility alone is not enough to route safely.
+func (s *DoltStore) hasMatchingCLIRemote(remote, expectedURL string) bool {
+	if expectedURL == "" {
+		return false
+	}
+	cliDir := s.CLIDir()
+	if cliDir == "" {
+		return false
+	}
+	if !s.hasCLIDatabase() {
+		return false
+	}
+	return doltutil.RemoteURLsMatch(doltutil.FindCLIRemote(cliDir, remote), expectedURL)
+}
+
+// hasCLIDatabase reports whether CLIDir points at an initialized Dolt database.
+// SQL-capable routes use this as a CLI availability check and fall back to SQL
+// when an external-server client has only a placeholder local directory.
+func (s *DoltStore) hasCLIDatabase() bool {
+	cliDir := s.CLIDir()
+	if cliDir == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(cliDir, ".dolt"))
+	return err == nil && info.IsDir()
+}
+
+// ensureMatchingCLIRemote materializes the local CLI remote needed before
+// subprocess push/pull/fetch routing. SQL remains the source of truth; the CLI
+// remote is only the local transport surface that dolt subprocesses read.
+func (s *DoltStore) ensureMatchingCLIRemote(remote, expectedURL string) error {
+	if s.hasMatchingCLIRemote(remote, expectedURL) {
+		return nil
+	}
+	cliDir := s.CLIDir()
+	if expectedURL == "" {
+		return fmt.Errorf("remote %q has an empty SQL URL", remote)
+	}
+	if cliDir == "" {
+		return fmt.Errorf("remote %q (%s) requires CLI routing but no CLI directory is configured", remote, expectedURL)
+	}
+	if err := doltutil.EnsureCLIRemote(cliDir, remote, expectedURL); err != nil {
+		return fmt.Errorf("materialize CLI remote %q (%s) in %s: %w", remote, expectedURL, cliDir, err)
+	}
+	if !s.hasMatchingCLIRemote(remote, expectedURL) {
+		return fmt.Errorf("materialized CLI remote %q in %s, but its URL does not match SQL URL %q", remote, cliDir, expectedURL)
+	}
+	return nil
+}
+
+func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, creds *remoteCredentials, args ...string) (*exec.Cmd, context.CancelFunc) {
+	return prepareDoltCLITransferCommand(ctx, s.CLIDir(), creds, s.isS3Remote(ctx, remote), args...)
+}
+
+func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := withCLIExecTimeout(ctx)
+	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/ref args
+	cmd.Dir = cliDir
+	creds.applyToCmd(cmd)
+	if s3Remote {
+		applyS3ChecksumEnvToCmd(cmd)
+	}
+	return cmd, cancel
+}
+
+// prepareCLIRouteForGitProtocol reports whether the SQL-visible remote uses
+// git wire protocol and prepares the matching local CLI remote before routing.
+func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote string) (bool, error) {
+	if s.CLIDir() == "" {
+		return false, nil
+	}
+	if !s.hasCLIDatabase() {
+		return false, nil
+	}
 	remotes, err := s.ListRemotes(ctx)
-	if err == nil {
-		for _, r := range remotes {
-			if r.Name == remote {
-				if !doltutil.IsGitProtocolURL(r.URL) {
-					return false
-				}
-				// Verify remote exists in CLI directory before routing to CLI push/pull.
-				// When the dolt sql-server is externally managed, remotes may exist only
-				// on the server's filesystem, not in the local dbPath.
-				return s.CLIDir() != "" && doltutil.FindCLIRemote(s.CLIDir(), remote) != ""
+	if err != nil {
+		return false, fmt.Errorf("list Dolt remotes before git-protocol routing: %w", err)
+	}
+	for _, r := range remotes {
+		if r.Name == remote {
+			if !doltutil.IsGitProtocolURL(r.URL) {
+				return false, nil
 			}
+			if err := s.ensureMatchingCLIRemote(remote, r.URL); err != nil {
+				return false, fmt.Errorf("remote %q uses git protocol and requires CLI routing: %w", remote, err)
+			}
+			return true, nil
 		}
 	}
-	// Fall back to CLI remotes (covers drift where remote exists only in filesystem)
-	if s.CLIDir() != "" {
-		if url := doltutil.FindCLIRemote(s.CLIDir(), remote); url != "" {
-			return doltutil.IsGitProtocolURL(url)
-		}
+	return false, nil
+}
+
+// shouldUseCLIForGitProtocol is a compatibility wrapper for tests and older
+// call sites. Prefer prepareCLIRouteForGitProtocol so mutation is explicit.
+func (s *DoltStore) shouldUseCLIForGitProtocol(ctx context.Context, remote string) (bool, error) {
+	return s.prepareCLIRouteForGitProtocol(ctx, remote)
+}
+
+// isGitProtocolRemote reports whether the SQL-visible remote uses git wire
+// protocol and the same remote is available in the local CLI directory.
+func (s *DoltStore) isGitProtocolRemote(ctx context.Context, remote string) bool {
+	ok, err := s.prepareCLIRouteForGitProtocol(ctx, remote)
+	if err != nil {
+		log.Printf("warning: %v", err)
+		return false
 	}
-	return false
+	return ok
 }
 
 // mainRemoteCredentials returns credentials for the main remote, or nil if none.
@@ -2024,19 +2105,13 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, cliExecTimeout)
-	defer cancel()
 	args := []string{"push"}
 	if force {
 		args = append(args, "--force")
 	}
 	args = append(args, remote, s.branch)
-	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/branch
-	cmd.Dir = s.CLIDir()
-	creds.applyToCmd(cmd)
-	if s.isS3Remote(ctx, remote) {
-		applyS3ChecksumEnvToCmd(cmd)
-	}
+	cmd, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
+	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2049,14 +2124,8 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // If creds is non-nil, credentials are set on the subprocess environment only.
 func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
-	ctx, cancel := context.WithTimeout(ctx, cliExecTimeout)
+	cmd, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, "pull", remote, s.branch)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "dolt", "pull", remote, s.branch) // #nosec G204 -- fixed command
-	cmd.Dir = s.CLIDir()
-	creds.applyToCmd(cmd)
-	if s.isS3Remote(ctx, remote) {
-		applyS3ChecksumEnvToCmd(cmd)
-	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("dolt pull failed: %s: %w", strings.TrimSpace(string(out)), err)
@@ -2108,27 +2177,32 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	// but still need CLI to avoid SQL connection timeout.
 	// Credentials are passed directly to the subprocess via cmd.Env, avoiding
 	// process-wide env var races with concurrent goroutines.
-	if s.isGitProtocolRemote(ctx, remote) {
+	if useCLI, err := s.prepareCLIRouteForGitProtocol(ctx, remote); err != nil {
+		return err
+	} else if useCLI {
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Credential CLI routing: when credentials are set and server is external,
 	// route through CLI subprocess so credentials reach the dolt process via
 	// cmd.Env (applyToCmd). The SQL path's withEnvCredentials sets process-wide
 	// env vars that an external server cannot see.
-	if s.shouldUseCLIForCredentials(ctx, remote, creds) {
+	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
+		return err
+	} else if useCLI {
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
 	// etc.) are set and we're in server mode, route through CLI so the dolt
 	// subprocess inherits the current env. The SQL server may not have these
 	// vars if it was started in a different context (GH#6).
-	if s.shouldUseCLIForCloudAuth(remote) {
+	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
+		return err
+	} else if useCLI {
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
-	// If the same remote exists in the local Dolt directory, prefer CLI push.
-	// This matches direct `dolt push` behavior and avoids sql-server mediated
-	// DOLT_PUSH failures for Hosted Dolt HTTPS remotes (GH#3358).
-	if s.shouldUseCLIForLocalRemote(ctx, remote) {
+	if useCLI, err := s.shouldUseCLIForLocalRemoteWithError(ctx, remote); err != nil {
+		return err
+	} else if useCLI {
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	if s.remoteUser != "" && remote == s.remote {
@@ -2209,7 +2283,9 @@ func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr e
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
 	// Credentials are passed directly to the subprocess via cmd.Env.
-	if s.isGitProtocolRemote(ctx, remote) {
+	if useCLI, err := s.prepareCLIRouteForGitProtocol(ctx, remote); err != nil {
+		return err
+	} else if useCLI {
 		if err := s.doltCLIPull(ctx, remote, creds); err != nil {
 			return err
 		}
@@ -2218,16 +2294,23 @@ func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr e
 	// Credential CLI routing: mirrors git-protocol path.
 	// Skips pullWithAutoResolve (consistent with git-protocol Pull — CLI manages its
 	// own connections and conflict handling).
-	if s.shouldUseCLIForCredentials(ctx, remote, creds) {
+	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
+		return err
+	} else if useCLI {
 		if err := s.doltCLIPull(ctx, remote, creds); err != nil {
 			return err
 		}
 		return nil
 	}
 	// Cloud auth CLI routing (GH#6).
-	if s.shouldUseCLIForCloudAuth(remote) {
+	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
+		return err
+	} else if useCLI {
 		return s.doltCLIPull(ctx, remote, creds)
 	}
+	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
+	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
+	// charge of metadata-only conflict repair.
 	if s.remoteUser != "" && remote == s.remote {
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if err := s.pullWithAutoResolve(ctx, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {

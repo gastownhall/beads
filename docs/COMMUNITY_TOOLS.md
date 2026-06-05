@@ -45,7 +45,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 ## Analytics & Observability
 
-* **[Thread](https://github.com/jklenk/thread)** - Read-only forensics and analytics layer for Beads. Reads local Dolt history and produces fidelity scores, rework cost metrics, session compliance scoring, and a self-contained HTML report. Add `Run 'thread prime --json' at session start` to your `AGENTS.md` to give agents project health context before they claim their first bead. 
+* **[Thread](https://github.com/jklenk/thread)** - Read-only forensics and analytics layer for Beads. Reads local Dolt history and produces fidelity scores, rework cost metrics, session compliance scoring, and a self-contained HTML report. Add `Run 'thread prime --json' at session start` to your `AGENTS.md` to give agents project health context before they claim their first bead.
 
 Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@jklenk](https://github.com/jklenk). (Python/DuckDB)
 

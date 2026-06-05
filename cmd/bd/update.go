@@ -293,6 +293,34 @@ create, update, show, or close operation).`,
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
+		mutatedStores := map[storage.DoltStorage][]string{}
+		mutatedResults := map[*RoutedResult]bool{}
+		pendingCloseResults := []*RoutedResult{}
+		trackMutation := func(result *RoutedResult) {
+			if result == nil || result.Store == nil {
+				return
+			}
+			if !mutatedResults[result] {
+				pendingCloseResults = append(pendingCloseResults, result)
+				mutatedResults[result] = true
+			}
+			mutatedStores[result.Store] = append(mutatedStores[result.Store], result.ResolvedID)
+		}
+		closeIfUnmutated := func(result *RoutedResult) {
+			if result == nil {
+				return
+			}
+			if mutatedResults[result] {
+				return
+			}
+			result.Close()
+		}
+		closePendingResults := func() {
+			for _, result := range pendingCloseResults {
+				result.Close()
+			}
+			pendingCloseResults = nil
+		}
 		for _, id := range args {
 			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
 			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
@@ -315,7 +343,7 @@ create, update, show, or close operation).`,
 
 			if err := validateIssueUpdatable(id, issue); err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
-				result.Close()
+				closeIfUnmutated(result)
 				continue
 			}
 
@@ -323,9 +351,10 @@ create, update, show, or close operation).`,
 			if claimFlag {
 				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
-					result.Close()
+					closeIfUnmutated(result)
 					continue
 				}
+				trackMutation(result)
 			}
 
 			// Apply regular field updates if any
@@ -372,9 +401,10 @@ create, update, show, or close operation).`,
 			if len(regularUpdates) > 0 {
 				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-					result.Close()
+					closeIfUnmutated(result)
 					continue
 				}
+				trackMutation(result)
 				// Audit log key field changes (survives Dolt GC flatten)
 				if s, ok := regularUpdates["status"].(string); ok {
 					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor, "")
@@ -401,9 +431,10 @@ create, update, show, or close operation).`,
 			if len(setLabels) > 0 || len(addLabels) > 0 || len(removeLabels) > 0 {
 				if err := applyLabelUpdates(ctx, issueStore, result.ResolvedID, actor, setLabels, addLabels, removeLabels); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating labels for %s: %v\n", id, err)
-					result.Close()
+					closeIfUnmutated(result)
 					continue
 				}
+				trackMutation(result)
 			}
 
 			// Handle parent reparenting
@@ -413,12 +444,12 @@ create, update, show, or close operation).`,
 					parentIssue, err := issueStore.GetIssue(ctx, newParent)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Error getting parent %s: %v\n", newParent, err)
-						result.Close()
+						closeIfUnmutated(result)
 						continue
 					}
 					if parentIssue == nil {
 						fmt.Fprintf(os.Stderr, "Error: parent issue %s not found\n", newParent)
-						result.Close()
+						closeIfUnmutated(result)
 						continue
 					}
 				}
@@ -427,13 +458,15 @@ create, update, show, or close operation).`,
 				deps, err := issueStore.GetDependencyRecords(ctx, result.ResolvedID)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error getting dependencies for %s: %v\n", id, err)
-					result.Close()
+					closeIfUnmutated(result)
 					continue
 				}
 				for _, dep := range deps {
 					if dep.Type == types.DepParentChild {
 						if err := issueStore.RemoveDependency(ctx, result.ResolvedID, dep.DependsOnID, actor); err != nil {
 							fmt.Fprintf(os.Stderr, "Error removing old parent dependency: %v\n", err)
+						} else {
+							trackMutation(result)
 						}
 						break
 					}
@@ -448,9 +481,10 @@ create, update, show, or close operation).`,
 					}
 					if err := issueStore.AddDependency(ctx, newDep, actor); err != nil {
 						fmt.Fprintf(os.Stderr, "Error adding parent dependency: %v\n", err)
-						result.Close()
+						closeIfUnmutated(result)
 						continue
 					}
+					trackMutation(result)
 				}
 			}
 
@@ -473,12 +507,24 @@ create, update, show, or close operation).`,
 			if firstUpdatedID == "" {
 				firstUpdatedID = result.ResolvedID
 			}
-			result.Close()
+			closeIfUnmutated(result)
 		}
 
-		if firstUpdatedID != "" {
-			commandDidWrite.Store(true)
+		if len(mutatedStores) > 0 {
+			for s, ids := range mutatedStores {
+				if s == nil {
+					continue
+				}
+				if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+					Command:  "update",
+					IssueIDs: ids,
+				}); err != nil {
+					closePendingResults()
+					FatalErrorRespectJSON("failed to commit: %v", err)
+				}
+			}
 		}
+		closePendingResults()
 
 		// Set last touched after all updates complete
 		if firstUpdatedID != "" {

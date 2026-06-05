@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func NewConfigSQLRepository(runner Runner) domain.ConfigSQLRepository {
@@ -136,4 +137,47 @@ func (r *configSQLRepositoryImpl) GetAdaptiveIDConfig(ctx context.Context) (doma
 	}
 
 	return cfg, nil
+}
+
+func (r *configSQLRepositoryImpl) GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error) {
+	rows, err := r.runner.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
+	if err != nil {
+		return nil, fmt.Errorf("db: GetCustomStatuses: query custom_statuses: %w", err)
+	}
+	defer rows.Close()
+	var result []types.CustomStatus
+	for rows.Next() {
+		var name, category string
+		if err := rows.Scan(&name, &category); err != nil {
+			return nil, fmt.Errorf("db: GetCustomStatuses: scan: %w", err)
+		}
+		result = append(result, types.CustomStatus{
+			Name:     name,
+			Category: types.StatusCategory(category),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: GetCustomStatuses: read custom_statuses: %w", err)
+	}
+	return result, nil
+}
+
+func (r *configSQLRepositoryImpl) GetInfraTypes(ctx context.Context) (map[string]bool, error) {
+	value, err := r.GetConfig(ctx, "types.infra")
+	if err != nil {
+		return nil, fmt.Errorf("db: GetInfraTypes: %w", err)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return map[string]bool{}, nil
+	}
+	parts := strings.Split(value, ",")
+	result := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result[p] = true
+		}
+	}
+	return result, nil
 }

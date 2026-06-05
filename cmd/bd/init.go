@@ -22,7 +22,6 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -2134,31 +2133,15 @@ func isDoltLocalOnly() bool {
 
 func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syncURL string, quiet bool) {
 	hasRemote, _ := store.HasRemote(ctx, "origin")
-	if !hasRemote {
-		if err := store.AddRemote(ctx, "origin", syncURL); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to add remote 'origin': %v\n", err)
-			// Non-fatal — user can add manually with: bd dolt remote add origin <url>
-		} else if !quiet {
-			fmt.Printf("  %s Configured Dolt remote: origin → %s\n", ui.RenderPass("✓"), syncURL)
-		}
-	}
-
-	// Server-mode git remotes often need a matching CLI remote so push/pull can
-	// use the user's local SSH keys or credential helpers instead of the SQL
-	// server process environment.
-	if !usesSQLServer() {
+	if hasRemote {
 		return
 	}
-	locator, ok := storage.UnwrapStore(store).(storage.StoreLocator)
-	if !ok {
+	if err := store.AddRemote(ctx, "origin", syncURL); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to add remote 'origin': %v\n", err)
 		return
 	}
-	dbPath := locator.CLIDir()
-	if dbPath == "" || doltutil.FindCLIRemote(dbPath, "origin") != "" {
-		return
-	}
-	if err := doltutil.AddCLIRemote(dbPath, "origin", syncURL); err != nil && !quiet {
-		fmt.Fprintf(os.Stderr, "Warning: failed to add CLI remote 'origin': %v\n", err)
+	if !quiet {
+		fmt.Printf("  %s Configured Dolt remote: origin → %s\n", ui.RenderPass("✓"), syncURL)
 	}
 }
 

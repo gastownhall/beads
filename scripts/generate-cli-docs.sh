@@ -2,6 +2,7 @@
 # generate-cli-docs.sh — Generate CLI reference docs from the live bd command tree.
 
 set -euo pipefail
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"

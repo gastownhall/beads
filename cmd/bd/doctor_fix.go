@@ -357,8 +357,6 @@ func applyFixList(path string, fixes []doctorCheck) {
 			}
 		case "Project Identity":
 			err = fix.FixProjectIdentity(path)
-		case "Remote Consistency":
-			err = fix.RemoteConsistency(path)
 		case "Dolt Schema":
 			// GH#2160: Pre-#2142 migrations may have wrong database configured.
 			// Probe the server and backfill dolt_database in metadata.json.

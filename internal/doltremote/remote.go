@@ -12,6 +12,7 @@ var NativeSchemes = []string{
 	"git+https://",
 	"git+ssh://",
 	"git+http://",
+	"git+file://",
 }
 
 // Normalize converts a remote URL to a Dolt-compatible format.

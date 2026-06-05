@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +18,6 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // Credential storage and encryption for federation peers.
@@ -588,27 +588,33 @@ func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn
 // FederationPeer is an alias for storage.FederationPeer for convenience.
 type FederationPeer = storage.FederationPeer
 
-// shouldUseCLIForPeerCredentials returns true when federation operations for a
-// specific peer should use CLI subprocess routing instead of SQL path.
-// Called inside withPeerCredentials callback where creds are already resolved.
-//
-// Returns true when ALL conditions are met:
-//  1. Peer credentials exist (resolved from federation_peers table)
-//  2. Server is in server mode (not embedded)
-//  3. Local CLI directory is available
-//  4. The peer remote is configured in the local CLI directory
-func (s *DoltStore) shouldUseCLIForPeerCredentials(_ context.Context, peer string, creds *remoteCredentials) bool {
+func (s *DoltStore) prepareCLIRouteForPeerCredentials(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
 	if creds.empty() {
-		return false // no credentials to pass
+		return false, nil // no credentials to pass
 	}
 	if !s.serverMode {
-		return false // embedded mode: withEnvCredentials works in-process
+		return false, nil // embedded mode: withEnvCredentials works in-process
 	}
-	cliDir := s.CLIDir()
-	if cliDir == "" {
-		return false // no local directory for CLI operations
+	if !s.hasCLIDatabase() {
+		return false, nil
 	}
-	return doltutil.FindCLIRemote(cliDir, peer) != ""
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return false, fmt.Errorf("list Dolt remotes before credential routing for peer %q: %w", peer, err)
+	}
+	for _, r := range remotes {
+		if r.Name == peer {
+			if err := s.ensureMatchingCLIRemote(peer, r.URL); err != nil {
+				return false, fmt.Errorf("peer remote %q has credentials and requires CLI routing: %w", peer, err)
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *DoltStore) shouldUseCLIForPeerCredentialsWithError(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
+	return s.prepareCLIRouteForPeerCredentials(ctx, peer, creds)
 }
 
 // shouldUseCLIForCredentials returns true when CLI subprocess routing should
@@ -621,58 +627,63 @@ func (s *DoltStore) shouldUseCLIForPeerCredentials(_ context.Context, peer strin
 // Returns true when ALL conditions are met:
 //  1. Credentials exist (remoteUser or remotePassword non-empty)
 //  2. Server is in server mode (not embedded)
-//  3. Local CLI directory is available
-//  4. The remote is configured in the local CLI directory
-func (s *DoltStore) shouldUseCLIForCredentials(_ context.Context, remote string, creds *remoteCredentials) bool {
-	if creds.empty() {
-		return false // no credentials to pass
-	}
-	if !s.serverMode {
-		return false // embedded mode: withEnvCredentials works in-process
-	}
-	cliDir := s.CLIDir()
-	if cliDir == "" {
-		return false // no local directory for CLI operations
-	}
-	// Only route to CLI if the remote is configured locally.
-	// Shared server / external server modes may have CLIDir pointing
-	// to wrong directory — FindCLIRemote returns "" in those cases.
-	return doltutil.FindCLIRemote(cliDir, remote) != ""
-}
-
-func shouldUseCLIForMatchingLocalRemote(sqlRemotes []storage.RemoteInfo, cliURL, remote string) bool {
-	if cliURL == "" {
+//  3. The remote exists as a SQL-visible remote
+//  4. The same remote URL can be materialized in the local CLI directory
+func (s *DoltStore) shouldUseCLIForCredentials(ctx context.Context, remote string, creds *remoteCredentials) bool {
+	ok, err := s.prepareCLIRouteForCredentials(ctx, remote, creds)
+	if err != nil {
+		log.Printf("warning: %v", err)
 		return false
 	}
-	for _, r := range sqlRemotes {
-		if r.Name == remote && r.URL == cliURL {
-			return true
+	return ok
+}
+
+func (s *DoltStore) prepareCLIRouteForCredentials(ctx context.Context, remote string, creds *remoteCredentials) (bool, error) {
+	if creds.empty() {
+		return false, nil // no credentials to pass
+	}
+	if !s.serverMode {
+		return false, nil // embedded mode: withEnvCredentials works in-process
+	}
+	if !s.hasCLIDatabase() {
+		return false, nil
+	}
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return false, fmt.Errorf("list Dolt remotes before credential routing for remote %q: %w", remote, err)
+	}
+	for _, r := range remotes {
+		if r.Name == remote {
+			if err := s.ensureMatchingCLIRemote(remote, r.URL); err != nil {
+				return false, fmt.Errorf("remote %q has credentials and requires CLI routing: %w", remote, err)
+			}
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
-// shouldUseCLIForLocalRemote returns true when the SQL-visible remote also
-// exists in the local CLI directory with the same URL. In that case the CLI
-// and SQL paths target the same remote, and CLI push is closer to direct
-// `dolt push` behavior than CALL DOLT_PUSH through the sql-server.
-func (s *DoltStore) shouldUseCLIForLocalRemote(ctx context.Context, remote string) bool {
+func (s *DoltStore) shouldUseCLIForCredentialsWithError(ctx context.Context, remote string, creds *remoteCredentials) (bool, error) {
+	return s.prepareCLIRouteForCredentials(ctx, remote, creds)
+}
+
+func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, remote string) (bool, error) {
 	if !s.serverMode {
-		return false
+		return false, nil
 	}
-	cliDir := s.CLIDir()
-	if cliDir == "" {
-		return false
-	}
-	cliURL := doltutil.FindCLIRemote(cliDir, remote)
-	if cliURL == "" {
-		return false
+	if !s.hasCLIDatabase() {
+		return false, nil
 	}
 	sqlRemotes, err := s.ListRemotes(ctx)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("list Dolt remotes before local CLI routing for remote %q: %w", remote, err)
 	}
-	return shouldUseCLIForMatchingLocalRemote(sqlRemotes, cliURL, remote)
+	for _, r := range sqlRemotes {
+		if r.Name == remote {
+			return s.hasMatchingCLIRemote(remote, r.URL), nil
+		}
+	}
+	return false, nil
 }
 
 // cloudAuthSchemeMap maps remote URL scheme prefixes to the environment
@@ -700,15 +711,13 @@ func isS3RemoteURL(url string) bool {
 
 func (s *DoltStore) isS3Remote(ctx context.Context, remote string) bool {
 	remotes, err := s.ListRemotes(ctx)
-	if err == nil {
-		for _, r := range remotes {
-			if r.Name == remote {
-				return isS3RemoteURL(r.URL)
-			}
-		}
+	if err != nil {
+		return false
 	}
-	if cliDir := s.CLIDir(); cliDir != "" {
-		return isS3RemoteURL(doltutil.FindCLIRemote(cliDir, remote))
+	for _, r := range remotes {
+		if r.Name == remote {
+			return isS3RemoteURL(r.URL)
+		}
 	}
 	return false
 }
@@ -734,8 +743,9 @@ func envPrefixesForRemoteURL(url string) []string {
 // match the remote's URL scheme. An Azure env var (AZURE_STORAGE_ACCOUNT)
 // will trigger CLI routing for an az:// remote but NOT for a dolthub:// remote.
 //
-// The CLI remote URL is used for scheme detection because that is the URL
-// the CLI subprocess will actually use (SQL remotes may differ due to drift).
+// Scheme detection uses the SQL remote URL. If matching cloud credentials are
+// present, bd materializes the same remote into the local CLI directory before
+// routing to the CLI subprocess.
 //
 // When bd connects to an external dolt-sql-server (server mode), CALL
 // DOLT_PUSH/PULL executes inside the server process. That process only has
@@ -743,28 +753,53 @@ func envPrefixesForRemoteURL(url string) []string {
 // changed) after the server started, the SQL path silently fails to
 // authenticate. Routing through a CLI subprocess (dolt push/pull) ensures
 // the child process inherits the current environment (GH#6).
-func (s *DoltStore) shouldUseCLIForCloudAuth(remote string) bool {
+func (s *DoltStore) shouldUseCLIForCloudAuth(ctx context.Context, remote string) bool {
+	ok, err := s.prepareCLIRouteForCloudAuth(ctx, remote)
+	if err != nil {
+		log.Printf("warning: %v", err)
+		return false
+	}
+	return ok
+}
+
+func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote string) (bool, error) {
 	if !s.serverMode {
-		return false // embedded mode: env vars are in-process
+		return false, nil // embedded mode: env vars are in-process
 	}
-	cliDir := s.CLIDir()
-	if cliDir == "" {
-		return false
+	if !s.hasCLIDatabase() {
+		return false, nil
 	}
-	cliURL := doltutil.FindCLIRemote(cliDir, remote)
-	if cliURL == "" {
-		return false
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return false, fmt.Errorf("list Dolt remotes before cloud-auth routing for remote %q: %w", remote, err)
 	}
-	prefixes := envPrefixesForRemoteURL(cliURL)
+	var remoteURL string
+	for _, r := range remotes {
+		if r.Name == remote {
+			remoteURL = r.URL
+			break
+		}
+	}
+	if remoteURL == "" {
+		return false, nil
+	}
+	prefixes := envPrefixesForRemoteURL(remoteURL)
 	if len(prefixes) == 0 {
-		return false // unknown scheme — not a cloud remote
+		return false, nil // unknown scheme — not a cloud remote
 	}
 	for _, e := range os.Environ() {
 		for _, prefix := range prefixes {
 			if strings.HasPrefix(e, prefix) {
-				return true
+				if err := s.ensureMatchingCLIRemote(remote, remoteURL); err != nil {
+					return false, fmt.Errorf("remote %q has cloud credentials and requires CLI routing: %w", remote, err)
+				}
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
+}
+
+func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remote string) (bool, error) {
+	return s.prepareCLIRouteForCloudAuth(ctx, remote)
 }

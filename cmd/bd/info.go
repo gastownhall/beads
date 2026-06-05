@@ -210,6 +210,20 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.0.5",
+		Date:    "2026-05-28",
+		Changes: []string{
+			"CHANGE: dependencies.depends_on_id is now a STORED generated column — writes must target exactly one of depends_on_issue_id/depends_on_wisp_id/depends_on_external (enforced by ck_dep_one_target); inserting into depends_on_id fails. Migrations 0041–0042 are intentionally irreversible (restore from a prior Dolt commit to roll back).",
+			"CHANGE: JSONL auto-export and auto-staging are now opt-in — set export.auto=true and export.git-add=true to keep the old behavior. Dolt is the canonical store; use bd dolt push/pull for sync and bd backup for restorable backups.",
+			"CHANGE: Foreign keys with ON DELETE/UPDATE CASCADE now span issue and wisp tables, so parent delete/rename cascades automatically.",
+			"NEW: dolt.mode config key (server|embedded) with validation; bd init warns on ambiguous configs and hard-fails when dolt.host/dolt.port are set without server mode.",
+			"NEW: forward schema-skew guard hard-fails when a binary opens a database migrated to a newer schema than it understands.",
+			"NEW: bd list --skip-labels toggle; bd show --json count-only details with opt-in streamed payloads.",
+			"FIX: bd close supports per-id reasons and idempotent re-close; bd create --defer <future> creates a deferred issue; bd create commits labels atomically.",
+			"FIX: migrations run on a connection with no read timeout; duplicate migration version numbers hard-fail instead of silently under-applying.",
+		},
+	},
+	{
 		Version: "1.0.4",
 		Date:    "2026-05-07",
 		Changes: []string{

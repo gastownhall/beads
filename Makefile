@@ -9,7 +9,8 @@ SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
 endif
 endif
 
-.PHONY: all build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check
+.PHONY: all build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
+.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm ci-website
 
 # Default target
 all: build
@@ -78,6 +79,24 @@ test-icu-path:
 test-full-cgo:
 	@echo "WARNING: make test-full-cgo is deprecated; use make test-icu-path for the explicit ICU-only path." >&2
 	@$(MAKE) test-icu-path
+
+ci-pr-core:
+	@./scripts/ci/pr-core.sh
+
+ci-pr-policy:
+	@./scripts/ci/pr-policy.sh
+
+ci-pr-lint:
+	@./scripts/ci/pr-lint.sh
+
+ci-package-mcp:
+	@./scripts/ci/package-mcp.sh
+
+ci-package-npm:
+	@./scripts/ci/package-npm.sh
+
+ci-website:
+	@./scripts/ci/website.sh
 
 # Run differential regression tests (baseline v0.49.6 vs current worktree).
 # Downloads baseline binary on first run; cached in ~/Library/Caches/beads-regression/.
@@ -190,6 +209,10 @@ check-docs:
 	@./scripts/check-doc-flags.sh ./bd
 	@./scripts/check-doc-freshness.sh
 
+# Ensure -short is not used as an implicit CI tier boundary.
+check-testing-short:
+	@./scripts/check-testing-short.sh
+
 # Clean build artifacts and benchmark profiles
 clean:
 	@echo "Cleaning..."
@@ -212,6 +235,12 @@ help:
 	@echo "  make test         - Run all tests"
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
+	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
+	@echo "  make ci-pr-policy - Run required PR policy wrapper"
+	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
+	@echo "  make ci-package-mcp - Run MCP Python package gate"
+	@echo "  make ci-package-npm - Run npm package gate"
+	@echo "  make ci-website - Run website typecheck/build gate"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
 	@echo "  make test-upgrade  - Run upgrade smoke tests (release stability gate)"
 	@echo "  make test-cross-version - Run cross-version smoke tests (last 30 tags)"

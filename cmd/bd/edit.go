@@ -165,8 +165,13 @@ Examples:
 			FatalErrorRespectJSON("updating issue: %v", err)
 		}
 		editSaved = true
-
-		commandDidWrite.Store(true)
+		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+			Command:  "edit",
+			IssueIDs: []string{id},
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Your edits are preserved in: %s\n", tmpPath)
+			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
 
 		displayTitle := issue.Title
 		if fieldToEdit == "title" {

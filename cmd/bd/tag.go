@@ -51,8 +51,12 @@ Examples:
 		if err := issueStore.AddLabel(ctx, result.ResolvedID, label, actor); err != nil {
 			FatalErrorRespectJSON("adding label to %s: %v", id, err)
 		}
-
-		commandDidWrite.Store(true)
+		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+			Command:  "tag",
+			IssueIDs: []string{result.ResolvedID},
+		}); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
 
 		SetLastTouchedID(result.ResolvedID)
 

@@ -7,17 +7,19 @@ integration, orchestrator, team workflow, or experimental automation. Before
 adding first-class fields, commands, or schema changes, check the
 [Project Charter](PROJECT_CHARTER.md#schema-boundary).
 
-## Agent Execution Metadata
+## Example: Agent Execution Metadata
 
-Automation may store execution hints in issue metadata so agents can make
-routing decisions without parsing prose. Agents enacting an issue should read
-metadata first, then use description and notes for scope and rationale:
+Agent execution hints are one example of using metadata to extend beads without
+adding new native database fields. Automation may store these hints so agents
+can make routing decisions without parsing prose. Agents enacting an issue
+should read metadata first, then use description and notes for scope and
+rationale:
 
 ```bash
 bd show <id> --json | jq '.[0] | {id,title,metadata,description,notes}'
 ```
 
-Current execution hint keys:
+The current convention for execution hint keys is:
 
 | Key | Meaning |
 |-----|---------|
@@ -27,9 +29,9 @@ Current execution hint keys:
 | `execution_mode` | Whether work should be local, delegated, or staged between delegated and local execution. |
 | `execution_parallel_group` | Grouping hint for work that can run alongside related tasks. |
 
-These keys are advisory metadata, but when present they take precedence over
-free-form notes for execution routing. Notes remain useful for rationale,
-ownership, and exact prompts.
+These keys are advisory metadata, not core issue fields. When a workflow uses
+them, they take precedence over free-form notes for execution routing. Notes
+remain useful for rationale, ownership, and exact prompts.
 
 Parent/orchestrator agents must consume these keys before spawning subagents.
 Model and reasoning effort are normally fixed at launch, so reading metadata
@@ -39,6 +41,28 @@ Do not add a first-class helper such as `bd show <id> --execution` or
 `bd plan <id> --json` yet. Keep using the JSON/JQ snippet until upstream
 issue gh-3541 determines whether schedulers or runners need these fields as a
 stable CLI surface.
+
+## Example: Tracker Round-Trip Metadata
+
+Tracker integrations map external issues into beads fields such as title,
+status, priority, type, labels, dependencies, and `external_ref`. When an
+integration needs to preserve tracker-specific fields that do not belong in the
+native beads schema, it can store those fields in issue metadata:
+
+```json
+{
+  "example_tracker": {
+    "board_id": "ENG",
+    "sprint_id": 42,
+    "remote_type": "story"
+  }
+}
+```
+
+This keeps beads' core issue model stable while allowing the integration to
+round-trip fields it understands. Prefer namespaced keys and keep
+tracker-specific policy in the integration. If a value becomes broadly useful
+to beads itself, revisit whether it deserves a native field.
 
 ## Reserved Key Prefixes
 

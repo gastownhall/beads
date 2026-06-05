@@ -15,7 +15,7 @@ import (
 
 func TestBuildCreateIssueFromInput_PopulatesAllFields(t *testing.T) {
 	due := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	defer1 := time.Date(2026, 5, 30, 9, 0, 0, 0, time.UTC)
+	defer1 := time.Now().UTC().Add(24 * time.Hour)
 	est := 90
 	meta := json.RawMessage(`{"k":"v"}`)
 

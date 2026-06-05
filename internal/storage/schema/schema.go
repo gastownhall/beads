@@ -179,8 +179,8 @@ func AllMigrationsSQL() string {
 		if err != nil {
 			continue
 		}
-		b.Write(data)
-		b.WriteByte('\n')
+		b.WriteString(cliCompatibleMigrationSQL(f.name, string(data)))
+		fmt.Fprintf(&b, "\nINSERT IGNORE INTO %s (version) VALUES (%d);\n", mainSource.cursorTable, f.version)
 	}
 	return b.String()
 }

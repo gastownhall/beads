@@ -290,12 +290,11 @@ async function testClaudeCodeWebSimulation(npmPrefix) {
     const existingIssue = JSON.parse(createOutput);
     logSuccess(`Created issue in first session: ${existingIssue.id}`);
 
-    // Simulate sync to git (bd automatically exports to JSONL)
+    // Simulate sync to git. The default auto-export policy is intentionally
+    // disabled, so make the package workflow's JSONL handoff explicit.
     const beadsDir = path.join(sessionDir, '.beads');
     const jsonlPath = path.join(beadsDir, 'issues.jsonl');
-
-    // Wait a moment for auto-export
-    execSync('sleep 1');
+    exec(`"${bdCmd}" export -o "${jsonlPath}"`, { cwd: sessionDir, env });
 
     // Verify JSONL exists
     if (!fs.existsSync(jsonlPath)) {

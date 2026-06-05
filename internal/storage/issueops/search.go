@@ -112,8 +112,8 @@ func searchTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types
 		selectSQL = "SELECT DISTINCT "
 	}
 	//nolint:gosec // G201: SQL fragments are built from fixed table/column names and parameterized filters.
-	querySQL := fmt.Sprintf(`%s%s FROM %s %s ORDER BY priority ASC, created_at DESC, id ASC %s`,
-		selectSQL, IssueSelectColumns, fromSQL, whereSQL, limitSQL)
+	querySQL := fmt.Sprintf(`%s%s FROM %s %s %s %s`,
+		selectSQL, IssueSelectColumns, fromSQL, whereSQL, issueOpsOrderBy(filter.SortBy, filter.SortDesc, ""), limitSQL)
 
 	rows, err := tx.QueryContext(ctx, querySQL, args...)
 	if err != nil {
@@ -155,8 +155,9 @@ func searchTablePatternB(ctx context.Context, tx *sql.Tx, fromSQL, whereSQL stri
 		idSelect = "SELECT DISTINCT "
 	}
 	//nolint:gosec // G201: SQL fragments from fixed column/table names and parameterized filters.
-	idQuery := fmt.Sprintf(`%s%s.id FROM %s %s ORDER BY %s.priority ASC, %s.created_at DESC, %s.id ASC LIMIT %d`,
-		idSelect, tables.Main, fromSQL, whereSQL, tables.Main, tables.Main, tables.Main, filter.Limit)
+	idQuery := fmt.Sprintf(`%s%s.id FROM %s %s %s LIMIT %d`,
+		idSelect, tables.Main, fromSQL, whereSQL,
+		issueOpsOrderBy(filter.SortBy, filter.SortDesc, tables.Main), filter.Limit)
 
 	rows, err := tx.QueryContext(ctx, idQuery, args...)
 	if err != nil {
@@ -315,4 +316,50 @@ func compactNonEmptyStrings(values []string) []string {
 		}
 	}
 	return out
+}
+
+var issueOpsSortDefs = map[string]struct {
+	column     string
+	defaultDir string
+}{
+	"":         {"priority", "ASC"},
+	"priority": {"priority", "ASC"},
+	"created":  {"created_at", "DESC"},
+	"updated":  {"updated_at", "DESC"},
+	"closed":   {"closed_at", "DESC"},
+	"status":   {"status", "ASC"},
+	"type":     {"issue_type", "ASC"},
+	"assignee": {"assignee", "ASC"},
+	"title":    {"title", "ASC"},
+}
+
+func issueOpsOrderBy(sortBy string, sortDesc bool, table string) string {
+	if sortBy == "id" {
+		return ""
+	}
+	def, ok := issueOpsSortDefs[sortBy]
+	if !ok {
+		def = issueOpsSortDefs[""]
+		sortBy = ""
+	}
+	qual := ""
+	if table != "" {
+		qual = table + "."
+	}
+	dir := def.defaultDir
+	if sortDesc {
+		if dir == "ASC" {
+			dir = "DESC"
+		} else {
+			dir = "ASC"
+		}
+	}
+	col := qual + def.column
+	if sortBy == "title" {
+		col = "LOWER(" + qual + "title)"
+	}
+	if sortBy == "" || sortBy == "priority" {
+		return fmt.Sprintf("ORDER BY %spriority %s, %screated_at DESC, %sid ASC", qual, dir, qual, qual)
+	}
+	return fmt.Sprintf("ORDER BY %s %s, %sid ASC", col, dir, qual)
 }

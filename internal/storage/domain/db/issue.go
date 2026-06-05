@@ -465,7 +465,7 @@ type issueScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanIssue(s issueScanner) (*types.Issue, error) {
+func scanIssue(s issueScanner, extra ...any) (*types.Issue, error) {
 	var issue types.Issue
 	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
@@ -479,7 +479,7 @@ func scanIssue(s issueScanner) (*types.Issue, error) {
 	var metadata sql.NullString
 	var createdAt, updatedAt sql.NullTime
 
-	if err := s.Scan(
+	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
@@ -491,7 +491,9 @@ func scanIssue(s issueScanner) (*types.Issue, error) {
 		&eventKind, &actorCol, &target, &payload,
 		&dueAt, &deferUntil,
 		&workType, &sourceSystem, &metadata,
-	); err != nil {
+	}
+	dests = append(dests, extra...)
+	if err := s.Scan(dests...); err != nil {
 		return nil, err
 	}
 
@@ -693,4 +695,20 @@ func normalizeUpdateValue(key string, value any) any {
 		}
 	}
 	return value
+}
+
+func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (domain.SearchPage, error) {
+	return r.searchAcrossIssuesAndWisps(ctx, query, filter)
+}
+
+func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (domain.SearchCountsPage, error) {
+	return r.searchAcrossIssuesAndWispsWithCounts(ctx, query, filter)
+}
+
+func (r *issueSQLRepositoryImpl) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
+	return r.getReadyWorkUnion(ctx, filter)
+}
+
+func (r *issueSQLRepositoryImpl) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (domain.SearchCountsPage, error) {
+	return r.getReadyWorkWithCountsUnion(ctx, filter)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -39,17 +40,28 @@ type DepListFilter struct {
 	Direction DepDirection
 }
 
+type BlockingInfo struct {
+	BlockedBy map[string][]string
+	Blocks    map[string][]string
+	Parent    map[string]string
+}
+
 type DependencySQLRepository interface {
 	Insert(ctx context.Context, dep *types.Dependency, actor string, opts DepInsertOpts) error
 	HasCycle(ctx context.Context, issueID, dependsOnID string) (bool, error)
 	ListByIssueIDs(ctx context.Context, issueIDs []string, opts DepListOpts) (DepBulkResult, error)
 	CountsByIssueIDs(ctx context.Context, issueIDs []string, opts DepCountsOpts) (map[string]*types.DependencyCounts, error)
+
+	GetBlockingInfo(ctx context.Context, issueIDs []string, opts DepListOpts) (BlockingInfo, error)
+	GetBlockingInfoAcrossIssuesAndWisps(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 }
 
 type DependencyUseCase interface {
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
 	ListByIssueIDs(ctx context.Context, issueIDs []string, filter DepListFilter) (DepBulkResult, error)
 	CountsByIssueIDs(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
+	GetBlockingInfo(ctx context.Context, issueIDs []string) (BlockingInfo, error)
+	GetForIssueIDs(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
 
 	AddWispDependency(ctx context.Context, dep *types.Dependency, actor string) error
 	ListByWispIDs(ctx context.Context, wispIDs []string, filter DepListFilter) (DepBulkResult, error)
@@ -102,6 +114,28 @@ func (u *dependencyUseCaseImpl) ListByIssueIDs(ctx context.Context, issueIDs []s
 	return u.list(ctx, issueIDs, filter, false)
 }
 
+func (u *dependencyUseCaseImpl) GetForIssueIDs(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	if len(ids) == 0 {
+		return map[string][]*types.Dependency{}, nil
+	}
+	issueRes, err := u.depRepo.ListByIssueIDs(ctx, ids, DepListOpts{Direction: DepDirectionOut})
+	if err != nil {
+		return nil, fmt.Errorf("GetForIssueIDs: %w", err)
+	}
+	out := issueRes.Outgoing
+	if out == nil {
+		out = make(map[string][]*types.Dependency)
+	}
+	wispRes, err := u.depRepo.ListByIssueIDs(ctx, ids, DepListOpts{Direction: DepDirectionOut, UseWispsTable: true})
+	if err != nil && !dberrors.IsTableNotExist(err) {
+		return nil, fmt.Errorf("GetForIssueIDs (wisps): %w", err)
+	}
+	for id, deps := range wispRes.Outgoing {
+		out[id] = append(out[id], deps...)
+	}
+	return out, nil
+}
+
 func (u *dependencyUseCaseImpl) ListByWispIDs(ctx context.Context, wispIDs []string, filter DepListFilter) (DepBulkResult, error) {
 	return u.list(ctx, wispIDs, filter, true)
 }
@@ -139,6 +173,21 @@ func (u *dependencyUseCaseImpl) counts(ctx context.Context, ids []string, useWis
 	out, err := u.depRepo.CountsByIssueIDs(ctx, ids, DepCountsOpts{UseWispsTable: useWisp})
 	if err != nil {
 		return nil, fmt.Errorf("dep counts: %w", err)
+	}
+	return out, nil
+}
+
+func (u *dependencyUseCaseImpl) GetBlockingInfo(ctx context.Context, issueIDs []string) (BlockingInfo, error) {
+	if len(issueIDs) == 0 {
+		return BlockingInfo{
+			BlockedBy: map[string][]string{},
+			Blocks:    map[string][]string{},
+			Parent:    map[string]string{},
+		}, nil
+	}
+	out, err := u.depRepo.GetBlockingInfoAcrossIssuesAndWisps(ctx, issueIDs)
+	if err != nil {
+		return BlockingInfo{}, fmt.Errorf("GetBlockingInfo: %w", err)
 	}
 	return out, nil
 }

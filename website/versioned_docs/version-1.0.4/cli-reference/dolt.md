@@ -177,7 +177,7 @@ bd dolt remote
 
 #### bd dolt remote add
 
-Add a Dolt remote (both SQL server and CLI)
+Add a Dolt remote
 
 ```
 bd dolt remote add <name> <url>
@@ -185,7 +185,7 @@ bd dolt remote add <name> <url>
 
 #### bd dolt remote list
 
-List configured Dolt remotes (SQL server + CLI)
+List configured Dolt remotes
 
 ```
 bd dolt remote list
@@ -193,16 +193,10 @@ bd dolt remote list
 
 #### bd dolt remote remove
 
-Remove a Dolt remote (both SQL server and CLI)
+Remove a Dolt remote
 
 ```
-bd dolt remote remove <name> [flags]
-```
-
-**Flags:**
-
-```
-      --force   Force remove even when SQL and CLI URLs conflict
+bd dolt remote remove <name>
 ```
 
 ### bd dolt set

@@ -55,6 +55,7 @@ bd list [flags]
       --no-parent                    Exclude child issues (show only top-level issues)
       --no-pinned                    Exclude pinned issues
       --notes-contains string        Filter by notes substring (case-insensitive)
+      --offset int                   Skip the first N matching results (0-based). Only supported under --proxied-server.
       --overdue                      Show only issues with due_at in the past (not closed)
       --parent string                Filter by parent issue ID (shows children of specified issue)
       --pinned                       Show only pinned issues

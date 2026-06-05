@@ -5,6 +5,7 @@
 # llms-full matches the default site version, not unreleased "Next".
 
 set -euo pipefail
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -131,7 +132,29 @@ if [ -f "$DOCS_DIR/intro.md" ]; then
 fi
 
 # Process directories in logical order
-for dir in getting-started core-concepts architecture cli-reference workflows multi-agent integrations recovery reference; do
+for dir in getting-started core-concepts architecture cli-reference workflows multi-agent integrations; do
+    if [ -d "$DOCS_DIR/$dir" ]; then
+        # Process index first if exists
+        if [ -f "$DOCS_DIR/$dir/index.md" ]; then
+            process_file "$DOCS_DIR/$dir/index.md"
+        fi
+
+        # Process other files
+        for file in "$DOCS_DIR/$dir"/*.md; do
+            if [ -f "$file" ] && [ "$(basename "$file")" != "index.md" ]; then
+                process_file "$file"
+            fi
+        done
+    fi
+done
+
+for doc in community-tools; do
+    if [ -f "$DOCS_DIR/$doc.md" ]; then
+        process_file "$DOCS_DIR/$doc.md"
+    fi
+done
+
+for dir in recovery reference; do
     if [ -d "$DOCS_DIR/$dir" ]; then
         # Process index first if exists
         if [ -f "$DOCS_DIR/$dir/index.md" ]; then

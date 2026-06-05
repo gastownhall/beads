@@ -4,10 +4,19 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 
+	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 )
+
+var cliRemoteLocks sync.Map
+
+func cliRemoteLock(dbPath string) *sync.Mutex {
+	lock, _ := cliRemoteLocks.LoadOrStore(dbPath, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
 
 // ShellQuote returns s wrapped in single quotes with any embedded single
 // quotes escaped, making it safe to interpolate into a shell command string.
@@ -25,17 +34,18 @@ func IsSSHURL(url string) bool {
 
 // IsGitProtocolURL returns true if the URL uses the git wire protocol.
 // This includes SSH transports (git+ssh://, ssh://, git@host:) and
-// git-over-HTTPS (git+https://) and plain git:// protocol.
-// These remotes involve network I/O that can exceed MySQL connection
-// timeouts and should use CLI-based push/pull instead of SQL.
+// git-over-HTTPS (git+https://), git+file://, and plain git:// protocol.
 func IsGitProtocolURL(url string) bool {
 	return IsSSHURL(url) ||
 		strings.HasPrefix(url, "git+https://") ||
 		strings.HasPrefix(url, "git+http://") ||
+		strings.HasPrefix(url, "git+file://") ||
 		strings.HasPrefix(url, "git://")
 }
 
-// ListCLIRemotes parses `dolt remote -v` output from the given database directory.
+// ListCLIRemotes parses `dolt remote -v` output from the given database
+// directory. This is a read-only guard for deciding whether CLI push/pull/fetch
+// can safely run from that directory; remote mutation still goes through SQL.
 func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	cmd := exec.Command("dolt", "remote", "-v") // #nosec G204 -- fixed command
 	cmd.Dir = dbPath
@@ -43,6 +53,7 @@ func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dolt remote -v failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
+
 	seen := map[string]bool{}
 	var remotes []storage.RemoteInfo
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -50,7 +61,6 @@ func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 		if line == "" {
 			continue
 		}
-		// dolt remote -v outputs: name <whitespace> url [<whitespace> (fetch|push)]
 		parts := strings.Fields(line)
 		if len(parts) >= 2 && !seen[parts[0]] {
 			seen[parts[0]] = true
@@ -60,9 +70,20 @@ func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 	return remotes, nil
 }
 
+// RemoteURLsMatch compares remote URLs after Dolt-compatible normalization.
+func RemoteURLsMatch(got, want string) bool {
+	if got == "" || want == "" {
+		return got == want
+	}
+	if got == want || doltremote.Normalize(got) == doltremote.Normalize(want) {
+		return true
+	}
+	return false
+}
+
 // AddCLIRemote adds a remote at the filesystem level via dolt CLI.
-// Both name and URL are validated before being passed to exec.Command
-// as a defense-in-depth measure.
+// Remote mutation should normally go through SQL; this is reserved for the
+// local CLI mirror required by subprocess push/pull/fetch routing.
 func AddCLIRemote(dbPath, name, url string) error {
 	if err := remotecache.ValidateRemoteName(name); err != nil {
 		return fmt.Errorf("invalid remote name: %w", err)
@@ -70,7 +91,7 @@ func AddCLIRemote(dbPath, name, url string) error {
 	if err := remotecache.ValidateRemoteURL(url); err != nil {
 		return fmt.Errorf("invalid remote URL: %w", err)
 	}
-	cmd := exec.Command("dolt", "remote", "add", name, url) // #nosec G204
+	cmd := exec.Command("dolt", "remote", "add", name, url) // #nosec G204 -- validated argv
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -80,12 +101,11 @@ func AddCLIRemote(dbPath, name, url string) error {
 }
 
 // RemoveCLIRemote removes a remote at the filesystem level via dolt CLI.
-// The name is validated before being passed to exec.Command.
 func RemoveCLIRemote(dbPath, name string) error {
 	if err := remotecache.ValidateRemoteName(name); err != nil {
 		return fmt.Errorf("invalid remote name: %w", err)
 	}
-	cmd := exec.Command("dolt", "remote", "remove", name) // #nosec G204
+	cmd := exec.Command("dolt", "remote", "remove", name) // #nosec G204 -- validated argv
 	cmd.Dir = dbPath
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -94,7 +114,8 @@ func RemoveCLIRemote(dbPath, name string) error {
 	return nil
 }
 
-// FindCLIRemote returns the URL for a named CLI remote, or "" if not found.
+// FindCLIRemote returns the URL for a named remote in dbPath, or "" when the
+// directory cannot be inspected or the remote is absent.
 func FindCLIRemote(dbPath, name string) string {
 	remotes, err := ListCLIRemotes(dbPath)
 	if err != nil {
@@ -108,12 +129,38 @@ func FindCLIRemote(dbPath, name string) string {
 	return ""
 }
 
-// ToRemoteNameMap converts a RemoteInfo slice to a map keyed by name.
-// Useful for de-duplicating remotes (e.g., from `dolt remote -v` which may list fetch+push).
-func ToRemoteNameMap(remotes []storage.RemoteInfo) map[string]string {
-	m := make(map[string]string, len(remotes))
-	for _, r := range remotes {
-		m[r.Name] = r.URL
+// EnsureCLIRemote makes the local CLI remote match the SQL-visible remote URL.
+// It is intentionally idempotent and only mutates the CLI surface when the
+// remote is absent or points somewhere else.
+func EnsureCLIRemote(dbPath, name, url string) error {
+	if err := remotecache.ValidateRemoteName(name); err != nil {
+		return fmt.Errorf("invalid remote name: %w", err)
 	}
-	return m
+	if err := remotecache.ValidateRemoteURL(url); err != nil {
+		return fmt.Errorf("invalid remote URL: %w", err)
+	}
+
+	lock := cliRemoteLock(dbPath)
+	lock.Lock()
+	defer lock.Unlock()
+
+	current := FindCLIRemote(dbPath, name)
+	if RemoteURLsMatch(current, url) {
+		return nil
+	}
+	if current != "" {
+		if err := RemoveCLIRemote(dbPath, name); err != nil {
+			return err
+		}
+	}
+	if err := AddCLIRemote(dbPath, name, url); err != nil {
+		if current == "" {
+			return err
+		}
+		if restoreErr := AddCLIRemote(dbPath, name, current); restoreErr != nil {
+			return fmt.Errorf("add replacement CLI remote failed: %w; additionally failed to restore previous URL %q: %v", err, current, restoreErr)
+		}
+		return fmt.Errorf("add replacement CLI remote failed; previous URL %q restored: %w", current, err)
+	}
+	return nil
 }

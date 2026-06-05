@@ -2,6 +2,7 @@ package db
 
 import (
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func (s *testSuite) TestConfigSQLRepository() {
@@ -39,6 +40,16 @@ func (s *testSuite) TestConfigSQLRepository() {
 		s.Run("MissingKeysReturnsDefaults", s.configGetAdaptiveIDConfigDefaults)
 		s.Run("OverridesApplied", s.configGetAdaptiveIDConfigOverrides)
 		s.Run("MalformedValuesFallBackToDefaults", s.configGetAdaptiveIDConfigMalformed)
+	})
+	s.Run("GetCustomStatuses", func() {
+		s.Run("EmptyTableReturnsNil", s.configGetCustomStatusesEmpty)
+		s.Run("ReturnsRowsOrderedByName", s.configGetCustomStatusesRows)
+	})
+	s.Run("GetInfraTypes", func() {
+		s.Run("MissingKeyReturnsEmpty", s.configGetInfraTypesMissing)
+		s.Run("EmptyValueReturnsEmpty", s.configGetInfraTypesEmpty)
+		s.Run("CommaSeparated", s.configGetInfraTypesCommaSeparated)
+		s.Run("TrimsWhitespaceAndSkipsEmpty", s.configGetInfraTypesTrimsAndSkipsEmpty)
 	})
 }
 
@@ -189,6 +200,60 @@ func (s *testSuite) configGetAdaptiveIDConfigOverrides() {
 	s.InDelta(0.05, got.MaxCollisionProbability, 0.0001)
 	s.Equal(4, got.MinLength)
 	s.Equal(7, got.MaxLength)
+}
+
+func (s *testSuite) configGetCustomStatusesEmpty() {
+	got, err := s.configRepo().GetCustomStatuses(s.Ctx())
+	s.Require().NoError(err)
+	s.Nil(got)
+}
+
+func (s *testSuite) configGetCustomStatusesRows() {
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO custom_statuses (name, category) VALUES (?, ?), (?, ?), (?, ?)",
+		"review", string(types.CategoryWIP),
+		"archived", string(types.CategoryDone),
+		"blocked", string(types.CategoryFrozen),
+	)
+	s.Require().NoError(err)
+
+	got, err := s.configRepo().GetCustomStatuses(s.Ctx())
+	s.Require().NoError(err)
+	s.Equal([]types.CustomStatus{
+		{Name: "archived", Category: types.CategoryDone},
+		{Name: "blocked", Category: types.CategoryFrozen},
+		{Name: "review", Category: types.CategoryWIP},
+	}, got)
+}
+
+func (s *testSuite) configGetInfraTypesMissing() {
+	got, err := s.configRepo().GetInfraTypes(s.Ctx())
+	s.Require().NoError(err)
+	s.Equal(map[string]bool{}, got)
+}
+
+func (s *testSuite) configGetInfraTypesEmpty() {
+	r := s.configRepo()
+	s.Require().NoError(r.SetConfig(s.Ctx(), "types.infra", ""))
+	got, err := r.GetInfraTypes(s.Ctx())
+	s.Require().NoError(err)
+	s.Equal(map[string]bool{}, got)
+}
+
+func (s *testSuite) configGetInfraTypesCommaSeparated() {
+	r := s.configRepo()
+	s.Require().NoError(r.SetConfig(s.Ctx(), "types.infra", "agent,rig,role"))
+	got, err := r.GetInfraTypes(s.Ctx())
+	s.Require().NoError(err)
+	s.Equal(map[string]bool{"agent": true, "rig": true, "role": true}, got)
+}
+
+func (s *testSuite) configGetInfraTypesTrimsAndSkipsEmpty() {
+	r := s.configRepo()
+	s.Require().NoError(r.SetConfig(s.Ctx(), "types.infra", "  agent , , rig  ,"))
+	got, err := r.GetInfraTypes(s.Ctx())
+	s.Require().NoError(err)
+	s.Equal(map[string]bool{"agent": true, "rig": true}, got)
 }
 
 func (s *testSuite) configGetAdaptiveIDConfigMalformed() {

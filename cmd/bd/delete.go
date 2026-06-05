@@ -168,7 +168,7 @@ Force: Delete and orphan dependents
 		// Actually delete — all writes in a single transaction
 		updatedIssueCount := 0
 		totalDepsRemoved := 0
-		deleteErr := transact(ctx, activeStore, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
+		deleteErr := transactHonoringAutoCommit(ctx, activeStore, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
 			// 1. Update text references in connected issues
 			for id, connIssue := range connectedIssues {
 				updates := make(map[string]interface{})

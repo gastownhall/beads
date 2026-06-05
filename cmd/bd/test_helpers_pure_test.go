@@ -260,6 +260,16 @@ var (
 	initTestBDErr  error
 )
 
+func findPrebuiltBDBinary() (string, error) {
+	if configured := os.Getenv("BEADS_TEST_BD_BINARY"); configured != "" {
+		if _, err := os.Stat(configured); err != nil {
+			return "", fmt.Errorf("BEADS_TEST_BD_BINARY %q is not usable: %w", configured, err)
+		}
+		return filepath.Abs(configured)
+	}
+	return "", nil
+}
+
 // buildBDForInitTests builds (or locates) a bd binary suitable for subprocess
 // tests. Uses the gms_pure_go tag so the resulting binary works in either
 // CGO mode. Lives in the pure-Go helpers file so subprocess-style tests can
@@ -267,18 +277,27 @@ var (
 func buildBDForInitTests(t *testing.T) string {
 	t.Helper()
 	initTestBDOnce.Do(func() {
-		// Check if bd binary exists in repo root (../../bd from cmd/bd/)
+		prebuilt, err := findPrebuiltBDBinary()
+		if err != nil {
+			initTestBDErr = err
+			return
+		}
+		if prebuilt != "" {
+			initTestBD = prebuilt
+			return
+		}
 		bdBinary := "bd"
 		if runtime.GOOS == windowsOS {
 			bdBinary = "bd.exe"
 		}
-		repoRoot := filepath.Join("..", "..")
-		existingBD := filepath.Join(repoRoot, bdBinary)
+		// Preserve the existing local optimization: if a bd binary exists in
+		// the repository root, init-style subprocess tests can reuse it.
+		existingBD := filepath.Join("..", "..", bdBinary)
 		if _, err := os.Stat(existingBD); err == nil {
 			initTestBD, _ = filepath.Abs(existingBD)
 			return
 		}
-		// Fall back to building
+		// Fall back to building.
 		tmpDir, err := testTempDir("bd-init-test-*")
 		if err != nil {
 			initTestBDErr = fmt.Errorf("failed to create temp dir: %w", err)

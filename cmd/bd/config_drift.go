@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // DriftItem represents a single drift check result.
@@ -153,9 +154,21 @@ func checkRemoteDrift() []DriftItem {
 		}}
 	}
 
-	doltDir := doltserver.ResolveDoltDir(beadsDir)
+	ctx := context.Background()
+	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{
+		ReadOnly:         true,
+		DisableAutoStart: true,
+	})
+	if err != nil {
+		return []DriftItem{{
+			Check:   "remote",
+			Status:  driftStatusSkipped,
+			Message: fmt.Sprintf("Cannot open Dolt store: %v", err),
+		}}
+	}
+	defer func() { _ = st.Close() }()
 
-	cliRemotes, err := doltutil.ListCLIRemotes(doltDir)
+	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
 		return []DriftItem{{
 			Check:   "remote",
@@ -164,9 +177,8 @@ func checkRemoteDrift() []DriftItem {
 		}}
 	}
 
-	// Find the "origin" remote (the conventional default)
 	var originURL string
-	for _, r := range cliRemotes {
+	for _, r := range remotes {
 		if r.Name == "origin" {
 			originURL = r.URL
 			break
@@ -185,7 +197,7 @@ func checkRemoteDrift() []DriftItem {
 	}
 
 	// Case 2: federation.remote set, origin exists but doesn't match
-	if federationRemote != "" && originURL != "" && originURL != federationRemote {
+	if federationRemote != "" && originURL != "" && !remoteURLMatchesConfig(originURL, federationRemote) {
 		return []DriftItem{{
 			Check:    "remote",
 			Status:   driftStatusDrift,
@@ -196,7 +208,7 @@ func checkRemoteDrift() []DriftItem {
 	}
 
 	// Case 3: federation.remote set and matches origin
-	if federationRemote != "" && originURL == federationRemote {
+	if federationRemote != "" && remoteURLMatchesConfig(originURL, federationRemote) {
 		return []DriftItem{{
 			Check:   "remote",
 			Status:  driftStatusOK,
@@ -205,9 +217,9 @@ func checkRemoteDrift() []DriftItem {
 	}
 
 	// Case 4: federation.remote not set but remotes exist
-	if federationRemote == "" && len(cliRemotes) > 0 {
-		names := make([]string, len(cliRemotes))
-		for i, r := range cliRemotes {
+	if federationRemote == "" && len(remotes) > 0 {
+		names := make([]string, len(remotes))
+		for i, r := range remotes {
 			names[i] = r.Name
 		}
 		return []DriftItem{{

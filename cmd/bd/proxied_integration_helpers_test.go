@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -86,6 +88,68 @@ func bdProxiedCreateFail(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd create %s should have failed; got:\n%s", strings.Join(args, " "), out)
 	}
 	return string(out)
+}
+
+func bdProxiedList(t *testing.T, bd string, p proxiedProject, args ...string) string {
+	t.Helper()
+	stdout, _ := bdProxiedListCapture(t, bd, p, args...)
+	return stdout
+}
+
+func bdProxiedListJSON(t *testing.T, bd string, p proxiedProject, args ...string) []*types.IssueWithCounts {
+	t.Helper()
+	fullArgs := append([]string{"list", "--json"}, args...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, stdout, stderr)
+	}
+	start := strings.Index(stdout, "[")
+	if start < 0 {
+		if strings.Contains(stdout, "null") || strings.TrimSpace(stdout) == "" {
+			return nil
+		}
+		t.Fatalf("no JSON array found in output:\n%s", stdout)
+	}
+	var issues []*types.IssueWithCounts
+	if err := json.Unmarshal([]byte(stdout[start:]), &issues); err != nil {
+		t.Fatalf("failed to parse JSON list output: %v\nraw: %s", err, stdout[start:])
+	}
+	return issues
+}
+
+func bdProxiedListCapture(t *testing.T, bd string, p proxiedProject, args ...string) (string, string) {
+	t.Helper()
+	fullArgs := append([]string{"list"}, args...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, stdout, stderr)
+	}
+	return stdout, stderr
+}
+
+func bdProxiedListFail(t *testing.T, bd string, p proxiedProject, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"list"}, args...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, fullArgs...)
+	if err == nil {
+		t.Fatalf("expected bd list %s to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), stdout, stderr)
+	}
+	return stdout + stderr
+}
+
+func bdProxiedRunBuffers(t *testing.T, bd, dir string, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdProxiedEnv(dir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 func bdProxiedShow(t *testing.T, bd, dir, id string) *types.Issue {

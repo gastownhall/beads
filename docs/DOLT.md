@@ -284,14 +284,20 @@ bd dolt push
 bd dolt pull
 ```
 
-For SSH remotes, `bd dolt push` and `bd dolt pull` automatically use the
-`dolt` CLI instead of the SQL server to avoid MySQL connection timeouts during
-transfer.
+`bd dolt remote add` registers the remote through the Dolt store API. SQL
+remotes are the source of truth for `bd dolt remote list`, `bd dolt push`, and
+`bd dolt pull`.
 
-`bd dolt remote add` registers the remote on both the SQL server and the
-filesystem CLI config. This ensures CLI-backed `dolt push`/`dolt pull` can find
-the remote. If either surface already has a remote with that name, the command
-prompts before overwriting.
+For git-protocol remotes, credentialed external-server remotes, and cloud
+remotes whose credentials are only present in the current shell, `bd dolt push`
+and `bd dolt pull` automatically materialize a matching local CLI remote before
+using the `dolt` CLI transport. The CLI remote is a local transport mirror, not
+a separate configuration source.
+
+If you are upgrading from an older beads version and previously added remotes
+with raw `dolt remote add`, re-register them with `bd dolt remote add <name>
+<url>` so they are visible through SQL. `bd doctor` reports legacy CLI-only or
+mismatched CLI remotes under `Dolt Remote Migration`.
 
 > **Sharing a Git repo**: Dolt stores data under `refs/dolt/data`, separate
 > from standard Git refs (`refs/heads/`, `refs/tags/`). You can safely point a
@@ -301,12 +307,9 @@ prompts before overwriting.
 ### List/Remove Remotes
 
 ```bash
-bd dolt remote list            # Shows configured remotes
+bd dolt remote list            # Shows SQL-configured remotes
 bd dolt remote remove origin   # Removes the remote
 ```
-
-Use `bd doctor --fix` to resolve discrepancies between SQL and CLI remote
-config.
 
 ## Contributor Onboarding (Clone Bootstrap)
 
@@ -782,6 +785,7 @@ rm .beads/*.backup-*.db
 
 ## See Also
 
+- [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) - The conceptual model behind cross-machine sync (Dolt source of truth, wire format, anti-patterns)
 - [SYNC_SETUP.md](SYNC_SETUP.md) - Setting up sync across multiple computers
 - [CONFIG.md](CONFIG.md) - Full configuration reference
 - [DEPENDENCIES.md](DEPENDENCIES.md) - Dependencies and gates

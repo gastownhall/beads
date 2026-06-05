@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -462,7 +462,7 @@ func ResolveInfraTypesInTx(ctx context.Context, tx *sql.Tx) map[string]bool {
 	}
 
 	if len(typeList) == 0 {
-		typeList = storage.DefaultInfraTypes()
+		typeList = domain.DefaultInfraTypes()
 	}
 
 	result := make(map[string]bool, len(typeList))

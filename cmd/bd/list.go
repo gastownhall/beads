@@ -12,12 +12,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
-	"github.com/steveyegge/beads/internal/validation"
 )
 
 // storageExecutor handles operations that need a store connection
@@ -40,10 +38,18 @@ func withStorage(ctx context.Context, store storage.DoltStorage, dbPath string, 
 	return fmt.Errorf("no storage available")
 }
 
+func withFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
+	if filter.Limit > 0 {
+		filter.Limit++
+	}
+	return filter
+}
+
 func readyWorkFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 	wf := types.WorkFilter{
 		Status:         types.StatusOpen,
 		Limit:          filter.Limit,
+		Offset:         filter.Offset,
 		Labels:         filter.Labels,
 		LabelsAny:      filter.LabelsAny,
 		ExcludeLabels:  filter.ExcludeLabels,
@@ -155,7 +161,7 @@ type watchListDependencyStore interface {
 
 func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool) ([]*types.Issue, error) {
 	if ready {
-		issues, err := store.GetReadyWork(ctx, readyWorkFilterFromIssueFilter(filter))
+		issues, err := store.GetReadyWork(ctx, readyWorkFilterFromIssueFilter(withFetchOneExtra(filter)))
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +180,7 @@ func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter ty
 		return issues, nil
 	}
 
-	issues, err := store.SearchIssues(ctx, "", filter)
+	issues, err := store.SearchIssues(ctx, "", withFetchOneExtra(filter))
 	if err != nil {
 		return nil, err
 	}
@@ -255,56 +261,47 @@ func issueSnapshot(issues []*types.Issue) string {
 	return b.String()
 }
 
-// sortIssues sorts a slice of issues by the specified field and direction
+func compareIssuesBy(a, b *types.Issue, sortBy string) int {
+	switch sortBy {
+	case "priority":
+		return cmp.Compare(a.Priority, b.Priority)
+	case "created":
+		return b.CreatedAt.Compare(a.CreatedAt)
+	case "updated":
+		return b.UpdatedAt.Compare(a.UpdatedAt)
+	case "closed":
+		if a.ClosedAt == nil && b.ClosedAt == nil {
+			return 0
+		} else if a.ClosedAt == nil {
+			return 1
+		} else if b.ClosedAt == nil {
+			return -1
+		}
+		return b.ClosedAt.Compare(*a.ClosedAt)
+	case "status":
+		return cmp.Compare(a.Status, b.Status)
+	case "id":
+		return utils.NaturalCompareIDs(a.ID, b.ID)
+	case "title":
+		return cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
+	case "type":
+		return cmp.Compare(a.IssueType, b.IssueType)
+	case "assignee":
+		return cmp.Compare(a.Assignee, b.Assignee)
+	}
+	return 0
+}
+
 func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
 	if sortBy == "" {
 		return
 	}
-
 	slices.SortFunc(issues, func(a, b *types.Issue) int {
-		var result int
-
-		switch sortBy {
-		case "priority":
-			// Lower priority numbers come first (P0 > P1 > P2 > P3 > P4)
-			result = cmp.Compare(a.Priority, b.Priority)
-		case "created":
-			// Default: newest first (descending)
-			result = b.CreatedAt.Compare(a.CreatedAt)
-		case "updated":
-			// Default: newest first (descending)
-			result = b.UpdatedAt.Compare(a.UpdatedAt)
-		case "closed":
-			// Default: newest first (descending)
-			// Handle nil ClosedAt values
-			if a.ClosedAt == nil && b.ClosedAt == nil {
-				result = 0
-			} else if a.ClosedAt == nil {
-				result = 1 // nil sorts last
-			} else if b.ClosedAt == nil {
-				result = -1 // non-nil sorts before nil
-			} else {
-				result = b.ClosedAt.Compare(*a.ClosedAt)
-			}
-		case "status":
-			result = cmp.Compare(a.Status, b.Status)
-		case "id":
-			result = utils.NaturalCompareIDs(a.ID, b.ID)
-		case "title":
-			result = cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
-		case "type":
-			result = cmp.Compare(a.IssueType, b.IssueType)
-		case "assignee":
-			result = cmp.Compare(a.Assignee, b.Assignee)
-		default:
-			// Unknown sort field, no sorting
-			result = 0
-		}
-
+		r := compareIssuesBy(a, b, sortBy)
 		if reverse {
-			return -result
+			return -r
 		}
-		return result
+		return r
 	})
 }
 
@@ -313,51 +310,29 @@ func sortIssuesWithCounts(items []*types.IssueWithCounts, sortBy string, reverse
 		return
 	}
 	slices.SortFunc(items, func(a, b *types.IssueWithCounts) int {
-		if a == nil || a.Issue == nil {
-			if b == nil || b.Issue == nil {
+		ai, bi := issueOrNil(a), issueOrNil(b)
+		if ai == nil {
+			if bi == nil {
 				return 0
 			}
 			return 1
 		}
-		if b == nil || b.Issue == nil {
+		if bi == nil {
 			return -1
 		}
-		var result int
-		switch sortBy {
-		case "priority":
-			result = cmp.Compare(a.Priority, b.Priority)
-		case "created":
-			result = b.CreatedAt.Compare(a.CreatedAt)
-		case "updated":
-			result = b.UpdatedAt.Compare(a.UpdatedAt)
-		case "closed":
-			if a.ClosedAt == nil && b.ClosedAt == nil {
-				result = 0
-			} else if a.ClosedAt == nil {
-				result = 1
-			} else if b.ClosedAt == nil {
-				result = -1
-			} else {
-				result = b.ClosedAt.Compare(*a.ClosedAt)
-			}
-		case "status":
-			result = cmp.Compare(a.Status, b.Status)
-		case "id":
-			result = utils.NaturalCompareIDs(a.ID, b.ID)
-		case "title":
-			result = cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
-		case "type":
-			result = cmp.Compare(a.IssueType, b.IssueType)
-		case "assignee":
-			result = cmp.Compare(a.Assignee, b.Assignee)
-		default:
-			result = 0
-		}
+		r := compareIssuesBy(ai, bi, sortBy)
 		if reverse {
-			return -result
+			return -r
 		}
-		return result
+		return r
 	})
+}
+
+func issueOrNil(iwc *types.IssueWithCounts) *types.Issue {
+	if iwc == nil {
+		return nil
+	}
+	return iwc.Issue
 }
 
 // skipLabelsIssueView wraps IssueWithCounts so the JSON encoder always emits
@@ -482,555 +457,26 @@ var listCmd = &cobra.Command{
 		return fmt.Errorf("bd list does not accept positional arguments; use flags instead (see bd list --help)")
 	},
 	Run: func(cmd *cobra.Command, args []string) {
-		status, _ := cmd.Flags().GetString("status")
-		// --state is alias for --status (desire path: bd-9h3w)
-		if status == "" {
-			status, _ = cmd.Flags().GetString("state")
-		}
-		assignee, _ := cmd.Flags().GetString("assignee")
-		issueType, _ := cmd.Flags().GetString("type")
-		issueType = utils.NormalizeIssueType(issueType) // Expand aliases (mr→merge-request, etc.)
-		limit, _ := cmd.Flags().GetInt("limit")
-		allFlag, _ := cmd.Flags().GetBool("all")
-		formatStr, _ := cmd.Flags().GetString("format")
-		// Handle --format json: the local --format flag shadows the hidden
-		// persistent --format on rootCmd, so "json" arrives here instead of
-		// setting jsonOutput via PersistentPreRun. Route it explicitly.
-		if strings.EqualFold(formatStr, "json") {
-			jsonOutput = true
-			formatStr = ""
-		}
-		labels, _ := cmd.Flags().GetStringSlice("label")
-		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
-		excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
-		labelPattern, _ := cmd.Flags().GetString("label-pattern")
-		labelRegex, _ := cmd.Flags().GetString("label-regex")
-		titleSearch, _ := cmd.Flags().GetString("title")
-		specPrefix, _ := cmd.Flags().GetString("spec")
-		idFilter, _ := cmd.Flags().GetString("id")
-		longFormat, _ := cmd.Flags().GetBool("long")
-		sortBy, _ := cmd.Flags().GetString("sort")
-		reverse, _ := cmd.Flags().GetBool("reverse")
+		in := gatherListInput(cmd)
 
-		// Pattern matching flags
-		titleContains, _ := cmd.Flags().GetString("title-contains")
-		descContains, _ := cmd.Flags().GetString("desc-contains")
-		notesContains, _ := cmd.Flags().GetString("notes-contains")
-
-		// Date range flags
-		createdAfter, _ := cmd.Flags().GetString("created-after")
-		createdBefore, _ := cmd.Flags().GetString("created-before")
-		updatedAfter, _ := cmd.Flags().GetString("updated-after")
-		updatedBefore, _ := cmd.Flags().GetString("updated-before")
-		closedAfter, _ := cmd.Flags().GetString("closed-after")
-		closedBefore, _ := cmd.Flags().GetString("closed-before")
-
-		// Empty/null check flags
-		emptyDesc, _ := cmd.Flags().GetBool("empty-description")
-		noAssignee, _ := cmd.Flags().GetBool("no-assignee")
-		noLabels, _ := cmd.Flags().GetBool("no-labels")
-
-		// Hydration toggle (AD-02): suppress the labels JOIN entirely.
-		// Distinct from --no-labels (filter rows where labels=[]).
-		skipLabels, _ := cmd.Flags().GetBool("skip-labels")
-		if skipLabels {
-			conflicts := skipLabelsConflicts(labels, labelsAny, labelPattern, labelRegex, excludeLabels, noLabels)
-			if len(conflicts) > 0 {
-				fmt.Fprint(os.Stderr, formatSkipLabelsConflictError(conflicts))
-				os.Exit(2)
-			}
-		}
-
-		// Priority range flags
-		priorityMinStr, _ := cmd.Flags().GetString("priority-min")
-		priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
-
-		// Pinned filtering flags
-		pinnedFlag, _ := cmd.Flags().GetBool("pinned")
-		noPinnedFlag, _ := cmd.Flags().GetBool("no-pinned")
-
-		// Template filtering
-		includeTemplates, _ := cmd.Flags().GetBool("include-templates")
-
-		// Gate filtering (bd-7zka.2)
-		includeGates, _ := cmd.Flags().GetBool("include-gates")
-
-		// Infra type filtering: exclude agent/rig/role/message by default
-		includeInfra, _ := cmd.Flags().GetBool("include-infra")
-
-		// Explicit type exclusion (--exclude-type)
-		excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
-
-		// Parent filtering (--filter-parent is alias for --parent)
-		parentID, _ := cmd.Flags().GetString("parent")
-		if parentID == "" {
-			// Flag registered; GetString only errors if flag doesn't exist
-			parentID, _ = cmd.Flags().GetString("filter-parent")
-		}
-		noParent, _ := cmd.Flags().GetBool("no-parent")
-
-		// Molecule type filtering
-		molTypeStr, _ := cmd.Flags().GetString("mol-type")
-		var molType *types.MolType
-		if molTypeStr != "" {
-			mt := types.MolType(molTypeStr)
-			if !mt.IsValid() {
-				FatalError("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
-			}
-			molType = &mt
-		}
-
-		// Wisp type filtering (TTL-based compaction classification)
-		wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
-		var wispType *types.WispType
-		if wispTypeStr != "" {
-			wt := types.WispType(wispTypeStr)
-			if !wt.IsValid() {
-				FatalError("invalid wisp-type %q (must be heartbeat, ping, patrol, gc_report, recovery, error, or escalation)", wispTypeStr)
-			}
-			wispType = &wt
-		}
-
-		// Time-based scheduling filters (GH#820)
-		deferredFlag, _ := cmd.Flags().GetBool("deferred")
-		deferAfter, _ := cmd.Flags().GetString("defer-after")
-		deferBefore, _ := cmd.Flags().GetString("defer-before")
-		dueAfter, _ := cmd.Flags().GetString("due-after")
-		dueBefore, _ := cmd.Flags().GetString("due-before")
-		overdueFlag, _ := cmd.Flags().GetBool("overdue")
-
-		// Pretty and watch flags (GH#654)
-		prettyFormat, _ := cmd.Flags().GetBool("pretty")
-		treeFormat, _ := cmd.Flags().GetBool("tree")
-		flatFormat, _ := cmd.Flags().GetBool("flat")
-		if flatFormat {
-			treeFormat = false
-		}
-		// --tree is alias for --pretty; JSON and explicit --format win
-		prettyFormat = (prettyFormat || treeFormat) && !jsonOutput && formatStr == ""
-		watchMode, _ := cmd.Flags().GetBool("watch")
-
-		// Pager control (bd-jdz3)
-		noPager, _ := cmd.Flags().GetBool("no-pager")
-
-		// Ready filter (bd-ihu31)
-		readyFlag, _ := cmd.Flags().GetBool("ready")
-
-		// Watch mode implies pretty format
-		if watchMode {
-			prettyFormat = true
-		}
-
-		// Use global jsonOutput set by PersistentPreRun
-
-		// Normalize labels: trim, dedupe, remove empty
-		labels = utils.NormalizeLabels(labels)
-		labelsAny = utils.NormalizeLabels(labelsAny)
-		excludeLabels = utils.NormalizeLabels(excludeLabels)
-
-		// Apply directory-aware label scoping if no labels explicitly provided (GH#541)
-		if !skipLabels && len(labels) == 0 && len(labelsAny) == 0 {
-			if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
-				labelsAny = dirLabels
-			}
-		}
-
-		// Resolve effective limit. Priority order:
-		// 1. Explicit --limit always wins (user intent is clear)
-		// 2. --all implies unlimited when --limit is not set (GH#1840)
-		// 3. Agent mode uses a lower default for context efficiency
-		// 4. Default limit (50) otherwise
-		limitChanged := cmd.Flags().Changed("limit")
-		effectiveLimit := limit
-		switch {
-		case limitChanged:
-			effectiveLimit = limit // Explicit value (including --limit 0 for unlimited)
-		case allFlag:
-			effectiveLimit = 0 // --all implies unlimited regardless of other flags
-		case ui.IsAgentMode():
-			effectiveLimit = 20 // Agent mode default
-		}
-
-		// Validate --sort field (bd-ttno)
-		if sortBy != "" {
-			validSortFields := map[string]bool{
-				"priority": true, "created": true, "updated": true, "closed": true,
-				"status": true, "id": true, "title": true, "type": true, "assignee": true,
-			}
-			if !validSortFields[sortBy] {
-				FatalError("invalid sort field %q (valid: priority, created, updated, closed, status, id, title, type, assignee)", sortBy)
-			}
-		}
-
-		// When --sort is specified, don't pass Limit to SQL — the hardcoded
-		// ORDER BY would truncate before Go-side sorting (GH#1237).
-		// Instead, apply limit in Go after sortIssues().
-		sqlLimit := effectiveLimit
-		if sortBy != "" {
-			sqlLimit = 0
-		}
-
-		// Fetch one extra row so we can distinguish "exactly N matches" from
-		// "N+ matches truncated" without running a second count query (GH#3212).
-		if sqlLimit > 0 {
-			sqlLimit++
-		}
-
-		filter := types.IssueFilter{
-			Limit: sqlLimit,
-		}
-
-		// --ready flag: show only open issues (excludes hooked/in_progress/blocked/deferred) (bd-ihu31)
-		if readyFlag {
-			s := types.StatusOpen
-			filter.Status = &s
-		} else if status != "" && status != "all" {
-			// Support comma-separated status values (GH#2846)
-			statusParts := strings.Split(status, ",")
-			var customStatuses []string
-			if store != nil {
-				cs, err := store.GetCustomStatuses(rootCtx)
-				if err != nil {
-					if !jsonOutput {
-						fmt.Fprintf(os.Stderr, "%s Could not load custom statuses from database: %v (falling back to config)\n", ui.RenderWarn("!"), err)
-					}
-				} else {
-					customStatuses = cs
-				}
-			}
-			if len(statusParts) == 1 {
-				s := types.Status(strings.TrimSpace(statusParts[0]))
-				if !s.IsValidWithCustom(customStatuses) {
-					validList := "open, in_progress, blocked, deferred, closed, pinned, hooked"
-					if len(customStatuses) > 0 {
-						validList += ", " + strings.Join(customStatuses, ", ")
-					}
-					FatalError("invalid status %q (valid: %s)", status, validList)
-				}
-				filter.Status = &s
-			} else {
-				for _, part := range statusParts {
-					s := types.Status(strings.TrimSpace(part))
-					if !s.IsValidWithCustom(customStatuses) {
-						validList := "open, in_progress, blocked, deferred, closed, pinned, hooked"
-						if len(customStatuses) > 0 {
-							validList += ", " + strings.Join(customStatuses, ", ")
-						}
-						FatalError("invalid status %q in multi-status filter (valid: %s)", strings.TrimSpace(part), validList)
-					}
-					filter.Statuses = append(filter.Statuses, s)
-				}
-			}
-		}
-
-		// Default to non-closed/non-pinned issues unless --all, --pinned, or explicit --status (GH#788, bd-uhcg)
-		// Also exclude custom statuses in done/frozen categories
-		if status == "" && !allFlag && !readyFlag && !pinnedFlag {
-			excludeStatuses := []types.Status{types.StatusClosed, types.StatusPinned}
-			if store != nil {
-				if detailed, err := store.GetCustomStatusesDetailed(rootCtx); err == nil {
-					for _, cs := range detailed {
-						if cs.Category == types.CategoryDone || cs.Category == types.CategoryFrozen {
-							excludeStatuses = append(excludeStatuses, types.Status(cs.Name))
-						}
-					}
-				}
-			}
-			filter.ExcludeStatus = excludeStatuses
-		}
-		// Use Changed() to properly handle P0 (priority=0)
-		if cmd.Flags().Changed("priority") {
-			priorityStr, _ := cmd.Flags().GetString("priority")
-			priority, err := validation.ValidatePriority(priorityStr)
-			if err != nil {
+		if usesProxiedServer() {
+			if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
 				FatalError("%v", err)
 			}
-			filter.Priority = &priority
-		}
-		if assignee != "" {
-			filter.Assignee = &assignee
-		}
-		if issueType != "" {
-			t := types.IssueType(issueType)
-			// Validate --type value (bd-ttno)
-			var customTypes []string
-			if store != nil {
-				ct, _ := store.GetCustomTypes(rootCtx)
-				customTypes = ct
-			}
-			if len(customTypes) == 0 {
-				customTypes = config.GetCustomTypesFromYAML()
-			}
-			if !t.IsValidWithCustom(customTypes) {
-				validTypes := "bug, feature, task, epic, chore, decision"
-				if len(customTypes) > 0 {
-					validTypes += ", " + joinStrings(customTypes, ", ")
-				}
-				FatalError("invalid issue type %q (valid: %s)", issueType, validTypes)
-			}
-			filter.IssueType = &t
-		}
-		if len(labels) > 0 {
-			filter.Labels = labels
-		}
-		if len(labelsAny) > 0 {
-			filter.LabelsAny = labelsAny
-		}
-		if len(excludeLabels) > 0 {
-			filter.ExcludeLabels = excludeLabels
-		}
-		if labelPattern != "" {
-			filter.LabelPattern = labelPattern
-		}
-		if labelRegex != "" {
-			filter.LabelRegex = labelRegex
-		}
-		if titleSearch != "" {
-			filter.TitleSearch = titleSearch
-		}
-		if idFilter != "" {
-			ids := utils.NormalizeLabels(strings.Split(idFilter, ","))
-			if len(ids) > 0 {
-				filter.IDs = ids
-			}
-		}
-		if specPrefix != "" {
-			filter.SpecIDPrefix = specPrefix
+			return
 		}
 
-		// Pattern matching
-		if titleContains != "" {
-			filter.TitleContains = titleContains
-		}
-		if descContains != "" {
-			filter.DescriptionContains = descContains
-		}
-		if notesContains != "" {
-			filter.NotesContains = notesContains
+		if in.offset > 0 {
+			FatalError("--offset is only supported under --proxied-server")
 		}
 
-		// Date ranges
-		if createdAfter != "" {
-			t, err := parseTimeFlag(createdAfter)
-			if err != nil {
-				FatalError("parsing --created-after: %v", err)
-			}
-			filter.CreatedAfter = &t
+		cfg, err := loadDirectListFilterConfig(rootCtx, store)
+		if err != nil {
+			FatalError("%v", err)
 		}
-		if createdBefore != "" {
-			t, err := parseTimeFlag(createdBefore)
-			if err != nil {
-				FatalError("parsing --created-before: %v", err)
-			}
-			filter.CreatedBefore = &t
-		}
-		if updatedAfter != "" {
-			t, err := parseTimeFlag(updatedAfter)
-			if err != nil {
-				FatalError("parsing --updated-after: %v", err)
-			}
-			filter.UpdatedAfter = &t
-		}
-		if updatedBefore != "" {
-			t, err := parseTimeFlag(updatedBefore)
-			if err != nil {
-				FatalError("parsing --updated-before: %v", err)
-			}
-			filter.UpdatedBefore = &t
-		}
-		if closedAfter != "" {
-			t, err := parseTimeFlag(closedAfter)
-			if err != nil {
-				FatalError("parsing --closed-after: %v", err)
-			}
-			filter.ClosedAfter = &t
-		}
-		if closedBefore != "" {
-			t, err := parseTimeFlag(closedBefore)
-			if err != nil {
-				FatalError("parsing --closed-before: %v", err)
-			}
-			filter.ClosedBefore = &t
-		}
-
-		// Empty/null checks
-		if emptyDesc {
-			filter.EmptyDescription = true
-		}
-		if noAssignee {
-			filter.NoAssignee = true
-		}
-		if noLabels {
-			filter.NoLabels = true
-		}
-		if skipLabels {
-			filter.SkipLabels = true
-		}
-
-		// Priority ranges
-		if cmd.Flags().Changed("priority-min") {
-			priorityMin, err := validation.ValidatePriority(priorityMinStr)
-			if err != nil {
-				FatalError("parsing --priority-min: %v", err)
-			}
-			filter.PriorityMin = &priorityMin
-		}
-		if cmd.Flags().Changed("priority-max") {
-			priorityMax, err := validation.ValidatePriority(priorityMaxStr)
-			if err != nil {
-				FatalError("parsing --priority-max: %v", err)
-			}
-			filter.PriorityMax = &priorityMax
-		}
-
-		// Pinned filtering: --pinned and --no-pinned are mutually exclusive
-		if pinnedFlag && noPinnedFlag {
-			FatalError("--pinned and --no-pinned are mutually exclusive")
-		}
-		if pinnedFlag {
-			pinned := true
-			filter.Pinned = &pinned
-		} else if noPinnedFlag || (status != "pinned" && status != "hooked" && !allFlag) {
-			// Exclude pinned beads by default — they are permanent references,
-			// not actionable work items. Use --pinned or --all to see them. (bd-uhcg)
-			// Also skip exclusion for --status=hooked: beads transitioning from
-			// pinned to hooked retain the legacy pinned=1 column, and excluding
-			// them breaks gt hook status detection (bd-pr-sheriff bug).
-			pinned := false
-			filter.Pinned = &pinned
-		}
-
-		// Template filtering: exclude templates by default
-		// Use --include-templates to show all issues including templates
-		if !includeTemplates {
-			isTemplate := false
-			filter.IsTemplate = &isTemplate
-		}
-
-		// Gate filtering: exclude gate issues by default (bd-7zka.2)
-		// Use --include-gates or --type gate to show gate issues
-		if !includeGates && issueType != "gate" {
-			filter.ExcludeTypes = append(filter.ExcludeTypes, "gate")
-		}
-
-		// Infra type filtering: exclude configured infra types by default.
-		// These types live in the wisps table after migration 007.
-		// Use --include-infra or --type=agent to show infra beads.
-		infraTypes := storage.DefaultInfraTypes()
-		if store != nil {
-			infraSet := store.GetInfraTypes(rootCtx)
-			infraTypes = make([]string, 0, len(infraSet))
-			for t := range infraSet {
-				infraTypes = append(infraTypes, t)
-			}
-		}
-		isInfra := func(t string) bool {
-			if store != nil {
-				return store.IsInfraTypeCtx(rootCtx, types.IssueType(t))
-			}
-			return storage.IsInfraType(types.IssueType(t))
-		}
-		if !includeInfra && !isInfra(issueType) {
-			for _, t := range infraTypes {
-				filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(t))
-			}
-		}
-
-		// Explicit type exclusion from --exclude-type flag.
-		for _, raw := range excludeTypeStrs {
-			for _, t := range strings.Split(raw, ",") {
-				t = strings.TrimSpace(t)
-				if t != "" {
-					filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(utils.NormalizeIssueType(t)))
-				}
-			}
-		}
-
-		// When explicitly requesting an infra type, search the wisps table
-		// (where infra beads live after migration 007).
-		if isInfra(issueType) {
-			ephemeral := true
-			filter.Ephemeral = &ephemeral
-		}
-
-		// Parent filtering: filter children by parent issue
-		if parentID != "" && noParent {
-			FatalError("--parent and --no-parent are mutually exclusive")
-		}
-		if parentID != "" {
-			filter.ParentID = &parentID
-		}
-		if noParent {
-			filter.NoParent = true
-		}
-
-		// Molecule type filtering
-		if molType != nil {
-			filter.MolType = molType
-		}
-
-		// Wisp type filtering
-		if wispType != nil {
-			filter.WispType = wispType
-		}
-
-		// Time-based scheduling filters (GH#820)
-		if deferredFlag {
-			filter.Deferred = true
-		}
-		if deferAfter != "" {
-			t, err := parseTimeFlag(deferAfter)
-			if err != nil {
-				FatalError("parsing --defer-after: %v", err)
-			}
-			filter.DeferAfter = &t
-		}
-		if deferBefore != "" {
-			t, err := parseTimeFlag(deferBefore)
-			if err != nil {
-				FatalError("parsing --defer-before: %v", err)
-			}
-			filter.DeferBefore = &t
-		}
-		if dueAfter != "" {
-			t, err := parseTimeFlag(dueAfter)
-			if err != nil {
-				FatalError("parsing --due-after: %v", err)
-			}
-			filter.DueAfter = &t
-		}
-		if dueBefore != "" {
-			t, err := parseTimeFlag(dueBefore)
-			if err != nil {
-				FatalError("parsing --due-before: %v", err)
-			}
-			filter.DueBefore = &t
-		}
-		if overdueFlag {
-			filter.Overdue = true
-		}
-
-		// Metadata filters (GH#1406)
-		metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
-		if len(metadataFieldFlags) > 0 {
-			filter.MetadataFields = make(map[string]string, len(metadataFieldFlags))
-			for _, mf := range metadataFieldFlags {
-				k, v, ok := strings.Cut(mf, "=")
-				if !ok || k == "" {
-					FatalErrorRespectJSON("invalid --metadata-field: expected key=value, got %q", mf)
-				}
-				if err := storage.ValidateMetadataKey(k); err != nil {
-					FatalErrorRespectJSON("invalid --metadata-field key: %v", err)
-				}
-				filter.MetadataFields[k] = v
-			}
-		}
-		hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
-		if hasMetadataKey != "" {
-			if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
-				FatalErrorRespectJSON("invalid --has-metadata-key: %v", err)
-			}
-			filter.HasMetadataKey = hasMetadataKey
+		filter, err := buildListFilter(in, cfg)
+		if err != nil {
+			FatalError("%v", err)
 		}
 
 		ctx := rootCtx
@@ -1046,86 +492,81 @@ var listCmd = &cobra.Command{
 			activeStore = routedStore
 		}
 
-		if watchMode {
-			watchIssues(ctx, activeStore, filter, readyFlag, parentID, sortBy, reverse, effectiveLimit)
+		if in.watchMode {
+			watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit)
 			return
 		}
 
 		if jsonOutput {
 			var iwc []*types.IssueWithCounts
 			var err error
-			if readyFlag {
-				iwc, err = activeStore.GetReadyWorkWithCounts(ctx, readyWorkFilterFromIssueFilter(filter))
+			if in.readyFlag {
+				iwc, err = activeStore.GetReadyWorkWithCounts(ctx, readyWorkFilterFromIssueFilter(withFetchOneExtra(filter)))
 			} else {
-				iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", filter)
+				iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", withFetchOneExtra(filter))
 			}
 			if err != nil {
 				FatalError("%v", err)
 			}
-			sortIssuesWithCounts(iwc, sortBy, reverse)
-			truncated := effectiveLimit > 0 && len(iwc) > effectiveLimit
+			sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
+			truncated := in.effectiveLimit > 0 && len(iwc) > in.effectiveLimit
 			if truncated {
-				iwc = iwc[:effectiveLimit]
+				iwc = iwc[:in.effectiveLimit]
 			}
 			if iwc == nil {
 				iwc = []*types.IssueWithCounts{}
 			}
-			if skipLabels {
+			if in.skipLabels {
 				outputJSON(newSkipLabelsListJSONResponse(iwc))
-				printTruncationHint(truncated, effectiveLimit)
+				printTruncationHint(truncated, in.effectiveLimit)
 				return
 			}
 			outputJSON(iwc)
-			printTruncationHint(truncated, effectiveLimit)
+			printTruncationHint(truncated, in.effectiveLimit)
 			return
 		}
 
 		var issues []*types.Issue
-		if readyFlag {
+		if in.readyFlag {
 			// Use blocker-aware GetReadyWork semantics (GH#3478).
 			// This ensures bd list --ready matches bd ready behavior,
 			// excluding issues with open blocks dependencies.
-			wf := readyWorkFilterFromIssueFilter(filter)
+			wf := readyWorkFilterFromIssueFilter(withFetchOneExtra(filter))
 			var err error
 			issues, err = activeStore.GetReadyWork(ctx, wf)
 			if err != nil {
 				FatalError("%v", err)
 			}
 		} else {
-			// Skip wisps merge when the caller doesn't need ephemeral results
-			// (no --include-infra, not an infra type request). Q2 perf opt.
-			if !includeInfra && (issueType == "" || !isInfra(issueType)) {
-				filter.SkipWisps = true
-			}
 			var err error
-			issues, err = activeStore.SearchIssues(ctx, "", filter)
+			issues, err = activeStore.SearchIssues(ctx, "", withFetchOneExtra(filter))
 			if err != nil {
 				FatalError("%v", err)
 			}
 		}
 
 		// Apply sorting
-		sortIssues(issues, sortBy, reverse)
+		sortIssues(issues, in.sortBy, in.reverse)
 
 		// Detect truncation (GH#3212). We fetched effectiveLimit+1 above, so any
 		// overflow means more matches exist than we're displaying.
-		truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
+		truncated := in.effectiveLimit > 0 && len(issues) > in.effectiveLimit
 		if truncated {
-			issues = issues[:effectiveLimit]
+			issues = issues[:in.effectiveLimit]
 		}
 
 		// Handle pretty format (GH#654)
 		// JSON output takes priority over pretty/tree format (bd-list-json-fix, bd-03r)
-		if prettyFormat && !jsonOutput {
+		if in.prettyFormat && !jsonOutput {
 			// Special handling for --tree --parent combination (hierarchical descendants)
-			if parentID != "" && !readyFlag {
-				treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", parentID, filter)
+			if in.parentID != "" && !in.readyFlag {
+				treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", in.parentID, filter)
 				if err != nil {
 					FatalError("%v", err)
 				}
 
 				if len(treeIssues) == 0 {
-					fmt.Printf("Issue '%s' has no children\n", parentID)
+					fmt.Printf("Issue '%s' has no children\n", in.parentID)
 					return
 				}
 
@@ -1133,7 +574,7 @@ var listCmd = &cobra.Command{
 				// Best effort: display gracefully degrades with empty data
 				allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
 				displayPrettyListWithDeps(treeIssues, false, allDeps)
-				printSkipLabelsFooter(skipLabels)
+				printSkipLabelsFooter(in.skipLabels)
 				return
 			}
 
@@ -1142,17 +583,19 @@ var listCmd = &cobra.Command{
 			// Best effort: display gracefully degrades with empty data
 			allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
 			displayPrettyListWithDeps(issues, false, allDeps)
-			printTruncationHint(truncated, effectiveLimit)
-			printSkipLabelsFooter(skipLabels)
+			printTruncationHint(truncated, in.effectiveLimit)
+			printSkipLabelsFooter(in.skipLabels)
 			return
 		}
 
 		// Handle format flag (non-json presets handled here; json handled earlier)
-		if formatStr != "" {
-			if err := outputFormattedList(ctx, activeStore, issues, formatStr); err != nil {
+		if in.formatStr != "" {
+			// Best effort: rendering degrades gracefully on dep-load failure.
+			depsByIssueID, _ := activeStore.GetAllDependencyRecords(ctx)
+			if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
 				FatalError("%v", err)
 			}
-			printTruncationHint(truncated, effectiveLimit)
+			printTruncationHint(truncated, in.effectiveLimit)
 			return
 		}
 
@@ -1182,14 +625,14 @@ var listCmd = &cobra.Command{
 				formatAgentIssue(&buf, issue, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
 			}
 			fmt.Print(buf.String())
-			printTruncationHint(truncated, effectiveLimit)
+			printTruncationHint(truncated, in.effectiveLimit)
 			return
-		} else if longFormat {
+		} else if in.longFormat {
 			// Long format: multi-line with details
 			buf.WriteString(fmt.Sprintf("\nFound %d issues:\n\n", len(issues)))
 			for _, issue := range issues {
 				labels := labelsMap[issue.ID]
-				formatIssueLong(&buf, issue, labels, skipLabels)
+				formatIssueLong(&buf, issue, labels, in.skipLabels)
 			}
 		} else {
 			// Compact format: one line per issue
@@ -1200,18 +643,18 @@ var listCmd = &cobra.Command{
 		}
 
 		// AD-02: footer note when --skip-labels is in effect (suppressed under --quiet).
-		if skipLabels && !isQuiet() {
+		if in.skipLabels && !isQuiet() {
 			buf.WriteString(skipLabelsFooterText())
 		}
 
 		// Output with pager support
-		if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: noPager}); err != nil {
+		if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: in.noPager}); err != nil {
 			if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil {
 				fmt.Fprintf(os.Stderr, "Error writing output: %v\n", writeErr)
 			}
 		}
 
-		printTruncationHint(truncated, effectiveLimit)
+		printTruncationHint(truncated, in.effectiveLimit)
 
 		// Show tip after successful list (direct mode only)
 		maybeShowTip(store)
@@ -1234,6 +677,7 @@ func init() {
 	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
 	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
 	listCmd.Flags().IntP("limit", "n", 50, "Limit results (default 50, use 0 for unlimited)")
+	listCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
 	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")

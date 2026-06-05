@@ -176,8 +176,12 @@ Examples:
 		if err != nil {
 			FatalErrorRespectJSON("adding comment: %v", err)
 		}
-
-		commandDidWrite.Store(true)
+		if err := commitPendingIfEmbedded(ctx, result.Store, actor, doltAutoCommitParams{
+			Command:  "comments add",
+			IssueIDs: []string{issueID},
+		}); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
 
 		if jsonOutput {
 			outputJSON(comment)

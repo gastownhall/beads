@@ -6,6 +6,13 @@ on:
       - main
     paths:
       - 'website/**'
+      - 'docs/ANTIVIRUS.md'
+      - 'docs/COMMUNITY_TOOLS.md'
+      - 'docs/LABELS.md'
+      - 'docs/METADATA.md'
+      - 'docs/SYNC_CONCEPTS.md'
+      - 'docs/UNINSTALLING.md'
+      - 'scripts/sync-website-docs.sh'
       - 'scripts/generate-llms-full.sh'
   workflow_dispatch:
 
@@ -34,16 +41,8 @@ jobs:
           cache: 'npm'
           cache-dependency-path: website/package-lock.json
 
-      - name: Install dependencies
-        working-directory: website
-        run: npm ci
-
-      - name: Generate llms-full.txt
-        run: ./scripts/generate-llms-full.sh
-
-      - name: Build website
-        working-directory: website
-        run: npm run build
+      - name: Run website package gate
+        run: make ci-website
 
       - name: Prepare link check (map baseUrl /beads/ to build output)
         run: |

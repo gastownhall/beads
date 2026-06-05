@@ -45,6 +45,24 @@ func bdUpdateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+func embeddedCurrentCommit(t *testing.T, beadsDir, database string) string {
+	t.Helper()
+	store, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("open embedded store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	head, err := store.GetCurrentCommit(t.Context())
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if head == "" {
+		t.Fatal("GetCurrentCommit returned empty hash")
+	}
+	return head
+}
+
 // bdShowJSON runs "bd show <id> --json" and returns the raw JSON output.
 func bdShowJSON(t *testing.T, bd, dir, id string) string {
 	t.Helper()
@@ -119,6 +137,71 @@ func showDeps(t *testing.T, bd, dir, id string) []struct {
 }
 
 // ===== Update tests =====
+
+func TestEmbeddedUpdateBatchAutoCommitDoesNotAdvanceHead(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ub")
+	issue := bdCreate(t, bd, dir, "Batch update")
+	before := embeddedCurrentCommit(t, beadsDir, "ub")
+
+	cmd := exec.Command(bd, "--dolt-auto-commit", "batch", "update", issue.ID, "--title", "Deferred batch update")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd --dolt-auto-commit batch update failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	after := embeddedCurrentCommit(t, beadsDir, "ub")
+	if after != before {
+		t.Fatalf("batch-mode update advanced HEAD; before=%s after=%s", before, after)
+	}
+}
+
+func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	targetDir := filepath.Join(dir, "target-repo")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	runBDInit(t, bd, targetDir, "--prefix", "tgt")
+
+	issue := bdCreate(t, bd, targetDir, "Routed target issue")
+	route := `{"prefix":"tgt-","path":"target-repo"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "routes.jsonl"), []byte(route), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	before := embeddedCurrentCommit(t, targetBeadsDir, "tgt")
+	bdUpdate(t, bd, dir, issue.ID, "--title", "Updated through route")
+	after := embeddedCurrentCommit(t, targetBeadsDir, "tgt")
+	if after == before {
+		t.Fatalf("routed update did not advance target HEAD; before=%s after=%s", before, after)
+	}
+
+	targetStore := openStore(t, targetBeadsDir, "tgt")
+	got, err := targetStore.GetIssue(t.Context(), issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue in target: %v", err)
+	}
+	if got.Title != "Updated through route" {
+		t.Fatalf("target title = %q, want routed update title", got.Title)
+	}
+}
 
 func TestEmbeddedUpdate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
