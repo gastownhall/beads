@@ -106,29 +106,6 @@ func TestResolveAutoStart(t *testing.T) {
 	}
 }
 
-func TestShouldSyncCLIRemotesToSQL(t *testing.T) {
-	tests := []struct {
-		name      string
-		readOnly  bool
-		localOnly bool
-		want      bool
-	}{
-		{name: "default writer syncs", want: true},
-		{name: "read only skips", readOnly: true, want: false},
-		{name: "local only skips", localOnly: true, want: false},
-		{name: "read only and local only skips", readOnly: true, localOnly: true, want: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldSyncCLIRemotesToSQL(tc.readOnly, tc.localOnly); got != tc.want {
-				t.Fatalf("shouldSyncCLIRemotesToSQL(readOnly=%v, localOnly=%v) = %v, want %v",
-					tc.readOnly, tc.localOnly, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestApplyCLIAutoStart_RespectsExternalMode verifies that an external-mode
 // repo (metadata.json with explicit dolt_server_port) suppresses the CLI
 // auto-start path, preventing the shadow-database fallback when the

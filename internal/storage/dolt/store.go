@@ -1148,10 +1148,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	return store, nil
 }
 
-func shouldSyncCLIRemotesToSQL(readOnly, localOnly bool) bool {
-	return !readOnly && !localOnly
-}
-
 func shouldPersistResolvedPortFile() bool {
 	return os.Getenv("BEADS_DOLT_SERVER_PORT") == "" && os.Getenv("BEADS_DOLT_PORT") == ""
 }
