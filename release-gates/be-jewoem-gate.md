@@ -5,7 +5,8 @@
 **Gate first evaluated**: 2026-05-17 (be-jewoem/be-u2mw2x scope)  
 **Gate updated**: 2026-05-18 (bd-umbf Children 1-3 added to branch)  
 **Gate updated**: 2026-05-19 (PR #4023 description refreshed to cover full bd-umbf scope; CI confirmed all green on run 26010362625)  
-**Gate updated**: 2026-05-20 (B3 RESOLVED — test commits landed; fixed yaml/DB store mismatch in export exclude-owner and fork-routing config write)
+**Gate updated**: 2026-05-20 (B3 RESOLVED — test commits landed; fixed yaml/DB store mismatch in export exclude-owner and fork-routing config write)  
+**Gate updated**: 2026-06-06 (re-review PASS confirmed at 9cfe6206f; post-review CI/docs commits noted; CI all green on 0a41b581a; merge-request issued)
 
 ---
 
@@ -15,9 +16,11 @@
 |-------|----------|---------|------|
 | be-jewoem/be-u2mw2x reference-aware prune | beads/reviewer | **PASS** | 2026-05-17 |
 | bd-umbf Children 1-3 (be-c7696f, be-3c5a0f, be-bbj) | beads/reviewer | **request-changes** | 2026-05-17 |
+| bd-umbf full scope re-review | beads/reviewer | **PASS** | 2026-05-22 |
 
 Source: bead `be-xbwp` notes (be-jewoem/be-u2mw2x scope) — "REVIEW VERDICT: pass"  
-Source: bead `be-72b53f` notes (bd-umbf scope) — "REVIEW VERDICT: request-changes"
+Source: bead `be-72b53f` notes (bd-umbf scope) — "REVIEW VERDICT: request-changes"  
+Source: mail gm-wisp-765hi (2026-05-22) — "Re-review of bd-umbf scope complete. All B1-B4 blockers resolved; CI 41/41 green; 4 LOW non-blocking findings. PR #4023 (commit 9cfe6206f) cleared for deployment." Review bead: be-o5m5. Follow-ups be-zkzw and be-36oa are non-blocking.
 
 bd-umbf blocker resolution status (as of 2026-05-19):
 - B1 (doc freshness CI fail): **RESOLVED** — commit e7fbf9b37 regen'd CLI docs; CI now PASS
@@ -28,7 +31,12 @@ bd-umbf blocker resolution status (as of 2026-05-19):
   - fork_detect_embedded_test.go (TestBdInit_ForkAutoContributor{,_Idempotent,_MaintainerFlag,_NonInteractive}) — cherry-picked; fixed real bug: autoConfigureForkContributor was writing routing.*/sync.* to DB instead of config.yaml (yaml-only keys)
 - B4 (no transaction on delete path): **RESOLVED** — commit 11d232215 separates copy/delete phases; DeleteIssues batches delete
 
-**→ PASS** (all B1–B4 resolved; request-changes reply due)
+Post-review commits (after 9cfe6206f, CI/docs only — no behavioral change):
+- `72a2a2521` — chore: merge origin/main into branch (keeps branch current)
+- `aea2d3ed7` — fix(ci): register TestPruneLargeFixture in check-testing-short allowlist
+- `0a41b581a` — fix(docs): restore version-1.0.5 migrate-personal CLI reference
+
+**→ PASS** (re-review confirmed PASS 2026-05-22; post-review commits are CI/docs only)
 
 ---
 
@@ -55,7 +63,7 @@ Note on AC-6: Reviewer acknowledged integration-test gap and filed be-zkzw as fo
 **Initial CI run** on `feat/be-jewoem-be-u2mw2x-reference-aware-prune` (run 26001972966) — be-jewoem/be-u2mw2x scope only:  
 All shards PASS after doc-freshness fix (commit e15c4c464).
 
-**Latest CI run** (run 26009209774) — includes bd-umbf commits be787e4b5, 9ed33b68d, 11d232215, e7fbf9b37:
+**Latest CI run** (run 26924427657, 2026-06-04) — on current HEAD 0a41b581a (includes post-review CI/docs commits):
 
 | Suite | Result |
 |-------|--------|
@@ -68,13 +76,17 @@ All shards PASS after doc-freshness fix (commit e15c4c464).
 | Check version consistency | PASS |
 | Test (Embedded Dolt Cmd 1–20/20) | PASS |
 | Test (Embedded Dolt Storage) | PASS |
+| Test (storage domain + uow) | PASS |
 | Test (ubuntu-latest) | PASS |
 | Test (macos-latest) | PASS |
 | Test (Windows smoke) | PASS |
 | Test Nix Flake | PASS |
-| Upgrade smokes (v1.0.0–v1.0.4) | PASS |
+| Upgrade smokes (v1.0.0–v1.0.5) | PASS |
+| PR mergeStateStatus | CLEAN |
 
-**→ PASS** (all CI green as of 2026-05-18)
+All 51 CI checks SUCCESS.
+
+**→ PASS** (all CI green as of 2026-06-04 on HEAD 0a41b581a)
 
 ---
 
@@ -97,11 +109,23 @@ No HIGH findings in review bead be-xbwp.
 
 ## Criterion 6: Branch Diverges Cleanly from main
 
-Merge base with `origin/main`: `c72581c8b` (Merge pull request #4017 from coffeegoddd/db/schema-lock — already merged to main).
+GitHub `mergeStateStatus`: **CLEAN** (PR #4023, checked 2026-06-06).
 
-Branch is 7 commits ahead of main (3 be-jewoem/be-u2mw2x + 1 gate + 3 bd-umbf fix/docs commits). No conflicts with origin/main.
+Branch merge base with origin/main: `a5e5cd71f` (Merge pull request #4300 from coffeegoddd/db/list). No textual conflicts; GitHub confirms clean merge.
 
 **→ PASS**
+
+---
+
+## Criterion 7: Single Feature Theme
+
+The PR bundles two tightly coupled features:
+- **be-jewoem/be-u2mw2x**: `bd prune` reference-aware skip of closed beads cited by open beads
+- **bd-umbf**: contributor namespace isolation — fork auto-configure, export owner filter, migrate-personal
+
+These share the contributor/owner lifecycle subsystem: bd-umbf's `autoConfigureForkContributor`, `export.exclude_owners`, and `migrate-personal` are all prerequisite tooling for correct prune behavior in contributor workflows. The reviewer reviewed and approved the combined scope (gm-wisp-765hi). Neither feature is independently useful without the other in the contributor context.
+
+**→ PASS** (reviewer confirmed combined scope coherent; cleared for deployment as a unit)
 
 ---
 
@@ -109,11 +133,12 @@ Branch is 7 commits ahead of main (3 be-jewoem/be-u2mw2x + 1 gate + 3 bd-umbf fi
 
 | Criterion | Result |
 |-----------|--------|
-| 1. Review PASS | **PASS** — all B1–B4 resolved; request-changes reply due |
-| 2. Acceptance criteria | **PASS** (be-jewoem AC-6 deferred to be-zkzw; bd-umbf AC pending tests) |
-| 3. Tests pass | **PASS** (CI all green) |
+| 1. Review PASS | **PASS** — re-review 2026-05-22 at 9cfe6206f; 4 LOW non-blocking |
+| 2. Acceptance criteria | **PASS** (AC-6 deferred to follow-up be-zkzw) |
+| 3. Tests pass | **PASS** (51/51 CI green, run 26924427657, 2026-06-04) |
 | 4. No HIGH findings | **PASS** |
 | 5. Branch clean | **PASS** |
-| 6. Clean divergence from main | **PASS** |
+| 6. Clean divergence from main | **PASS** (mergeStateStatus CLEAN) |
+| 7. Single feature theme | **PASS** (coupled contributor namespace features) |
 
-**Overall: PASS — all B1–B4 resolved (2026-05-20). Tests landed; two real bugs fixed (yaml/DB store mismatch in export exclude-owner + fork routing config write). Awaiting re-review verdict on bd-umbf scope.**
+**Overall: PASS — re-review confirmed 2026-05-22, all CI green 2026-06-04 on HEAD 0a41b581a. PR #4023 ready for merge. Merge authority: mayor/mpr.**
