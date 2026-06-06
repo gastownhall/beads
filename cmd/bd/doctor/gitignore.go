@@ -123,6 +123,8 @@ var requiredPatterns = []string{
 	"*.corrupt.backup/",
 	".beads-credential-key",
 	"proxied_server_client_info.json",
+	".local_version",
+	"backup/",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
@@ -218,7 +220,7 @@ func FixGitignore(repoPath string) error {
 func missingGitignorePatterns(content string) []string {
 	var missing []string
 	for _, pattern := range requiredPatterns {
-		if !strings.Contains(content, pattern) {
+		if !containsGitignorePattern(content, pattern) {
 			missing = append(missing, pattern)
 		}
 	}
