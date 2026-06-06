@@ -38,6 +38,18 @@ else
     (cd "$PROJECT_ROOT" && CGO_ENABLED=0 go build -tags gms_pure_go -o "$BD" ./cmd/bd/)
 fi
 
+# Guard against a CGO-enabled bd: it exposes `bd federation` subcommands that CI never
+# produces (scripts/ci/pr-policy.sh build_docs_binary uses env CGO_ENABLED=0 go build).
+# If the resolved binary does not print the pure-go stub, rebuild pure-go internally.
+if [ -x "$BD" ] && ! "$BD" federation --help 2>&1 | grep -q "Federation commands require CGO"; then
+    echo "CGO-enabled bd detected at $BD; rebuilding pure-go binary for CI-consistent docs..."
+    if [ -z "$TMP_BUILD_DIR" ]; then
+        TMP_BUILD_DIR="$(mktemp -d)"
+    fi
+    BD="$TMP_BUILD_DIR/bd-pure"
+    (cd "$PROJECT_ROOT" && CGO_ENABLED=0 go build -tags gms_pure_go -o "$BD" ./cmd/bd/)
+fi
+
 if [ ! -x "$BD" ]; then
     echo "Error: bd binary not found or not executable: $BD" >&2
     echo "Usage: $0 [--check] [path-to-bd]" >&2
