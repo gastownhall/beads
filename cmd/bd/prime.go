@@ -465,10 +465,13 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 
 	var closeProtocol string
 	var profileRule string
-	if stealthMode || localOnly {
-		// Stealth mode or local-only: close issues, no git operations
+	if stealthMode {
+		// Stealth mode is an explicit no-git context.
 		closeProtocol = "Before saying \"done\": bd close <completed-ids>"
 		profileRule = "Git authority: no git operations in this context"
+	} else if localOnly {
+		closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; report git status and proposed handoff (local-only/no remote sync)"
+		profileRule = "Git authority: local-only/no-remote. No git remote configured. Do not push, pull, or run remote sync. Local git operations follow active user, orchestrator, and repository authority."
 	} else if ephemeral {
 		closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; report git status and proposed handoff (no push - ephemeral branch)"
 		profileRule = "Profile model: conservative by default; commit only with explicit user/orchestrator authority"
@@ -522,8 +525,8 @@ func outputCLIContext(w io.Writer, stealthMode bool) error {
 	var gitWorkflowRule string
 	var profileRule string
 
-	if stealthMode || localOnly {
-		// Stealth mode or local-only: close issues, no git operations
+	if stealthMode {
+		// Stealth mode is an explicit no-git context.
 		closeProtocol = `[ ] bd close <id1> <id2> ...   (close completed issues)`
 		syncSection = `### Sync & Collaboration
 - ` + "`bd search <query>`" + ` - Search issues by keyword`
@@ -531,14 +534,24 @@ func outputCLIContext(w io.Writer, stealthMode bool) error {
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
 ` + "```"
-		// Only show local-only note if not in stealth mode (stealth is explicit user choice)
-		if localOnly && !stealthMode {
-			closeNote = "**Note:** No git remote configured. Issues are saved locally only."
-			gitWorkflowRule = "Git workflow: local-only (no git remote)"
-		} else {
-			gitWorkflowRule = "Git workflow: stealth mode (no git ops)"
-		}
+		gitWorkflowRule = "Git workflow: stealth mode (no git ops)"
 		profileRule = "Git authority: no git operations in this context"
+	} else if localOnly {
+		closeProtocol = `[ ] 1. bd close <id1> <id2> ...   (close completed issues)
+[ ] 2. run quality gates        (tests, linters, builds when relevant)
+[ ] 3. git status               (check what changed)
+[ ] 4. report handoff           (local-only/no remote sync; wait for authority)`
+		closeNote = "**Note:** No git remote configured. Do not push, pull, or run remote sync. Local git operations follow active user, orchestrator, and repository authority."
+		syncSection = `### Sync & Collaboration
+- ` + "`bd search <query>`" + ` - Search issues by keyword`
+		completingWorkflow = `**Completing work:**
+` + "```bash" + `
+bd close <id1> <id2> ...    # Close all completed issues at once
+git status                  # Report changed files and proposed commands
+# Local-only/no-remote: do not push, pull, or run remote sync
+` + "```"
+		gitWorkflowRule = "Git workflow: local-only/no-remote; no push, pull, or remote sync"
+		profileRule = "Git authority: local-only/no-remote. Local git operations follow active user, orchestrator, and repository authority."
 	} else if ephemeral {
 		closeProtocol = `[ ] 1. bd close <id1> <id2> ...   (close completed issues)
 [ ] 2. run quality gates        (tests, linters, builds when relevant)
