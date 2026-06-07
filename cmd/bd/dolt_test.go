@@ -1626,6 +1626,58 @@ func (m *minimalPullStore) Pull(ctx context.Context) error {
 	return m.pullErr
 }
 
+// minimalPushStore implements storage.DoltStorage by embedding the interface
+// (all methods panic on nil) with Push and ForcePush overridden for controlled testing.
+type minimalPushStore struct {
+	storage.DoltStorage
+	pushCalled bool
+}
+
+func (m *minimalPushStore) Push(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func (m *minimalPushStore) ForcePush(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func TestNoPushSkipsDoltPush(t *testing.T) {
+	// no-push guard must exit with a skip message and must NOT call the store's
+	// Push() when no-push: true. Regression guard for PR #4212 guard at
+	// cmd/bd/dolt.go:247-249.
+
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPushStore{}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	out := captureStdout(t, func() error {
+		doltPushCmd.Run(doltPushCmd, nil)
+		return nil
+	})
+
+	if fake.pushCalled {
+		t.Error("bd dolt push must not call Push() when no-push: true; Push() was called")
+	}
+	if !strings.Contains(out, "skipping push") {
+		t.Errorf("expected 'skipping push' output, got: %q", out)
+	}
+}
+
 func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 	// no-push is a push-only guard. bd dolt pull must contact the remote even when
 	// no-push: true — contributor clones need to receive upstream updates.
