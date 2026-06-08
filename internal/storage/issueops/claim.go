@@ -6,11 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// ClaimFromStatusesKey is the config key listing additional statuses (beyond
+// the built-in "open") from which an issue may be claimed. Projects that model
+// their lifecycle with custom statuses (e.g. "ready") set this so that claim
+// works for those statuses too. See gastownhall/beads#4164.
+const ClaimFromStatusesKey = "claim.from-statuses"
 
 // ClaimResult holds the result of a ClaimIssueInTx call.
 type ClaimResult struct {
@@ -18,9 +25,35 @@ type ClaimResult struct {
 	IsWisp   bool
 }
 
+// resolveClaimableStatusesInTx returns the set of statuses from which an issue
+// may be claimed. The built-in "open" status is always claimable; projects can
+// add others (typically custom statuses such as "ready") via the
+// claim.from-statuses config key. The returned slice is de-duplicated and
+// always contains "open" first so default behavior is unchanged when the key is
+// unset (gastownhall/beads#4164).
+func resolveClaimableStatusesInTx(ctx context.Context, tx *sql.Tx) []string {
+	statuses := []string{string(types.StatusOpen)}
+	seen := map[string]struct{}{string(types.StatusOpen): {}}
+
+	value, err := GetConfigInTx(ctx, tx, ClaimFromStatusesKey)
+	if err != nil || value == "" {
+		return statuses
+	}
+	for _, s := range ParseCommaSeparatedList(value) {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		statuses = append(statuses, s)
+	}
+	return statuses
+}
+
 // ClaimIssueInTx atomically claims an issue using compare-and-swap semantics.
 // It sets the assignee to actor and status to "in_progress" only if the issue
-// is currently open and unassigned or already assigned to the same actor.
+// is currently in a claimable status (always "open", plus any statuses listed
+// in the claim.from-statuses config key — see GH#4164) and is unassigned or
+// already assigned to the same actor.
 // Returns storage.ErrAlreadyClaimed if already claimed by a different user.
 // Idempotent: re-claiming an in_progress issue by the same actor is a no-op
 // success (supports agent retry workflows).
@@ -40,6 +73,15 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 
 	now := time.Now().UTC()
 
+	// Build the claimable-status CAS predicate. "open" is always claimable;
+	// projects may add custom statuses via claim.from-statuses (GH#4164).
+	claimable := resolveClaimableStatusesInTx(ctx, tx)
+	statusPlaceholders := strings.TrimSuffix(strings.Repeat("?, ", len(claimable)), ", ")
+	statusArgs := make([]interface{}, len(claimable))
+	for i, s := range claimable {
+		statusArgs[i] = s
+	}
+
 	// Conditional UPDATE: only succeeds while the issue is still claimable.
 	// Also set started_at on first transition to in_progress (GH#2796); preserve
 	// any existing value so re-claims don't overwrite the original start time.
@@ -47,17 +89,25 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 		result sql.Result
 	)
 	if oldIssue.StartedAt == nil {
+		args := make([]interface{}, 0, 4+len(statusArgs))
+		args = append(args, actor, now, now, id)
+		args = append(args, statusArgs...)
+		args = append(args, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
 			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?
-			WHERE id = ? AND status = 'open' AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, issueTable), actor, now, now, id, actor)
+			WHERE id = ? AND status IN (%s) AND (assignee = '' OR assignee IS NULL OR assignee = ?)
+		`, issueTable, statusPlaceholders), args...)
 	} else {
+		args := make([]interface{}, 0, 3+len(statusArgs))
+		args = append(args, actor, now, id)
+		args = append(args, statusArgs...)
+		args = append(args, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
 			SET assignee = ?, status = 'in_progress', updated_at = ?
-			WHERE id = ? AND status = 'open' AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, issueTable), actor, now, id, actor)
+			WHERE id = ? AND status IN (%s) AND (assignee = '' OR assignee IS NULL OR assignee = ?)
+		`, issueTable, statusPlaceholders), args...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to claim issue: %w", err)
