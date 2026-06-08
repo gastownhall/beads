@@ -194,6 +194,57 @@ func BeadsIssueToGitHubFields(issue *types.Issue, config *MappingConfig) map[str
 	return fields
 }
 
+// PushFieldsEqual reports whether a GitHub push would be a no-op by comparing
+// only the fields a push can actually mutate: title, body, state, and the
+// label set that BeadsIssueToGitHubFields would send. When these already match
+// the remote issue, the push is redundant and can be skipped — this is what
+// prevents `bd github sync --push-only` from re-PATCHing every issue on every
+// run (gastownhall/beads#4214). Mirrors linear.PushFieldsEqual.
+func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+	if local.Title != remote.Title {
+		return false
+	}
+	if local.Description != remote.Body {
+		return false
+	}
+
+	desiredState := "open"
+	if local.Status == types.StatusClosed {
+		desiredState = "closed"
+	}
+	if !strings.EqualFold(desiredState, remote.State) {
+		return false
+	}
+
+	// Compare the label set we would push against the remote's current labels.
+	// Both include the scoped type::/priority::/status:: labels plus any
+	// non-scoped labels, so an unchanged issue produces an identical set.
+	desiredLabels, _ := BeadsIssueToGitHubFields(local, config)["labels"].([]string)
+	return labelSetsEqual(desiredLabels, remote.LabelNames())
+}
+
+// labelSetsEqual reports whether a and b contain the same labels, ignoring
+// order (GitHub does not preserve label order across a round-trip).
+func labelSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, l := range a {
+		counts[l]++
+	}
+	for _, l := range b {
+		counts[l]--
+		if counts[l] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // priorityToLabel converts beads priority (0-4) to GitHub priority label value.
 func priorityToLabel(priority int) string {
 	switch priority {

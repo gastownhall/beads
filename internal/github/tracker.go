@@ -165,6 +165,12 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 	return &githubFieldMapper{config: t.config}
 }
 
+// MappingConfig exposes the tracker's field-mapping configuration so callers
+// (e.g. push-hook content comparison) can mirror push field semantics.
+func (t *Tracker) MappingConfig() *MappingConfig {
+	return t.config
+}
+
 // IsExternalRef checks if a ref belongs to this GitHub tracker.
 // It recognizes both full GitHub URLs and the "github:{id}" shorthand format
 // produced by BuildExternalRef when a URL is unavailable.

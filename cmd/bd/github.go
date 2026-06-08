@@ -419,8 +419,9 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
 	engine.OnWarning = func(msg string) { _, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
-	// Set up GitHub-specific pull hooks
+	// Set up GitHub-specific pull and push hooks
 	engine.PullHooks = buildGitHubPullHooks(ctx)
+	engine.PushHooks = buildGitHubPushHooks(gt)
 
 	// Build sync options from CLI flags
 	pull := !githubSyncPushOnly
@@ -475,6 +476,29 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// buildGitHubPushHooks creates PushHooks for GitHub-specific push behavior.
+// The ContentEqual hook lets the engine skip issues whose pushable fields
+// already match GitHub, so repeated `github sync --push-only` / `github push`
+// runs don't re-PATCH unchanged issues (gastownhall/beads#4214).
+func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
+	config := gt.MappingConfig()
+	if config == nil {
+		config = github.DefaultMappingConfig()
+	}
+	return &tracker.PushHooks{
+		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+			if remote == nil {
+				return false
+			}
+			gh, ok := remote.Raw.(*github.Issue)
+			if !ok || gh == nil {
+				return false
+			}
+			return github.PushFieldsEqual(local, gh, config)
+		},
+	}
 }
 
 // buildGitHubPullHooks creates PullHooks for GitHub-specific pull behavior.
