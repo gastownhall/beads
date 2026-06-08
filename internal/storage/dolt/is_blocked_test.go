@@ -2,7 +2,9 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -17,6 +19,69 @@ func getIsBlocked(t *testing.T, ctx context.Context, store *DoltStore, table, id
 		t.Fatalf("read is_blocked from %s for %s: %v", table, id, err)
 	}
 	return b != 0
+}
+
+// updatedMinusCreatedSeconds returns the stored updated_at minus created_at, in
+// seconds, computed in SQL so the comparison is on the raw DATETIME numerals and
+// independent of any Go-side timezone handling.
+func updatedMinusCreatedSeconds(t *testing.T, ctx context.Context, store *DoltStore, table, id string) int64 {
+	t.Helper()
+	var diff sql.NullInt64
+	//nolint:gosec // G201: table is a hardcoded "issues" or "wisps" from callers.
+	err := store.db.QueryRowContext(ctx,
+		"SELECT TIMESTAMPDIFF(SECOND, created_at, updated_at) FROM "+table+" WHERE id = ?", id).Scan(&diff)
+	if err != nil {
+		t.Fatalf("read created_at/updated_at skew from %s for %s: %v", table, id, err)
+	}
+	if !diff.Valid {
+		t.Fatalf("created_at/updated_at skew for %s is NULL", id)
+	}
+	return diff.Int64
+}
+
+// TestIsBlocked_RecomputeWritesUTCUpdatedAt guards GH#4298: the is_blocked
+// recompute must write updated_at as true UTC, consistent with created_at.
+// Before the fix the recompute UPDATE omitted updated_at and relied on the
+// schema's ON UPDATE CURRENT_TIMESTAMP, which the embedded Dolt driver fills
+// with local wall-clock time mislabeled as UTC — so updated_at landed off by
+// the machine's UTC offset. A non-UTC local zone is forced here so the
+// regression is deterministic regardless of host/CI timezone.
+func TestIsBlocked_RecomputeWritesUTCUpdatedAt(t *testing.T) {
+	origLocal := time.Local
+	time.Local = time.FixedZone("TEST-0700", -7*60*60)
+	defer func() { time.Local = origLocal }()
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "isb-utc-blocker")
+	createPerm(t, ctx, store, "isb-utc-blocked")
+
+	// Adding a blocks dependency runs the is_blocked recompute over the depender.
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "isb-utc-blocked", DependsOnID: "isb-utc-blocker", Type: types.DepBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	if !getIsBlocked(t, ctx, store, "issues", "isb-utc-blocked") {
+		t.Fatal("expected is_blocked = 1 after adding blocks dep")
+	}
+
+	// created_at is written as explicit UTC; a correctly-UTC updated_at from the
+	// recompute (which fires in the same wall-clock moment) must be within a
+	// small window of it. A timezone-mislabeled updated_at would be off by the
+	// forced -7h offset (~25200s).
+	skew := updatedMinusCreatedSeconds(t, ctx, store, "issues", "isb-utc-blocked")
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > 60 {
+		t.Fatalf("updated_at and created_at differ by %ds after is_blocked recompute; "+
+			"expected both true UTC (skew <= 60s). updated_at was written in local time "+
+			"mislabeled as UTC (GH#4298)", skew)
+	}
 }
 
 func TestIsBlocked_FreshIssueIsNotBlocked(t *testing.T) {

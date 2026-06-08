@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -122,7 +123,7 @@ func markIsBlockedPassForIssuesInTx(ctx context.Context, tx *sql.Tx, ids []strin
 
 func markBlockedTemplateForIssues() string {
 	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 1
+		UPDATE issues i SET i.is_blocked = 1, i.updated_at = ?
 		WHERE i.id IN (%%s)
 		  AND i.is_blocked = 0
 		  AND i.status <> 'closed' AND i.status <> 'pinned'
@@ -166,7 +167,7 @@ func markBlockedTemplateForIssues() string {
 
 func unmarkBlockedTemplateForIssues() string {
 	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 0
+		UPDATE issues i SET i.is_blocked = 0, i.updated_at = ?
 		WHERE i.id IN (%%s)
 		  AND i.is_blocked = 1
 		  AND (
@@ -228,7 +229,7 @@ func markIsBlockedPassForWispsInTx(ctx context.Context, tx *sql.Tx, ids []string
 
 func markBlockedTemplateForWisps() string {
 	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 1
+		UPDATE wisps w SET w.is_blocked = 1, w.updated_at = ?
 		WHERE w.id IN (%%s)
 		  AND w.is_blocked = 0
 		  AND w.status <> 'closed' AND w.status <> 'pinned'
@@ -272,7 +273,7 @@ func markBlockedTemplateForWisps() string {
 
 func unmarkBlockedTemplateForWisps() string {
 	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 0
+		UPDATE wisps w SET w.is_blocked = 0, w.updated_at = ?
 		WHERE w.id IN (%%s)
 		  AND w.is_blocked = 1
 		  AND (
@@ -318,6 +319,12 @@ func unmarkBlockedTemplateForWisps() string {
 
 //nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.
 func runMarkUnmarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl, unmarkTmpl string, ids []string) (int64, error) {
+	// Bind updated_at explicitly as true UTC. The is_blocked recompute is the one
+	// issueops UPDATE that otherwise relies on the schema's ON UPDATE
+	// CURRENT_TIMESTAMP; under the embedded Dolt driver that records local
+	// wall-clock time mislabeled as UTC (GH#4298). Every other UPDATE sets
+	// updated_at = ? with a Go-side UTC value, so do the same here.
+	now := time.Now().UTC()
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
@@ -325,15 +332,16 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl, unmarkT
 			end = len(ids)
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
+		execArgs := append([]interface{}{now}, args...)
 
-		res, err := tx.ExecContext(ctx, fmt.Sprintf(markTmpl, placeholders), args...)
+		res, err := tx.ExecContext(ctx, fmt.Sprintf(markTmpl, placeholders), execArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
 		}
 		n, _ := res.RowsAffected()
 		changed += n
 
-		res, err = tx.ExecContext(ctx, fmt.Sprintf(unmarkTmpl, placeholders), args...)
+		res, err = tx.ExecContext(ctx, fmt.Sprintf(unmarkTmpl, placeholders), execArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
 		}
@@ -345,6 +353,8 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl, unmarkT
 
 //nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.
 func runMarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl string, ids []string) (int64, error) {
+	// See runMarkUnmarkBatchedInTx: bind updated_at as explicit UTC (GH#4298).
+	now := time.Now().UTC()
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
@@ -352,8 +362,9 @@ func runMarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl string, ids []
 			end = len(ids)
 		}
 		placeholders, args := buildSQLInClause(ids[start:end])
+		execArgs := append([]interface{}{now}, args...)
 
-		res, err := tx.ExecContext(ctx, fmt.Sprintf(markTmpl, placeholders), args...)
+		res, err := tx.ExecContext(ctx, fmt.Sprintf(markTmpl, placeholders), execArgs...)
 		if err != nil {
 			return changed, fmt.Errorf("mark is_blocked: %w", err)
 		}
