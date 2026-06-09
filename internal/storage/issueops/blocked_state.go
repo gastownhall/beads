@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -110,19 +111,23 @@ func recomputeIsBlockedPassForIssuesInTx(ctx context.Context, tx *sql.Tx, ids []
 		return 0, nil
 	}
 
-	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), ids)
+	now := time.Now().UTC()
+	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), ids, []interface{}{now})
 }
 
 func markIsBlockedPassForIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	return runMarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), ids)
+	now := time.Now().UTC()
+	return runMarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), ids, []interface{}{now})
 }
 
 func markBlockedTemplateForIssues() string {
+	// updated_at set explicitly to suppress ON UPDATE CURRENT_TIMESTAMP which
+	// would inherit Dolt's local-time query clock (GH#4298).
 	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 1
+		UPDATE issues i SET i.is_blocked = 1, i.updated_at = ?
 		WHERE i.id IN (%%s)
 		  AND i.is_blocked = 0
 		  AND i.status <> 'closed' AND i.status <> 'pinned'
@@ -165,8 +170,10 @@ func markBlockedTemplateForIssues() string {
 }
 
 func unmarkBlockedTemplateForIssues() string {
+	// updated_at set explicitly to suppress ON UPDATE CURRENT_TIMESTAMP which
+	// would inherit Dolt's local-time query clock (GH#4298).
 	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 0
+		UPDATE issues i SET i.is_blocked = 0, i.updated_at = ?
 		WHERE i.id IN (%%s)
 		  AND i.is_blocked = 1
 		  AND (
@@ -216,19 +223,23 @@ func recomputeIsBlockedPassForWispsInTx(ctx context.Context, tx *sql.Tx, ids []s
 		return 0, nil
 	}
 
-	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), unmarkBlockedTemplateForWisps(), ids)
+	now := time.Now().UTC()
+	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), unmarkBlockedTemplateForWisps(), ids, []interface{}{now})
 }
 
 func markIsBlockedPassForWispsInTx(ctx context.Context, tx *sql.Tx, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	return runMarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), ids)
+	now := time.Now().UTC()
+	return runMarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), ids, []interface{}{now})
 }
 
 func markBlockedTemplateForWisps() string {
+	// updated_at set explicitly to suppress ON UPDATE CURRENT_TIMESTAMP which
+	// would inherit Dolt's local-time query clock (GH#4298).
 	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 1
+		UPDATE wisps w SET w.is_blocked = 1, w.updated_at = ?
 		WHERE w.id IN (%%s)
 		  AND w.is_blocked = 0
 		  AND w.status <> 'closed' AND w.status <> 'pinned'
@@ -271,8 +282,10 @@ func markBlockedTemplateForWisps() string {
 }
 
 func unmarkBlockedTemplateForWisps() string {
+	// updated_at set explicitly to suppress ON UPDATE CURRENT_TIMESTAMP which
+	// would inherit Dolt's local-time query clock (GH#4298).
 	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 0
+		UPDATE wisps w SET w.is_blocked = 0, w.updated_at = ?
 		WHERE w.id IN (%%s)
 		  AND w.is_blocked = 1
 		  AND (
@@ -317,14 +330,16 @@ func unmarkBlockedTemplateForWisps() string {
 }
 
 //nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.
-func runMarkUnmarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl, unmarkTmpl string, ids []string) (int64, error) {
+func runMarkUnmarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl, unmarkTmpl string, ids []string, prefixArgs []interface{}) (int64, error) {
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
 		if end > len(ids) {
 			end = len(ids)
 		}
-		placeholders, args := buildSQLInClause(ids[start:end])
+		placeholders, inArgs := buildSQLInClause(ids[start:end])
+		// Safe: all callers pass a len==cap slice ([]interface{}{now}), so append always allocates a fresh backing array and never mutates prefixArgs across batches.
+		args := append(prefixArgs, inArgs...)
 
 		res, err := tx.ExecContext(ctx, fmt.Sprintf(markTmpl, placeholders), args...)
 		if err != nil {
@@ -344,14 +359,16 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl, unmarkT
 }
 
 //nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.
-func runMarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl string, ids []string) (int64, error) {
+func runMarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl string, ids []string, prefixArgs []interface{}) (int64, error) {
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
 		if end > len(ids) {
 			end = len(ids)
 		}
-		placeholders, args := buildSQLInClause(ids[start:end])
+		placeholders, inArgs := buildSQLInClause(ids[start:end])
+		// Safe: all callers pass a len==cap slice ([]interface{}{now}), so append always allocates a fresh backing array and never mutates prefixArgs across batches.
+		args := append(prefixArgs, inArgs...)
 
 		res, err := tx.ExecContext(ctx, fmt.Sprintf(markTmpl, placeholders), args...)
 		if err != nil {

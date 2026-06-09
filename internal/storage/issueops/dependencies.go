@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
@@ -286,8 +287,10 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		return nil
 	}
 
+	// updated_at set explicitly to suppress ON UPDATE CURRENT_TIMESTAMP which
+	// would inherit Dolt's local-time query clock (GH#4298).
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s s SET s.is_blocked = 1
+		UPDATE %s s SET s.is_blocked = 1, s.updated_at = ?
 		WHERE s.id = ?
 		  AND s.is_blocked = 0
 		  AND s.status <> 'closed' AND s.status <> 'pinned'
@@ -296,7 +299,7 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		    WHERE t.id = ?
 		      AND t.status <> 'closed' AND t.status <> 'pinned'
 		  )
-	`, sourceTable, targetTable), source, target)
+	`, sourceTable, targetTable), time.Now().UTC(), source, target)
 	return err
 }
 
