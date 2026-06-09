@@ -15,6 +15,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 ## Web UIs
 
+- **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
+
 - **[beads-ui](https://github.com/mantoni/beads-ui)** - Local web interface with live updates and kanban board. Uses the `bd` CLI for Dolt compatibility. Run with `npx beads-ui start`. Built by [@mantoni](https://github.com/mantoni). (Node.js)
 
 - **[BeadBoard](https://github.com/zenchantlive/beadboard)** - Multi-agent orchestration and communication system with a live dashboard. Agent-to-agent messaging (HANDOFF/BLOCKED/DECISION/INFO), DAG dependency graph, swarm coordination with archetypes and templates, scope-based work reservations, and an embedded execution runtime (bb-pi) built on [Pi](https://github.com/badlogic/pi-mono) that spawns typed worker agents. Cross-platform (macOS, Linux, Windows). Includes the `beadboard-driver` skill for agent integration (`npx skills add zenchantlive/beadboard --skill beadboard-driver`). Built by [@zenchantlive](https://github.com/zenchantlive). (Next.js/TypeScript)
