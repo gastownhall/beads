@@ -372,6 +372,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// --init-if-missing makes init idempotent: when the workspace
 				// is already initialized, skip and exit 0 instead of aborting.
 				if initIfMissing {
+					// Guard against masking a genuine mismatch: if the caller
+					// explicitly requested a --prefix that does not match the
+					// existing workspace, silently skipping would ignore the
+					// request. Abort as usual in that case. (Skipped when
+					// --database is set, since that overrides prefix-based
+					// naming and is the authoritative database selector.)
+					if cmd.Flags().Changed("prefix") && !cmd.Flags().Changed("database") {
+						if existing := existingWorkspaceDBName(); initIfMissingPrefixMismatch(existing, prefix) {
+							FatalError("workspace already initialized as database %q, but --prefix %q was requested.\nRemove --prefix (or pass a matching value) to reuse the existing workspace.", existing, prefix)
+						}
+					}
 					if !quiet {
 						fmt.Fprintln(os.Stderr, "Skipping init: workspace already initialized.")
 					}
@@ -460,19 +471,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		// Normalize prefix before storing it in config or deriving the Dolt
 		// database name. Dots are not valid in issue prefixes and must match the
-		// underscore form used for DoltDatabase/metadata.json.
-		// Leading dots produce invalid names (e.g. ".claude" -> "claude"), and
-		// the trailing hyphen is added automatically during ID generation.
-		prefix = strings.TrimLeft(prefix, ".")
-		prefix = strings.TrimRight(prefix, "-")
-		prefix = strings.ReplaceAll(prefix, ".", "_")
-
-		// Sanitize prefix for use as a MySQL database name.
-		// Directory names like "001" (common in temp dirs) are invalid because
-		// MySQL identifiers must start with a letter or underscore.
-		if len(prefix) > 0 && !((prefix[0] >= 'a' && prefix[0] <= 'z') || (prefix[0] >= 'A' && prefix[0] <= 'Z') || prefix[0] == '_') {
-			prefix = "bd_" + prefix
-		}
+		// underscore form used for DoltDatabase/metadata.json. Leading dots
+		// produce invalid names (e.g. ".claude" -> "claude"), the trailing
+		// hyphen is added automatically during ID generation, and a leading
+		// non-letter is prefixed with "bd_" so the derived MySQL identifier is
+		// valid (directory names like "001" are common in temp dirs).
+		prefix = normalizeIssuePrefix(prefix)
 
 		// Cross-boundary safety (bd-q83 / ADR 0002): check remote state
 		// BEFORE any filesystem side-effects so a refusal exits cleanly.
@@ -713,7 +717,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Must match the sanitization applied to metadata.json DoltDatabase
 			// field (line below), otherwise init creates a database with one name
 			// but metadata.json records a different name, causing reopens to fail.
-			dbName = strings.ReplaceAll(prefix, "-", "_")
+			dbName = dbNameFromPrefix(prefix)
 		} else {
 			dbName = "beads"
 		}
@@ -1969,33 +1973,82 @@ func countExistingIssues(_ string) (int, error) {
 //
 // For redirects, checks the redirect target and errors if it already has a database.
 // This prevents accidentally overwriting an existing canonical database (GH#bd-0qel).
-func checkExistingBeadsData(prefix string) error {
-	// Check BEADS_DIR environment variable first (matches FindBeadsDir pattern)
-	// When BEADS_DIR is set, it takes precedence over CWD and worktree checks
-	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		absBeadsDir := utils.CanonicalizePath(envBeadsDir)
-		return checkExistingBeadsDataAt(absBeadsDir, prefix)
+// normalizeIssuePrefix applies the prefix normalization rules shared by the
+// init path and the --init-if-missing mismatch guard: strip leading dots, drop
+// the trailing hyphen, convert dots to underscores, and prepend "bd_" when the
+// result would not start with a SQL-identifier-safe character. Keeping this in
+// one place ensures the mismatch check derives exactly the same name init does.
+func normalizeIssuePrefix(prefix string) string {
+	prefix = strings.TrimLeft(prefix, ".")
+	prefix = strings.TrimRight(prefix, "-")
+	prefix = strings.ReplaceAll(prefix, ".", "_")
+	if len(prefix) > 0 && !((prefix[0] >= 'a' && prefix[0] <= 'z') || (prefix[0] >= 'A' && prefix[0] <= 'Z') || prefix[0] == '_') {
+		prefix = "bd_" + prefix
 	}
+	return prefix
+}
 
+// dbNameFromPrefix derives the Dolt database name from a normalized issue
+// prefix (hyphens become underscores), matching how init records DoltDatabase.
+func dbNameFromPrefix(prefix string) string {
+	return strings.ReplaceAll(prefix, "-", "_")
+}
+
+// initIfMissingPrefixMismatch reports whether an explicit --prefix request
+// conflicts with the existing workspace, in which case --init-if-missing must
+// abort rather than silently skip (otherwise the requested prefix is ignored).
+// existingDBName is the existing workspace's recorded Dolt database name;
+// requestedPrefix is the raw, un-normalized --prefix value. Returns false when
+// the existing name is unknown so an undeterminable state falls through to the
+// benign skip.
+func initIfMissingPrefixMismatch(existingDBName, requestedPrefix string) bool {
+	if existingDBName == "" {
+		return false
+	}
+	requested := dbNameFromPrefix(normalizeIssuePrefix(requestedPrefix))
+	return requested != "" && !strings.EqualFold(existingDBName, requested)
+}
+
+// resolveInitBeadsDir resolves the .beads directory that init would target,
+// using the same precedence as checkExistingBeadsData (BEADS_DIR > worktree
+// fallback > CWD). Returns "" when it cannot be determined.
+func resolveInitBeadsDir() string {
+	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
+		return utils.CanonicalizePath(envBeadsDir)
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil // Can't determine CWD, allow init to proceed
+		return ""
 	}
-
-	// Determine where to check for .beads directory
-	// Guard with isGitRepo() check first - on Windows, git commands may hang
-	// when run outside a git repository (GH#727)
-	var beadsDir string
 	if isGitRepo() && git.IsWorktree() {
-		beadsDir = beads.GetWorktreeFallbackBeadsDir()
-		if beadsDir == "" {
-			return nil // Can't determine shared fallback, allow init to proceed
-		}
-	} else {
-		// For regular repos (or non-git directories), check current directory
-		beadsDir = filepath.Join(cwd, ".beads")
+		return beads.GetWorktreeFallbackBeadsDir()
 	}
+	return filepath.Join(cwd, ".beads")
+}
 
+// existingWorkspaceDBName returns the Dolt database name explicitly recorded
+// for the already-initialized workspace at the init target, or "" if it cannot
+// be determined. It reads the raw DoltDatabase field rather than
+// GetDoltDatabase() on purpose: the getter falls back to a default name (and an
+// env override), which would manufacture a phantom value and trigger false
+// mismatches. An unset value safely falls through to the benign skip.
+func existingWorkspaceDBName() string {
+	beadsDir := resolveInitBeadsDir()
+	if beadsDir == "" {
+		return ""
+	}
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.DoltDatabase
+}
+
+func checkExistingBeadsData(prefix string) error {
+	beadsDir := resolveInitBeadsDir()
+	if beadsDir == "" {
+		return nil // Can't determine target, allow init to proceed
+	}
 	return checkExistingBeadsDataAt(beadsDir, prefix)
 }
 

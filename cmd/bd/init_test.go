@@ -301,6 +301,88 @@ func TestInitIfMissing(t *testing.T) {
 	}
 }
 
+// TestInitIfMissingPrefixMismatch covers the guard that keeps --init-if-missing
+// from masking a genuine prefix mismatch (review follow-up on #4332/#3490): a
+// re-init that explicitly requests a different prefix than the existing
+// workspace must abort, while a matching prefix (after normalization) or an
+// undeterminable existing name must fall through to the benign skip.
+func TestInitIfMissingPrefixMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		existing  string
+		requested string
+		want      bool
+	}{
+		{name: "exact match", existing: "foo", requested: "foo", want: false},
+		{name: "case-insensitive match", existing: "Foo", requested: "foo", want: false},
+		{name: "hyphen normalizes to underscore", existing: "my_proj", requested: "my-proj", want: false},
+		{name: "trailing hyphen trimmed", existing: "foo", requested: "foo-", want: false},
+		{name: "leading-digit gets bd_ prefix", existing: "bd_001", requested: "001", want: false},
+		{name: "genuine mismatch aborts", existing: "foo", requested: "bar", want: true},
+		{name: "unknown existing falls through", existing: "", requested: "bar", want: false},
+		{name: "empty requested falls through", existing: "foo", requested: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := initIfMissingPrefixMismatch(tt.existing, tt.requested); got != tt.want {
+				t.Errorf("initIfMissingPrefixMismatch(%q, %q) = %v, want %v",
+					tt.existing, tt.requested, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInitIfMissingMatchingPrefixSkips verifies the mismatch guard does not
+// regress the happy path: re-running with the SAME explicit --prefix as the
+// existing workspace still skips cleanly (exit 0) rather than aborting.
+func TestInitIfMissingMatchingPrefixSkips(t *testing.T) {
+	skipIfNoDolt(t)
+	origDBPath := dbPath
+	resetInitFlags := func() {
+		_ = initCmd.Flags().Set("force", "false")
+		_ = initCmd.Flags().Set("reinit-local", "false")
+		_ = initCmd.Flags().Set("init-if-missing", "false")
+		_ = initCmd.Flags().Set("quiet", "false")
+		_ = initCmd.Flags().Set("prefix", "")
+	}
+	defer func() {
+		dbPath = origDBPath
+		resetInitFlags()
+	}()
+	dbPath = ""
+	resetInitFlags()
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("First init failed: %v", err)
+	}
+
+	resetInitFlags()
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	// Same prefix as the existing workspace: must skip, not abort.
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--init-if-missing"})
+	execErr := rootCmd.Execute()
+
+	w.Close()
+	os.Stderr = oldStderr
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	stderr := buf.String()
+
+	if execErr != nil {
+		t.Fatalf("init --init-if-missing with matching prefix should succeed, got: %v", execErr)
+	}
+	if !strings.Contains(stderr, "Skipping init: workspace already initialized") {
+		t.Errorf("expected benign skip message, got:\n%s", stderr)
+	}
+}
+
 func TestInitWithCustomDBPath(t *testing.T) {
 	t.Skip("BEADS_DB env var does not control Dolt store location; Dolt always uses .beads/dolt/")
 	// Save original state
