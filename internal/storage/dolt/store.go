@@ -1690,7 +1690,23 @@ func (s *DoltStore) Commit(ctx context.Context, message string) (retErr error) {
 	// GH#2455: Stage all dirty tables EXCEPT config. Query dolt_status for
 	// dirty tables and stage each one individually, skipping config to avoid
 	// sweeping up stale issue_prefix changes from concurrent operations.
-	rows, err := conn.QueryContext(ctx, "SELECT table_name FROM dolt_status")
+	//
+	// Exclude dolt_ignore'd tables in the scan itself (same predicate as
+	// issueops.HasPendingChanges). Ignored tables (wisp_%, local_metadata, …)
+	// can sit PERMANENTLY dirty in dolt_status under wisp churn but can never
+	// be staged — DOLT_ADD on them fails and is skipped below. Without this
+	// exclusion the table list is non-empty whenever only ignored tables are
+	// dirty, so every write command issues a guaranteed-empty DOLT_COMMIT that
+	// the server rejects with "nothing to commit" — flooding the Dolt log and
+	// burning server CPU at orchestrator reconcile cadence (observed ~99% of
+	// all Dolt log lines on a busy coordination DB).
+	rows, err := conn.QueryContext(ctx, `
+		SELECT s.table_name FROM dolt_status s
+		WHERE NOT EXISTS (
+			SELECT 1 FROM dolt_ignore di
+			WHERE di.ignored = 1
+			AND s.table_name LIKE di.pattern
+		)`)
 	if err != nil {
 		// If dolt_status fails, fall back to nothing (rare edge case).
 		return fmt.Errorf("failed to query dolt_status: %w", err)
