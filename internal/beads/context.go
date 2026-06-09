@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -332,7 +333,11 @@ func isPathInSafeBoundary(path string) bool {
 		}
 	}
 	// Also reject other users' home directories
-	homeDir, _ := os.UserHomeDir()
+	u, err := user.Current()
+	homeDir := ""
+	if err == nil {
+		homeDir = u.HomeDir
+	}
 	if strings.HasPrefix(absPath, "/Users/") || strings.HasPrefix(absPath, "/home/") || strings.HasPrefix(absPath, "/var/home/") {
 		if homeDir != "" && !strings.HasPrefix(absPath, homeDir) {
 			return false
