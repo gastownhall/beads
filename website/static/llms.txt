@@ -49,7 +49,7 @@ bd backup sync                            # Push a Dolt-native backup
 
 Quick fixes for common issues:
 
-- Database Recovery: `bd backup restore` or `bd backup fetch-git`
+- Database Recovery: `bd backup restore`
 - Merge Conflicts: Use Dolt merge/recovery tools, then `bd dolt pull`
 - Circular Dependencies: `bd doctor` (diagnose only, NEVER --fix)
 - Sync Failures: `bd dolt pull`
