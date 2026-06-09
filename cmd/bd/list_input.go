@@ -110,6 +110,9 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 
 	limit, _ := cmd.Flags().GetInt("limit")
 	in.limitChanged = cmd.Flags().Changed("limit")
+	if !in.limitChanged {
+		limit = config.GetInt("list.limit")
+	}
 	in.allFlag, _ = cmd.Flags().GetBool("all")
 
 	in.formatStr, _ = cmd.Flags().GetString("format")

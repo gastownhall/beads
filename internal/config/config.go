@@ -260,6 +260,9 @@ func Initialize() error {
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
 
+	// List command defaults
+	v.SetDefault("list.limit", 50)
+
 	// Output configuration (GH#1384)
 	// Controls title display in command feedback messages.
 	// 0 = hide title, N > 0 = truncate to N chars with "…"
