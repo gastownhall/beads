@@ -11,6 +11,11 @@ import (
 )
 
 func TestOutputContextFunction(t *testing.T) {
+	// Isolate from live store: structural content must not depend on what
+	// memories happen to be stored locally (they can contain any text,
+	// including the git-operation strings that stealth mode rejects).
+	defer stubNoMemories()()
+
 	tests := []struct {
 		name          string
 		mcpMode       bool
@@ -326,6 +331,26 @@ func stubPrimeNoPushConfigured(noPush bool) func() {
 	}
 	return func() {
 		primeNoPushConfigured = original
+	}
+}
+
+// stubNoMemories disables live store access so structural-content tests
+// remain deterministic regardless of local store state. Memories can contain
+// arbitrary text (including git-operation strings rejected by stealth mode),
+// so tests that check prime's structural output must suppress them.
+func stubNoMemories() func() {
+	oldStore := store
+	oldActive := storeActive
+	oldEnsure := ensureStoreActiveForPrime
+	store = nil
+	storeActive = false
+	ensureStoreActiveForPrime = func(_ context.Context) error {
+		return context.Canceled // non-timeout → formatMemoriesForPrime returns ""
+	}
+	return func() {
+		store = oldStore
+		storeActive = oldActive
+		ensureStoreActiveForPrime = oldEnsure
 	}
 }
 
