@@ -74,6 +74,17 @@ type PushHooks struct {
 	// Returns true if content is identical (skip update). If nil, uses timestamp comparison.
 	ContentEqual func(local *types.Issue, remote *TrackerIssue) bool
 
+	// ContentHash, if set, returns a stable fingerprint of the issue's pushable
+	// fields. When present, the engine persists the hash in local_metadata after
+	// each successful create/update (and whenever ContentEqual reports a match)
+	// and consults it BEFORE fetching the remote issue: if the stored hash still
+	// matches the current content, the remote fetch and update are skipped
+	// entirely. This avoids the per-issue GET that ContentEqual alone still
+	// incurs, so a no-op `--push-only` run does not drain the API rate limit
+	// (gastownhall/beads#4214). Returning "" disables the short-circuit for that
+	// issue (the engine falls back to the fetch + ContentEqual path).
+	ContentHash func(local *types.Issue) string
+
 	// ShouldPush filters issues during push. Return false to skip.
 	// Called in addition to type/state/ephemeral filters. Use for prefix filtering, etc.
 	// If nil, all issues (matching other filters) are pushed.
@@ -814,6 +825,46 @@ func parseSyncTime(value string) (time.Time, error) {
 }
 
 // doPush exports beads issues to the external tracker.
+// pushHashKey returns the local_metadata key under which the last-pushed
+// content hash for an issue is stored, namespaced per tracker (e.g.
+// "github.pushhash.bd-123"). local_metadata is dolt-ignored, so these hashes
+// are clone-local and reset on clone/branch-checkout/server-restart; that only
+// costs one fetch+ContentEqual pass to repopulate, never a missed update.
+func (e *Engine) pushHashKey(issueID string) string {
+	return e.Tracker.ConfigPrefix() + ".pushhash." + issueID
+}
+
+// storedPushHashMatches reports whether the persisted push hash for issue still
+// equals its current content hash. When true, a push is provably a no-op and
+// both the remote fetch and the update can be skipped.
+func (e *Engine) storedPushHashMatches(ctx context.Context, issue *types.Issue) bool {
+	if e.PushHooks == nil || e.PushHooks.ContentHash == nil {
+		return false
+	}
+	current := e.PushHooks.ContentHash(issue)
+	if current == "" {
+		return false
+	}
+	stored, err := e.Store.GetLocalMetadata(ctx, e.pushHashKey(issue.ID))
+	return err == nil && stored != "" && stored == current
+}
+
+// recordPushHash persists the current content hash for issue so subsequent
+// pushes can short-circuit via storedPushHashMatches. No-op when ContentHash is
+// unset or returns "". Never called during dry-run.
+func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue) {
+	if e.PushHooks == nil || e.PushHooks.ContentHash == nil {
+		return
+	}
+	h := e.PushHooks.ContentHash(issue)
+	if h == "" {
+		return
+	}
+	if err := e.Store.SetLocalMetadata(ctx, e.pushHashKey(issue.ID), h); err != nil {
+		e.warn("Failed to record push hash for %s: %v", issue.ID, err)
+	}
+}
+
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.push",
 		trace.WithAttributes(
@@ -945,6 +996,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			if willCreate {
 				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Created++
+			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue) {
+				// Content unchanged since last push: a real run would skip this
+				// issue, so the preview must say so too (gastownhall/beads#4214).
+				stats.Skipped++
 			} else {
 				e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Updated++
@@ -991,6 +1046,8 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			for _, w := range created.Warnings {
 				e.warn("%s (%s)", w, issue.ID)
 			}
+			// Remember what we just pushed so the next sync can skip the fetch.
+			e.recordPushHash(ctx, issue)
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue
@@ -1002,6 +1059,15 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 
 			// Check if update is needed
 			if !forceIDs[issue.ID] {
+				// Fast path: if the local content is unchanged since the last
+				// successful push, the remote must already match it, so skip the
+				// fetch entirely. This is what keeps a no-op `--push-only` run
+				// from issuing one GET per issue (gastownhall/beads#4214).
+				if e.storedPushHashMatches(ctx, issue) {
+					stats.Skipped++
+					continue
+				}
+
 				extIssue, err := e.Tracker.FetchIssue(ctx, extID)
 				if isRateLimitExhausted(err) {
 					return stats, fmt.Errorf("sync aborted: %w", err)
@@ -1010,6 +1076,9 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 					// ContentEqual hook: content-hash dedup to skip unnecessary API calls
 					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
 						if e.PushHooks.ContentEqual(issue, extIssue) {
+							// Remote already matches: record the hash so future
+							// runs skip the fetch above, not just the update.
+							e.recordPushHash(ctx, issue)
 							stats.Skipped++
 							continue
 						}
@@ -1032,6 +1101,8 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				}
 				continue
 			}
+			// Remember what we just pushed so the next sync can skip the fetch.
+			e.recordPushHash(ctx, issue)
 			stats.Updated++
 		} else {
 			stats.Skipped++

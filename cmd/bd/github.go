@@ -498,6 +498,13 @@ func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
 			}
 			return github.PushFieldsEqual(local, gh, config)
 		},
+		// ContentHash lets the engine skip the per-issue GitHub fetch entirely
+		// when an issue is unchanged since its last push, so a no-op
+		// `github sync --push-only` makes ~zero REST calls instead of one GET
+		// per linked issue (gastownhall/beads#4214).
+		ContentHash: func(local *types.Issue) string {
+			return github.PushContentHash(local, config)
+		},
 	}
 }
 

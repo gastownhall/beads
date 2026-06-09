@@ -1394,6 +1394,104 @@ func TestEnginePushWithContentEqual(t *testing.T) {
 	}
 }
 
+// TestEnginePushWithContentHash verifies the local_metadata content-hash
+// short-circuit (gastownhall/beads#4214): once an issue has been pushed, an
+// unchanged re-push must skip the remote fetch entirely (zero FetchIssue calls),
+// and a local content change must invalidate the hash so the issue is pushed
+// again.
+func TestEnginePushWithContentHash(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:          "bd-hash1",
+		Title:       "Hashable content",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://test.test/EXT-HASH1"),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{
+			ID:         "EXT-HASH1",
+			Identifier: "EXT-HASH1",
+			Title:      "Hashable content",
+			UpdatedAt:  time.Now().Add(-1 * time.Hour),
+		},
+	}
+
+	// Hash only the title so we can flip it deterministically below.
+	contentHash := func(local *types.Issue) string { return "h:" + local.Title }
+
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		ContentEqual: func(local *types.Issue, remote *TrackerIssue) bool {
+			return local.Title == remote.Title
+		},
+		ContentHash: contentHash,
+	}
+
+	// First push: no stored hash yet, so the engine fetches, finds the remote
+	// already matches (ContentEqual), skips the update, and records the hash.
+	if _, err := engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
+		t.Fatalf("Sync() #1 error: %v", err)
+	}
+	if tracker.fetchCalls != 1 {
+		t.Fatalf("first push fetchCalls = %d, want 1", tracker.fetchCalls)
+	}
+	if got, _ := store.GetLocalMetadata(ctx, "test.pushhash.bd-hash1"); got != contentHash(issue) {
+		t.Fatalf("stored push hash = %q, want %q", got, contentHash(issue))
+	}
+
+	// Second push: hash matches, so the fetch must be skipped entirely.
+	tracker.fetchCalls = 0
+	if _, err := engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
+		t.Fatalf("Sync() #2 error: %v", err)
+	}
+	if tracker.fetchCalls != 0 {
+		t.Errorf("unchanged re-push fetchCalls = %d, want 0 (hash should short-circuit fetch)", tracker.fetchCalls)
+	}
+	if len(tracker.updated) != 0 {
+		t.Errorf("unchanged re-push tracker.updated = %d, want 0", len(tracker.updated))
+	}
+
+	// Dry-run with a matching hash must preview a skip, not "Would update"
+	// (the pre-fix dry-run always reported an update). No metadata is written.
+	dryResult, err := engine.Sync(ctx, SyncOptions{Push: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("Sync() dry-run error: %v", err)
+	}
+	if dryResult.Stats.Updated != 0 || dryResult.Stats.Skipped != 1 {
+		t.Errorf("dry-run stats = {Updated:%d Skipped:%d}, want {Updated:0 Skipped:1}",
+			dryResult.Stats.Updated, dryResult.Stats.Skipped)
+	}
+
+	// Local change: hash no longer matches, so the issue is fetched and updated.
+	tracker.fetchCalls = 0
+	if err := store.UpdateIssue(ctx, "bd-hash1", map[string]interface{}{"title": "Changed content"}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue() error: %v", err)
+	}
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() #3 error: %v", err)
+	}
+	if tracker.fetchCalls != 1 {
+		t.Errorf("changed push fetchCalls = %d, want 1 (hash mismatch must fetch)", tracker.fetchCalls)
+	}
+	if result.Stats.Updated != 1 {
+		t.Errorf("changed push Stats.Updated = %d, want 1", result.Stats.Updated)
+	}
+	if got, _ := store.GetLocalMetadata(ctx, "test.pushhash.bd-hash1"); got != "h:Changed content" {
+		t.Errorf("post-update stored hash = %q, want %q", got, "h:Changed content")
+	}
+}
+
 func TestEnginePushExcludeEphemeral(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

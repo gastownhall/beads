@@ -2,7 +2,12 @@
 package github
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -224,6 +229,45 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) b
 	// non-scoped labels, so an unchanged issue produces an identical set.
 	desiredLabels, _ := BeadsIssueToGitHubFields(local, config)["labels"].([]string)
 	return labelSetsEqual(desiredLabels, remote.LabelNames())
+}
+
+// PushContentHash returns a stable hex fingerprint of the fields a push would
+// send to GitHub: title, body, desired state, and the order-independent label
+// set produced by BeadsIssueToGitHubFields. The engine persists this hash in
+// local_metadata after each push and compares it before fetching the remote
+// issue, so an unchanged issue is skipped without any API call
+// (gastownhall/beads#4214). It is derived from the same fields PushFieldsEqual
+// compares, so the two agree on what "unchanged" means. Fields are
+// length-prefixed before hashing so distinct field boundaries cannot collide.
+func PushContentHash(local *types.Issue, config *MappingConfig) string {
+	if local == nil {
+		return ""
+	}
+
+	desiredState := "open"
+	if local.Status == types.StatusClosed {
+		desiredState = "closed"
+	}
+
+	desiredLabels, _ := BeadsIssueToGitHubFields(local, config)["labels"].([]string)
+	sortedLabels := append([]string(nil), desiredLabels...)
+	sort.Strings(sortedLabels)
+
+	h := sha256.New()
+	writeField := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		_, _ = h.Write(n[:])
+		_, _ = h.Write([]byte(s))
+	}
+	writeField(local.Title)
+	writeField(local.Description)
+	writeField(desiredState)
+	writeField(strconv.Itoa(len(sortedLabels)))
+	for _, l := range sortedLabels {
+		writeField(l)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // labelSetsEqual reports whether a and b contain the same labels, ignoring

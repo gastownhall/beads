@@ -115,3 +115,61 @@ func TestPushFieldsEqual(t *testing.T) {
 		})
 	}
 }
+
+// TestPushContentHash covers the local content fingerprint used to skip the
+// per-issue GitHub fetch on a no-op push (gastownhall/beads#4214). It must be
+// stable for identical content (and label reordering), and must change whenever
+// any pushable field changes, so the engine never skips a needed update.
+func TestPushContentHash(t *testing.T) {
+	config := DefaultMappingConfig()
+
+	base := &types.Issue{
+		Title:       "Fix the thing",
+		Description: "Some body text",
+		IssueType:   types.IssueType("task"),
+		Priority:    2,
+		Status:      types.StatusOpen,
+		Labels:      []string{"backend", "ops"},
+	}
+
+	h := func(i *types.Issue) string { return PushContentHash(i, config) }
+
+	if h(base) == "" {
+		t.Fatal("PushContentHash returned empty for a valid issue")
+	}
+	if PushContentHash(nil, config) != "" {
+		t.Error("PushContentHash(nil) should return empty string")
+	}
+
+	// Stable across repeated calls.
+	if h(base) != h(base) {
+		t.Error("PushContentHash is not deterministic for identical input")
+	}
+
+	// Stable across non-scoped label reordering (GitHub does not preserve order).
+	reordered := *base
+	reordered.Labels = []string{"ops", "backend"}
+	if h(base) != h(&reordered) {
+		t.Error("PushContentHash changed when only label order changed")
+	}
+
+	// Every pushable field must perturb the hash.
+	mutate := map[string]func(*types.Issue){
+		"title":    func(i *types.Issue) { i.Title = "Different" },
+		"body":     func(i *types.Issue) { i.Description = "Changed" },
+		"status":   func(i *types.Issue) { i.Status = types.StatusClosed },
+		"priority": func(i *types.Issue) { i.Priority = 1 },
+		"type":     func(i *types.Issue) { i.IssueType = types.IssueType("bug") },
+		"labels":   func(i *types.Issue) { i.Labels = []string{"backend"} },
+	}
+	for name, fn := range mutate {
+		t.Run(name+" changes hash", func(t *testing.T) {
+			mutated := *base
+			mutated.Labels = append([]string(nil), base.Labels...)
+			fn(&mutated)
+			if h(&mutated) == h(base) {
+				t.Errorf("PushContentHash unchanged after %s mutation", name)
+			}
+		})
+	}
+}
