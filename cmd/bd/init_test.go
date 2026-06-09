@@ -227,6 +227,80 @@ func TestInitAlreadyInitialized(t *testing.T) {
 	}
 }
 
+// GH#3490: `bd init --init-if-missing` makes init idempotent for scaffold
+// scripts. When the workspace is already initialized, init must skip and
+// return without error (exit 0), emitting a benign "Skipping init" message,
+// instead of aborting via os.Exit(1). The default (no-flag) abort path calls
+// os.Exit(1) and therefore cannot be exercised in-process (see the note above
+// TestInitAlreadyInitialized); this test covers the new success path.
+func TestInitIfMissing(t *testing.T) {
+	skipIfNoDolt(t)
+	// Reset global state
+	origDBPath := dbPath
+
+	// Cobra flag values persist across Execute() calls on the shared command
+	// tree (a sibling test may have left --force set, and our own first init
+	// sets --quiet). Normalize the flags this test depends on before each run,
+	// and restore defaults afterward so we neither inherit nor leak state.
+	resetInitFlags := func() {
+		_ = initCmd.Flags().Set("force", "false")
+		_ = initCmd.Flags().Set("reinit-local", "false")
+		_ = initCmd.Flags().Set("init-if-missing", "false")
+		_ = initCmd.Flags().Set("quiet", "false")
+		_ = initCmd.Flags().Set("prefix", "")
+	}
+	defer func() {
+		dbPath = origDBPath
+		resetInitFlags()
+	}()
+	dbPath = ""
+	resetInitFlags()
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// First init creates the workspace.
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("First init failed: %v", err)
+	}
+
+	// Re-running with --init-if-missing must be a benign no-op that exits 0:
+	// Execute() returns nil rather than the process aborting via os.Exit(1).
+	// Clear --quiet (set by the first run) so the skip message is emitted, and
+	// ensure no stale --force bypasses the already-initialized guard.
+	resetInitFlags()
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--init-if-missing"})
+	execErr := rootCmd.Execute()
+
+	w.Close()
+	os.Stderr = oldStderr
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	stderr := buf.String()
+
+	if execErr != nil {
+		t.Fatalf("init --init-if-missing on an initialized workspace should succeed, got: %v", execErr)
+	}
+	if !strings.Contains(stderr, "Skipping init: workspace already initialized") {
+		t.Errorf("expected a 'Skipping init: workspace already initialized' message on stderr, got:\n%s", stderr)
+	}
+
+	// The skip is a no-op: the existing workspace must remain in place (init
+	// returned before touching any data). We assert on the .beads directory
+	// rather than a specific backend layout so the test holds for both the
+	// embedded and server test modes.
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if info, err := os.Stat(beadsDir); err != nil || !info.IsDir() {
+		t.Fatalf("expected existing .beads workspace to remain at %s, stat err: %v", beadsDir, err)
+	}
+}
+
 func TestInitWithCustomDBPath(t *testing.T) {
 	t.Skip("BEADS_DB env var does not control Dolt store location; Dolt always uses .beads/dolt/")
 	// Save original state

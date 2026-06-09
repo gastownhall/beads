@@ -75,6 +75,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		skipAgents, _ := cmd.Flags().GetBool("skip-agents")
 		force, _ := cmd.Flags().GetBool("force")
 		reinitLocal, _ := cmd.Flags().GetBool("reinit-local")
+		initIfMissing, _ := cmd.Flags().GetBool("init-if-missing")
 		discardRemote, _ := cmd.Flags().GetBool("discard-remote")
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 		roleFlag, _ := cmd.Flags().GetString("role")
@@ -368,6 +369,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// docs/adr/0002-init-safety-invariants.md).
 		if !reinitLocal {
 			if err := checkExistingBeadsData(prefix); err != nil {
+				// --init-if-missing makes init idempotent: when the workspace
+				// is already initialized, skip and exit 0 instead of aborting.
+				if initIfMissing {
+					if !quiet {
+						fmt.Fprintln(os.Stderr, "Skipping init: workspace already initialized.")
+					}
+					return
+				}
 				FatalError("%v", err)
 			}
 		}
@@ -1641,6 +1650,7 @@ func init() {
 	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
 	initCmd.Flags().Bool("from-jsonl", false, "Import issues from configured import.path instead of git history")
+	initCmd.Flags().Bool("init-if-missing", false, "If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")
 	initCmd.Flags().String("agents-profile", "", "AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)")
