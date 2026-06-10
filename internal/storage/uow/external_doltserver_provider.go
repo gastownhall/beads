@@ -45,7 +45,9 @@ func NewExternalDoltServerUOWProvider(
 		Backend:     proxy.BackendExternal,
 		LogFilePath: serverLogFilePath,
 		External:    external,
-		IdleTimeout: defaultProxyIdleTimeout,
+		IdleTimeout: proxy.IdleTimeoutFromEnv(defaultProxyIdleTimeout),
+		PoolSize:    proxy.PoolSizeFromEnv(),
+		BackendUser: rootUser,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)

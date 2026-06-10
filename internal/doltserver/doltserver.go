@@ -237,6 +237,30 @@ func SharedDoltDir() (string, error) {
 	return dir, nil
 }
 
+// SharedProxyRootDir returns the machine-wide rootDir for the shared db-proxy
+// child (its proxy.lock / proxy.pid / proxy.log). Every proxied scope that
+// selects the shared backend points at this one rootDir, so the proxy parent's
+// spawn-or-reuse — keyed by rootDir — collapses their per-scope children into a
+// single shared db-proxy-child. Returns ~/.beads/shared-server/proxy/ (created
+// on first use). Override the location with BEADS_SHARED_PROXY_ROOT_PATH, which
+// mirrors how BEADS_SHARED_SERVER_DIR overrides SharedServerDir.
+func SharedProxyRootDir() (string, error) {
+	var dir string
+	if d := os.Getenv("BEADS_SHARED_PROXY_ROOT_PATH"); d != "" {
+		dir = d
+	} else {
+		serverDir, err := SharedServerDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(serverDir, "proxy")
+	}
+	if err := os.MkdirAll(dir, config.BeadsDirPerm); err != nil {
+		return "", fmt.Errorf("cannot create shared proxy root directory %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
 // resolveServerDir returns the canonical server directory for dolt state files.
 // In shared server mode, returns ~/.beads/shared-server/ instead of the
 // project's .beads/ directory.

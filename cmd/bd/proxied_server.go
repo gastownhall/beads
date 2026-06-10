@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
@@ -45,7 +46,29 @@ func envOrAbsJoin(envName, beadsDir string) string {
 	return filepath.Join(beadsDir, p)
 }
 
+// sharedProxyModeEnabled reports whether this scope should route through the
+// machine-wide shared db-proxy (BackendLocalSharedServer) instead of its own
+// per-scope proxieddb child. Opt-in via BEADS_SHARED_PROXY (1/true/yes/on); OFF
+// by default, so every existing proxied scope is byte-for-byte unchanged.
+func sharedProxyModeEnabled() bool {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv("BEADS_SHARED_PROXY"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func resolveProxiedServerRootPath(beadsDir string) (string, error) {
+	// Opt-in: route this scope through the machine-wide shared db-proxy so all
+	// proxied scopes collapse onto one db-proxy-child (be-pen9). This is the one
+	// rootDir chokepoint every proxied provider already routes through, so the
+	// switch lands consistently for both the routed store and the uow provider.
+	// The shared backend + external wiring that completes production shared-mode
+	// is applied by the consumer (the gascity deployment, per
+	// docs/CONNECTION_POOLING_DEPLOYMENT.md).
+	if sharedProxyModeEnabled() {
+		return doltserver.SharedProxyRootDir()
+	}
 	if p := envOrAbsJoin("BEADS_PROXIED_SERVER_ROOT_PATH", beadsDir); p != "" {
 		return p, nil
 	}

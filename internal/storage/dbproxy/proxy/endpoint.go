@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -33,7 +34,12 @@ func IsUpstreamMismatch(err error) bool {
 }
 
 func intendedUpstreamID(opts OpenOpts) string {
-	if opts.Backend == BackendExternal {
+	// The shared backend fronts the managed dolt through the same external-server
+	// mechanism, so its upstream identity is the same ExternalDoltServerID. A
+	// shared proxy pointed at a different managed dolt must be rejected by the
+	// reuse guard exactly as an external one is (see ErrUpstreamMismatch).
+	switch opts.Backend {
+	case BackendExternal, BackendLocalSharedServer:
 		return server.ExternalDoltServerID(opts.External)
 	}
 	return ""
@@ -55,6 +61,13 @@ type OpenOpts struct {
 	LogFilePath    string
 	DoltBinPath    string
 	External       configfile.ExternalDoltConfig
+	// PoolSize, when > 0, makes the spawned proxy pool backend connections
+	// (see ProxyOpts.PoolSize). BackendUser is the user the proxy uses to
+	// authenticate those pooled connections; the password, when needed, is
+	// inherited by the child via the environment (it is never passed on the
+	// command line). 0 preserves the transparent, non-pooling proxy.
+	PoolSize    int
+	BackendUser string
 }
 
 const (
@@ -64,6 +77,51 @@ const (
 )
 
 var ResolveExecutable = os.Executable
+
+// PoolSizeEnvVar is the opt-in switch for backend connection pooling. When set
+// to a positive integer, a proxy spawned by this process pools up to that many
+// warm backend connections instead of dialing one per client. Unset or 0
+// disables pooling (transparent forwarding, the historical behavior).
+const PoolSizeEnvVar = "BEADS_PROXY_POOL_SIZE"
+
+// PoolSizeFromEnv reads PoolSizeEnvVar, returning 0 (pooling disabled) when
+// unset, empty, non-numeric, or negative.
+func PoolSizeFromEnv() int {
+	v := strings.TrimSpace(os.Getenv(PoolSizeEnvVar))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// IdleTimeoutEnvVar overrides how long a pooling proxy stays alive with no
+// active client connections before it shuts down. The default (30s) is tuned
+// for a single busy workspace; an orchestrator that touches many scopes
+// sparsely (e.g. gascity probing dozens of rigs once per patrol) starves each
+// proxy below that window, so it spawns, serves one op, idle-dies, and respawns
+// on the next touch — pure churn that never reaches the warm-pool steady state
+// pooling exists to provide. Raising the timeout (e.g. "10m") keeps proxies warm
+// across sparse bursts. Accepts a Go duration string.
+const IdleTimeoutEnvVar = "BEADS_PROXY_IDLE_TIMEOUT"
+
+// IdleTimeoutFromEnv reads IdleTimeoutEnvVar, returning fallback when unset,
+// empty, or unparseable. A parsed non-positive value (e.g. "0") is returned
+// verbatim, which disables the idle timeout (proxy stays up until stopped).
+func IdleTimeoutFromEnv(fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(IdleTimeoutEnvVar))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
+}
 
 func PickFreePort() (int, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -90,7 +148,10 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 		if opts.DoltBinPath == "" {
 			return Endpoint{}, fmt.Errorf("OpenOpts.DoltBinPath is required for backend %q", opts.Backend)
 		}
-	case BackendExternal:
+	case BackendExternal, BackendLocalSharedServer:
+		// The shared backend fronts the managed dolt via the external-server
+		// mechanism, so it carries the same requirements: a log path and a
+		// valid External target (which is also its upstream identity).
 		if opts.LogFilePath == "" {
 			return Endpoint{}, fmt.Errorf("OpenOpts.LogFilePath is required for backend %q", opts.Backend)
 		}
@@ -204,19 +265,20 @@ func spawnAndHandoff(rootDir string, opts OpenOpts, deadline time.Time, lock *ut
 	}
 }
 
-func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*exec.Cmd, <-chan struct{}, error) {
-	released := false
-	defer func() {
-		if !released {
-			lock.Unlock()
-		}
-	}()
+// backendCarriesExternal reports whether the backend fronts an external dolt
+// target whose --external-* connection args must cross the fork boundary. Both
+// the external backend and the shared backend (which fronts the managed dolt
+// through the same external-server mechanism) carry them; the managed
+// local-server backend does not.
+func backendCarriesExternal(b Backend) bool {
+	return b == BackendExternal || b == BackendLocalSharedServer
+}
 
-	self, err := ResolveExecutable()
-	if err != nil {
-		return nil, nil, fmt.Errorf("locate bd executable: %w", err)
-	}
-
+// childArgs builds the db-proxy-child argv (the tokens after the executable)
+// for the given rootDir, open options, and listener port. It is pure — no I/O,
+// no side effects — so the fork contract can be unit-tested without spawning a
+// process. forkExecChild is the sole production caller.
+func childArgs(rootDir string, opts OpenOpts, port int) []string {
 	idleTimeout := opts.IdleTimeout
 	if idleTimeout < 0 {
 		idleTimeout = 0
@@ -238,7 +300,13 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 	if opts.DoltBinPath != "" {
 		args = append(args, "--dolt-bin", opts.DoltBinPath)
 	}
-	if opts.Backend == BackendExternal {
+	if opts.PoolSize > 0 {
+		args = append(args, "--pool-size", strconv.Itoa(opts.PoolSize))
+		if opts.BackendUser != "" {
+			args = append(args, "--backend-user", opts.BackendUser)
+		}
+	}
+	if backendCarriesExternal(opts.Backend) {
 		ext := opts.External
 		if ext.Host != "" {
 			args = append(args, "--external-host", ext.Host)
@@ -262,6 +330,23 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 			args = append(args, "--external-keep-alive", ext.KeepAlivePeriod.String())
 		}
 	}
+	return args
+}
+
+func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*exec.Cmd, <-chan struct{}, error) {
+	released := false
+	defer func() {
+		if !released {
+			lock.Unlock()
+		}
+	}()
+
+	self, err := ResolveExecutable()
+	if err != nil {
+		return nil, nil, fmt.Errorf("locate bd executable: %w", err)
+	}
+
+	args := childArgs(rootDir, opts, port)
 
 	logFile, err := os.OpenFile(opts.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: logFilePath is caller-derived (workspace path), not user-request input
 	if err != nil {

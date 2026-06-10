@@ -29,6 +29,8 @@ var (
 	dbProxyChildExternalTLSCertPath string
 	dbProxyChildExternalTLSKeyPath  string
 	dbProxyChildExternalKeepAlive   time.Duration
+	dbProxyChildPoolSize            int
+	dbProxyChildBackendUser         string
 )
 
 var dbProxyChildCmd = &cobra.Command{
@@ -63,11 +65,24 @@ not intended to be invoked directly by users.`,
 			return err
 		}
 
+		// Backend credentials for pooled connections. The user arrives via
+		// flag (default root); the password is read from the environment so it
+		// never appears on the command line. Only the external backend has a
+		// non-empty password; the managed loopback server uses root with no
+		// password.
+		backendPassword := ""
+		if backend == proxy.BackendExternal || backend == proxy.BackendLocalSharedServer {
+			backendPassword = os.Getenv(configfile.ExternalDoltPasswordEnvVar)
+		}
+
 		p := proxy.NewProxyServer(proxy.ProxyOpts{
-			RootDir:     dbProxyChildRoot,
-			Port:        dbProxyChildPort,
-			IdleTimeout: dbProxyChildIdleTimeout,
-			Server:      srv,
+			RootDir:         dbProxyChildRoot,
+			Port:            dbProxyChildPort,
+			IdleTimeout:     dbProxyChildIdleTimeout,
+			Server:          srv,
+			PoolSize:        dbProxyChildPoolSize,
+			BackendUser:     dbProxyChildBackendUser,
+			BackendPassword: backendPassword,
 		})
 		if err := p.ListenAndServe(cmd.Context()); err != nil {
 			if errors.Is(err, proxy.ErrLockHeld) {
@@ -83,10 +98,12 @@ func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, dolt
 	switch backend {
 	case proxy.BackendLocalServer:
 		return server.NewDoltServer(doltBin, rootDir, configPath, logPath, 0)
-	case proxy.BackendExternal:
+	case proxy.BackendExternal, proxy.BackendLocalSharedServer:
+		// The shared backend fronts the managed dolt through the same external
+		// server. The N+1 → 1 collapse comes from pointing every scope at one
+		// shared rootDir (so the parent's spawn-or-reuse yields a single child),
+		// not from a distinct server type.
 		return server.NewExternalDoltServer(external)
-	case proxy.BackendLocalSharedServer:
-		return nil, fmt.Errorf("backend %q: not yet implemented", backend)
 	}
 	return nil, fmt.Errorf("unknown backend %q", backend)
 }
@@ -107,6 +124,8 @@ func init() {
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalTLSCertPath, "external-tls-cert-path", "", "external backend: absolute path to client TLS certificate (mTLS)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalTLSKeyPath, "external-tls-key-path", "", "external backend: absolute path to client TLS private key (mTLS)")
 	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildExternalKeepAlive, "external-keep-alive", 0, "external backend: TCP keepalive period (default 30s)")
+	dbProxyChildCmd.Flags().IntVar(&dbProxyChildPoolSize, "pool-size", 0, "if >0, pool up to N warm authenticated backend connections instead of dialing one per client")
+	dbProxyChildCmd.Flags().StringVar(&dbProxyChildBackendUser, "backend-user", "root", "user the proxy authenticates pooled backend connections as")
 	_ = dbProxyChildCmd.MarkFlagRequired("root")
 	_ = dbProxyChildCmd.MarkFlagRequired("port")
 	_ = dbProxyChildCmd.MarkFlagRequired("backend")

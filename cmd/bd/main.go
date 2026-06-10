@@ -1049,6 +1049,28 @@ var rootCmd = &cobra.Command{
 			}
 			uowProvider = p
 
+			// Also route a server-mode store through the proxy so the legacy
+			// store-based commands (list/ready/stats/update/close/...) work in
+			// proxied mode instead of dereferencing a nil store. Both the uow
+			// provider and this store connect through the same proxy and share
+			// its backend connection pool. Best-effort: `bd create` uses the uow
+			// provider and does not need the store, so a routing failure here
+			// must not break the proxied-create path.
+			if s, serr := newProxiedServerRoutedStore(rootCtx, beadsDir); serr == nil {
+				store = s
+				storeMutex.Lock()
+				storeActive = true
+				storeMutex.Unlock()
+				if dbPath != "" {
+					hookRunner = hooks.NewRunner(filepath.Join(filepath.Dir(dbPath), "hooks"))
+				}
+				if hookRunner != nil && !config.GetBool("no-hooks") {
+					store = storage.NewHookFiringStore(store, hookRunner)
+				}
+			} else {
+				debug.Logf("proxied-server: routed store unavailable, store-based commands disabled: %v", serr)
+			}
+
 			syncCommandContext()
 			return
 		}

@@ -33,17 +33,41 @@ type ProxyOpts struct {
 	// against it; tests use Snapshot() to assert. Production code should
 	// leave this nil.
 	Stats *Stats
+
+	// PoolSize enables connection pooling when > 0: instead of dialing a fresh
+	// backend per client and closing it on disconnect (the transparent path),
+	// the proxy terminates each client handshake itself and lends a backend
+	// from a pool of up to PoolSize warm, already-authenticated connections,
+	// resetting and returning them on client disconnect. This collapses the
+	// per-bd-invocation connection churn that dolt pays for as setup CPU.
+	// 0 (default) preserves the original transparent forwarding behavior.
+	PoolSize int
+	// BackendUser / BackendPassword are the credentials the proxy uses to
+	// authenticate pooled backend connections to dolt. Only consulted when
+	// PoolSize > 0. For the managed loopback server this is root / empty.
+	BackendUser     string
+	BackendPassword string
+	// PoolConnMaxLifetime optionally retires pooled connections after this
+	// duration. 0 (default) keeps them indefinitely — a short lifetime would
+	// re-create the very connection churn pooling exists to eliminate.
+	PoolConnMaxLifetime time.Duration
 }
 
 type proxyServer struct {
-	rootDir     string
-	port        int
-	idleTimeout time.Duration
-	server      server.DatabaseServer
-	stats       *Stats
+	rootDir         string
+	port            int
+	idleTimeout     time.Duration
+	server          server.DatabaseServer
+	stats           *Stats
+	poolSize        int
+	backendUser     string
+	backendPassword string
+	poolLifetime    time.Duration
 
 	logger      *log.Logger
 	listener    net.Listener
+	pool        *backendPool
+	connID      atomic.Uint32
 	activeConns atomic.Int64
 	conns       errgroup.Group
 }
@@ -79,11 +103,15 @@ var errIdleTimeout = errors.New("idle timeout reached")
 
 func NewProxyServer(opts ProxyOpts) *proxyServer {
 	return &proxyServer{
-		rootDir:     opts.RootDir,
-		port:        opts.Port,
-		idleTimeout: opts.IdleTimeout,
-		server:      opts.Server,
-		stats:       opts.Stats,
+		rootDir:         opts.RootDir,
+		port:            opts.Port,
+		idleTimeout:     opts.IdleTimeout,
+		server:          opts.Server,
+		stats:           opts.Stats,
+		poolSize:        opts.PoolSize,
+		backendUser:     opts.BackendUser,
+		backendPassword: opts.BackendPassword,
+		poolLifetime:    opts.PoolConnMaxLifetime,
 	}
 }
 
@@ -163,6 +191,19 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("write pid file: %w", err)
 	}
 	defer func() { _ = pidfile.Remove(p.rootDir, PIDFileName) }()
+
+	if p.poolSize > 0 {
+		user := p.backendUser
+		if user == "" {
+			user = "root"
+		}
+		p.pool = newBackendPool(
+			func(dctx context.Context) (net.Conn, error) { return p.server.Dial(dctx) },
+			user, p.backendPassword, p.poolSize, p.poolLifetime, p.stats,
+		)
+		p.tracef("connection pooling enabled (maxIdle=%d, user=%q, lifetime=%s)", p.poolSize, user, p.poolLifetime)
+		defer p.pool.drain()
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
@@ -269,6 +310,10 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		p.tracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
 	}()
 
+	if p.pool != nil {
+		return p.handlePooledConn(ctx, client)
+	}
+
 	p.stats.IncBackendDialAttempt()
 	backend, err := p.server.Dial(ctx)
 	if err != nil {
@@ -315,6 +360,32 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		return err
 	})
 	return g.Wait()
+}
+
+// handlePooledConn serves one client connection in pooling mode: terminate the
+// client handshake, borrow a wire-compatible backend from the pool, forward the
+// command phase byte-transparently, and reset+return the backend on disconnect.
+func (p *proxyServer) handlePooledConn(ctx context.Context, client net.Conn) error {
+	defer func() { _ = client.Close() }()
+	p.stats.IncHandledConn()
+	res, err := runPooledSession(ctx, p.stats, p.pool, client, p.connID.Add(1))
+	if err != nil {
+		p.tracef("handlePooledConn(%s) session error: %v", client.RemoteAddr(), err)
+		if res.backend != nil {
+			_ = res.backend.conn.Close()
+		}
+		return err
+	}
+	if res.backend == nil {
+		return nil
+	}
+	if res.reusable {
+		p.pool.put(res.backend)
+	} else {
+		_ = res.backend.conn.Close()
+		p.stats.IncPoolRetire()
+	}
+	return nil
 }
 
 func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout time.Duration) error {

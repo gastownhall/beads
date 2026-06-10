@@ -46,14 +46,31 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 	})
 }
 
-func TestNewDatabaseServer_BackendLocalSharedServerStillStubbed(t *testing.T) {
-	_, err := newDatabaseServer(
-		proxy.BackendLocalSharedServer,
-		"/tmp/root", "/tmp/cfg", "/tmp/log", "/usr/bin/dolt",
-		configfile.ExternalDoltConfig{},
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not yet implemented")
+func TestNewDatabaseServer_SharedServer(t *testing.T) {
+	t.Run("valid external target builds an ExternalDoltServer", func(t *testing.T) {
+		srv, err := newDatabaseServer(
+			proxy.BackendLocalSharedServer,
+			"", "", "", "",
+			configfile.ExternalDoltConfig{Host: "db.internal", Port: 3306},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, srv)
+		// The shared backend fronts the managed dolt through the same
+		// external-server mechanism — the collapse comes from a shared rootDir,
+		// not a distinct server type.
+		_, ok := srv.(*server.ExternalDoltServer)
+		assert.True(t, ok, "expected *server.ExternalDoltServer, got %T", srv)
+	})
+
+	t.Run("invalid config bubbles validation error", func(t *testing.T) {
+		_, err := newDatabaseServer(
+			proxy.BackendLocalSharedServer,
+			"", "", "", "",
+			configfile.ExternalDoltConfig{},
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ExternalDoltConfig")
+	})
 }
 
 func TestNewDatabaseServer_UnknownBackendRejected(t *testing.T) {
