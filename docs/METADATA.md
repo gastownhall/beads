@@ -33,14 +33,22 @@ These keys are advisory metadata, not core issue fields. When a workflow uses
 them, they take precedence over free-form notes for execution routing. Notes
 remain useful for rationale, ownership, and exact prompts.
 
+Model and effort values are portable hints, not runtime bindings. The
+`execution_reasoning_effort` values above are a canonical advisory scale:
+writers should store canonical values rather than runtime-local ones, and a
+consumer whose runtime uses a different scale should map the stored value to
+its nearest native level instead of dropping the hint. Likewise,
+`execution_suggested_model` is a capability-tier suggestion: a consumer on a
+different provider should substitute a model of the same tier rather than
+ignore the hint.
+
 Parent/orchestrator agents must consume these keys before spawning subagents.
 Model and reasoning effort are normally fixed at launch, so reading metadata
 after delegation is too late.
 
 Do not add a first-class helper such as `bd show <id> --execution` or
-`bd plan <id> --json` yet. Keep using the JSON/JQ snippet until upstream
-issue gh-3541 determines whether schedulers or runners need these fields as a
-stable CLI surface.
+`bd plan <id> --json`. Issue gh-3541 resolved to keep execution hints as
+metadata only; the JSON/JQ snippet remains the supported access path.
 
 ## Example: Tracker Round-Trip Metadata
 
