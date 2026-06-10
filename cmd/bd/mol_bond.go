@@ -124,12 +124,19 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		vars[parts[0]] = parts[1]
 	}
 
+	// mol bond writes the spawned wisps into the same database as the target issue,
+	// so operate on the target's (possibly routed) database rather than the active
+	// store. See resolveBondStore. (GH#4220)
+	workStore, closeWorkStore := resolveBondStore(ctx, store, args[:2])
+	defer closeWorkStore()
+
+	// For dry-run, just check if operands can be resolved (don't cook)
 	if dryRun {
-		issueA, formulaA, err := resolveOrDescribe(ctx, store, args[0])
+		issueA, formulaA, err := resolveOrDescribe(ctx, workStore, args[0])
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		issueB, formulaB, err := resolveOrDescribe(ctx, store, args[1])
+		issueB, formulaB, err := resolveOrDescribe(ctx, workStore, args[1])
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -193,11 +200,14 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	subgraphA, cookedA, err := resolveOrCookToSubgraph(ctx, store, args[0], vars)
+	// Resolve both operands - can be issue IDs or formula names
+	// Formula names are cooked inline to in-memory subgraphs
+	// Pass vars for step condition filtering (bd-7zka.1)
+	subgraphA, cookedA, err := resolveOrCookToSubgraph(ctx, workStore, args[0], vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	subgraphB, cookedB, err := resolveOrCookToSubgraph(ctx, store, args[1], vars)
+	subgraphB, cookedB, err := resolveOrCookToSubgraph(ctx, workStore, args[1], vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -219,23 +229,23 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 	case aIsProto && bIsProto:
 		// Compound protos are templates - always persistent
 		// Note: Proto+proto bonding from formulas is a DB operation, not in-memory
-		result, err = bondProtoProto(ctx, store, issueA, issueB, bondType, customTitle, actor)
+		result, err = bondProtoProto(ctx, workStore, issueA, issueB, bondType, customTitle, actor)
 	case aIsProto && !bIsProto:
 		// Pass subgraph directly if cooked from formula
 		if cookedA {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
+			result, err = bondProtoMolWithSubgraph(ctx, workStore, subgraphA, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
 		} else {
-			result, err = bondProtoMol(ctx, store, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
+			result, err = bondProtoMol(ctx, workStore, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
 		}
 	case !aIsProto && bIsProto:
 		// Pass subgraph directly if cooked from formula
 		if cookedB {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, bondType, vars, childRef, actor, ephemeral, pour)
+			result, err = bondProtoMolWithSubgraph(ctx, workStore, subgraphB, issueB, issueA, bondType, vars, childRef, actor, ephemeral, pour)
 		} else {
-			result, err = bondMolProto(ctx, store, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
+			result, err = bondMolProto(ctx, workStore, issueA, issueB, bondType, vars, childRef, actor, ephemeral, pour)
 		}
 	default:
-		result, err = bondMolMol(ctx, store, issueA, issueB, bondType, actor)
+		result, err = bondMolMol(ctx, workStore, issueA, issueB, bondType, actor)
 	}
 
 	if err != nil {
@@ -628,6 +638,37 @@ func resolveOrCookToSubgraph(ctx context.Context, s storage.DoltStorage, operand
 	}
 
 	return subgraph, true, nil
+}
+
+// resolveBondStore picks the database a bond should operate on.
+//
+// `bd mol bond` spawns wisps into the same database as the target issue. When an
+// operand is an existing issue that lives in a different rig's database — e.g. when
+// invoked from the town root (or with BEADS_DOLT_DATA_DIR set) where the active store
+// is the town DB (hq) but the target lives in a rig DB — the operand resolves
+// "not found" against the active store and the bond fails. This mirrors the
+// cross-database prefix routing already used by `bd show`, `bd update`, `bd close`,
+// etc. (GH#4220)
+//
+// It returns the routed store (and its close function) for the first operand that
+// routes elsewhere, or the local store (with a no-op close) when nothing routes.
+// Formula-name operands are skipped: they are cooked into the working store, not
+// looked up across databases.
+func resolveBondStore(ctx context.Context, localStore storage.DoltStorage, operands []string) (storage.DoltStorage, func()) {
+	for _, arg := range operands {
+		if looksLikeFormulaName(arg) {
+			continue
+		}
+		res, err := resolveAndGetIssueWithRouting(ctx, localStore, arg)
+		if err != nil {
+			continue // not resolvable here; resolveOrCook will surface the real error
+		}
+		if res.Routed {
+			return res.Store, res.Close
+		}
+		res.Close()
+	}
+	return localStore, func() {}
 }
 
 // looksLikeFormulaName checks if an operand looks like a formula name.
