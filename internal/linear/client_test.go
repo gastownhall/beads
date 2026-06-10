@@ -636,8 +636,10 @@ func TestExecute_NoRetryAfterFallsBackToExponential(t *testing.T) {
 	}
 }
 
-func TestExecute_CircuitBreakerTrips(t *testing.T) {
+func TestExecute_CircuitBreakerTripsOnSubsequentRequest(t *testing.T) {
+	requestCount := 0
 	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
 		w.Header().Set("X-RateLimit-Requests-Remaining", "50")
 		w.Header().Set("X-RateLimit-Requests-Reset", "2026-06-01T00:00:00Z")
 		w.WriteHeader(http.StatusOK)
@@ -647,7 +649,15 @@ func TestExecute_CircuitBreakerTrips(t *testing.T) {
 	client := NewClient("key", "team").WithEndpoint(srv.Server.URL)
 	ctx := context.Background()
 
-	_, err := client.Execute(ctx, &GraphQLRequest{Query: "{ viewer { id } }"})
+	data, err := client.Execute(ctx, &GraphQLRequest{Query: "{ viewer { id } }"})
+	if err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if data == nil {
+		t.Fatal("first Execute returned nil data")
+	}
+
+	_, err = client.Execute(ctx, &GraphQLRequest{Query: "{ viewer { id } }"})
 	if err == nil {
 		t.Fatal("expected ErrRateLimitExhausted, got nil")
 	}
@@ -661,6 +671,9 @@ func TestExecute_CircuitBreakerTrips(t *testing.T) {
 	}
 	if rlErr.Floor != DefaultRateLimitFloor {
 		t.Errorf("Floor = %d, want %d", rlErr.Floor, DefaultRateLimitFloor)
+	}
+	if requestCount != 1 {
+		t.Errorf("requestCount = %d, want 1 (second call should trip locally)", requestCount)
 	}
 }
 

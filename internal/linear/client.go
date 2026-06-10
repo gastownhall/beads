@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/debug"
@@ -112,6 +113,16 @@ const issuesQuery = `
 	}
 `
 
+type rateLimitState struct {
+	mu        sync.RWMutex
+	remaining int
+	resetsAt  time.Time
+}
+
+func newRateLimitState() *rateLimitState {
+	return &rateLimitState{remaining: -1}
+}
+
 // NewClient creates a new Linear client with the given API key and team ID.
 func NewClient(apiKey, teamID string) *Client {
 	return &Client{
@@ -122,6 +133,7 @@ func NewClient(apiKey, teamID string) *Client {
 		HTTPClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
+		rateLimitState: newRateLimitState(),
 	}
 }
 
@@ -136,6 +148,7 @@ func NewOAuthClient(oauthConfig OAuthConfig, teamID string) *Client {
 		HTTPClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
+		rateLimitState: newRateLimitState(),
 	}
 }
 
@@ -151,6 +164,7 @@ func (c *Client) WithEndpoint(endpoint string) *Client {
 		AuthMode:       c.AuthMode,
 		TokenManager:   c.TokenManager,
 		RateLimitFloor: c.RateLimitFloor,
+		rateLimitState: c.rateLimitState,
 	}
 }
 
@@ -166,6 +180,7 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 		AuthMode:       c.AuthMode,
 		TokenManager:   c.TokenManager,
 		RateLimitFloor: c.RateLimitFloor,
+		rateLimitState: c.rateLimitState,
 	}
 }
 
@@ -181,6 +196,7 @@ func (c *Client) WithProjectID(projectID string) *Client {
 		AuthMode:       c.AuthMode,
 		TokenManager:   c.TokenManager,
 		RateLimitFloor: c.RateLimitFloor,
+		rateLimitState: c.rateLimitState,
 	}
 }
 
@@ -210,7 +226,34 @@ func (c *Client) WithRateLimitFloor(floor int) *Client {
 		AuthMode:       c.AuthMode,
 		TokenManager:   c.TokenManager,
 		RateLimitFloor: floor,
+		rateLimitState: c.rateLimitState,
 	}
+}
+
+func (c *Client) circuitBreakerError() *ErrRateLimitExhausted {
+	if c.rateLimitState == nil {
+		return nil
+	}
+	c.rateLimitState.mu.RLock()
+	defer c.rateLimitState.mu.RUnlock()
+	if c.rateLimitState.remaining < 0 || c.rateLimitState.remaining >= c.rateLimitFloor() {
+		return nil
+	}
+	return &ErrRateLimitExhausted{
+		Remaining: c.rateLimitState.remaining,
+		Floor:     c.rateLimitFloor(),
+		ResetsAt:  c.rateLimitState.resetsAt,
+	}
+}
+
+func (c *Client) recordRateLimitHeaders(info RateLimitInfo) {
+	if c.rateLimitState == nil || info.RequestsRemaining < 0 {
+		return
+	}
+	c.rateLimitState.mu.Lock()
+	c.rateLimitState.remaining = info.RequestsRemaining
+	c.rateLimitState.resetsAt = info.RequestsReset
+	c.rateLimitState.mu.Unlock()
 }
 
 // rateLimitFloor returns the effective circuit-breaker floor, using the
@@ -298,6 +341,10 @@ func (c *Client) executeOnce(ctx context.Context, req *GraphQLRequest) (json.Raw
 	var lastErr error
 	var lastStatus int
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		if rlErr := c.circuitBreakerError(); rlErr != nil {
+			return nil, lastStatus, rlErr
+		}
+
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.Endpoint, bytes.NewReader(body))
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to create request: %w", err)
@@ -325,15 +372,7 @@ func (c *Client) executeOnce(ctx context.Context, req *GraphQLRequest) (json.Raw
 
 		lastStatus = resp.StatusCode
 		rl := parseRateLimitHeaders(resp.Header)
-
-		// Circuit breaker: stop early when remaining quota is critically low.
-		if rl.RequestsRemaining >= 0 && rl.RequestsRemaining < c.rateLimitFloor() {
-			return nil, lastStatus, &ErrRateLimitExhausted{
-				Remaining: rl.RequestsRemaining,
-				Floor:     c.rateLimitFloor(),
-				ResetsAt:  rl.RequestsReset,
-			}
-		}
+		c.recordRateLimitHeaders(rl)
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			delay := rl.RetryAfter
