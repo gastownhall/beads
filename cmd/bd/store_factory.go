@@ -184,3 +184,27 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	// (bd-6dnrw.32, GH#3231).
 	return embeddeddolt.OpenReadOnly(ctx, beadsDir, database, "main")
 }
+
+// newWritableRoutedStoreFromConfig opens the target rig's storage for writing
+// without running schema migrations. Like newReadOnlyStoreFromConfig it avoids
+// mutating a foreign project's schema history (GH#3231), but write transactions
+// are permitted. Used by routed writes (bd update/comment/note/reopen) where
+// the target database already exists and must not be migrated by the source
+// rig's binary.
+func newWritableRoutedStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	cfg, err := configfile.Load(beadsDir)
+	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
+		return nil, fmt.Errorf("proxy server store needs to be uow provider")
+	}
+	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{})
+	}
+	database := configfile.DefaultDoltDatabase
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	if sanitized := sanitizeDBName(database); sanitized != database {
+		database = sanitized
+	}
+	return embeddeddolt.OpenWritable(ctx, beadsDir, database, "main")
+}

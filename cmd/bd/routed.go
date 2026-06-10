@@ -80,7 +80,7 @@ func resolveAndGetIssueWithRoutingMode(ctx context.Context, localStore storage.D
 	// This handles cross-rig lookups where the ID's prefix maps to a different
 	// database (e.g., hr-8wn.1 routes to the herald rig's database).
 	if isNotFoundErr(err) {
-		if prefixResult, prefixErr := resolveViaPrefixRoutingMode(ctx, id, forWrite); prefixErr == nil {
+		if prefixResult, prefixErr := resolveViaPrefixRouting(ctx, id, forWrite); prefixErr == nil {
 			return prefixResult, nil
 		}
 	}
@@ -150,15 +150,10 @@ type prefixRoute struct {
 // (e.g., crew/beercan → town/.beads with database "hq"), a bead ID like "hr-8wn.1"
 // can be resolved by following the "hr-" route to the herald rig's .beads directory,
 // which declares dolt_database="herald".
-func resolveViaPrefixRouting(ctx context.Context, id string) (*RoutedResult, error) {
-	return resolveViaPrefixRoutingMode(ctx, id, false)
-}
-
-// resolveViaPrefixRoutingMode is resolveViaPrefixRouting with an explicit
-// store-open mode. forWrite opens the routed target writable, behaving like
-// running the command inside that rig; false keeps the read-only open that
-// guarantees a routed read cannot mutate the target (bd-6dnrw.32).
-func resolveViaPrefixRoutingMode(ctx context.Context, id string, forWrite bool) (*RoutedResult, error) {
+//
+// forWrite must be true when the caller intends to write through the returned
+// store (bd update/comment/note/reopen). When false, the store is read-only.
+func resolveViaPrefixRouting(ctx context.Context, id string, forWrite bool) (*RoutedResult, error) {
 	// Extract prefix from the bead ID (e.g., "hr-" from "hr-8wn.1")
 	prefix := extractBeadPrefix(id)
 	if prefix == "" {
@@ -210,18 +205,19 @@ func resolveViaPrefixRoutingMode(ctx context.Context, id string, forWrite bool) 
 
 	debug.Logf("[routing] Prefix %q matched route to %s (database: %s)\n", prefix, matchedRoute.Path, targetDB)
 
-	// Open a store for the target database — read-only unless the caller
-	// declared write intent (routed writes must commit on the target head,
-	// which a read-only open refuses).
-	// We need to temporarily override BEADS_DOLT_SERVER_DATABASE so the store
-	// connects to the correct database on the shared Dolt server.
-	openStore := newReadOnlyStoreFromConfig
-	if forWrite {
-		openStore = newDoltStoreFromConfig
-	}
+	// Open the target store; use a writable handle for write operations and
+	// a read-only handle for reads. Both skip schema migrations to avoid
+	// mutating foreign history (GH#3231). We need to temporarily override
+	// BEADS_DOLT_SERVER_DATABASE so the store connects to the correct
+	// database on the shared Dolt server.
 	origDB := os.Getenv("BEADS_DOLT_SERVER_DATABASE")
 	_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", targetDB)
-	targetStore, err := openStore(ctx, targetBeadsDir)
+	var targetStore storage.DoltStorage
+	if forWrite {
+		targetStore, err = newWritableRoutedStoreFromConfig(ctx, targetBeadsDir)
+	} else {
+		targetStore, err = newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
+	}
 	// Restore the original env var
 	if origDB != "" {
 		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", origDB)
@@ -321,7 +317,7 @@ func getIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id
 
 	// If not found locally, try prefix-based routing via routes.jsonl.
 	if isNotFoundErr(err) {
-		if prefixResult, prefixErr := resolveViaPrefixRouting(ctx, id); prefixErr == nil {
+		if prefixResult, prefixErr := resolveViaPrefixRouting(ctx, id, false); prefixErr == nil {
 			return prefixResult, nil
 		}
 	}

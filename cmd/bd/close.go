@@ -613,10 +613,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			cleanup()
 			return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, err)
 		}
-		// Write-intent: a prefix-routed target opens writable so the close
-		// commits on the target head (#4141). Contributor auto-routing below
-		// stays read-only: it hydrates foreign projects that must not be mutated.
-		if r, err := resolveViaPrefixRoutingMode(ctx, id, true); err == nil {
+		if r, err := resolveViaPrefixRouting(ctx, id, true); err == nil {
 			results = append(results, r)
 			continue
 		}

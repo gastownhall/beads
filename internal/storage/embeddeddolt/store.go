@@ -165,6 +165,49 @@ func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*Embe
 	return s, nil
 }
 
+// OpenWritable opens an existing embedded database for write access without
+// running migrations. Like OpenReadOnly it skips CREATE DATABASE and schema
+// migrations to avoid mutating a foreign project's history (bd-6dnrw.32,
+// GH#3231), but write transactions are allowed. Use for routed writes (bd
+// update/comment/note/reopen targeting a sibling rig's database) where the
+// target already exists and must not be migrated by the source rig's binary.
+//
+// Does NOT use the Open cache — see OpenReadOnly for rationale.
+func OpenWritable(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	if database == "" {
+		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
+	}
+	if !validIdentifier.MatchString(database) {
+		return nil, fmt.Errorf("embeddeddolt: invalid database name: %q", database)
+	}
+	absBeadsDir, err := filepath.Abs(beadsDir)
+	if err != nil {
+		return nil, fmt.Errorf("embeddeddolt: resolving beads dir: %w", err)
+	}
+	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
+	if _, err := os.Stat(dataDir); err != nil {
+		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w", dataDir, err)
+	}
+
+	s := &EmbeddedDoltStore{
+		dataDir:  dataDir,
+		beadsDir: absBeadsDir,
+		database: database,
+		branch:   branch,
+	}
+
+	db, cleanup, err := OpenSQL(ctx, dataDir, database, branch)
+	if err != nil {
+		return nil, fmt.Errorf("embeddeddolt: open db: %w", err)
+	}
+	defer func() { _ = cleanup() }()
+	if err := schema.CheckForwardDrift(ctx, db); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
 // withConn opens a short-lived database connection configured for the store's
 // database and branch, begins an explicit SQL transaction, and passes it to
 // fn. If commit is true and fn returns nil, the transaction is committed;
