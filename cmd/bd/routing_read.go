@@ -91,9 +91,12 @@ func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage)
 	return routing.DetermineTargetRepo(routingConfig, userRole, ".")
 }
 
-// openRoutedReadStore opens the auto-routed target store for read commands.
-// Returns routed=false when reads should stay in the current store.
-func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, error) {
+// openRoutedStore opens the auto-routed target store for commands that may
+// read or write through it. Returns routed=false when the current store is the
+// target. The store is writable-no-migrate: like OpenReadOnly it skips the
+// remote-migrate gate and MigrateUp (GH#3231), but write transactions are
+// allowed so that routed writes commit to the target.
+func openRoutedStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, error) {
 	repoPath := determineAutoRoutedRepoPath(ctx, store)
 	if repoPath == "" || repoPath == "." {
 		return nil, false, nil
@@ -101,9 +104,15 @@ func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storag
 
 	targetRepoPath := routing.ExpandPath(repoPath)
 	targetBeadsDir := filepath.Join(targetRepoPath, ".beads")
-	targetStore, err := newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
+	targetStore, err := newWritableNoMigrateStoreFromConfig(ctx, targetBeadsDir)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
 	}
 	return targetStore, true, nil
+}
+
+// openRoutedReadStore is an alias for openRoutedStore kept for test
+// compatibility. New callers should use openRoutedStore directly.
+func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, error) {
+	return openRoutedStore(ctx, store)
 }

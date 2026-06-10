@@ -74,15 +74,15 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 }
 
-// newWritableRoutedStoreFromConfig opens a writable target store for routed
+// newWritableNoMigrateStoreFromConfig opens a writable target store for routed
 // writes without running schema migrations. No-CGO variant: server mode only.
-func newWritableRoutedStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+func newWritableNoMigrateStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
 		return nil, fmt.Errorf("proxy server store needs to be uow provider")
 	}
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
-		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{})
+		return dolt.NewFromConfig(ctx, beadsDir)
 	}
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
 }

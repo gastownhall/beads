@@ -185,7 +185,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			CheckReadonly("ready --claim")
 		} else {
 			// Contributor auto-routing: read from the same target repo as bd create.
-			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+			routedStore, routed, err := openRoutedStore(ctx, activeStore)
 			if err != nil {
 				FatalError("%v", err)
 			}

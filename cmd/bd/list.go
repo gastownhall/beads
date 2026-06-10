@@ -483,7 +483,7 @@ var listCmd = &cobra.Command{
 
 		activeStore := store
 		// Contributor auto-routing: read from the same target repo as bd create.
-		routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+		routedStore, routed, err := openRoutedStore(ctx, activeStore)
 		if err != nil {
 			FatalError("%v", err)
 		}

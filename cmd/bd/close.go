@@ -594,7 +594,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			return nil, fmt.Errorf("no auto-routed store available")
 		}
 		sharedRoutedTried = true
-		rs, routed, err := openRoutedReadStore(ctx, localStore)
+		rs, routed, err := openRoutedStore(ctx, localStore)
 		if err != nil {
 			return nil, err
 		}
@@ -613,7 +613,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			cleanup()
 			return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, err)
 		}
-		if r, err := resolveViaPrefixRouting(ctx, id, true); err == nil {
+		if r, err := resolveViaPrefixRouting(ctx, id); err == nil {
 			results = append(results, r)
 			continue
 		}

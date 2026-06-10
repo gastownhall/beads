@@ -64,6 +64,49 @@ var errClosed = errors.New("embeddeddolt: store is closed")
 // errReadOnly is returned when a write is attempted on a read-only store.
 var errReadOnly = errors.New("embeddeddolt: store is read-only")
 
+// RoutedSchemaBehindError is returned by OpenWritable when the target database
+// schema version is behind the binary's expected version. Writing to a
+// schema-behind target risks data corruption; the target must be upgraded first.
+type RoutedSchemaBehindError struct {
+	DBVersion     int
+	BinaryVersion int
+}
+
+func (e *RoutedSchemaBehindError) Error() string {
+	return fmt.Sprintf(
+		"embeddeddolt: cannot open routed target for writing: target schema is at v%d, this binary expects v%d"+
+			" — run 'bd doctor' or 'bd upgrade' on the target repository to apply pending migrations, then retry",
+		e.DBVersion, e.BinaryVersion)
+}
+
+// IsRoutedSchemaBehindError reports whether err is a RoutedSchemaBehindError.
+func IsRoutedSchemaBehindError(err error) bool {
+	var e *RoutedSchemaBehindError
+	return errors.As(err, &e)
+}
+
+// checkBackwardDrift returns an error if the database schema version is behind
+// the binary's expected version. Skips the check when version is 0 (fresh DB
+// that has not yet run initSchema) to avoid false positives.
+func checkBackwardDrift(ctx context.Context, db *sql.DB) error {
+	var currentVersion int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+	).Scan(&currentVersion); err != nil {
+		return nil // schema_migrations absent → fresh DB
+	}
+	if currentVersion == 0 {
+		return nil // fresh DB before initSchema — not a write hazard
+	}
+	if currentVersion < schema.LatestVersion() {
+		return &RoutedSchemaBehindError{
+			DBVersion:     currentVersion,
+			BinaryVersion: schema.LatestVersion(),
+		}
+	}
+	return nil
+}
+
 // IsClosed reports whether the store has been closed. Implements
 // storage.LifecycleManager so that callers (e.g., maybeAutoCommit) can
 // skip operations on a closed store without triggering errClosed.
@@ -165,12 +208,16 @@ func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*Embe
 	return s, nil
 }
 
-// OpenWritable opens an existing embedded database for write access without
-// running migrations. Like OpenReadOnly it skips CREATE DATABASE and schema
-// migrations to avoid mutating a foreign project's history (bd-6dnrw.32,
-// GH#3231), but write transactions are allowed. Use for routed writes (bd
-// update/comment/note/reopen targeting a sibling rig's database) where the
-// target already exists and must not be migrated by the source rig's binary.
+// OpenWritable opens an existing embedded database for writable access with no
+// auto-migration side-effects. Like OpenReadOnly it skips CREATE DATABASE, the
+// remote-migrate gate, and MigrateUp — preserving the no-foreign-migration
+// contract from GH#3231. Unlike OpenReadOnly, write transactions are allowed so
+// that routed writes (bd update/comment/note/reopen) can commit to the target.
+//
+// Forward drift (DB ahead of binary) is checked and rejected. Backward drift
+// (target schema behind binary) is also checked: writing from a binary that
+// expects columns the target does not have risks data corruption. Targets with
+// version 0 (uninitialized) skip the backward drift check.
 //
 // Does NOT use the Open cache — see OpenReadOnly for rationale.
 func OpenWritable(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
@@ -202,6 +249,9 @@ func OpenWritable(ctx context.Context, beadsDir, database, branch string) (*Embe
 	}
 	defer func() { _ = cleanup() }()
 	if err := schema.CheckForwardDrift(ctx, db); err != nil {
+		return nil, err
+	}
+	if err := checkBackwardDrift(ctx, db); err != nil {
 		return nil, err
 	}
 
