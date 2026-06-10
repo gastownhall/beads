@@ -573,7 +573,6 @@ func runDiagnostics(path string) doctorResult {
 	skewCheck := convertWithCategory(doctor.CheckMigrationContentSkew(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, skewCheck)
 
-
 	// Dolt health checks (connection, schema, issue count, status).
 	for _, dc := range doctor.RunDoltHealthChecks(path) {
 		result.Checks = append(result.Checks, convertDoctorCheck(dc))
