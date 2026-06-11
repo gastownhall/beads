@@ -22,6 +22,8 @@ bd export -o ~/beads-issues-$(date +%Y%m%d).jsonl
 
 `bd export` is not a complete restorable database backup. It does not preserve
 Dolt branches, commit history, working-set state, or non-issue tables.
+Attachment bytes are also outside the Dolt database and JSONL export; copy
+`.beads/attachments` separately if you need to keep attached files.
 
 ## Repository Reset
 

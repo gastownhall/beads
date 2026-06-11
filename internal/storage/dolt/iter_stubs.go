@@ -27,6 +27,18 @@ func (s *DoltStore) IterIssueComments(ctx context.Context, issueID string) (stor
 	return storage.NewSliceIter(cs), nil
 }
 
+// IterAttachments streams attachment metadata on an issue.
+//
+// TODO(be-yinl4d-iter): replace slice-then-walk with a fully streaming
+// implementation.
+func (s *DoltStore) IterAttachments(ctx context.Context, issueID string) (storage.Iter[types.Attachment], error) {
+	as, err := s.ListAttachments(ctx, issueID)
+	if err != nil {
+		return nil, err
+	}
+	return storage.NewSliceIter(as), nil
+}
+
 // IterEvents streams the audit-trail events for an issue.
 //
 // TODO(be-yinl4d-iter): replace with a fully streaming implementation.

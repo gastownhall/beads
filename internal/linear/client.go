@@ -90,20 +90,32 @@ const issuesQuery = `
 					progress
 					targetDate
 				}
-				relations {
-					nodes {
-						id
-						type
-						relatedIssue {
+					relations {
+						nodes {
 							id
-							identifier
+							type
+							relatedIssue {
+								id
+								identifier
+							}
 						}
 					}
+					attachments {
+						nodes {
+							id
+							title
+							subtitle
+							url
+							iconUrl
+							metadata
+							createdAt
+							updatedAt
+						}
+					}
+					createdAt
+					updatedAt
+					completedAt
 				}
-				createdAt
-				updatedAt
-				completedAt
-			}
 			pageInfo {
 				hasNextPage
 				endCursor
@@ -1122,13 +1134,25 @@ func (c *Client) FetchIssueByIdentifier(ctx context.Context, identifier string) 
 							name
 						}
 					}
-					parent {
-						id
-						identifier
-					}
-					projectMilestone {
-						id
-						name
+						parent {
+							id
+							identifier
+						}
+						attachments {
+							nodes {
+								id
+								title
+								subtitle
+								url
+								iconUrl
+								metadata
+								createdAt
+								updatedAt
+							}
+						}
+						projectMilestone {
+							id
+							name
 						description
 						progress
 						targetDate

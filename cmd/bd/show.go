@@ -156,6 +156,9 @@ var showCmd = &cobra.Command{
 				details.DependencyCount = &depnCount
 				cmtCount, _ := issueStore.CountIssueComments(ctx, issue.ID)
 				details.CommentCount = &cmtCount
+				attCount, _ := issueStore.CountAttachments(ctx, issue.ID)
+				details.AttachmentCount = &attCount
+				details.Attachments, _ = issueStore.ListAttachments(ctx, issue.ID)
 
 				// --include-dependents: stream via Iter, shallow-copy each item.
 				// May be slow on hub beads with many dependents.
@@ -268,6 +271,23 @@ var showCmd = &cobra.Command{
 			labels, _ := issueStore.GetLabels(ctx, issue.ID) // Best effort: show issue even if label fetch fails
 			if len(labels) > 0 {
 				fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(labels, ", "))
+			}
+
+			attachments, _ := issueStore.ListAttachments(ctx, issue.ID) // Best effort: show issue even if attachments unavailable
+			if len(attachments) > 0 {
+				fmt.Printf("\n%s\n", ui.RenderBold("ATTACHMENTS"))
+				for _, item := range attachmentListEntries(issueStore, attachments) {
+					missing := ""
+					if item.Missing {
+						missing = " " + ui.RenderMuted("(missing)")
+					}
+					fmt.Printf("  %s  %s  %s  %s%s\n",
+						item.ShortHash,
+						item.OriginalFilename,
+						item.MimeType,
+						item.Size,
+						missing)
+				}
 			}
 
 			// Show custom metadata (GH#1406)

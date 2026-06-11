@@ -9,7 +9,7 @@ sidebar_position: 0
 <!-- AUTO-GENERATED: do not edit manually -->
 Reference for bd v1.0.0. Generated from `bd help --list` and `bd help --doc <command>`.
 
-This reference covers all 106 live top-level `bd` commands. Regenerate it with:
+This reference covers all 107 live top-level `bd` commands. Regenerate it with:
 
 ```bash
 ./scripts/generate-cli-docs.sh
@@ -20,6 +20,7 @@ This reference covers all 106 live top-level `bd` commands. Regenerate it with:
 - [`bd admin`](./admin.md)
 - [`bd ado`](./ado.md)
 - [`bd assign`](./assign.md)
+- [`bd attachment`](./attachment.md)
 - [`bd audit`](./audit.md)
 - [`bd backup`](./backup.md)
 - [`bd batch`](./batch.md)

@@ -757,6 +757,7 @@ type IssueDetails struct {
 	Dependencies []*IssueWithDependencyMetadata `json:"dependencies,omitempty"`
 	Dependents   []*IssueWithDependencyMetadata `json:"dependents,omitempty"`
 	Comments     []*Comment                     `json:"comments,omitempty"`
+	Attachments  []*Attachment                  `json:"attachments,omitempty"`
 	Parent       *string                        `json:"parent,omitempty"`
 
 	// Cardinality fields — emitted by default (count-only mode).
@@ -765,6 +766,7 @@ type IssueDetails struct {
 	DependentCount  *int64 `json:"dependent_count,omitempty"`
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
+	AttachmentCount *int64 `json:"attachment_count,omitempty"`
 
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
@@ -949,6 +951,24 @@ type Comment struct {
 	Author    string    `json:"author"`
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// Attachment describes a file associated with an issue.
+//
+// The bytes are stored outside this metadata row. StorageRelPath records the
+// path relative to the bead store root so filesystem code can locate the
+// object without coupling SQL storage to the byte-store implementation.
+type Attachment struct {
+	ID               string    `json:"id"`
+	IssueID          string    `json:"issue_id"`
+	HashAlgorithm    string    `json:"hash_algorithm"`
+	ContentHash      string    `json:"content_hash"`
+	OriginalFilename string    `json:"original_filename"`
+	MimeType         string    `json:"mime_type"`
+	ByteSize         int64     `json:"byte_size"`
+	StorageRelPath   string    `json:"storage_relpath"`
+	CreatedBy        string    `json:"created_by"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // UnmarshalJSON handles backward compatibility for Comment.

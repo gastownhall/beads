@@ -132,6 +132,7 @@ type Issue struct {
 	ProjectMilestone *ProjectMilestone `json:"projectMilestone,omitempty"`
 	Parent           *Parent           `json:"parent,omitempty"`
 	Relations        *Relations        `json:"relations,omitempty"`
+	Attachments      *Attachments      `json:"attachments,omitempty"`
 	CreatedAt        string            `json:"createdAt"`
 	UpdatedAt        string            `json:"updatedAt"`
 	CompletedAt      string            `json:"completedAt,omitempty"`
@@ -184,6 +185,25 @@ type Relations struct {
 	Nodes []Relation `json:"nodes"`
 }
 
+// Attachment represents a Linear issue attachment. Linear attachments are URL
+// cards, not binary rows; file bytes must be uploaded separately and then linked
+// via the URL field.
+type Attachment struct {
+	ID        string                 `json:"id"`
+	Title     string                 `json:"title"`
+	Subtitle  string                 `json:"subtitle"`
+	URL       string                 `json:"url"`
+	IconURL   string                 `json:"iconUrl"`
+	Metadata  map[string]interface{} `json:"metadata"`
+	CreatedAt string                 `json:"createdAt"`
+	UpdatedAt string                 `json:"updatedAt"`
+}
+
+// Attachments wraps the nodes array for issue attachments.
+type Attachments struct {
+	Nodes []Attachment `json:"nodes"`
+}
+
 // TeamStates represents workflow states for a team.
 type TeamStates struct {
 	ID     string         `json:"id"`
@@ -220,6 +240,42 @@ type IssueUpdateResponse struct {
 		Success bool  `json:"success"`
 		Issue   Issue `json:"issue"`
 	} `json:"issueUpdate"`
+}
+
+// AttachmentCreateResponse represents the response from attachmentCreate.
+type AttachmentCreateResponse struct {
+	AttachmentCreate struct {
+		Success    bool       `json:"success"`
+		Attachment Attachment `json:"attachment"`
+	} `json:"attachmentCreate"`
+}
+
+// AttachmentsForURLResponse represents the response from attachmentsForURL.
+type AttachmentsForURLResponse struct {
+	AttachmentsForURL struct {
+		Nodes []Attachment `json:"nodes"`
+	} `json:"attachmentsForURL"`
+}
+
+// FileUploadResponse represents Linear's fileUpload mutation response.
+type FileUploadResponse struct {
+	FileUpload struct {
+		Success    bool       `json:"success"`
+		UploadFile UploadFile `json:"uploadFile"`
+	} `json:"fileUpload"`
+}
+
+// UploadFile contains the pre-signed PUT target and final private asset URL.
+type UploadFile struct {
+	UploadURL string         `json:"uploadUrl"`
+	AssetURL  string         `json:"assetUrl"`
+	Headers   []UploadHeader `json:"headers"`
+}
+
+// UploadHeader is one header Linear requires callers to copy onto the signed PUT.
+type UploadHeader struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 // TeamResponse represents the response from team query.

@@ -113,19 +113,26 @@ Team Selection:
   Push requires explicit --team when multiple teams are configured.
 
 Pull Options:
-  --milestones       Reconstruct Linear project milestones as local epic parents
+  --milestones            Reconstruct Linear project milestones as local epic parents
+  --pull-attachments      Import Linear issue attachment metadata
+  --download-attachments  Download linked attachment URLs into .beads/attachments
 
 Type Filtering (--push only):
-  --type task,feature       Only sync issues of these types
-  --exclude-type wisp       Exclude issues of these types
-  --include-ephemeral       Include ephemeral issues (wisps, etc.); default is to exclude
-  --parent TICKET           Only push this ticket and its descendants
-  --relations               Import Linear relations as bd dependencies on pull
+  --type task,feature     Only sync issues of these types
+  --exclude-type wisp     Exclude issues of these types
+  --include-ephemeral     Include ephemeral issues (wisps, etc.); default is to exclude
+  --parent TICKET         Only push this ticket and its descendants
+  --push-attachments      Upload local attachment bytes to Linear private file storage
+  --relations             Import Linear relations as bd dependencies on pull
 
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
-  --prefer-local    Always prefer local beads version
-  --prefer-linear   Always prefer Linear version
+  --prefer-local          Always prefer local beads version
+  --prefer-linear         Always prefer Linear version
+
+Attachment sync is opt-in. --push-attachments uploads local files to Linear's
+private cloud storage and links the returned asset URL as a Linear issue attachment.
+Accessing those files outside Linear requires Linear authentication.
 
 Examples:
   bd linear sync --pull                         # Import from Linear
@@ -176,6 +183,9 @@ func init() {
 	linearSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
 	linearSyncCmd.Flags().Bool("update-refs", true, "Update external_ref after creating Linear issues")
 	linearSyncCmd.Flags().Bool("milestones", false, "Reconstruct Linear project milestones as local epic parents when pulling")
+	linearSyncCmd.Flags().Bool("pull-attachments", false, "Import Linear issue attachment metadata (opt-in)")
+	linearSyncCmd.Flags().Bool("download-attachments", false, "Download Linear attachment URL bytes into .beads/attachments (implies --pull-attachments)")
+	linearSyncCmd.Flags().Bool("push-attachments", false, "Upload local attachment bytes to Linear private file storage (opt-in third-party transfer)")
 	linearSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
 	linearSyncCmd.Flags().StringSlice("type", nil, "Only sync issues of these types (can be repeated)")
 	linearSyncCmd.Flags().StringSlice("exclude-type", nil, "Exclude issues of these types (can be repeated)")
@@ -211,6 +221,9 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	pullIfStale, _ := cmd.Flags().GetBool("pull-if-stale")
 	threshold, _ := cmd.Flags().GetDuration("threshold")
 	noWait, _ := cmd.Flags().GetBool("no-wait")
+	pullAttachments, _ := cmd.Flags().GetBool("pull-attachments")
+	downloadAttachments, _ := cmd.Flags().GetBool("download-attachments")
+	pushAttachments, _ := cmd.Flags().GetBool("push-attachments")
 
 	// Handle --pull-if-stale: skip pull if data is fresh
 	if pullIfStale {
@@ -332,11 +345,14 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 
 	// Build sync options from CLI flags
 	opts := tracker.SyncOptions{
-		Pull:       pull,
-		Push:       push,
-		DryRun:     dryRun,
-		CreateOnly: createOnly,
-		State:      state,
+		Pull:                pull,
+		Push:                push,
+		DryRun:              dryRun,
+		CreateOnly:          createOnly,
+		State:               state,
+		PullAttachments:     pullAttachments,
+		DownloadAttachments: downloadAttachments,
+		PushAttachments:     pushAttachments,
 	}
 	opts.DependencySources = linearPullDependencySources(relations)
 

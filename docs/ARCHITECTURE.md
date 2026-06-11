@@ -288,6 +288,7 @@ orchestration, or team-specific data before adding new first-class fields; see
 ```
 .beads/
 ├── dolt/             # Dolt database, sql-server.pid, sql-server.log (gitignored)
+├── attachments/      # Local attachment bytes; metadata lives in Dolt
 ├── metadata.json     # Backend config (local, gitignored)
 └── config.yaml       # Project config (optional)
 ```

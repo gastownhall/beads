@@ -112,6 +112,15 @@ func (s *EmbeddedDoltStore) CountIssueComments(ctx context.Context, issueID stri
 	return n, err
 }
 
+func (s *EmbeddedDoltStore) CountAttachments(ctx context.Context, issueID string) (int64, error) {
+	var n int64
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT count(*) FROM attachments WHERE issue_id = ?`, issueID).Scan(&n)
+	})
+	return n, err
+}
+
 func (s *EmbeddedDoltStore) CountEvents(ctx context.Context, issueID string, limit int) (int64, error) {
 	var n int64
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {

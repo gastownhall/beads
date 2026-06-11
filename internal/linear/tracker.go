@@ -2,6 +2,7 @@ package linear
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 )
 
 var _ tracker.BatchPushTracker = (*Tracker)(nil)
+var _ tracker.AttachmentSyncTracker = (*Tracker)(nil)
 
 func init() {
 	tracker.Register("linear", func() tracker.IssueTracker {
@@ -527,6 +529,89 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 	return fmt.Sprintf("https://linear.app/issue/%s", issue.Identifier)
 }
 
+func (t *Tracker) AttachmentSettings(context.Context) (*tracker.AttachmentSettings, error) {
+	// Linear does not expose an instance attachment toggle or upload limit through
+	// the public GraphQL API. Uploads remain opt-in at the bd CLI/sync layer.
+	return &tracker.AttachmentSettings{Enabled: true}, nil
+}
+
+func (t *Tracker) FetchIssueAttachments(ctx context.Context, issue *tracker.TrackerIssue) ([]tracker.TrackerAttachment, error) {
+	if issue == nil {
+		return nil, nil
+	}
+	if len(issue.Attachments) > 0 {
+		return append([]tracker.TrackerAttachment(nil), issue.Attachments...), nil
+	}
+	client := t.clientForExternalID(ctx, issue.Identifier)
+	if client == nil {
+		return nil, fmt.Errorf("cannot determine Linear team for issue %s", issue.Identifier)
+	}
+	li, err := client.FetchIssueByIdentifier(ctx, issue.Identifier)
+	if err != nil {
+		return nil, err
+	}
+	if li == nil {
+		return nil, nil
+	}
+	return linearAttachmentsToTracker(li.Attachments), nil
+}
+
+func (t *Tracker) DownloadAttachment(ctx context.Context, attachment tracker.TrackerAttachment) ([]byte, error) {
+	if strings.TrimSpace(attachment.ContentURL) == "" {
+		return nil, fmt.Errorf("linear attachment %s has no URL to download", attachment.ID)
+	}
+	client := t.primaryClient()
+	if client == nil {
+		return nil, fmt.Errorf("no Linear client available")
+	}
+	return client.DownloadFile(ctx, attachment.ContentURL)
+}
+
+func (t *Tracker) UploadAttachment(ctx context.Context, externalIssueID string, attachment *types.Attachment, content []byte) (*tracker.TrackerAttachment, error) {
+	if attachment == nil {
+		return nil, fmt.Errorf("attachment is nil")
+	}
+	client := t.clientForExternalID(ctx, externalIssueID)
+	if client == nil {
+		return nil, fmt.Errorf("cannot determine Linear team for issue %s", externalIssueID)
+	}
+	li, err := client.FetchIssueByIdentifier(ctx, externalIssueID)
+	if err != nil {
+		return nil, err
+	}
+	if li == nil {
+		return nil, fmt.Errorf("Linear issue %s not found", externalIssueID)
+	}
+	assetURL, err := client.UploadFileToLinear(ctx, attachment.MimeType, attachment.OriginalFilename, content)
+	if err != nil {
+		return nil, err
+	}
+	metadata := map[string]interface{}{
+		"source":         "beads",
+		"beads_issue_id": attachment.IssueID,
+		"filename":       attachment.OriginalFilename,
+		"mime_type":      attachment.MimeType,
+		"byte_size":      attachment.ByteSize,
+		"hash_algorithm": attachment.HashAlgorithm,
+		"content_hash":   attachment.ContentHash,
+	}
+	created, err := client.CreateAttachment(ctx, li.ID, attachment.OriginalFilename, attachment.MimeType, assetURL, metadata)
+	if err != nil {
+		return nil, err
+	}
+	mapped := linearAttachmentToTracker(*created)
+	if mapped.Filename == "" {
+		mapped.Filename = attachment.OriginalFilename
+	}
+	if mapped.ByteSize == 0 {
+		mapped.ByteSize = attachment.ByteSize
+	}
+	if mapped.MimeType == "" {
+		mapped.MimeType = attachment.MimeType
+	}
+	return &mapped, nil
+}
+
 // ValidatePushStateMappings ensures push has explicit, non-ambiguous status
 // mappings for every configured team before any mutation occurs.
 func (t *Tracker) ValidatePushStateMappings(ctx context.Context) error {
@@ -679,6 +764,7 @@ func linearToTrackerIssue(li *Issue) tracker.TrackerIssue {
 			},
 		}
 	}
+	ti.Attachments = linearAttachmentsToTracker(li.Attachments)
 
 	if t, err := time.Parse(time.RFC3339, li.CreatedAt); err == nil {
 		ti.CreatedAt = t
@@ -693,6 +779,66 @@ func linearToTrackerIssue(li *Issue) tracker.TrackerIssue {
 	}
 
 	return ti
+}
+
+func linearAttachmentsToTracker(attachments *Attachments) []tracker.TrackerAttachment {
+	if attachments == nil || len(attachments.Nodes) == 0 {
+		return nil
+	}
+	out := make([]tracker.TrackerAttachment, 0, len(attachments.Nodes))
+	for _, attachment := range attachments.Nodes {
+		out = append(out, linearAttachmentToTracker(attachment))
+	}
+	return out
+}
+
+func linearAttachmentToTracker(attachment Attachment) tracker.TrackerAttachment {
+	remote := tracker.TrackerAttachment{
+		ID:         attachment.ID,
+		Filename:   attachment.Title,
+		ContentURL: attachment.URL,
+		Metadata: map[string]interface{}{
+			"linear_url": attachment.URL,
+		},
+	}
+	if attachment.IconURL != "" {
+		remote.ThumbnailURL = attachment.IconURL
+	}
+	if attachment.Metadata != nil {
+		for key, value := range attachment.Metadata {
+			remote.Metadata[key] = value
+		}
+		if filename, ok := attachment.Metadata["filename"].(string); ok && filename != "" {
+			remote.Filename = filename
+		}
+		if mimeType, ok := attachment.Metadata["mime_type"].(string); ok {
+			remote.MimeType = mimeType
+		}
+		remote.ByteSize = metadataInt64(attachment.Metadata["byte_size"])
+	}
+	if remote.Filename == "" {
+		remote.Filename = attachment.URL
+	}
+	if created, err := time.Parse(time.RFC3339, attachment.CreatedAt); err == nil {
+		remote.CreatedAt = created
+	}
+	return remote
+}
+
+func metadataInt64(value interface{}) int64 {
+	switch v := value.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return n
+	default:
+		return 0
+	}
 }
 
 // BuildStateCacheFromTracker builds a StateCache using the tracker's primary client.

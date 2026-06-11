@@ -38,6 +38,7 @@ type IssueFields struct {
 	Created     string           `json:"created"`
 	Updated     string           `json:"updated"`
 	Resolution  *ResolutionField `json:"resolution"`
+	Attachments []Attachment     `json:"attachment"`
 }
 
 // StatusField represents a Jira issue status.
@@ -160,7 +161,7 @@ func (c *Client) FetchIssueTimestamp(ctx context.Context, jiraKey string) (time.
 }
 
 // searchFields is the default set of fields to request in search/get queries.
-const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution"
+const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution,attachment"
 
 // SearchIssues queries Jira using JQL and returns all matching issues, handling pagination.
 func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) {
