@@ -46,9 +46,13 @@ var jiraSyncCmd = &cobra.Command{
 	Long: `Synchronize issues between beads and Jira.
 
 Modes:
-  --pull         Import issues from Jira into beads
-  --push         Export issues from beads to Jira
-  (no flags)     Bidirectional sync: pull then push, with conflict resolution
+	  --pull         Import issues from Jira into beads
+	  --push         Export issues from beads to Jira
+	  (no flags)     Bidirectional sync: pull then push, with conflict resolution
+
+	Attachment sync is opt-in. --download-attachments copies remote Jira files into
+	the local .beads/attachments store. --push-attachments uploads local attachment
+	bytes to Jira, a third-party service.
 
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
@@ -81,6 +85,9 @@ func init() {
 	jiraSyncCmd.Flags().Bool("prefer-local", false, "Prefer local version on conflicts")
 	jiraSyncCmd.Flags().Bool("prefer-jira", false, "Prefer Jira version on conflicts")
 	jiraSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
+	jiraSyncCmd.Flags().Bool("pull-attachments", false, "Import Jira attachment metadata (opt-in)")
+	jiraSyncCmd.Flags().Bool("download-attachments", false, "Download Jira attachment bytes into .beads/attachments (implies --pull-attachments)")
+	jiraSyncCmd.Flags().Bool("push-attachments", false, "Upload local attachment bytes to Jira (opt-in third-party transfer)")
 	jiraSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
 	jiraSyncCmd.Flags().StringSlice("project", nil, "Project key(s) to sync (overrides configured project/projects)")
 	registerSelectiveSyncFlags(jiraSyncCmd)
@@ -97,6 +104,9 @@ func runJiraSync(cmd *cobra.Command, args []string) {
 	preferLocal, _ := cmd.Flags().GetBool("prefer-local")
 	preferJira, _ := cmd.Flags().GetBool("prefer-jira")
 	createOnly, _ := cmd.Flags().GetBool("create-only")
+	pullAttachments, _ := cmd.Flags().GetBool("pull-attachments")
+	downloadAttachments, _ := cmd.Flags().GetBool("download-attachments")
+	pushAttachments, _ := cmd.Flags().GetBool("push-attachments")
 	state, _ := cmd.Flags().GetString("state")
 
 	if !dryRun {
@@ -137,11 +147,14 @@ func runJiraSync(cmd *cobra.Command, args []string) {
 
 	// Build sync options from CLI flags
 	opts := tracker.SyncOptions{
-		Pull:       pull,
-		Push:       push,
-		DryRun:     dryRun,
-		CreateOnly: createOnly,
-		State:      state,
+		Pull:                pull,
+		Push:                push,
+		DryRun:              dryRun,
+		CreateOnly:          createOnly,
+		State:               state,
+		PullAttachments:     pullAttachments,
+		DownloadAttachments: downloadAttachments,
+		PushAttachments:     pushAttachments,
 	}
 
 	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {

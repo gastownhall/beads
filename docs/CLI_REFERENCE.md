@@ -7,6 +7,13 @@ Reference for bd Latest. Generated from `bd help --all`.
 ### Working With Issues:
 
 - [bd assign](#bd-assign) — Assign an issue to someone
+- [bd attachment](#bd-attachment) — Manage issue file attachments
+  - [bd attachment add](#bd-attachment-add) — Attach a file to an issue
+  - [bd attachment copy](#bd-attachment-copy) — Copy an attachment out to a file or directory
+  - [bd attachment fsck](#bd-attachment-fsck) — Find unreachable attachment files
+  - [bd attachment list](#bd-attachment-list) — List attachments for an issue
+  - [bd attachment prune](#bd-attachment-prune) — Remove unreachable attachment files
+  - [bd attachment remove](#bd-attachment-remove) — Remove an attachment from an issue
 - [bd children](#bd-children) — List child beads of a parent
 - [bd close](#bd-close) — Close one or more issues
 - [bd comment](#bd-comment) — Add a comment to an issue
@@ -322,6 +329,78 @@ Examples:
 ```
 bd assign <id> <name>
 ```
+
+### bd attachment
+
+Manage issue file attachments
+
+```
+bd attachment
+```
+
+**Aliases:** attachments
+
+#### bd attachment add
+
+Attach a file to an issue
+
+```
+bd attachment add [issue-id] [path]
+```
+
+#### bd attachment copy
+
+Copy an attachment out to a file or directory
+
+```
+bd attachment copy [issue-id] [filename-or-hash] [target] [flags]
+```
+
+**Flags:**
+
+```
+  -f, --force   Overwrite the target file if it exists
+```
+
+#### bd attachment fsck
+
+Find unreachable attachment files
+
+```
+bd attachment fsck
+```
+
+#### bd attachment list
+
+List attachments for an issue
+
+```
+bd attachment list [issue-id]
+```
+
+#### bd attachment prune
+
+Remove unreachable attachment files
+
+```
+bd attachment prune [flags]
+```
+
+**Flags:**
+
+```
+  -n, --dry-run   Show unreachable files without removing them
+```
+
+#### bd attachment remove
+
+Remove an attachment from an issue
+
+```
+bd attachment remove [issue-id] [filename-or-hash]
+```
+
+**Aliases:** rm
 
 ### bd children
 
@@ -2306,7 +2385,9 @@ bd backup status
 Sync the current beads database to the configured Dolt backup destination.
 
 This pushes the entire database state (all branches, full history) to the
-backup location configured with 'bd backup init'.
+backup location configured with 'bd backup init'. Attachment metadata is part
+of the database, but attachment bytes under .beads/attachments are local files
+and need a separate filesystem backup.
 
 The backup is atomic — if the sync fails, the previous backup state is preserved.
 

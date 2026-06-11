@@ -705,6 +705,16 @@ func (s *configStore) AddIssueComment(_ context.Context, _, _, _ string) (*types
 func (s *configStore) GetIssueComments(_ context.Context, _ string) ([]*types.Comment, error) {
 	return nil, nil
 }
+func (s *configStore) AddAttachment(_ context.Context, _ *types.Attachment) (*types.Attachment, error) {
+	return nil, nil
+}
+func (s *configStore) ListAttachments(_ context.Context, _ string) ([]*types.Attachment, error) {
+	return nil, nil
+}
+func (s *configStore) ResolveAttachment(_ context.Context, _, _ string) (*types.Attachment, error) {
+	return nil, nil
+}
+func (s *configStore) RemoveAttachment(_ context.Context, _, _ string) error { return nil }
 func (s *configStore) GetEvents(_ context.Context, _ string, _ int) ([]*types.Event, error) {
 	return nil, nil
 }
@@ -745,6 +755,9 @@ func (s *configStore) CountDependencies(_ context.Context, _ string) (int64, err
 func (s *configStore) CountIssueComments(_ context.Context, _ string) (int64, error) {
 	return 0, nil
 }
+func (s *configStore) CountAttachments(_ context.Context, _ string) (int64, error) {
+	return 0, nil
+}
 func (s *configStore) CountEvents(_ context.Context, _ string, _ int) (int64, error) {
 	return 0, nil
 }
@@ -760,6 +773,9 @@ func (s *configStore) IterDependenciesWithMetadata(_ context.Context, _ string) 
 }
 func (s *configStore) IterIssueComments(_ context.Context, _ string) (storage.Iter[types.Comment], error) {
 	return storage.NewSliceIter[types.Comment](nil), nil
+}
+func (s *configStore) IterAttachments(_ context.Context, _ string) (storage.Iter[types.Attachment], error) {
+	return storage.NewSliceIter[types.Attachment](nil), nil
 }
 func (s *configStore) IterEvents(_ context.Context, _ string, _ int) (storage.Iter[types.Event], error) {
 	return storage.NewSliceIter[types.Event](nil), nil

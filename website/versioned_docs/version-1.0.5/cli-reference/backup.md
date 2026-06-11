@@ -107,7 +107,9 @@ bd backup status
 Sync the current beads database to the configured Dolt backup destination.
 
 This pushes the entire database state (all branches, full history) to the
-backup location configured with 'bd backup init'.
+backup location configured with 'bd backup init'. Attachment metadata is part
+of the database, but attachment bytes under .beads/attachments are local files
+and need a separate filesystem backup.
 
 The backup is atomic — if the sync fails, the previous backup state is preserved.
 

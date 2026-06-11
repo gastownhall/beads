@@ -125,6 +125,11 @@ named `origin` automatically. Cross-machine sync uses `bd dolt push` and
 for viewers and interchange, not the source of truth or a full database
 backup.
 
+Attachment metadata syncs with the Dolt database, but attachment bytes are
+plain local files under `.beads/attachments`. See
+[docs/ATTACHMENTS.md](docs/ATTACHMENTS.md) before relying on sync or backup for
+attached files.
+
 ### Server Mode
 
 ```bash
@@ -171,6 +176,8 @@ migration instructions.
 for review, migration, and interoperability, but they do not capture Dolt
 branches, commit history, working-set state, or non-issue tables. Use
 `bd backup` or a manual Dolt backup when you need a restorable database backup.
+Attachment bytes under `.beads/attachments` are outside the Dolt database and
+need a separate filesystem backup.
 
 ## 🌐 Community Tools
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/steveyegge/beads/internal/attachments"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -141,6 +143,9 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		opts.Pull = true
 		opts.Push = true
 	}
+	if opts.DownloadAttachments {
+		opts.PullAttachments = true
+	}
 
 	// Track IDs to skip/force during push based on conflict resolution
 	skipPushIDs := make(map[string]bool)
@@ -175,6 +180,9 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Updated += pullStats.Updated
 		result.Stats.Skipped += pullStats.Skipped
 		result.Stats.Errors += pullStats.Errors
+		result.Stats.AttachmentsPulled += pullStats.AttachmentsPulled
+		result.Stats.AttachmentsDownloaded += pullStats.AttachmentsDownloaded
+		result.Stats.AttachmentsSkipped += pullStats.AttachmentsSkipped
 	}
 
 	// Phase 3: Push
@@ -193,6 +201,8 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.Stats.Updated += pushStats.Updated
 		result.Stats.Skipped += pushStats.Skipped
 		result.Stats.Errors += pushStats.Errors
+		result.Stats.AttachmentsPushed += pushStats.AttachmentsPushed
+		result.Stats.AttachmentsSkipped += pushStats.AttachmentsSkipped
 		result.Warnings = append(result.Warnings, pushStats.Warnings...)
 	}
 
@@ -474,6 +484,15 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+			if opts.PullAttachments {
+				attachmentStats := e.syncPullAttachments(ctx, existing.ID, &extIssue, opts)
+				stats.AttachmentsPulled += attachmentStats.pulled
+				stats.AttachmentsDownloaded += attachmentStats.downloaded
+				stats.AttachmentsSkipped += attachmentStats.skipped
+				if attachmentStats.errors > 0 {
+					stats.Errors += attachmentStats.errors
+				}
+			}
 			stats.Skipped++
 			continue
 		}
@@ -491,7 +510,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 		if existing != nil {
 			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
-			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
+			metadata := extIssue.Metadata
+			if opts.PullAttachments {
+				metadata = metadataWithTrackerAttachments(metadata, extIssue.Attachments)
+			}
+			if raw, ok := marshalTrackerMetadata(metadata); ok {
 				updates["metadata"] = raw
 			}
 
@@ -505,10 +528,23 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
+			if opts.PullAttachments {
+				attachmentStats := e.syncPullAttachments(ctx, existing.ID, &extIssue, opts)
+				stats.AttachmentsPulled += attachmentStats.pulled
+				stats.AttachmentsDownloaded += attachmentStats.downloaded
+				stats.AttachmentsSkipped += attachmentStats.skipped
+				if attachmentStats.errors > 0 {
+					stats.Errors += attachmentStats.errors
+				}
+			}
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
-			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
+			metadata := extIssue.Metadata
+			if opts.PullAttachments {
+				metadata = metadataWithTrackerAttachments(metadata, extIssue.Attachments)
+			}
+			if raw, ok := marshalTrackerMetadata(metadata); ok {
 				conv.Issue.Metadata = raw
 			}
 			if err := e.Store.CreateIssue(ctx, conv.Issue, e.Actor); err != nil {
@@ -516,6 +552,15 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Created++
+			if opts.PullAttachments {
+				attachmentStats := e.syncPullAttachments(ctx, conv.Issue.ID, &extIssue, opts)
+				stats.AttachmentsPulled += attachmentStats.pulled
+				stats.AttachmentsDownloaded += attachmentStats.downloaded
+				stats.AttachmentsSkipped += attachmentStats.skipped
+				if attachmentStats.errors > 0 {
+					stats.Errors += attachmentStats.errors
+				}
+			}
 		}
 	}
 
@@ -584,6 +629,211 @@ func marshalTrackerMetadata(metadata interface{}) (json.RawMessage, bool) {
 		return nil, false
 	}
 	return json.RawMessage(raw), true
+}
+
+func metadataWithTrackerAttachments(metadata map[string]interface{}, remote []TrackerAttachment) map[string]interface{} {
+	if len(remote) == 0 {
+		return metadata
+	}
+	out := make(map[string]interface{}, len(metadata)+1)
+	for k, v := range metadata {
+		out[k] = v
+	}
+	out["tracker_attachments"] = remote
+	return out
+}
+
+type attachmentSyncStats struct {
+	pulled     int
+	downloaded int
+	pushed     int
+	skipped    int
+	errors     int
+}
+
+func (e *Engine) syncPullAttachments(ctx context.Context, localIssueID string, extIssue *TrackerIssue, opts SyncOptions) attachmentSyncStats {
+	var stats attachmentSyncStats
+	capability, ok := e.Tracker.(AttachmentSyncTracker)
+	if !ok {
+		e.warn("%s does not support attachment sync; skipping attachments", e.Tracker.DisplayName())
+		stats.skipped++
+		return stats
+	}
+
+	remote := append([]TrackerAttachment(nil), extIssue.Attachments...)
+	if len(remote) == 0 {
+		fetched, err := capability.FetchIssueAttachments(ctx, extIssue)
+		if err != nil {
+			e.warn("Failed to fetch attachments for %s: %v", extIssue.Identifier, err)
+			stats.errors++
+			return stats
+		}
+		remote = fetched
+	}
+	stats.pulled += len(remote)
+	if err := e.updateTrackerAttachmentMetadata(ctx, localIssueID, extIssue.Metadata, remote); err != nil {
+		e.warn("Failed to update attachment metadata for %s: %v", localIssueID, err)
+		stats.errors++
+	}
+	if !opts.DownloadAttachments {
+		return stats
+	}
+
+	existing, err := e.Store.ListAttachments(ctx, localIssueID)
+	if err != nil {
+		e.warn("Failed to list local attachments for %s: %v", localIssueID, err)
+		stats.errors++
+		return stats
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, a := range existing {
+		if a != nil {
+			seen[a.HashAlgorithm+":"+a.ContentHash] = struct{}{}
+		}
+	}
+	for _, remoteAttachment := range remote {
+		data, err := capability.DownloadAttachment(ctx, remoteAttachment)
+		if err != nil {
+			e.warn("Failed to download attachment %s on %s: %v", remoteAttachment.ID, extIssue.Identifier, err)
+			stats.errors++
+			continue
+		}
+		stored, err := attachments.StoreBytes(e.Store, localIssueID, remoteAttachment.Filename, data)
+		if err != nil {
+			e.warn("Failed to store attachment %s on %s: %v", remoteAttachment.ID, localIssueID, err)
+			stats.errors++
+			continue
+		}
+		key := stored.HashAlgorithm + ":" + stored.ContentHash
+		if _, ok := seen[key]; ok {
+			stats.skipped++
+			continue
+		}
+		if _, err := e.Store.AddAttachment(ctx, &types.Attachment{
+			IssueID:          localIssueID,
+			HashAlgorithm:    stored.HashAlgorithm,
+			ContentHash:      stored.ContentHash,
+			OriginalFilename: stored.OriginalFilename,
+			MimeType:         stored.MimeType,
+			ByteSize:         stored.ByteSize,
+			StorageRelPath:   stored.StorageRelPath,
+			CreatedBy:        e.Actor,
+		}); err != nil {
+			e.warn("Failed to record attachment %s on %s: %v", remoteAttachment.ID, localIssueID, err)
+			stats.errors++
+			continue
+		}
+		seen[key] = struct{}{}
+		stats.downloaded++
+	}
+	return stats
+}
+
+func (e *Engine) updateTrackerAttachmentMetadata(ctx context.Context, localIssueID string, metadata map[string]interface{}, remote []TrackerAttachment) error {
+	raw, ok := marshalTrackerMetadata(metadataWithTrackerAttachments(metadata, remote))
+	if !ok {
+		return nil
+	}
+	return e.Store.UpdateIssue(ctx, localIssueID, map[string]interface{}{"metadata": raw}, e.Actor)
+}
+
+func (e *Engine) syncPushAttachments(ctx context.Context, issue *types.Issue, externalID string, opts SyncOptions) attachmentSyncStats {
+	var stats attachmentSyncStats
+	if opts.DryRun {
+		return stats
+	}
+	capability, ok := e.Tracker.(AttachmentSyncTracker)
+	if !ok {
+		e.warn("%s does not support attachment sync; skipping attachments", e.Tracker.DisplayName())
+		stats.skipped++
+		return stats
+	}
+	settings, err := capability.AttachmentSettings(ctx)
+	if err != nil {
+		e.warn("Failed to read attachment settings from %s: %v", e.Tracker.DisplayName(), err)
+		stats.errors++
+		return stats
+	}
+	if settings != nil && !settings.Enabled {
+		stats.skipped++
+		return stats
+	}
+	remote, err := capability.FetchIssueAttachments(ctx, &TrackerIssue{Identifier: externalID})
+	if err != nil {
+		e.warn("Failed to fetch remote attachments for %s: %v", externalID, err)
+		stats.errors++
+		return stats
+	}
+	remoteByNameSize := make(map[string]struct{}, len(remote))
+	for _, attachment := range remote {
+		remoteByNameSize[attachmentNameSizeKey(attachment.Filename, attachment.ByteSize)] = struct{}{}
+	}
+	localAttachments, err := e.Store.ListAttachments(ctx, issue.ID)
+	if err != nil {
+		e.warn("Failed to list local attachments for %s: %v", issue.ID, err)
+		stats.errors++
+		return stats
+	}
+	for _, attachment := range localAttachments {
+		if attachment == nil {
+			continue
+		}
+		if settings != nil && settings.UploadLimit > 0 && attachment.ByteSize > settings.UploadLimit {
+			e.warn("Skipping attachment %s on %s: size %d exceeds %s upload limit %d", attachment.OriginalFilename, issue.ID, attachment.ByteSize, e.Tracker.DisplayName(), settings.UploadLimit)
+			stats.skipped++
+			continue
+		}
+		key := attachmentNameSizeKey(attachment.OriginalFilename, attachment.ByteSize)
+		if _, ok := remoteByNameSize[key]; ok {
+			stats.skipped++
+			continue
+		}
+		path, err := attachments.StoredPath(e.Store, attachment.StorageRelPath)
+		if err != nil {
+			e.warn("Failed to resolve attachment %s on %s: %v", attachment.OriginalFilename, issue.ID, err)
+			stats.errors++
+			continue
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // path is constrained by attachments.StoredPath.
+		if err != nil {
+			e.warn("Failed to read attachment %s on %s: %v", attachment.OriginalFilename, issue.ID, err)
+			stats.errors++
+			continue
+		}
+		uploaded, err := capability.UploadAttachment(ctx, externalID, attachment, data)
+		if err != nil {
+			e.warn("Failed to upload attachment %s from %s to %s: %v", attachment.OriginalFilename, issue.ID, e.Tracker.DisplayName(), err)
+			stats.errors++
+			continue
+		}
+		if uploaded != nil {
+			remote = append(remote, *uploaded)
+			remoteByNameSize[key] = struct{}{}
+		}
+		stats.pushed++
+	}
+	if len(remote) > 0 {
+		if err := e.updateTrackerAttachmentMetadata(ctx, issue.ID, issueMetadataMap(issue), remote); err != nil {
+			e.warn("Failed to update attachment metadata for %s: %v", issue.ID, err)
+			stats.errors++
+		}
+	}
+	return stats
+}
+
+func attachmentNameSizeKey(filename string, size int64) string {
+	return strings.TrimSpace(filename) + ":" + fmt.Sprintf("%d", size)
+}
+
+func issueMetadataMap(issue *types.Issue) map[string]interface{} {
+	if issue == nil || len(issue.Metadata) == 0 {
+		return nil
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(issue.Metadata, &metadata); err != nil {
+		return nil
+	}
+	return metadata
 }
 
 func appendFilteredDependencies(dst []DependencyInfo, deps []DependencyInfo, allowedTypes []types.DependencyType, allowedSources []DependencySource) []DependencyInfo {
@@ -955,6 +1205,14 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				// but also flag the error so the user knows the link is broken
 			}
 			stats.Created++
+			if opts.PushAttachments {
+				attachmentStats := e.syncPushAttachments(ctx, issue, created.Identifier, opts)
+				stats.AttachmentsPushed += attachmentStats.pushed
+				stats.AttachmentsSkipped += attachmentStats.skipped
+				if attachmentStats.errors > 0 {
+					stats.Errors += attachmentStats.errors
+				}
+			}
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue
 			extID := e.Tracker.ExtractIdentifier(extRef)
@@ -973,10 +1231,26 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 					// ContentEqual hook: content-hash dedup to skip unnecessary API calls
 					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
 						if e.PushHooks.ContentEqual(issue, extIssue) {
+							if opts.PushAttachments {
+								attachmentStats := e.syncPushAttachments(ctx, issue, extID, opts)
+								stats.AttachmentsPushed += attachmentStats.pushed
+								stats.AttachmentsSkipped += attachmentStats.skipped
+								if attachmentStats.errors > 0 {
+									stats.Errors += attachmentStats.errors
+								}
+							}
 							stats.Skipped++
 							continue
 						}
 					} else if !extIssue.UpdatedAt.Before(issue.UpdatedAt) {
+						if opts.PushAttachments {
+							attachmentStats := e.syncPushAttachments(ctx, issue, extID, opts)
+							stats.AttachmentsPushed += attachmentStats.pushed
+							stats.AttachmentsSkipped += attachmentStats.skipped
+							if attachmentStats.errors > 0 {
+								stats.Errors += attachmentStats.errors
+							}
+						}
 						stats.Skipped++ // Default: external is same or newer
 						continue
 					}
@@ -996,6 +1270,14 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				continue
 			}
 			stats.Updated++
+			if opts.PushAttachments {
+				attachmentStats := e.syncPushAttachments(ctx, issue, extID, opts)
+				stats.AttachmentsPushed += attachmentStats.pushed
+				stats.AttachmentsSkipped += attachmentStats.skipped
+				if attachmentStats.errors > 0 {
+					stats.Errors += attachmentStats.errors
+				}
+			}
 		} else {
 			stats.Skipped++
 		}

@@ -76,6 +76,23 @@ type PullStatsProvider interface {
 	LastPullStats() (queried int, candidates int)
 }
 
+// AttachmentSyncTracker is an optional capability for trackers that can
+// synchronize file attachments. The core IssueTracker interface stays issue-only
+// so existing integrations do not accidentally move local files to third-party
+// services; SyncOptions must opt into metadata import, byte download, or upload.
+type AttachmentSyncTracker interface {
+	// AttachmentSettings returns whether remote attachments are enabled and the
+	// maximum upload size the tracker currently advertises.
+	AttachmentSettings(ctx context.Context) (*AttachmentSettings, error)
+	// FetchIssueAttachments returns remote attachment metadata for one issue.
+	FetchIssueAttachments(ctx context.Context, issue *TrackerIssue) ([]TrackerAttachment, error)
+	// DownloadAttachment returns the raw bytes for a remote attachment.
+	DownloadAttachment(ctx context.Context, attachment TrackerAttachment) ([]byte, error)
+	// UploadAttachment uploads local attachment bytes to the external issue
+	// identified by the tracker's human-readable identifier, such as PROJ-123.
+	UploadAttachment(ctx context.Context, externalIssueID string, attachment *types.Attachment, content []byte) (*TrackerAttachment, error)
+}
+
 // FieldMapper handles bidirectional conversion of issue fields between
 // an external tracker and beads. Each tracker provides its own mapper.
 type FieldMapper interface {

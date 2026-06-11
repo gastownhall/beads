@@ -113,6 +113,16 @@ func (s *DoltStore) CountIssueComments(ctx context.Context, issueID string) (int
 	return n, err
 }
 
+// CountAttachments returns the number of file attachments on an issue.
+func (s *DoltStore) CountAttachments(ctx context.Context, issueID string) (int64, error) {
+	var n int64
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx,
+			`SELECT count(*) FROM attachments WHERE issue_id = ?`, issueID).Scan(&n)
+	})
+	return n, err
+}
+
 // CountEvents returns the number of audit events for an issue, capped at limit
 // (or unbounded if limit == 0).
 func (s *DoltStore) CountEvents(ctx context.Context, issueID string, limit int) (int64, error) {

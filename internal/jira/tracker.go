@@ -336,6 +336,52 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 	return fmt.Sprintf("%s/browse/%s", t.jiraURL, issue.Identifier)
 }
 
+func (t *Tracker) AttachmentSettings(ctx context.Context) (*tracker.AttachmentSettings, error) {
+	settings, err := t.client.GetAttachmentSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &tracker.AttachmentSettings{
+		Enabled:     settings.Enabled,
+		UploadLimit: settings.UploadLimit,
+	}, nil
+}
+
+func (t *Tracker) FetchIssueAttachments(ctx context.Context, issue *tracker.TrackerIssue) ([]tracker.TrackerAttachment, error) {
+	if issue == nil {
+		return nil, nil
+	}
+	if len(issue.Attachments) == 0 && issue.Identifier != "" {
+		refreshed, err := t.client.GetIssue(ctx, issue.Identifier)
+		if err != nil {
+			return nil, err
+		}
+		if refreshed != nil {
+			return jiraAttachmentsToTracker(refreshed.Fields.Attachments), nil
+		}
+	}
+	return append([]tracker.TrackerAttachment(nil), issue.Attachments...), nil
+}
+
+func (t *Tracker) DownloadAttachment(ctx context.Context, attachment tracker.TrackerAttachment) ([]byte, error) {
+	return t.client.DownloadAttachmentContent(ctx, attachment.ID)
+}
+
+func (t *Tracker) UploadAttachment(ctx context.Context, externalIssueID string, attachment *types.Attachment, content []byte) (*tracker.TrackerAttachment, error) {
+	if attachment == nil {
+		return nil, fmt.Errorf("attachment is nil")
+	}
+	uploaded, err := t.client.UploadAttachment(ctx, externalIssueID, attachment.OriginalFilename, content)
+	if err != nil {
+		return nil, err
+	}
+	if len(uploaded) == 0 {
+		return nil, fmt.Errorf("jira upload returned no attachment metadata")
+	}
+	mapped := jiraAttachmentToTracker(uploaded[0])
+	return &mapped, nil
+}
+
 // getConfig reads a config value from storage, falling back to env var.
 // For yaml-only keys (e.g. jira.api_token), reads from config.yaml first
 // to avoid leaking secrets when pushing the Dolt database to remotes.
@@ -385,12 +431,13 @@ func parseJiraCustomFieldValue(value string) (interface{}, error) {
 // priorityMap is optional (nil uses hardcoded defaults).
 func jiraToTrackerIssue(ji *Issue, priorityMap map[string]string) tracker.TrackerIssue {
 	ti := tracker.TrackerIssue{
-		ID:         ji.ID,
-		Identifier: ji.Key,
-		URL:        ji.Self,
-		Title:      ji.Fields.Summary,
-		Labels:     ji.Fields.Labels,
-		Raw:        ji,
+		ID:          ji.ID,
+		Identifier:  ji.Key,
+		URL:         ji.Self,
+		Title:       ji.Fields.Summary,
+		Labels:      ji.Fields.Labels,
+		Attachments: jiraAttachmentsToTracker(ji.Fields.Attachments),
+		Raw:         ji,
 	}
 
 	// Description: convert ADF to plain text
@@ -435,6 +482,39 @@ func jiraToTrackerIssue(ji *Issue, priorityMap map[string]string) tracker.Tracke
 	}
 
 	return ti
+}
+
+func jiraAttachmentsToTracker(in []Attachment) []tracker.TrackerAttachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]tracker.TrackerAttachment, 0, len(in))
+	for _, attachment := range in {
+		out = append(out, jiraAttachmentToTracker(attachment))
+	}
+	return out
+}
+
+func jiraAttachmentToTracker(attachment Attachment) tracker.TrackerAttachment {
+	remote := tracker.TrackerAttachment{
+		ID:           attachment.ID,
+		Filename:     attachment.Filename,
+		MimeType:     attachment.MimeType,
+		ByteSize:     attachment.Size,
+		ContentURL:   attachment.Content,
+		ThumbnailURL: attachment.Thumbnail,
+		Metadata: map[string]interface{}{
+			"jira_self": attachment.Self,
+		},
+	}
+	if attachment.Author != nil {
+		remote.AuthorID = attachment.Author.AccountID
+		remote.AuthorName = attachment.Author.DisplayName
+	}
+	if created, err := ParseTimestamp(attachment.Created); err == nil {
+		remote.CreatedAt = created
+	}
+	return remote
 }
 
 // jiraPriorityToNumeric converts a Jira priority name to a numeric value (0=highest, 4=lowest).

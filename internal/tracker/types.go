@@ -44,6 +44,11 @@ type TrackerIssue struct {
 	ParentID         string // Parent issue identifier (for subtasks/children)
 	ParentInternalID string // Parent issue internal ID
 
+	// Attachments contains remote attachment metadata when attachment sync is
+	// explicitly enabled. Remote-only metadata is kept separate from Beads'
+	// local file-backed attachment rows until bytes are downloaded.
+	Attachments []TrackerAttachment
+
 	// Raw data for tracker-specific processing
 	Raw interface{} // Original API response for tracker-specific access
 
@@ -97,6 +102,15 @@ type SyncOptions struct {
 	// DependencySources limits which dependency sources pull creates from tracker
 	// mapper output. Empty means all dependency sources are created.
 	DependencySources []DependencySource
+	// PullAttachments imports remote attachment metadata. This is opt-in because
+	// tracker attachment metadata may expose third-party file URLs and identities.
+	PullAttachments bool
+	// DownloadAttachments downloads remote attachment bytes into the local
+	// .beads/attachments store. Implies PullAttachments.
+	DownloadAttachments bool
+	// PushAttachments uploads local attachment bytes to the external tracker.
+	// This is opt-in because it moves local files to a third-party service.
+	PushAttachments bool
 }
 
 // SyncResult is the complete result of a sync operation.
@@ -112,34 +126,66 @@ type SyncResult struct {
 
 // SyncStats accumulates sync statistics.
 type SyncStats struct {
-	Pulled    int `json:"pulled"`
-	Pushed    int `json:"pushed"`
-	Created   int `json:"created"`
-	Updated   int `json:"updated"`
-	Skipped   int `json:"skipped"`
-	Errors    int `json:"errors"`
-	Conflicts int `json:"conflicts"`
+	Pulled                int `json:"pulled"`
+	Pushed                int `json:"pushed"`
+	Created               int `json:"created"`
+	Updated               int `json:"updated"`
+	Skipped               int `json:"skipped"`
+	Errors                int `json:"errors"`
+	Conflicts             int `json:"conflicts"`
+	AttachmentsPulled     int `json:"attachments_pulled,omitempty"`
+	AttachmentsDownloaded int `json:"attachments_downloaded,omitempty"`
+	AttachmentsPushed     int `json:"attachments_pushed,omitempty"`
+	AttachmentsSkipped    int `json:"attachments_skipped,omitempty"`
 }
 
 // PullStats tracks pull operation results.
 type PullStats struct {
-	Queried     int
-	Candidates  int
-	Created     int
-	Updated     int
-	Skipped     int
-	Errors      int
-	Incremental bool
-	SyncedSince string
+	Queried               int
+	Candidates            int
+	Created               int
+	Updated               int
+	Skipped               int
+	Errors                int
+	AttachmentsPulled     int
+	AttachmentsDownloaded int
+	AttachmentsSkipped    int
+	Incremental           bool
+	SyncedSince           string
 }
 
 // PushStats tracks push operation results.
 type PushStats struct {
-	Created  int
-	Updated  int
-	Skipped  int
-	Errors   int
-	Warnings []string
+	Created            int
+	Updated            int
+	Skipped            int
+	Errors             int
+	AttachmentsPushed  int
+	AttachmentsSkipped int
+	Warnings           []string
+}
+
+// TrackerAttachment is tracker-neutral metadata for a remote attachment.
+// The ID and ContentURL fields are intentionally preserved so sync retries can
+// reconcile an existing remote file instead of uploading duplicates.
+type TrackerAttachment struct {
+	ID           string                 `json:"id"`
+	IssueID      string                 `json:"issue_id,omitempty"`
+	Filename     string                 `json:"filename"`
+	MimeType     string                 `json:"mime_type,omitempty"`
+	ByteSize     int64                  `json:"byte_size,omitempty"`
+	ContentURL   string                 `json:"content_url,omitempty"`
+	ThumbnailURL string                 `json:"thumbnail_url,omitempty"`
+	AuthorID     string                 `json:"author_id,omitempty"`
+	AuthorName   string                 `json:"author_name,omitempty"`
+	CreatedAt    time.Time              `json:"created_at,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// AttachmentSettings describes a tracker instance's attachment support.
+type AttachmentSettings struct {
+	Enabled     bool  `json:"enabled"`
+	UploadLimit int64 `json:"upload_limit,omitempty"`
 }
 
 // BatchPushItem describes one local issue handled by a tracker batch push.

@@ -372,6 +372,42 @@ func (s *InstrumentedStorage) GetIssueComments(ctx context.Context, issueID stri
 	return v, err
 }
 
+func (s *InstrumentedStorage) AddAttachment(ctx context.Context, attachment *types.Attachment) (*types.Attachment, error) {
+	issueID := ""
+	if attachment != nil {
+		issueID = attachment.IssueID
+	}
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "AddAttachment", attrs...)
+	v, err := s.inner.AddAttachment(ctx, attachment)
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
+func (s *InstrumentedStorage) ListAttachments(ctx context.Context, issueID string) ([]*types.Attachment, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "ListAttachments", attrs...)
+	v, err := s.inner.ListAttachments(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
+func (s *InstrumentedStorage) ResolveAttachment(ctx context.Context, issueID, selector string) (*types.Attachment, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "ResolveAttachment", attrs...)
+	v, err := s.inner.ResolveAttachment(ctx, issueID, selector)
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
+func (s *InstrumentedStorage) RemoveAttachment(ctx context.Context, issueID, attachmentID string) error {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "RemoveAttachment", attrs...)
+	err := s.inner.RemoveAttachment(ctx, issueID, attachmentID)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
 func (s *InstrumentedStorage) GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error) {
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetEvents", attrs...)
@@ -505,6 +541,14 @@ func (s *InstrumentedStorage) IterIssueComments(ctx context.Context, issueID str
 	return it, err
 }
 
+func (s *InstrumentedStorage) IterAttachments(ctx context.Context, issueID string) (storage.Iter[types.Attachment], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterAttachments", attrs...)
+	it, err := s.inner.IterAttachments(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
 func (s *InstrumentedStorage) IterEvents(ctx context.Context, issueID string, limit int) (storage.Iter[types.Event], error) {
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "IterEvents", attrs...)
@@ -575,6 +619,13 @@ func (s *InstrumentedStorage) CountDependencies(ctx context.Context, issueID str
 func (s *InstrumentedStorage) CountIssueComments(ctx context.Context, issueID string) (int64, error) {
 	ctx, span, t := s.op(ctx, "CountIssueComments", attribute.String("issue.id", issueID))
 	v, err := s.inner.CountIssueComments(ctx, issueID)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountAttachments(ctx context.Context, issueID string) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountAttachments", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountAttachments(ctx, issueID)
 	s.done(ctx, span, t, err)
 	return v, err
 }
