@@ -261,6 +261,13 @@ type Config struct {
 	// NewConnection event in dolt-server.log and churns the pool for no
 	// benefit when the server is local and stable.
 	ConnMaxLifetime time.Duration
+
+	// ConnMaxIdleTime overrides how long a connection may sit idle in the pool
+	// before the pool retires it (0 = default 20s). This must stay below the
+	// dolt sql-server wait_timeout (currently 30s) so the pool retires an idle
+	// connection before the server reaps it server-side; otherwise the next
+	// query handed a server-reaped connection fails with "invalid connection".
+	ConnMaxIdleTime time.Duration
 }
 
 // Defaults for the *sql.DB connection pool. Exported for tests/callers that
@@ -270,6 +277,11 @@ const (
 	defaultMaxOpenConns    = 10
 	defaultMaxIdleConns    = 5
 	defaultConnMaxLifetime = time.Hour
+	// defaultConnMaxIdleTime keeps idle pooled connections shorter-lived than the
+	// dolt sql-server wait_timeout (30s) so the pool retires an idle connection
+	// before the server reaps it; this prevents the next read from picking up a
+	// server-closed connection and failing with "invalid connection".
+	defaultConnMaxIdleTime = 20 * time.Second
 )
 
 // cliExecTimeout is the maximum time to wait for dolt CLI push/pull operations.
@@ -598,18 +610,26 @@ var ErrStoreClosed = errors.New("store is closed")
 
 // withReadTx runs fn inside a transaction while holding the store's read-lock.
 // Used for read operations that need a *sql.Tx to share issueops functions.
+//
+// The whole BeginTx+fn is wrapped in withRetry so a transient connection error
+// (e.g. "invalid connection" when the dolt sql-server reaps a pooled connection
+// that has been idle past its wait_timeout) is retried rather than surfaced to
+// the caller. This is safe because fn is read-only and the transaction is always
+// rolled back, so re-running the operation has no side effects.
 func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.closed.Load() {
 		return ErrStoreClosed
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin read tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	return fn(tx)
+	return s.withRetry(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin read tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		return fn(tx)
+	})
 }
 
 func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
@@ -1330,9 +1350,15 @@ func applyPoolLimits(db *sql.DB, cfg *Config) {
 		lifetime = cfg.ConnMaxLifetime
 	}
 
+	idle := defaultConnMaxIdleTime
+	if cfg.ConnMaxIdleTime > 0 {
+		idle = cfg.ConnMaxIdleTime
+	}
+
 	db.SetMaxOpenConns(maxOpen)
 	db.SetMaxIdleConns(maxIdle)
 	db.SetConnMaxLifetime(lifetime)
+	db.SetConnMaxIdleTime(idle)
 }
 
 // openServerConnection opens a connection to a dolt sql-server via MySQL protocol
