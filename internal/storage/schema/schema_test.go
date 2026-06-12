@@ -165,6 +165,9 @@ func TestMigration0035HandlesLegacyWispDependenciesShape(t *testing.T) {
 	}
 
 	up := string(upSQL)
+	if strings.Contains(up, "''rig''") || strings.Contains(up, "'rig'") {
+		t.Fatal("0035 up migration must not move type=rig beads into wisps")
+	}
 	for _, want := range []string{
 		"@has_split_wisp_dependencies",
 		"INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)",
@@ -176,6 +179,9 @@ func TestMigration0035HandlesLegacyWispDependenciesShape(t *testing.T) {
 	}
 
 	down := string(downSQL)
+	if strings.Contains(down, "''rig''") || strings.Contains(down, "'rig'") {
+		t.Fatal("0035 down migration must not treat type=rig as an infra wisp")
+	}
 	for _, want := range []string{
 		"@has_split_wisp_dependencies",
 		"SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id FROM wisp_dependencies",
