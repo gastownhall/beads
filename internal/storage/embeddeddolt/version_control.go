@@ -197,6 +197,15 @@ func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message s
 	return err
 }
 
+// CommitConfigOnly commits the config table (GH#4078). Embedded mode is
+// single-process, so the '-Am' Commit cannot sweep a concurrent operation's
+// working set — the scoped-staging concern that exists in server mode
+// (GH#2455) does not apply here, and this aliases Commit for the same
+// reason CommitWithConfig does.
+func (s *EmbeddedDoltStore) CommitConfigOnly(ctx context.Context, message string) error {
+	return s.Commit(ctx, message)
+}
+
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
 	return s.AddRemoteWithRef(ctx, name, url, "")
 }

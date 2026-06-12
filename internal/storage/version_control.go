@@ -190,6 +190,13 @@ type VersionControl interface {
 	// racy HEAD-before/HEAD-after comparison (the interface threading tracked
 	// as bd mybd-z9h7j; CommitPending already had the shape).
 	CommitAll(ctx context.Context, message string) (bool, error)
+	// CommitConfigOnly commits ONLY the config table — the scoped commit for
+	// intentional config writes (bd remember, bd config set) in server mode.
+	// Unlike CommitWithConfig ('-Am'), it never stages other tables, so a
+	// concurrent operation's dirty working set is not swept (GH#2455).
+	// GH#4078: without this, server-mode config writes strand the working
+	// set dirty — generic Commit() excludes config and silently no-ops.
+	CommitConfigOnly(ctx context.Context, message string) error
 	CommitPending(ctx context.Context, actor string) (bool, error)
 	CommitExists(ctx context.Context, commitHash string) (bool, error)
 	GetCurrentCommit(ctx context.Context) (string, error)
