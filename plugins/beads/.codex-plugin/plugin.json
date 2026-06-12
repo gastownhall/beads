@@ -16,7 +16,7 @@
     "agent-memory"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
+  "hooks": "./.codex-plugin/hooks/hooks.json",
   "interface": {
     "displayName": "Beads",
     "shortDescription": "Project task tracking with bd",
