@@ -105,6 +105,14 @@ func (s *testSuite) readyExcludesDefaultTypes() {
 	gate.IssueType = types.TypeGate
 	s.Require().NoError(r.Insert(s.Ctx(), gate, "tester", domain.InsertIssueOpts{}))
 
+	rig := newTestIssue("bd-rdy-dt-rig", "rig")
+	rig.IssueType = types.IssueType("rig")
+	s.Require().NoError(r.Insert(s.Ctx(), rig, "tester", domain.InsertIssueOpts{}))
+
+	message := newTestIssue("bd-rdy-dt-message", "message")
+	message.IssueType = types.TypeMessage
+	s.Require().NoError(r.Insert(s.Ctx(), message, "tester", domain.InsertIssueOpts{}))
+
 	task := newTestIssue("bd-rdy-dt-task", "task")
 	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
 
@@ -114,6 +122,8 @@ func (s *testSuite) readyExcludesDefaultTypes() {
 	s.Contains(got, "bd-rdy-dt-task")
 	s.NotContains(got, "bd-rdy-dt-mol")
 	s.NotContains(got, "bd-rdy-dt-gate")
+	s.NotContains(got, "bd-rdy-dt-rig")
+	s.NotContains(got, "bd-rdy-dt-message")
 }
 
 func (s *testSuite) readyFilterByPriority() {

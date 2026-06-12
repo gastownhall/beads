@@ -910,7 +910,7 @@ bd list [flags]
       --has-metadata-key string      Filter issues that have this metadata key set
       --id string                    Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)
       --include-gates                Include gate issues in output (normally hidden)
-      --include-infra                Include infrastructure beads (agent/rig/role/message) in output
+      --include-infra                Include infrastructure beads (agent/role/message) in output
       --include-templates            Include template molecules in output
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
@@ -2375,7 +2375,7 @@ bd export [flags]
 
 ```
       --all                Include all records (infra, templates, gates, memories)
-      --include-infra      Include infrastructure beads (agents, rigs, roles, messages)
+      --include-infra      Include infrastructure beads (agents, roles, messages)
       --include-memories   Include persistent memories (from 'bd remember') in the export
   -o, --output string      Output file path (default: stdout)
       --scrub              Exclude test/pollution records

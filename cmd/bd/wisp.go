@@ -750,7 +750,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
 	}
 	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d infra issue(s) (agent/rig/role/message - protected from GC)\n", infraCount)
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
 	}
 
 	if len(closedIssues) == 0 {
