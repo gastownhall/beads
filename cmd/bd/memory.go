@@ -337,6 +337,9 @@ Examples:
 			return HandleErrorRespectJSON("storing memory: %v", err)
 		}
 		noteDirectMemoryWrite()
+		if err := commitConfigWrite(rootCtx, store, "remember"); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		// Remembered versus Updated is Replaced, observed in the SAME
 		// transaction as the write. The shipped code read the row first and
@@ -437,6 +440,9 @@ Examples:
 			return printForgetNotFound(result.Key)
 		}
 		noteDirectMemoryWrite()
+		if err := commitConfigWrite(rootCtx, store, "forget"); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		return printForgetResult(result.Key, result.Value)
 	},
