@@ -255,7 +255,13 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Gitignore":
 			err = doctor.FixGitignore(path)
 		case "Project Gitignore":
-			err = doctor.FixProjectGitignore(path)
+			// Stealth repos must not get a tracked .gitignore; route the patterns into
+			// .git/info/exclude instead (matches bd init --stealth).
+			if isStealthRepo(path) {
+				err = addProjectPatternsToGitExclude(path, doctor.ProjectGitignorePatterns, false)
+			} else {
+				err = doctor.FixProjectGitignore(path)
+			}
 		case "Redirect Tracking":
 			err = doctor.FixRedirectTracking(path)
 		case "Last-Touched Tracking":

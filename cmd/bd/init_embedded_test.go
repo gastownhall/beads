@@ -884,12 +884,116 @@ func TestEmbeddedInit(t *testing.T) {
 	})
 
 	t.Run("stealth", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "st", "--stealth")
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "st", "--stealth")
 		requireNoFile(t, filepath.Join(dir, "AGENTS.md"))
 		requireNoFile(t, filepath.Join(dir, "CLAUDE.md"))
 		requireNoFile(t, filepath.Join(dir, ".claude"))
 		requireNoFile(t, filepath.Join(dir, ".agents"))
 		requireNoFile(t, filepath.Join(dir, ".codex"))
+
+		// Stealth must stay invisible: it should create .beads/ but route everything else into
+		// .git/info/exclude so the database lives there without git seeing it.
+		requireFile(t, beadsDir)
+		excludeContent, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
+		if err != nil {
+			t.Fatalf("failed to read .git/info/exclude: %v", err)
+		}
+		for _, want := range []string{".beads/", ".dolt/", "*.db"} {
+			if !strings.Contains(string(excludeContent), want) {
+				t.Errorf(".git/info/exclude missing %q:\n%s", want, excludeContent)
+			}
+		}
+	})
+
+	// Regression: bd init --stealth must not touch any git-visible files. Previously it
+	// created/modified the tracked project-root .gitignore via doctor.EnsureProjectGitignore, which
+	// showed up in `git status` and defeated stealth. Everything beads adds must be excluded
+	// (.beads/) or live in .git/info/exclude, leaving the working tree clean from git's view.
+	t.Run("stealth_leaves_worktree_clean", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		// Commit a baseline so the repo has a clean, non-empty starting state.
+		gitignorePath := filepath.Join(dir, ".gitignore")
+		if err := os.WriteFile(gitignorePath, []byte("node_modules/\n"), 0644); err != nil {
+			t.Fatalf("seed .gitignore: %v", err)
+		}
+		for _, args := range [][]string{
+			{"add", "-A"},
+			{"commit", "-m", "baseline"},
+		} {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
+			}
+		}
+
+		runBDInit(t, bd, dir, "--prefix", "stc", "--stealth")
+
+		// git status --porcelain must be empty: stealth touched no visible files.
+		cmd := exec.Command("git", "-c", "core.hooksPath=", "status", "--porcelain")
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git status failed: %v\n%s", err, out)
+		}
+		if strings.TrimSpace(string(out)) != "" {
+			t.Errorf("bd init --stealth left git-visible changes (should be invisible):\n%s", out)
+		}
+
+		// And the seeded .gitignore must be byte-for-byte unchanged.
+		got, err := os.ReadFile(gitignorePath)
+		if err != nil {
+			t.Fatalf("read .gitignore: %v", err)
+		}
+		if string(got) != "node_modules/\n" {
+			t.Errorf("stealth modified project .gitignore:\ngot: %q", string(got))
+		}
+	})
+
+	// Regression: bd doctor --fix on a stealth repo must stay invisible too. Previously the
+	// "Project Gitignore" fix called FixProjectGitignore unconditionally and re-created the tracked
+	// .gitignore that stealth init deliberately avoided.
+	t.Run("stealth_doctor_fix_keeps_worktree_clean", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		gitignorePath := filepath.Join(dir, ".gitignore")
+		if err := os.WriteFile(gitignorePath, []byte("node_modules/\n"), 0644); err != nil {
+			t.Fatalf("seed .gitignore: %v", err)
+		}
+		for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", "baseline"}} {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
+			}
+		}
+
+		runBDInit(t, bd, dir, "--prefix", "sdf", "--stealth")
+
+		// bd doctor --fix may exit non-zero for unrelated checks; we only care that it does not
+		// introduce git-visible changes on a stealth repo.
+		fixCmd := exec.Command(bd, "doctor", "--fix", "--yes")
+		fixCmd.Dir = dir
+		fixCmd.Env = bdEnv(dir)
+		if out, err := fixCmd.CombinedOutput(); err != nil {
+			t.Logf("bd doctor --fix exited non-zero (tolerated): %v\n%s", err, out)
+		}
+
+		statusCmd := exec.Command("git", "-c", "core.hooksPath=", "status", "--porcelain")
+		statusCmd.Dir = dir
+		out, err := statusCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git status failed: %v\n%s", err, out)
+		}
+		if strings.TrimSpace(string(out)) != "" {
+			t.Errorf("bd doctor --fix left git-visible changes on a stealth repo:\n%s", out)
+		}
+		if got, _ := os.ReadFile(gitignorePath); string(got) != "node_modules/\n" {
+			t.Errorf("bd doctor --fix modified project .gitignore on a stealth repo:\ngot: %q", string(got))
+		}
 	})
 
 	t.Run("force_reinit", func(t *testing.T) {

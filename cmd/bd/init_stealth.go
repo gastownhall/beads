@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -110,6 +112,134 @@ func setupGitExclude(verbose bool) error {
 	}
 
 	return nil
+}
+
+// resolveGitExcludePath returns the path to .git/info/exclude for repoPath, using --git-common-dir
+// so worktrees resolve to the main repo's exclude file (GH#1053). An empty repoPath resolves
+// against the current directory.
+func resolveGitExcludePath(repoPath string) (string, error) {
+	args := make([]string, 0, 3)
+	if repoPath != "" {
+		args = append(args, "-C", repoPath)
+	}
+	args = append(args, "rev-parse", "--git-common-dir")
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("not a git repository")
+	}
+	gitDir := strings.TrimSpace(string(out))
+	// git prints --git-common-dir relative to its working directory (repoPath when -C is used), so
+	// anchor relative results back to repoPath.
+	if !filepath.IsAbs(gitDir) {
+		base := repoPath
+		if base == "" {
+			base = "."
+		}
+		gitDir = filepath.Join(base, gitDir)
+	}
+	return filepath.Join(gitDir, "info", "exclude"), nil
+}
+
+// addProjectPatternsToGitExclude appends project-root ignore patterns (.dolt/, *.db, etc.) to
+// .git/info/exclude rather than a tracked .gitignore. Stealth mode uses this so beads never creates
+// or modifies a visible .gitignore that would expose its presence to repo collaborators. repoPath
+// is the repository root ("" resolves against the current directory).
+func addProjectPatternsToGitExclude(repoPath string, patterns []string, verbose bool) error {
+	excludePath, err := resolveGitExcludePath(repoPath)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
+		return fmt.Errorf("failed to create git info directory: %w", err)
+	}
+
+	var existingContent string
+	// #nosec G304 - git config path
+	if content, err := os.ReadFile(excludePath); err == nil {
+		existingContent = string(content)
+	}
+
+	var toAdd []string
+	for _, p := range patterns {
+		// Exact line match avoids false positives (e.g. ".beads/issues.jsonl" matching ".beads/").
+		if !containsExactPattern(existingContent, p) {
+			toAdd = append(toAdd, p)
+		}
+	}
+	if len(toAdd) == 0 {
+		if verbose {
+			fmt.Printf("Git exclude already has Dolt file patterns\n")
+		}
+		return nil
+	}
+
+	newContent := existingContent
+	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
+		newContent += "\n"
+	}
+	newContent += "\n# Beads stealth mode: Dolt files (added by bd init --stealth)\n"
+	for _, p := range toAdd {
+		newContent += p + "\n"
+	}
+
+	// #nosec G306 - config file needs 0644
+	if err := os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
+		return fmt.Errorf("failed to write git exclude file: %w", err)
+	}
+	if verbose {
+		fmt.Printf("Configured git exclude for Dolt files: %s\n", excludePath)
+	}
+	return nil
+}
+
+// isStealthRepo reports whether the beads workspace at repoPath was set up in stealth mode. Stealth
+// init persists no-git-ops: true (the same signal bd prime keys off), so beads must keep its
+// footprint out of tracked files.
+func isStealthRepo(repoPath string) bool {
+	beadsDir := doctor.ResolveBeadsDirForRepo(repoPath)
+	return config.GetStringFromDir(beadsDir, "no-git-ops") == "true"
+}
+
+// checkProjectExcludeStealth is the stealth-mode counterpart to doctor.CheckProjectGitignore: it
+// verifies the project-root ignore patterns live in .git/info/exclude instead of a tracked
+// .gitignore. Reusing the "Project Gitignore" name keeps the --fix dispatch and ordering stable.
+func checkProjectExcludeStealth(repoPath string) doctor.DoctorCheck {
+	excludePath, err := resolveGitExcludePath(repoPath)
+	if err != nil {
+		return doctor.DoctorCheck{
+			Name:    "Project Gitignore",
+			Status:  doctor.StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	var content string
+	// #nosec G304 - git config path
+	if data, err := os.ReadFile(excludePath); err == nil {
+		content = string(data)
+	}
+
+	var missing []string
+	for _, p := range doctor.ProjectGitignorePatterns {
+		if !containsExactPattern(content, p) {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) > 0 {
+		return doctor.DoctorCheck{
+			Name:    "Project Gitignore",
+			Status:  doctor.StatusWarning,
+			Message: "Stealth mode: .git/info/exclude missing Dolt exclusion patterns",
+			Detail:  "Missing: " + strings.Join(missing, ", "),
+			Fix:     "Run: bd doctor --fix",
+		}
+	}
+	return doctor.DoctorCheck{
+		Name:    "Project Gitignore",
+		Status:  doctor.StatusOK,
+		Message: "Dolt and credential files excluded via .git/info/exclude (stealth)",
+	}
 }
 
 // setupForkExclude configures .git/info/exclude for fork workflows (GH#742)

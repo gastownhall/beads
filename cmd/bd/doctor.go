@@ -681,9 +681,14 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, gitignoreCheck)
 	// Don't fail overall check for gitignore, just warn
 
-	// Check 14a: Project-root .gitignore has Dolt exclusion patterns (GH#2034)
-	projectGitignoreCheck := convertWithCategory(doctor.CheckProjectGitignore(path), doctor.CategoryGit)
-	result.Checks = append(result.Checks, projectGitignoreCheck)
+	// Check 14a: Project-root Dolt exclusion patterns (GH#2034). In stealth mode these live in
+	// .git/info/exclude, so check that location instead to avoid recreating .gitignore.
+	if isStealthRepo(path) {
+		result.Checks = append(result.Checks, convertWithCategory(checkProjectExcludeStealth(path), doctor.CategoryGit))
+	} else {
+		projectGitignoreCheck := convertWithCategory(doctor.CheckProjectGitignore(path), doctor.CategoryGit)
+		result.Checks = append(result.Checks, projectGitignoreCheck)
+	}
 	// Don't fail overall check for project gitignore, just warn
 
 	// Check 14b: redirect file tracking (worktree redirect files shouldn't be committed)

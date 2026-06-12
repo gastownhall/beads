@@ -659,7 +659,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			cwdAbs, _ := filepath.Abs(cwd)
 			beadsDirIsLocal := strings.HasPrefix(beadsDirAbs, filepath.Clean(cwdAbs)+string(filepath.Separator))
 			if beadsDirIsLocal {
-				if err := doctor.EnsureProjectGitignore(cwd); err != nil {
+				if stealth {
+					// Stealth mode: route Dolt-file ignore patterns into .git/info/exclude instead
+					// of a tracked .gitignore so collaborators never see beads-related changes.
+					if err := addProjectPatternsToGitExclude(cwd, doctor.ProjectGitignorePatterns, !quiet); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to update git exclude: %v\n", err)
+						// Non-fatal - continue anyway
+					}
+				} else if err := doctor.EnsureProjectGitignore(cwd); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to update project .gitignore: %v\n", err)
 					// Non-fatal - continue anyway
 				}
