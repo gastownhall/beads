@@ -1273,6 +1273,10 @@ type IssueFilter struct {
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
+	// IndexedMetadataKeys names metadata keys backed by an indexed generated
+	// column (see storage.MetadataColumnName); listed keys use that column
+	// instead of a JSON_EXTRACT scan. Populated from the metadata schema config.
+	IndexedMetadataKeys map[string]bool
 
 	// Hydration options — control which relational data is populated on returned issues.
 	// Labels are always hydrated. Dependencies are not by default (for performance).

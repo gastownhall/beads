@@ -272,8 +272,13 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
 			return nil, nil, err
 		}
-		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
-		args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
+		if filter.IndexedMetadataKeys[filter.HasMetadataKey] {
+			// Indexed generated column: index lookup instead of a JSON scan.
+			whereClauses = append(whereClauses, storage.MetadataColumnName(filter.HasMetadataKey)+" IS NOT NULL")
+		} else {
+			whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
+			args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
+		}
 	}
 	if len(filter.MetadataFields) > 0 {
 		metaKeys := make([]string, 0, len(filter.MetadataFields))
@@ -285,8 +290,16 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 			if err := storage.ValidateMetadataKey(k); err != nil {
 				return nil, nil, err
 			}
-			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
+			if filter.IndexedMetadataKeys[k] {
+				// Equality against the indexed generated column avoids a
+				// JSON_EXTRACT full scan. Dolt's optimizer does not rewrite the
+				// JSON form to use the index, so the column is targeted directly.
+				whereClauses = append(whereClauses, storage.MetadataColumnName(k)+" = ?")
+				args = append(args, filter.MetadataFields[k])
+			} else {
+				whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
+				args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
+			}
 		}
 	}
 

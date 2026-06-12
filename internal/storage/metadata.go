@@ -53,6 +53,7 @@ type MetadataFieldSchema struct {
 	Required bool
 	Min      *float64 // min value for int/float
 	Max      *float64 // max value for int/float
+	Indexed  bool     // maintain an indexed generated column for fast equality filtering
 }
 
 // MetadataSchemaConfig holds the parsed metadata validation configuration.
@@ -228,4 +229,28 @@ func JSONMetadataPath(key string) string {
 		return `$."` + key + `"`
 	}
 	return "$." + key
+}
+
+// MetadataColumnName returns the deterministic name of the generated column
+// that mirrors a metadata key for indexed equality filtering. The key is
+// sanitized to a safe SQL identifier, e.g. "session_name" -> "bd_md_session_name"
+// and "gc.routed_to" -> "bd_md_gc_routed_to".
+func MetadataColumnName(key string) string {
+	var b strings.Builder
+	b.Grow(len("bd_md_") + len(key))
+	b.WriteString("bd_md_")
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+// MetadataIndexName returns the index name for a metadata generated column.
+func MetadataIndexName(key string) string {
+	return "idx_" + MetadataColumnName(key)
 }

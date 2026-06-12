@@ -84,6 +84,10 @@ func parseFieldSchema(m map[string]interface{}) storage.MetadataFieldSchema {
 		schema.Max = &max
 	}
 
+	if indexed, ok := m["indexed"].(bool); ok {
+		schema.Indexed = indexed
+	}
+
 	return schema
 }
 
