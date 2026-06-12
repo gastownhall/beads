@@ -36,3 +36,30 @@ func TestPartialIDSearchPartRejectsInvalidSearchText(t *testing.T) {
 		}
 	}
 }
+
+func TestHashSegmentPrefixMatch(t *testing.T) {
+	tests := []struct {
+		issueHash string
+		hashPart  string
+		want      bool
+	}{
+		// Direct prefix: plain hash starts with query
+		{"oqfe9", "oqf", true},
+		// Exact match
+		{"oqf", "oqf", true},
+		// The gcy-g4o repro: wisp compound hash must NOT match
+		{"wisp-goqfo", "oqf", false},
+		// Wisp last-segment match (t3st matches wisp-t3st)
+		{"wisp-t3st", "t3st", true},
+		// Partial prefix of last segment
+		{"wisp-t3st", "t3", true},
+		// No match
+		{"abc123", "xyz", false},
+	}
+	for _, tt := range tests {
+		got := hashSegmentPrefixMatch(tt.issueHash, tt.hashPart)
+		if got != tt.want {
+			t.Errorf("hashSegmentPrefixMatch(%q, %q) = %v; want %v", tt.issueHash, tt.hashPart, got, tt.want)
+		}
+	}
+}
