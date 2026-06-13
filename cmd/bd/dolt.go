@@ -1046,7 +1046,12 @@ var doltRemoteAddCmd = &cobra.Command{
 
 		result, err := ensureDoltRemote(ctx, st, name, url, confirmDoltRemoteOverwrite)
 		if err != nil {
-			FatalError("adding remote: %v", err)
+			if jsonOutput {
+				outputJSONError(err, "remote_add_failed")
+			} else {
+				fmt.Fprintf(os.Stderr, "Error adding remote: %v\n", err)
+			}
+			os.Exit(1)
 		}
 		if result.Canceled {
 			fmt.Println("Canceled.")
@@ -1143,7 +1148,12 @@ var doltRemoteRemoveCmd = &cobra.Command{
 		name := args[0]
 
 		if err := st.RemoveRemote(ctx, name); err != nil {
-			FatalError("removing remote: %v", err)
+			if jsonOutput {
+				outputJSONError(err, "remote_remove_failed")
+			} else {
+				fmt.Fprintf(os.Stderr, "Error removing remote: %v\n", err)
+			}
+			os.Exit(1)
 		}
 
 		if name == "origin" {
