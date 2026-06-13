@@ -50,26 +50,26 @@ func (r *RoutedResult) Close() {
 // Tries the local store first, then prefix-based routing via routes.jsonl,
 // then falls back to contributor auto-routing.
 //
-// Routed stores are opened read-only; mutating commands must use
-// resolveAndGetIssueWithRoutingForWrite instead.
+// Prefix-routed target stores use a writable-no-migrate open (see
+// resolveViaPrefixRouting); contributor auto-routed stores stay read-only.
 //
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
 func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
-	return resolveAndGetIssueWithRoutingMode(ctx, localStore, id, false)
+	return resolveAndGetIssueWithRoutingMode(ctx, localStore, id)
 }
 
 // resolveAndGetIssueWithRoutingForWrite is the write-intent variant of
-// resolveAndGetIssueWithRouting: a prefix-routed target store is opened
-// writable so mutating commands can write through it and commit on the
-// target store's head (#4141). Read paths must keep the read-only variant so
-// a routed read can never write migrations or other open-time mutations into
-// a foreign project's history (bd-6dnrw.32, GH#3231).
+// resolveAndGetIssueWithRouting. Both share the same writable-no-migrate routed
+// open; the distinct name documents write intent so mutating commands can
+// commit on the target store's head (#4141). The no-migrate open preserves the
+// bd-6dnrw.32 / GH#3231 invariant that a routed read never writes migrations or
+// other open-time mutations into a foreign project's history.
 func resolveAndGetIssueWithRoutingForWrite(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
-	return resolveAndGetIssueWithRoutingMode(ctx, localStore, id, true)
+	return resolveAndGetIssueWithRoutingMode(ctx, localStore, id)
 }
 
-func resolveAndGetIssueWithRoutingMode(ctx context.Context, localStore storage.DoltStorage, id string, forWrite bool) (*RoutedResult, error) {
+func resolveAndGetIssueWithRoutingMode(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
