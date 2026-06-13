@@ -85,6 +85,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
 
 ### Fixed
+- **Server-mode config writes commit again — `bd dolt pull` no longer needs a
+  manual flush.** `bd remember`, `bd forget`, and `bd config set|unset|set-many`
+  in server mode left the `config` table dirty forever: `maybeAutoCommit` skips
+  SQL-server modes entirely, and generic `Commit()` excludes config
+  ([#2455](https://github.com/gastownhall/beads/issues/2455)), so the next
+  `bd dolt pull` failed with `cannot merge with uncommitted changes` until the
+  operator ran raw `DOLT_ADD('config')`/`DOLT_COMMIT` SQL. Config writes now
+  commit immediately via the new scoped `CommitConfigOnly` (stages ONLY the
+  config table — concurrent operations' dirty tables are never swept),
+  restoring the v1.0.1 behavior from
+  [#3052](https://github.com/gastownhall/beads/pull/3052)
+  ([#4078](https://github.com/gastownhall/beads/issues/4078)).
+
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
