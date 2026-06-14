@@ -111,6 +111,42 @@ func TestTracker_InitFromConfig(t *testing.T) {
 	}
 }
 
+func TestTracker_InitSeverityMapConfig(t *testing.T) {
+	t.Setenv("AZURE_DEVOPS_PAT", "config-pat")
+	tr := &Tracker{}
+	store := newMockStore(map[string]string{
+		"ado.org":            "configorg",
+		"ado.project":        "configproject",
+		"ado.severity_map.0": "Critical",
+		"ado.severity_map.1": "Critical",
+		"ado.severity_map.2": "Major",
+		"ado.severity_map.3": "Minor",
+		"ado.severity_map.4": "Minor",
+	})
+	err := tr.Init(context.Background(), store)
+	if err != nil {
+		t.Fatalf("Init() unexpected error: %v", err)
+	}
+
+	mapper, ok := tr.mapper.(*adoFieldMapper)
+	if !ok {
+		t.Fatalf("mapper is not *adoFieldMapper")
+	}
+
+	want := map[int]string{
+		0: "Critical",
+		1: "Critical",
+		2: "Major",
+		3: "Minor",
+		4: "Minor",
+	}
+	for p, sev := range want {
+		if got := mapper.SeverityForBug(p); got != sev {
+			t.Errorf("SeverityForBug(%d) = %q, want %q", p, got, sev)
+		}
+	}
+}
+
 func TestTracker_InitWithCustomURL(t *testing.T) {
 	// ado.pat is yaml-only (secret), so set it via env var.
 	t.Setenv("AZURE_DEVOPS_PAT", "config-pat")
