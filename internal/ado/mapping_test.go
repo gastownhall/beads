@@ -10,7 +10,7 @@ import (
 )
 
 func TestPriorityToBeads(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name  string
@@ -38,7 +38,7 @@ func TestPriorityToBeads(t *testing.T) {
 }
 
 func TestPriorityToTracker(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name  string
@@ -64,7 +64,7 @@ func TestPriorityToTracker(t *testing.T) {
 }
 
 func TestSeverityForBug(t *testing.T) {
-	fm := NewFieldMapper(nil, nil)
+	fm := NewFieldMapper(nil, nil, nil)
 	m := fm.(*adoFieldMapper)
 
 	tests := []struct {
@@ -91,8 +91,72 @@ func TestSeverityForBug(t *testing.T) {
 	}
 }
 
+func TestSeverityForBug_CustomMap(t *testing.T) {
+	fm := NewFieldMapper(nil, nil, map[string]string{
+		"0": "Critical",
+		"1": "High",
+		"2": "Medium",
+		"3": "Low",
+	})
+	m := fm.(*adoFieldMapper)
+
+	tests := []struct {
+		name     string
+		priority int
+		want     string
+	}{
+		{"custom P0 → Critical", 0, "Critical"},
+		{"custom P1 → High", 1, "High"},
+		{"custom P2 → Medium", 2, "Medium"},
+		{"custom P3 → Low", 3, "Low"},
+		{"P4 not in map → 4 - Low default", 4, "4 - Low"},
+		{"negative → 3 - Medium default", -1, "3 - Medium"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := m.SeverityForBug(tt.priority)
+			if got != tt.want {
+				t.Errorf("SeverityForBug(%d) = %q, want %q", tt.priority, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSeverityForBug_NormalizedMap(t *testing.T) {
+	fm := NewFieldMapper(nil, nil, map[string]string{
+		" 0 ": " Critical ",
+		"1":   "",
+		"5":   "Urgent",
+		"foo": "Unknown",
+		"2":   "Major",
+	})
+	m := fm.(*adoFieldMapper)
+
+	// "0" should be trimmed and used; "1" empty value ignored; invalid keys ignored.
+	tests := []struct {
+		name     string
+		priority int
+		want     string
+	}{
+		{"trimmed key/value P0 → Critical", 0, "Critical"},
+		{"empty value P1 falls back to default", 1, "2 - High"},
+		{"valid P2 → Major", 2, "Major"},
+		{"invalid key P5 ignored, falls back default", 5, "3 - Medium"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := m.SeverityForBug(tt.priority)
+			if got != tt.want {
+				t.Errorf("SeverityForBug(%d) = %q, want %q", tt.priority, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStatusToBeads_Defaults(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name  string
@@ -119,7 +183,7 @@ func TestStatusToBeads_Defaults(t *testing.T) {
 }
 
 func TestStatusToBeads_NonStringInput(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name  string
@@ -143,7 +207,7 @@ func TestStatusToBeads_NonStringInput(t *testing.T) {
 }
 
 func TestStatusToTracker_DefaultCase(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	got := m.StatusToTracker(types.Status("unknown_status"))
 	if got != "New" {
@@ -160,6 +224,7 @@ func TestStatusToTracker_CustomMapOverridesDefault(t *testing.T) {
 			"blocked":     "On Hold",
 			"deferred":    "Parked",
 		},
+		nil,
 		nil,
 	)
 
@@ -186,7 +251,7 @@ func TestStatusToTracker_CustomMapOverridesDefault(t *testing.T) {
 }
 
 func TestTypeToBeads_NonStringInput(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name  string
@@ -209,7 +274,7 @@ func TestTypeToBeads_NonStringInput(t *testing.T) {
 }
 
 func TestTypeToBeads_UnknownWithDefault(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	got := m.TypeToBeads("CustomWorkItemType")
 	if got != types.TypeTask {
@@ -218,7 +283,7 @@ func TestTypeToBeads_UnknownWithDefault(t *testing.T) {
 }
 
 func TestTypeToBeads_CustomMap(t *testing.T) {
-	m := NewFieldMapper(nil, map[string]string{"feature": "Product Backlog Item", "bug": "Defect"})
+	m := NewFieldMapper(nil, map[string]string{"feature": "Product Backlog Item", "bug": "Defect"}, nil)
 
 	tests := []struct {
 		name  string
@@ -242,7 +307,7 @@ func TestTypeToBeads_CustomMap(t *testing.T) {
 }
 
 func TestTypeToTracker_DefaultCase(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	got := m.TypeToTracker(types.IssueType("unknown_type"))
 	if got != "Task" {
@@ -257,7 +322,9 @@ func TestTypeToTracker_CustomMapAllTypes(t *testing.T) {
 		"task":    "Work Item",
 		"epic":    "Initiative",
 		"chore":   "Maintenance",
-	})
+	},
+		nil,
+	)
 
 	tests := []struct {
 		name  string
@@ -285,6 +352,7 @@ func TestStatusToBeads_CustomMap(t *testing.T) {
 	m := NewFieldMapper(
 		map[string]string{"in_progress": "Doing", "closed": "Finished"},
 		nil,
+		nil,
 	)
 
 	tests := []struct {
@@ -308,7 +376,7 @@ func TestStatusToBeads_CustomMap(t *testing.T) {
 }
 
 func TestStatusToTracker_Defaults(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name  string
@@ -336,6 +404,7 @@ func TestStatusToTracker_CustomMap(t *testing.T) {
 	m := NewFieldMapper(
 		map[string]string{"in_progress": "Doing", "closed": "Finished"},
 		nil,
+		nil,
 	)
 
 	tests := []struct {
@@ -359,7 +428,7 @@ func TestStatusToTracker_CustomMap(t *testing.T) {
 }
 
 func TestTypeToBeads_Defaults(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name  string
@@ -386,7 +455,7 @@ func TestTypeToBeads_Defaults(t *testing.T) {
 }
 
 func TestTypeToBeads_Scrum(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	got := m.TypeToBeads("Product Backlog Item")
 	if got != types.TypeFeature {
@@ -395,7 +464,7 @@ func TestTypeToBeads_Scrum(t *testing.T) {
 }
 
 func TestTypeToTracker_Defaults(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name  string
@@ -420,7 +489,7 @@ func TestTypeToTracker_Defaults(t *testing.T) {
 }
 
 func TestTypeToTracker_CustomMap(t *testing.T) {
-	m := NewFieldMapper(nil, map[string]string{"feature": "Product Backlog Item"})
+	m := NewFieldMapper(nil, map[string]string{"feature": "Product Backlog Item"}, nil)
 
 	got := m.TypeToTracker(types.TypeFeature)
 	if got != "Product Backlog Item" {
@@ -435,7 +504,7 @@ func TestTypeToTracker_CustomMap(t *testing.T) {
 }
 
 func TestIssueToBeads(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	wi := &WorkItem{
 		ID:  42,
@@ -534,7 +603,7 @@ func TestIssueToBeads(t *testing.T) {
 }
 
 func TestIssueToBeads_NilRaw(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	// nil TrackerIssue.
 	if conv := m.IssueToBeads(nil); conv != nil {
@@ -555,7 +624,7 @@ func TestIssueToBeads_NilRaw(t *testing.T) {
 }
 
 func TestIssueToTracker(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	meta, _ := json.Marshal(map[string]interface{}{
 		"ado.area_path":      "Project\\TeamA",
@@ -612,7 +681,7 @@ func TestIssueToTracker(t *testing.T) {
 }
 
 func TestIssueToTracker_BugSetsSeverity(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name         string
@@ -648,7 +717,7 @@ func TestIssueToTracker_BugSetsSeverity(t *testing.T) {
 }
 
 func TestIssueToTracker_NonBugNoSeverity(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	nonBugTypes := []types.IssueType{
 		types.TypeFeature,
@@ -677,7 +746,7 @@ func TestIssueToTracker_NonBugNoSeverity(t *testing.T) {
 func TestIssueToTracker_CustomBugTypeName(t *testing.T) {
 	// When a custom type map maps "bug" to "Defect", Severity should NOT be set
 	// because the type name is "Defect", not "Bug".
-	m := NewFieldMapper(nil, map[string]string{"bug": "Defect"})
+	m := NewFieldMapper(nil, map[string]string{"bug": "Defect"}, nil)
 
 	issue := &types.Issue{
 		Title:     "Custom bug type",
@@ -785,50 +854,60 @@ func TestExtractAssignedTo(t *testing.T) {
 }
 
 func TestRestoreMetadata(t *testing.T) {
+	m := NewFieldMapper(nil, nil, nil)
+
 	tests := []struct {
 		name       string
+		issueType  types.IssueType
 		metadata   json.RawMessage
 		wantFields map[string]interface{}
 	}{
 		{
 			name:       "nil metadata",
+			issueType:  types.TypeTask,
 			metadata:   nil,
 			wantFields: map[string]interface{}{},
 		},
 		{
 			name:       "empty metadata",
+			issueType:  types.TypeTask,
 			metadata:   json.RawMessage([]byte{}),
 			wantFields: map[string]interface{}{},
 		},
 		{
 			name:       "invalid JSON metadata",
+			issueType:  types.TypeTask,
 			metadata:   json.RawMessage([]byte(`not json`)),
 			wantFields: map[string]interface{}{},
 		},
 		{
-			name:     "only area_path",
-			metadata: json.RawMessage(`{"ado.area_path":"Project\\Team"}`),
+			name:      "only area_path",
+			issueType: types.TypeTask,
+			metadata:  json.RawMessage(`{"ado.area_path":"Project\\Team"}`),
 			wantFields: map[string]interface{}{
 				FieldAreaPath: "Project\\Team",
 			},
 		},
 		{
-			name:     "only iteration_path",
-			metadata: json.RawMessage(`{"ado.iteration_path":"Sprint 1"}`),
+			name:      "only iteration_path",
+			issueType: types.TypeTask,
+			metadata:  json.RawMessage(`{"ado.iteration_path":"Sprint 1"}`),
 			wantFields: map[string]interface{}{
 				FieldIterationPath: "Sprint 1",
 			},
 		},
 		{
-			name:     "only story_points",
-			metadata: json.RawMessage(`{"ado.story_points":5}`),
+			name:      "only story_points",
+			issueType: types.TypeTask,
+			metadata:  json.RawMessage(`{"ado.story_points":5}`),
 			wantFields: map[string]interface{}{
 				FieldStoryPoints: float64(5),
 			},
 		},
 		{
-			name:     "all metadata fields",
-			metadata: json.RawMessage(`{"ado.area_path":"A","ado.iteration_path":"B","ado.story_points":8}`),
+			name:      "all metadata fields",
+			issueType: types.TypeTask,
+			metadata:  json.RawMessage(`{"ado.area_path":"A","ado.iteration_path":"B","ado.story_points":8}`),
 			wantFields: map[string]interface{}{
 				FieldAreaPath:      "A",
 				FieldIterationPath: "B",
@@ -837,19 +916,28 @@ func TestRestoreMetadata(t *testing.T) {
 		},
 		{
 			name:       "unrelated metadata keys ignored",
+			issueType:  types.TypeTask,
 			metadata:   json.RawMessage(`{"ado.rev":3,"custom_field":"value"}`),
 			wantFields: map[string]interface{}{},
 		},
 		{
-			name:     "severity metadata restored",
-			metadata: json.RawMessage(`{"ado.severity":"2 - High"}`),
+			name:      "severity metadata restored for bug",
+			issueType: types.TypeBug,
+			metadata:  json.RawMessage(`{"ado.severity":"2 - High"}`),
 			wantFields: map[string]interface{}{
 				FieldSeverity: "2 - High",
 			},
 		},
 		{
-			name:     "all metadata fields including severity",
-			metadata: json.RawMessage(`{"ado.area_path":"A","ado.iteration_path":"B","ado.story_points":8,"ado.severity":"1 - Critical"}`),
+			name:       "severity metadata not restored for non-bug",
+			issueType:  types.TypeFeature,
+			metadata:   json.RawMessage(`{"ado.severity":"2 - High"}`),
+			wantFields: map[string]interface{}{},
+		},
+		{
+			name:      "all metadata fields including severity for bug",
+			issueType: types.TypeBug,
+			metadata:  json.RawMessage(`{"ado.area_path":"A","ado.iteration_path":"B","ado.story_points":8,"ado.severity":"1 - Critical"}`),
 			wantFields: map[string]interface{}{
 				FieldAreaPath:      "A",
 				FieldIterationPath: "B",
@@ -861,9 +949,9 @@ func TestRestoreMetadata(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			issue := &types.Issue{Metadata: tt.metadata}
+			issue := &types.Issue{IssueType: tt.issueType, Metadata: tt.metadata}
 			fields := map[string]interface{}{}
-			restoreMetadata(issue, fields)
+			m.(*adoFieldMapper).restoreMetadata(issue, fields)
 
 			for k, want := range tt.wantFields {
 				got, ok := fields[k]
@@ -886,7 +974,7 @@ func TestRestoreMetadata(t *testing.T) {
 }
 
 func TestBlockedStatusRoundTrip(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	// Push direction: blocked beads issue → ADO Active + beads:blocked tag.
 	issue := &types.Issue{
@@ -935,7 +1023,7 @@ func TestBlockedStatusRoundTrip(t *testing.T) {
 }
 
 func TestBlockedStatusPush_NoLabels(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	// Blocked issue with no labels should still get beads:blocked tag.
 	issue := &types.Issue{
@@ -951,7 +1039,7 @@ func TestBlockedStatusPush_NoLabels(t *testing.T) {
 }
 
 func TestActiveWithoutBlockedTag_StaysInProgress(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	wi := &WorkItem{
 		ID: 100,
@@ -971,7 +1059,7 @@ func TestActiveWithoutBlockedTag_StaysInProgress(t *testing.T) {
 }
 
 func TestPriorityRoundTrip(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	tests := []struct {
 		name          string
@@ -1039,7 +1127,7 @@ func TestPriorityRoundTrip(t *testing.T) {
 }
 
 func TestPriorityNoMetadata_DefaultsTo3(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	// ADO priority 4 without beads_priority metadata → defaults to beads 3.
 	wi := &WorkItem{
@@ -1059,7 +1147,7 @@ func TestPriorityNoMetadata_DefaultsTo3(t *testing.T) {
 }
 
 func TestSeverityRoundTrip(t *testing.T) {
-	m := NewFieldMapper(nil, nil)
+	m := NewFieldMapper(nil, nil, nil)
 
 	// Pull: ADO Bug with Severity → beads issue with severity in metadata.
 	wi := &WorkItem{
@@ -1120,5 +1208,224 @@ func TestHasBeadsTag(t *testing.T) {
 				t.Errorf("hasBeadsTag(%q, %q) = %v, want %v", tt.tagStr, tt.tag, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSeverityForBug_CustomMapOnePerLevel verifies the push direction (beads → ADO)
+// with a custom severity map covering every beads priority level (0-4).
+func TestSeverityForBug_CustomMapOnePerLevel(t *testing.T) {
+	sm := map[string]string{
+		"0": "1 - Critical",
+		"1": "2 - High",
+		"2": "3 - Medium",
+		"3": "4 - Low",
+		"4": "4 - Backlog",
+	}
+	fm := NewFieldMapper(nil, nil, sm)
+	m := fm.(*adoFieldMapper)
+
+	tests := []struct {
+		priority int
+		want     string
+	}{
+		{0, "1 - Critical"},
+		{1, "2 - High"},
+		{2, "3 - Medium"},
+		{3, "4 - Low"},
+		{4, "4 - Backlog"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := m.SeverityForBug(tt.priority)
+			if got != tt.want {
+				t.Errorf("SeverityForBug(%d) = %q, want %q", tt.priority, got, tt.want)
+			}
+
+			// Push direction: IssueToTracker should produce the custom severity.
+			issue := &types.Issue{
+				Title:     "Bug with custom severity",
+				Status:    types.StatusOpen,
+				Priority:  tt.priority,
+				IssueType: types.TypeBug,
+			}
+			fields := m.IssueToTracker(issue)
+			sev, ok := fields[FieldSeverity].(string)
+			if !ok {
+				t.Fatalf("push: Severity field missing for Bug type at priority %d", tt.priority)
+			}
+			if sev != tt.want {
+				t.Errorf("push: Severity = %q, want %q", sev, tt.want)
+			}
+		})
+	}
+}
+
+// TestSeverityForBug_CustomThreeLevel verifies the "Minor / Major / Critical"
+// three-level severity scheme through both push and pull directions.
+func TestSeverityForBug_CustomThreeLevel(t *testing.T) {
+	// Three-level mapping: P0-1→Critical, P2→Major, P3-4→Minor.
+	sm := map[string]string{
+		"0": "Critical",
+		"1": "Critical",
+		"2": "Major",
+		"3": "Minor",
+		"4": "Minor",
+	}
+	fm := NewFieldMapper(nil, nil, sm)
+	m := fm.(*adoFieldMapper)
+
+	// ── Push direction: beads priority → ADO severity ──
+	pushTests := []struct {
+		priority int
+		want     string
+	}{
+		{0, "Critical"},
+		{1, "Critical"},
+		{2, "Major"},
+		{3, "Minor"},
+		{4, "Minor"},
+	}
+
+	for _, tt := range pushTests {
+		t.Run("push_"+tt.want, func(t *testing.T) {
+			got := m.SeverityForBug(tt.priority)
+			if got != tt.want {
+				t.Errorf("SeverityForBug(%d) = %q, want %q", tt.priority, got, tt.want)
+			}
+
+			issue := &types.Issue{
+				Title:     "Bug with three-level severity",
+				Status:    types.StatusOpen,
+				Priority:  tt.priority,
+				IssueType: types.TypeBug,
+			}
+			fields := m.IssueToTracker(issue)
+			sev, ok := fields[FieldSeverity].(string)
+			if !ok {
+				t.Fatalf("push: Severity field missing for Bug at priority %d", tt.priority)
+			}
+			if sev != tt.want {
+				t.Errorf("push: Severity = %q, want %q", sev, tt.want)
+			}
+		})
+	}
+
+	// ── Pull direction: ADO severity → beads metadata, then push restores it ──
+	pullTests := []struct {
+		name        string
+		adoSeverity string
+		priority    float64
+	}{
+		{"pull Critical", "Critical", 0},
+		{"pull Major", "Major", 2},
+		{"pull Minor", "Minor", 3},
+	}
+
+	for _, tt := range pullTests {
+		t.Run(tt.name, func(t *testing.T) {
+			wi := &WorkItem{
+				ID:  100,
+				Rev: 1,
+				URL: "https://dev.azure.com/org/proj/_apis/wit/workItems/100",
+				Fields: map[string]interface{}{
+					FieldTitle:        "Pulled bug",
+					FieldState:        "New",
+					FieldPriority:     tt.priority,
+					FieldWorkItemType: "Bug",
+					FieldSeverity:     tt.adoSeverity,
+				},
+			}
+			ti := &tracker.TrackerIssue{ID: "100", Raw: wi}
+			conv := m.IssueToBeads(ti)
+			if conv == nil {
+				t.Fatal("pull: IssueToBeads returned nil")
+			}
+
+			// Verify severity stored in metadata.
+			var meta map[string]interface{}
+			if err := json.Unmarshal(conv.Issue.Metadata, &meta); err != nil {
+				t.Fatalf("pull: failed to unmarshal metadata: %v", err)
+			}
+			if meta["ado.severity"] != tt.adoSeverity {
+				t.Errorf("pull: ado.severity = %v, want %q", meta["ado.severity"], tt.adoSeverity)
+			}
+
+			// Push back: metadata severity should take precedence over computed severity.
+			fields := m.IssueToTracker(conv.Issue)
+			sev, ok := fields[FieldSeverity].(string)
+			if !ok {
+				t.Fatal("push: Severity field missing on restore")
+			}
+			if sev != tt.adoSeverity {
+				t.Errorf("push restored: Severity = %q, want %q (metadata should win)", sev, tt.adoSeverity)
+			}
+		})
+	}
+}
+
+// TestSeverityForBug_CustomMapRoundTrip verifies the full round-trip with a non-default
+// severity value: pull from ADO preserves the raw severity in metadata, and push restores it.
+func TestSeverityForBug_CustomMapRoundTrip(t *testing.T) {
+	sm := map[string]string{
+		"0": "Critical",
+		"1": "Major",
+		"2": "Medium",
+		"3": "Minor",
+		"4": "Trivial",
+	}
+	m := NewFieldMapper(nil, nil, sm)
+
+	// Pull: ADO Bug with an unusual severity → metadata preserves it.
+	wi := &WorkItem{
+		ID:  200,
+		Rev: 1,
+		URL: "https://dev.azure.com/org/proj/_apis/wit/workItems/200",
+		Fields: map[string]interface{}{
+			FieldTitle:        "Custom severity round-trip",
+			FieldState:        "New",
+			FieldPriority:     float64(0),
+			FieldWorkItemType: "Bug",
+			FieldSeverity:     "Blocker - Must Fix",
+		},
+	}
+	ti := &tracker.TrackerIssue{ID: "200", Raw: wi}
+	conv := m.IssueToBeads(ti)
+	if conv == nil {
+		t.Fatal("pull: IssueToBeads returned nil")
+	}
+
+	var meta map[string]interface{}
+	if err := json.Unmarshal(conv.Issue.Metadata, &meta); err != nil {
+		t.Fatalf("pull: failed to unmarshal metadata: %v", err)
+	}
+	if meta["ado.severity"] != "Blocker - Must Fix" {
+		t.Errorf("pull: ado.severity = %v, want %q", meta["ado.severity"], "Blocker - Must Fix")
+	}
+
+	// Push back: metadata should override the computed severity.
+	fields := m.IssueToTracker(conv.Issue)
+	sev, ok := fields[FieldSeverity].(string)
+	if !ok {
+		t.Fatal("push: Severity field missing on restore")
+	}
+	if sev != "Blocker - Must Fix" {
+		t.Errorf("push restored: Severity = %q, want %q", sev, "Blocker - Must Fix")
+	}
+
+	// New issue (no metadata): computed severity from the custom map.
+	newIssue := &types.Issue{
+		Title:     "New bug issue",
+		Status:    types.StatusOpen,
+		Priority:  0,
+		IssueType: types.TypeBug,
+	}
+	fields = m.IssueToTracker(newIssue)
+	sev, ok = fields[FieldSeverity].(string)
+	if !ok {
+		t.Fatal("push new: Severity field missing")
+	}
+	if sev != "Critical" {
+		t.Errorf("push new: Severity = %q, want %q", sev, "Critical")
 	}
 }

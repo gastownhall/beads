@@ -662,7 +662,7 @@ func TestTracker_Registration(t *testing.T) {
 
 func TestTracker_FieldMapper(t *testing.T) {
 	tr := &Tracker{
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	fm := tr.FieldMapper()
 	if fm == nil {
@@ -763,7 +763,7 @@ func newTestTracker(t *testing.T, handler http.Handler) (*Tracker, *httptest.Ser
 
 	return &Tracker{
 		client:   client,
-		mapper:   NewFieldMapper(nil, nil),
+		mapper:   NewFieldMapper(nil, nil, nil),
 		baseURL:  server.URL,
 		org:      "testorg",
 		projects: []string{"testproject"},
@@ -945,7 +945,7 @@ func TestTracker_FetchIssue(t *testing.T) {
 func TestTracker_FetchIssue_InvalidID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.FetchIssue(context.Background(), "not-a-number")
 	if err == nil {
@@ -1160,7 +1160,7 @@ func TestTracker_UpdateIssue(t *testing.T) {
 func TestTracker_UpdateIssue_InvalidID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.UpdateIssue(context.Background(), "abc", &types.Issue{Title: "x"})
 	if err == nil {
@@ -1240,7 +1240,7 @@ func containsSubstr(s, substr string) bool {
 func TestTracker_FetchIssue_ZeroID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.FetchIssue(context.Background(), "0")
 	if err == nil {
@@ -1254,7 +1254,7 @@ func TestTracker_FetchIssue_ZeroID(t *testing.T) {
 func TestTracker_FetchIssue_NegativeID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.FetchIssue(context.Background(), "-5")
 	if err == nil {
@@ -1268,7 +1268,7 @@ func TestTracker_FetchIssue_NegativeID(t *testing.T) {
 func TestTracker_UpdateIssue_ZeroID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.UpdateIssue(context.Background(), "0", &types.Issue{Title: "x"})
 	if err == nil {
@@ -1282,7 +1282,7 @@ func TestTracker_UpdateIssue_ZeroID(t *testing.T) {
 func TestTracker_UpdateIssue_NegativeID(t *testing.T) {
 	tr := &Tracker{
 		client: NewClient(NewSecretString("pat"), "org", "proj"),
-		mapper: NewFieldMapper(nil, nil),
+		mapper: NewFieldMapper(nil, nil, nil),
 	}
 	_, err := tr.UpdateIssue(context.Background(), "-1", &types.Issue{Title: "x"})
 	if err == nil {
