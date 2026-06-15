@@ -1626,6 +1626,17 @@ func (m *minimalPullStore) Pull(ctx context.Context) error {
 	return m.pullErr
 }
 
+// ListRemotes keeps the post-pull error classifier alive. After this PR was
+// cut, main routed bd dolt pull's failure handling through isConfirmedNoRemote
+// (cmd/bd/dolt.go), which calls store.ListRemotes; without this method the call
+// would dereference the nil embedded DoltStorage and panic. Reporting no
+// remotes keeps the simulated "remote not found" failure on the benign
+// no-remote path (clean exit, no os.Exit), which is what this test needs to
+// observe that the pull was attempted rather than skipped.
+func (m *minimalPullStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return nil, nil
+}
+
 func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 	// no-push is a push-only guard. bd dolt pull must contact the remote even when
 	// no-push: true — contributor clones need to receive upstream updates.
