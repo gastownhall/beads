@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestEnsureMatchingCLIRemoteSurfacesValidationErrors(t *testing.T) {
@@ -104,6 +106,40 @@ func TestWithCLIExecTimeoutAddsDeadline(t *testing.T) {
 	}
 	if until := time.Until(deadline); until <= 0 || until > cliExecTimeout {
 		t.Fatalf("deadline is %s away, want within %s", until, cliExecTimeout)
+	}
+}
+
+func TestCredentialsForRemoteInfoUsesURLUser(t *testing.T) {
+	remotes := []storage.RemoteInfo{
+		{Name: "central", URL: "http://beads@192.168.1.28:50051/ow"},
+	}
+
+	creds := credentialsForRemoteInfo("central", "secret", remotes)
+	if creds == nil {
+		t.Fatal("expected credentials from remote URL user")
+	}
+	if creds.username != "beads" {
+		t.Fatalf("username = %q, want beads", creds.username)
+	}
+	if creds.password != "secret" {
+		t.Fatalf("password = %q, want secret", creds.password)
+	}
+}
+
+func TestCredentialsForRemoteInfoIgnoresUncredentialedOrDifferentRemote(t *testing.T) {
+	remotes := []storage.RemoteInfo{
+		{Name: "central", URL: "http://192.168.1.28:50051/ow"},
+		{Name: "backup", URL: "http://backup@192.168.1.29:50051/ow"},
+		{Name: "bad", URL: "http://%zz"},
+	}
+
+	tests := []string{"central", "missing", "bad"}
+	for _, remote := range tests {
+		t.Run(remote, func(t *testing.T) {
+			if creds := credentialsForRemoteInfo(remote, "secret", remotes); creds != nil {
+				t.Fatalf("credentialsForRemoteInfo(%q) = %#v, want nil", remote, creds)
+			}
+		})
 	}
 }
 

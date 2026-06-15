@@ -21,6 +21,7 @@ import (
 	"hash/fnv"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2060,12 +2061,37 @@ func (s *DoltStore) mainRemoteCredentials() *remoteCredentials {
 	return &remoteCredentials{username: s.remoteUser, password: s.remotePassword}
 }
 
-// credentialsForRemote returns credentials only when the target remote is the
-// default remote (s.remote). Non-default remotes get nil creds to avoid sending
-// the wrong credentials to the wrong host.
-func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
+// credentialsForRemote returns credentials for the selected remote without
+// leaking default remote credentials to unrelated remotes. Explicit
+// DOLT_REMOTE_USER/DOLT_REMOTE_PASSWORD credentials apply only to the default
+// remote. For named remotes, a URL user (for example
+// http://beads@example:50051/db) selects the auth user while the password still
+// comes from DOLT_REMOTE_PASSWORD.
+func (s *DoltStore) credentialsForRemote(ctx context.Context, remote string) (*remoteCredentials, error) {
 	if remote == s.remote {
-		return s.mainRemoteCredentials()
+		return s.mainRemoteCredentials(), nil
+	}
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list Dolt remotes before credential resolution for remote %q: %w", remote, err)
+	}
+	return credentialsForRemoteInfo(remote, s.remotePassword, remotes), nil
+}
+
+func credentialsForRemoteInfo(remote, password string, remotes []storage.RemoteInfo) *remoteCredentials {
+	for _, r := range remotes {
+		if r.Name != remote {
+			continue
+		}
+		parsed, err := url.Parse(r.URL)
+		if err != nil || parsed.User == nil {
+			return nil
+		}
+		username := parsed.User.Username()
+		if username == "" {
+			return nil
+		}
+		return &remoteCredentials{username: username, password: password}
 	}
 	return nil
 }
@@ -2207,7 +2233,10 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	creds := s.credentialsForRemote(remote)
+	creds, err := s.credentialsForRemote(ctx, remote)
+	if err != nil {
+		return err
+	}
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -2241,14 +2270,14 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	} else if useCLI {
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
-	if s.remoteUser != "" && remote == s.remote {
+	if !creds.empty() && creds.username != "" {
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if force {
-				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
+				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", creds.username, remote, s.branch); err != nil {
 					return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
 				}
 			} else {
-				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
+				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", creds.username, remote, s.branch); err != nil {
 					return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
 				}
 			}
@@ -2341,7 +2370,10 @@ func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr e
 // each route carries. Split from pullFromRemote so every successful route
 // funnels back through the is_blocked recompute.
 func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
-	creds := s.credentialsForRemote(remote)
+	creds, err := s.credentialsForRemote(ctx, remote)
+	if err != nil {
+		return err
+	}
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -2370,9 +2402,9 @@ func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
 	// charge of metadata-only conflict repair.
-	if s.remoteUser != "" && remote == s.remote {
+	if !creds.empty() && creds.username != "" {
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
-			if err := s.pullWithAutoResolve(ctx, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
+			if err := s.pullWithAutoResolve(ctx, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", creds.username, remote, s.branch); err != nil {
 				return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 			}
 			return nil
