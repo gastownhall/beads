@@ -13,6 +13,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/dolthub/driver/v2 v2.1.4
 	github.com/go-sql-driver/mysql v1.9.3
+	github.com/invopop/jsonschema v0.13.0
 	github.com/olebedev/when v1.1.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
@@ -41,7 +42,6 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cockroachdb/apd/v3 v3.2.3 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/moby/moby/api v1.54.1 // indirect
 	github.com/moby/moby/client v0.4.0 // indirect
