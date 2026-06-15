@@ -9,7 +9,7 @@ sidebar_position: 0
 <!-- AUTO-GENERATED: do not edit manually -->
 Reference for bd v1.0.0. Generated from `bd help --list` and `bd help --doc <command>`.
 
-This reference covers all 106 live top-level `bd` commands. Regenerate it with:
+This reference covers all 107 live top-level `bd` commands. Regenerate it with:
 
 ```bash
 ./scripts/generate-cli-docs.sh
@@ -101,6 +101,7 @@ This reference covers all 106 live top-level `bd` commands. Regenerate it with:
 - [`bd repo`](./repo.md)
 - [`bd restore`](./restore.md)
 - [`bd rules`](./rules.md)
+- [`bd schema`](./schema.md)
 - [`bd search`](./search.md)
 - [`bd set-state`](./set-state.md)
 - [`bd setup`](./setup.md)

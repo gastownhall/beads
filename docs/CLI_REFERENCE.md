@@ -280,6 +280,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd orphans](#bd-orphans) — Identify orphaned issues (referenced in commits but still open)
 - [bd ready](#bd-ready) — Show ready work (open, no active blockers)
 - [bd rename](#bd-rename) — Rename an issue ID
+- [bd schema](#bd-schema) — Print the JSON Schema for bd's --json / export output
 - [bd ship](#bd-ship) — Publish a capability for cross-project dependencies
 - [bd undefer](#bd-undefer) — Undefer one or more issues (restore to open)
 - [bd version](#bd-version) — Print version information
@@ -6732,6 +6733,22 @@ Note: The new ID must use a valid prefix for this database.
 
 ```
 bd rename <old-id> <new-id>
+```
+
+### bd schema
+
+Print the JSON Schema for bd's canonical output record types.
+
+The schema is reflected from the same Go structs bd serializes, so it stays in
+lockstep with the actual --json / export output. Use it to generate typed
+consumer models (datamodel-code-generator, quicktype, ...) rather than
+hand-maintaining them.
+
+  bd schema | jq '.types.issue'        # the issue record schema
+  bd schema | jq '.types.dependency'   # the dependency record schema
+
+```
+bd schema
 ```
 
 ### bd ship

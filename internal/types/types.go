@@ -821,7 +821,7 @@ const (
 
 // AllDependencyTypes lists the built-in dependency types, in declaration order.
 // Single source for the `bd schema` enum so the published schema enumerates
-// exactly the types bd recognises.
+// exactly the types bd recognizes.
 var AllDependencyTypes = []DependencyType{
 	DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor,
 	DepRelated, DepDiscoveredFrom,
