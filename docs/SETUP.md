@@ -53,7 +53,7 @@ BD_AGENT_PROFILE=team-maintainer bd prime
 
 | Recipe | Path | Integration Type |
 |--------|------|-----------------|
-| `cursor` | `.cursor/rules/beads.mdc` | Rules file |
+| `cursor` | `.cursor/rules/beads.mdc` + `.cursor/mcp.json` | Rules file + MCP |
 | `windsurf` | `.windsurf/rules/beads.md` | Rules file |
 | `cody` | `.cody/rules/beads.md` | Rules file |
 | `kilocode` | `.kilocode/rules/beads.md` | Rules file |
@@ -402,37 +402,38 @@ bd setup cursor
 
 ### What Gets Installed
 
-Creates `.cursor/rules/beads.mdc` with:
-- Core workflow rules (track work in bd, not markdown TODOs)
-- Quick command reference
-- Workflow pattern (ready → claim → work → close → sync)
-- Context loading instructions
+Creates two files:
 
-### Flags
+1. `.cursor/rules/beads.mdc` with:
+   - Agent safety rails (no `bd edit`, no markdown TODOs, use `--json`)
+   - Workflow pattern (ready → claim → work → close → sync)
+   - Session close protocol (push is mandatory)
+   - `bd prime` and `bd remember` guidance
 
-| Flag | Description |
-|------|-------------|
-| `--check` | Check if integration is installed |
-| `--remove` | Remove beads rules file |
+2. `.cursor/mcp.json` with a merged `beads` MCP server entry (`bd mcp`), unless a beads-capable MCP server is already configured.
 
 ### Examples
 
 ```bash
-# Check if rules are installed
+# Check if integration is installed
 bd setup cursor --check
-# Output: ✓ Cursor integration installed: .cursor/rules/beads.mdc
+# Output: ✓ Cursor integration installed
+#   Rules: .cursor/rules/beads.mdc
+#   MCP: .cursor/mcp.json
 
-# Remove rules
+# Remove integration
 bd setup cursor --remove
 ```
 
 ### How It Works
 
-Cursor reads `.cursor/rules/*.mdc` files and includes them in the AI's context. The beads rules file teaches the AI:
-- To use `bd ready` for finding work
-- To use `bd create` for tracking new issues
-- To treat commit, push, and Dolt remote sync as policy-controlled handoff actions
-- The basic workflow pattern
+Cursor reads `.cursor/rules/*.mdc` files and includes them in the AI's context on every exchange. The beads rules file teaches the AI:
+- Safety rails that prevent common agent failures (`bd edit`, TodoWrite, missing `--json`)
+- To run `bd prime` at session start for full workflow context
+- To use `bd ready` for finding work and `bd update --claim` for claiming it
+- That work is not complete until `git push` succeeds
+
+The MCP entry exposes `bd mcp` as native tools so agents can call beads operations without shelling out.
 
 ## Aider
 

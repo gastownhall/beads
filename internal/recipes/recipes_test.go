@@ -36,8 +36,17 @@ func TestGetRecipe(t *testing.T) {
 	if recipe.Name != "Cursor IDE" {
 		t.Errorf("got Name=%q, want 'Cursor IDE'", recipe.Name)
 	}
-	if recipe.Path != ".cursor/rules/beads.mdc" {
-		t.Errorf("got Path=%q, want '.cursor/rules/beads.mdc'", recipe.Path)
+	if recipe.Type != TypeMultiFile {
+		t.Errorf("got Type=%q, want %q", recipe.Type, TypeMultiFile)
+	}
+	wantPaths := []string{".cursor/rules/beads.mdc", ".cursor/mcp.json"}
+	if len(recipe.Paths) != len(wantPaths) {
+		t.Fatalf("got %d paths, want %d", len(recipe.Paths), len(wantPaths))
+	}
+	for i, want := range wantPaths {
+		if recipe.Paths[i] != want {
+			t.Errorf("Paths[%d]=%q, want %q", i, recipe.Paths[i], want)
+		}
 	}
 
 	// Test unknown recipe

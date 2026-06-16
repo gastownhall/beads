@@ -45,9 +45,9 @@ type Recipe struct {
 var BuiltinRecipes = map[string]Recipe{
 	"cursor": {
 		Name:        "Cursor IDE",
-		Path:        ".cursor/rules/beads.mdc",
-		Type:        TypeFile,
-		Description: "Cursor IDE rules file",
+		Type:        TypeMultiFile,
+		Description: "Cursor IDE rules and MCP configuration",
+		Paths:       []string{".cursor/rules/beads.mdc", ".cursor/mcp.json"},
 	},
 	"windsurf": {
 		Name:        "Windsurf",
