@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/doltremote"
 )
 
 // Unit tests for the git-origin collision guard helpers:
@@ -63,44 +64,37 @@ func TestGitOriginGetURL_WithOrigin_ReturnsURL(t *testing.T) {
 	}
 }
 
-// --- guardNormalizeURL ---
+// --- doltremote.CanonicalForComparison ---
+// Verify that all first-class Dolt URL forms and their git-origin equivalents
+// normalize to the same canonical string, so the collision guard correctly
+// detects matches regardless of which scheme Dolt stored.
 
-func TestGuardNormalizeURL_TrailingSlash(t *testing.T) {
-	in := "https://github.com/org/repo/"
-	want := "https://github.com/org/repo"
-	if got := guardNormalizeURL(in); got != want {
-		t.Errorf("guardNormalizeURL(%q) = %q, want %q", in, got, want)
+func TestCanonicalForComparison_HTTPSVariants(t *testing.T) {
+	// git origin (plain https) and Dolt remote (git+ prefix) must be equal.
+	plain := doltremote.CanonicalForComparison("https://github.com/org/repo.git")
+	gitPlus := doltremote.CanonicalForComparison("git+https://github.com/org/repo.git")
+	if plain != gitPlus {
+		t.Errorf("https and git+https canonical mismatch: %q vs %q", plain, gitPlus)
 	}
 }
 
-func TestGuardNormalizeURL_DotGitSuffix(t *testing.T) {
-	in := "https://github.com/org/repo.git"
-	want := "https://github.com/org/repo"
-	if got := guardNormalizeURL(in); got != want {
-		t.Errorf("guardNormalizeURL(%q) = %q, want %q", in, got, want)
+func TestCanonicalForComparison_SCPAndGitSSH(t *testing.T) {
+	// SCP-style git origin and Dolt's git+ssh:// form must be equal.
+	scp := doltremote.CanonicalForComparison("git@github.com:org/repo.git")
+	ssh := doltremote.CanonicalForComparison("git+ssh://git@github.com/org/repo.git")
+	if scp != ssh {
+		t.Errorf("SCP and git+ssh canonical mismatch: %q vs %q", scp, ssh)
 	}
 }
 
-func TestGuardNormalizeURL_DotGitAndTrailingSlash(t *testing.T) {
-	in := "https://github.com/org/repo.git/"
-	want := "https://github.com/org/repo"
-	if got := guardNormalizeURL(in); got != want {
-		t.Errorf("guardNormalizeURL(%q) = %q, want %q", in, got, want)
-	}
-}
-
-func TestGuardNormalizeURL_NoChange(t *testing.T) {
-	in := "https://github.com/org/repo"
-	if got := guardNormalizeURL(in); got != in {
-		t.Errorf("guardNormalizeURL(%q) = %q, want unchanged %q", in, got, in)
-	}
-}
-
-func TestGuardNormalizeURL_SSHFormat(t *testing.T) {
-	in := "git@github.com:org/repo.git"
-	want := "git@github.com:org/repo"
-	if got := guardNormalizeURL(in); got != want {
-		t.Errorf("guardNormalizeURL(%q) = %q, want %q", in, got, want)
+func TestCanonicalForComparison_TrailingSlashAndDotGit(t *testing.T) {
+	// Trailing slash and .git variants of the same repo must all be equal.
+	base := doltremote.CanonicalForComparison("https://github.com/org/repo")
+	dotGit := doltremote.CanonicalForComparison("https://github.com/org/repo.git")
+	slash := doltremote.CanonicalForComparison("https://github.com/org/repo/")
+	dotGitSlash := doltremote.CanonicalForComparison("https://github.com/org/repo.git/")
+	if base != dotGit || base != slash || base != dotGitSlash {
+		t.Errorf("trailing-slash/.git variants differ: %q %q %q %q", base, dotGit, slash, dotGitSlash)
 	}
 }
 
@@ -123,9 +117,13 @@ func TestDoltRemoteMatchesGitOrigin_MatchingURL_ReturnsTrue(t *testing.T) {
 	runGitCommand(t, dir, "remote", "add", "origin", originURL)
 	t.Chdir(dir)
 
-	// Exact match (same URL — guardNormalizeURL strips .git)
+	// Exact match.
 	if !doltRemoteMatchesGitOrigin(originURL) {
 		t.Errorf("doltRemoteMatchesGitOrigin(%q) = false, want true (exact match)", originURL)
+	}
+	// Dolt-normalized form (git+ prefix) must also match.
+	if !doltRemoteMatchesGitOrigin("git+https://github.com/org/repo.git") {
+		t.Error("doltRemoteMatchesGitOrigin(git+https://…) = false, want true")
 	}
 }
 

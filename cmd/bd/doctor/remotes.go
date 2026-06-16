@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -50,10 +51,10 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 		}
 	}
 
-	normalizedOrigin := normRemoteURL(originURL)
+	normalizedOrigin := doltremote.CanonicalForComparison(originURL)
 	var colliding []string
 	for _, r := range sqlRemotes {
-		if normRemoteURL(r.URL) == normalizedOrigin {
+		if doltremote.CanonicalForComparison(r.URL) == normalizedOrigin {
 			colliding = append(colliding, r.Name)
 		}
 	}
@@ -86,13 +87,6 @@ func gitOriginRemoteURL(repoPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
-}
-
-// normRemoteURL strips trailing slashes and ".git" suffix for URL comparison.
-func normRemoteURL(url string) string {
-	url = strings.TrimRight(url, "/")
-	url = strings.TrimSuffix(url, ".git")
-	return url
 }
 
 // querySQLRemotes gets remotes from the SQL server.
