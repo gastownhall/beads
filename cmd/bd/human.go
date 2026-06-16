@@ -70,6 +70,8 @@ SUBCOMMANDS:
 		// Setup & Maintenance
 		fmt.Printf("%s\n", ui.RenderAccent("Setup & Maintenance:"))
 		printCmd("init", "Initialize bd in current directory")
+		printCmd("dolt pull", "Pull issue updates from the remote")
+		printCmd("dolt push", "Push local issue changes to the remote")
 		printCmd("doctor", "Check installation health")
 		fmt.Println()
 
