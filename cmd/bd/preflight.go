@@ -177,7 +177,7 @@ func buildPreflightChecklist(dir string) []string {
 // isBeadsRepo reports whether dir is the beads source repo, detected by the
 // module path in go.mod. Used to keep preflight's repo-specific checklist.
 func isBeadsRepo(dir string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod")) //nolint:gosec // path is constructed internally (repo root + fixed filename)
 	if err != nil {
 		return false
 	}
