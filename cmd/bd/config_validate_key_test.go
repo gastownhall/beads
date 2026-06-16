@@ -59,6 +59,10 @@ func TestRejectProtectedConfigKey(t *testing.T) {
 			t.Errorf("rejectProtectedConfigKey(%q) = (_, false), want rejected", key)
 			continue
 		}
+		// Message must not carry its own "Error:" prefix: FatalError adds one.
+		if strings.HasPrefix(msg, "Error:") {
+			t.Errorf("rejectProtectedConfigKey(%q) message must not start with \"Error:\"; FatalError adds the prefix. Got:\n%s", key, msg)
+		}
 		// Error message must surface the three lifecycle alternatives.
 		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix"}
 		for _, want := range wantSubstrings {
