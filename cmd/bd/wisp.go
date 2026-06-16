@@ -575,6 +575,9 @@ var wispGCCmd = &cobra.Command{
 
 A wisp is considered abandoned if:
   - It hasn't been updated in --age duration and is not closed
+  - AND it is not active: blocked steps (waiting on a dependency) and
+    in-progress/hooked steps are live molecule work and are never reclaimed
+    by age, no matter how long they have been waiting (GH#4394).
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
@@ -607,6 +610,22 @@ type WispGCResult struct {
 	CleanedCount int      `json:"cleaned_count"`
 	Candidates   int      `json:"candidates,omitempty"`
 	DryRun       bool     `json:"dry_run,omitempty"`
+}
+
+// isActiveWisp reports whether a wisp is in an active execution state that
+// age-based GC must never reclaim. A wisp is active if it is blocked on an
+// open dependency (blockedSet, derived from is_blocked) or if its status is an
+// in-flight execution state. Reclaiming any of these mid-execution destroys
+// active molecules (GH#4394).
+func isActiveWisp(issue *types.Issue, blockedSet map[string]bool) bool {
+	if blockedSet[issue.ID] {
+		return true
+	}
+	switch issue.Status {
+	case types.StatusInProgress, types.StatusBlocked, types.StatusHooked, types.StatusPinned:
+		return true
+	}
+	return false
 }
 
 func runWispGC(cmd *cobra.Command, args []string) error {
@@ -661,6 +680,20 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		return HandleError("listing wisps: %v", err)
 	}
 
+	// Wisps that are still actively blocked on an open dependency are live
+	// molecule steps waiting their turn, not abandoned. is_blocked is derived
+	// state and a recompute deliberately does NOT bump updated_at, so a step
+	// that has been waiting longer than --age otherwise looks stale and gets
+	// reclaimed mid-execution, killing the molecule (GH#4394).
+	blockedSet := make(map[string]bool)
+	if blocked, bErr := store.GetBlockedIssues(ctx, types.WorkFilter{}); bErr == nil {
+		for _, b := range blocked {
+			blockedSet[b.ID] = true
+		}
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not determine blocked wisps; age GC may reclaim active steps: %v\n", bErr)
+	}
+
 	// Find old/abandoned wisps
 	now := time.Now()
 	var abandoned []*types.Issue
@@ -672,6 +705,12 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 
 		// Skip closed issues unless --all is specified
 		if issue.Status == types.StatusClosed && !cleanAll {
+			continue
+		}
+
+		// Never reclaim active wisps by age — blocked/in-progress steps are
+		// live molecule work, not abandoned (GH#4394).
+		if isActiveWisp(issue, blockedSet) {
 			continue
 		}
 
@@ -712,6 +751,12 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 					}
 					// Never cascade to infra types
 					if store.IsInfraTypeCtx(ctx, child.IssueType) {
+						continue
+					}
+					// Never cascade into active wisps — a blocked/in-progress
+					// step is live work even if its parent looks abandoned
+					// (GH#4394).
+					if isActiveWisp(child, blockedSet) {
 						continue
 					}
 					abandoned = append(abandoned, child)
