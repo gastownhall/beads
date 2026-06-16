@@ -375,6 +375,10 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 		// Safe paths - should be accepted
 		{"user home directory", filepath.Join(homeDir, "projects/.beads"), true},
 		{"temp directory", os.TempDir(), true},
+
+		// Another user's home directory - should be rejected regardless of $HOME
+		{"other user home /home", "/home/some-other-nonexistent-user/.beads", false},
+		{"other user home /Users", "/Users/some-other-nonexistent-user/.beads", false},
 	}
 
 	for _, tt := range tests {

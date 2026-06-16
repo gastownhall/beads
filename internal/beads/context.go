@@ -332,15 +332,27 @@ func isPathInSafeBoundary(path string) bool {
 			return false
 		}
 	}
-	// Also reject other users' home directories
-	u, err := user.Current()
-	homeDir := ""
-	if err == nil {
-		homeDir = u.HomeDir
-	}
+	// Also reject other users' home directories.
 	if strings.HasPrefix(absPath, "/Users/") || strings.HasPrefix(absPath, "/home/") || strings.HasPrefix(absPath, "/var/home/") {
-		if homeDir != "" && !strings.HasPrefix(absPath, homeDir) {
-			return false
+		// Resolve the current user's home from the account database, which is
+		// not affected by $HOME manipulation. Fall back to $HOME when that
+		// lookup is unavailable (e.g. CGO-free builds where the user is not in
+		// /etc/passwd); leaving homeDir empty here would skip the check and
+		// fail open, which is worse than trusting $HOME.
+		homeDir := ""
+		if u, err := user.Current(); err == nil {
+			homeDir = u.HomeDir
+		}
+		if homeDir == "" {
+			homeDir, _ = os.UserHomeDir()
+		}
+		if homeDir != "" {
+			home := strings.TrimSuffix(homeDir, "/")
+			// Compare on a path boundary so a sibling like /home/aliceXX is
+			// not treated as inside /home/alice.
+			if absPath != home && !strings.HasPrefix(absPath, home+"/") {
+				return false
+			}
 		}
 	}
 	return true
