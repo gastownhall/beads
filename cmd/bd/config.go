@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -33,6 +34,9 @@ Common namespaces:
   - jira.*            Jira integration settings
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
+  - gitlab.*          GitLab integration settings
+  - ado.*             Azure DevOps integration settings
+  - notion.*          Notion integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
@@ -862,11 +866,30 @@ Examples:
 
 // recognizedConfigPrefixes lists valid top-level config namespaces.
 // Keys under custom.* are always accepted (user-extensible).
+//
+// Tracker namespaces (jira., linear., github., ado., ...) are NOT listed here:
+// they are derived from the tracker registry at runtime via
+// allRecognizedConfigPrefixes, so the recognizer cannot drift out of sync when
+// a new tracker is added (GH#4427).
 var recognizedConfigPrefixes = []string{
-	"export.", "import.", "dolt.", "jira.", "linear.", "github.", "custom.",
+	"export.", "import.", "dolt.", "custom.",
 	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
 	"hierarchy.", "ai.", "backup.", "federation.", "metrics.", "agent.",
+}
+
+// allRecognizedConfigPrefixes returns the static namespaces plus the prefix of
+// every registered tracker ("ado.", "jira.", ...). Deriving tracker prefixes
+// from the registry keeps config-key recognition in sync with the set of
+// trackers compiled into bd instead of a hand-maintained allowlist (GH#4427).
+func allRecognizedConfigPrefixes() []string {
+	names := tracker.List()
+	prefixes := make([]string, 0, len(recognizedConfigPrefixes)+len(names))
+	prefixes = append(prefixes, recognizedConfigPrefixes...)
+	for _, name := range names {
+		prefixes = append(prefixes, name+".")
+	}
+	return prefixes
 }
 
 // recognizedConfigKeys lists valid non-namespaced config keys.
@@ -883,7 +906,7 @@ func isRecognizedConfigKey(key string) bool {
 	if recognizedConfigKeys[key] {
 		return true
 	}
-	for _, prefix := range recognizedConfigPrefixes {
+	for _, prefix := range allRecognizedConfigPrefixes() {
 		if strings.HasPrefix(key, prefix) {
 			return true
 		}
@@ -922,7 +945,7 @@ func suggestConfigKey(key string) string {
 
 	bestMatch := ""
 	bestDist := 3 // max edit distance to suggest
-	for _, known := range recognizedConfigPrefixes {
+	for _, known := range allRecognizedConfigPrefixes() {
 		knownPrefix := strings.TrimSuffix(known, ".")
 		d := levenshteinDistance(parts[0], knownPrefix)
 		if d > 0 && d < bestDist {
