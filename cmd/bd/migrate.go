@@ -92,11 +92,15 @@ BD_ALLOW_REMOTE_MIGRATE=1 remains supported for scripted/CI use.
 			return HandleError("failed to load config: %v", err)
 		}
 
-		return handleDoltMetadataUpdate(cfg, dryRun)
+		return handleDoltMetadataUpdate(cfg, beadsDir, dryRun)
 	},
 }
 
-func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
+// handleDoltMetadataUpdate handles version metadata updates for Dolt backends.
+// beadsDir is the resolved .beads directory (honoring -C); repo-derived metadata
+// is computed from it rather than the process cwd so `bd -C <dir> migrate`
+// fingerprints the target repo, not the caller's (GH#4361).
+func handleDoltMetadataUpdate(cfg *configfile.Config, beadsDir string, dryRun bool) error {
 	ctx := rootCtx
 	store := getStore()
 	if store == nil {
@@ -207,7 +211,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
 
 	// Set repo_id if missing (non-fatal — may fail in non-git environments)
 	if needsRepoID {
-		computed, err := beads.ComputeRepoID()
+		computed, err := beads.ComputeRepoIDForPath(beadsDir)
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Warning: could not compute repo_id: %v\n", err)
@@ -228,7 +232,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
 
 	// Set clone_id if missing (non-fatal — may fail in non-git environments)
 	if needsCloneID {
-		computed, err := beads.GetCloneID()
+		computed, err := beads.GetCloneIDForPath(beadsDir)
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Warning: could not compute clone_id: %v\n", err)
@@ -304,7 +308,11 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 		return HandleErrorWithHint("no beads database found", diagHint())
 	}
 
-	newRepoID, err := beads.ComputeRepoID()
+	// Compute new repo ID from the resolved .beads directory (honoring -C),
+	// not the process cwd. Otherwise `bd -C <dir> migrate --update-repo-id`
+	// stamps the target DB with the caller repo's fingerprint and the bad
+	// value propagates to every clone on the next sync (GH#4361).
+	newRepoID, err := beads.ComputeRepoIDForPath(beadsDir)
 	if err != nil {
 		if jsonOutput {
 			if jerr := outputJSON(map[string]interface{}{
