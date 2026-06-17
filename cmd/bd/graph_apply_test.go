@@ -106,8 +106,6 @@ func TestValidateGraphApplyPlanAcceptsNewFields(t *testing.T) {
 	}
 }
 
-// TestValidateGraphApplyPlanRejectsNegativeEstimate verifies that a negative
-// estimate is caught at validation time. (GH#4064)
 func TestValidateGraphApplyPlanRejectsNegativeEstimate(t *testing.T) {
 	neg := -5
 	plan := &GraphApplyPlan{
@@ -227,7 +225,8 @@ func TestDetectUnknownGraphFields_KnownSchemaIsClean(t *testing.T) {
         "commit_message": "test",
         "nodes": [
             {"key": "root", "title": "Root", "type": "epic", "priority": 2,
-             "description": "d", "assignee": "alice", "assign_after_create": false,
+             "description": "d", "design": "design notes", "acceptance_criteria": "AC",
+             "notes": "some notes", "assignee": "alice", "assign_after_create": false,
              "estimate": 60, "labels": ["a"], "metadata": {"k": "v"},
              "metadata_refs": {"r": "root"}, "external_ref": "gh-1",
              "deps": [{"target": "child", "type": "blocks"}]},
@@ -508,6 +507,79 @@ func TestGraphApplyEdgeIsLocalCycleRelevantOnlyForLocalBlockingEdges(t *testing.
 				t.Fatalf("localCycleRelevant = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDetectUnknownGraphFields_NewHints verifies hints are emitted for common
+// misspellings of the newly added fields (GH#4064).
+func TestDetectUnknownGraphFields_NewHints(t *testing.T) {
+	planJSON := []byte(`{
+        "nodes": [
+            {"key": "a", "title": "A", "acceptance": "must pass", "estimate": 30, "deps": ["b"], "body": "text"},
+            {"key": "b", "title": "B"}
+        ]
+    }`)
+
+	got := detectUnknownGraphFields(planJSON)
+	wantFields := []string{"acceptance", "body", "deps", "estimate"}
+	if fields, ok := got[`node["a"]`]; !ok {
+		t.Fatalf("expected unknown fields on node a, got %#v", got)
+	} else if !reflect.DeepEqual(fields, wantFields) {
+		t.Fatalf("node a fields = %v, want %v", fields, wantFields)
+	}
+
+	var buf bytes.Buffer
+	warnUnknownGraphFields(&buf, got)
+	out := buf.String()
+	for _, hint := range []string{"acceptance_criteria", "estimated_minutes", "edges", "description"} {
+		if !strings.Contains(out, hint) {
+			t.Errorf("expected hint mentioning %q in output:\n%s", hint, out)
+		}
+	}
+}
+
+// TestGraphApplyNodeNewFieldsParsed verifies that the new content fields
+// (design, acceptance_criteria, notes, estimated_minutes, external_ref) are
+// correctly parsed from JSON into GraphApplyNode. (GH#4064)
+func TestGraphApplyNodeNewFieldsParsed(t *testing.T) {
+	planJSON := []byte(`{
+        "nodes": [
+            {
+                "key": "task1",
+                "title": "Implement feature",
+                "type": "task",
+                "description": "Main description",
+                "design": "Use the strategy pattern",
+                "acceptance_criteria": "All tests pass, code reviewed",
+                "notes": "Check with team first",
+                "estimate": 120,
+                "external_ref": "jira-ABC-123"
+            }
+        ]
+    }`)
+
+	var plan GraphApplyPlan
+	if err := json.Unmarshal(planJSON, &plan); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(plan.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(plan.Nodes))
+	}
+	n := plan.Nodes[0]
+	if n.Design != "Use the strategy pattern" {
+		t.Errorf("design = %q", n.Design)
+	}
+	if n.AcceptanceCriteria != "All tests pass, code reviewed" {
+		t.Errorf("acceptance_criteria = %q", n.AcceptanceCriteria)
+	}
+	if n.Notes != "Check with team first" {
+		t.Errorf("notes = %q", n.Notes)
+	}
+	if n.Estimate == nil || *n.Estimate != 120 {
+		t.Errorf("estimate = %v", n.Estimate)
+	}
+	if n.ExternalRef != "jira-ABC-123" {
+		t.Errorf("external_ref = %q", n.ExternalRef)
 	}
 }
 

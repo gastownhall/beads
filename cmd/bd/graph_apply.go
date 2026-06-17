@@ -22,22 +22,25 @@ type GraphApplyPlan struct {
 
 // GraphApplyNode describes a single bead to create.
 type GraphApplyNode struct {
-	Key               string              `json:"key"`
-	Title             string              `json:"title"`
-	Type              string              `json:"type,omitempty"`
-	Description       string              `json:"description,omitempty"`
-	Assignee          string              `json:"assignee,omitempty"`
-	AssignAfterCreate bool                `json:"assign_after_create,omitempty"`
-	Priority          *int                `json:"priority,omitempty"` // nil defaults to P2
-	Estimate          *int                `json:"estimate,omitempty"` // minutes
-	Labels            []string            `json:"labels,omitempty"`
-	Metadata          map[string]string   `json:"metadata,omitempty"`
-	MetadataRefs      map[string]string   `json:"metadata_refs,omitempty"`
-	ExternalRef       string              `json:"external_ref,omitempty"`
-	Parent            string              `json:"parent,omitempty"` // alias for parent_key
-	ParentKey         string              `json:"parent_key,omitempty"`
-	ParentID          string              `json:"parent_id,omitempty"`
-	Deps              []GraphApplyNodeDep `json:"deps,omitempty"`
+	Key                string              `json:"key"`
+	Title              string              `json:"title"`
+	Type               string              `json:"type,omitempty"`
+	Description        string              `json:"description,omitempty"`
+	Design             string              `json:"design,omitempty"`
+	AcceptanceCriteria string              `json:"acceptance_criteria,omitempty"`
+	Notes              string              `json:"notes,omitempty"`
+	Assignee           string              `json:"assignee,omitempty"`
+	AssignAfterCreate  bool                `json:"assign_after_create,omitempty"`
+	Priority           *int                `json:"priority,omitempty"` // nil defaults to P2
+	Estimate           *int                `json:"estimate,omitempty"` // minutes
+	Labels             []string            `json:"labels,omitempty"`
+	Metadata           map[string]string   `json:"metadata,omitempty"`
+	MetadataRefs       map[string]string   `json:"metadata_refs,omitempty"`
+	ExternalRef        string              `json:"external_ref,omitempty"`
+	Parent             string              `json:"parent,omitempty"` // alias for parent_key
+	ParentKey          string              `json:"parent_key,omitempty"`
+	ParentID           string              `json:"parent_id,omitempty"`
+	Deps               []GraphApplyNodeDep `json:"deps,omitempty"`
 }
 
 // GraphApplyEdge describes a dependency edge.
@@ -88,12 +91,18 @@ type GraphApplyDryRun struct {
 
 // GraphApplyDryRunRow describes a single planned node in the dry-run preview.
 type GraphApplyDryRunRow struct {
-	Key       string `json:"key"`
-	Title     string `json:"title"`
-	Type      string `json:"type"`
-	Priority  int    `json:"priority"`
-	ParentKey string `json:"parent_key,omitempty"`
-	ParentID  string `json:"parent_id,omitempty"`
+	Key                string `json:"key"`
+	Title              string `json:"title"`
+	Type               string `json:"type"`
+	Priority           int    `json:"priority"`
+	Description        string `json:"description,omitempty"`
+	Design             string `json:"design,omitempty"`
+	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
+	Notes              string `json:"notes,omitempty"`
+	Estimate           *int   `json:"estimate,omitempty"`
+	ExternalRef        string `json:"external_ref,omitempty"`
+	ParentKey          string `json:"parent_key,omitempty"`
+	ParentID           string `json:"parent_id,omitempty"`
 }
 
 const graphApplyDryRunTransactionValidationNote = "dry-run validates the graph structure only; live create may still reject parent-child blocking paths after resolving stored dependencies"
@@ -115,6 +124,9 @@ var knownGraphNodeFields = map[string]struct{}{
 	"title":               {},
 	"type":                {},
 	"description":         {},
+	"design":              {},
+	"acceptance_criteria": {},
+	"notes":               {},
 	"assignee":            {},
 	"assign_after_create": {},
 	"priority":            {},
@@ -145,9 +157,11 @@ var knownGraphEdgeFields = map[string]struct{}{
 // a "parent" string instead of "parent_key", or "blocks" arrays instead of
 // the top-level edges array). (GH#3367)
 var graphFieldHints = map[string]string{
-	"blocks":   "use the top-level 'edges' array or per-node 'deps', e.g. {\"deps\": [{\"target\": \"key\", \"type\": \"blocks\"}]}",
-	"depends":  "use the top-level 'edges' array or per-node 'deps' with type 'blocks'",
-	"children": "set 'parent_key' or 'parent' on each child instead of listing children on the parent",
+	"blocks":     "use the top-level 'edges' array or per-node 'deps', e.g. {\"deps\": [{\"target\": \"key\", \"type\": \"blocks\"}]}",
+	"depends":    "use the top-level 'edges' array or per-node 'deps' with type 'blocks'",
+	"children":   "set 'parent_key' or 'parent' on each child instead of listing children on the parent",
+	"acceptance": "use 'acceptance_criteria'",
+	"body":       "use 'description'",
 }
 
 // detectUnknownGraphFields scans the raw plan JSON and returns unknown field
@@ -336,12 +350,18 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) error {
 			parentDeps++
 		}
 		rows = append(rows, GraphApplyDryRunRow{
-			Key:       node.Key,
-			Title:     node.Title,
-			Type:      issueType,
-			Priority:  priority,
-			ParentKey: effectiveParentKey,
-			ParentID:  node.ParentID,
+			Key:                node.Key,
+			Title:              node.Title,
+			Type:               issueType,
+			Priority:           priority,
+			Description:        node.Description,
+			Design:             node.Design,
+			AcceptanceCriteria: node.AcceptanceCriteria,
+			Notes:              node.Notes,
+			Estimate:           node.Estimate,
+			ExternalRef:        node.ExternalRef,
+			ParentKey:          effectiveParentKey,
+			ParentID:           node.ParentID,
 		})
 	}
 
@@ -558,17 +578,18 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 			}
 
 			issue := &types.Issue{
-				Title:     node.Title,
-				IssueType: issueType,
-				Status:    types.StatusOpen,
-				Priority:  priority,
-				Labels:    node.Labels,
-				Metadata:  metadataJSON,
-				Ephemeral: opts.Ephemeral,
-				NoHistory: opts.NoHistory,
-			}
-			if node.Description != "" {
-				issue.Description = node.Description
+				Title:              node.Title,
+				IssueType:          issueType,
+				Status:             types.StatusOpen,
+				Priority:           priority,
+				Labels:             node.Labels,
+				Metadata:           metadataJSON,
+				Ephemeral:          opts.Ephemeral,
+				NoHistory:          opts.NoHistory,
+				Description:        node.Description,
+				Design:             node.Design,
+				AcceptanceCriteria: node.AcceptanceCriteria,
+				Notes:              node.Notes,
 			}
 			if node.Estimate != nil {
 				issue.EstimatedMinutes = node.Estimate

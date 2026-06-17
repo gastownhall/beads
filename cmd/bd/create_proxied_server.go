@@ -506,17 +506,25 @@ func materializeGraphNodeIssue(n GraphApplyNode, in createInput) (*types.Issue, 
 		}
 		metadataJSON = raw
 	}
-	return &types.Issue{
-		Title:       n.Title,
-		Description: n.Description,
-		IssueType:   issueType,
-		Status:      types.StatusOpen,
-		Priority:    priority,
-		Labels:      n.Labels,
-		Metadata:    metadataJSON,
-		Ephemeral:   in.ephemeral,
-		NoHistory:   in.noHistory,
-		CreatedBy:   in.createdBy,
-		Owner:       in.owner,
-	}, nil
+	issue := &types.Issue{
+		Title:              n.Title,
+		Description:        n.Description,
+		Design:             n.Design,
+		AcceptanceCriteria: n.AcceptanceCriteria,
+		Notes:              n.Notes,
+		EstimatedMinutes:   n.Estimate,
+		IssueType:          issueType,
+		Status:             types.StatusOpen,
+		Priority:           priority,
+		Labels:             n.Labels,
+		Metadata:           metadataJSON,
+		Ephemeral:          in.ephemeral,
+		NoHistory:          in.noHistory,
+		CreatedBy:          in.createdBy,
+		Owner:              in.owner,
+	}
+	if n.ExternalRef != "" {
+		issue.ExternalRef = &n.ExternalRef
+	}
+	return issue, nil
 }

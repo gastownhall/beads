@@ -817,3 +817,56 @@ func TestExecuteGraphApplyUnitAllowsExplicitParentChildDuplicate(t *testing.T) {
 		t.Fatalf("dependency type = %s, want %s", deps[0].DependencyType, types.DepParentChild)
 	}
 }
+
+// TestExecuteGraphApplyUnitPersistsContentFields verifies that the new content
+// fields (design, acceptance_criteria, notes, estimated_minutes, external_ref)
+// are correctly propagated to the created issues. (GH#4064)
+func TestExecuteGraphApplyUnitPersistsContentFields(t *testing.T) {
+	ctx, fakeStore := withGraphApplyFakeStore(t)
+
+	est := 90
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{
+				Key:                "task1",
+				Title:              "Full-featured task",
+				Type:               "task",
+				Description:        "A description",
+				Design:             "Strategy pattern with factory",
+				AcceptanceCriteria: "All tests pass; reviewed by 2 maintainers",
+				Notes:              "Discuss with team before starting",
+				Estimate:           &est,
+				ExternalRef:        "gh-4064",
+			},
+		},
+	}
+
+	result, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	if err != nil {
+		t.Fatalf("executeGraphApply: %v", err)
+	}
+
+	issue, err := fakeStore.GetIssue(ctx, result.IDs["task1"])
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+
+	if issue.Description != "A description" {
+		t.Errorf("description = %q, want %q", issue.Description, "A description")
+	}
+	if issue.Design != "Strategy pattern with factory" {
+		t.Errorf("design = %q, want %q", issue.Design, "Strategy pattern with factory")
+	}
+	if issue.AcceptanceCriteria != "All tests pass; reviewed by 2 maintainers" {
+		t.Errorf("acceptance_criteria = %q, want %q", issue.AcceptanceCriteria, "All tests pass; reviewed by 2 maintainers")
+	}
+	if issue.Notes != "Discuss with team before starting" {
+		t.Errorf("notes = %q, want %q", issue.Notes, "Discuss with team before starting")
+	}
+	if issue.EstimatedMinutes == nil || *issue.EstimatedMinutes != 90 {
+		t.Errorf("estimated_minutes = %v, want 90", issue.EstimatedMinutes)
+	}
+	if issue.ExternalRef == nil || *issue.ExternalRef != "gh-4064" {
+		t.Errorf("external_ref = %v, want %q", issue.ExternalRef, "gh-4064")
+	}
+}
