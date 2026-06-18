@@ -34,6 +34,11 @@ the flags appear in the command line.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("close")
 
+		if usesProxiedServer() {
+			runCloseProxiedServer(cmd, rootCtx, args)
+			return
+		}
+
 		// If no IDs provided, use last touched issue
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
@@ -90,7 +95,7 @@ the flags appear in the command line.`,
 
 		// Track which stores were mutated so routed closes can commit before
 		// cleanup closes the routed handle. Deduped by pointer.
-		mutatedStores := map[storage.DoltStorage]struct{}{}
+		mutatedStores := map[storage.DoltStorage][]string{}
 
 		// Direct mode
 		closedIssues := []*types.Issue{}
@@ -142,7 +147,7 @@ the flags appear in the command line.`,
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
-			mutatedStores[activeStore] = struct{}{}
+			mutatedStores[activeStore] = append(mutatedStores[activeStore], id)
 
 			// Audit log the close (survives Dolt GC flatten)
 			oldStatus := "open"
@@ -230,7 +235,7 @@ the flags appear in the command line.`,
 				err := postCloseStore.ClaimIssue(ctx, nextIssue.ID, actor)
 				if err == nil {
 					claimedNextIssue = nextIssue
-					mutatedStores[postCloseStore] = struct{}{}
+					mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], nextIssue.ID)
 					if jsonOutput {
 						// JSON handled below
 					} else {
@@ -257,28 +262,16 @@ the flags appear in the command line.`,
 		}
 
 		if closedCount > 0 {
-			hasRoutedMutation := false
-			for s := range mutatedStores {
-				if s != nil && s != store {
-					hasRoutedMutation = true
-					break
+			for s, ids := range mutatedStores {
+				if s == nil {
+					continue
 				}
-			}
-			if hasRoutedMutation {
-				for s := range mutatedStores {
-					if s == nil {
-						continue
-					}
-					if err := maybeAutoCommitStore(ctx, s, doltAutoCommitParams{
-						Command:  cmd.Name(),
-						IssueIDs: resolvedIDs,
-					}); err != nil {
-						FatalErrorRespectJSON("dolt auto-commit failed: %v", err)
-					}
+				if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+					Command:  "close",
+					IssueIDs: ids,
+				}); err != nil {
+					FatalErrorRespectJSON("failed to commit: %v", err)
 				}
-				commandDidExplicitDoltCommit = true
-			} else {
-				commandDidWrite.Store(true)
 			}
 		}
 
@@ -625,7 +618,10 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			cleanup()
 			return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, err)
 		}
-		if r, err := resolveViaPrefixRouting(ctx, id); err == nil {
+		// Write-intent: a prefix-routed target opens writable so the close
+		// commits on the target head (#4141). Contributor auto-routing below
+		// stays read-only: it hydrates foreign projects that must not be mutated.
+		if r, err := resolveViaPrefixRoutingMode(ctx, id, true); err == nil {
 			results = append(results, r)
 			continue
 		}

@@ -191,8 +191,9 @@ Examples:
 		ctx := rootCtx
 		issueID := args[0]
 
-		// Resolve partial ID and get issue
-		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		// Resolve partial ID and get issue. Write-intent: a prefix-routed target
+		// opens writable so the comment/close commits on the target head (#4141).
+		result, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, issueID)
 		if err != nil {
 			FatalErrorRespectJSON("resolving issue ID %s: %v", issueID, err)
 		}
@@ -263,8 +264,9 @@ Examples:
 		ctx := rootCtx
 		issueID := args[0]
 
-		// Resolve partial ID and get issue
-		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		// Resolve partial ID and get issue. Write-intent: a prefix-routed target
+		// opens writable so the comment/close commits on the target head (#4141).
+		result, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, issueID)
 		if err != nil {
 			FatalErrorRespectJSON("resolving issue ID %s: %v", issueID, err)
 		}

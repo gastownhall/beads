@@ -27,10 +27,25 @@ Generates maintained CLI reference docs from the live Cobra command tree exposed
 
 - `docs/CLI_REFERENCE.md` from `bd help --all`
 - `website/docs/cli-reference/*.md` from `bd help --list` and `bd help --doc <command>`
-- `website/versioned_docs/version-1.0.0/cli-reference/*.md` so the published default docs and llms artifact source stay in sync
+- `website/versioned_docs/version-*/cli-reference/*.md` so published versioned docs and the llms artifact source stay in sync
 - `website/static/llms-full.txt` freshness is checked from the same generated website docs tree
 
 `scripts/check-doc-flags.sh` runs the `--check` mode in CI and fails when live top-level commands are missing from generated docs or `llms-full.txt` is stale.
+
+## check-docs-version.sh
+
+Validates the released Docusaurus docs metadata:
+
+- `website/versions.json` latest entry and `website/docusaurus.config.ts` `lastVersion` agree
+- the matching `website/versioned_docs/version-X.Y.Z` and sidebar snapshot exist
+- the versioned CLI reference label matches the latest released docs snapshot
+- `website/static/llms-full.txt` is sourced from the latest released snapshot
+
+Default CI mode does not require the latest released docs snapshot to equal
+`cmd/bd/version.go`, because a version bump may land before the release is cut.
+Use `BEADS_REQUIRE_RELEASE_DOCS=1 ./scripts/check-docs-version.sh`, or run from a
+`v*` tag, for release preflight mode where the docs snapshot must match the
+current binary version.
 
 ## check-doc-freshness.sh
 

@@ -20,6 +20,8 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
 	runner := s.Runner()
+	labelUC := domain.NewLabelUseCase(NewLabelSQLRepository(runner))
+	depUC := domain.NewDependencyUseCase(NewDependencySQLRepository(runner))
 	return domain.NewIssueUseCase(
 		NewIssueSQLRepository(runner),
 		NewDependencySQLRepository(runner),
@@ -27,6 +29,9 @@ func (s *testSuite) issueUseCase() domain.IssueUseCase {
 		NewChildCounterSQLRepository(runner),
 		NewCommentSQLRepository(runner),
 		NewConfigSQLRepository(runner),
+		NewEventsSQLRepository(runner),
+		labelUC,
+		depUC,
 	)
 }
 

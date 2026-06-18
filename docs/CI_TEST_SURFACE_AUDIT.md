@@ -149,31 +149,44 @@ These are valuable but are not one unified release gate in CI today.
 
 ## Current GitHub Actions Map
 
-### `ci.yml`
+### Split PR/Main Workflows
 
-Triggers: push to `main`, pull request to `main`, merge queue.
+The former monolithic `ci.yml` has been split by tier/domain:
 
-Jobs:
+- `pr.yml`: pull request and merge queue baseline. It owns the Linux build
+  artifact stage, PR policy/core/lint wrappers, compatibility policy/lint jobs,
+  package gates that consume the Linux artifact, storage domain/uow tests, and
+  the aggregate check `PR / CI Gate / Required`.
+- `pr-risk.yml`: pull request and merge queue risk jobs. It owns embedded Dolt
+  risk detection, embedded build/storage/cmd shards, the Nix flake smoke, and
+  the aggregate check `PR Risk / CI Gate / Required`.
+- `main.yml`: push-to-`main` branch health. It reruns the baseline wrappers,
+  package gates, Linux/macOS short coverage, Windows smoke, embedded Dolt, Nix,
+  storage domain/uow, and promoted Linux no-short integration shards.
 
-- `detect-ci-tier`: decides whether to run full embedded Dolt coverage.
-- `check-build-tags`: runs `scripts/check-build-tags.sh` and
+Key jobs preserved by display name:
+
+- `Build Artifacts`: runs `make ci-pr-policy`, `make ci-pr-lint`, builds
+  `bd-linux-gms-pure`, and uploads checksummed run-scoped artifacts.
+- `Check build-tag policy`: runs `scripts/check-build-tags.sh` and
   `scripts/check-go-install-guidance.sh`.
-- `check-cmd-bd-puregeo-tests`: CGO-disabled cmd/bd build, test-binary compile,
-  and a focused pure-Go test subset.
-- `check-version-consistency`: runs `scripts/check-versions.sh`.
-- `check-doc-flags`: builds a no-CGO `bd` and validates docs against CLI flags.
-- `check-no-beads-changes`: PR-only guard for `.beads/issues.jsonl`.
-- `test`: Linux/macOS matrix, installs Dolt, builds `bd`, then runs:
-  - Linux: `gotestsum -- -tags gms_pure_go -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...`
-  - macOS: `go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...`
-- `test-domain-uow`: pulls `dolthub/dolt-sql-server:1.88.1`, prebuilds `bd`,
-  and runs `internal/storage/domain/...` plus `internal/storage/uow/...`.
-- `build-embedded`, `test-embedded-storage`, `test-embedded-cmd`: conditional
-  embedded Dolt matrix.
-- `test-windows`: Windows build plus `version` and `help` smoke tests only.
-- `fmt-check`: `make fmt-check`.
-- `lint`: `golangci-lint` with `--build-tags=gms_pure_go`.
-- `test-nix`: `nix run .#default -- --help` and validates first help line.
+- `Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)`: CGO-disabled cmd/bd
+  build, test-binary compile, and a focused pure-Go test subset.
+- `Check version consistency`, `Check no duplicate migration versions`,
+  `Check doc flags freshness`, and PR-only `Check for .beads changes`.
+- `PR Policy (wrapper timing)`, `PR Core (wrapper timing)`, and
+  `PR Lint (wrapper timing)`.
+- `Package Gate (MCP)`, `Package Gate (npm)`, and `Package Gate (website)`.
+- `Test (storage domain + uow)`.
+- `Build (Embedded Dolt)`, `Test (Embedded Dolt Storage)`, and
+  `Test (Embedded Dolt Cmd N/20)`.
+- Aggregate required-check candidates: `PR / CI Gate / Required` and
+  `PR Risk / CI Gate / Required`.
+- Main-only platform and integration jobs: `Test (ubuntu-latest)`,
+  `Test (macos-latest)`, `Test (Windows - smoke)`,
+  `Main Linux integration packages (N/6)`, and
+  `Main Linux integration cmd/bd (N/8)`.
+- `Check formatting`, `Lint`, and `Test Nix Flake`.
 
 ### Other Workflows
 
@@ -310,9 +323,10 @@ Do not make workflow YAML be the only place where command policy lives.
 
 ### Phase 3: Align Current PR CI With the Wrappers
 
-Once the tier commands exist, change `ci.yml` to call those commands. Preserve
-useful CI-only behavior such as gotestsum/JUnit output by wrapping around the
-same underlying command rather than maintaining a separate test definition.
+Once the tier commands exist, change the PR/main workflows to call those
+commands. Preserve useful CI-only behavior such as gotestsum/JUnit output by
+wrapping around the same underlying command rather than maintaining a separate
+test definition.
 
 ### Phase 4: Fill Package-Specific Gaps
 
@@ -350,11 +364,13 @@ For every tier, capture enough artifacts to debug failures without rerunning:
 
 1. Turn this audit into a shorter `docs/CI.md` policy once maintainers agree on
    the tier names.
-2. Add `make test-pr-core` that exactly reproduces the current Linux PR test
-   command, including `-race`, `-short`, and `-skip '^TestEmbedded'`.
-3. Add a no-CGO all-package compile/test gate or explicitly document why the
+2. Split `cmd/bd` by top-level test name for the no-short Linux integration
+   lane; the first package-sharded run showed `cmd/bd` owns the wall-clock tail.
+3. Promote the additive PR wrapper jobs after repeated measurements confirm
+   they preserve the current required PR behavior.
+4. Add a no-CGO all-package compile/test gate or explicitly document why the
    focused cmd/bd subset is enough.
-4. Add path-gated MCP, npm package, and website checks before touching the main
+5. Add path-gated MCP, npm package, and website checks before touching the main
    Go matrix.
-5. Update `docs/TESTING.md` after the wrapper commands exist so local guidance
-   points at the same contract CI runs.
+6. Keep `docs/TESTING.md` aligned with the wrapper commands as direct workflow
+   commands are replaced.

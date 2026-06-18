@@ -7,7 +7,7 @@ import (
 	"log"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -210,7 +210,7 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 		if yamlTypes := config.GetInfraTypesFromYAML(); len(yamlTypes) > 0 {
 			typeList = yamlTypes
 		} else {
-			typeList = storage.DefaultInfraTypes()
+			typeList = domain.DefaultInfraTypes()
 		}
 		result = make(map[string]bool, len(typeList))
 		for _, t := range typeList {

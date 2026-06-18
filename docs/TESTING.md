@@ -83,11 +83,29 @@ BEADS_TEST_SKIP=dolt ./scripts/test.sh
 BEADS_TEST_SKIP=dolt,slow ./scripts/test.sh
 ```
 
+### Short Mode and Test Boundaries
+
+`testing.Short()` is reserved for true runtime, stress, and large-fixture skips.
+It must not be used as an implicit integration, e2e, API, Docker, or external
+dependency boundary.
+
+Use these mechanisms instead:
+
+- `//go:build integration` or `//go:build e2e` for named suites.
+- Environment readiness checks such as `BEADS_TEST_SKIP=dolt`,
+  `BEADS_TEST_EMBEDDED_DOLT=1`, or required API-key checks.
+- Named wrappers such as `make ci-pr-core`, the main integration shards, and the
+  package gate wrappers.
+
+Run `make check-testing-short` to verify that new `testing.Short()` usage stays
+within the approved runtime/stress/large-fixture allowlist. The PR policy wrapper
+runs the same check.
+
 #### Enabling Dolt tests
 
 ```bash
 # Pull the exact Dolt image to enable integration tests
-docker pull dolthub/dolt-sql-server:1.88.1
+docker pull dolthub/dolt-sql-server:2.1.0
 
 # Point tests at an existing Dolt server (skips container startup)
 BEADS_DOLT_PORT=3308 ./scripts/test.sh
@@ -187,12 +205,28 @@ internal/*/       - Various internal package tests
 
 ## Continuous Integration
 
-The current CI workflow does not call `scripts/test.sh` for the main PR Go test
-matrix. Until CI wrapper migration is complete, reproduce exact CI behavior from
-the command documented in the failing workflow or in the CI cleanup plan.
+The current CI workflow does not yet call the `scripts/ci/*` wrappers for every
+job. Until workflow migration is complete, use the command documented in the
+failing workflow when reproducing an existing status check exactly.
 
 Use `scripts/test.sh` for local default validation and targeted development
 runs.
+
+Use the CI wrappers for the accepted target PR contracts:
+
+```bash
+make ci-pr-core
+make ci-pr-policy
+make ci-pr-lint
+```
+
+Use the package gate wrappers when touching package or docs surfaces:
+
+```bash
+make ci-package-mcp
+make ci-package-npm
+make ci-website
+```
 
 ### Coverage Signal Policy
 

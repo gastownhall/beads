@@ -12,3 +12,15 @@ cmd/bd/init.go              @gastownhall/beads-maintainers
 cmd/bd/init_*.go            @gastownhall/beads-maintainers
 cmd/bd/init_safety*.go      @gastownhall/beads-maintainers
 docs/adr/0002-init-safety-invariants.md  @gastownhall/beads-maintainers
+
+# Schema-migration critical path (bd-6dnrw.15). The 2026 Apr-Jun window
+# shipped a corrupting migration (PR 4039, DEFAULT (UUID()) PK, zero reviews,
+# self-merged), a duplicate version number (PR 4027), and in-place edits to
+# released migrations (PRs 3991/3918/3942). Migration changes get at least
+# one human maintainer review; scripts/check-migration-hygiene.sh enforces
+# the mechanical invariants in CI, and reviewers should treat allowlist
+# additions and hygiene-script changes with the same suspicion as the
+# migrations themselves. NOTE: GitHub only enforces CODEOWNERS when branch
+# protection has "require review from Code Owners" enabled (bd-6dnrw.23).
+internal/storage/schema/migrations/  @gastownhall/beads-maintainers
+scripts/check-migration-hygiene.sh   @gastownhall/beads-maintainers

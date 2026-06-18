@@ -269,9 +269,9 @@ func updateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 //nolint:gosec // G201: table is from WispTableRouting ("events" or "wisp_events")
 func RecordFullEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?)
-	`, table), issueID, eventType, actor, oldValue, newValue)
+		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, table), NewEventID(), issueID, eventType, actor, oldValue, newValue)
 	if err != nil {
 		return fmt.Errorf("record event in %s: %w", table, err)
 	}

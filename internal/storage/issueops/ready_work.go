@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -19,11 +19,6 @@ type readyWorkPredicates struct {
 	limitSQL         string
 	args             []interface{}
 	deferredChildIDs []string
-}
-
-type readyWorkOrder struct {
-	sql  string
-	args []interface{}
 }
 
 func readyWorkPageSize(limit int) int {
@@ -37,161 +32,41 @@ func readyWorkPageSize(limit int) int {
 	return limit
 }
 
-func buildReadyWorkOrder(policy types.SortPolicy) readyWorkOrder {
-	switch policy {
-	case types.SortPolicyOldest:
-		return readyWorkOrder{sql: "ORDER BY created_at ASC, id ASC"}
-	case types.SortPolicyPriority:
-		return readyWorkOrder{sql: "ORDER BY priority ASC, created_at DESC, id ASC"}
-	case types.SortPolicyHybrid, "":
-		recentCutoff := time.Now().UTC().Add(-48 * time.Hour)
-		return readyWorkOrder{
-			sql: `ORDER BY
-			CASE WHEN created_at >= ? THEN 0 ELSE 1 END ASC,
-			CASE WHEN created_at >= ? THEN priority ELSE 999 END ASC,
-			created_at ASC, id ASC`,
-			args: []interface{}{recentCutoff, recentCutoff},
-		}
-	default:
-		return readyWorkOrder{sql: "ORDER BY priority ASC, created_at DESC, id ASC"}
-	}
+func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
+	return sqlbuild.BuildReadyWorkOrder(policy, "created_at", "priority")
 }
 
+// buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
+// needs (children of deferred parents, parent descendants), then delegates
+// the clause text to sqlbuild so both stacks share ready semantics.
 func buildReadyWorkPredicates(ctx context.Context, tx *sql.Tx, filter types.WorkFilter, tables FilterTables) (*readyWorkPredicates, error) {
-	var statusClause string
-	if filter.Status != "" {
-		statusClause = "status = ?"
-	} else {
-		statusClause = "status IN ('open', 'in_progress')"
-	}
-	whereClauses := []string{
-		statusClause,
-		"(pinned = 0 OR pinned IS NULL)",
-		"is_blocked = 0",
-	}
-	if !filter.IncludeEphemeral {
-		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-	}
-	var args []interface{}
-	if filter.Status != "" {
-		args = append(args, string(filter.Status))
-	}
-
-	if filter.Priority != nil {
-		whereClauses = append(whereClauses, "priority = ?")
-		args = append(args, *filter.Priority)
-	}
-	if filter.Type != "" {
-		whereClauses = append(whereClauses, "issue_type = ?")
-		args = append(args, filter.Type)
-	} else {
-		excludeTypes := readyWorkExcludeTypes(filter.ExcludeTypes)
-		placeholders := make([]string, len(excludeTypes))
-		for i, t := range excludeTypes {
-			placeholders[i] = "?"
-			args = append(args, string(t))
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("issue_type NOT IN (%s)", strings.Join(placeholders, ",")))
-	}
-	if filter.Unassigned {
-		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
-	} else if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
-	}
-
-	var deferredChildIDs []string
+	var inputs sqlbuild.ReadyWorkWhereInputs
 	if !filter.IncludeDeferred {
-		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
-		var dcErr error
-		deferredChildIDs, dcErr = getChildrenOfDeferredParentsInTx(ctx, tx)
+		deferredChildIDs, dcErr := getChildrenOfDeferredParentsInTx(ctx, tx)
 		if dcErr != nil {
 			return nil, fmt.Errorf("get ready work: compute deferred parent children: %w", dcErr)
 		}
-		if len(deferredChildIDs) > 0 {
-			for start := 0; start < len(deferredChildIDs); start += queryBatchSize {
-				end := start + queryBatchSize
-				if end > len(deferredChildIDs) {
-					end = len(deferredChildIDs)
-				}
-				placeholders, batchArgs := buildSQLInClause(deferredChildIDs[start:end])
-				args = append(args, batchArgs...)
-				whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
-			}
-		}
+		inputs.DeferredChildIDs = deferredChildIDs
 	}
-
-	if len(filter.Labels) > 0 {
-		for _, label := range filter.Labels {
-			whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", tables.Labels))
-			args = append(args, label)
-		}
-	}
-	if len(filter.ExcludeLabels) > 0 {
-		placeholders := make([]string, len(filter.ExcludeLabels))
-		for i, label := range filter.ExcludeLabels {
-			placeholders[i] = "?"
-			args = append(args, label)
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
-	}
-
 	// Parent filtering: return all transitive descendants of parentID.
 	// GH#3396: previously was a one-hop subquery against dependencies, so
 	// grandchildren were silently dropped despite the help text and
 	// WorkFilter.ParentID godoc both promising "descendants (recursive)".
 	if filter.ParentID != nil {
-		parentID := *filter.ParentID
-		descendantIDs, descErr := GetDescendantIDsInTx(ctx, tx, parentID, 0)
+		descendantIDs, descErr := GetDescendantIDsInTx(ctx, tx, *filter.ParentID, 0)
 		if descErr != nil {
 			return nil, fmt.Errorf("get parent descendants: %w", descErr)
 		}
-		parentClauses := []string{fmt.Sprintf("(id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child'))", tables.Dependencies)}
-		args = append(args, parentID)
-		for start := 0; start < len(descendantIDs); start += queryBatchSize {
-			end := start + queryBatchSize
-			if end > len(descendantIDs) {
-				end = len(descendantIDs)
-			}
-			placeholders, batchArgs := buildSQLInClause(descendantIDs[start:end])
-			parentClauses = append(parentClauses, fmt.Sprintf("id IN (%s)", placeholders))
-			args = append(args, batchArgs...)
-		}
-		whereClauses = append(whereClauses, "("+strings.Join(parentClauses, " OR ")+")")
+		inputs.ParentDescendantIDs = descendantIDs
 	}
 
-	if filter.MoleculeID != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("(id IN (SELECT issue_id FROM %s WHERE type = 'parent-child' AND %s = ?) OR (id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')))", tables.Dependencies, DepTargetExpr, tables.Dependencies))
-		args = append(args, filter.MoleculeID, filter.MoleculeID)
+	whereSQL, args, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
+	if err != nil {
+		return nil, err
 	}
-
-	if filter.HasMetadataKey != "" {
-		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
-			return nil, err
-		}
-		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
-		args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
-	}
-
-	if len(filter.MetadataFields) > 0 {
-		metaKeys := make([]string, 0, len(filter.MetadataFields))
-		for k := range filter.MetadataFields {
-			metaKeys = append(metaKeys, k)
-		}
-		sort.Strings(metaKeys)
-		for _, k := range metaKeys {
-			if err := storage.ValidateMetadataKey(k); err != nil {
-				return nil, err
-			}
-			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
-		}
-	}
-
-	whereSQL := "WHERE " + strings.Join(whereClauses, " AND ")
 
 	orderBy := buildReadyWorkOrder(filter.SortPolicy)
-	args = append(args, orderBy.args...)
+	args = append(args, orderBy.Args...)
 
 	var limitSQL string
 	if filter.Limit > 0 {
@@ -200,10 +75,10 @@ func buildReadyWorkPredicates(ctx context.Context, tx *sql.Tx, filter types.Work
 
 	return &readyWorkPredicates{
 		whereSQL:         whereSQL,
-		orderBySQL:       orderBy.sql,
+		orderBySQL:       orderBy.SQL,
 		limitSQL:         limitSQL,
 		args:             args,
-		deferredChildIDs: deferredChildIDs,
+		deferredChildIDs: inputs.DeferredChildIDs,
 	}, nil
 }
 
@@ -336,16 +211,13 @@ func getReadyWispsInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter,
 	return ready, nil
 }
 
-func queryReadyWispIssueIDPage(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, excludeDeferred bool, orderBy readyWorkOrder, limit, offset int) ([]string, error) {
-	fromSQL, labelWhere, labelArgs, labelDriven, filterForClauses := buildLabelDrivenSearch(filter, WispsFilterTables)
-	whereClauses, args, err := BuildIssueFilterClauses("", filterForClauses, WispsFilterTables)
+func queryReadyWispIssueIDPage(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, excludeDeferred bool, orderBy sqlbuild.ReadyWorkOrder, limit, offset int) ([]string, error) {
+	plan := sqlbuild.BuildLabelDrivenSearch(filter, WispsFilterTables)
+	whereClauses, args, err := BuildIssueFilterClauses("", plan.Filter, WispsFilterTables)
 	if err != nil {
 		return nil, err
 	}
-	if len(labelWhere) > 0 {
-		whereClauses = append(labelWhere, whereClauses...)
-		args = append(labelArgs, args...)
-	}
+	whereClauses, args = plan.MergeInto(whereClauses, args)
 	if excludeDeferred {
 		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
 	}
@@ -356,13 +228,13 @@ func queryReadyWispIssueIDPage(ctx context.Context, tx *sql.Tx, filter types.Iss
 	}
 
 	selectSQL := "SELECT "
-	if labelDriven {
+	if plan.Distinct {
 		selectSQL = "SELECT DISTINCT "
 	}
-	args = append(args, orderBy.args...)
+	args = append(args, orderBy.Args...)
 	//nolint:gosec // G201: SQL fragments are fixed table/column names and parameterized filters; limit/offset are ints.
 	query := fmt.Sprintf(`%sid FROM %s %s %s LIMIT %d OFFSET %d`,
-		selectSQL, fromSQL, whereSQL, orderBy.sql, limit, offset)
+		selectSQL, plan.FromSQL, whereSQL, orderBy.SQL, limit, offset)
 
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -410,27 +282,7 @@ func getWispIssuesByIDsInOrderInTx(ctx context.Context, tx *sql.Tx, ids []string
 }
 
 func readyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
-	excludeTypes := []types.IssueType{
-		types.IssueType("merge-request"),
-		types.TypeGate,
-		types.TypeMolecule,
-		types.TypeMessage,
-		types.IssueType("agent"),
-		types.IssueType("role"),
-		types.IssueType("rig"),
-	}
-	seen := make(map[types.IssueType]bool, len(excludeTypes)+len(extra))
-	for _, t := range excludeTypes {
-		seen[t] = true
-	}
-	for _, t := range extra {
-		if t == "" || seen[t] {
-			continue
-		}
-		seen[t] = true
-		excludeTypes = append(excludeTypes, t)
-	}
-	return excludeTypes
+	return sqlbuild.ReadyWorkExcludeTypes(extra)
 }
 
 func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {

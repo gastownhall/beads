@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
@@ -295,6 +296,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			continue
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path, doctorVerbose)
+		case "Dependency Keys":
+			err = fix.DependencyKeys(path, doctorVerbose)
 		case "Child-Parent Dependencies":
 			// Requires explicit opt-in flag (destructive, may remove intentional deps)
 			if !doctorFixChildParent {
@@ -357,14 +360,20 @@ func applyFixList(path string, fixes []doctorCheck) {
 			}
 		case "Project Identity":
 			err = fix.FixProjectIdentity(path)
-		case "Remote Consistency":
-			err = fix.RemoteConsistency(path)
 		case "Dolt Schema":
 			// GH#2160: Pre-#2142 migrations may have wrong database configured.
 			// Probe the server and backfill dolt_database in metadata.json.
 			err = fix.FixMissingDoltDatabase(path)
 		case "Dolt Format":
 			err = fix.DoltFormat(path)
+		case "Corrupt Manifest":
+			// GH#3290 / bd-6dnrw.6: destructive backup+reinit, gated here so it
+			// only ever runs on explicit doctor --fix confirmation.
+			var backups []string
+			backups, err = doltserver.RecoverCorruptManifest(doctor.ResolveBeadsDirForRepo(path))
+			for _, b := range backups {
+				fmt.Printf("  Backed up corrupt dolt database to %s and reinitialized\n", b)
+			}
 		default:
 			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
 			fmt.Printf("  Manual fix: %s\n", check.Fix)

@@ -221,8 +221,8 @@ func TestPromoteFromEphemeralRejectsCrossTypedTargetCollision(t *testing.T) {
 		t.Fatalf("AddDependency before promote: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx, `
-		INSERT INTO dependencies (issue_id, depends_on_external, type, created_at, created_by, metadata)
-		VALUES (?, ?, ?, NOW(), ?, ?)
+		INSERT INTO dependencies (id, issue_id, depends_on_external, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, ?, NOW(), ?, ?)
 	`, "mixed-promote-collision-source", "mixed-promote-collision-target", types.DepRelated, "tester", "{}"); err != nil {
 		t.Fatalf("seed external collision: %v", err)
 	}

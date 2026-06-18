@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,7 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -76,6 +77,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		skipAgents, _ := cmd.Flags().GetBool("skip-agents")
 		force, _ := cmd.Flags().GetBool("force")
 		reinitLocal, _ := cmd.Flags().GetBool("reinit-local")
+		initIfMissing, _ := cmd.Flags().GetBool("init-if-missing")
 		discardRemote, _ := cmd.Flags().GetBool("discard-remote")
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
 		roleFlag, _ := cmd.Flags().GetString("role")
@@ -369,6 +371,33 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// docs/adr/0002-init-safety-invariants.md).
 		if !reinitLocal {
 			if err := checkExistingBeadsData(prefix); err != nil {
+				// --init-if-missing makes init idempotent, but ONLY for the
+				// benign "workspace already initialized" case. An operational
+				// error from the check (e.g. an unreadable .beads/embeddeddolt
+				// directory) must still abort rather than be masked as a
+				// successful skip.
+				if initIfMissing && errors.Is(err, errWorkspaceAlreadyInitialized) {
+					// Guard against masking a genuine mismatch: an explicit
+					// --prefix or --database that does not match the existing
+					// workspace must abort, since silently skipping would ignore
+					// the request and reuse a different database. --database is
+					// the authoritative selector, so it is checked even when
+					// --prefix is also set.
+					existing := existingWorkspaceDBName()
+					if cmd.Flags().Changed("database") {
+						if initIfMissingDatabaseMismatch(existing, database) {
+							FatalError("workspace already initialized as database %q, but --database %q was requested.\nRemove --database (or pass a matching value) to reuse the existing workspace.", existing, database)
+						}
+					} else if cmd.Flags().Changed("prefix") {
+						if initIfMissingPrefixMismatch(existing, prefix) {
+							FatalError("workspace already initialized as database %q, but --prefix %q was requested.\nRemove --prefix (or pass a matching value) to reuse the existing workspace.", existing, prefix)
+						}
+					}
+					if !quiet {
+						fmt.Fprintln(os.Stderr, "Skipping init: workspace already initialized.")
+					}
+					return
+				}
 				FatalError("%v", err)
 			}
 		}
@@ -452,19 +481,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		// Normalize prefix before storing it in config or deriving the Dolt
 		// database name. Dots are not valid in issue prefixes and must match the
-		// underscore form used for DoltDatabase/metadata.json.
-		// Leading dots produce invalid names (e.g. ".claude" -> "claude"), and
-		// the trailing hyphen is added automatically during ID generation.
-		prefix = strings.TrimLeft(prefix, ".")
-		prefix = strings.TrimRight(prefix, "-")
-		prefix = strings.ReplaceAll(prefix, ".", "_")
-
-		// Sanitize prefix for use as a MySQL database name.
-		// Directory names like "001" (common in temp dirs) are invalid because
-		// MySQL identifiers must start with a letter or underscore.
-		if len(prefix) > 0 && !((prefix[0] >= 'a' && prefix[0] <= 'z') || (prefix[0] >= 'A' && prefix[0] <= 'Z') || prefix[0] == '_') {
-			prefix = "bd_" + prefix
-		}
+		// underscore form used for DoltDatabase/metadata.json. Leading dots
+		// produce invalid names (e.g. ".claude" -> "claude"), the trailing
+		// hyphen is added automatically during ID generation, and a leading
+		// non-letter is prefixed with "bd_" so the derived MySQL identifier is
+		// valid (directory names like "001" are common in temp dirs).
+		prefix = normalizeIssuePrefix(prefix)
 
 		// Cross-boundary safety (bd-q83 / ADR 0002): check remote state
 		// BEFORE any filesystem side-effects so a refusal exits cleanly.
@@ -705,7 +727,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Must match the sanitization applied to metadata.json DoltDatabase
 			// field (line below), otherwise init creates a database with one name
 			// but metadata.json records a different name, causing reopens to fail.
-			dbName = strings.ReplaceAll(prefix, "-", "_")
+			dbName = dbNameFromPrefix(prefix)
 		} else {
 			dbName = "beads"
 		}
@@ -944,6 +966,34 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		store, err := newDoltStore(ctx, doltCfg)
 		if err != nil {
+			// #4259: the remote-migrate gate refused to auto-apply pending
+			// migrations. When init just bootstrapped the clone, the REMOTE is
+			// what is behind this binary — the gate's generic "adopt: bd
+			// bootstrap" remedy is circular, and init has not yet written
+			// metadata.json/config.yaml, so without finalization the workspace
+			// is stranded where not even the gate's own unlock commands can
+			// open it (bd-4mpy7).
+			var gateErr *schema.RemoteMigrateGateError
+			if errors.As(err, &gateErr) {
+				if bootstrappedFromRemote {
+					// Leave the workspace in the same finalized state the
+					// bd bootstrap sync path produces (GH#3201) so
+					// `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` and
+					// `bd dolt push` can open the cloned database.
+					fcfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
+					if ferr := finalizeSyncedBootstrap(beadsDir, syncURL, fcfg, dbName); ferr != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to finalize bootstrapped workspace: %v\n", ferr)
+					}
+				}
+				if jsonOutput {
+					handleRemoteMigrateGateJSON(gateErr)
+				} else if bootstrappedFromRemote {
+					printBootstrapRemoteBehindGuidance(os.Stderr, gateErr, syncURL, "bd init")
+				} else {
+					fmt.Fprint(os.Stderr, gateErr.UserMessage())
+				}
+				os.Exit(1)
+			}
 			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %v\n", err)
 			os.Exit(1)
 		}
@@ -1642,6 +1692,7 @@ func init() {
 	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
 	initCmd.Flags().Bool("from-jsonl", false, "Import issues from configured import.path instead of git history")
+	initCmd.Flags().Bool("init-if-missing", false, "If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")
 	initCmd.Flags().String("agents-profile", "", "AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)")
@@ -1741,8 +1792,34 @@ func migrateOldDatabases(targetPath string, quiet bool) error {
 	return nil
 }
 
+// errWorkspaceAlreadyInitialized marks the benign "this workspace already has a
+// database" outcome from checkExistingBeadsData. --init-if-missing treats only
+// this case as an idempotent skip; any other error from the check is operational
+// (e.g. an unreadable .beads/embeddeddolt directory) and must still abort rather
+// than be silently masked as success.
+var errWorkspaceAlreadyInitialized = errors.New("workspace already initialized")
+
+// workspaceExistsError carries a user-facing "already initialized" message while
+// still matching errWorkspaceAlreadyInitialized via errors.Is, so callers can
+// distinguish the benign case without the sentinel text leaking into the message.
+type workspaceExistsError struct{ msg string }
+
+func (e *workspaceExistsError) Error() string { return e.msg }
+func (e *workspaceExistsError) Is(target error) bool {
+	return target == errWorkspaceAlreadyInitialized
+}
+
+// alreadyInitialized builds a workspaceExistsError from a formatted message.
+func alreadyInitialized(format string, args ...any) error {
+	return &workspaceExistsError{msg: fmt.Sprintf(format, args...)}
+}
+
 // checkExistingBeadsDataAt checks for existing database at a specific beadsDir path.
 // This is extracted to support both BEADS_DIR and CWD-based resolution.
+//
+// A returned error that matches errWorkspaceAlreadyInitialized means a database
+// already exists (the benign, idempotent-skip case); any other error is
+// operational and must not be treated as success.
 func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 	// Check if .beads directory exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -1756,7 +1833,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 				return fmt.Errorf("resolve proxied server root: %w", rootErr)
 			}
 			if info, statErr := os.Stat(proxiedRoot); statErr == nil && info.IsDir() {
-				return fmt.Errorf(`
+				return alreadyInitialized(`
 %s Found existing Dolt database: %s
 
 This workspace is already initialized.
@@ -1788,7 +1865,7 @@ Aborting.`, ui.RenderWarn("⚠"), proxiedRoot, ui.RenderAccent("bd list"))
 				}
 				if info, statErr := os.Stat(filepath.Join(embeddedRoot, entry.Name(), ".dolt")); statErr == nil && info.IsDir() {
 					location := filepath.Join(embeddedRoot, entry.Name())
-					return fmt.Errorf(`
+					return alreadyInitialized(`
 %s Found existing Dolt database: %s
 
 This workspace is already initialized.
@@ -1849,7 +1926,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				port := doltserver.DefaultConfig(beadsDir).Port
 				location = fmt.Sprintf("dolt server at %s:%d", host, port)
 			}
-			return fmt.Errorf(`
+			return alreadyInitialized(`
 %s Found existing Dolt database: %s
 
 This workspace is already initialized.
@@ -1874,7 +1951,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 	if redirectTarget != beadsDir {
 		targetDBPath := filepath.Join(redirectTarget, beads.CanonicalDatabaseName)
 		if _, err := os.Stat(targetDBPath); err == nil {
-			return fmt.Errorf(`
+			return alreadyInitialized(`
 %s Cannot init: redirect target already has database
 
 Local .beads redirects to: %s
@@ -1898,7 +1975,7 @@ Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent(
 	// Check for existing database file (no redirect case)
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if _, err := os.Stat(dbPath); err == nil {
-		return fmt.Errorf(`
+		return alreadyInitialized(`
 %s Found existing database: %s
 
 This workspace is already initialized.
@@ -1960,33 +2037,96 @@ func countExistingIssues(_ string) (int, error) {
 //
 // For redirects, checks the redirect target and errors if it already has a database.
 // This prevents accidentally overwriting an existing canonical database (GH#bd-0qel).
-func checkExistingBeadsData(prefix string) error {
-	// Check BEADS_DIR environment variable first (matches FindBeadsDir pattern)
-	// When BEADS_DIR is set, it takes precedence over CWD and worktree checks
-	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
-		absBeadsDir := utils.CanonicalizePath(envBeadsDir)
-		return checkExistingBeadsDataAt(absBeadsDir, prefix)
+// normalizeIssuePrefix applies the prefix normalization rules shared by the
+// init path and the --init-if-missing mismatch guard: strip leading dots, drop
+// the trailing hyphen, convert dots to underscores, and prepend "bd_" when the
+// result would not start with a SQL-identifier-safe character. Keeping this in
+// one place ensures the mismatch check derives exactly the same name init does.
+func normalizeIssuePrefix(prefix string) string {
+	prefix = strings.TrimLeft(prefix, ".")
+	prefix = strings.TrimRight(prefix, "-")
+	prefix = strings.ReplaceAll(prefix, ".", "_")
+	if len(prefix) > 0 && !((prefix[0] >= 'a' && prefix[0] <= 'z') || (prefix[0] >= 'A' && prefix[0] <= 'Z') || prefix[0] == '_') {
+		prefix = "bd_" + prefix
 	}
+	return prefix
+}
 
+// dbNameFromPrefix derives the Dolt database name from a normalized issue
+// prefix (hyphens become underscores), matching how init records DoltDatabase.
+func dbNameFromPrefix(prefix string) string {
+	return strings.ReplaceAll(prefix, "-", "_")
+}
+
+// initIfMissingPrefixMismatch reports whether an explicit --prefix request
+// conflicts with the existing workspace, in which case --init-if-missing must
+// abort rather than silently skip (otherwise the requested prefix is ignored).
+// existingDBName is the existing workspace's recorded Dolt database name;
+// requestedPrefix is the raw, un-normalized --prefix value. Returns false when
+// the existing name is unknown so an undeterminable state falls through to the
+// benign skip.
+func initIfMissingPrefixMismatch(existingDBName, requestedPrefix string) bool {
+	if existingDBName == "" {
+		return false
+	}
+	requested := dbNameFromPrefix(normalizeIssuePrefix(requestedPrefix))
+	return requested != "" && !strings.EqualFold(existingDBName, requested)
+}
+
+// initIfMissingDatabaseMismatch reports whether an explicit --database request
+// conflicts with the existing workspace. --database is the authoritative database
+// selector (it overrides prefix-based naming later in init), so an explicit
+// mismatch must abort --init-if-missing rather than silently reuse a different
+// database. existingDBName is the existing workspace's recorded Dolt database
+// name; requestedDatabase is the raw --database value. Returns false when either
+// is unknown so an undeterminable state falls through to the benign skip.
+func initIfMissingDatabaseMismatch(existingDBName, requestedDatabase string) bool {
+	if existingDBName == "" || requestedDatabase == "" {
+		return false
+	}
+	return !strings.EqualFold(existingDBName, requestedDatabase)
+}
+
+// resolveInitBeadsDir resolves the .beads directory that init would target,
+// using the same precedence as checkExistingBeadsData (BEADS_DIR > worktree
+// fallback > CWD). Returns "" when it cannot be determined.
+func resolveInitBeadsDir() string {
+	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
+		return utils.CanonicalizePath(envBeadsDir)
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil // Can't determine CWD, allow init to proceed
+		return ""
 	}
-
-	// Determine where to check for .beads directory
-	// Guard with isGitRepo() check first - on Windows, git commands may hang
-	// when run outside a git repository (GH#727)
-	var beadsDir string
 	if isGitRepo() && git.IsWorktree() {
-		beadsDir = beads.GetWorktreeFallbackBeadsDir()
-		if beadsDir == "" {
-			return nil // Can't determine shared fallback, allow init to proceed
-		}
-	} else {
-		// For regular repos (or non-git directories), check current directory
-		beadsDir = filepath.Join(cwd, ".beads")
+		return beads.GetWorktreeFallbackBeadsDir()
 	}
+	return filepath.Join(cwd, ".beads")
+}
 
+// existingWorkspaceDBName returns the Dolt database name explicitly recorded
+// for the already-initialized workspace at the init target, or "" if it cannot
+// be determined. It reads the raw DoltDatabase field rather than
+// GetDoltDatabase() on purpose: the getter falls back to a default name (and an
+// env override), which would manufacture a phantom value and trigger false
+// mismatches. An unset value safely falls through to the benign skip.
+func existingWorkspaceDBName() string {
+	beadsDir := resolveInitBeadsDir()
+	if beadsDir == "" {
+		return ""
+	}
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.DoltDatabase
+}
+
+func checkExistingBeadsData(prefix string) error {
+	beadsDir := resolveInitBeadsDir()
+	if beadsDir == "" {
+		return nil // Can't determine target, allow init to proceed
+	}
 	return checkExistingBeadsDataAt(beadsDir, prefix)
 }
 
@@ -2134,31 +2274,15 @@ func isDoltLocalOnly() bool {
 
 func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syncURL string, quiet bool) {
 	hasRemote, _ := store.HasRemote(ctx, "origin")
-	if !hasRemote {
-		if err := store.AddRemote(ctx, "origin", syncURL); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to add remote 'origin': %v\n", err)
-			// Non-fatal — user can add manually with: bd dolt remote add origin <url>
-		} else if !quiet {
-			fmt.Printf("  %s Configured Dolt remote: origin → %s\n", ui.RenderPass("✓"), syncURL)
-		}
-	}
-
-	// Server-mode git remotes often need a matching CLI remote so push/pull can
-	// use the user's local SSH keys or credential helpers instead of the SQL
-	// server process environment.
-	if !usesSQLServer() {
+	if hasRemote {
 		return
 	}
-	locator, ok := storage.UnwrapStore(store).(storage.StoreLocator)
-	if !ok {
+	if err := store.AddRemote(ctx, "origin", syncURL); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to add remote 'origin': %v\n", err)
 		return
 	}
-	dbPath := locator.CLIDir()
-	if dbPath == "" || doltutil.FindCLIRemote(dbPath, "origin") != "" {
-		return
-	}
-	if err := doltutil.AddCLIRemote(dbPath, "origin", syncURL); err != nil && !quiet {
-		fmt.Fprintf(os.Stderr, "Warning: failed to add CLI remote 'origin': %v\n", err)
+	if !quiet {
+		fmt.Printf("  %s Configured Dolt remote: origin → %s\n", ui.RenderPass("✓"), syncURL)
 	}
 }
 

@@ -28,7 +28,7 @@ func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg stri
 
 	// Create a Dolt version commit from the working set changes.
 	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
-		return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, commitAuthor)
 		})
 	}
@@ -114,6 +114,17 @@ func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep 
 	}
 	t.dirty.MarkDirty(depTable)
 	return nil
+}
+
+// CycleThroughEdges reports a blocking cycle through one of the new edges,
+// including the transaction's own uncommitted dependency writes
+// (bd-6dnrw.8, bd-578h9.9).
+func (t *embeddedTransaction) CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error) {
+	graph := make(map[string][]string)
+	if err := issueops.AppendBlockingGraphInTx(ctx, t.tx, []string{"dependencies", "wisp_dependencies"}, graph); err != nil {
+		return "", err
+	}
+	return issueops.CycleThroughEdgesInGraph(graph, edges), nil
 }
 
 func (t *embeddedTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {

@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -358,6 +359,14 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Errorf("planning .beads missing: %v", err)
 		}
 
+		// Regression: autoConfigureForkContributor must initialize the planning
+		// Dolt schema, not just create the .beads directory. An uninitialized
+		// store causes "Dolt server unreachable" on first use (e.g. bd migrate-personal).
+		planningEmbeddedDir := filepath.Join(planningDir, ".beads", "embeddeddolt")
+		if _, err := os.Stat(planningEmbeddedDir); err != nil {
+			t.Errorf("planning embeddeddolt dir missing (planning store not pre-initialized): %v", err)
+		}
+
 		roleCmd := exec.Command("git", "config", "--get", "beads.role")
 		roleCmd.Dir = dir
 		roleOut, err := roleCmd.Output()
@@ -653,6 +662,89 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 		if !strings.Contains(string(configYAML), remoteURL) {
 			t.Fatalf("config.yaml should persist --remote URL %q:\n%s", remoteURL, configYAML)
+		}
+	})
+
+	t.Run("remote_behind_schema_gates_with_guidance", func(t *testing.T) {
+		// bd-4mpy7: bootstrapping from a remote whose database is behind this
+		// binary's schema must fail with designated-migrator guidance and
+		// leave a finalized workspace where the guidance commands can run —
+		// not a half-initialized directory with a raw gate error.
+		remoteDir := filepath.Join(t.TempDir(), "behind-remote")
+		remoteURL := "file://" + remoteDir
+
+		sourceDir, sourceBeads, _ := bdInit(t, bd, "--prefix", "bsrc", "--skip-hooks", "--skip-agents")
+		bdCreate(t, bd, sourceDir, "Behind remote issue", "--type", "task")
+		bdDolt(t, bd, sourceDir, "commit")
+
+		// Regress the source database one migration and publish it, all in
+		// one raw SQL session — running bd against the regressed database
+		// would just auto-migrate it back (it has no remote registered yet).
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		db, cleanupSQL, err := embeddeddolt.OpenSQL(ctx, filepath.Join(sourceBeads, "embeddeddolt"), "bsrc", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		for _, q := range []string{
+			fmt.Sprintf("DELETE FROM schema_migrations WHERE version = %d", schema.LatestVersion()),
+			"CALL DOLT_COMMIT('-am', 'regress schema one version')",
+			fmt.Sprintf("CALL DOLT_REMOTE('add', 'origin', '%s')", remoteURL),
+			"CALL DOLT_PUSH('--force', 'origin', 'main')",
+		} {
+			if _, err := db.ExecContext(ctx, q); err != nil {
+				_ = cleanupSQL()
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		_ = cleanupSQL()
+
+		cloneDir := t.TempDir()
+		initGitRepoAt(t, cloneDir)
+		cmd := exec.Command(bd, "init", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+		cmd.Dir = cloneDir
+		cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=0")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("bd init --remote against a behind-schema remote should fail; output:\n%s", out)
+		}
+		for _, want := range []string{
+			"Re-running `bd init` will NOT fix this",
+			schema.AllowRemoteMigrateEnv + "=1",
+			"bd dolt push",
+		} {
+			if !strings.Contains(string(out), want) {
+				t.Fatalf("init output missing %q:\n%s", want, out)
+			}
+		}
+
+		// The failed init must leave a finalized workspace (metadata.json,
+		// config.yaml) so the guidance commands can open the cloned database.
+		cloneBeads := filepath.Join(cloneDir, ".beads")
+		for _, f := range []string{"metadata.json", "config.yaml"} {
+			if _, err := os.Stat(filepath.Join(cloneBeads, f)); err != nil {
+				t.Fatalf("failed init should leave %s behind: %v", f, err)
+			}
+		}
+
+		// Recovery per the guidance: the designated migrator unlocks,
+		// migrates, and the workspace is usable.
+		cmd = exec.Command(bd, "migrate")
+		cmd.Dir = cloneDir
+		cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=1")
+		if migOut, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s=1 bd migrate failed: %v\n%s", schema.AllowRemoteMigrateEnv, err, migOut)
+		}
+
+		cmd = exec.Command(bd, "list")
+		cmd.Dir = cloneDir
+		cmd.Env = bdEnv(cloneDir)
+		listOut, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd list after migrate failed: %v\n%s", err, listOut)
+		}
+		if !strings.Contains(string(listOut), "Behind remote issue") {
+			t.Fatalf("migrated clone missing source issue:\n%s", listOut)
 		}
 	})
 

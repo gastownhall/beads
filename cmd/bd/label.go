@@ -27,7 +27,7 @@ func processBatchLabelOperation(issueIDs []string, label string, operation strin
 	txFunc func(context.Context, storage.Transaction, string, string, string) error) {
 	ctx := rootCtx
 	commitMsg := fmt.Sprintf("bd: label %s '%s' on %d issue(s)", operation, label, len(issueIDs))
-	err := transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
+	err := transactHonoringAutoCommit(ctx, store, commitMsg, func(tx storage.Transaction) error {
 		for _, issueID := range issueIDs {
 			if err := txFunc(ctx, tx, issueID, label, actor); err != nil {
 				return fmt.Errorf("%s label '%s' on %s: %w", operation, label, issueID, err)
@@ -287,7 +287,7 @@ var labelPropagateCmd = &cobra.Command{
 
 		// Add label to each child in a single transaction (AddLabel is idempotent)
 		commitMsg := fmt.Sprintf("bd: propagate label '%s' from %s to %d children", label, parentID, len(children))
-		err = transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
+		err = transactHonoringAutoCommit(ctx, store, commitMsg, func(tx storage.Transaction) error {
 			for _, child := range children {
 				if err := tx.AddLabel(ctx, child.ID, label, actor); err != nil {
 					return fmt.Errorf("add label '%s' on %s: %w", label, child.ID, err)

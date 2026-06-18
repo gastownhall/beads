@@ -894,10 +894,11 @@ func TestEngineConflictResolution(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
 
-	// Set up last_sync (use UTC to avoid DATETIME timezone round-trip issues)
+	// Set up last_sync (use UTC to avoid DATETIME timezone round-trip issues).
+	// The engine reads last_sync from local metadata, not config.
 	lastSync := time.Now().UTC().Add(-1 * time.Hour)
-	if err := store.SetConfig(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
-		t.Fatalf("SetConfig() error: %v", err)
+	if err := store.SetLocalMetadata(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetLocalMetadata() error: %v", err)
 	}
 
 	// Create a local issue that was modified after last_sync
@@ -946,8 +947,8 @@ func TestEngineSyncDoesNotCreateFalseConflictsAfterPull(t *testing.T) {
 	defer store.Close()
 
 	lastSync := time.Now().UTC().Add(-1 * time.Hour)
-	if err := store.SetConfig(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
-		t.Fatalf("SetConfig() error: %v", err)
+	if err := store.SetLocalMetadata(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetLocalMetadata() error: %v", err)
 	}
 
 	issue := &types.Issue{

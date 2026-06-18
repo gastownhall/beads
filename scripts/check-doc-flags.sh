@@ -164,8 +164,8 @@ if [ -f "$CLI_REF" ]; then
             if [ -z "$BD_FOR_GEN" ]; then
                 echo "FAIL: Could not resolve bd binary path for CLI docs freshness check"
                 ERRORS=$((ERRORS + 1))
-            elif "$PROJECT_ROOT/scripts/generate-cli-docs.sh" --check "$BD_FOR_GEN"; then
-                echo "PASS: Generated CLI docs are fresh"
+            elif "$PROJECT_ROOT/scripts/check-cli-docs-drift.sh" "$BD_FOR_GEN"; then
+                echo "PASS: CLI docs freshness gate (see drift check output above)"
             else
                 ERRORS=$((ERRORS + 1))
             fi

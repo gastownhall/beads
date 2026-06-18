@@ -689,12 +689,14 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Commit to Dolt. In DoltStore mode, CreateIssue commits the issue
-		// row internally, so only post-create metadata (deps) needs a separate
-		// commit. In EmbeddedDoltStore mode, CreateIssue writes
-		// to the working set without a Dolt commit, so we always commit
-		// everything together at the end.
-		if !usesSQLServer() || postCreateWrites {
+		// Commit to Dolt. Server-mode DoltStore writes version themselves.
+		// EmbeddedDoltStore writes to the working set and commits here only
+		// when --dolt-auto-commit=on.
+		shouldCommit, err := shouldCommitCreatePostWrites(issue, postCreateWrites)
+		if err != nil {
+			FatalError("dolt auto-commit failed: %v", err)
+		}
+		if shouldCommit {
 			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
 			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
 				WarnError("failed to commit: %v", err)
@@ -706,7 +708,10 @@ var createCmd = &cobra.Command{
 		// DoltHub remotes. Per-create pushes caused 22GB of git-remote-cache
 		// bloat with dozens of agents creating wisps constantly (hq-glw).
 		if repoPath != "." && targetStore != nil {
-			if err := targetStore.Commit(ctx, fmt.Sprintf("bd: create (auto-commit) by %s", actor)); err != nil && !isDoltNothingToCommit(err) {
+			if err := commitPendingIfEmbedded(ctx, targetStore, actor, doltAutoCommitParams{
+				Command:  "create",
+				IssueIDs: []string{issue.ID},
+			}); err != nil {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
 			}
 		}
@@ -858,6 +863,20 @@ func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {
 	if issue.EventKind != "" {
 		fmt.Printf("  Event category: %s\n", issue.EventKind)
 	}
+}
+
+func shouldCommitCreatePostWrites(_ *types.Issue, _ bool) (bool, error) {
+	if isEmbeddedMode() {
+		if strings.TrimSpace(doltAutoCommit) == "" {
+			return true, nil
+		}
+		mode, err := getDoltAutoCommitMode()
+		if err != nil {
+			return false, err
+		}
+		return mode == doltAutoCommitOn, nil
+	}
+	return false, nil
 }
 
 func createDepsAcceptedTypeList() string {

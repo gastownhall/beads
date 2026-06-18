@@ -240,6 +240,14 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 			result.Error = fmt.Errorf("commit conflict resolution: %w", err)
 			return result, result.Error
 		}
+
+		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
+		// recompute (unresolved rows would have fed it garbage); now that the
+		// resolution is committed, cover the whole merge+resolution window.
+		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
+			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
+			return result, result.Error
+		}
 	}
 	result.Merged = true
 

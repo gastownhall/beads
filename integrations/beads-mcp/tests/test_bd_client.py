@@ -197,9 +197,7 @@ async def test_ready_with_issue_type(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_ready_invalid_response(bd_client, mock_process):
     """Test ready method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         params = ReadyWorkParams(limit=10)
@@ -235,9 +233,7 @@ async def test_list_issues(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_list_issues_invalid_response(bd_client, mock_process):
     """Test list_issues method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         params = ListIssuesParams(status="open")
@@ -492,9 +488,7 @@ async def test_close(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_close_invalid_response(bd_client, mock_process):
     """Test close method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with (
         patch("asyncio.create_subprocess_exec", return_value=mock_process),
@@ -596,9 +590,7 @@ async def test_reopen_with_reason(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_reopen_invalid_response(bd_client, mock_process):
     """Test reopen method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with (
         patch("asyncio.create_subprocess_exec", return_value=mock_process),
@@ -744,9 +736,7 @@ async def test_blocked(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_blocked_invalid_response(bd_client, mock_process):
     """Test blocked method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         result = await bd_client.blocked()

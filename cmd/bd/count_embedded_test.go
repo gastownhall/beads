@@ -465,6 +465,113 @@ func TestEmbeddedCount(t *testing.T) {
 	})
 }
 
+// TestEmbeddedCountIncludeInfra is the CLI-level guard for GH#4387:
+// `bd count --include-infra <filters>` must return exactly the cardinality of
+// `bd list --include-infra <filters> --all` (modulo list's --limit), including
+// the wisps tier (no_history + ephemeral beads) and honoring list's default
+// template exclusion. Without the flag, bd count keeps today's durable-only
+// semantics.
+func TestEmbeddedCountIncludeInfra(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ci")
+
+	// Durable issues tier.
+	bdCreate(t, bd, dir, "Infra durable task one", "--type", "task")
+	bdCreate(t, bd, dir, "Infra durable task two", "--type", "task")
+	bdCreate(t, bd, dir, "Infra durable bug", "--type", "bug")
+	closedIssue := bdCreate(t, bd, dir, "Infra durable task closed", "--type", "task")
+	bdClose(t, bd, dir, closedIssue.ID)
+	// Wisps tier: no_history beads are durable work that bd list --include-infra
+	// returns; ephemeral beads are GC-eligible wisps.
+	bdCreate(t, bd, dir, "Infra nohistory task one", "--type", "task", "--no-history")
+	bdCreate(t, bd, dir, "Infra nohistory task two", "--type", "task", "--no-history")
+	bdCreate(t, bd, dir, "Infra ephemeral task", "--type", "task", "--ephemeral")
+
+	countOf := func(args ...string) int {
+		t.Helper()
+		m := bdCountJSON(t, bd, dir, args...)
+		return int(m["count"].(float64))
+	}
+	listCardinality := func(args ...string) int {
+		t.Helper()
+		fullArgs := append([]string{"--include-infra", "--all", "--limit", "0"}, args...)
+		return len(bdListJSON(t, bd, dir, fullArgs...))
+	}
+
+	t.Run("default_stays_durable_only", func(t *testing.T) {
+		if got := countOf("--type", "task"); got != 3 {
+			t.Errorf("bd count --type task = %d, want 3 (durable tasks only; default must stay byte-identical)", got)
+		}
+	})
+
+	t.Run("include_infra_counts_wisps_tier", func(t *testing.T) {
+		// 3 durable tasks + 2 no_history tasks + 1 ephemeral task.
+		if got := countOf("--include-infra", "--type", "task"); got != 6 {
+			t.Errorf("bd count --include-infra --type task = %d, want 6", got)
+		}
+	})
+
+	t.Run("include_infra_matches_list_cardinality", func(t *testing.T) {
+		for _, filters := range [][]string{
+			nil,
+			{"--type", "task"},
+			{"--type", "bug"},
+			{"--status", "open"},
+			{"--status", "closed"},
+		} {
+			want := listCardinality(filters...)
+			got := countOf(append([]string{"--include-infra"}, filters...)...)
+			if got != want {
+				t.Errorf("bd count --include-infra %v = %d, but bd list --include-infra --all %v returned %d rows", filters, got, filters, want)
+			}
+		}
+	})
+
+	t.Run("include_infra_grouped_by_type", func(t *testing.T) {
+		m := bdCountJSON(t, bd, dir, "--include-infra", "--by-type")
+		total := int(m["total"].(float64))
+		if want := listCardinality(); total != want {
+			t.Errorf("bd count --include-infra --by-type total = %d, want list cardinality %d", total, want)
+		}
+		groups, ok := m["groups"].([]interface{})
+		if !ok {
+			t.Fatal("expected groups array")
+		}
+		byType := make(map[string]int)
+		for _, g := range groups {
+			gm := g.(map[string]interface{})
+			byType[gm["group"].(string)] = int(gm["count"].(float64))
+		}
+		if byType["task"] != 6 {
+			t.Errorf("grouped task count = %d, want 6 (wisps tier missing from --by-type)", byType["task"])
+		}
+		if byType["bug"] != 1 {
+			t.Errorf("grouped bug count = %d, want 1", byType["bug"])
+		}
+	})
+
+	t.Run("grouped_without_flag_stays_durable_only", func(t *testing.T) {
+		m := bdCountJSON(t, bd, dir, "--by-type")
+		groups, ok := m["groups"].([]interface{})
+		if !ok {
+			t.Fatal("expected groups array")
+		}
+		for _, g := range groups {
+			gm := g.(map[string]interface{})
+			if gm["group"] == "task" {
+				if got := int(gm["count"].(float64)); got != 3 {
+					t.Errorf("bd count --by-type task = %d, want 3 (durable only)", got)
+				}
+			}
+		}
+	})
+}
+
 // TestEmbeddedCountConcurrent exercises count operations concurrently.
 func TestEmbeddedCountConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {

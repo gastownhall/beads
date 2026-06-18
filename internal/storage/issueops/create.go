@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -55,6 +56,10 @@ func CreateIssueInTx(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *t
 // CreateIssueResult reports the tables actually written by CreateIssueInTx.
 type CreateIssueResult struct {
 	ChangedTables map[string]bool
+	// StaleRejected reports that the RejectStaleUpserts guard kept the stored
+	// row: nothing was written, and the issue's aux data must not be
+	// persisted by later batch stages either (bd-578h9.8).
+	StaleRejected bool
 }
 
 func (r *CreateIssueResult) markChanged(table string) {
@@ -111,9 +116,19 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		return result, nil
 	}
 
-	isNew, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts.ConflictSkip)
+	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
 	if err != nil {
 		return result, err
+	}
+	if staleRejected {
+		// The stored row is strictly newer than this snapshot: nothing was
+		// written, and the snapshot's labels/comments belong to the older
+		// version, so they must not merge in either (bd-578h9.8).
+		result.StaleRejected = true
+		if bc.Opts.OnStaleRejected != nil {
+			bc.Opts.OnStaleRejected(issue.ID)
+		}
+		return result, nil
 	}
 	result.markChanged(issueTable)
 
@@ -178,13 +193,19 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx *sql.Tx, issues []*types
 	}
 
 	result := CreateIssuesResult{}
+	accepted := issues[:0:0]
 	for _, issue := range issues {
 		issueResult, err := CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
 		if err != nil {
 			return CreateIssuesResult{}, err
 		}
 		result.merge(issueResult.ChangedTables)
+		if issueResult.StaleRejected {
+			continue // stale snapshot: keep its deps out of the batch too
+		}
+		accepted = append(accepted, issue)
 	}
+	issues = accepted
 
 	depResult, err := PersistDependenciesWithOptionsResult(ctx, tx, issues, actor, opts)
 	if err != nil {
@@ -493,31 +514,54 @@ func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable
 	}
 }
 
-// InsertIssueIfNew inserts the issue and returns whether it was genuinely new.
+// InsertIssueIfNew inserts the issue and returns whether it was genuinely new,
+// and whether the RejectStaleUpserts guard rejected it.
 //
-// When conflictSkip is true and an issue with the same ID already exists, the
-// row is left untouched (no UPSERT) and isNew is false. This is the
+// When opts.ConflictSkip is true and an issue with the same ID already exists,
+// the row is left untouched (no UPSERT) and isNew is false. This is the
 // auto-import upgrade-recovery guarantee (GH#3955): even if the emptiness
 // guard in maybeAutoImportJSONL regresses, a stale issues.jsonl can never
-// overwrite live rows — worst case is a no-op. With conflictSkip false the
-// behavior is unchanged: InsertIssueIntoTable runs its INSERT … ON DUPLICATE
-// KEY UPDATE, so explicit `bd import` keeps UPSERT semantics.
+// overwrite live rows — worst case is a no-op. Otherwise the INSERT … ON
+// DUPLICATE KEY UPDATE runs, so explicit `bd import` keeps UPSERT semantics;
+// with opts.RejectStaleUpserts the update half is conditional on the incoming
+// row being strictly newer than the stored one (bd-pkim8, bd-hj85c).
+// Staleness is decided by an explicit in-transaction read (stored updated_at
+// strictly newer ⇒ rejected) so callers can skip aux persistence and count
+// the row as skipped instead of created (bd-578h9.8). Equal-timestamp rows
+// are deliberately NOT rejected here, even though the ODKU's
+// VALUES(updated_at) > updated_at condition keeps every stored column for
+// them: updated_at has second granularity, so a tie may be two distinct
+// same-second updates — the local row must win the tie (an incoming row with
+// an empty notes field must not wipe local notes), but its aux data
+// (labels/comments/deps, which never bump updated_at) still merges
+// additively (bd-hj85c).
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue *types.Issue, conflictSkip bool) (isNew bool, err error) {
+func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (isNew bool, staleRejected bool, err error) {
 	var existingCount int
 	if issue.ID != "" {
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, issueTable), issue.ID).Scan(&existingCount); err != nil {
-			return false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
+			return false, false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
 		}
 	}
-	if conflictSkip && existingCount > 0 {
-		return false, nil // issue already exists — skip, never overwrite
+	if opts.ConflictSkip && existingCount > 0 {
+		return false, false, nil // issue already exists — skip, never overwrite
 	}
-	if err := InsertIssueIntoTable(ctx, tx, issueTable, issue); err != nil {
-		return false, fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
+	if opts.RejectStaleUpserts && existingCount > 0 {
+		var storedNewer int
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ? AND updated_at > ?`, issueTable), issue.ID, issue.UpdatedAt).Scan(&storedNewer); err != nil {
+			return false, false, fmt.Errorf("failed to check issue staleness for %s: %w", issue.ID, err)
+		}
+		if storedNewer > 0 {
+			// The conditional ODKU would keep every stored column anyway;
+			// skipping the no-op insert makes the rejection observable.
+			return false, true, nil
+		}
 	}
-	return existingCount == 0, nil
+	if err := insertIssueIntoTable(ctx, tx, issueTable, issue, opts.RejectStaleUpserts); err != nil {
+		return false, false, fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
+	}
+	return existingCount == 0, false, nil
 }
 
 func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
@@ -554,9 +598,9 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 		comment := "Added label: " + label
 		//nolint:gosec // G201: eventTable is determined by ephemeral flag
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (issue_id, event_type, actor, comment)
-			VALUES (?, ?, ?, ?)
-		`, eventTable), issue.ID, types.EventLabelAdded, actor, comment); err != nil {
+			INSERT INTO %s (id, issue_id, event_type, actor, comment)
+			VALUES (?, ?, ?, ?, ?)
+		`, eventTable), NewEventID(), issue.ID, types.EventLabelAdded, actor, comment); err != nil {
 			return result, fmt.Errorf("failed to record label event %q for %s: %w", label, issue.ID, err)
 		}
 		result.markChanged(eventTable)
@@ -668,12 +712,15 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			if createdAt.IsZero() {
 				createdAt = time.Now().UTC()
 			}
+			// Deterministic id from (issue_id, target) keeps bulk-imported edges
+			// merge-safe across clones — two clones importing the same JSONL get the
+			// same primary key, not two random UUIDs that collide on uk_dep_* (#4259).
 			//nolint:gosec // G201: depTable is one of two hardcoded constants; target column from DepTargetKind.Column()
 			sqlResult, err := tx.ExecContext(ctx, fmt.Sprintf(`
-					INSERT INTO %s (issue_id, %s, type, created_by, created_at)
-					VALUES (?, ?, ?, ?, ?)
+					INSERT INTO %s (id, issue_id, %s, type, created_by, created_at)
+					VALUES (?, ?, ?, ?, ?, ?)
 					ON DUPLICATE KEY UPDATE type = type
-				`, depTable, kind.Column()), dep.IssueID, dep.DependsOnID, dep.Type, actor, createdAt)
+				`, depTable, kind.Column()), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, createdAt)
 			if err != nil {
 				return result, fmt.Errorf("failed to insert dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}

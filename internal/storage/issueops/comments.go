@@ -162,9 +162,9 @@ func AddCommentEventInTx(ctx context.Context, tx *sql.Tx, issueID, actor, commen
 	_, _, eventTable, _ := WispTableRouting(isWisp)
 
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, eventTable), issueID, types.EventCommented, actor, comment); err != nil {
+		INSERT INTO %s (id, issue_id, event_type, actor, comment)
+		VALUES (?, ?, ?, ?, ?)
+	`, eventTable), NewEventID(), issueID, types.EventCommented, actor, comment); err != nil {
 		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
 	}
 	return nil

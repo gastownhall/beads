@@ -545,7 +545,12 @@ func checkBeadsPluginInFile(readFile func(string) ([]byte, error), path string) 
 		return false
 	}
 	for key, value := range enabledPlugins {
-		if strings.Contains(strings.ToLower(key), "beads") {
+		// enabledPlugins keys are "<pluginName>@<marketplace>". Match the
+		// plugin-name segment exactly: a substring test (GH#4244) mistakes any
+		// "*beads*" plugin (e.g. design-to-beads) for the beads hook plugin and
+		// wrongly skips the SessionStart hook write.
+		name, _, _ := strings.Cut(strings.ToLower(key), "@")
+		if name == "beads" {
 			if enabled, ok := value.(bool); ok && enabled {
 				return true
 			}

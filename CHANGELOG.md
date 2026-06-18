@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade Notes
+
+- **Mixed bd versions sharing one Dolt remote.** Pre-1.0.6 binaries record
+  applied migrations as `(version, NULL)` while 1.0.6+ records
+  `(version, sha256)` in `schema_migrations`, so two clones applying the same
+  migration with different bd vintages used to produce a row conflict on
+  `bd dolt pull`. The pull auto-resolver now resolves this class by keeping
+  whichever side recorded the hash. Two *different* recorded hashes for the
+  same version are the real [#4259](https://github.com/gastownhall/beads/issues/4259)
+  schema fork and are still surfaced to the operator (see the `bd doctor`
+  Migration Content Skew check). To avoid the mixed-vintage window entirely,
+  upgrade all clones of a shared remote together, letting one designated
+  machine migrate and `bd dolt push` first.
+
+- **Upgrading from 1.0.4/1.0.5 with multiple clones: sync before AND
+  immediately after.** This release reshapes the `dependencies` primary key
+  (migration `0050`). If two clones cross that boundary with un-synced
+  dependency edits on both sides, their histories become permanently
+  un-mergeable — Dolt refuses the merge outright (`cannot merge because table
+  dependencies has different primary keys in its common ancestor`) before the
+  pull auto-resolver can run. To stay safe: `bd dolt push` + `bd dolt pull`
+  on every clone *before* upgrading, let one designated machine upgrade,
+  migrate, and `bd dolt push`, then on each remaining clone upgrade and
+  `bd dolt pull` *before* doing tracked work. If clones have already forked,
+  see the recovery playbook:
+  [docs/RECOVERY.md#pk-fork-refused](docs/RECOVERY.md#pk-fork-refused).
+
+### Added
+
+- **Per-migration content hash.** `schema_migrations` now records the SHA-256 of each migration's file content alongside its version (`content_hash`), so two clones at the same `MAX(version)` but with divergent migration content become detectable (reporter fix No.2 for [#4259](https://github.com/gastownhall/beads/issues/4259)). The column is added to fresh databases via the bootstrap schema and idempotently to existing databases at migrate time; already-applied rows keep a NULL hash. The column definition and the hashes are deterministic, so `schema_migrations` still merges cleanly across clones.
+- **`bd doctor` migration-content-skew check.** Using the recorded hashes, `bd doctor` now compares the local `schema_migrations` against the cached remote-tracking ref (no network fetch) and warns when this database and its remote applied different content for the same migration version — the silent schema fork from [#4259](https://github.com/gastownhall/beads/issues/4259), surfaced as a clear advisory instead of a cryptic merge failure. Read-only diagnostic (it does not gate push/pull); the comparison primitive (`schema.ContentHashSkew`) is reusable.
+- **Remote-migrate prevention gate.** `bd` now refuses to silently auto-apply pending schema migrations to an existing database that has a remote configured (in both server and embedded mode), and tells the operator to choose: migrate (as the single designated migrator, then `bd dolt push`) or adopt the already-migrated database from the remote (`bd bootstrap`). Migrating each clone independently forks the schema and breaks `bd dolt pull` ([#4259](https://github.com/gastownhall/beads/issues/4259)). The gate is a no-op for fresh databases, databases already at the binary's version, databases with no remote, and read-only opens. The designated migrator proceeds with `BD_ALLOW_REMOTE_MIGRATE=1`. In server mode the gate also detects remotes persisted on disk in `.dolt/config`, so a freshly (auto-)started server — whose in-memory `dolt_remotes` table is not yet populated — cannot slip a remote-backed database past the gate.
+
+- **Recovery guidance for Dolt primary-key merge refusals.** When `bd dolt pull` (or `push`) fails with Dolt's hard refusal `cannot merge because table X has different primary keys [in its common ancestor]` — the un-mergeable schema fork left behind by independently-migrated clones straddling a PK-reshaping migration ([#4259](https://github.com/gastownhall/beads/issues/4259)) — `bd` now recognizes the error class and prints the bootstrap-from-canonical-clone recovery recipe instead of just the raw error. Full playbook: [docs/RECOVERY.md#pk-fork-refused](docs/RECOVERY.md#pk-fork-refused).
+
+### Fixed
+
+- **Cross-clone issue-delete vs child-row-insert merges now converge.** The
+  synced child tables (`dependencies`, `labels`, `comments`, `events`,
+  snapshots) carry `FOREIGN KEY ... ON DELETE CASCADE` to `issues` (migrations
+  `0041`/`0042`), but Dolt merges row-wise and never re-executes cascades: if
+  clone A deleted an issue while clone B added a dependency, label, or comment
+  referencing it, `bd dolt pull` failed outright with a foreign-key constraint
+  violation ("transaction rolled back"), recorded nothing in `dolt_conflicts`,
+  and could never converge on retry. The pull auto-resolver (SQL and CLI
+  routes) now repairs this class by applying the foreign key's own cascade
+  semantics — deleting the merged-in rows whose issue reference dangles — and
+  refuses, exactly as before, any constraint violation it does not recognize
+  (different constraint type, table bd does not own, FK to another parent).
+  The repair converges across clones: it deletes precisely the rows the
+  cascade already removed on the deleting clone. (bd-6dnrw.4)
+
+- **`is_blocked` recompute no longer misses auto-resolved merges.** A pull
+  whose merge bd auto-resolved (conflicts) or cascade-repaired (constraint
+  violations) lands in the working set without advancing HEAD — the merge
+  commit is created later — so the bd-6dnrw.3 post-pull recompute mistook it
+  for "nothing merged" and skipped, leaving `is_blocked` stale exactly when
+  the merge had needed intervention. The recompute now diffs to the working
+  set and skips only when `issues`/`dependencies` are clean too. (bd-6dnrw.39)
+
+- **`is_blocked` recomputed after `bd dolt pull`.** The denormalized
+  `is_blocked` column (migration `0046`) was maintained only by local write
+  paths, so a pull that merged another clone's writes silently left it stale —
+  e.g. clone A closes blocker X while clone B adds an edge W→X, and the merged
+  result carries `W.is_blocked=1` with a closed blocker, hiding W from
+  `bd ready`. Every pull path (server SQL and CLI routes, peer pulls, embedded
+  mode) now recomputes the column for exactly the rows the merge changed,
+  scoped via `dolt_diff` between the pre- and post-pull HEADs and expanded
+  through the same affected-set logic the local write paths use. Oversized or
+  schema-reshaping merges fall back to a full recompute; conflicted pulls skip
+  it until the operator resolves. (bd-6dnrw.3, PR 4107 follow-up)
+
+- **Deterministic history-table primary keys (cross-clone merge-safety).**
+  Migration `0037` converted the legacy BIGINT primary keys of `events`,
+  `comments`, `issue_snapshots` and `compaction_snapshots` by backfilling
+  `UUID()` — a different random value on every clone, the same hazard class as
+  the `dependencies` fork below. Two legacy clones that upgraded independently
+  held identical history rows under different primary keys, so their merges
+  duplicated every pre-upgrade event and comment (or refused outright). A
+  one-time-per-clone upgrade backfill now rewrites those ids to deterministic
+  values derived from each row's content (`internal/storage/rowid`), so
+  independently-migrated clones converge to byte-identical history tables;
+  exact-duplicate rows are kept distinct via per-duplicate ordinals. The pass
+  is gated on a clone-local marker (ignored migration `0009`), so steady-state
+  opens never re-key — rows inserted after the pass are minted once and reach
+  other clones by merge, so their ids are already consistent. (bd-6dnrw.2,
+  the history-table sibling of
+  [#4259](https://github.com/gastownhall/beads/issues/4259))
+
+- **Deterministic dependency primary keys (cross-clone merge-safety).** `dependencies.id` (and `wisp_dependencies.id`) were filled by `DEFAULT (UUID())`, a per-clone-random value. Two clones that created the same edge — or that applied migration `0043` independently — diverged on the primary key, so `bd dolt pull` failed unrecoverably (`cannot merge because table dependencies has different primary keys in its common ancestor`, or a `uk_dep_*` unique-key violation). `id` is now derived deterministically from the natural edge key `(issue_id, target)` at every insert site (`internal/storage/depid`); migration `0050` drops the random default and idempotently re-asserts the natural-identity unique keys; and an upgrade backfill rewrites existing rows. Independently-migrated clones now converge to byte-identical, merge-safe `dependencies`. And because the same edge now has the same primary key on every clone, `bd dolt pull` **auto-resolves** a same-edge dependency conflict that differs only in audit columns (created_at/created_by/metadata/thread_id) the same way it already does for the metadata table — so two machines that each run `bd dep add X Y` between syncs merge cleanly. A conflict where the dependency *type* differs is still surfaced for the operator. ([#4259](https://github.com/gastownhall/beads/issues/4259))
+
 ## [1.0.5] - 2026-05-28
 
 ### Upgrade Notes

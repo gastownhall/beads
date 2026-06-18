@@ -156,7 +156,9 @@ Examples:
 		}
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		// Write-intent: comments add writes through the routed target store,
+		// matching the `bd comment` shorthand (#4141).
+		result, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, issueID)
 		if err != nil {
 			if result != nil {
 				result.Close()
@@ -176,8 +178,12 @@ Examples:
 		if err != nil {
 			FatalErrorRespectJSON("adding comment: %v", err)
 		}
-
-		commandDidWrite.Store(true)
+		if err := commitPendingIfEmbedded(ctx, result.Store, actor, doltAutoCommitParams{
+			Command:  "comments add",
+			IssueIDs: []string{issueID},
+		}); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
 
 		if jsonOutput {
 			outputJSON(comment)

@@ -17,6 +17,34 @@ func disableGlobalGitIgnore(t *testing.T, repoDir string) {
 	}
 }
 
+// TestShouldFlagTrackedFile_RuntimeArtifacts pins the untrack patterns to the
+// gitignore template's runtime entries. bd-578h9.6: last_pull was added to
+// the gitignore template (7ebf4df6a) but gitignore cannot untrack an
+// already-committed file, so clones kept committing and churning it until the
+// untrack mechanism knew the name too.
+func TestShouldFlagTrackedFile_RuntimeArtifacts(t *testing.T) {
+	cases := []struct {
+		rel  string
+		flag bool
+	}{
+		{"last_pull", true}, // bd-578h9.6
+		{"last-touched", true},
+		{"push-state.json", true},
+		{"sync-state.json", true},
+		{"daemon.pid", true},
+		{"bd.lock", true},
+		{"dolt/noms/manifest", true},
+		{"issues.jsonl", false},
+		{"config.json", false},
+		{"sub/last_pull", false}, // patterns apply to top-level .beads/ files only
+	}
+	for _, tc := range cases {
+		if got := shouldFlagTrackedFile(tc.rel); got != tc.flag {
+			t.Errorf("shouldFlagTrackedFile(%q) = %v, want %v", tc.rel, got, tc.flag)
+		}
+	}
+}
+
 func TestCheckTrackedRuntimeFiles_WorktreeFallbackUsesSharedBeads(t *testing.T) {
 	mainRepoDir, worktreeDir := setupWorktreeRepo(t)
 	disableGlobalGitIgnore(t, mainRepoDir)

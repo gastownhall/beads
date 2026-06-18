@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	"github.com/steveyegge/beads"
 	internalbeads "github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/linear"
 )
 
 var (
@@ -124,10 +122,6 @@ Config options:
 			}
 			os.Exit(0)
 		}
-
-		// Auto-pull from Linear if data is stale and LINEAR_API_KEY is set.
-		// Runs before orientation output so agents start with fresh data.
-		maybePullStaleLinearData(beadsDir)
 
 		// Detect MCP mode (unless overridden by flags)
 		mcpMode := isMCPActive()
@@ -410,53 +404,6 @@ func formatPrimeMemoryTimeout(compact bool, timeout time.Duration) string {
 	return "\n## Persistent Memories\n\n" + msg + "\n"
 }
 
-// maybePullStaleLinearData checks if Linear data is stale and auto-pulls
-// if LINEAR_API_KEY is available. Called during prime before orientation output.
-func maybePullStaleLinearData(beadsDir string) {
-	apiKey := os.Getenv("LINEAR_API_KEY")
-	if apiKey == "" {
-		if yamlKey := config.GetString("linear.api_key"); yamlKey == "" {
-			return
-		}
-	}
-
-	if !linear.IsPullStale(beadsDir, linear.DefaultStaleThreshold) {
-		return
-	}
-
-	info := linear.GetStalenessInfo(beadsDir, linear.DefaultStaleThreshold)
-	ageStr := "unknown"
-	if !info.NeverPulled {
-		ageStr = linear.FormatAge(info.Age)
-	}
-
-	// Shell out to bd linear sync --pull --json to perform the pull.
-	// Prime skips DB init, so we can't use the store directly.
-	syncCmd := exec.Command("bd", "linear", "sync", "--pull", "--json")
-	syncCmd.Env = os.Environ()
-	output, err := syncCmd.Output()
-	if err != nil {
-		return
-	}
-
-	var result struct {
-		Stats struct {
-			Pulled int `json:"pulled"`
-		} `json:"stats"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		return
-	}
-
-	if result.Stats.Pulled > 0 {
-		if info.NeverPulled {
-			fmt.Fprintf(os.Stderr, "↻ Pulled %d updates from Linear (first pull)\n", result.Stats.Pulled)
-		} else {
-			fmt.Fprintf(os.Stderr, "↻ Pulled %d updates from Linear (data was %s stale)\n", result.Stats.Pulled, ageStr)
-		}
-	}
-}
-
 // outputMCPContext outputs minimal context for MCP users
 func outputMCPContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
@@ -644,6 +591,7 @@ git status                  # Check changed files
 ### Creating & Updating
 - ` + "`bd create --title=\"Summary of this issue\" --description=\"Why this issue exists and what needs to be done\" --type=task|bug|feature --priority=2`" + ` - New issue
   - Priority: 0-4 or P0-P4 (0=critical, 2=medium, 4=backlog). NOT "high"/"medium"/"low"
+- ` + "`bd create ... --parent=<id>`" + ` - Hierarchical child (task under epic, subtask under task; inherits parent labels)
 - ` + "`bd update <id> --claim`" + ` - Claim work
 - ` + "`bd update <id> --assignee=username`" + ` - Assign to someone
 - ` + "`bd update <id> --title/--description/--notes/--design`" + ` - Update fields inline

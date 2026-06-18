@@ -181,7 +181,6 @@ func TestLoadSelectionEnvironmentUsesAmbientEnvFileForBEADSDB(t *testing.T) {
 		t.Fatalf("FindDatabasePath() = %q, want %q", got, targetDBPath)
 	}
 }
-
 func TestSelectedDoltBeadsDirUsesReboundBEADSDir(t *testing.T) {
 	callerRepo := filepath.Join(t.TempDir(), "caller")
 	callerBeadsDir := filepath.Join(callerRepo, ".beads")

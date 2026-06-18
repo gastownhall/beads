@@ -169,6 +169,18 @@ The `--commit --tag --push` flags will:
 
 This triggers GitHub Actions to build release artifacts automatically.
 
+The tag workflow re-runs release-critical package gates before publishing:
+
+- `make ci-package-mcp` builds and validates the MCP package, then the PyPI job
+  publishes the validated `dist/*` artifact from that gate.
+- `make ci-package-npm` validates the npm wrapper package before npm publish.
+- `make ci-website` validates the release docs/website build before GoReleaser
+  publishes GitHub release assets.
+
+The npm publish job also waits for the macOS release assets, because the npm
+`postinstall` script downloads platform-specific archives from the GitHub
+release.
+
 **Recommended workflow:**
 
 ```bash

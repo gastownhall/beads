@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -27,6 +28,7 @@ Deferred issues don't show in 'bd ready' but remain visible in 'bd list'.
 Examples:
   bd defer bd-abc                  # Defer a single issue (status-based)
   bd defer bd-abc --until=tomorrow # Defer until specific time
+  bd defer bd-abc --reason="waiting on API access"
   bd defer bd-abc bd-def           # Defer multiple issues`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
@@ -47,6 +49,11 @@ Examples:
 				fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --until=+1h or --until=tomorrow\n")
 			}
 			deferUntil = &t
+		}
+		reason, _ := cmd.Flags().GetString("reason")
+		reason = strings.TrimSpace(reason)
+		if cmd.Flags().Changed("reason") && reason == "" {
+			FatalError("reason cannot be empty")
 		}
 
 		ctx := rootCtx
@@ -79,6 +86,22 @@ Examples:
 			if deferUntil != nil {
 				updates["defer_until"] = *deferUntil
 			}
+			if reason != "" {
+				issue, err := store.GetIssue(ctx, fullID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error loading %s: %v\n", fullID, err)
+					continue
+				}
+				if issue == nil {
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", fullID)
+					continue
+				}
+				notes := issue.Notes
+				if notes != "" {
+					notes += "\n"
+				}
+				updates["notes"] = notes + reason
+			}
 
 			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
 				fmt.Fprintf(os.Stderr, "Error deferring %s: %v\n", fullID, err)
@@ -108,6 +131,7 @@ Examples:
 func init() {
 	// Time-based scheduling flag (GH#820)
 	deferCmd.Flags().String("until", "", "Defer until specific time (e.g., +1h, tomorrow, next monday)")
+	deferCmd.Flags().String("reason", "", "Record why this issue is being deferred (appended to notes)")
 	deferCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(deferCmd)
 }

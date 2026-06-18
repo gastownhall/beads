@@ -423,7 +423,7 @@ func queryBlocksInfo(
 	return nil
 }
 
-func loadStatusByIDInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]types.Status, error) {
+func loadStatusByIDInTx(ctx context.Context, tx DBTX, ids []string) (map[string]types.Status, error) {
 	statusByID := make(map[string]types.Status)
 	if len(ids) == 0 {
 		return statusByID, nil
@@ -474,7 +474,7 @@ func loadStatusByIDInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[stri
 // Returns full issue objects for the newly-unblocked issues.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
-func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID string) ([]*types.Issue, error) {
+func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx DBTX, closedIssueID string) ([]*types.Issue, error) {
 	candidateSet := make(map[string]bool)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
@@ -604,7 +604,7 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 // a list of blocker descriptions for display.
 //
 //nolint:gosec // G201: table names are hardcoded constants.
-func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []string, error) {
+func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string, error) {
 	var blocked bool
 	found := false
 	for _, table := range []string{"issues", "wisps"} {

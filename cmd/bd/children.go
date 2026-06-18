@@ -24,6 +24,7 @@ Examples:
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		parentID := args[0]
+		pretty, _ := cmd.Flags().GetBool("pretty")
 
 		// Set the parent flag on listCmd, run it, then reset
 		_ = listCmd.Flags().Set("parent", parentID)
@@ -33,10 +34,16 @@ Examples:
 		_ = listCmd.Flags().Set("status", "all")
 		defer func() { _ = listCmd.Flags().Set("status", "") }()
 
+		if pretty {
+			_ = listCmd.Flags().Set("pretty", "true")
+			defer func() { _ = listCmd.Flags().Set("pretty", "false") }()
+		}
+
 		listCmd.Run(listCmd, []string{})
 	},
 }
 
 func init() {
+	childrenCmd.Flags().Bool("pretty", false, "Show children in tree format")
 	rootCmd.AddCommand(childrenCmd)
 }

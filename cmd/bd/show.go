@@ -20,6 +20,10 @@ var showCmd = &cobra.Command{
 	Short:   "Show issue details",
 	Args:    cobra.ArbitraryArgs, // Allow zero positional args when --id is used
 	Run: func(cmd *cobra.Command, args []string) {
+		if usesProxiedServer() {
+			runShowProxiedServer(cmd, rootCtx, args)
+			return
+		}
 		showThread, _ := cmd.Flags().GetBool("thread")
 		shortMode, _ := cmd.Flags().GetBool("short")
 		longMode, _ := cmd.Flags().GetBool("long")

@@ -18,9 +18,113 @@ permissions:
   attestations: write
 
 jobs:
+  # Pre-publish gate: refuse to publish a release whose version constants and
+  # Docusaurus docs snapshot disagree. This blocks the failure mode where a tag
+  # ships with version.go bumped but the docs snapshot missing (which otherwise
+  # only surfaces as a red main after the artifacts are already published).
+  verify-version-consistency:
+    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag matches version.go
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          code_version="$(grep 'Version = ' cmd/bd/version.go | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$tag_version" != "$code_version" ]; then
+            echo "ERROR: tag v$tag_version does not match cmd/bd/version.go ($code_version)" >&2
+            exit 1
+          fi
+          echo "OK: tag and version.go agree on $code_version"
+
+      - name: Check version + docs consistency
+        run: BEADS_REQUIRE_RELEASE_DOCS=1 ./scripts/check-versions.sh
+
+  release-package-mcp:
+    name: Release Package Gate (MCP)
+    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: verify-version-consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        run: python -m pip install uv==0.11.16
+
+      - name: Run MCP package gate
+        run: make ci-package-mcp
+
+      - name: Upload validated MCP dist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-mcp-dist
+          path: integrations/beads-mcp/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release-package-npm:
+    name: Release Package Gate (npm)
+    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: verify-version-consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+
+      - name: Run npm package gate
+        run: make ci-package-npm
+
+  release-package-website:
+    name: Release Package Gate (website)
+    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: verify-version-consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Run website package gate
+        run: make ci-website
+
   goreleaser:
     # Guard: only run goreleaser in the canonical repository (not in forks)
     if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    needs:
+      - release-package-mcp
+      - release-package-npm
+      - release-package-website
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -329,8 +433,8 @@ jobs:
 
   publish-pypi:
     runs-on: ubuntu-latest
-    needs: goreleaser
-    if: ${{ always() && github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: [release-package-mcp, goreleaser]
+    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -341,12 +445,18 @@ jobs:
           python-version: '3.14'
 
       - name: Install uv
-        run: pip install uv
+        run: python -m pip install uv==0.11.16
 
-      - name: Build package
+      - name: Download validated MCP dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-mcp-dist
+          path: integrations/beads-mcp/dist
+
+      - name: Verify validated MCP dist
         run: |
-          cd integrations/beads-mcp
-          uv build
+          test -n "$(find integrations/beads-mcp/dist -maxdepth 1 -type f -print -quit)"
+          ls -la integrations/beads-mcp/dist
 
       - name: Publish to PyPI
         env:
@@ -358,7 +468,7 @@ jobs:
 
   publish-npm:
     runs-on: ubuntu-latest
-    needs: goreleaser
+    needs: [release-package-npm, goreleaser, goreleaser-macos]
     if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
     permissions:
       contents: read

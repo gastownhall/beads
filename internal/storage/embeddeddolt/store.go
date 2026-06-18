@@ -36,7 +36,7 @@ var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 // time the embedded engine's write lock is held, reducing contention when
 // multiple processes access the same database concurrently.
 //
-// The dolthub/driver handles its own concurrency internally. File-level locking
+// The dolthub/driver/v2 handles its own concurrency internally. File-level locking
 // is only used during bd init to protect one-time initialization steps.
 type EmbeddedDoltStore struct {
 	dataDir       string
@@ -45,10 +45,24 @@ type EmbeddedDoltStore struct {
 	branch        string
 	credentialKey []byte
 	closed        atomic.Bool
+	// readOnly marks a store opened via OpenReadOnly: open-time mutations
+	// (CREATE DATABASE, schema migrations) were skipped and write
+	// transactions are refused (bd-6dnrw.32).
+	readOnly bool
+	// lenientGate marks a store opened for a read-only command
+	// (OpenForReadOnlyCommand): a #4259 remote-migrate gate refusal skips
+	// the migration with a warning instead of failing the open, so read
+	// commands keep working on the current schema until the operator makes
+	// the migrate-or-adopt decision (bd-578h9.5). Unlike readOnly, writes
+	// stay allowed (e.g. the post-command autocommit net).
+	lenientGate bool
 }
 
 // errClosed is returned when a method is called after Close.
 var errClosed = errors.New("embeddeddolt: store is closed")
+
+// errReadOnly is returned when a write is attempted on a read-only store.
+var errReadOnly = errors.New("embeddeddolt: store is read-only")
 
 // IsClosed reports whether the store has been closed. Implements
 // storage.LifecycleManager so that callers (e.g., maybeAutoCommit) can
@@ -61,10 +75,10 @@ func (s *EmbeddedDoltStore) IsClosed() bool {
 // beadsDir is the .beads/ root; the data directory is derived as <beadsDir>/embeddeddolt/.
 // The database is created automatically if it doesn't exist (initSchema handles this).
 //
-// The dolthub/driver handles its own concurrency internally. File-level locking
+// The dolthub/driver/v2 handles its own concurrency internally. File-level locking
 // is only used during bd init (via util.TryLock in the init command) to protect
 // one-time initialization steps — the store itself does not hold any lock.
-func newStore(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+func newStore(ctx context.Context, beadsDir, database, branch string, lenientGate bool) (*EmbeddedDoltStore, error) {
 	if database == "" {
 		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
 	}
@@ -82,14 +96,70 @@ func newStore(ctx context.Context, beadsDir, database, branch string) (*Embedded
 	}
 
 	s := &EmbeddedDoltStore{
-		dataDir:  dataDir,
-		beadsDir: absBeadsDir,
-		database: database,
-		branch:   branch,
+		dataDir:     dataDir,
+		beadsDir:    absBeadsDir,
+		database:    database,
+		branch:      branch,
+		lenientGate: lenientGate,
 	}
 
 	if err := s.initSchema(ctx); err != nil {
 		return nil, fmt.Errorf("embeddeddolt: init schema: %w", err)
+	}
+
+	return s, nil
+}
+
+// OpenReadOnly opens an existing embedded database for read-only access,
+// skipping every mutating open-time step: no data-directory creation, no
+// CREATE DATABASE, no remote-migrate gate, and no schema migrations
+// (bd-6dnrw.32). It is the embedded equivalent of server mode's
+// Config.ReadOnly open, used for cross-repo hydration of foreign projects
+// (GH#3231) where opening must not write anything — not even a one-time
+// migration backfill commit — into the target's history. Drift in either
+// direction is checked at open: forward (the database AHEAD of this binary)
+// because stale-binary reads fail cryptically, and behind (the database
+// BEHIND this binary) because these paths used to auto-migrate and would
+// otherwise fail at query time with unknown-column errors (bd-578h9.12).
+//
+// Read-only stores bypass the Open cache in both directions: they must not be
+// handed a future writable Open (which would skip migrations), and writable
+// opens of the same directory keep their own lifecycle. Write transactions on
+// the returned store are refused.
+func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	if database == "" {
+		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
+	}
+	if !validIdentifier.MatchString(database) {
+		return nil, fmt.Errorf("embeddeddolt: invalid database name: %q", database)
+	}
+	absBeadsDir, err := filepath.Abs(beadsDir)
+	if err != nil {
+		return nil, fmt.Errorf("embeddeddolt: resolving beads dir: %w", err)
+	}
+	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
+	if _, err := os.Stat(dataDir); err != nil {
+		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w", dataDir, err)
+	}
+
+	s := &EmbeddedDoltStore{
+		dataDir:  dataDir,
+		beadsDir: absBeadsDir,
+		database: database,
+		branch:   branch,
+		readOnly: true,
+	}
+
+	db, cleanup, err := OpenSQL(ctx, dataDir, database, branch)
+	if err != nil {
+		return nil, fmt.Errorf("embeddeddolt: open db: %w", err)
+	}
+	defer func() { _ = cleanup() }()
+	if err := schema.CheckForwardDrift(ctx, db); err != nil {
+		return nil, err
+	}
+	if err := schema.CheckBehindDrift(ctx, db); err != nil {
+		return nil, err
 	}
 
 	return s, nil
@@ -105,6 +175,10 @@ func newStore(ctx context.Context, beadsDir, database, branch string) (*Embedded
 func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (err error) {
 	if s.closed.Load() {
 		err = errClosed
+		return
+	}
+	if commit && s.readOnly {
+		err = errReadOnly
 		return
 	}
 
@@ -146,6 +220,9 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 	if s.closed.Load() {
 		return 0, errClosed
+	}
+	if s.readOnly {
+		return 0, errReadOnly
 	}
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
 	if err != nil {
@@ -196,7 +273,29 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 		}
 	}
 
-	// Embedded mode relies on the dolthub/driver's local file/concurrency
+	// #4259: refuse to silently apply pending migrations to a remote-backed,
+	// already-initialized database — independently migrating each clone forks the
+	// schema. Embedded mode (the mode the original report was filed against) syncs
+	// via Dolt remotes too, so it needs the same gate as server mode.
+	if err := schema.CheckRemoteMigrateGate(ctx, conn); err != nil {
+		var gateErr *schema.RemoteMigrateGateError
+		if s.lenientGate && errors.As(err, &gateErr) {
+			// Read-only command: the gate exists to stop in-place
+			// migration, not reads (bd-578h9.5). Warn and continue on
+			// the current schema; write commands still fail the open
+			// with the full migrate-or-adopt guidance.
+			fmt.Fprintf(os.Stderr,
+				"Warning: %v\n"+
+					"  Read-only command: continuing on schema v%d without migrating.\n"+
+					"  To resolve, the ONE designated migrator runs: %s=1 bd migrate && bd dolt push\n"+
+					"  Everyone else adopts the migrated database: bd bootstrap\n",
+				gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
+			return nil
+		}
+		return err
+	}
+
+	// Embedded mode relies on the dolthub/driver/v2's local file/concurrency
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
 		return fmt.Errorf("embeddeddolt: migrate: %w", err)
@@ -372,7 +471,7 @@ func (s *EmbeddedDoltStore) Close() error {
 
 // DoltGC runs Dolt garbage collection to reclaim disk space.
 func (s *EmbeddedDoltStore) DoltGC(ctx context.Context) error {
-	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.DoltGC(ctx, db)
 	})
 }
@@ -443,7 +542,7 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 // Flatten squashes all Dolt commit history into a single commit.
 // Pins a single *sql.Conn for session-scoped stored procedures.
 func (s *EmbeddedDoltStore) Flatten(ctx context.Context) error {
-	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		if pooled, ok := db.(*sql.DB); ok {
 			conn, err := pooled.Conn(ctx)
 			if err != nil {
@@ -459,7 +558,7 @@ func (s *EmbeddedDoltStore) Flatten(ctx context.Context) error {
 // Compact squashes old Dolt commits while preserving recent ones.
 // Pins a single *sql.Conn for session-scoped stored procedures.
 func (s *EmbeddedDoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
-	return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		// withDBConn returns *sql.DB; pin a single connection for
 		// session-scoped operations (checkout, reset, cherry-pick).
 		if pooled, ok := db.(*sql.DB); ok {

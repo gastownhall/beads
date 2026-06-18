@@ -31,8 +31,10 @@ Examples:
 		id := args[0]
 		ctx := rootCtx
 
-		// Resolve ID with prefix routing (supports cross-rig edits like `bd edit xe-5ls`)
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		// Resolve ID with prefix routing (supports cross-rig edits like `bd edit xe-5ls`).
+		// Write-intent: the routed target opens writable so the field update
+		// commits on the target head (#4141).
+		result, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, id)
 		if err != nil {
 			FatalErrorRespectJSON("resolving %s: %v", id, err)
 		}
@@ -165,8 +167,13 @@ Examples:
 			FatalErrorRespectJSON("updating issue: %v", err)
 		}
 		editSaved = true
-
-		commandDidWrite.Store(true)
+		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+			Command:  "edit",
+			IssueIDs: []string{id},
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Your edits are preserved in: %s\n", tmpPath)
+			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
 
 		displayTitle := issue.Title
 		if fieldToEdit == "title" {

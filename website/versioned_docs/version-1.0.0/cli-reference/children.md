@@ -22,5 +22,11 @@ Examples:
   bd children hq-abc123 --pretty # Show children in tree format
 
 ```
-bd children <parent-id>
+bd children <parent-id> [flags]
+```
+
+**Flags:**
+
+```
+      --pretty   Show children in tree format
 ```

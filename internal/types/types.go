@@ -1286,6 +1286,10 @@ type IssueFilter struct {
 	// Performance escape hatches
 	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)
 	NoIDShrink bool // Q3: force Pattern A (full 47-col scan) even when Limit > 0
+
+	Offset   int
+	SortBy   string
+	SortDesc bool
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1360,6 +1364,8 @@ type WorkFilter struct {
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
+
+	Offset int
 }
 
 // StaleFilter is used to filter stale issue queries

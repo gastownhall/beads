@@ -132,10 +132,7 @@ func TestRoutingWithExplicitOverride(t *testing.T) {
 }
 
 func TestMultiRepoEndToEnd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
-	}
-	if testDoltPort == 0 {
+	if !hasDoltTestPort() {
 		t.Skip("skipping: Dolt test container not available")
 	}
 

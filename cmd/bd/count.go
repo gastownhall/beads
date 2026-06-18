@@ -29,6 +29,7 @@ Examples:
   bd count --by-assignee            # Group count by assignee
   bd count --by-label               # Group count by label
   bd count --assignee alice --by-status  # Count alice's issues by status
+  bd count --include-infra          # Count issues + wisps tier (matches 'bd list --include-infra --all' cardinality)
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 		status, _ := cmd.Flags().GetString("status")
@@ -197,7 +198,15 @@ Examples:
 			filter.PriorityMax = &priorityMax
 		}
 
-		filter.SkipWisps = true // bd count never needs ephemeral wisp results
+		if includeInfra, _ := cmd.Flags().GetBool("include-infra"); includeInfra {
+			cfg, err := loadDirectListFilterConfig(ctx, store)
+			if err != nil {
+				FatalError("%v", err)
+			}
+			applyCountIncludeInfra(&filter, issueType, cfg)
+		} else {
+			filter.SkipWisps = true // durable tier only; bd count's historical default
+		}
 
 		// Q1: SQL COUNT(*) aggregate — avoids materializing all rows.
 		if groupBy == "" {
@@ -261,6 +270,40 @@ Examples:
 	},
 }
 
+// applyCountIncludeInfra switches the count filter to the wisps-inclusive
+// mode of `bd list --include-infra` (GH#4387). It mirrors the buildListFilter
+// defaults that determine list's cardinality so that, for any filter set,
+// `bd count --include-infra <filters>` returns exactly the number of rows
+// `bd list --include-infra <filters> --all` materializes:
+//
+//   - the wisps table is merged into the count (SkipWisps=false), picking up
+//     no_history beads (durable work stored in the wisps tier) and ephemeral
+//     wisps, exactly like list's merge path;
+//   - template molecules are excluded (list's default without
+//     --include-templates);
+//   - gate beads are excluded unless gates are explicitly requested via
+//     --type gate (list's default without --include-gates);
+//   - counting an infra type (agent/rig/role/message, or the store-configured
+//     set) routes to the ephemeral wisps tier, like list's infra-type listing.
+//
+// The non-flag path never calls this function: bd count without
+// --include-infra keeps its historical durable-only semantics.
+func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, cfg listFilterConfig) {
+	filter.SkipWisps = false
+
+	isTemplate := false
+	filter.IsTemplate = &isTemplate
+
+	if issueType != "gate" {
+		filter.ExcludeTypes = append(filter.ExcludeTypes, "gate")
+	}
+
+	if issueType != "" && cfg.isInfra(issueType) {
+		ephemeral := true
+		filter.Ephemeral = &ephemeral
+	}
+}
+
 func init() {
 	// Filter flags (same as list command)
 	countCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
@@ -293,6 +336,11 @@ func init() {
 	// Priority ranges
 	countCmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")
 	countCmd.Flags().Int("priority-max", 0, "Filter by maximum priority (inclusive)")
+
+	// Wisps tier (GH#4387): mirrors bd list's flag of the same name so
+	// `bd count --include-infra <filters>` returns exactly the cardinality of
+	// `bd list --include-infra <filters> --all`.
+	countCmd.Flags().Bool("include-infra", false, "Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)")
 
 	// Grouping flags
 	countCmd.Flags().Bool("by-status", false, "Group count by status")

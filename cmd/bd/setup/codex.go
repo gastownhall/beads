@@ -458,7 +458,16 @@ func codexConfigEnablesBeadsPlugin(content string) bool {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			table := strings.Trim(trimmed, "[]")
-			inBeadsPlugin = strings.HasPrefix(table, "plugins.") && strings.Contains(strings.ToLower(table), "beads")
+			// Plugin tables are [plugins.<name>] or [plugins."<name>@<marketplace>"]
+			// (TOML quotes a key containing "@"). Match the <name> segment
+			// exactly: a substring test (GH#4244) mistakes any "*beads*" plugin
+			// (e.g. design-to-beads) for the beads hook plugin and wrongly skips
+			// the hooks write.
+			inBeadsPlugin = false
+			if rest, ok := strings.CutPrefix(table, "plugins."); ok {
+				name, _, _ := strings.Cut(strings.ToLower(strings.Trim(rest, "\"'")), "@")
+				inBeadsPlugin = name == "beads"
+			}
 			continue
 		}
 		if inBeadsPlugin && codexConfigLineKey(trimmed) == "enabled" {

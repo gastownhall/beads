@@ -29,6 +29,20 @@ type cacheEntry struct {
 // This prevents redundant engine initializations when multiple code paths open
 // connectors against the same data directory in the same process.
 func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openCached(ctx, beadsDir, database, branch, false)
+}
+
+// OpenForReadOnlyCommand opens like Open, except that a #4259 remote-migrate
+// gate refusal skips the pending migrations with a stderr warning instead of
+// failing the open (bd-578h9.5): the gate exists to stop in-place migration,
+// not reads, and server mode's read-only opens already skip migration. The
+// returned store is otherwise a normal writable store (read-only commands
+// can still write incidentally, e.g. the post-command autocommit net).
+func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openCached(ctx, beadsDir, database, branch, true)
+}
+
+func openCached(ctx context.Context, beadsDir, database, branch string, lenientGate bool) (*EmbeddedDoltStore, error) {
 	key, err := cacheKey(beadsDir)
 	if err != nil {
 		return nil, err
@@ -43,7 +57,7 @@ func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDolt
 	cacheMu.Unlock()
 
 	// Slow path: create a new store outside the lock.
-	s, err := newStore(ctx, beadsDir, database, branch)
+	s, err := newStore(ctx, beadsDir, database, branch, lenientGate)
 	if err != nil {
 		return nil, err
 	}

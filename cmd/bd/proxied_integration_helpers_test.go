@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -88,6 +90,115 @@ func bdProxiedCreateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+func bdProxiedList(t *testing.T, bd string, p proxiedProject, args ...string) string {
+	t.Helper()
+	stdout, _ := bdProxiedListCapture(t, bd, p, args...)
+	return stdout
+}
+
+func bdProxiedListJSON(t *testing.T, bd string, p proxiedProject, args ...string) []*types.IssueWithCounts {
+	t.Helper()
+	fullArgs := append([]string{"list", "--json"}, args...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, stdout, stderr)
+	}
+	start := strings.Index(stdout, "[")
+	if start < 0 {
+		if strings.Contains(stdout, "null") || strings.TrimSpace(stdout) == "" {
+			return nil
+		}
+		t.Fatalf("no JSON array found in output:\n%s", stdout)
+	}
+	var issues []*types.IssueWithCounts
+	if err := json.Unmarshal([]byte(stdout[start:]), &issues); err != nil {
+		t.Fatalf("failed to parse JSON list output: %v\nraw: %s", err, stdout[start:])
+	}
+	return issues
+}
+
+func bdProxiedListCapture(t *testing.T, bd string, p proxiedProject, args ...string) (string, string) {
+	t.Helper()
+	fullArgs := append([]string{"list"}, args...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, stdout, stderr)
+	}
+	return stdout, stderr
+}
+
+func bdProxiedListFail(t *testing.T, bd string, p proxiedProject, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"list"}, args...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, fullArgs...)
+	if err == nil {
+		t.Fatalf("expected bd list %s to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), stdout, stderr)
+	}
+	return stdout + stderr
+}
+
+func bdProxiedRunBuffers(t *testing.T, bd, dir string, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdProxiedEnv(dir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+func bdProxiedUpdate(t *testing.T, bd, dir string, args ...string) []*types.Issue {
+	t.Helper()
+	fullArgs := append([]string{"update", "--json"}, args...)
+	out, err := bdProxiedRun(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd update %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	s := string(out)
+	start := strings.Index(s, "[")
+	if start < 0 {
+		t.Fatalf("no JSON array found in update output:\n%s", s)
+	}
+	var issues []*types.Issue
+	if err := json.Unmarshal([]byte(s[start:]), &issues); err != nil {
+		t.Fatalf("failed to parse update JSON: %v\nraw: %s", err, s[start:])
+	}
+	if len(issues) == 0 {
+		t.Fatalf("update returned empty JSON array:\n%s", s)
+	}
+	return issues
+}
+
+func bdProxiedUpdateOne(t *testing.T, bd, dir string, args ...string) *types.Issue {
+	t.Helper()
+	issues := bdProxiedUpdate(t, bd, dir, args...)
+	if len(issues) != 1 {
+		t.Fatalf("expected 1 issue in update output, got %d", len(issues))
+	}
+	return issues[0]
+}
+
+func bdProxiedUpdateRaw(t *testing.T, bd, dir string, args ...string) (string, string, error) {
+	t.Helper()
+	fullArgs := append([]string{"update"}, args...)
+	return bdProxiedRunBuffers(t, bd, dir, fullArgs...)
+}
+
+func bdProxiedUpdateFail(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	stdout, stderr, err := bdProxiedUpdateRaw(t, bd, dir, args...)
+	if err == nil {
+		t.Fatalf("bd update %s should have failed; got:\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), stdout, stderr)
+	}
+	return stdout + stderr
+}
+
 func bdProxiedShow(t *testing.T, bd, dir, id string) *types.Issue {
 	t.Helper()
 	out, err := bdProxiedRun(t, bd, dir, "show", id, "--json")
@@ -95,6 +206,63 @@ func bdProxiedShow(t *testing.T, bd, dir, id string) *types.Issue {
 		t.Fatalf("bd show %s --json failed: %v\n%s", id, err, out)
 	}
 	return parseIssueJSON(t, out)
+}
+
+func bdProxiedShowRaw(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"show"}, args...)
+	out, err := bdProxiedRun(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd show %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+func bdProxiedShowFail(t *testing.T, bd, dir string, args ...string) (string, string) {
+	t.Helper()
+	fullArgs := append([]string{"show"}, args...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, fullArgs...)
+	if err == nil {
+		t.Fatalf("bd show %s should have failed; got stdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), stdout, stderr)
+	}
+	return stdout, stderr
+}
+
+func bdProxiedShowDetailsAll(t *testing.T, bd, dir string, args ...string) []map[string]interface{} {
+	t.Helper()
+	fullArgs := append([]string{"show", "--json"}, args...)
+	out, err := bdProxiedRun(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd show --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	s := strings.TrimSpace(string(out))
+	start := strings.IndexAny(s, "[{")
+	if start < 0 {
+		t.Fatalf("no JSON in show output: %s", s)
+	}
+	s = s[start:]
+	if strings.HasPrefix(s, "[") {
+		var arr []map[string]interface{}
+		if err := json.Unmarshal([]byte(s), &arr); err != nil {
+			t.Fatalf("parse show JSON array: %v\n%s", err, s)
+		}
+		return arr
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatalf("parse show JSON: %v\n%s", err, s)
+	}
+	return []map[string]interface{}{m}
+}
+
+func bdProxiedShowDetailsFirst(t *testing.T, bd, dir string, args ...string) map[string]interface{} {
+	t.Helper()
+	arr := bdProxiedShowDetailsAll(t, bd, dir, args...)
+	if len(arr) == 0 {
+		t.Fatalf("bd show --json %s returned empty array", strings.Join(args, " "))
+	}
+	return arr[0]
 }
 
 type proxiedProject struct {
@@ -105,7 +273,28 @@ type proxiedProject struct {
 	prefix    string
 }
 
+func bdProxiedInitWithHooks(t *testing.T, bd, prefix string, hooks map[string]string, extraInitArgs ...string) proxiedProject {
+	t.Helper()
+	p := bdProxiedInitInternal(t, bd, prefix, false, extraInitArgs...)
+	hooksDir := filepath.Join(p.beadsDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+	for name, body := range hooks {
+		hookPath := filepath.Join(hooksDir, name)
+		if err := os.WriteFile(hookPath, []byte(body), 0o755); err != nil {
+			t.Fatalf("write hook %s: %v", name, err)
+		}
+	}
+	return p
+}
+
 func bdProxiedInit(t *testing.T, bd, prefix string, extraInitArgs ...string) proxiedProject {
+	t.Helper()
+	return bdProxiedInitInternal(t, bd, prefix, true, extraInitArgs...)
+}
+
+func bdProxiedInitInternal(t *testing.T, bd, prefix string, skipHooks bool, extraInitArgs ...string) proxiedProject {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -119,15 +308,18 @@ func bdProxiedInit(t *testing.T, bd, prefix string, extraInitArgs ...string) pro
 	})
 	shutdownProxyOnInterrupt(t, proxyRoot)
 
-	args := append([]string{
+	baseArgs := []string{
 		"init",
 		"--proxied-server",
 		"--quiet",
 		"--prefix", prefix,
 		"--non-interactive",
-		"--skip-hooks",
 		"--skip-agents",
-	}, extraInitArgs...)
+	}
+	if skipHooks {
+		baseArgs = append(baseArgs, "--skip-hooks")
+	}
+	args := append(baseArgs, extraInitArgs...)
 
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir

@@ -550,6 +550,14 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 7e1: Corrupt-manifest state (GH#3290). Detection only; the
+	// destructive backup+reinit repair runs solely via doctor --fix (bd-6dnrw.6).
+	corruptManifestCheck := convertDoctorCheck(doctor.CheckCorruptManifest(path))
+	result.Checks = append(result.Checks, corruptManifestCheck)
+	if corruptManifestCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
 	// Check 7e2: Stale circuit breaker files
 	circuitCheck := convertDoctorCheck(doctor.CheckCircuitBreaker())
 	result.Checks = append(result.Checks, circuitCheck)
@@ -557,15 +565,17 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 7f: Remote consistency (SQL vs CLI)
-	remoteCheck := convertWithCategory(doctor.CheckRemoteConsistency(path), doctor.CategoryData)
-	result.Checks = append(result.Checks, remoteCheck)
-	// Don't fail overall for remote discrepancies, just warn
+	// Check 7f: Migration content skew vs the cached remote ref (#4259). Advisory.
+	skewCheck := convertWithCategory(doctor.CheckMigrationContentSkew(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, skewCheck)
 
 	// Dolt health checks (connection, schema, issue count, status).
 	for _, dc := range doctor.RunDoltHealthChecks(path) {
 		result.Checks = append(result.Checks, convertDoctorCheck(dc))
 	}
+
+	legacyRemoteCheck := convertWithCategory(doctor.CheckLegacyCLIRemotes(path), doctor.CategoryFederation)
+	result.Checks = append(result.Checks, legacyRemoteCheck)
 
 	// Federation health checks (bd-wkumz.6)
 	// Check 8d: Federation remotesapi port accessibility
@@ -603,6 +613,14 @@ func runDiagnostics(path string) doctorResult {
 	cycleCheck := convertWithCategory(doctor.CheckDependencyCyclesWithStore(sharedStore), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, cycleCheck)
 	if cycleCheck.Status == statusError || cycleCheck.Status == statusWarning {
+		result.OverallOK = false
+	}
+
+	// Check 10b: Rekey-backfill leftovers — randomly-keyed or targetless
+	// dependency rows that survive the #4259 migration backfill (bd-6dnrw.17).
+	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(sharedStore), doctor.CategoryMetadata)
+	result.Checks = append(result.Checks, depKeyCheck)
+	if depKeyCheck.Status == statusError || depKeyCheck.Status == statusWarning {
 		result.OverallOK = false
 	}
 

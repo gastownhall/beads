@@ -19,18 +19,42 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <version>"
+usage() {
+    echo "Usage: $0 <version> [--skip-docs]"
     echo ""
-    echo "Updates version numbers across all components (no git operations)."
+    echo "Updates version numbers across all components (no git operations),"
+    echo "and snapshots the Docusaurus release docs so version.go and the docs"
+    echo "snapshot cannot drift apart."
+    echo ""
+    echo "  --skip-docs   Skip the Docusaurus snapshot (e.g. on a host without"
+    echo "                Node.js). You must then run scripts/snapshot-release-docs.sh"
+    echo "                <version> elsewhere before tagging, or CI will fail."
     echo ""
     echo "Example: $0 0.47.1"
     echo ""
     echo "For full releases, use: bd mol wisp beads-release --var version=X.Y.Z"
+}
+
+NEW_VERSION=""
+SKIP_DOCS=0
+for arg in "$@"; do
+    case "$arg" in
+        --skip-docs) SKIP_DOCS=1 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) echo "Unknown option: $arg" >&2; usage; exit 1 ;;
+        *)
+            if [ -n "$NEW_VERSION" ]; then
+                echo "Error: multiple versions given" >&2; usage; exit 1
+            fi
+            NEW_VERSION="$arg"
+            ;;
+    esac
+done
+
+if [ -z "$NEW_VERSION" ]; then
+    usage
     exit 1
 fi
-
-NEW_VERSION=$1
 
 # Validate semantic versioning
 if ! [[ $NEW_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -106,7 +130,21 @@ echo "  • cmd/bd/winres/manifest.xml"
 update_file "cmd/bd/winres/manifest.xml" "version=\"$CURRENT_VERSION.0\"" "version=\"$NEW_VERSION.0\""
 
 echo ""
-echo -e "${GREEN}✓ Versions updated to $NEW_VERSION${NC}"
+echo -e "${GREEN}✓ Version constants updated to $NEW_VERSION${NC}"
+echo ""
+
+# Snapshot the Docusaurus release docs as part of the same bump so version.go
+# and the published docs cannot diverge. This is the failure mode that left
+# main red after the 1.0.5 release (version bumped, docs snapshot missing).
+if [ "$SKIP_DOCS" -eq 1 ]; then
+    echo -e "${YELLOW}Skipping docs snapshot (--skip-docs).${NC}"
+    echo "  Run scripts/snapshot-release-docs.sh $NEW_VERSION before tagging,"
+    echo "  or CI (check-version-consistency) will fail."
+else
+    echo "Snapshotting release docs..."
+    ./scripts/snapshot-release-docs.sh "$NEW_VERSION"
+fi
+
 echo ""
 echo "Changed files:"
 git diff --stat 2>/dev/null || true
@@ -114,7 +152,4 @@ echo ""
 echo "Next steps:"
 echo "  • Update CHANGELOG.md with release notes"
 echo "  • Update cmd/bd/info.go versionChanges"
-echo "  • Snapshot release docs: cd website && npm ci && npx docusaurus docs:version $NEW_VERSION"
-echo "  • Set website/docusaurus.config.ts lastVersion to $NEW_VERSION"
-echo "  • Regenerate docs artifacts: ./scripts/generate-cli-docs.sh ./bd && ./scripts/generate-llms-full.sh"
 echo "  • Or use: bd mol wisp beads-release --var version=$NEW_VERSION"

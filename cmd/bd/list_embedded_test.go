@@ -690,6 +690,15 @@ func TestEmbeddedList(t *testing.T) {
 			t.Errorf("expected 'invalid status' error, got: %s", out)
 		}
 	})
+
+	t.Run("reject_offset_in_direct_mode", func(t *testing.T) {
+		// --offset is only honored under --proxied-server; the direct
+		// (embedded) path must fatal before touching the store.
+		out := bdListFail(t, bd, dir, "--offset", "1")
+		if !strings.Contains(out, "--offset is only supported under --proxied-server") {
+			t.Errorf("expected --offset direct-mode rejection, got: %s", out)
+		}
+	})
 }
 
 // seedTestData creates a rich set of test issues covering all filter dimensions.

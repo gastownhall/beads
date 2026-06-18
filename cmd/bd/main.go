@@ -223,12 +223,17 @@ func loadEnvironment() {
 	}
 }
 
-// repairSharedServerEmbeddedMismatch detects and auto-repairs the case where
-// shared-server mode is active but metadata.json still pins dolt_mode=embedded.
-// This prevents the silent fallback into embedded mode that hides server-backed
-// issue state after upgrades (GH#2949).
-func repairSharedServerEmbeddedMismatch(beadsDir string, cfg *configfile.Config) {
-	if cfg == nil {
+var sharedServerEmbeddedMismatchWarned bool
+
+// warnSharedServerEmbeddedMismatch detects the case where shared-server mode
+// is active but metadata.json explicitly pins dolt_mode=embedded. The
+// shared-server setting wins for this invocation (GH#2946/2949: stale embedded
+// metadata must not hide server-backed issue state), but bd never rewrites the
+// committed metadata.json — per-machine environment must not leak into shared
+// config (bd-6dnrw.5). Print guidance so the user resolves the conflict
+// explicitly.
+func warnSharedServerEmbeddedMismatch(cfg *configfile.Config) {
+	if cfg == nil || sharedServerEmbeddedMismatchWarned {
 		return
 	}
 	if strings.ToLower(strings.TrimSpace(cfg.DoltMode)) != configfile.DoltModeEmbedded {
@@ -237,14 +242,10 @@ func repairSharedServerEmbeddedMismatch(beadsDir string, cfg *configfile.Config)
 	if !doltserver.IsSharedServerMode() {
 		return
 	}
-	fmt.Fprintln(os.Stderr, "Notice: shared-server is enabled but metadata.json had dolt_mode=embedded.")
-	cfg.DoltMode = configfile.DoltModeServer
-	if err := cfg.Save(beadsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to auto-repair metadata.json: %v\n", err)
-		fmt.Fprintln(os.Stderr, "Fix manually: set dolt_mode to \"server\" in .beads/metadata.json")
-	} else {
-		fmt.Fprintln(os.Stderr, "Auto-repaired: dolt_mode updated to \"server\" in metadata.json.")
-	}
+	sharedServerEmbeddedMismatchWarned = true
+	fmt.Fprintln(os.Stderr, "Notice: shared-server mode is enabled (BEADS_DOLT_SHARED_SERVER or dolt.shared-server in config.yaml) but .beads/metadata.json pins dolt_mode=\"embedded\". Using the shared server for this run.")
+	fmt.Fprintln(os.Stderr, "  To persist server mode: set dolt_mode to \"server\" in .beads/metadata.json and commit it.")
+	fmt.Fprintln(os.Stderr, "  To stay embedded: unset BEADS_DOLT_SHARED_SERVER (or remove dolt.shared-server from config.yaml).")
 }
 
 // loadServerModeFromBeadsDir loads the storage mode (embedded vs server vs
@@ -258,7 +259,7 @@ func loadServerModeFromBeadsDir(beadsDir string) {
 	if err != nil || cfg == nil {
 		return
 	}
-	repairSharedServerEmbeddedMismatch(beadsDir, cfg)
+	warnSharedServerEmbeddedMismatch(cfg)
 	psm := cfg.IsDoltProxiedServerMode()
 	sm := cfg.IsDoltServerMode()
 	// GH#2946: shared-server override for stale metadata.json (no-db commands)
@@ -313,13 +314,13 @@ func selectedNoDBBeadsDir(cmd *cobra.Command) string {
 			return selectedBeadsDir
 		}
 	}
-	if dbPath != "" {
-		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
+	if os.Getenv("BEADS_DIR") != "" {
+		if selectedBeadsDir := beads.FindBeadsDir(); selectedBeadsDir != "" {
 			return selectedBeadsDir
 		}
 	}
-	if os.Getenv("BEADS_DIR") != "" {
-		if selectedBeadsDir := beads.FindBeadsDir(); selectedBeadsDir != "" {
+	if dbPath != "" {
+		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
 			return selectedBeadsDir
 		}
 	}
@@ -824,10 +825,6 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Ambient staleness warning: if Linear data is stale, warn once per
-		// shell session on stderr. Only fires when LINEAR_API_KEY is set.
-		maybeWarnLinearStaleness(cmd)
-
 		if skipsStoreInit {
 			return
 		}
@@ -962,6 +959,7 @@ var rootCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "warning: failed to load beads config from %s: %v\n", beadsDir, cfgErr)
 		}
 		if cfg != nil {
+			warnSharedServerEmbeddedMismatch(cfg)
 			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()
 			proxiedServerMode = doltCfg.ProxiedServer
 			if cmdCtx != nil {
@@ -1080,6 +1078,17 @@ var rootCmd = &cobra.Command{
 					handleSchemaSkewJSON(skewErr)
 				} else {
 					fmt.Fprint(os.Stderr, skewErr.UserMessage())
+				}
+				os.Exit(1)
+			}
+			// #4259: the remote-migrate gate blocks silent in-place migration of a
+			// remote-backed database and tells the operator to migrate-or-adopt.
+			var gateErr *schema.RemoteMigrateGateError
+			if errors.As(err, &gateErr) {
+				if jsonOutput {
+					handleRemoteMigrateGateJSON(gateErr)
+				} else {
+					fmt.Fprint(os.Stderr, gateErr.UserMessage())
 				}
 				os.Exit(1)
 			}

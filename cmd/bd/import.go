@@ -57,6 +57,20 @@ Timestamps (created_at, updated_at, started_at, closed_at) are preserved
 when present in the JSONL and otherwise filled in by the importer. The
 legacy "wisp" boolean is accepted as an alias for "ephemeral".
 
+By default a row only rewrites an existing local issue when its
+updated_at is strictly newer. Older rows are skipped (reported as
+stale_skipped_ids) and rows with the same updated_at keep every local
+column — updated_at has second granularity, so a timestamp tie can be
+two distinct same-second updates, and the local row wins the tie
+(reported as tie_kept_local_ids; the row's labels/comments/dependencies
+still merge). The guard is also enforced inside the upsert itself, so a
+local update that lands while the import is running is preserved rather
+than overwritten. Existing issues that the import did rewrite are listed
+with a field-level summary (updated_issues), so local state changed by
+an import is visible. To deliberately restore an older snapshot, pass
+--allow-stale, which imports every row even when it overwrites newer
+local state.
+
 EXAMPLES:
   bd import                        # Import from configured import.path
   bd import backup.jsonl           # Import from a specific file
@@ -65,21 +79,24 @@ EXAMPLES:
   cat issues.jsonl | bd import -   # Pipe JSONL from another tool
   bd import --dry-run              # Show what would be imported
   bd import --dedup                # Skip issues with duplicate titles
+  bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
   bd import --json                 # Structured output with created and skipped IDs`,
 	GroupID: "sync",
 	RunE:    runImport,
 }
 
 var (
-	importDryRun bool
-	importDedup  bool
-	importInput  string
+	importDryRun     bool
+	importDedup      bool
+	importAllowStale bool
+	importInput      string
 )
 
 func init() {
 	importCmd.Flags().StringVarP(&importInput, "input", "i", "", "Read JSONL from a specific file")
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
+	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
 	rootCmd.AddCommand(importCmd)
 }
 
@@ -136,15 +153,18 @@ func runImport(cmd *cobra.Command, args []string) error {
 }
 
 type importResultJSON struct {
-	Source              string   `json:"source"`
-	Created             int      `json:"created"`
-	Skipped             int      `json:"skipped"`
-	DedupHits           int      `json:"dedup_skipped,omitempty"`
-	Memories            int      `json:"memories,omitempty"`
-	IDs                 []string `json:"ids,omitempty"`
-	StaleSkippedIDs     []string `json:"stale_skipped_ids,omitempty"`
-	SkippedDependencies []string `json:"skipped_dependencies,omitempty"`
-	DryRun              bool     `json:"dry_run,omitempty"`
+	Source              string         `json:"source"`
+	Created             int            `json:"created"`
+	Updated             int            `json:"updated,omitempty"`
+	Skipped             int            `json:"skipped"`
+	DedupHits           int            `json:"dedup_skipped,omitempty"`
+	Memories            int            `json:"memories,omitempty"`
+	IDs                 []string       `json:"ids,omitempty"`
+	UpdatedIssues       []ImportChange `json:"updated_issues,omitempty"`
+	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
+	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
+	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
+	DryRun              bool           `json:"dry_run,omitempty"`
 }
 
 func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
@@ -242,15 +262,18 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 
 	// Import issues
 	if len(issues) > 0 {
-		opts := ImportOptions{SkipPrefixValidation: true}
+		opts := ImportOptions{SkipPrefixValidation: true, AllowStale: importAllowStale}
 		importResult, err := importIssuesCore(ctx, "", store, issues, opts)
 		if err != nil {
 			return fmt.Errorf("import failed: %w", err)
 		}
 		result.Created = importResult.Created
+		result.Updated = importResult.Updated
 		result.Skipped += importResult.Skipped
 		result.SkippedDependencies = append(result.SkippedDependencies, importResult.SkippedDependencies...)
 		result.IDs = append(result.IDs, importResult.ImportedIDs...)
+		result.UpdatedIssues = append(result.UpdatedIssues, importResult.UpdatedIssues...)
+		result.TieKeptLocalIDs = append(result.TieKeptLocalIDs, importResult.TieKeptLocalIDs...)
 		result.StaleSkippedIDs = append(result.StaleSkippedIDs, importResult.StaleSkippedIDs...)
 	}
 
@@ -261,7 +284,12 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		}
 		commitMsg += fmt.Sprintf(" from %s", filepath.Base(source))
 		if err := store.Commit(ctx, commitMsg); err != nil {
-			return fmt.Errorf("commit: %w", err)
+			// An import can be a working-set no-op: re-importing an
+			// identical snapshot, or equal-timestamp rows whose guarded
+			// upsert kept every local column (bd-hj85c).
+			if !strings.Contains(err.Error(), "nothing to commit") {
+				return fmt.Errorf("commit: %w", err)
+			}
 		}
 	}
 
@@ -279,9 +307,19 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits)
 	}
 	if staleSkipped := result.Skipped - dedupHits; staleSkipped > 0 {
-		fmt.Fprintf(os.Stderr, " (%d stale skipped)", staleSkipped)
+		fmt.Fprintf(os.Stderr, " (%d stale skipped; use --allow-stale to restore older rows)", staleSkipped)
 	}
 	fmt.Fprintln(os.Stderr)
+	if len(result.UpdatedIssues) > 0 {
+		fmt.Fprintf(os.Stderr, "Updated %d existing issue(s):\n", len(result.UpdatedIssues))
+		for _, change := range result.UpdatedIssues {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", change.ID, change.Changes)
+		}
+	}
+	if len(result.TieKeptLocalIDs) > 0 {
+		fmt.Fprintf(os.Stderr, "Kept local state for %d issue(s) with the same updated_at but different content (use --allow-stale to overwrite): %s\n",
+			len(result.TieKeptLocalIDs), strings.Join(result.TieKeptLocalIDs, ", "))
+	}
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", skipped)
 	}

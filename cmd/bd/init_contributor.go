@@ -282,7 +282,8 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		return nil
 	}
 
-	// Already configured: idempotent re-init.
+	// Already configured: idempotent re-init. Check both DB config and YAML
+	// config — a YAML-configured contributor setup would be missed by DB-only check.
 	if existing, err := store.GetConfig(ctx, "routing.contributor"); err == nil && existing != "" {
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
@@ -290,6 +291,16 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 			fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
 		}
 		return nil
+	}
+	if src := config.GetValueSource("routing.contributor"); src != config.SourceDefault {
+		if yamlVal := strings.TrimSpace(config.GetString("routing.contributor")); yamlVal != "" {
+			if !quiet {
+				fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
+				fmt.Printf("    Contributor routing configured via config.yaml → %s\n", yamlVal)
+				fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
+			}
+			return nil
+		}
 	}
 
 	homeDir, err := os.UserHomeDir()
@@ -309,8 +320,16 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if err := gitInit.Run(); err != nil {
 			return fmt.Errorf("failed to init git in planning repo: %w", err)
 		}
-		if err := os.MkdirAll(filepath.Join(planningPath, ".beads"), 0750); err != nil {
+		planningBeadsDir := filepath.Join(planningPath, ".beads")
+		if err := os.MkdirAll(planningBeadsDir, 0750); err != nil {
 			return fmt.Errorf("failed to create .beads in planning repo: %w", err)
+		}
+		// Initialize the planning Dolt schema so commands like bd migrate-personal
+		// can open the store immediately without hitting an uninitialized DB.
+		// Non-fatal: no-CGO and server-mode builds skip this silently; the schema
+		// initializes on first use once a Dolt server is running for that path.
+		if planningStore, storeErr := newDoltStoreFromConfig(ctx, planningBeadsDir); storeErr == nil {
+			_ = planningStore.Close()
 		}
 	}
 

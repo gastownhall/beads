@@ -79,6 +79,21 @@ func bdDepWithInput(t *testing.T, bd, dir, input string, args ...string) string 
 	return stdout.String()
 }
 
+// bdDepWithInputFail runs "bd dep" with stdin input expecting failure.
+func bdDepWithInputFail(t *testing.T, bd, dir, input string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"dep"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected bd dep %s to fail, but succeeded:\n%s", strings.Join(args, " "), out)
+	}
+	return string(out)
+}
+
 func TestEmbeddedDep(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -523,7 +538,12 @@ func TestEmbeddedDepNoCycleCheck(t *testing.T) {
 	bdDep(t, bd, dir, extra.ID, "--blocks", ids[n-1], "--no-cycle-check")
 }
 
-func TestEmbeddedDepBulkNoCycleCheckSkipsPerEdgeCycleValidation(t *testing.T) {
+// TestEmbeddedDepBulkNoCycleCheckKeepsWholeGraphGate pins the bd-6dnrw.8
+// contract: bulk --no-cycle-check skips the per-edge recursive check for
+// speed, but one whole-graph cycle check still gates the commit, so a bulk
+// add that would introduce a cycle rolls back atomically instead of landing
+// and poisoning ready-work.
+func TestEmbeddedDepBulkNoCycleCheckKeepsWholeGraphGate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -534,15 +554,25 @@ func TestEmbeddedDepBulkNoCycleCheckSkipsPerEdgeCycleValidation(t *testing.T) {
 
 	a := bdCreate(t, bd, dir, "Bulk cycle A", "--type", "task")
 	b := bdCreate(t, bd, dir, "Bulk cycle B", "--type", "task")
-	input := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":%q}\n", a.ID, b.ID, b.ID, a.ID)
+	c := bdCreate(t, bd, dir, "Bulk cycle C", "--type", "task")
 
-	out := bdDepWithInput(t, bd, dir, input, "add", "--file", "-", "--no-cycle-check")
+	// Cycle-free bulk wiring succeeds with the per-edge check skipped.
+	okInput := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":%q}\n", a.ID, b.ID, b.ID, c.ID)
+	out := bdDepWithInput(t, bd, dir, okInput, "add", "--file", "-", "--no-cycle-check")
 	if !strings.Contains(out, "Added 2 dependencies") {
 		t.Fatalf("expected bulk add summary, got: %s", out)
 	}
 
+	// Closing the chain into a cycle is refused by the final whole-graph
+	// check, and the refused batch commits nothing.
+	cycleInput := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n", c.ID, a.ID)
+	failOut := bdDepWithInputFail(t, bd, dir, cycleInput, "add", "--file", "-", "--no-cycle-check")
+	if !strings.Contains(failOut, "dependency cycle would be created") || !strings.Contains(failOut, "no edges added") {
+		t.Fatalf("expected whole-graph cycle rejection, got: %s", failOut)
+	}
+
 	cycles := bdDep(t, bd, dir, "cycles")
-	if !strings.Contains(cycles, "Found") {
-		t.Fatalf("expected skipped cycle validation to leave detectable cycle, got: %s", cycles)
+	if !strings.Contains(cycles, "No dependency cycles detected") {
+		t.Fatalf("expected rolled-back bulk add to leave the graph acyclic, got: %s", cycles)
 	}
 }

@@ -22,8 +22,30 @@ import (
 // If the issue routes to a different database, a routed store is returned
 // and must be closed by the caller via the returned cleanup function.
 // If the issue is in the local store, cleanup is a no-op.
+//
+// The routed store is opened read-only; callers that mutate the returned store
+// (e.g. dep add/remove/link writing through the source issue's store) must use
+// resolveIDWithRoutingForWrite instead.
 func resolveIDWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (resolvedID string, targetStore storage.DoltStorage, cleanup func(), err error) {
-	result, err := resolveAndGetIssueWithRouting(ctx, localStore, id)
+	return resolveIDWithRoutingMode(ctx, localStore, id, false)
+}
+
+// resolveIDWithRoutingForWrite is the write-intent variant of
+// resolveIDWithRouting: a prefix-routed target store is opened writable so a
+// dependency write through it commits on the target head (#4141). Read-only
+// resolution (e.g. resolving the depends-on target ID, or dep tree) must keep
+// resolveIDWithRouting so a routed read never mutates a foreign project's
+// history (bd-6dnrw.32, GH#3231).
+func resolveIDWithRoutingForWrite(ctx context.Context, localStore storage.DoltStorage, id string) (resolvedID string, targetStore storage.DoltStorage, cleanup func(), err error) {
+	return resolveIDWithRoutingMode(ctx, localStore, id, true)
+}
+
+func resolveIDWithRoutingMode(ctx context.Context, localStore storage.DoltStorage, id string, forWrite bool) (resolvedID string, targetStore storage.DoltStorage, cleanup func(), err error) {
+	resolve := resolveAndGetIssueWithRouting
+	if forWrite {
+		resolve = resolveAndGetIssueWithRoutingForWrite
+	}
+	result, err := resolve(ctx, localStore, id)
 	if err != nil {
 		return "", nil, func() {}, fmt.Errorf("resolving issue ID %s: %w", id, err)
 	}
@@ -123,8 +145,10 @@ Examples:
 			ctx := rootCtx
 			depType := "blocks"
 
-			// Resolve partial IDs with routing support
-			fromID, fromStore, fromCleanup, err := resolveIDWithRouting(ctx, store, blocksID)
+			// Resolve partial IDs with routing support. The source issue's store
+			// is mutated below, so resolve it write-intent (#4141); the blocker
+			// target is only resolved by ID and stays read-only.
+			fromID, fromStore, fromCleanup, err := resolveIDWithRoutingForWrite(ctx, store, blocksID)
 			if err != nil {
 				FatalErrorRespectJSON("%v", err)
 			}
@@ -158,10 +182,11 @@ Examples:
 				warnIfCyclesExist(fromStore)
 			}
 
-			if !usesSQLServer() && fromStore != nil {
-				if err := fromStore.Commit(ctx, fmt.Sprintf("bd: dep add (auto-commit) by %s", actor)); err != nil && !isDoltNothingToCommit(err) {
-					FatalErrorRespectJSON("failed to commit: %v", err)
-				}
+			if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+				Command:  "dep add",
+				IssueIDs: []string{fromID, toID},
+			}); err != nil {
+				FatalErrorRespectJSON("failed to commit: %v", err)
 			}
 
 			if jsonOutput {
@@ -279,7 +304,9 @@ Examples:
 		// Check if toID is an external reference (don't resolve it)
 		isExternalRef := strings.HasPrefix(dependsOnArg, "external:")
 
-		fromID, fromStore, fromCleanup, err := resolveIDWithRouting(ctx, store, args[0])
+		// Write-intent: the source issue's store is mutated by AddDependency
+		// below, so the routed target must open writable (#4141).
+		fromID, fromStore, fromCleanup, err := resolveIDWithRoutingForWrite(ctx, store, args[0])
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
@@ -340,10 +367,11 @@ Examples:
 			warnIfCyclesExist(fromStore)
 		}
 
-		if !usesSQLServer() && fromStore != nil {
-			if err := fromStore.Commit(ctx, fmt.Sprintf("bd: dep add (auto-commit) by %s", actor)); err != nil && !isDoltNothingToCommit(err) {
-				FatalErrorRespectJSON("failed to commit: %v", err)
-			}
+		if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+			Command:  "dep add",
+			IssueIDs: []string{fromID, toID},
+		}); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
 		}
 
 		if jsonOutput {
@@ -367,6 +395,28 @@ type bulkDepInput struct {
 	Type        string `json:"type"`
 	IssueID     string `json:"issue_id"`
 	DependsOnID string `json:"depends_on_id"`
+}
+
+// newCycleThroughEdges runs a whole-graph cycle check inside the bulk-add
+// transaction and returns a rendered cycle path when a cycle actually
+// traverses one of the edges being added, or "" when none does. Endpoint
+// membership is not enough: an issue sitting in a pre-existing committed
+// cycle must not block unrelated bulk wiring that merely touches it
+// (bd-578h9.9). Non-blocking edge types cannot form blocking cycles and are
+// excluded. A failed check returns an error — the bulk add must roll back
+// rather than commit unverified edges (bd-6dnrw.8).
+func newCycleThroughEdges(ctx context.Context, tx storage.Transaction, edges []bulkDepEdge) (string, error) {
+	pairs := make([][2]string, 0, len(edges))
+	for _, edge := range edges {
+		if edge.Type != types.DepBlocks && edge.Type != types.DepConditionalBlocks {
+			continue
+		}
+		pairs = append(pairs, [2]string{edge.IssueID, edge.DependsOnID})
+	}
+	if len(pairs) == 0 {
+		return "", nil
+	}
+	return tx.CycleThroughEdges(ctx, pairs)
 }
 
 type bulkDepEdge struct {
@@ -419,6 +469,21 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) {
 			}
 			if err := tx.AddDependencyWithOptions(rootCtx, dep, actor, storage.DependencyAddOptions{SkipCycleCheck: noCycleCheck}); err != nil {
 				return fmt.Errorf("line %d: %w", edge.Line, err)
+			}
+		}
+		if noCycleCheck {
+			// --no-cycle-check skips the per-edge recursive check for bulk
+			// speed, not graph integrity: one whole-graph check still gates
+			// the commit so cycles introduced by these edges roll back
+			// instead of landing and poisoning ready-work (bd-6dnrw.8).
+			// Cycles that predate this bulk add (not touching any added
+			// edge) don't block it.
+			cyclePath, cycleErr := newCycleThroughEdges(rootCtx, tx, resolved)
+			if cycleErr != nil {
+				return fmt.Errorf("final cycle check failed (no edges added): %w", cycleErr)
+			}
+			if cyclePath != "" {
+				return fmt.Errorf("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 			}
 		}
 		return nil
@@ -532,7 +597,9 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 
 	for _, edge := range edges {
 		current := edge
-		fromID, fromStore, fromCleanup, err := resolveIDWithRouting(ctx, store, edge.IssueID)
+		// Write-intent: addBulkDependencies writes through current.Store (the
+		// source issue's store), so a routed target must open writable (#4141).
+		fromID, fromStore, fromCleanup, err := resolveIDWithRoutingForWrite(ctx, store, edge.IssueID)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("line %d: resolving issue ID %s: %v", edge.Line, edge.IssueID, err))
 			continue
@@ -820,9 +887,11 @@ var depRemoveCmd = &cobra.Command{
 		CheckReadonly("dep remove")
 		ctx := rootCtx
 
-		// Resolve partial IDs with routing support
+		// Resolve partial IDs with routing support. The source issue's store is
+		// mutated by RemoveDependency below, so resolve it write-intent (#4141);
+		// the depends-on target is only resolved by ID and stays read-only.
 		var fromID, toID string
-		fromID, fromStore, fromCleanup, err := resolveIDWithRouting(ctx, store, args[0])
+		fromID, fromStore, fromCleanup, err := resolveIDWithRoutingForWrite(ctx, store, args[0])
 		if err != nil {
 			FatalErrorRespectJSON("%v", err)
 		}
@@ -862,10 +931,11 @@ var depRemoveCmd = &cobra.Command{
 			FatalErrorRespectJSON("%v", err)
 		}
 
-		if !usesSQLServer() && fromStore != nil {
-			if err := fromStore.Commit(ctx, fmt.Sprintf("bd: dep remove (auto-commit) by %s", actor)); err != nil && !isDoltNothingToCommit(err) {
-				FatalErrorRespectJSON("failed to commit: %v", err)
-			}
+		if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+			Command:  "dep remove",
+			IssueIDs: []string{fullFromID, fullToID},
+		}); err != nil {
+			FatalErrorRespectJSON("failed to commit: %v", err)
 		}
 
 		if jsonOutput {
@@ -1416,13 +1486,13 @@ func ParseExternalRef(ref string) (project, capability string) {
 func init() {
 	// dep command shorthand flag
 	depCmd.Flags().StringP("blocks", "b", "", "Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)")
-	depCmd.Flags().Bool("no-cycle-check", false, "Skip cycle detection after adding (use for bulk wiring — run 'bd dep cycles' to verify afterwards)")
+	depCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
 
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes)")
 	depAddCmd.Flags().String("blocked-by", "", "Issue ID that blocks the first issue (alternative to positional arg)")
 	depAddCmd.Flags().String("depends-on", "", "Issue ID that the first issue depends on (alias for --blocked-by)")
 	depAddCmd.Flags().String("file", "", "Read dependency edges from JSONL file, or '-' for stdin")
-	depAddCmd.Flags().Bool("no-cycle-check", false, "Skip cycle detection after adding (use for bulk wiring — run 'bd dep cycles' to verify afterwards)")
+	depAddCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
 
 	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")

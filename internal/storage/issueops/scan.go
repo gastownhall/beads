@@ -5,22 +5,16 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // IssueSelectColumns is the canonical column list for full issue hydration.
 // Every query that reads a complete types.Issue from the issues table should
-// use this constant to avoid column-list drift between scan sites.
-const IssueSelectColumns = `id, content_hash, title, description, design, acceptance_criteria, notes,
-	       status, priority, issue_type, assignee, estimated_minutes,
-	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
-	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
-	       await_type, await_id, timeout_ns, waiters,
-	       mol_type,
-	       event_kind, actor, target, payload,
-	       due_at, defer_until,
-	       work_type, source_system, metadata`
+// use this constant to avoid column-list drift between scan sites. The list
+// itself lives in internal/storage/sqlbuild, shared with the domain/db stack;
+// ScanIssueFrom below scans it positionally and must stay in agreement.
+const IssueSelectColumns = sqlbuild.IssueSelectColumns
 
 // IssueScanner is the common interface between *sql.Row and *sql.Rows,
 // allowing a single scan function to work with both single-row and
@@ -30,10 +24,11 @@ type IssueScanner interface {
 }
 
 // ScanIssueFrom scans a full issue from any source implementing IssueScanner.
-// The caller must ensure the query selected exactly IssueSelectColumns in order.
-func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
+// The caller must ensure the query selected exactly IssueSelectColumns in
+// order; any extra dests are appended for trailing columns beyond that list.
+func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var issue types.Issue
-	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
+	var createdAtStr, updatedAtStr sql.NullString // scanned as strings, parsed with format fallbacks
 	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
@@ -45,7 +40,7 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
 
-	if err := s.Scan(
+	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
@@ -57,7 +52,9 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
 		&workType, &sourceSystem, &metadata,
-	); err != nil {
+	}
+	dests = append(dests, extra...)
+	if err := s.Scan(dests...); err != nil {
 		return nil, err
 	}
 

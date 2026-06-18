@@ -49,6 +49,12 @@ Force: Delete and orphan dependents
 	Args: cobra.MinimumNArgs(0),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("delete")
+
+		if usesProxiedServer() {
+			runDeleteProxiedServer(cmd, rootCtx, args)
+			return
+		}
+
 		fromFile, _ := cmd.Flags().GetString("from-file")
 		force, _ := cmd.Flags().GetBool("force")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -88,8 +94,10 @@ Force: Delete and orphan dependents
 		// Single issue deletion (legacy behavior)
 		issueID := issueIDs[0]
 		ctx := rootCtx
-		// Get the issue to be deleted, using prefix-based routing
-		routedResult, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		// Get the issue to be deleted, using prefix-based routing. Write-intent:
+		// a prefix-routed target opens writable so the delete commits on the
+		// target head (#4141).
+		routedResult, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, issueID)
 		if err != nil {
 			if isNotFoundErr(err) {
 				FatalError("issue %s not found", issueID)
@@ -168,7 +176,7 @@ Force: Delete and orphan dependents
 		// Actually delete — all writes in a single transaction
 		updatedIssueCount := 0
 		totalDepsRemoved := 0
-		deleteErr := transact(ctx, activeStore, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
+		deleteErr := transactHonoringAutoCommit(ctx, activeStore, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
 			// 1. Update text references in connected issues
 			for id, connIssue := range connectedIssues {
 				updates := make(map[string]interface{})
@@ -252,7 +260,9 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	notFound := []string{}
 	var routedStore storage.DoltStorage
 	for _, id := range issueIDs {
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		// Write-intent: the batch delete mutates this routed store below, so it
+		// must open writable to commit on the target head (#4141).
+		result, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, id)
 		if err != nil {
 			if isNotFoundErr(err) {
 				notFound = append(notFound, id)

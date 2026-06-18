@@ -1,18 +1,19 @@
 # Linting Policy
 
-Last reviewed: 2026-05-28
+Last reviewed: 2026-05-29
 
-Freshness source: `.golangci.yml`, `.github/workflows/ci.yml`, and
-`golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...` returning
-`0 issues`.
+Freshness source: `.golangci.yml`, `.github/workflows/pr.yml`,
+`.github/workflows/main.yml`, and
+`golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...` returning zero
+issues.
 
 This document explains the required Go lint gate for this codebase.
 
 ## Current Status
 
-Lint is a required CI gate. The CI workflow runs `golangci-lint` with the
-repository configuration and `--build-tags=gms_pure_go`; it is expected to pass
-with zero issues.
+Lint is a required CI gate. The PR and main workflows run `golangci-lint` with
+the repository configuration and `--build-tags=gms_pure_go`; it is expected to
+pass with zero issues.
 
 Run the same check locally with:
 

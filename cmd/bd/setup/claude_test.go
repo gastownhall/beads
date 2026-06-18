@@ -1013,6 +1013,36 @@ func TestHasBeadsPlugin(t *testing.T) {
 			t.Error("expected no plugin detected")
 		}
 	})
+
+	t.Run("design-to-beads not mistaken for beads plugin", func(t *testing.T) {
+		// GH#4244: a plugin whose name merely contains "beads" (here
+		// design-to-beads) must NOT be taken for the beads hook plugin, or the
+		// SessionStart hook write is wrongly skipped.
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"enabledPlugins": map[string]interface{}{
+				"design-to-beads@xexr-marketplace": true,
+			},
+		})
+		if hasBeadsPlugin(env) {
+			t.Error("design-to-beads should not be detected as the beads plugin")
+		}
+	})
+
+	t.Run("real beads plugin detected past a decoy", func(t *testing.T) {
+		// The exact-name match must still find a real beads@<marketplace> even
+		// when a *beads*-named decoy is enabled too (GH#3192 preserved).
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"enabledPlugins": map[string]interface{}{
+				"design-to-beads@xexr-marketplace": true,
+				"beads@beads-marketplace":          true,
+			},
+		})
+		if !hasBeadsPlugin(env) {
+			t.Error("real beads@beads-marketplace should be detected even alongside a decoy")
+		}
+	})
 }
 
 func TestInstallClaudeSkipsHooksWhenPluginPresent(t *testing.T) {

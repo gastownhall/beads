@@ -190,6 +190,7 @@ func TestOverlayYAMLPrefix(t *testing.T) {
 	t.Run("db wins when yaml empty", func(t *testing.T) {
 		config.ResetForTesting()
 		_ = config.Initialize()
+		config.Set("issue-prefix", "")
 		t.Cleanup(config.ResetForTesting)
 
 		if got := overlayYAMLPrefix("dbp"); got != "dbp" {
@@ -199,6 +200,7 @@ func TestOverlayYAMLPrefix(t *testing.T) {
 	t.Run("empty db ok when yaml empty", func(t *testing.T) {
 		config.ResetForTesting()
 		_ = config.Initialize()
+		config.Set("issue-prefix", "")
 		t.Cleanup(config.ResetForTesting)
 
 		if got := overlayYAMLPrefix(""); got != "" {
