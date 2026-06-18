@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -381,6 +382,81 @@ func TestInitIfMissingMatchingPrefixSkips(t *testing.T) {
 	if !strings.Contains(stderr, "Skipping init: workspace already initialized") {
 		t.Errorf("expected benign skip message, got:\n%s", stderr)
 	}
+}
+
+func TestInitIfMissingDatabaseMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		existing  string
+		requested string
+		want      bool
+	}{
+		{name: "exact match", existing: "foo", requested: "foo", want: false},
+		{name: "case-insensitive match", existing: "Foo", requested: "foo", want: false},
+		{name: "genuine mismatch aborts", existing: "foo", requested: "bar", want: true},
+		{name: "unknown existing falls through", existing: "", requested: "bar", want: false},
+		{name: "empty requested falls through", existing: "foo", requested: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := initIfMissingDatabaseMismatch(tt.existing, tt.requested); got != tt.want {
+				t.Errorf("initIfMissingDatabaseMismatch(%q, %q) = %v, want %v",
+					tt.existing, tt.requested, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckExistingBeadsDataOperationalErrorNotMasked verifies the core of the
+// --init-if-missing idempotency fix: only the benign "already initialized"
+// outcome matches errWorkspaceAlreadyInitialized (and may be skipped), while an
+// operational failure must NOT match it — otherwise --init-if-missing would mask
+// a real error (e.g. an unreadable .beads/embeddeddolt) as a successful skip.
+func TestCheckExistingBeadsDataOperationalErrorNotMasked(t *testing.T) {
+	saveEmbeddedConfig := func(t *testing.T, beadsDir string) {
+		t.Helper()
+		cfg := &configfile.Config{
+			Database: "dolt",
+			Backend:  configfile.BackendDolt,
+			DoltMode: configfile.DoltModeEmbedded,
+		}
+		if err := cfg.Save(beadsDir); err != nil {
+			t.Fatalf("save config: %v", err)
+		}
+	}
+
+	t.Run("existing database matches sentinel", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		saveEmbeddedConfig(t, beadsDir)
+		// A real embedded database lives at embeddeddolt/<db>/.dolt.
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "mydb", ".dolt"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		err := checkExistingBeadsDataAt(beadsDir, "mydb")
+		if err == nil {
+			t.Fatal("expected already-initialized error, got nil")
+		}
+		if !errors.Is(err, errWorkspaceAlreadyInitialized) {
+			t.Errorf("existing-database error must match errWorkspaceAlreadyInitialized, got: %v", err)
+		}
+	})
+
+	t.Run("operational error not masked", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		saveEmbeddedConfig(t, beadsDir)
+		// Make embeddeddolt a regular file so os.ReadDir fails with a
+		// non-IsNotExist (operational) error rather than "already initialized".
+		if err := os.WriteFile(filepath.Join(beadsDir, "embeddeddolt"), []byte("not a dir"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := checkExistingBeadsDataAt(beadsDir, "mydb")
+		if err == nil {
+			t.Fatal("expected operational error, got nil")
+		}
+		if errors.Is(err, errWorkspaceAlreadyInitialized) {
+			t.Errorf("operational error must NOT match errWorkspaceAlreadyInitialized (would be masked by --init-if-missing): %v", err)
+		}
+	})
 }
 
 func TestInitWithCustomDBPath(t *testing.T) {

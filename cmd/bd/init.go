@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -369,17 +370,25 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// docs/adr/0002-init-safety-invariants.md).
 		if !reinitLocal {
 			if err := checkExistingBeadsData(prefix); err != nil {
-				// --init-if-missing makes init idempotent: when the workspace
-				// is already initialized, skip and exit 0 instead of aborting.
-				if initIfMissing {
-					// Guard against masking a genuine mismatch: if the caller
-					// explicitly requested a --prefix that does not match the
-					// existing workspace, silently skipping would ignore the
-					// request. Abort as usual in that case. (Skipped when
-					// --database is set, since that overrides prefix-based
-					// naming and is the authoritative database selector.)
-					if cmd.Flags().Changed("prefix") && !cmd.Flags().Changed("database") {
-						if existing := existingWorkspaceDBName(); initIfMissingPrefixMismatch(existing, prefix) {
+				// --init-if-missing makes init idempotent, but ONLY for the
+				// benign "workspace already initialized" case. An operational
+				// error from the check (e.g. an unreadable .beads/embeddeddolt
+				// directory) must still abort rather than be masked as a
+				// successful skip.
+				if initIfMissing && errors.Is(err, errWorkspaceAlreadyInitialized) {
+					// Guard against masking a genuine mismatch: an explicit
+					// --prefix or --database that does not match the existing
+					// workspace must abort, since silently skipping would ignore
+					// the request and reuse a different database. --database is
+					// the authoritative selector, so it is checked even when
+					// --prefix is also set.
+					existing := existingWorkspaceDBName()
+					if cmd.Flags().Changed("database") {
+						if initIfMissingDatabaseMismatch(existing, database) {
+							FatalError("workspace already initialized as database %q, but --database %q was requested.\nRemove --database (or pass a matching value) to reuse the existing workspace.", existing, database)
+						}
+					} else if cmd.Flags().Changed("prefix") {
+						if initIfMissingPrefixMismatch(existing, prefix) {
 							FatalError("workspace already initialized as database %q, but --prefix %q was requested.\nRemove --prefix (or pass a matching value) to reuse the existing workspace.", existing, prefix)
 						}
 					}
@@ -1754,8 +1763,34 @@ func migrateOldDatabases(targetPath string, quiet bool) error {
 	return nil
 }
 
+// errWorkspaceAlreadyInitialized marks the benign "this workspace already has a
+// database" outcome from checkExistingBeadsData. --init-if-missing treats only
+// this case as an idempotent skip; any other error from the check is operational
+// (e.g. an unreadable .beads/embeddeddolt directory) and must still abort rather
+// than be silently masked as success.
+var errWorkspaceAlreadyInitialized = errors.New("workspace already initialized")
+
+// workspaceExistsError carries a user-facing "already initialized" message while
+// still matching errWorkspaceAlreadyInitialized via errors.Is, so callers can
+// distinguish the benign case without the sentinel text leaking into the message.
+type workspaceExistsError struct{ msg string }
+
+func (e *workspaceExistsError) Error() string { return e.msg }
+func (e *workspaceExistsError) Is(target error) bool {
+	return target == errWorkspaceAlreadyInitialized
+}
+
+// alreadyInitialized builds a workspaceExistsError from a formatted message.
+func alreadyInitialized(format string, args ...any) error {
+	return &workspaceExistsError{msg: fmt.Sprintf(format, args...)}
+}
+
 // checkExistingBeadsDataAt checks for existing database at a specific beadsDir path.
 // This is extracted to support both BEADS_DIR and CWD-based resolution.
+//
+// A returned error that matches errWorkspaceAlreadyInitialized means a database
+// already exists (the benign, idempotent-skip case); any other error is
+// operational and must not be treated as success.
 func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 	// Check if .beads directory exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -1769,7 +1804,7 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 				return fmt.Errorf("resolve proxied server root: %w", rootErr)
 			}
 			if info, statErr := os.Stat(proxiedRoot); statErr == nil && info.IsDir() {
-				return fmt.Errorf(`
+				return alreadyInitialized(`
 %s Found existing Dolt database: %s
 
 This workspace is already initialized.
@@ -1801,7 +1836,7 @@ Aborting.`, ui.RenderWarn("⚠"), proxiedRoot, ui.RenderAccent("bd list"))
 				}
 				if info, statErr := os.Stat(filepath.Join(embeddedRoot, entry.Name(), ".dolt")); statErr == nil && info.IsDir() {
 					location := filepath.Join(embeddedRoot, entry.Name())
-					return fmt.Errorf(`
+					return alreadyInitialized(`
 %s Found existing Dolt database: %s
 
 This workspace is already initialized.
@@ -1862,7 +1897,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				port := doltserver.DefaultConfig(beadsDir).Port
 				location = fmt.Sprintf("dolt server at %s:%d", host, port)
 			}
-			return fmt.Errorf(`
+			return alreadyInitialized(`
 %s Found existing Dolt database: %s
 
 This workspace is already initialized.
@@ -1887,7 +1922,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 	if redirectTarget != beadsDir {
 		targetDBPath := filepath.Join(redirectTarget, beads.CanonicalDatabaseName)
 		if _, err := os.Stat(targetDBPath); err == nil {
-			return fmt.Errorf(`
+			return alreadyInitialized(`
 %s Cannot init: redirect target already has database
 
 Local .beads redirects to: %s
@@ -1911,7 +1946,7 @@ Aborting.`, ui.RenderWarn("⚠"), redirectTarget, targetDBPath, ui.RenderAccent(
 	// Check for existing database file (no redirect case)
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if _, err := os.Stat(dbPath); err == nil {
-		return fmt.Errorf(`
+		return alreadyInitialized(`
 %s Found existing database: %s
 
 This workspace is already initialized.
@@ -2007,6 +2042,20 @@ func initIfMissingPrefixMismatch(existingDBName, requestedPrefix string) bool {
 	}
 	requested := dbNameFromPrefix(normalizeIssuePrefix(requestedPrefix))
 	return requested != "" && !strings.EqualFold(existingDBName, requested)
+}
+
+// initIfMissingDatabaseMismatch reports whether an explicit --database request
+// conflicts with the existing workspace. --database is the authoritative database
+// selector (it overrides prefix-based naming later in init), so an explicit
+// mismatch must abort --init-if-missing rather than silently reuse a different
+// database. existingDBName is the existing workspace's recorded Dolt database
+// name; requestedDatabase is the raw --database value. Returns false when either
+// is unknown so an undeterminable state falls through to the benign skip.
+func initIfMissingDatabaseMismatch(existingDBName, requestedDatabase string) bool {
+	if existingDBName == "" || requestedDatabase == "" {
+		return false
+	}
+	return !strings.EqualFold(existingDBName, requestedDatabase)
 }
 
 // resolveInitBeadsDir resolves the .beads directory that init would target,
