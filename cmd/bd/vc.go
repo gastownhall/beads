@@ -153,16 +153,20 @@ Examples:
 
 		// We are explicitly creating a Dolt commit; avoid redundant auto-commit in PersistentPostRun.
 		commandDidExplicitDoltCommit = true
-		if err := store.Commit(ctx, vcCommitMessage); err != nil {
-			if isDoltNothingToCommit(err) {
-				if jsonOutput {
-					outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
-				} else {
-					fmt.Println("Nothing to commit")
-				}
-				return
-			}
+		// GH#4078: include config and report truthfully — the old Commit()
+		// path silently no-opped on config-only working sets while still
+		// printing "Created commit".
+		committed, err := explicitDoltCommit(ctx, store, vcCommitMessage)
+		if err != nil {
 			FatalErrorRespectJSON("failed to commit: %v", err)
+		}
+		if !committed {
+			if jsonOutput {
+				outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
+			} else {
+				fmt.Println("Nothing to commit")
+			}
+			return
 		}
 
 		// Get the new commit hash

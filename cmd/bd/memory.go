@@ -92,6 +92,9 @@ Examples:
 			FatalErrorRespectJSON("storing memory: %v", err)
 		}
 		commandDidWrite.Store(true)
+		if err := commitConfigWrite(ctx, store, "remember"); err != nil {
+			FatalErrorRespectJSON("%v", err)
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]string{
@@ -232,6 +235,9 @@ Examples:
 			FatalErrorRespectJSON("forgetting memory: %v", err)
 		}
 		commandDidWrite.Store(true)
+		if err := commitConfigWrite(ctx, store, "forget"); err != nil {
+			FatalErrorRespectJSON("%v", err)
+		}
 
 		if jsonOutput {
 			outputJSON(map[string]string{

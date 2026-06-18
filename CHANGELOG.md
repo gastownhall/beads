@@ -44,6 +44,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Server-mode config writes commit again — `bd dolt pull` no longer needs a
+  manual flush.** `bd remember`, `bd forget`, and `bd config set|unset|set-many`
+  in server mode left the `config` table dirty forever: `maybeAutoCommit` skips
+  SQL-server modes entirely, and generic `Commit()` excludes config
+  ([#2455](https://github.com/gastownhall/beads/issues/2455)), so the next
+  `bd dolt pull` failed with `cannot merge with uncommitted changes` until the
+  operator ran raw `DOLT_ADD('config')`/`DOLT_COMMIT` SQL. Config writes now
+  commit immediately via the new scoped `CommitConfigOnly` (stages ONLY the
+  config table — concurrent operations' dirty tables are never swept),
+  restoring the v1.0.1 behavior from
+  [#3052](https://github.com/gastownhall/beads/pull/3052)
+  ([#4078](https://github.com/gastownhall/beads/issues/4078)).
+- **`bd dolt commit` and `bd vc commit` are truthful and include config.** On a
+  config-only working set both commands printed success (`Committed.` /
+  `Created commit <hash>` — the hash being the unchanged HEAD) while committing
+  nothing. Explicit commits are intentional flush points: they now include the
+  config table and honestly report `Nothing to commit` when the working set is
+  clean ([#4078](https://github.com/gastownhall/beads/issues/4078)).
 - **Cross-clone issue-delete vs child-row-insert merges now converge.** The
   synced child tables (`dependencies`, `labels`, `comments`, `events`,
   snapshots) carry `FOREIGN KEY ... ON DELETE CASCADE` to `issues` (migrations

@@ -1793,6 +1793,15 @@ func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error 
 	return nil
 }
 
+// CommitConfigOnly commits ONLY the config table (GH#4078). Use after
+// intentional config writes (bd remember, bd config set) in server mode,
+// where generic Commit() excludes config (GH#2455) and nothing else ever
+// commits it. Scoped staging means a concurrent operation's dirty tables
+// are never swept — the same guarantee that motivated GH#2455.
+func (s *DoltStore) CommitConfigOnly(ctx context.Context, message string) error {
+	return s.doltAddAndCommit(ctx, []string{"config"}, message)
+}
+
 // doltAddAndCommit stages the specified tables and commits on a pinned
 // connection. This prevents DOLT_COMMIT('-Am') from sweeping up stale
 // working set changes from concurrent operations (GH#2455).

@@ -81,6 +81,31 @@ func commitPendingIfEmbedded(ctx context.Context, st storage.DoltStorage, actor 
 	return maybeAutoCommitStore(ctx, st, p)
 }
 
+// commitConfigWrite commits the config table immediately after an
+// intentional config write (bd remember/forget, bd config set/unset).
+// Server modes only: maybeAutoCommit skips SQL-server modes entirely, and
+// generic Commit() excludes config (GH#2455) — so without this the write
+// strands the working set dirty and the next 'bd dolt pull' fails until a
+// manual flush (GH#4078). The commit is SCOPED to the config table, so a
+// concurrent operation's dirty tables are never swept. Embedded mode is a
+// no-op: its '-Am' auto-commit and the unflagged-writes sweep already
+// include config. Runs regardless of dolt.auto-commit mode — leaving the
+// config write uncommitted is the bug, not a batching feature (this
+// restores the v1.0.1 behavior from PR #3052).
+func commitConfigWrite(ctx context.Context, st storage.DoltStorage, command string) error {
+	if isEmbeddedMode() || st == nil {
+		return nil
+	}
+	if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {
+		return nil
+	}
+	msg := formatDoltAutoCommitMessage(command, getActor(), nil)
+	if err := st.CommitConfigOnly(ctx, msg); err != nil && !isDoltNothingToCommit(err) {
+		return fmt.Errorf("committing config write: %w", err)
+	}
+	return nil
+}
+
 func maybeAutoCommitStore(ctx context.Context, st storage.DoltStorage, p doltAutoCommitParams) error {
 	mode, err := getDoltAutoCommitMode()
 	if err != nil {
