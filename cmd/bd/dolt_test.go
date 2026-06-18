@@ -1626,6 +1626,15 @@ func (m *minimalPullStore) Pull(ctx context.Context) error {
 	return m.pullErr
 }
 
+// ListRemotes is exercised by current main's pull failure handling
+// (isConfirmedNoRemote -> st.ListRemotes during error classification). The
+// embedded nil DoltStorage would panic, so report "no remotes": this keeps a
+// simulated pull failure on the benign no-remote path (clean exit) while still
+// proving the no-push guard does not short-circuit bd dolt pull.
+func (m *minimalPullStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return nil, nil
+}
+
 // minimalPushStore implements storage.DoltStorage by embedding the interface
 // (all methods panic on nil) with Push and ForcePush overridden for controlled testing.
 type minimalPushStore struct {
