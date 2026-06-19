@@ -46,71 +46,19 @@ func setupStealthMode(verbose bool) error {
 // This is the correct approach for per-repository user-specific ignores (GitHub #704).
 // Unlike global gitignore, patterns here are relative to the repo root.
 func setupGitExclude(verbose bool) error {
-	// Find the common .git directory (handles worktrees correctly - GH#1053)
-	// Use --git-common-dir to get the main repo's .git, not the worktree's .git/worktrees/<name>
-	gitDir, err := exec.Command("git", "rev-parse", "--git-common-dir").Output()
+	added, excludePath, err := addExcludePatterns("",
+		"# Beads stealth mode (added by bd init --stealth)",
+		[]string{".beads/", ".claude/settings.local.json"})
 	if err != nil {
-		return fmt.Errorf("not a git repository")
+		return err
 	}
-	gitDirPath := strings.TrimSpace(string(gitDir))
-
-	// Path to the exclude file
-	excludePath := filepath.Join(gitDirPath, "info", "exclude")
-
-	// Ensure the info directory exists
-	infoDir := filepath.Join(gitDirPath, "info")
-	if err := os.MkdirAll(infoDir, 0755); err != nil {
-		return fmt.Errorf("failed to create git info directory: %w", err)
-	}
-
-	// Read existing exclude file if it exists
-	var existingContent string
-	// #nosec G304 - git config path
-	if content, err := os.ReadFile(excludePath); err == nil {
-		existingContent = string(content)
-	}
-
-	// Use relative patterns (these work correctly in .git/info/exclude)
-	beadsPattern := ".beads/"
-	claudePattern := ".claude/settings.local.json"
-
-	hasBeads := strings.Contains(existingContent, beadsPattern)
-	hasClaude := strings.Contains(existingContent, claudePattern)
-
-	if hasBeads && hasClaude {
-		if verbose {
-			fmt.Printf("Git exclude already configured for stealth mode\n")
-		}
-		return nil
-	}
-
-	// Append missing patterns
-	newContent := existingContent
-	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
-		newContent += "\n"
-	}
-
-	if !hasBeads || !hasClaude {
-		newContent += "\n# Beads stealth mode (added by bd init --stealth)\n"
-	}
-
-	if !hasBeads {
-		newContent += beadsPattern + "\n"
-	}
-	if !hasClaude {
-		newContent += claudePattern + "\n"
-	}
-
-	// Write the updated exclude file
-	// #nosec G306 - config file needs 0644
-	if err := os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
-		return fmt.Errorf("failed to write git exclude file: %w", err)
-	}
-
 	if verbose {
-		fmt.Printf("Configured git exclude for stealth mode: %s\n", excludePath)
+		if len(added) == 0 {
+			fmt.Printf("Git exclude already configured for stealth mode\n")
+		} else {
+			fmt.Printf("Configured git exclude for stealth mode: %s\n", excludePath)
+		}
 	}
-
 	return nil
 }
 
@@ -123,6 +71,8 @@ func resolveGitExcludePath(repoPath string) (string, error) {
 		args = append(args, "-C", repoPath)
 	}
 	args = append(args, "rev-parse", "--git-common-dir")
+	// #nosec G702 - fixed "git" command; args are constant subcommands plus an internal repoPath,
+	// never attacker-controlled input.
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository")
@@ -140,65 +90,159 @@ func resolveGitExcludePath(repoPath string) (string, error) {
 	return filepath.Join(gitDir, "info", "exclude"), nil
 }
 
-// addProjectPatternsToGitExclude appends project-root ignore patterns (.dolt/, *.db, etc.) to
-// .git/info/exclude rather than a tracked .gitignore. Stealth mode uses this so beads never creates
-// or modifies a visible .gitignore that would expose its presence to repo collaborators. repoPath
-// is the repository root ("" resolves against the current directory).
-func addProjectPatternsToGitExclude(repoPath string, patterns []string, verbose bool) error {
-	excludePath, err := resolveGitExcludePath(repoPath)
+// addExcludePatterns ensures each pattern exists as an exact line in repoPath's .git/info/exclude,
+// appending any missing ones under header. It returns the patterns it actually added (empty when all
+// were already present) and the resolved exclude path. repoPath "" resolves against the current
+// directory. This is the shared core for stealth, fork, and project-pattern exclude setup.
+func addExcludePatterns(repoPath, header string, patterns []string) (added []string, excludePath string, err error) {
+	excludePath, err = resolveGitExcludePath(repoPath)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
-		return fmt.Errorf("failed to create git info directory: %w", err)
+	if err = os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
+		return nil, "", fmt.Errorf("failed to create git info directory: %w", err)
 	}
 
-	var existingContent string
+	var existing string
 	// #nosec G304 - git config path
-	if content, err := os.ReadFile(excludePath); err == nil {
-		existingContent = string(content)
+	if content, rerr := os.ReadFile(excludePath); rerr == nil {
+		existing = string(content)
 	}
 
-	var toAdd []string
 	for _, p := range patterns {
 		// Exact line match avoids false positives (e.g. ".beads/issues.jsonl" matching ".beads/").
-		if !containsExactPattern(existingContent, p) {
-			toAdd = append(toAdd, p)
+		if !containsExactPattern(existing, p) {
+			added = append(added, p)
 		}
 	}
-	if len(toAdd) == 0 {
-		if verbose {
-			fmt.Printf("Git exclude already has Dolt file patterns\n")
-		}
-		return nil
+	if len(added) == 0 {
+		return nil, excludePath, nil
 	}
 
-	newContent := existingContent
-	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
+	newContent := existing
+	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
 		newContent += "\n"
 	}
-	newContent += "\n# Beads stealth mode: Dolt files (added by bd init --stealth)\n"
-	for _, p := range toAdd {
+	newContent += "\n" + header + "\n"
+	for _, p := range added {
 		newContent += p + "\n"
 	}
 
 	// #nosec G306 - config file needs 0644
-	if err := os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
-		return fmt.Errorf("failed to write git exclude file: %w", err)
+	if err = os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
+		return nil, excludePath, fmt.Errorf("failed to write git exclude file: %w", err)
+	}
+	return added, excludePath, nil
+}
+
+// projectExcludeHeader labels the project-root ignore patterns (.dolt/, *.db, …) that beads routes
+// into .git/info/exclude instead of a tracked .gitignore when git ops are disabled. It is kept
+// neutral (not "added by bd init --stealth") because both bd init --stealth and bd doctor --fix
+// write it.
+const projectExcludeHeader = "# Beads: Dolt files kept local via .git/info/exclude (stealth / no-git-ops)"
+
+// addProjectPatternsToGitExclude appends project-root ignore patterns (.dolt/, *.db, etc.) to
+// .git/info/exclude rather than a tracked .gitignore. Stealth / no-git-ops repos use this so beads
+// never creates or modifies a visible .gitignore that would expose its presence to repo
+// collaborators. repoPath is the repository root ("" resolves against the current directory).
+func addProjectPatternsToGitExclude(repoPath string, patterns []string, verbose bool) error {
+	added, excludePath, err := addExcludePatterns(repoPath, projectExcludeHeader, patterns)
+	if err != nil {
+		return err
 	}
 	if verbose {
-		fmt.Printf("Configured git exclude for Dolt files: %s\n", excludePath)
+		if len(added) == 0 {
+			fmt.Printf("Git exclude already has Dolt file patterns\n")
+		} else {
+			fmt.Printf("Configured git exclude for Dolt files: %s\n", excludePath)
+		}
 	}
 	return nil
 }
 
-// isStealthRepo reports whether the beads workspace at repoPath was set up in stealth mode. Stealth
-// init persists no-git-ops: true (the same signal bd prime keys off), so beads must keep its
-// footprint out of tracked files.
+// removeBeadsProjectGitignoreSection strips the bd-managed section from the tracked project-root
+// .gitignore at repoPath, reversing doctor.EnsureProjectGitignore. It removes only the header beads
+// writes (doctor.ProjectGitignoreHeader) plus the Dolt pattern lines beads added directly beneath
+// it, so unrelated user patterns are preserved. If beads was the .gitignore's only content the file
+// is removed entirely, restoring true stealth. Returns true when it changed (or removed) the file;
+// a repo with no beads section (or no .gitignore) is left untouched.
+func removeBeadsProjectGitignoreSection(repoPath string) (bool, error) {
+	gitignorePath := filepath.Join(repoPath, ".gitignore")
+	// #nosec G304 - path is the repo-root .gitignore
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read .gitignore: %w", err)
+	}
+
+	managed := make(map[string]bool, len(doctor.ProjectGitignorePatterns))
+	for _, p := range doctor.ProjectGitignorePatterns {
+		managed[p] = true
+	}
+
+	lines := strings.Split(string(content), "\n")
+	out := make([]string, 0, len(lines))
+	changed := false
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == doctor.ProjectGitignoreHeader {
+			changed = true
+			// Drop the blank separator beads writes before the header, if we just emitted one.
+			if n := len(out); n > 0 && strings.TrimSpace(out[n-1]) == "" {
+				out = out[:n-1]
+			}
+			// Skip the header and the bd-managed pattern lines directly beneath it.
+			i++
+			for i < len(lines) && managed[strings.TrimSpace(lines[i])] {
+				i++
+			}
+			i-- // compensate for the loop's i++
+			continue
+		}
+		out = append(out, lines[i])
+	}
+	if !changed {
+		return false, nil
+	}
+
+	newContent := strings.Join(out, "\n")
+	if strings.TrimSpace(newContent) == "" {
+		// beads was the only reason this .gitignore existed — remove it for true stealth.
+		if err := os.Remove(gitignorePath); err != nil {
+			return false, fmt.Errorf("failed to remove emptied .gitignore: %w", err)
+		}
+		return true, nil
+	}
+
+	// #nosec G306 - gitignore needs to be readable by git and collaborators
+	if err := os.WriteFile(gitignorePath, []byte(newContent), 0644); err != nil {
+		return false, fmt.Errorf("failed to write .gitignore: %w", err)
+	}
+	return true, nil
+}
+
+// isStealthRepo reports whether beads must keep its footprint out of tracked git files for the
+// workspace at repoPath. It keys off the persisted no-git-ops flag — the same signal bd prime uses
+// for the stealth session-close protocol (GH#593). bd init --stealth sets it, and a user may also
+// set it directly; either way beads routes ignores into .git/info/exclude rather than a tracked
+// .gitignore.
 func isStealthRepo(repoPath string) bool {
 	beadsDir := doctor.ResolveBeadsDirForRepo(repoPath)
 	return config.GetStringFromDir(beadsDir, "no-git-ops") == "true"
+}
+
+// trackedGitignoreHasBeadsSection reports whether the tracked project-root .gitignore at repoPath
+// still carries the bd-managed section header — i.e. a previous run leaked Dolt patterns into a
+// git-visible file. Used by the stealth doctor check to flag the leak for --fix to clean up.
+func trackedGitignoreHasBeadsSection(repoPath string) bool {
+	// #nosec G304 - path is the repo-root .gitignore
+	content, err := os.ReadFile(filepath.Join(repoPath, ".gitignore"))
+	if err != nil {
+		return false
+	}
+	return containsExactPattern(string(content), doctor.ProjectGitignoreHeader)
 }
 
 // checkProjectExcludeStealth is the stealth-mode counterpart to doctor.CheckProjectGitignore: it
@@ -226,12 +270,25 @@ func checkProjectExcludeStealth(repoPath string) doctor.DoctorCheck {
 			missing = append(missing, p)
 		}
 	}
-	if len(missing) > 0 {
+
+	leaked := trackedGitignoreHasBeadsSection(repoPath)
+
+	if len(missing) > 0 || leaked {
+		var details []string
+		message := "Stealth mode: .git/info/exclude missing Dolt exclusion patterns"
+		if len(missing) > 0 {
+			details = append(details, "Missing from .git/info/exclude: "+strings.Join(missing, ", "))
+		}
+		if leaked {
+			// A previous run leaked the patterns into the tracked .gitignore; --fix moves them out.
+			message = "Stealth mode: Dolt patterns are exposed in the tracked .gitignore"
+			details = append(details, "Tracked .gitignore contains the beads section; bd doctor --fix will move it into .git/info/exclude")
+		}
 		return doctor.DoctorCheck{
 			Name:    "Project Gitignore",
 			Status:  doctor.StatusWarning,
-			Message: "Stealth mode: .git/info/exclude missing Dolt exclusion patterns",
-			Detail:  "Missing: " + strings.Join(missing, ", "),
+			Message: message,
+			Detail:  strings.Join(details, "; "),
 			Fix:     "Run: bd doctor --fix",
 		}
 	}
@@ -247,65 +304,22 @@ func checkProjectExcludeStealth(repoPath string) doctor.DoctorCheck {
 // This is separate from stealth mode - fork protection is specifically about
 // preventing beads/Claude files from appearing in upstream PRs.
 func setupForkExclude(verbose bool) error {
-	// Use --git-common-dir to get main repo's .git, not worktree's (GH#1053)
-	gitDir, err := exec.Command("git", "rev-parse", "--git-common-dir").Output()
+	added, _, err := addExcludePatterns("",
+		"# Beads fork protection (bd init)",
+		[]string{".beads/", "**/RECOVERY*.md", "**/SESSION*.md"})
 	if err != nil {
-		return fmt.Errorf("not a git repository")
+		return err
 	}
-	gitDirPath := strings.TrimSpace(string(gitDir))
-	excludePath := filepath.Join(gitDirPath, "info", "exclude")
-
-	// Ensure info directory exists
-	if err := os.MkdirAll(filepath.Join(gitDirPath, "info"), 0755); err != nil {
-		return fmt.Errorf("failed to create git info directory: %w", err)
-	}
-
-	// Read existing content
-	var existingContent string
-	// #nosec G304 - git config path
-	if content, err := os.ReadFile(excludePath); err == nil {
-		existingContent = string(content)
-	}
-
-	// Patterns to add for fork protection
-	patterns := []string{".beads/", "**/RECOVERY*.md", "**/SESSION*.md"}
-	var toAdd []string
-	for _, p := range patterns {
-		// Check for exact line match (pattern alone on a line)
-		// This avoids false positives like ".beads/issues.jsonl" matching ".beads/"
-		if !containsExactPattern(existingContent, p) {
-			toAdd = append(toAdd, p)
-		}
-	}
-
-	if len(toAdd) == 0 {
-		if verbose {
-			fmt.Printf("%s Git exclude already configured\n", ui.RenderPass("✓"))
-		}
-		return nil
-	}
-
-	// Append patterns
-	newContent := existingContent
-	if !strings.HasSuffix(newContent, "\n") && len(newContent) > 0 {
-		newContent += "\n"
-	}
-	newContent += "\n# Beads fork protection (bd init)\n"
-	for _, p := range toAdd {
-		newContent += p + "\n"
-	}
-
-	// #nosec G306 - config file needs 0644
-	if err := os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
-		return fmt.Errorf("failed to write git exclude: %w", err)
-	}
-
 	if verbose {
-		fmt.Printf("\n%s Added to .git/info/exclude:\n", ui.RenderPass("✓"))
-		for _, p := range toAdd {
-			fmt.Printf("  %s\n", p)
+		if len(added) == 0 {
+			fmt.Printf("%s Git exclude already configured\n", ui.RenderPass("✓"))
+		} else {
+			fmt.Printf("\n%s Added to .git/info/exclude:\n", ui.RenderPass("✓"))
+			for _, p := range added {
+				fmt.Printf("  %s\n", p)
+			}
+			fmt.Println("\nNote: .git/info/exclude is local-only and won't affect upstream.")
 		}
-		fmt.Println("\nNote: .git/info/exclude is local-only and won't affect upstream.")
 	}
 	return nil
 }

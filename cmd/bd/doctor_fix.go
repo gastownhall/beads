@@ -255,10 +255,13 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Gitignore":
 			err = doctor.FixGitignore(path)
 		case "Project Gitignore":
-			// Stealth repos must not get a tracked .gitignore; route the patterns into
-			// .git/info/exclude instead (matches bd init --stealth).
+			// Stealth / no-git-ops repos must not get a tracked .gitignore; route the patterns into
+			// .git/info/exclude instead (matches bd init --stealth) and strip any beads section a
+			// previous run leaked into the tracked .gitignore so stealth leaves no trace.
 			if isStealthRepo(path) {
-				err = addProjectPatternsToGitExclude(path, doctor.ProjectGitignorePatterns, false)
+				if err = addProjectPatternsToGitExclude(path, doctor.ProjectGitignorePatterns, false); err == nil {
+					_, err = removeBeadsProjectGitignoreSection(path)
+				}
 			} else {
 				err = doctor.FixProjectGitignore(path)
 			}

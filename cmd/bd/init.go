@@ -666,6 +666,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 						fmt.Fprintf(os.Stderr, "Warning: failed to update git exclude: %v\n", err)
 						// Non-fatal - continue anyway
 					}
+					// bd init --stealth is safe to re-run: clean up any beads section an earlier
+					// (non-stealth or pre-fix) run leaked into the tracked .gitignore.
+					if removed, err := removeBeadsProjectGitignoreSection(cwd); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to clean project .gitignore: %v\n", err)
+						// Non-fatal - continue anyway
+					} else if removed && !quiet {
+						fmt.Printf("  %s Removed leaked beads section from tracked .gitignore\n", ui.RenderPass("✓"))
+					}
 				} else if err := doctor.EnsureProjectGitignore(cwd); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to update project .gitignore: %v\n", err)
 					// Non-fatal - continue anyway
