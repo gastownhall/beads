@@ -812,7 +812,7 @@ var recognizedConfigPrefixes = []string{
 	"export.", "import.", "dolt.", "jira.", "linear.", "github.", "custom.",
 	"status.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
-	"hierarchy.", "ai.", "backup.", "federation.",
+	"hierarchy.", "ai.", "backup.", "federation.", "ado.",
 }
 
 // recognizedConfigKeys lists valid non-namespaced config keys.

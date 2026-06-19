@@ -10,7 +10,7 @@ func TestIsRecognizedConfigKey(t *testing.T) {
 		"export.auto", "dolt.auto-push", "jira.url", "custom.anything",
 		"doctor.suppress.git-hooks", "no-git-ops", "beads.role",
 		"status.custom", "ai.model", "backup.enabled", "import.path",
-		"dolt.local-only",
+		"dolt.local-only", "ado.org", "ado.project", "ado.projects",
 	}
 	for _, key := range recognized {
 		if !isRecognizedConfigKey(key) {
