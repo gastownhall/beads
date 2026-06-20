@@ -617,6 +617,40 @@ func (s *EmbeddedDoltStore) EventsSince(ctx context.Context, cursor storage.Even
 	return result, err
 }
 
+// RecordProvenanceEvent appends a provenance event idempotently. inserted is
+// false when the deterministic id already existed. Append-only — no update path.
+func (s *EmbeddedDoltStore) RecordProvenanceEvent(ctx context.Context, ev types.ProvenanceEvent) (id string, inserted bool, err error) {
+	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
+		var txErr error
+		id, inserted, txErr = issueops.RecordProvenanceEventInTx(ctx, tx, ev)
+		return txErr
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return id, inserted, nil
+}
+
+func (s *EmbeddedDoltStore) GetProvenanceEvents(ctx context.Context, issueID, kindFilter string) ([]types.ProvenanceEvent, error) {
+	var result []types.ProvenanceEvent
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetProvenanceEventsInTx(ctx, tx, issueID, kindFilter)
+		return err
+	})
+	return result, err
+}
+
+func (s *EmbeddedDoltStore) GetProvenanceByRef(ctx context.Context, ref string) ([]types.ProvenanceEvent, error) {
+	var result []types.ProvenanceEvent
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetProvenanceByRefInTx(ctx, tx, ref)
+		return err
+	})
+	return result, err
+}
+
 // RunInTransaction is implemented in transaction.go.
 
 // Close decrements the reference count if this store was opened via Open (the

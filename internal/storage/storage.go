@@ -404,6 +404,13 @@ type Storage interface {
 	GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error)
 	GetAllEventsSince(ctx context.Context, since time.Time) ([]*types.Event, error)
 
+	// Provenance is an append-only event log binding issues to opaque external
+	// artifacts (git SHAs, PRs, work-ids). Record is idempotent on a
+	// deterministic id; there is deliberately no update or delete operation.
+	RecordProvenanceEvent(ctx context.Context, ev types.ProvenanceEvent) (id string, inserted bool, err error)
+	GetProvenanceEvents(ctx context.Context, issueID string, kindFilter string) ([]types.ProvenanceEvent, error)
+	GetProvenanceByRef(ctx context.Context, ref string) ([]types.ProvenanceEvent, error)
+
 	// Aggregate counts — cheaper than materializing rows when only cardinality is needed.
 	// Filter.Limit and Filter.Offset are ignored by CountIssues; all others apply.
 

@@ -1529,6 +1529,47 @@ const (
 	EventLeaseReclaimed EventType = "lease_reclaimed"
 )
 
+// ProvenanceEvent is one entry in the append-only provenance log: a typed
+// binding from an issue to a structured external artifact (a git SHA, PR,
+// work-id, transcript, or branch).
+//
+// Unlike Event (a field-mutation audit record), a ProvenanceEvent records that
+// something happened in the world — a commit landed, a claim was made, work was
+// handed off — and ties it to an opaque external Ref. bd never interprets Actor
+// or Ref; only Kind and RefKind are structurally validated. This keeps the log
+// a primitive usable by any runtime without baking in orchestrator semantics.
+//
+// OccurredAt (event-time) is distinct from CreatedAt (ingest-time): a producer
+// may record a fact after it happened.
+type ProvenanceEvent struct {
+	ID         string     `json:"id"`
+	IssueID    string     `json:"issue_id"`
+	Kind       ProvKind   `json:"kind"`
+	Actor      *string    `json:"actor,omitempty"`
+	Ref        *string    `json:"ref,omitempty"`
+	RefKind    *string    `json:"ref_kind,omitempty"`
+	Payload    *string    `json:"payload,omitempty"`
+	Source     string     `json:"source"`
+	OccurredAt *time.Time `json:"occurred_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// ProvKind categorizes a provenance event.
+type ProvKind string
+
+// Provenance event kind constants. These are the only structurally-valid kinds;
+// the record path rejects anything outside this set.
+const (
+	ProvCut     ProvKind = "cut"
+	ProvClaim   ProvKind = "claim"
+	ProvSuspend ProvKind = "suspend"
+	ProvResume  ProvKind = "resume"
+	ProvHandoff ProvKind = "handoff"
+	ProvCommit  ProvKind = "commit"
+	ProvLand    ProvKind = "land"
+	ProvUsed    ProvKind = "used"
+)
+
 // BlockedIssue extends Issue with blocking information
 type BlockedIssue struct {
 	Issue
