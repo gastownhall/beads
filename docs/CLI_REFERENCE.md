@@ -104,7 +104,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd export](#bd-export) — Export issues to JSONL format
 - [bd federation](#bd-federation) — Manage peer-to-peer federation (requires CGO)
 - [bd import](#bd-import) — Import issues from a JSONL file or stdin into the database
-- [bd restore](#bd-restore) — Restore full history of a compacted issue from Dolt history
+- [bd restore](#bd-restore) — Restore the pre-compaction content of a compacted issue
 - [bd vc](#bd-vc) — Version control operations
   - [bd vc commit](#bd-vc-commit) — Create a commit with all staged changes
   - [bd vc merge](#bd-vc-merge) — Merge a branch into the current branch
@@ -2476,13 +2476,19 @@ bd import [file|-] [flags]
 
 ### bd restore
 
-Restore full history of a compacted issue from Dolt version history.
+Restore the pre-compaction content of a compacted issue.
 
-When an issue is compacted, its description and notes are truncated.
-This command queries Dolt's history tables to find the pre-compaction
-version and displays the full issue content.
+When an issue is compacted, its description/design/notes/acceptance criteria
+are summarized and the originals are archived to a compaction snapshot. This
+command recovers that original content.
 
-This is read-only and does not modify the database.
+By default it is read-only: it displays the archived content without modifying
+the database. Pass --apply to write the original content back into the issue
+and step its compaction level back down.
+
+If no archived snapshot exists (e.g. the issue was compacted by an older bd
+before snapshot archiving), restore falls back to a best-effort reconstruction
+from Dolt version history, which can only be displayed, not applied.
 
 ```
 bd restore <issue-id> [flags]
@@ -2491,7 +2497,8 @@ bd restore <issue-id> [flags]
 **Flags:**
 
 ```
-      --json   Output restore results in JSON format
+      --apply   Write the restored content back into the issue (default: display only)
+      --json    Output restore results in JSON format
 ```
 
 ### bd vc
