@@ -51,7 +51,7 @@ Modes:
 
 Tiers:
   - Tier 1: Semantic compression (30 days closed, 70% reduction)
-  - Tier 2: Ultra compression (90 days closed, 95% reduction)
+  - Tier 2: Ultra compression (90 days closed) - planned, not yet implemented
 
 Dolt Garbage Collection:
   With auto-commit per mutation, Dolt commit history grows over time. Use
@@ -122,6 +122,13 @@ Examples:
 		}
 		if activeModes > 1 {
 			fmt.Fprintf(os.Stderr, "Error: cannot use multiple modes together (--analyze, --apply, --auto are mutually exclusive)\n")
+			os.Exit(1)
+		}
+
+		// Only Tier 1 compaction is implemented. Reject other tiers up front with
+		// a clear message rather than failing deep inside a mode.
+		if compactTier != 1 {
+			fmt.Fprintf(os.Stderr, "Error: Tier %d compaction is not yet implemented; only --tier 1 is available\n", compactTier)
 			os.Exit(1)
 		}
 
@@ -496,8 +503,9 @@ func runCompactStats(ctx context.Context, store storage.DoltStorage) {
 				"total_size": tier1Size,
 			},
 			"tier2": map[string]interface{}{
-				"candidates": len(tier2),
-				"total_size": tier2Size,
+				"candidates":  len(tier2),
+				"total_size":  tier2Size,
+				"implemented": false,
 			},
 		}
 		outputJSON(output)
@@ -512,12 +520,9 @@ func runCompactStats(ctx context.Context, store storage.DoltStorage) {
 		fmt.Printf("  Estimated savings: %d bytes (70%%)\n\n", tier1Size*7/10)
 	}
 
-	fmt.Printf("Tier 2 (90+ days closed, Tier 1 compacted):\n")
+	fmt.Printf("Tier 2 (90+ days closed, Tier 1 compacted): not yet implemented\n")
 	fmt.Printf("  Candidates: %d\n", len(tier2))
 	fmt.Printf("  Total size: %d bytes\n", tier2Size)
-	if tier2Size > 0 {
-		fmt.Printf("  Estimated savings: %d bytes (95%%)\n", tier2Size*95/100)
-	}
 }
 
 func runCompactAnalyze(ctx context.Context, store storage.DoltStorage) {
@@ -911,7 +916,7 @@ func progressBar(current, total int) string {
 
 func init() {
 	compactCmd.Flags().BoolVar(&compactDryRun, "dry-run", false, "Preview without compacting")
-	compactCmd.Flags().IntVar(&compactTier, "tier", 1, "Compaction tier (1 or 2)")
+	compactCmd.Flags().IntVar(&compactTier, "tier", 1, "Compaction tier (only tier 1 is implemented)")
 	compactCmd.Flags().BoolVar(&compactAll, "all", false, "Process all candidates")
 	compactCmd.Flags().StringVar(&compactID, "id", "", "Compact specific issue")
 	compactCmd.Flags().BoolVar(&compactForce, "force", false, "Force compact (bypass checks, requires --id)")
