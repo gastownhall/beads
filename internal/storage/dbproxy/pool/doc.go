@@ -10,13 +10,24 @@
 //	BEADS_DOLT_POOL_SIZE=16      # optional: persistent backends (default 16, min 4)
 //	BEADS_DOLT_POOL_SOCKET=/path # optional: client socket (default <rootDir>/pool.sock)
 //
-// When BEADS_DOLT_POOL is truthy, uow.NewExternalDoltServerUOWProvider resolves
-// a BackendExternalPooled endpoint instead of the TCP byte-passthrough proxy:
-// bd spawns a db-proxy-child in pooled mode (reusing the same lock/pidfile/log/
-// idle-shutdown lifecycle), the child listens on the pooler unix socket, and bd
-// connects to that socket. The socket path is recorded in proxy.pid and bd's
-// DSN is built as a unix-socket DSN (the store layer also honors
-// BEADS_DOLT_SERVER_SOCKET for direct connections).
+// Two activation paths consult BEADS_DOLT_POOL, both spawning a db-proxy-child
+// in pooled mode (reusing the same lock/pidfile/log/idle-shutdown lifecycle)
+// that listens on a pooler unix socket recorded in proxy.pid:
+//
+//   - SERVER-MODE store path (the town's actual path): the direct dolt store
+//     (internal/storage/dolt, newServerMode -> openServerConnection over TCP to
+//     BEADS_DOLT_SERVER_HOST/PORT). maybeActivatePooler ensures a SHARED,
+//     long-lived pooler keyed to the resolved host:port under
+//     ~/.beads/pool/<host>_<port>/ — one pooler per Dolt endpoint, reused by
+//     every bd process via the proxy lock/pidfile — and rewrites
+//     cfg.ServerSocket to the pooler socket.
+//   - uow external-doltserver provider: NewExternalDoltServerUOWProvider
+//     resolves a BackendExternalPooled endpoint under the workspace server root.
+//
+// In both cases bd's DSN is built as a unix-socket DSN (the store layer also
+// honors BEADS_DOLT_SERVER_SOCKET for direct connections). Activation is a strict
+// no-op unless BEADS_DOLT_POOL is truthy, BEADS_TEST_MODE is unset, and the path
+// is plain TCP server mode (no operator socket, not a proxied-server config).
 //
 // # Routing summary
 //

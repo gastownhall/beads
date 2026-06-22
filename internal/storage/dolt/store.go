@@ -1004,6 +1004,13 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
+	// Opt-in: when BEADS_DOLT_POOL is set, front the resolved Dolt endpoint with
+	// the shared connection pooler and redirect this store's connection to the
+	// pooler socket. No-op unless opted in; see maybeActivatePooler. This runs
+	// BEFORE the connectivity check / DSN building so cfg.ServerSocket takes
+	// effect for the rest of newServerMode.
+	maybeActivatePooler(cfg)
+
 	// Clean stale circuit breaker files before checking — prevents leftover
 	// state from previous sessions poisoning fresh inits (GH#2598).
 	CleanStaleCircuitBreakerFiles()
