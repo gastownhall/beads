@@ -196,8 +196,10 @@ func TestMigration0053RepairsRigWispsShape(t *testing.T) {
 
 	body := string(sql)
 	for _, want := range []string{
+		"@has_wisps",
+		"INFORMATION_SCHEMA.TABLES",
 		"INSERT IGNORE INTO issues",
-		"FROM wisps WHERE issue_type = 'rig'",
+		"FROM wisps WHERE issue_type = ''rig''",
 		"SET ephemeral = 0",
 		"INSERT IGNORE INTO dependencies",
 		"FROM wisp_dependencies wd",
@@ -206,12 +208,41 @@ func TestMigration0053RepairsRigWispsShape(t *testing.T) {
 		"wisp_child_counters",
 		"INSERT IGNORE INTO child_counters",
 		"UPDATE child_counters",
-		"DELETE FROM wisps WHERE issue_type = 'rig'",
+		"DELETE FROM wisps WHERE issue_type = ''rig''",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("0053 migration missing rig repair marker %q", want)
 		}
 	}
+}
+
+func TestMigration0053NoopsWithoutWispTablesThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "rig-repair-no-wisps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-wisps dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	seedSQL := fmt.Sprintf(`
+DROP TABLE IF EXISTS wisp_child_counters;
+DROP TABLE IF EXISTS wisp_comments;
+DROP TABLE IF EXISTS wisp_events;
+DROP TABLE IF EXISTS wisp_dependencies;
+DROP TABLE IF EXISTS wisp_labels;
+DROP TABLE IF EXISTS wisps;
+DELETE FROM schema_migrations WHERE version = %d;
+`, LatestVersion())
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	if err != nil {
+		t.Fatalf("read 0053 migration: %v", err)
+	}
+	runDoltSQL(t, dir, seedSQL+"\n"+string(migrationSQL))
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "0")
 }
 
 func TestMigration0053RepairsRigWispsThroughDoltCLI(t *testing.T) {
@@ -258,7 +289,7 @@ INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (%s, 7);
 	if err != nil {
 		t.Fatalf("read 0053 migration: %v", err)
 	}
-	runDoltSQL(t, dir, seedSQL+"\n"+string(migrationSQL))
+	runDoltSQL(t, dir, seedSQL+"\n"+cliCompatibleMigrationSQL("0053_repair_rig_wisps.up.sql", string(migrationSQL)))
 
 	requireDoltCount(t, dir,
 		`SELECT COUNT(*) AS c FROM issues WHERE id = 'schema-cli-rig' AND issue_type = 'rig' AND ephemeral = 0`, "1")
