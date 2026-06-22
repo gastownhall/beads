@@ -283,7 +283,7 @@ Examples:
 //     --include-templates);
 //   - gate beads are excluded unless gates are explicitly requested via
 //     --type gate (list's default without --include-gates);
-//   - counting an infra type (agent/rig/role/message, or the store-configured
+//   - counting an infra type (agent/role/message, or the store-configured
 //     set) routes to the ephemeral wisps tier, like list's infra-type listing.
 //
 // The non-flag path never calls this function: bd count without
