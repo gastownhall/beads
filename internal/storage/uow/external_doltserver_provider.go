@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pool"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
@@ -41,12 +42,22 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: creating server root directory: %w", err)
 	}
 
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	opts := proxy.OpenOpts{
 		Backend:     proxy.BackendExternal,
 		LogFilePath: serverLogFilePath,
 		External:    external,
 		IdleTimeout: defaultProxyIdleTimeout,
-	})
+	}
+	// Opt-in: front the external Dolt server with the query-level connection
+	// pooler (a unix socket) instead of the TCP byte-passthrough proxy. Gated
+	// by BEADS_DOLT_POOL so default behavior is unchanged.
+	if pool.EnabledFromEnv() {
+		opts.Backend = proxy.BackendExternalPooled
+		opts.PoolSocket = pool.SocketFromEnv(absServerRootDir)
+		opts.PoolSize = pool.SizeFromEnv()
+	}
+
+	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, opts)
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}

@@ -107,6 +107,7 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 
 func buildDSN(ep proxy.Endpoint, database, user, password string) string {
 	return util.DoltServerDSN{
+		Socket:   ep.Socket, // set in pooled mode; empty for TCP passthrough
 		Host:     ep.Host,
 		Port:     ep.Port,
 		User:     user,

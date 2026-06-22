@@ -212,8 +212,8 @@ func (p *Pool) Borrow(ctx context.Context) (*backend, error) {
 	return b, nil
 }
 
-// waitUntil blocks on the cond until either it is signalled or the deadline
-// passes. It returns true if it may have been signalled (caller should
+// waitUntil blocks on the cond until either it is signaled or the deadline
+// passes. It returns true if it may have been signaled (caller should
 // re-check the predicate) and false if the deadline elapsed. p.mu must be held.
 func (p *Pool) waitUntil(deadline time.Time) bool {
 	remaining := time.Until(deadline)

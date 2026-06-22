@@ -79,6 +79,10 @@ func NewServer(ctx context.Context, sc ServerConfig) (*Server, error) {
 // Pool returns the underlying pool (for stats/inspection).
 func (s *Server) Pool() *Pool { return s.pool }
 
+// ActiveConns reports the number of client connections currently being served,
+// used by callers to drive idle-shutdown.
+func (s *Server) ActiveConns() int64 { return s.handler.ActiveConns() }
+
 // Socket returns the listening socket path.
 func (s *Server) Socket() string { return s.socket }
 
