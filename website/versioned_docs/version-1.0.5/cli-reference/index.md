@@ -20,6 +20,7 @@ This reference covers all 107 live top-level `bd` commands. Regenerate it with:
 - [`bd admin`](./admin.md)
 - [`bd ado`](./ado.md)
 - [`bd assign`](./assign.md)
+- [`bd attachment`](./attachment.md)
 - [`bd audit`](./audit.md)
 - [`bd backup`](./backup.md)
 - [`bd batch`](./batch.md)

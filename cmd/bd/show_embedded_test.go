@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -146,6 +147,48 @@ func TestEmbeddedShow(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("expected 'bug' in labels: %v", labels)
+		}
+	})
+
+	t.Run("show_includes_attachments", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Attachment show", "--type", "task")
+		source := filepath.Join(dir, "show-attachment.txt")
+		if err := os.WriteFile(source, []byte("show attachment"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		attachOut := bdAttachment(t, bd, dir, "add", issue.ID, source, "--json")
+		var added attachmentListItem
+		if err := json.Unmarshal([]byte(attachOut), &added); err != nil {
+			t.Fatalf("parse attachment add JSON: %v\n%s", err, attachOut)
+		}
+
+		out := bdShowRaw(t, bd, dir, issue.ID)
+		if !strings.Contains(out, "ATTACHMENTS") {
+			t.Fatalf("expected ATTACHMENTS section in show output:\n%s", out)
+		}
+		if !strings.Contains(out, "show-attachment.txt") {
+			t.Fatalf("expected attachment filename in show output:\n%s", out)
+		}
+		if !strings.Contains(out, added.ShortHash) {
+			t.Fatalf("expected attachment short hash %s in show output:\n%s", added.ShortHash, out)
+		}
+
+		m := bdShowDetails(t, bd, dir, issue.ID)
+		if got := m["attachment_count"]; got != float64(1) {
+			t.Fatalf("attachment_count = %v, want 1", got)
+		}
+		attachments, ok := m["attachments"].([]interface{})
+		if !ok || len(attachments) != 1 {
+			t.Fatalf("attachments = %#v, want one attachment", m["attachments"])
+		}
+
+		storedPath := filepath.Join(beadsDir, filepath.FromSlash(added.StorageRelPath))
+		if err := os.Remove(storedPath); err != nil {
+			t.Fatalf("remove stored attachment for missing marker: %v", err)
+		}
+		missingOut := bdShowRaw(t, bd, dir, issue.ID)
+		if !strings.Contains(missingOut, "(missing)") {
+			t.Fatalf("expected missing marker in show output:\n%s", missingOut)
 		}
 	})
 

@@ -185,6 +185,27 @@ func (h *HookFiringStore) AddIssueComment(ctx context.Context, issueID, author, 
 	return comment, nil
 }
 
+// AddAttachment adds attachment metadata and fires on_update.
+func (h *HookFiringStore) AddAttachment(ctx context.Context, attachment *types.Attachment) (*types.Attachment, error) {
+	result, err := h.inner.AddAttachment(ctx, attachment)
+	if err != nil {
+		return nil, err
+	}
+	if result != nil {
+		h.fireHookByID(ctx, hooks.EventUpdate, result.IssueID)
+	}
+	return result, nil
+}
+
+// RemoveAttachment removes attachment metadata and fires on_update.
+func (h *HookFiringStore) RemoveAttachment(ctx context.Context, issueID, attachmentID string) error {
+	if err := h.inner.RemoveAttachment(ctx, issueID, attachmentID); err != nil {
+		return err
+	}
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
+	return nil
+}
+
 // ── Transaction support ─────────────────────────────────────────────
 
 // RunInTransaction wraps the callback's transaction with hook tracking.
@@ -556,6 +577,12 @@ var (
 	} = (*HookFiringStore)(nil)
 	_ interface {
 		AddIssueComment(context.Context, string, string, string) (*types.Comment, error)
+	} = (*HookFiringStore)(nil)
+	_ interface {
+		AddAttachment(context.Context, *types.Attachment) (*types.Attachment, error)
+	} = (*HookFiringStore)(nil)
+	_ interface {
+		RemoveAttachment(context.Context, string, string) error
 	} = (*HookFiringStore)(nil)
 	_ interface {
 		ReopenIssue(context.Context, string, string, string) error

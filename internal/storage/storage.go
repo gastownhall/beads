@@ -26,6 +26,9 @@ var ErrNotClaimable = errors.New("issue not claimable")
 // ErrNotFound is returned when a requested entity does not exist in the database.
 var ErrNotFound = errors.New("not found")
 
+// ErrAmbiguous is returned when a selector matches multiple entities.
+var ErrAmbiguous = errors.New("ambiguous selector")
+
 // ErrNotInitialized is returned when the database has not been initialized
 // (e.g., issue_prefix config is missing).
 var ErrNotInitialized = errors.New("database not initialized")
@@ -83,6 +86,12 @@ type Storage interface {
 	GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error)
 	GetAllEventsSince(ctx context.Context, since time.Time) ([]*types.Event, error)
 
+	// Attachments
+	AddAttachment(ctx context.Context, attachment *types.Attachment) (*types.Attachment, error)
+	ListAttachments(ctx context.Context, issueID string) ([]*types.Attachment, error)
+	ResolveAttachment(ctx context.Context, issueID, selector string) (*types.Attachment, error)
+	RemoveAttachment(ctx context.Context, issueID, attachmentID string) error
+
 	// Aggregate counts — cheaper than materializing rows when only cardinality is needed.
 	// Filter.Limit and Filter.Offset are ignored by CountIssues; all others apply.
 
@@ -97,6 +106,8 @@ type Storage interface {
 	CountDependencies(ctx context.Context, issueID string) (int64, error)
 	// CountIssueComments returns the number of comments on an issue.
 	CountIssueComments(ctx context.Context, issueID string) (int64, error)
+	// CountAttachments returns the number of file attachments on an issue.
+	CountAttachments(ctx context.Context, issueID string) (int64, error)
 	// CountEvents returns the number of audit events for an issue, capped at limit
 	// (or unbounded if limit == 0).
 	CountEvents(ctx context.Context, issueID string, limit int) (int64, error)
@@ -117,6 +128,8 @@ type Storage interface {
 	IterDependenciesWithMetadata(ctx context.Context, issueID string) (Iter[types.IssueWithDependencyMetadata], error)
 	// IterIssueComments streams comments on an issue, ordered by created_at.
 	IterIssueComments(ctx context.Context, issueID string) (Iter[types.Comment], error)
+	// IterAttachments streams file attachment metadata on an issue.
+	IterAttachments(ctx context.Context, issueID string) (Iter[types.Attachment], error)
 	// IterEvents streams the audit-trail events for an issue, ordered by
 	// created_at descending. limit==0 means unbounded.
 	IterEvents(ctx context.Context, issueID string, limit int) (Iter[types.Event], error)

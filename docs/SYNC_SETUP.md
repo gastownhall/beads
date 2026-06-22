@@ -221,6 +221,7 @@ bd list                            # sees the closed task
 - **Commit before pulling** — if you have uncommitted working set changes, `bd dolt pull` will fail with "cannot merge with uncommitted changes". Run `bd dolt commit` first.
 - **Push before switching machines** — unpushed changes only exist locally.
 - **Do not use JSONL as sync** — `.beads/issues.jsonl` is an export for viewers and interchange. It is not the source of truth, not a full database backup, and cannot safely reconcile deletes or pruning.
+- **Back up attachment bytes separately** — attachment metadata syncs through Dolt, but plain files under `.beads/attachments` are local-only. After metadata-only sync, `bd show` and `bd attachment list` report absent files as missing. See [ATTACHMENTS.md](ATTACHMENTS.md).
 
 ## Troubleshooting
 

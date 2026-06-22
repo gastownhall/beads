@@ -8,6 +8,12 @@
 
 <document path="docs/intro.md">
 
+---
+id: intro
+title: Introduction
+sidebar_position: 1
+slug: /
+---
 
 # Beads Documentation
 
@@ -96,6 +102,11 @@ The magic is automatic synchronization via Dolt's version-controlled database wi
 
 <document path="docs/getting-started/ide-setup.md">
 
+---
+id: ide-setup
+title: IDE Setup
+sidebar_position: 3
+---
 
 # IDE Setup for AI Agents
 
@@ -309,6 +320,11 @@ bd setup claude --check   # or cursor, aider
 
 <document path="docs/getting-started/installation.md">
 
+---
+id: installation
+title: Installation
+sidebar_position: 1
+---
 
 # Installing bd
 
@@ -584,6 +600,11 @@ After installation:
 
 <document path="docs/getting-started/quickstart.md">
 
+---
+id: quickstart
+title: Quick Start
+sidebar_position: 2
+---
 
 # Beads Quick Start
 
@@ -955,6 +976,11 @@ See the [repository README](https://github.com/gastownhall/beads/blob/main/READM
 
 <document path="docs/getting-started/upgrading.md">
 
+---
+id: upgrading
+title: Upgrading
+sidebar_position: 4
+---
 
 # Upgrading bd
 
@@ -1196,6 +1222,11 @@ bd dolt pull
 
 <document path="docs/core-concepts/index.md">
 
+---
+id: index
+title: Core Concepts
+sidebar_position: 1
+---
 
 # Core Concepts
 
@@ -1272,6 +1303,11 @@ Declarative workflow templates:
 
 <document path="docs/core-concepts/hash-ids.md">
 
+---
+id: hash-ids
+title: Hash-based IDs
+sidebar_position: 5
+---
 
 # Hash-based IDs
 
@@ -1401,6 +1437,11 @@ bd show bd-new --json | jq '.original_id'
 
 <document path="docs/core-concepts/issues.md">
 
+---
+id: issues
+title: Issues & Dependencies
+sidebar_position: 2
+---
 
 # Issues & Dependencies
 
@@ -1584,6 +1625,11 @@ bd list --status open --priority 1 --type bug --json
 
 <document path="docs/core-concepts/labels.md">
 
+---
+id: labels
+title: Labels
+slug: /core-concepts/labels
+---
 
 # Labels in Beads
 
@@ -2373,6 +2419,11 @@ bd doctor
 
 <document path="docs/core-concepts/metadata.md">
 
+---
+id: metadata
+title: Issue Metadata
+slug: /core-concepts/metadata
+---
 
 # Issue Metadata
 
@@ -2458,6 +2509,11 @@ Avoid these prefixes in user-defined keys to prevent conflicts with future Beads
 
 <document path="docs/core-concepts/sync-concepts.md">
 
+---
+id: sync-concepts
+title: Sync Concepts
+slug: /core-concepts/sync-concepts
+---
 
 # Sync Concepts
 
@@ -2531,6 +2587,11 @@ bd bootstrap
 
 <document path="docs/architecture/index.md">
 
+---
+sidebar_position: 1
+title: Architecture Overview
+description: Understanding Beads' three-layer data model
+---
 
 # Architecture Overview
 
@@ -2761,6 +2822,7 @@ This reference covers all 107 live top-level `bd` commands. Regenerate it with:
 - [`bd admin`](./admin.md)
 - [`bd ado`](./ado.md)
 - [`bd assign`](./assign.md)
+- [`bd attachment`](./attachment.md)
 - [`bd audit`](./audit.md)
 - [`bd backup`](./backup.md)
 - [`bd batch`](./batch.md)
@@ -3167,6 +3229,86 @@ bd assign <id> <name>
 
 </document>
 
+<document path="docs/cli-reference/attachment.md">
+
+
+<!-- AUTO-GENERATED: do not edit manually -->
+Generated from `bd help --doc attachment`
+
+## bd attachment
+
+Manage issue file attachments
+
+```
+bd attachment
+```
+
+**Aliases:** attachments
+
+### bd attachment add
+
+Attach a file to an issue
+
+```
+bd attachment add [issue-id] [path]
+```
+
+### bd attachment copy
+
+Copy an attachment out to a file or directory
+
+```
+bd attachment copy [issue-id] [filename-or-hash] [target] [flags]
+```
+
+**Flags:**
+
+```
+  -f, --force   Overwrite the target file if it exists
+```
+
+### bd attachment fsck
+
+Find unreachable attachment files
+
+```
+bd attachment fsck
+```
+
+### bd attachment list
+
+List attachments for an issue
+
+```
+bd attachment list [issue-id]
+```
+
+### bd attachment prune
+
+Remove unreachable attachment files
+
+```
+bd attachment prune [flags]
+```
+
+**Flags:**
+
+```
+  -n, --dry-run   Show unreachable files without removing them
+```
+
+### bd attachment remove
+
+Remove an attachment from an issue
+
+```
+bd attachment remove [issue-id] [filename-or-hash]
+```
+
+**Aliases:** rm
+
+</document>
+
 <document path="docs/cli-reference/audit.md">
 
 
@@ -3331,7 +3473,9 @@ bd backup status
 Sync the current beads database to the configured Dolt backup destination.
 
 This pushes the entire database state (all branches, full history) to the
-backup location configured with 'bd backup init'.
+backup location configured with 'bd backup init'. Attachment metadata is part
+of the database, but attachment bytes under .beads/attachments are local files
+and need a separate filesystem backup.
 
 The backup is atomic — if the sync fails, the previous backup state is preserved.
 
@@ -10206,6 +10350,11 @@ bd worktree remove <name> [flags]
 
 <document path="docs/workflows/index.md">
 
+---
+id: index
+title: Workflows
+sidebar_position: 1
+---
 
 # Workflows
 
@@ -10300,6 +10449,11 @@ bd close release-1.0.0.1
 
 <document path="docs/workflows/formulas.md">
 
+---
+id: formulas
+title: Formulas
+sidebar_position: 3
+---
 
 # Formulas
 
@@ -10552,6 +10706,11 @@ type = "human"
 
 <document path="docs/workflows/gates.md">
 
+---
+id: gates
+title: Gates
+sidebar_position: 4
+---
 
 # Gates
 
@@ -10768,6 +10927,11 @@ waits_for = ["test-a", "test-b"]  # Fan-in: waits for all
 
 <document path="docs/workflows/molecules.md">
 
+---
+id: molecules
+title: Molecules
+sidebar_position: 2
+---
 
 # Molecules
 
@@ -10934,6 +11098,11 @@ bd ready  # Shows next steps
 
 <document path="docs/workflows/wisps.md">
 
+---
+id: wisps
+title: Wisps
+sidebar_position: 5
+---
 
 # Wisps
 
@@ -11063,6 +11232,11 @@ bd wisp cleanup --completed  # Remove only completed
 
 <document path="docs/multi-agent/index.md">
 
+---
+id: index
+title: Multi-Agent
+sidebar_position: 1
+---
 
 # Multi-Agent Coordination
 
@@ -11135,6 +11309,11 @@ bd dep add bd-42 external:other-repo/bd-100
 
 <document path="docs/multi-agent/coordination.md">
 
+---
+id: coordination
+title: Agent Coordination
+sidebar_position: 3
+---
 
 # Agent Coordination
 
@@ -11292,6 +11471,11 @@ bd list --label-any needs-review
 
 <document path="docs/multi-agent/routing.md">
 
+---
+id: routing
+title: Routing
+sidebar_position: 2
+---
 
 # Multi-Repo Routing
 
@@ -11408,6 +11592,11 @@ bd hydrate --from backend-repo
 
 <document path="docs/integrations/index.md">
 
+---
+id: index
+title: Integrations
+slug: /integrations
+---
 
 # Integrations
 
@@ -11450,6 +11639,11 @@ These integrations use the Beads MCP server rather than a dedicated `bd setup` r
 
 <document path="docs/integrations/aider.md">
 
+---
+id: aider
+title: Aider
+sidebar_position: 3
+---
 
 # Aider Integration
 
@@ -11566,6 +11760,11 @@ bd doctor
 
 <document path="docs/integrations/claude-code.md">
 
+---
+id: claude-code
+title: Claude Code
+sidebar_position: 1
+---
 
 # Claude Code Integration
 
@@ -11751,6 +11950,11 @@ bd init --quiet
 
 <document path="docs/integrations/codex.md">
 
+---
+id: codex
+title: Codex
+sidebar_position: 2
+---
 
 # Codex Integration
 
@@ -11778,6 +11982,10 @@ The Beads Codex plugin stores hooks at `plugins/beads/.codex-plugin/hooks/hooks.
 
 <document path="docs/integrations/cody.md">
 
+---
+id: cody
+title: Sourcegraph Cody
+---
 
 # Sourcegraph Cody Integration
 
@@ -11800,6 +12008,10 @@ bd setup cody --remove
 
 <document path="docs/integrations/cursor.md">
 
+---
+id: cursor
+title: Cursor
+---
 
 # Cursor Integration
 
@@ -11822,6 +12034,10 @@ bd setup cursor --remove
 
 <document path="docs/integrations/factory.md">
 
+---
+id: factory
+title: Factory.ai Droid
+---
 
 # Factory.ai Droid Integration
 
@@ -11844,6 +12060,10 @@ bd setup factory --remove
 
 <document path="docs/integrations/gemini.md">
 
+---
+id: gemini
+title: Gemini CLI
+---
 
 # Gemini CLI Integration
 
@@ -11882,6 +12102,11 @@ bd setup gemini --project --remove
 
 <document path="docs/integrations/github-copilot.md">
 
+---
+id: github-copilot
+title: GitHub Copilot
+sidebar_position: 4
+---
 
 # GitHub Copilot Integration
 
@@ -12027,6 +12252,11 @@ Git hooks are optional. They refresh exports and legacy fallback checks, while i
 
 <document path="docs/integrations/junie.md">
 
+---
+id: junie
+title: Junie
+sidebar_position: 4
+---
 
 # Junie Integration
 
@@ -12246,6 +12476,10 @@ This removes:
 
 <document path="docs/integrations/kilocode.md">
 
+---
+id: kilocode
+title: Kilo Code
+---
 
 # Kilo Code Integration
 
@@ -12268,6 +12502,11 @@ bd setup kilocode --remove
 
 <document path="docs/integrations/mcp-server.md">
 
+---
+id: mcp-server
+title: MCP Server
+sidebar_position: 2
+---
 
 # MCP Server
 
@@ -12454,6 +12693,10 @@ bd init --quiet
 
 <document path="docs/integrations/mux.md">
 
+---
+id: mux
+title: Mux
+---
 
 # Mux Integration
 
@@ -12496,6 +12739,10 @@ bd setup mux --global --remove
 
 <document path="docs/integrations/opencode.md">
 
+---
+id: opencode
+title: OpenCode
+---
 
 # OpenCode Integration
 
@@ -12518,6 +12765,10 @@ bd setup opencode --remove
 
 <document path="docs/integrations/windsurf.md">
 
+---
+id: windsurf
+title: Windsurf
+---
 
 # Windsurf Integration
 
@@ -12540,6 +12791,11 @@ bd setup windsurf --remove
 
 <document path="docs/community-tools.md">
 
+---
+id: community-tools
+title: Community Tools
+slug: /community-tools
+---
 
 # Beads Community Tools
 
@@ -12664,6 +12920,11 @@ Found or built a tool? Open a PR to add it to this list or comment on discussion
 
 <document path="docs/recovery/index.md">
 
+---
+sidebar_position: 1
+title: Recovery Overview
+description: Diagnose and resolve common Beads issues
+---
 
 # Recovery Overview
 
@@ -12709,6 +12970,11 @@ If these runbooks don't resolve your issue:
 
 <document path="docs/recovery/circular-dependencies.md">
 
+---
+sidebar_position: 4
+title: Circular Dependencies
+description: Detect and break dependency cycles
+---
 
 # Circular Dependencies Recovery
 
@@ -12771,6 +13037,11 @@ bd ready
 
 <document path="docs/recovery/database-corruption.md">
 
+---
+sidebar_position: 2
+title: Database Corruption
+description: Recover from Dolt database corruption
+---
 
 # Database Corruption Recovery
 
@@ -12836,6 +13107,11 @@ dolt sql-server
 
 <document path="docs/recovery/merge-conflicts.md">
 
+---
+sidebar_position: 3
+title: Merge Conflicts
+description: Resolve Dolt merge conflicts
+---
 
 # Merge Conflicts Recovery
 
@@ -12893,6 +13169,11 @@ bd dolt push
 
 <document path="docs/recovery/sync-failures.md">
 
+---
+sidebar_position: 5
+title: Sync Failures
+description: Recover from Dolt sync failures
+---
 
 # Sync Failures Recovery
 
@@ -12971,6 +13252,11 @@ bd doctor
 
 <document path="docs/recovery/uninstalling.md">
 
+---
+id: uninstalling
+title: Uninstalling
+slug: /recovery/uninstalling
+---
 
 # Uninstalling Beads
 
@@ -13103,6 +13389,11 @@ bd init
 
 <document path="docs/reference/advanced.md">
 
+---
+id: advanced
+title: Advanced Features
+sidebar_position: 3
+---
 
 # Advanced Features
 
@@ -13285,6 +13576,11 @@ bd list
 
 <document path="docs/reference/antivirus.md">
 
+---
+id: antivirus
+title: Antivirus False Positives
+slug: /reference/antivirus
+---
 
 # Antivirus False Positives
 
@@ -13496,6 +13792,11 @@ This helps us track and address false positives across different antivirus vendo
 
 <document path="docs/reference/configuration.md">
 
+---
+id: configuration
+title: Configuration
+sidebar_position: 1
+---
 
 # Configuration
 
@@ -13774,6 +14075,11 @@ bd info --json | jq '.config' # Quick snapshot
 
 <document path="docs/reference/faq.md">
 
+---
+id: faq
+title: FAQ
+sidebar_position: 5
+---
 
 # Frequently Asked Questions
 
@@ -13932,6 +14238,11 @@ bd hooks status
 
 <document path="docs/reference/git-integration.md">
 
+---
+id: git-integration
+title: Git Integration
+sidebar_position: 2
+---
 
 # Git Integration
 
@@ -14053,6 +14364,11 @@ bd duplicates --auto-merge
 
 <document path="docs/reference/troubleshooting.md">
 
+---
+id: troubleshooting
+title: Troubleshooting
+sidebar_position: 4
+---
 
 # Troubleshooting
 
