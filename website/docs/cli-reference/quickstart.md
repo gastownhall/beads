@@ -13,5 +13,5 @@ Generated from `bd help --doc quickstart`
 Display a quick start guide showing common bd workflows and patterns.
 
 ```
-bd quickstart
+bd quickstart [flags]
 ```

@@ -7,7 +7,7 @@ sidebar_position: 0
 # CLI Reference
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Reference for bd Latest. Generated from `bd help --list` and `bd help --doc <command>`.
+Reference for bd Latest. Generated from `bd help --docs-root`.
 
 This reference covers all 107 live top-level `bd` commands. Regenerate it with:
 

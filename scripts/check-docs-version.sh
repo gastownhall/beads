@@ -102,7 +102,7 @@ if [ "$MISMATCH" -ne 0 ]; then
             echo "  npx docusaurus docs:version $CANONICAL"
             echo "  cd .."
             echo "  # Ensure website/docusaurus.config.ts lastVersion is '$CANONICAL'"
-            echo "  ./scripts/generate-cli-docs.sh ./bd"
+            echo "  ./scripts/generate-cli-docs.sh --versioned $CANONICAL ./bd"
             echo "  ./scripts/generate-llms-full.sh"
             echo "  BEADS_REQUIRE_RELEASE_DOCS=1 ./scripts/check-docs-version.sh"
             ;;

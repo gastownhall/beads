@@ -26,7 +26,7 @@ Commands:
   show   Show formula details, steps, and composition rules
 
 ```
-bd formula
+bd formula [flags]
 ```
 
 ### bd formula convert
@@ -105,5 +105,5 @@ Examples:
   bd formula show security-audit --json
 
 ```
-bd formula show <formula-name>
+bd formula show <formula-name> [flags]
 ```

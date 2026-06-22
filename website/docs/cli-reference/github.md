@@ -20,7 +20,7 @@ Configuration can be set via 'bd config' or environment variables:
   github.url / GITHUB_API_URL           - Custom API URL (GitHub Enterprise)
 
 ```
-bd github
+bd github [flags]
 ```
 
 ### bd github pull
@@ -62,7 +62,7 @@ bd github push [bead-ids...] [flags]
 List GitHub repositories that the configured token has access to.
 
 ```
-bd github repos
+bd github repos [flags]
 ```
 
 ### bd github status
@@ -70,7 +70,7 @@ bd github repos
 Display current GitHub configuration and sync status.
 
 ```
-bd github status
+bd github status [flags]
 ```
 
 ### bd github sync

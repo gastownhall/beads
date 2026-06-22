@@ -79,5 +79,5 @@ RECOVERY
 
 
 ```
-bd init-safety
+bd init-safety [flags]
 ```

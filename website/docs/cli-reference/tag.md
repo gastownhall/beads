@@ -19,5 +19,5 @@ Examples:
   bd tag bd-123 needs-review
 
 ```
-bd tag <id> <label>
+bd tag <id> <label> [flags]
 ```

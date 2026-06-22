@@ -24,7 +24,7 @@ SUBCOMMANDS:
   human stats             Show summary statistics for human-needed beads
 
 ```
-bd human
+bd human [flags]
 ```
 
 ### bd human dismiss
@@ -99,5 +99,5 @@ Example:
   bd human stats
 
 ```
-bd human stats
+bd human stats [flags]
 ```

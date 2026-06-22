@@ -19,7 +19,7 @@ Each line is one event. This file is intended to be versioned in git and used fo
 Entries are append-only. Labeling creates a new "label" entry that references a parent entry.
 
 ```
-bd audit
+bd audit [flags]
 ```
 
 ### bd audit label

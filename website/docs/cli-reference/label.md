@@ -13,7 +13,7 @@ Generated from `bd help --doc label`
 Manage issue labels
 
 ```
-bd label
+bd label [flags]
 ```
 
 ### bd label add
@@ -21,7 +21,7 @@ bd label
 Add a label to one or more issues
 
 ```
-bd label add [issue-id...] [label]
+bd label add [issue-id...] [label] [flags]
 ```
 
 ### bd label list
@@ -29,7 +29,7 @@ bd label add [issue-id...] [label]
 List labels for an issue
 
 ```
-bd label list [issue-id]
+bd label list [issue-id] [flags]
 ```
 
 ### bd label list-all
@@ -37,7 +37,7 @@ bd label list [issue-id]
 List all unique labels in the database
 
 ```
-bd label list-all
+bd label list-all [flags]
 ```
 
 ### bd label propagate
@@ -45,7 +45,7 @@ bd label list-all
 Push a label from a parent down to all direct children that don't already have it. Useful for applying branch: labels across an epic's subtasks.
 
 ```
-bd label propagate [parent-id] [label]
+bd label propagate [parent-id] [label] [flags]
 ```
 
 ### bd label remove
@@ -53,5 +53,5 @@ bd label propagate [parent-id] [label]
 Remove a label from one or more issues
 
 ```
-bd label remove [issue-id...] [label]
+bd label remove [issue-id...] [label] [flags]
 ```

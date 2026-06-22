@@ -29,7 +29,7 @@ DoltHub is recommended for cloud backup:
   Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
 
 ```
-bd backup
+bd backup [flags]
 ```
 
 ### bd backup init
@@ -50,7 +50,7 @@ DoltHub (recommended for cloud backup):
 After adding, run 'bd backup sync' to push your data.
 
 ```
-bd backup init <path>
+bd backup init <path> [flags]
 ```
 
 **Aliases:** add
@@ -63,7 +63,7 @@ This unregisters the backup remote from Dolt and removes the local
 backup configuration. The backup data at the destination is not deleted.
 
 ```
-bd backup remove
+bd backup remove [flags]
 ```
 
 **Aliases:** rm
@@ -99,7 +99,7 @@ bd backup restore [path] [flags]
 Show last backup status
 
 ```
-bd backup status
+bd backup status [flags]
 ```
 
 ### bd backup sync
@@ -114,5 +114,5 @@ The backup is atomic — if the sync fails, the previous backup state is preserv
 Run 'bd backup init &lt;path&gt;' first to configure a destination.
 
 ```
-bd backup sync
+bd backup sync [flags]
 ```

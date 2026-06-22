@@ -29,5 +29,5 @@ Examples:
   bd recompute-blocked --json   # Machine-parseable &#123;"rows_corrected": N&#125;
 
 ```
-bd recompute-blocked
+bd recompute-blocked [flags]
 ```

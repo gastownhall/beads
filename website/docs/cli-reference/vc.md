@@ -19,7 +19,7 @@ Note: 'bd history', 'bd diff', and 'bd branch' also work for quick access.
 This subcommand provides additional operations like merge and commit.
 
 ```
-bd vc
+bd vc [flags]
 ```
 
 ### bd vc commit
@@ -72,5 +72,5 @@ Examples:
   bd vc status
 
 ```
-bd vc status
+bd vc status [flags]
 ```

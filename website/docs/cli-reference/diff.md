@@ -23,5 +23,5 @@ Examples:
   bd diff abc123 def456         # Compare two specific commits
 
 ```
-bd diff <from-ref> <to-ref>
+bd diff <from-ref> <to-ref> [flags]
 ```

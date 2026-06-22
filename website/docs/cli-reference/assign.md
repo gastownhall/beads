@@ -19,5 +19,5 @@ Examples:
   bd assign bd-123 ""      # unassign
 
 ```
-bd assign <id> <name>
+bd assign <id> <name> [flags]
 ```

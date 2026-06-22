@@ -30,7 +30,7 @@ Examples:
   bd merge-slot release             # Release the slot
 
 ```
-bd merge-slot
+bd merge-slot [flags]
 ```
 
 ### bd merge-slot acquire
@@ -67,7 +67,7 @@ Returns:
   - not found: no merge slot exists for this rig
 
 ```
-bd merge-slot check
+bd merge-slot check [flags]
 ```
 
 ### bd merge-slot create
@@ -78,7 +78,7 @@ The slot ID is automatically generated based on the beads prefix (e.g., gt-merge
 The slot is created with status=open (available).
 
 ```
-bd merge-slot create
+bd merge-slot create [flags]
 ```
 
 ### bd merge-slot release

@@ -13,7 +13,7 @@ Generated from `bd help --doc rules`
 Audit and compact Claude rules
 
 ```
-bd rules
+bd rules [flags]
 ```
 
 ### bd rules audit

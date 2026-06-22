@@ -27,5 +27,5 @@ For agents or environments that do not auto-inject hook output, use
 'bd init --agents-profile=full' to embed the complete command reference.
 
 ```
-bd onboard
+bd onboard [flags]
 ```

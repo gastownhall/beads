@@ -21,5 +21,5 @@ Examples:
 
 
 ```
-bd types
+bd types [flags]
 ```

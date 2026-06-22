@@ -72,7 +72,6 @@ fi
 GEN_PATHSPECS=(
     "docs/CLI_REFERENCE.md"
     "website/docs/cli-reference"
-    ":(glob)website/versioned_docs/*/cli-reference/**"
     "website/static/llms-full.txt"
 )
 
@@ -114,12 +113,8 @@ surface_fingerprint() {
                 cat "$f"
             fi
         done
-        local dirs=()
-        for d in website/docs/cli-reference website/versioned_docs/*/cli-reference; do
-            [ -d "$d" ] && dirs+=("$d")
-        done
-        if [ "${#dirs[@]}" -gt 0 ]; then
-            find "${dirs[@]}" -type f -name '*.md' | sort | while IFS= read -r f; do
+        if [ -d website/docs/cli-reference ]; then
+            find website/docs/cli-reference -type f -name '*.md' | sort | while IFS= read -r f; do
                 printf '== %s\n' "$f"
                 cat "$f"
             done

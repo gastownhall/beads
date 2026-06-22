@@ -20,7 +20,7 @@ The upgrade command helps you stay aware of bd version changes:
 Version tracking is automatic - bd updates metadata.json on every run.
 
 ```
-bd upgrade
+bd upgrade [flags]
 ```
 
 ### bd upgrade ack
@@ -39,7 +39,7 @@ Examples:
   bd upgrade ack --json
 
 ```
-bd upgrade ack
+bd upgrade ack [flags]
 ```
 
 ### bd upgrade review
@@ -57,7 +57,7 @@ Examples:
   bd upgrade review --json
 
 ```
-bd upgrade review
+bd upgrade review [flags]
 ```
 
 ### bd upgrade status
@@ -72,5 +72,5 @@ Examples:
   bd upgrade status --json
 
 ```
-bd upgrade status
+bd upgrade status [flags]
 ```
