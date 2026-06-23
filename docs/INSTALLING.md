@@ -39,6 +39,16 @@ Beads has several components - here's what they are and when you need them:
 brew install beads
 ```
 
+Homebrew core's `beads` formula is the supported Homebrew package. If you
+previously installed the old tap formula as `bd`, migrate to the core formula:
+
+```bash
+brew uninstall bd
+brew untap gastownhall/beads 2>/dev/null || true
+brew untap steveyegge/beads 2>/dev/null || true
+brew install beads
+```
+
 **Why Homebrew?**
 - ✅ Simple one-command install
 - ✅ Automatic updates via `brew upgrade`
