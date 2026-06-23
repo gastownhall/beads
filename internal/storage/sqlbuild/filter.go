@@ -13,6 +13,14 @@ import (
 // BuildIssueFilterClauses builds WHERE clause fragments and args from a query
 // string and IssueFilter. The tables parameter controls which table names are
 // referenced in subqueries (issues vs wisps).
+//
+// Invariant: every clause must reference only main-table columns or correlated
+// subqueries keyed by id — never the counts mega-query's aggregate aliases
+// (labels_json, dep_count, rdep_count, comment_count, parent_id, deps_json).
+// SearchCountsSQL renders this WHERE inside a pre-join subquery where those
+// aliases are out of scope; a count-driven predicate (e.g. "issues with >5
+// blockers") cannot live here and would need a separate outer predicate
+// parameter. See the SearchCountsSQL doc comment for why a violation fails loud.
 func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables FilterTables) ([]string, []any, error) {
 	var whereClauses []string
 	var args []any

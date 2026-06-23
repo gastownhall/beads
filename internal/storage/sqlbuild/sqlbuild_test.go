@@ -216,6 +216,35 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		}
 	}
 
+	// Filter-before-join structure (predicate form): whereSQL is applied to the
+	// main table in a derived table that closes before the first aggregate LEFT
+	// JOIN. Locking this prevents a regression back to the filter-after-join
+	// shape that materialized every aggregate before pruning. "SELECT i.*" is
+	// the derived driver's marker — "FROM (" alone is ambiguous, since the
+	// reverse-blocker subquery also nests one.
+	driverEnd := strings.Index(sql, ") i")
+	firstJoin := strings.Index(sql, "LEFT JOIN")
+	if !strings.Contains(sql, "SELECT i.*") || driverEnd < 0 {
+		t.Fatalf("counts SQL must wrap the main table in a derived subquery; got:\n%s", sql)
+	}
+	if firstJoin < 0 || driverEnd > firstJoin {
+		t.Fatalf("derived driver must close before the first aggregate LEFT JOIN")
+	}
+	if idx := strings.Index(sql, "WHERE x = ?"); idx < 0 || idx > driverEnd {
+		t.Errorf("WHERE filter must appear inside the derived driver (before %q)", ") i")
+	}
+	// ORDER BY and LIMIT must stay AFTER the joins, and appear exactly once —
+	// the ready-work path passes a parameterized ORDER BY, so duplicating it
+	// would desync the placeholder/arg counts.
+	for _, outer := range []string{"ORDER BY y", "LIMIT 5"} {
+		if strings.Count(sql, outer) != 1 {
+			t.Errorf("%q must appear exactly once, got %d", outer, strings.Count(sql, outer))
+		}
+		if idx := strings.Index(sql, outer); idx < firstJoin {
+			t.Errorf("%q must appear after the aggregate joins", outer)
+		}
+	}
+
 	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, true)
 	if strings.Contains(noWispDeps, "UNION ALL") {
 		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
@@ -233,6 +262,12 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, false)
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
+	}
+	// The by-IDs form keeps the plain "FROM wisps i" driver: its subqueries are
+	// already id-constrained, so there is no join-then-filter blowup to avoid and
+	// no reason to interpose a derived table.
+	if strings.Contains(byIDs, "SELECT i.*") {
+		t.Errorf("by-IDs counts SQL must keep the plain driver, not a derived table:\n%s", byIDs)
 	}
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")

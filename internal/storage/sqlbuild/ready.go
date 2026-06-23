@@ -83,6 +83,13 @@ type ReadyWorkWhereInputs struct {
 // BuildReadyWorkWhere renders the full ready-work WHERE clause for one table
 // family. Both stacks must keep ready semantics identical (Seam A parity
 // suite); all ready predicates live here.
+//
+// Invariant: every clause must reference only main-table columns or correlated
+// subqueries keyed by id — never the counts mega-query's aggregate aliases
+// (labels_json, dep_count, rdep_count, comment_count, parent_id, deps_json).
+// SearchCountsSQL renders this WHERE inside a pre-join subquery where those
+// aliases are out of scope. See the SearchCountsSQL doc comment for why a
+// violation fails loud.
 func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyWorkWhereInputs) (string, []any, error) {
 	var statusClause string
 	if filter.Status != "" {
