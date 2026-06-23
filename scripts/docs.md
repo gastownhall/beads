@@ -18,6 +18,9 @@ Generates maintained CLI reference docs from the live Cobra command tree exposed
 # Regenerate checked-in CLI docs using a temporary no-cgo build
 ./scripts/generate-cli-docs.sh
 
+# Regenerate the live docs and one release snapshot
+./scripts/generate-cli-docs.sh --versioned 1.0.5
+
 # Regenerate/check against an existing binary
 ./scripts/generate-cli-docs.sh ./bd
 ./scripts/generate-cli-docs.sh --check ./bd
@@ -25,12 +28,12 @@ Generates maintained CLI reference docs from the live Cobra command tree exposed
 
 ### Outputs
 
-- `docs/CLI_REFERENCE.md` from `bd help --all`
-- `website/docs/cli-reference/*.md` from `bd help --list` and `bd help --doc <command>`
-- `website/versioned_docs/version-*/cli-reference/*.md` so published versioned docs and the llms artifact source stay in sync
+- `docs/CLI_REFERENCE.md` from the live Cobra command tree
+- `website/docs/cli-reference/*.md` from the live Cobra command tree
+- `website/versioned_docs/version-X.Y.Z/cli-reference/*.md` only when `--versioned X.Y.Z` is supplied by the release snapshot workflow
 - `website/static/llms-full.txt` freshness is checked from the same generated website docs tree
 
-`scripts/check-doc-flags.sh` runs the `--check` mode in CI and fails when live top-level commands are missing from generated docs or `llms-full.txt` is stale.
+`scripts/check-doc-flags.sh` runs the `--check` mode in CI and fails when live top-level commands are missing from live generated docs or `llms-full.txt` is stale. Historical Docusaurus CLI snapshots are release artifacts; ordinary PR checks do not rewrite them to match unreleased commands.
 
 ## check-docs-version.sh
 

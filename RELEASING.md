@@ -267,7 +267,13 @@ gh release create v0.22.0 \
 
 ## 3. Homebrew Update
 
-Homebrew formula is now in homebrew-core. Updates are handled automatically via GitHub Release artifacts.
+Homebrew uses the `beads` formula in homebrew-core. Do not publish or revive
+the old `bd` formula in `gastownhall/homebrew-beads`; having two independently
+updated Homebrew formulas causes version drift and installs the wrong binary for
+some users.
+
+Updates to the supported Homebrew formula are handled through Homebrew core
+after GitHub Release artifacts are available.
 
 ### Verify Homebrew
 

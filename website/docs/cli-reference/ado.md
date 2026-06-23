@@ -20,7 +20,7 @@ Configuration can be set via 'bd config' or environment variables:
   ado.url / AZURE_DEVOPS_URL              - Custom base URL (on-prem)
 
 ```
-bd ado
+bd ado [flags]
 ```
 
 ### bd ado projects
@@ -28,7 +28,7 @@ bd ado
 List Azure DevOps projects that the configured token has access to.
 
 ```
-bd ado projects
+bd ado projects [flags]
 ```
 
 ### bd ado pull
@@ -70,7 +70,7 @@ bd ado push [bead-ids...] [flags]
 Display current Azure DevOps configuration and sync status.
 
 ```
-bd ado status
+bd ado status [flags]
 ```
 
 ### bd ado sync

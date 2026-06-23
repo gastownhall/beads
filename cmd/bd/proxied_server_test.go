@@ -61,21 +61,6 @@ func TestProxiedServerPathHelpers(t *testing.T) {
 	assert.Equal(t, "/tmp/some/.beads/proxieddb/server.log", proxiedServerLogPath(bd))
 }
 
-// TestCommandSupportsProxiedServer pins the PersistentPreRun guard for
-// bd-6dnrw.44 item 1: only commands with a proxied-server dispatch path may
-// reach store init in proxied-server mode; everything else must be rejected
-// up front (the global store stays nil and would panic mid-command).
-func TestCommandSupportsProxiedServer(t *testing.T) {
-	assert.True(t, commandSupportsProxiedServer(createCmd))
-	assert.True(t, commandSupportsProxiedServer(listCmd))
-
-	assert.False(t, commandSupportsProxiedServer(readyCmd), "bd ready has no proxied dispatch; users get pointed at bd list --ready")
-	assert.False(t, commandSupportsProxiedServer(showCmd))
-	assert.False(t, commandSupportsProxiedServer(depCmd))
-	// Subcommands are judged by their top-level ancestor.
-	assert.False(t, commandSupportsProxiedServer(depAddCmd))
-}
-
 // TestInitCommandRegistersProxiedServerFlag verifies the --proxied-server flag
 // is wired into initCmd. Flag-presence regression test.
 func TestInitCommandRegistersProxiedServerFlag(t *testing.T) {

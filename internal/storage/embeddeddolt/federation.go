@@ -201,6 +201,17 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		StartTime: time.Now(),
 	}
 
+	// GH#2474 / bd-578h9.2: commit pending changes before the merge, matching
+	// embedded Pull/PullRemote/PullFrom and server-mode Sync. Embedded Commit is
+	// DOLT_COMMIT('-Am'), so it stages config — where kv.memory.* memories live —
+	// and a leftover dirty working set (e.g. a `bd remember` write) would
+	// otherwise make DOLT_MERGE refuse to start ("cannot merge with uncommitted
+	// changes"). CommitPending is a no-op when the working set is already clean.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		result.Error = fmt.Errorf("commit pending before sync: %w", err)
+		return result, result.Error
+	}
+
 	// Step 1: Fetch
 	if err := s.Fetch(ctx, peer); err != nil {
 		result.Error = fmt.Errorf("fetch failed: %w", err)

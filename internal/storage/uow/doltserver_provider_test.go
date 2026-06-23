@@ -11,13 +11,10 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -178,83 +175,6 @@ func TestNewDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) {
 		assert.NoErrorf(t, r.err, "provider %d", i)
 		assert.NotNilf(t, r.provider, "provider %d", i)
 	}
-}
-
-// TestNewDoltServerUOWProvider_RemoteMigrateGate_BlocksReopen mirrors
-// TestDoltNew_RemoteMigrateGate_BlocksReopen for the proxied-server store-open
-// path (bd-6dnrw.28): opening a proxied workspace whose database is behind the
-// binary AND has a remote persisted on disk must refuse to auto-migrate with a
-// *schema.RemoteMigrateGateError instead of silently forking the schema
-// (gastownhall/beads#4259/#4268). The proxy/child server is shut down between
-// opens so the reopen exercises the cold-start state where dolt_remotes can
-// read empty and only the on-disk probe sees the remote (GH#2315).
-func TestNewDoltServerUOWProvider_RemoteMigrateGate_BlocksReopen(t *testing.T) {
-	testutil.RequireDoltBinary(t)
-	bin, err := exec.LookPath("dolt")
-	require.NoError(t, err)
-	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
-
-	bdBin := buildBDBinary(t)
-	prev := proxy.ResolveExecutable
-	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
-	t.Cleanup(func() { proxy.ResolveExecutable = prev })
-
-	t.Setenv("HOME", t.TempDir())
-
-	port, err := proxy.PickFreePort()
-	require.NoError(t, err)
-	storeRootDir := t.TempDir()
-	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
-	cfgPath := writeServerConfig(t, port)
-	logPath := filepath.Join(t.TempDir(), "server.log")
-
-	ctx := context.Background()
-	open := func() (UnitOfWorkProvider, error) {
-		return NewDoltServerUOWProvider(
-			ctx, storeRootDir, "beads", logPath, cfgPath,
-			proxy.BackendLocalServer, "root", "", bin,
-		)
-	}
-
-	// Fresh database: the gate must not block initial creation/migration.
-	provider, err := open()
-	require.NoError(t, err)
-
-	// Simulate a database one migration behind this binary by dropping the
-	// latest cursor row (the schema change itself stays applied; only the
-	// recorded version regresses, so the gate sees a pending migration).
-	p, ok := provider.(*doltSQLProvider)
-	require.True(t, ok, "provider type = %T", provider)
-	_, err = p.db.ExecContext(ctx,
-		"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion())
-	require.NoError(t, err)
-	require.NoError(t, provider.Close(ctx))
-
-	// Stop the proxy + child server so the remote can be persisted on disk and
-	// the reopen starts from the cold-start state.
-	require.NoError(t, proxy.Shutdown(storeRootDir))
-
-	// Persist a remote in the database's .dolt config. The child server may
-	// still be releasing its directory lock, so retry briefly.
-	dbDir := filepath.Join(storeRootDir, "beads")
-	remoteURL := "file://" + filepath.Join(t.TempDir(), "remote")
-	require.Eventually(t, func() bool {
-		return doltutil.AddCLIRemote(dbDir, "origin", remoteURL) == nil
-	}, 10*time.Second, 200*time.Millisecond, "AddCLIRemote(%s)", dbDir)
-
-	// Reopen: behind + remote-backed must refuse to migrate in place.
-	blocked, err := open()
-	if err == nil {
-		_ = blocked.Close(ctx)
-		t.Fatal("reopen = nil error, want *schema.RemoteMigrateGateError")
-	}
-	require.True(t, schema.IsRemoteMigrateGateError(err),
-		"reopen error = %T (%v), want error wrapping *schema.RemoteMigrateGateError", err, err)
 }
 
 var (

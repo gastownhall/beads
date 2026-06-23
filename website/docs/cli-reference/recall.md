@@ -17,5 +17,5 @@ Examples:
   bd recall auth-jwt
 
 ```
-bd recall <key>
+bd recall <key> [flags]
 ```

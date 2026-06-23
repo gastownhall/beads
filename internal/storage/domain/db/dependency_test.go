@@ -17,6 +17,13 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
 		s.Run("ThreadIDPersists", s.depInsertThreadID)
 	})
+	s.Run("Delete", func() {
+		s.Run("ReturnsFoundFalseOnMissingEdge", s.depDeleteMissingEdge)
+		s.Run("ReturnsTypeAndDependsOnID", s.depDeleteReturnsMetadata)
+		s.Run("RemovesRow", s.depDeleteRemovesRow)
+		s.Run("RejectsEmptyIDs", s.depDeleteEmptyIDs)
+		s.Run("WispRoutesToWispDependencies", s.depDeleteWispRouting)
+	})
 	s.Run("HasCycle", func() {
 		s.Run("StraightLineIsAcyclic", s.depCycleAcyclic)
 		s.Run("DirectBackEdgeDetected", s.depCycleDirectBackEdge)
@@ -502,4 +509,75 @@ func (s *testSuite) depWispDirectBackEdge() {
 	cycle, err := r.HasCycle(s.Ctx(), "bd-dep-wd-t", "bd-dep-wd-s")
 	s.Require().NoError(err)
 	s.True(cycle, "fast path must probe wisp_dependencies too")
+}
+
+func (s *testSuite) depDeleteMissingEdge() {
+	s.seedIssueRow("bd-dep-del-miss-a")
+	s.seedIssueRow("bd-dep-del-miss-b")
+	r := s.depRepo()
+
+	res, err := r.Delete(s.Ctx(), "bd-dep-del-miss-a", "bd-dep-del-miss-b", "tester", domain.DepInsertOpts{})
+	s.Require().NoError(err, "Delete on a non-existent edge must succeed (mirrors RemoveDependencyInTx)")
+	s.False(res.Found, "Found must be false so callers like Reparent can distinguish no-op from removal")
+}
+
+func (s *testSuite) depDeleteReturnsMetadata() {
+	s.seedIssueRow("bd-dep-del-meta-a")
+	s.seedIssueRow("bd-dep-del-meta-b")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-del-meta-a", "bd-dep-del-meta-b", types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	res, err := r.Delete(s.Ctx(), "bd-dep-del-meta-a", "bd-dep-del-meta-b", "tester", domain.DepInsertOpts{})
+	s.Require().NoError(err)
+	s.True(res.Found)
+	s.Equal(types.DepParentChild, res.Type)
+	s.Equal("bd-dep-del-meta-b", res.DependsOnID)
+}
+
+func (s *testSuite) depDeleteRemovesRow() {
+	s.seedIssueRow("bd-dep-del-row-a")
+	s.seedIssueRow("bd-dep-del-row-b")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-del-row-a", "bd-dep-del-row-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	_, err := r.Delete(s.Ctx(), "bd-dep-del-row-a", "bd-dep-del-row-b", "tester", domain.DepInsertOpts{})
+	s.Require().NoError(err)
+
+	out, err := r.ListByIssueIDs(s.Ctx(), []string{"bd-dep-del-row-a"}, domain.DepListOpts{Direction: domain.DepDirectionOut})
+	s.Require().NoError(err)
+	s.Empty(out.Outgoing["bd-dep-del-row-a"], "deleted dep must disappear from outgoing list")
+}
+
+func (s *testSuite) depDeleteEmptyIDs() {
+	r := s.depRepo()
+	_, err := r.Delete(s.Ctx(), "", "bd-x", "tester", domain.DepInsertOpts{})
+	s.Require().Error(err)
+	_, err = r.Delete(s.Ctx(), "bd-x", "", "tester", domain.DepInsertOpts{})
+	s.Require().Error(err)
+}
+
+func (s *testSuite) depDeleteWispRouting() {
+	s.seedIssueRow("bd-dep-del-wisp-issuesrc")
+	s.seedIssueRow("bd-dep-del-wisp-issuetgt")
+	s.seedWispRow("bd-dep-del-wisp-wispsrc")
+	s.seedWispRow("bd-dep-del-wisp-wisptgt")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-del-wisp-issuesrc", "bd-dep-del-wisp-issuetgt", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-del-wisp-wispsrc", "bd-dep-del-wisp-wisptgt", types.DepBlocks), "tester", domain.DepInsertOpts{UseWispsTable: true}))
+
+	res, err := r.Delete(s.Ctx(), "bd-dep-del-wisp-wispsrc", "bd-dep-del-wisp-wisptgt", "tester", domain.DepInsertOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.True(res.Found)
+
+	var permCount, wispCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", "bd-dep-del-wisp-issuesrc").Scan(&permCount))
+	s.Equal(1, permCount, "wisp-routed Delete must not touch the dependencies table")
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", "bd-dep-del-wisp-wispsrc").Scan(&wispCount))
+	s.Equal(0, wispCount, "wisp-routed Delete must remove from wisp_dependencies")
 }

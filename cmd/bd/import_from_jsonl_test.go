@@ -442,6 +442,40 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
+	t.Run("preserves dependency created_by from JSONL import", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlContent := `{"id":"test-dep-target","title":"Dependency target","status":"open","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-dep-source","title":"Dependency source","status":"open","priority":2,"issue_type":"task","dependencies":[{"depends_on_id":"test-dep-target","type":"blocks","created_by":"someone.else","created_at":"2025-01-01T00:00:00Z"}],"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed: %v", err)
+		}
+		if count != 2 {
+			t.Fatalf("imported count = %d, want 2", count)
+		}
+
+		deps, err := store.GetDependencyRecords(ctx, "test-dep-source")
+		if err != nil {
+			t.Fatalf("GetDependencyRecords(test-dep-source): %v", err)
+		}
+		if len(deps) != 1 {
+			t.Fatalf("deps = %#v, want one dependency", deps)
+		}
+		if deps[0].CreatedBy != "someone.else" {
+			t.Fatalf("dependency created_by = %q, want someone.else", deps[0].CreatedBy)
+		}
+	})
+
 	t.Run("skips tombstone entries during import", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "dolt")

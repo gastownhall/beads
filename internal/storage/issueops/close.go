@@ -11,22 +11,23 @@ import (
 
 // CloseResult holds the result of a CloseIssueInTx call.
 type CloseResult struct {
-	IsWisp bool
+	IsWisp        bool
+	AlreadyClosed bool
 }
 
 // CloseIssueInTx closes an issue within a transaction, setting status to closed
 // and recording the close event. Routes to the correct table (issues/wisps)
 // automatically. The caller is responsible for Dolt versioning if needed.
-func CloseIssueInTx(ctx context.Context, tx *sql.Tx, id string, reason, actor, session string) (*CloseResult, error) {
+func CloseIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string) (*CloseResult, error) {
 	return closeIssueInTx(ctx, tx, id, reason, actor, session, true)
 }
 
-func CloseIssueWithoutEventInTx(ctx context.Context, tx *sql.Tx, id string, reason, actor, session string) (*CloseResult, error) {
+func CloseIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string) (*CloseResult, error) {
 	return closeIssueInTx(ctx, tx, id, reason, actor, session, false)
 }
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func closeIssueInTx(ctx context.Context, tx *sql.Tx, id string, reason, actor, session string, recordEvent bool) (*CloseResult, error) {
+func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string, recordEvent bool) (*CloseResult, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
@@ -45,8 +46,8 @@ func closeIssueInTx(ctx context.Context, tx *sql.Tx, id string, reason, actor, s
 
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by_session = ?
-		WHERE id = ?
-	`, issueTable), types.StatusClosed, now, now, reason, session, id)
+		WHERE id = ? AND status != ?
+	`, issueTable), types.StatusClosed, now, now, reason, session, id, types.StatusClosed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to close issue: %w", err)
 	}
@@ -67,7 +68,7 @@ func closeIssueInTx(ctx context.Context, tx *sql.Tx, id string, reason, actor, s
 			return nil, fmt.Errorf("failed to check issue existence: %w", qerr)
 		}
 		if types.Status(status) == types.StatusClosed {
-			return &CloseResult{IsWisp: isWisp}, nil
+			return &CloseResult{IsWisp: isWisp, AlreadyClosed: true}, nil
 		}
 		return nil, fmt.Errorf("failed to close issue: %s", id)
 	}

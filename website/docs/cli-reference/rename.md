@@ -25,5 +25,5 @@ Examples:
 Note: The new ID must use a valid prefix for this database.
 
 ```
-bd rename <old-id> <new-id>
+bd rename <old-id> <new-id> [flags]
 ```

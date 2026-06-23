@@ -1,7 +1,8 @@
 """Real integration tests for BdClient using actual bd binary."""
 
+import os
 import shutil
-import tempfile
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -32,16 +33,38 @@ def bd_executable():
     return bd_path
 
 
-@pytest.fixture
-def temp_workspace():
-    """Create a temporary workspace for an embedded Dolt beads database."""
-    with tempfile.TemporaryDirectory(prefix="beads_test_workspace_") as temp_dir:
-        yield temp_dir
+@pytest.fixture(scope="session")
+def bd_init_isolation_flags_supported(bd_executable):
+    """Skip integration tests when bd lacks the init flags these tests require."""
+    result = subprocess.run(
+        [bd_executable, "init", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    help_text = f"{result.stdout}\n{result.stderr}"
+    required_flags = ("--non-interactive", "--skip-agents", "--skip-hooks")
+    missing_flags = [flag for flag in required_flags if flag not in help_text]
+    if missing_flags:
+        pytest.skip(
+            "bd init does not support required test isolation flags: "
+            + ", ".join(missing_flags)
+            + ". Install a current bd from this repository before running integration tests."
+        )
 
 
 @pytest.fixture
-async def bd_client(bd_executable, temp_workspace, monkeypatch):
-    """Create BdClient with an isolated workspace database."""
+def temp_workspace(tmp_path: Path) -> Path:
+    """Create a per-test workspace isolated with its own BEADS_DIR."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    return workspace
+
+
+@pytest.fixture
+async def bd_client(bd_executable, temp_workspace, monkeypatch, bd_init_isolation_flags_supported):
+    """Create BdClient with a temporary Dolt workspace - fully hermetic."""
+    beads_dir = temp_workspace / ".beads"
     monkeypatch.delenv("BEADS_DB", raising=False)
     monkeypatch.delenv("BEADS_DIR", raising=False)
     monkeypatch.delenv("BD_DB", raising=False)
@@ -49,10 +72,14 @@ async def bd_client(bd_executable, temp_workspace, monkeypatch):
 
     client = BdClient(
         bd_path=bd_executable,
-        beads_dir="",
+        beads_dir=str(beads_dir),
         beads_db="",
-        working_dir=temp_workspace,
+        working_dir=str(temp_workspace),
     )
+
+    env = os.environ.copy()
+    env["BEADS_DIR"] = str(beads_dir)
+    env["BD_NON_INTERACTIVE"] = "1"
 
     import asyncio
 
@@ -61,8 +88,12 @@ async def bd_client(bd_executable, temp_workspace, monkeypatch):
         "init",
         "--prefix",
         "test",
+        "--non-interactive",
+        "--skip-agents",
+        "--skip-hooks",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
         cwd=temp_workspace,
     )
     _stdout, stderr = await process.communicate()
@@ -409,7 +440,9 @@ async def test_dependency_types(bd_client):
 
 
 @pytest.mark.asyncio
-async def test_init_creates_beads_directory(bd_executable):
+async def test_init_creates_beads_directory(
+    bd_executable, tmp_path, monkeypatch, bd_init_isolation_flags_supported
+):
     """Test that init creates .beads directory in current working directory.
 
     This is a critical test for the bug where init was using --db flag
@@ -418,31 +451,40 @@ async def test_init_creates_beads_directory(bd_executable):
     from beads_mcp.bd_client import BdClient
     from beads_mcp.models import InitParams
 
-    # Create a temporary directory to test in
-    with tempfile.TemporaryDirectory(prefix="beads_init_test_") as temp_dir:
-        temp_path = Path(temp_dir)
-        beads_dir = temp_path / ".beads"
+    temp_path = tmp_path / "init-workspace"
+    temp_path.mkdir()
+    beads_dir = temp_path / ".beads"
+    monkeypatch.setenv("BD_NON_INTERACTIVE", "1")
+    monkeypatch.delenv("BEADS_DIR", raising=False)
+    monkeypatch.delenv("BEADS_DB", raising=False)
 
-        # Ensure .beads doesn't exist yet
-        assert not beads_dir.exists()
+    # Ensure .beads doesn't exist yet
+    assert not beads_dir.exists()
 
-        # Create client WITHOUT beads_db set and WITH working_dir set to temp_dir
-        client = BdClient(bd_path=bd_executable, beads_db=None, working_dir=temp_dir)
+    # Create client WITHOUT beads_db set and WITH working_dir set to temp_dir
+    client = BdClient(
+        bd_path=bd_executable,
+        beads_dir=str(beads_dir),
+        beads_db=None,
+        working_dir=str(temp_path),
+    )
 
-        # Initialize with custom prefix (no need to chdir!)
-        params = InitParams(prefix="test")
-        result = await client.init(params)
+    # Initialize with custom prefix (no need to chdir!)
+    params = InitParams(prefix="test")
+    result = await client.init(params)
 
-        # Verify .beads directory was created in temp directory
-        assert beads_dir.exists(), f".beads directory not created in {temp_dir}"
-        assert beads_dir.is_dir(), ".beads exists but is not a directory"
+    # Verify .beads directory was created in temp directory
+    assert beads_dir.exists(), f".beads directory not created in {temp_path}"
+    assert beads_dir.is_dir(), ".beads exists but is not a directory"
 
-        # Verify the embedded Dolt database was created under .beads/.
-        embedded_dir = beads_dir / "embeddeddolt"
-        assert embedded_dir.exists(), "No embedded Dolt directory created in .beads/"
-        assert any(path.name == ".dolt" for path in embedded_dir.glob("*/.dolt")), (
-            f"Expected an embedded Dolt database under {embedded_dir}"
-        )
+    # Verify Dolt backend files were created under the isolated .beads directory.
+    assert (beads_dir / "metadata.json").is_file()
+    assert (beads_dir / "config.yaml").is_file()
+    embedded_dir = beads_dir / "embeddeddolt"
+    assert embedded_dir.exists(), "No embedded Dolt directory created in .beads/"
+    assert any(path.name == ".dolt" for path in embedded_dir.glob("*/.dolt")), (
+        f"Expected an embedded Dolt database under {embedded_dir}"
+    )
 
-        # Verify success message
-        assert "initialized" in result.lower() or "created" in result.lower()
+    # Verify success message
+    assert "initialized" in result.lower() or "created" in result.lower()

@@ -32,7 +32,7 @@ Examples:
   bd gate resolve &lt;id&gt;   # Close a gate manually
 
 ```
-bd gate
+bd gate [flags]
 ```
 
 ### bd gate add-waiter
@@ -45,7 +45,7 @@ The waiter is typically the worker's address (e.g., "my-project/workers/agent-1"
 This is used by 'bd done --phase-complete' to register for gate wake notifications.
 
 ```
-bd gate add-waiter <gate-id> <waiter>
+bd gate add-waiter <gate-id> <waiter> [flags]
 ```
 
 ### bd gate check
@@ -203,5 +203,5 @@ Display details of a gate issue including its waiters.
 This is similar to 'bd show' but validates that the issue is a gate.
 
 ```
-bd gate show <gate-id>
+bd gate show <gate-id> [flags]
 ```

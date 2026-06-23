@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1450,6 +1451,101 @@ func TestIsChildOf(t *testing.T) {
 				t.Errorf("isChildOf(%q, %q) = %v, want %v", tt.childID, tt.parentID, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDepRoutedTargetOpensReadOnly is the regression guard for the dep/link
+// target-resolution invariant: a cross-rig dependency target is resolved by ID
+// only, so resolveIDWithRouting must open the routed foreign store read-only,
+// while resolveIDForMutation (used for the mutated source issue) opens it
+// writable. Opening a dep/link target writable re-exposes GH#3231 open-time
+// mutations against a foreign project.
+//
+// NOTE: This test uses os.Chdir and cannot run in parallel with other tests.
+func TestDepRoutedTargetOpensReadOnly(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	townBeadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatalf("create town beads dir: %v", err)
+	}
+	rigBeadsDir := filepath.Join(tmpDir, "rig", ".beads")
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatalf("create rig beads dir: %v", err)
+	}
+
+	townDBPath := filepath.Join(townBeadsDir, "dolt")
+	townStore := newTestStoreIsolatedDB(t, townDBPath, "hq")
+
+	rigDBPath := filepath.Join(rigBeadsDir, "dolt")
+	rigStore := newTestStoreIsolatedDB(t, rigDBPath, "gt")
+	if err := rigStore.CreateIssue(ctx, &types.Issue{
+		ID:        "gt-target1",
+		Title:     "Routed dep target",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}, "test"); err != nil {
+		t.Fatalf("create rig issue: %v", err)
+	}
+	// Release the rig store before routing reopens it.
+	rigStore.Close()
+
+	routesPath := filepath.Join(townBeadsDir, "routes.jsonl")
+	if err := os.WriteFile(routesPath, []byte(`{"prefix":"gt-","path":"rig"}`), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	oldDbPath := dbPath
+	dbPath = townDBPath
+	t.Cleanup(func() { dbPath = oldDbPath })
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	// Target-only resolution (the dep/link target) must open the routed store
+	// read-only.
+	roID, roStore, roCleanup, err := resolveIDWithRouting(ctx, townStore, "gt-target1")
+	if err != nil {
+		t.Fatalf("resolveIDWithRouting (target) failed: %v", err)
+	}
+	if roID != "gt-target1" {
+		t.Errorf("resolved target ID = %q, want gt-target1", roID)
+	}
+	roDolt, ok := roStore.(*dolt.DoltStore)
+	if !ok {
+		roCleanup()
+		t.Fatalf("routed target store is %T, want *dolt.DoltStore", roStore)
+	}
+	if !roDolt.IsReadOnly() {
+		roCleanup()
+		t.Fatal("dep/link target must be resolved read-only, but routed store is writable (GH#3231)")
+	}
+	roCleanup()
+
+	// Source resolution (the mutated issue's store) must open the routed store
+	// writable so the dependency write commits on the target head (#4141).
+	rwID, rwStore, rwCleanup, err := resolveIDForMutation(ctx, townStore, "gt-target1")
+	if err != nil {
+		t.Fatalf("resolveIDForMutation (source) failed: %v", err)
+	}
+	defer rwCleanup()
+	if rwID != "gt-target1" {
+		t.Errorf("resolved source ID = %q, want gt-target1", rwID)
+	}
+	rwDolt, ok := rwStore.(*dolt.DoltStore)
+	if !ok {
+		t.Fatalf("routed source store is %T, want *dolt.DoltStore", rwStore)
+	}
+	if rwDolt.IsReadOnly() {
+		t.Fatal("source resolution must open the routed store writable, but it is read-only")
 	}
 }
 

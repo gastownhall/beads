@@ -30,6 +30,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 		{"fresh/no-flags", RemoteSafetyInput{}, ActionNoRemoteData, 0},
 		{"fresh/force", RemoteSafetyInput{Force: true}, ActionNoRemoteData, 0},
 		{"fresh/reinit-local", RemoteSafetyInput{ReinitLocal: true}, ActionNoRemoteData, 0},
+		{"fresh/from-jsonl", RemoteSafetyInput{FromJSONL: true}, ActionNoRemoteData, 0},
 		{"fresh/discard-remote", RemoteSafetyInput{DiscardRemote: true}, ActionNoRemoteData, 0},
 		{"fresh/force+discard", RemoteSafetyInput{Force: true, DiscardRemote: true}, ActionNoRemoteData, 0},
 
@@ -54,12 +55,22 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			RemoteSafetyInput{RemoteHasDoltData: true, Force: true, ReinitLocal: true},
 			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
 		},
+		{
+			"remote/from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, FromJSONL: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
 
 		// Remote-has-data, user forced WITH discard-remote, non-interactive,
 		// no token: requires destroy-token.
 		{
 			"remote/force+discard/non-interactive/no-token",
 			RemoteSafetyInput{RemoteHasDoltData: true, Force: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			"remote/from-jsonl+discard/non-interactive/no-token",
+			RemoteSafetyInput{RemoteHasDoltData: true, FromJSONL: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
 			ActionRequireDestroyToken, ExitDestroyTokenMissing,
 		},
 
@@ -80,6 +91,14 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			"remote/force+discard/non-interactive/matching-token",
 			RemoteSafetyInput{
 				RemoteHasDoltData: true, Force: true, DiscardRemote: true,
+				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		{
+			"remote/from-jsonl+discard/non-interactive/matching-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, FromJSONL: true, DiscardRemote: true,
 				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
 			},
 			ActionProceedWithDivergence, 0,
@@ -158,6 +177,9 @@ func TestCheckRemoteSafety_RefusalTextNoEcho(t *testing.T) {
 	// And it must point to the help topic for the destructive path.
 	if !strings.Contains(msg, "bd help init-safety") {
 		t.Errorf("refusal text does not point to 'bd help init-safety':\n%s", msg)
+	}
+	if !strings.Contains(msg, "--from-jsonl") {
+		t.Errorf("refusal text does not name the JSONL local-source flag:\n%s", msg)
 	}
 }
 
@@ -288,13 +310,11 @@ func TestLocalOnlyInitSkipsConfigureButPersistsExplicitRemote(t *testing.T) {
 	if err := persistInitSyncRemote(beadsDir, remote, remote, false, true, false); err != nil {
 		t.Fatalf("persistInitSyncRemote failed: %v", err)
 	}
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read config: %v", err)
-	}
-	if !strings.Contains(string(data), `sync.remote: "git+ssh://git@example.com/org/project.git"`) &&
-		!strings.Contains(string(data), "sync.remote: git+ssh://git@example.com/org/project.git") {
-		t.Fatalf("sync.remote was not persisted under local-only config:\n%s", data)
+	got := config.GetStringFromDir(beadsDir, "sync.remote")
+	if got != remote {
+		data, _ := os.ReadFile(configPath)
+		t.Fatalf("sync.remote was not persisted under local-only config: got %q, want %q\nfile:\n%s",
+			got, remote, data)
 	}
 }
 
@@ -412,6 +432,126 @@ func TestInitForceRefusesWhenRemoteHasDoltData(t *testing.T) {
 	beadsDir := filepath.Join(cloneDir, ".beads")
 	if _, err := os.Stat(beadsDir); err == nil {
 		t.Errorf("refusal should not have created %s", beadsDir)
+	}
+}
+
+// TestInitFromJSONLRefusesWhenRemoteHasDoltData is the GH#3427 regression
+// guard for the safe default: --from-jsonl must not be silently ignored and
+// must not start a remote clone when origin advertises refs/dolt/data.
+func TestInitFromJSONLRefusesWhenRemoteHasDoltData(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	cloneDir := t.TempDir()
+	runGitForBootstrapTest(t, cloneDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, cloneDir, "config", "core.hooksPath", ".git/hooks")
+
+	beadsDir := filepath.Join(cloneDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"jl-abc123","title":"Local JSONL wins","type":"task","status":"open","priority":2}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bdBin, "init", "--from-jsonl", "--prefix", "jl", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = cloneDir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+
+	if err == nil {
+		t.Fatalf("bd init --from-jsonl succeeded; expected remote-divergence refusal. stderr:\n%s", stderr.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+	}
+
+	stderrStr := stderr.String()
+	for _, must := range []string{"bd bootstrap", "bd help init-safety", "--from-jsonl", "remote 'origin'"} {
+		if !strings.Contains(stderrStr, must) {
+			t.Errorf("refusal missing %q:\n%s", must, stderrStr)
+		}
+	}
+	if strings.Contains(stderrStr, "failed to clone remote") {
+		t.Errorf("--from-jsonl should refuse before attempting remote clone:\n%s", stderrStr)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil {
+		t.Errorf("refusal should not have created an embedded Dolt database")
+	}
+}
+
+func TestInitFromJSONLExplicitRemoteRefusesWhenRemoteHasDoltData(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	cloneDir := t.TempDir()
+	runGitForBootstrapTest(t, cloneDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, cloneDir, "config", "core.hooksPath", ".git/hooks")
+
+	beadsDir := filepath.Join(cloneDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"jl-abc123","title":"Local JSONL wins","type":"task","status":"open","priority":2}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bdBin, "init", "--from-jsonl", "--remote", bareDir, "--prefix", "jl", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = cloneDir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+
+	if err == nil {
+		t.Fatalf("bd init --from-jsonl --remote succeeded; expected remote-divergence refusal. stderr:\n%s", stderr.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+	}
+
+	stderrStr := stderr.String()
+	for _, must := range []string{"bd bootstrap", "bd help init-safety", "--from-jsonl", "remote 'origin'"} {
+		if !strings.Contains(stderrStr, must) {
+			t.Errorf("refusal missing %q:\n%s", must, stderrStr)
+		}
+	}
+	if strings.Contains(stderrStr, "failed to clone remote") {
+		t.Errorf("--from-jsonl should refuse before attempting remote clone:\n%s", stderrStr)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil {
+		t.Errorf("refusal should not have created an embedded Dolt database")
 	}
 }
 

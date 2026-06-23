@@ -25,7 +25,7 @@ Examples:
   bd state witness-abc health     # Output: healthy
 
 ```
-bd state <issue-id> <dimension>
+bd state <issue-id> <dimension> [flags]
 ```
 
 ### bd state list
@@ -42,5 +42,5 @@ Example:
   #   health: healthy
 
 ```
-bd state list <issue-id>
+bd state list <issue-id> [flags]
 ```

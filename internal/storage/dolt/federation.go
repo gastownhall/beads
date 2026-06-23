@@ -62,7 +62,7 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 	// GH#2474: Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
 	if !s.readOnly {
-		if err := s.Commit(ctx, "auto-commit before pull"); err != nil {
+		if err := s.commitBeforePull(ctx, "auto-commit before pull"); err != nil {
 			if !isDoltNothingToCommit(err) {
 				return nil, fmt.Errorf("failed to commit pending changes before pull: %w", err)
 			}
@@ -311,6 +311,20 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		StartTime: time.Now(),
 	}
 
+	// GH#2474: match PullFrom — commit pending changes before the merge,
+	// INCLUDING config (where kv.memory.* rows live). Plain Commit excludes
+	// config (GH#2455), so federation metadata writes such as add-peer plus any
+	// persistent memories would otherwise leave the working set dirty and wedge
+	// DOLT_MERGE ("cannot merge with uncommitted changes").
+	if !s.readOnly {
+		if err := s.commitBeforePull(ctx, "auto-commit before sync"); err != nil {
+			if !isDoltNothingToCommit(err) {
+				result.Error = fmt.Errorf("failed to commit pending changes before sync: %w", err)
+				return result, result.Error
+			}
+		}
+	}
+
 	// Step 1: Fetch from peer
 	if err := s.Fetch(ctx, peer); err != nil {
 		result.Error = fmt.Errorf("fetch failed: %w", err)
@@ -348,8 +362,12 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		}
 		result.ConflictsResolved = true
 
-		// Commit the resolution
-		if err := s.Commit(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
+		// Commit the resolution INCLUDING config: the operator chose this
+		// strategy, and plain Commit excludes config (GH#2455). A config-only
+		// conflict — routine now that kv.memory.* memories sync through config —
+		// would otherwise resolve but never commit, leaving the merge
+		// unconcluded and re-wedging the next sync.
+		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
 			result.Error = fmt.Errorf("failed to commit conflict resolution: %w", err)
 			return result, result.Error
 		}

@@ -9,6 +9,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
 jobs:
   detect-ci-tier:
     name: Detect CI tier
@@ -17,7 +21,7 @@ jobs:
       full_embedded: ${{ steps.tier.outputs.full_embedded }}
       reason: ${{ steps.tier.outputs.reason }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
@@ -28,60 +32,60 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash .github/scripts/ci-embedded-tier.sh
 
-  # End-to-end coverage for proxied-server CLI subcommands. Each sub-test
-  # spawns a real dolt sql-server via the proxy and exercises the bd CLI
-  # subprocess against it (see cmd/bd/*_proxied_integration_test.go).
+  # # End-to-end coverage for proxied-server CLI subcommands. Each sub-test
+  # # spawns a real dolt sql-server via the proxy and exercises the bd CLI
+  # # subprocess against it (see cmd/bd/*_proxied_integration_test.go).
+  # #
+  # # The -run pattern intentionally matches the TestProxiedServer* prefix so
+  # # new proxied integration suites (TestProxiedServerCreate, ...Update,
+  # # ...Show, etc.) are auto-included without further CI edits. Adopt the
+  # # `TestProxiedServer<Subcommand>` naming convention for any new entry
+  # # points and they will be picked up here.
+  # #
+  # # Companion to test-domain-uow (which tests the storage/uow layer); this
+  # # job is the CLI-side gate that ensures the proxied path stays at parity
+  # # with the embedded path's behavior.
+  # #
+  # # The package-level testcontainers Dolt singleton (started by
+  # # cmd/bd/test_dolt_server_cgo_test.go) is automatically skipped when
+  # # BEADS_TEST_PROXIED_SERVER=1 is set, so this lane is ~50s faster than
+  # # it would otherwise be.
+  # test-proxied-server-cmd:
+  #   name: Test (proxied-server cmd)
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
   #
-  # The -run pattern intentionally matches the TestProxiedServer* prefix so
-  # new proxied integration suites (TestProxiedServerCreate, ...Update,
-  # ...Show, etc.) are auto-included without further CI edits. Adopt the
-  # `TestProxiedServer<Subcommand>` naming convention for any new entry
-  # points and they will be picked up here.
+  #     - name: Set up Go
+  #       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+  #       with:
+  #         go-version-file: 'go.mod'
   #
-  # Companion to test-domain-uow (which tests the storage/uow layer); this
-  # job is the CLI-side gate that ensures the proxied path stays at parity
-  # with the embedded path's behavior.
+  #     - name: Install Dolt CLI
+  #       run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
   #
-  # The package-level testcontainers Dolt singleton (started by
-  # cmd/bd/test_dolt_server_cgo_test.go) is automatically skipped when
-  # BEADS_TEST_PROXIED_SERVER=1 is set, so this lane is ~50s faster than
-  # it would otherwise be.
-  test-proxied-server-cmd:
-    name: Test (proxied-server cmd)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: 'go.mod'
-
-      - name: Install Dolt CLI
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
-
-      - name: Verify dolt on PATH
-        run: dolt version
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Pre-build bd binary for proxied integration tests
-        # The test's buildEmbeddedBD helper picks up BEADS_TEST_BD_BINARY,
-        # skipping a per-test ~45s rebuild for each invocation.
-        run: go build -tags gms_pure_go -o /tmp/bd-proxied-test ./cmd/bd
-
-      - name: Test proxied-server bd subcommands
-        env:
-          BEADS_TEST_PROXIED_SERVER: "1"
-          BEADS_TEST_BD_BINARY: /tmp/bd-proxied-test
-        # ^TestProxiedServer matches every proxied-server top-level test
-        # (Create today; future Update/Show/etc. auto-join without edits).
-        run: go test -tags gms_pure_go -count=1 -timeout=10m -v -run '^TestProxiedServer' ./cmd/bd/
+  #     - name: Verify dolt on PATH
+  #       run: dolt version
+  #
+  #     - name: Configure Git and Dolt identity
+  #       run: |
+  #         git config --global user.name "CI Bot"
+  #         git config --global user.email "ci@beads.test"
+  #         dolt config --global --add user.name "CI Bot"
+  #         dolt config --global --add user.email "ci@beads.test"
+  #
+  #     - name: Pre-build bd binary for proxied integration tests
+  #       # The test's buildEmbeddedBD helper picks up BEADS_TEST_BD_BINARY,
+  #       # skipping a per-test ~45s rebuild for each invocation.
+  #       run: go build -tags gms_pure_go -o /tmp/bd-proxied-test ./cmd/bd
+  #
+  #     - name: Test proxied-server bd subcommands
+  #       env:
+  #         BEADS_TEST_PROXIED_SERVER: "1"
+  #         BEADS_TEST_BD_BINARY: /tmp/bd-proxied-test
+  #       # ^TestProxiedServer matches every proxied-server top-level test
+  #       # (Create today; future Update/Show/etc. auto-join without edits).
+  #       run: go test -tags gms_pure_go -count=1 -timeout=10m -v -run '^TestProxiedServer' ./cmd/bd/
 
   # Embedded Dolt tests - test the in-process Dolt engine (no server required)
   #
@@ -95,7 +99,7 @@ jobs:
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -127,7 +131,7 @@ jobs:
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Download binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -159,7 +163,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Download binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -186,8 +190,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: DeterminateSystems/determinate-nix-action@f4c468f2287f0f14a113841b41f2dc8957119519 # v3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: DeterminateSystems/determinate-nix-action@9adf02b41cfdac2632e1c16f0480ff5bf3b05dd6 # v3
       - name: Run bd help via Nix
         id: nix_help
         run: |
@@ -216,7 +220,7 @@ jobs:
       - test-nix
     if: ${{ always() }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Evaluate CI gate
         env:

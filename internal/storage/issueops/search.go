@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -16,7 +15,7 @@ import (
 //
 // Set filter.SkipWisps=true for callers that never need ephemeral results; this
 // avoids the unconditional full-table wisps scan (Q2 perf opt).
-func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	// Route ephemeral-only queries to wisps table.
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		results, err := searchTableInTx(ctx, tx, query, filter, WispsFilterTables)
@@ -59,16 +58,20 @@ func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter type
 			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
 		}
 		if len(wispResults) > 0 {
-			seen := make(map[string]bool, len(results))
-			for _, issue := range results {
-				seen[issue.ID] = true
+			// Prefer the canonical wisp record when an ID exists in both tables.
+			// Cross-table dups are a transient data-integrity issue (be-iabdi);
+			// hard-erroring breaks every lookup city-wide.
+			wispByID := make(map[string]*types.Issue, len(wispResults))
+			for _, w := range wispResults {
+				wispByID[w.ID] = w
 			}
-			for _, issue := range wispResults {
-				if seen[issue.ID] {
-					return nil, fmt.Errorf("id %q exists in both issues and wisps", issue.ID)
+			var filtered []*types.Issue
+			for _, r := range results {
+				if wispByID[r.ID] == nil {
+					filtered = append(filtered, r)
 				}
-				results = append(results, issue)
 			}
+			results = append(filtered, wispResults...)
 		}
 	}
 
@@ -81,7 +84,7 @@ func SearchIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter type
 // SELECT id scan + batch hydration instead of a full 47-column projection scan.
 // Pattern B is equivalent to Pattern A but faster on large corpora where most rows
 // are never needed (mirrors the pattern in scanIssueIDs and GetStaleIssuesInTx).
-func searchTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables) ([]*types.Issue, error) {
+func searchTableInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables) ([]*types.Issue, error) {
 	plan := sqlbuild.BuildLabelDrivenSearch(filter, tables)
 	whereClauses, args, err := BuildIssueFilterClauses(query, plan.Filter, tables)
 	if err != nil {
@@ -147,7 +150,7 @@ func searchTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types
 // searchTablePatternB runs Pattern B: SELECT id LIMIT n → batch hydrate.
 // Equivalent result to Pattern A but avoids streaming all 47 columns for rows
 // that won't survive the LIMIT cut. Mirrors the approach in GetStaleIssuesInTx.
-func searchTablePatternB(ctx context.Context, tx *sql.Tx, fromSQL, whereSQL string, args []interface{}, filter types.IssueFilter, tables FilterTables, labelDriven bool) ([]*types.Issue, error) {
+func searchTablePatternB(ctx context.Context, tx DBTX, fromSQL, whereSQL string, args []interface{}, filter types.IssueFilter, tables FilterTables, labelDriven bool) ([]*types.Issue, error) {
 	idSelect := "SELECT "
 	if labelDriven {
 		idSelect = "SELECT DISTINCT "
@@ -228,7 +231,7 @@ func searchTablePatternB(ctx context.Context, tx *sql.Tx, fromSQL, whereSQL stri
 // hydrateIssues populates labels (and optionally dependencies) on a slice of issues.
 // All issues must belong to tables.Main; labels come from tables.Labels.
 // When skipLabels is true, label hydration is suppressed (Issue.Labels is left nil).
-func hydrateIssues(ctx context.Context, tx *sql.Tx, issues []*types.Issue, tables FilterTables, includeDeps bool, skipLabels bool) error {
+func hydrateIssues(ctx context.Context, tx DBTX, issues []*types.Issue, tables FilterTables, includeDeps bool, skipLabels bool) error {
 	if len(issues) == 0 {
 		return nil
 	}

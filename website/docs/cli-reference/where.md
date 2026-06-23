@@ -21,5 +21,5 @@ Examples:
 
 
 ```
-bd where
+bd where [flags]
 ```

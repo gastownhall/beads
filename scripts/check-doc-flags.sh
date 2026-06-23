@@ -133,12 +133,6 @@ if [ -f "$CLI_REF" ]; then
         fi
 
         WEBSITE_DIRS=("$PROJECT_ROOT/website/docs/cli-reference")
-        if [ -d "$PROJECT_ROOT/website/versioned_docs" ]; then
-            for vdir in "$PROJECT_ROOT"/website/versioned_docs/version-*; do
-                [ -d "$vdir" ] || continue
-                WEBSITE_DIRS+=("$vdir/cli-reference")
-            done
-        fi
         for dir in "${WEBSITE_DIRS[@]}"; do
             if [ ! -d "$dir" ]; then
                 continue
@@ -164,8 +158,8 @@ if [ -f "$CLI_REF" ]; then
             if [ -z "$BD_FOR_GEN" ]; then
                 echo "FAIL: Could not resolve bd binary path for CLI docs freshness check"
                 ERRORS=$((ERRORS + 1))
-            elif "$PROJECT_ROOT/scripts/generate-cli-docs.sh" --check "$BD_FOR_GEN"; then
-                echo "PASS: Generated CLI docs are fresh"
+            elif "$PROJECT_ROOT/scripts/check-cli-docs-drift.sh" "$BD_FOR_GEN"; then
+                echo "PASS: CLI docs freshness gate (see drift check output above)"
             else
                 ERRORS=$((ERRORS + 1))
             fi

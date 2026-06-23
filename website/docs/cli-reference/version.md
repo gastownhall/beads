@@ -13,5 +13,5 @@ Generated from `bd help --doc version`
 Print version information
 
 ```
-bd version
+bd version [flags]
 ```

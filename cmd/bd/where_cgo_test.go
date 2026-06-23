@@ -95,8 +95,7 @@ func TestWhereCommand_ReadsPrefixFromEmbeddedStore(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() error {
-		whereCmd.Run(whereCmd, nil)
-		return nil
+		return whereCmd.RunE(whereCmd, nil)
 	})
 
 	var result WhereResult

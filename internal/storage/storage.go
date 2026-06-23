@@ -248,6 +248,18 @@ type Compactor interface {
 	Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error
 }
 
+// BlockedRecomputer recomputes the denormalized is_blocked column for every
+// issue and wisp in one full pass and reports how many rows it corrected.
+// Callers should type-assert to this interface for the is_blocked repair
+// (bd-6dnrw.37): unlike the scoped post-pull recompute, it does not depend on a
+// merge advancing HEAD, so it can recover a column a skipped recompute (a
+// recompute that failed after its merge committed, or a hand-resolved
+// conflicted pull) left stale. It is idempotent — a consistent database
+// corrects nothing.
+type BlockedRecomputer interface {
+	RecomputeAllBlocked(ctx context.Context) (int, error)
+}
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool

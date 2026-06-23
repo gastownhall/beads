@@ -15,6 +15,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 ## Web UIs
 
+- **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
+
 - **[beads-ui](https://github.com/mantoni/beads-ui)** - Local web interface with live updates and kanban board. Uses the `bd` CLI for Dolt compatibility. Run with `npx beads-ui start`. Built by [@mantoni](https://github.com/mantoni). (Node.js)
 
 - **[BeadBoard](https://github.com/zenchantlive/beadboard)** - Multi-agent orchestration and communication system with a live dashboard. Agent-to-agent messaging (HANDOFF/BLOCKED/DECISION/INFO), DAG dependency graph, swarm coordination with archetypes and templates, scope-based work reservations, and an embedded execution runtime (bb-pi) built on [Pi](https://github.com/badlogic/pi-mono) that spawns typed worker agents. Cross-platform (macOS, Linux, Windows). Includes the `beadboard-driver` skill for agent integration (`npx skills add zenchantlive/beadboard --skill beadboard-driver`). Built by [@zenchantlive](https://github.com/zenchantlive). (Next.js/TypeScript)
@@ -30,6 +32,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 - **[Lista Beads](https://marketplace.visualstudio.com/items?itemName=ListaDev.lista-beads)** - Full-featured VS Code extension: filterable tree view, issue detail panel, dashboard with metrics, dependency graph, Dolt push/pull, CodeLens for bead references, wisps & formula support, stale issue management, and multi-tracker sync (Azure DevOps, GitHub, Jira, Linear, GitLab). Built by [@harry-miller-trimble](https://github.com/harry-miller-trimble). (TypeScript)
 
 - **[nvim-beads (fancypantalons)](https://github.com/fancypantalons/nvim-beads)** - Neovim plugin for managing Beads issues. By [@fancypantalons](https://github.com/fancypantalons). (Lua)
+- **[beads.nvim](https://github.com/tomfordweb/beads.nvim)** - Neovim UI for managing Beads issues — ready queue, editable floating detail view, create/quick-capture, Telescope pickers, memories, and dependency graph. Uses the `bd` CLI for Dolt compatibility. By [@tomfordweb](https://github.com/tomfordweb). (Lua)
 
 - **[beads-manager](https://plugins.jetbrains.com/plugin/30089-beads-manager)** - Jetbrains IDE plugin to manage and view bead details. Maintained by [@developmeh](https://github.com/developmeh). (Kotlin)
 

@@ -31,7 +31,7 @@ Examples:
   bd repo sync                       # Sync from all configured repos
 
 ```
-bd repo
+bd repo [flags]
 ```
 
 ### bd repo add

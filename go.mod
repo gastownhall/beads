@@ -12,6 +12,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.45.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/dolthub/driver/v2 v2.1.4
+	github.com/dolthub/eventkit v0.0.0-20260611184414-99f5693e696a
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/olebedev/when v1.1.0
 	github.com/spf13/cobra v1.10.2
@@ -155,7 +156,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
-	github.com/goccy/go-json v0.10.2 // indirect
+	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/gocraft/dbr/v2 v2.7.6 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect

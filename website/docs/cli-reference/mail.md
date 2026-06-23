@@ -32,5 +32,5 @@ Examples:
   bd mail read msg-123             # Reads a message
 
 ```
-bd mail [subcommand] [args...]
+bd mail [subcommand] [args...] [flags]
 ```

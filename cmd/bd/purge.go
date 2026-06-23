@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -64,8 +65,17 @@ EXAMPLES:
   bd purge --older-than 7d --force   # Only purge items closed 7+ days ago
   bd purge --pattern "*-wisp-*"      # Only purge matching ID pattern
   bd purge --dry-run                 # Detailed preview with stats`,
-	Run: func(cmd *cobra.Command, _ []string) {
-		runPurgeOrPrune(cmd, purgeScope{
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("purge")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		return runPurgeOrPrune(cmd, purgeScope{
 			cmdName:        "purge",
 			pastTense:      "purged",
 			countKey:       "purged_count",
@@ -77,10 +87,7 @@ EXAMPLES:
 	},
 }
 
-// runPurgeOrPrune implements the shared delete-closed-beads flow used by
-// both `bd purge` (ephemeral scope) and `bd prune` (non-ephemeral scope).
-// The caller's scope controls the filter, messaging, and safety gate.
-func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
+func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	CheckReadonly(scope.cmdName)
 
 	force, _ := cmd.Flags().GetBool("force")
@@ -88,10 +95,8 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 	olderThan, _ := cmd.Flags().GetString("older-than")
 	pattern, _ := cmd.Flags().GetString("pattern")
 
-	// Safety gate: prune refuses to run without scope narrowing so a typo
-	// or muscle-memory `--force` can't wipe every closed bead in the repo.
 	if scope.requireFilter && olderThan == "" && pattern == "" {
-		FatalErrorWithHint(
+		return HandleErrorWithHint(
 			fmt.Sprintf("bd %s requires --older-than or --pattern", scope.cmdName),
 			"Protects against accidental bulk deletion. Use `--pattern '*'` to\n"+
 				"  include all closed beads in this scope, or `--older-than 1d`\n"+
@@ -100,13 +105,12 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 	}
 
 	ctx := rootCtx
 
-	// Build filter: closed + ephemeral-or-not per scope
 	statusClosed := types.StatusClosed
 	ephemeralFlag := scope.ephemeralOnly
 	filter := types.IssueFilter{
@@ -114,25 +118,22 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 		Ephemeral: &ephemeralFlag,
 	}
 
-	// Parse --older-than duration (e.g., "7d", "30d", "24h", or just "30" for days)
 	var cutoff *time.Time
 	if olderThan != "" {
 		days, err := parseHumanDuration(olderThan)
 		if err != nil {
-			FatalError("invalid --older-than value %q: %v", olderThan, err)
+			return HandleErrorRespectJSON("invalid --older-than value %q: %v", olderThan, err)
 		}
 		cutoffTime := time.Now().UTC().AddDate(0, 0, -days)
 		cutoff = &cutoffTime
 		filter.ClosedBefore = cutoff
 	}
 
-	// Get matching issues
 	closedIssues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
-		FatalError("listing issues: %v", err)
+		return HandleErrorRespectJSON("listing issues: %v", err)
 	}
 
-	// Filter by ID pattern if specified
 	if pattern != "" {
 		var matched []*types.Issue
 		for _, issue := range closedIssues {
@@ -148,33 +149,29 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 	pinnedCount := safetyStats.PinnedSkipped
 	warnClosedDeletionSafetySkips(safetyStats)
 
-	// Report nothing-to-do
 	if len(closedIssues) == 0 {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				scope.countKey: 0,
 				"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
 			})
-		} else {
-			msg := fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName)
-			if olderThan != "" {
-				msg += fmt.Sprintf(" (older than %s)", olderThan)
-			}
-			if pattern != "" {
-				msg += fmt.Sprintf(" (matching %q)", pattern)
-			}
-			fmt.Println(msg)
 		}
-		return
+		msg := fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName)
+		if olderThan != "" {
+			msg += fmt.Sprintf(" (older than %s)", olderThan)
+		}
+		if pattern != "" {
+			msg += fmt.Sprintf(" (matching %q)", pattern)
+		}
+		fmt.Println(msg)
+		return nil
 	}
 
-	// Extract IDs
 	issueIDs := make([]string, len(closedIssues))
 	for i, issue := range closedIssues {
 		issueIDs[i] = issue.ID
 	}
 
-	// Dry-run: show stats preview
 	if dryRun {
 		result, err := store.DeleteIssues(ctx, issueIDs, false, false, true)
 		if jsonOutput {
@@ -193,23 +190,21 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 			if pinnedCount > 0 {
 				stats["pinned_skipped"] = pinnedCount
 			}
-			outputJSON(stats)
-		} else {
-			fmt.Printf("Would %s %d %s(s)\n", scope.cmdName, len(issueIDs), scope.subjectNoun)
-			if err == nil {
-				fmt.Printf("  Dependencies: %d\n", result.DependenciesCount)
-				fmt.Printf("  Labels:       %d\n", result.LabelsCount)
-				fmt.Printf("  Events:       %d\n", result.EventsCount)
-			}
-			if pinnedCount > 0 {
-				fmt.Printf("  Pinned (skipped): %d\n", pinnedCount)
-			}
-			fmt.Printf("\n(Dry-run mode — no changes made)\n")
+			return outputJSON(stats)
 		}
-		return
+		fmt.Printf("Would %s %d %s(s)\n", scope.cmdName, len(issueIDs), scope.subjectNoun)
+		if err == nil {
+			fmt.Printf("  Dependencies: %d\n", result.DependenciesCount)
+			fmt.Printf("  Labels:       %d\n", result.LabelsCount)
+			fmt.Printf("  Events:       %d\n", result.EventsCount)
+		}
+		if pinnedCount > 0 {
+			fmt.Printf("  Pinned (skipped): %d\n", pinnedCount)
+		}
+		fmt.Printf("\n(Dry-run mode — no changes made)\n")
+		return nil
 	}
 
-	// Preview mode (no --force)
 	if !force {
 		fmt.Printf("Found %d %s(s) to %s\n", len(issueIDs), scope.subjectNoun, scope.cmdName)
 		if pinnedCount > 0 {
@@ -222,18 +217,20 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 		if pattern != "" {
 			hint += " --pattern " + pattern
 		}
-		FatalErrorWithHint(
+		return HandleErrorWithHint(
 			fmt.Sprintf("would %s %d bead(s)", scope.cmdName, len(issueIDs)),
 			fmt.Sprintf("Use --force to confirm or --dry-run to preview.\n  %s", hint))
 	}
 
-	// Actually purge
 	result, err := store.DeleteIssues(ctx, issueIDs, false, true, false)
 	if err != nil {
-		FatalError("%s failed: %v", scope.cmdName, err)
+		return HandleErrorRespectJSON("%s failed: %v", scope.cmdName, err)
 	}
 
 	commandDidWrite.Store(true)
+	if result.DeletedCount > 0 {
+		commandMayEmptyJSONLExport.Store(true)
+	}
 
 	if jsonOutput {
 		stats := map[string]interface{}{
@@ -245,21 +242,16 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) {
 		if pinnedCount > 0 {
 			stats["pinned_skipped"] = pinnedCount
 		}
-		outputJSON(stats)
-	} else {
-		fmt.Printf("%s %s %d %s(s)\n", ui.RenderPass("✓"), capitalize(scope.pastTense), result.DeletedCount, scope.subjectNoun)
-		fmt.Printf("  Dependencies removed: %d\n", result.DependenciesCount)
-		fmt.Printf("  Labels removed:       %d\n", result.LabelsCount)
-		fmt.Printf("  Events removed:       %d\n", result.EventsCount)
-		if pinnedCount > 0 {
-			fmt.Printf("  Pinned (skipped):     %d\n", pinnedCount)
-		}
+		return outputJSON(stats)
 	}
-
-	if result.DeletedCount > 0 {
-		commandDidWrite.Store(true)
-		commandMayEmptyJSONLExport.Store(true)
+	fmt.Printf("%s %s %d %s(s)\n", ui.RenderPass("✓"), capitalize(scope.pastTense), result.DeletedCount, scope.subjectNoun)
+	fmt.Printf("  Dependencies removed: %d\n", result.DependenciesCount)
+	fmt.Printf("  Labels removed:       %d\n", result.LabelsCount)
+	fmt.Printf("  Events removed:       %d\n", result.EventsCount)
+	if pinnedCount > 0 {
+		fmt.Printf("  Pinned (skipped):     %d\n", pinnedCount)
 	}
+	return nil
 }
 
 func capitalize(s string) string {

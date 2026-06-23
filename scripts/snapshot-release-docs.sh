@@ -79,7 +79,7 @@ trap 'rm -f "$BD_DOCS"' EXIT
 CGO_ENABLED=0 go build -tags gms_pure_go -o "$BD_DOCS" ./cmd/bd/
 
 echo "  • generate-cli-docs.sh"
-./scripts/generate-cli-docs.sh "$BD_DOCS"
+./scripts/generate-cli-docs.sh --versioned "$VERSION" "$BD_DOCS"
 
 echo "  • generate-llms-full.sh"
 ./scripts/generate-llms-full.sh

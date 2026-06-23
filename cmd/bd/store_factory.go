@@ -93,11 +93,13 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// Proxied-server workspaces have no classic store backend; they are
-		// served through the UOW provider (newProxiedServerUOWProvider) by
-		// commands with a proxied dispatch path. Reachable cross-repo, e.g.
-		// when hydration or routing opens a foreign proxied workspace.
-		return nil, fmt.Errorf("workspace %s uses dolt proxied-server mode, which cannot be opened as a classic store; only commands with proxied-server support can use it", beadsDir)
+		// TODO: this needs to be uow provider
+		return nil, fmt.Errorf("proxy server store should be uow provider")
+		// 	return newProxiedServerStore(ctx, &dolt.Config{
+		// 		BeadsDir:      beadsDir,
+		// 		Database:      cfg.GetDoltDatabase(),
+		// 		ProxiedServer: true,
+		// 	})
 	}
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfig(ctx, beadsDir)
@@ -164,9 +166,14 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// Proxied-server workspaces have no classic store backend (see
-		// newDoltStoreFromConfig); read-only cross-repo opens hit this too.
-		return nil, fmt.Errorf("workspace %s uses dolt proxied-server mode, which cannot be opened as a classic store; only commands with proxied-server support can use it", beadsDir)
+		// TODO: this needs to be uow provider
+		return nil, fmt.Errorf("proxy server store needs to be uow provider")
+		// return newProxiedServerStore(ctx, &dolt.Config{
+		// 	BeadsDir:      beadsDir,
+		// 	Database:      cfg.GetDoltDatabase(),
+		// 	ProxiedServer: true,
+		// 	ReadOnly:      true,
+		// })
 	}
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})

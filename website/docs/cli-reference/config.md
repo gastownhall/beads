@@ -79,7 +79,7 @@ Examples:
   bd config unset jira.url
 
 ```
-bd config
+bd config [flags]
 ```
 
 ### bd config apply
@@ -131,7 +131,7 @@ Examples:
   bd config drift --json
 
 ```
-bd config drift
+bd config drift [flags]
 ```
 
 ### bd config get
@@ -139,7 +139,7 @@ bd config drift
 Get a configuration value
 
 ```
-bd config get <key>
+bd config get <key> [flags]
 ```
 
 ### bd config list
@@ -147,7 +147,7 @@ bd config get <key>
 List all configuration
 
 ```
-bd config list
+bd config list [flags]
 ```
 
 ### bd config set
@@ -221,7 +221,7 @@ bd config show [flags]
 Delete a configuration value
 
 ```
-bd config unset <key>
+bd config unset <key> [flags]
 ```
 
 ### bd config validate
@@ -239,5 +239,5 @@ Checks:
 	  bd config validate --json
 
 ```
-bd config validate
+bd config validate [flags]
 ```

@@ -52,6 +52,16 @@ irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 brew upgrade beads
 ```
 
+If you still have the old tap formula installed as `bd`, switch to the
+Homebrew core formula:
+
+```bash
+brew uninstall bd
+brew untap gastownhall/beads 2>/dev/null || true
+brew untap steveyegge/beads 2>/dev/null || true
+brew install beads
+```
+
 ### go install
 
 ```bash

@@ -84,7 +84,7 @@ bd dep add [issue-id] [depends-on-id] [flags]
 Detect dependency cycles
 
 ```
-bd dep cycles
+bd dep cycles [flags]
 ```
 
 ### bd dep list
@@ -129,7 +129,7 @@ Examples:
   bd relate bd-123 bd-456    # Create see-also connection
 
 ```
-bd dep relate <id1> <id2>
+bd dep relate <id1> <id2> [flags]
 ```
 
 ### bd dep remove
@@ -137,7 +137,7 @@ bd dep relate <id1> <id2>
 Remove a dependency
 
 ```
-bd dep remove [issue-id] [depends-on-id]
+bd dep remove [issue-id] [depends-on-id] [flags]
 ```
 
 **Aliases:** rm
@@ -182,5 +182,5 @@ Example:
   bd unrelate bd-abc bd-xyz
 
 ```
-bd dep unrelate <id1> <id2>
+bd dep unrelate <id1> <id2> [flags]
 ```

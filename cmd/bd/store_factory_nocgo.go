@@ -49,10 +49,13 @@ func acquireEmbeddedLock(_ string, _ bool) (util.Unlocker, error) {
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// Proxied-server workspaces have no classic store backend; they are
-		// served through the UOW provider by commands with a proxied
-		// dispatch path.
-		return nil, fmt.Errorf("workspace %s uses dolt proxied-server mode, which cannot be opened as a classic store; only commands with proxied-server support can use it", beadsDir)
+		// TODO: this needs to be uow provider
+		return nil, fmt.Errorf("proxy server store should be uow provider")
+		// 	return newProxiedServerStore(ctx, &dolt.Config{
+		// 		BeadsDir:      beadsDir,
+		// 		Database:      cfg.GetDoltDatabase(),
+		// 		ProxiedServer: true,
+		// 	})
 	}
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfig(ctx, beadsDir)
@@ -64,9 +67,14 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// Proxied-server workspaces have no classic store backend (see
-		// newDoltStoreFromConfig); read-only cross-repo opens hit this too.
-		return nil, fmt.Errorf("workspace %s uses dolt proxied-server mode, which cannot be opened as a classic store; only commands with proxied-server support can use it", beadsDir)
+		// TODO: this needs to be uow provider
+		return nil, fmt.Errorf("proxy server store needs to be uow provider")
+		// return newProxiedServerStore(ctx, &dolt.Config{
+		// 	BeadsDir:      beadsDir,
+		// 	Database:      cfg.GetDoltDatabase(),
+		// 	ProxiedServer: true,
+		// 	ReadOnly:      true,
+		// })
 	}
 	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})

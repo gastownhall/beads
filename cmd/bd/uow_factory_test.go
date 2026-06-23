@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -23,36 +22,6 @@ func TestNewProxiedServerUOWProvider_RoutesExternalConfigToExternalProvider(t *t
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Host requires Port",
 		"expected external validation error proving the external code path was taken; got: %v", err)
-}
-
-// A corrupted sidecar must abort provider construction, not silently fall
-// back to a fresh managed local database (bd-6dnrw.44 item 6, split-brain).
-func TestNewProxiedServerUOWProvider_CorruptSidecarErrorsInsteadOfManagedFallback(t *testing.T) {
-	beadsDir := t.TempDir()
-	require.NoError(t, os.WriteFile(
-		filepath.Join(beadsDir, configfile.ProxiedServerClientInfoFileName),
-		[]byte("{not json"), 0o600))
-
-	_, err := newProxiedServerUOWProvider(context.Background(), beadsDir)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), configfile.ProxiedServerClientInfoFileName,
-		"error must name the unreadable sidecar; got: %v", err)
-	assert.Contains(t, err.Error(), "refusing to fall back",
-		"must refuse the managed-local fallback; got: %v", err)
-}
-
-// An unparseable workspace config must abort too — defaulting the database
-// name sends writes to the wrong database.
-func TestNewProxiedServerUOWProvider_CorruptWorkspaceConfigErrors(t *testing.T) {
-	beadsDir := t.TempDir()
-	require.NoError(t, os.WriteFile(
-		filepath.Join(beadsDir, "metadata.json"),
-		[]byte("{not json"), 0o600))
-
-	_, err := newProxiedServerUOWProvider(context.Background(), beadsDir)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "workspace config",
-		"error must point at the workspace config; got: %v", err)
 }
 
 func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/idgen"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -20,11 +21,21 @@ type IssueTableOpts struct {
 	UseWispsTable bool
 }
 
+type ClaimRowResult struct {
+	Updated          bool
+	CurrentAssignee  string
+	CurrentStatus    types.Status
+	StartedAtWasZero bool
+	OldIssue         *types.Issue
+}
+
 type IssueSQLRepository interface {
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
 	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
+	Claim(ctx context.Context, id, actor string, opts IssueTableOpts) (ClaimRowResult, error)
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
+	AsOf(ctx context.Context, id, ref string) (*types.Issue, error)
 	GetByIDs(ctx context.Context, ids []string, opts IssueTableOpts) ([]*types.Issue, error)
 	Exists(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
@@ -34,6 +45,61 @@ type IssueSQLRepository interface {
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
+	Delete(ctx context.Context, id string, opts IssueTableOpts) error
+	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts) (int, error)
+	PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, regularIDs []string, err error)
+	FindAllDependents(ctx context.Context, ids []string) ([]string, error)
+	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
+	RecomputeIsBlocked(ctx context.Context, issueIDs, wispIDs []string) error
+	Close(ctx context.Context, id string, params CloseRowParams, actor string, opts IssueTableOpts) (CloseRowResult, error)
+	Reopen(ctx context.Context, id string, params ReopenRowParams, actor string, opts IssueTableOpts) (ReopenRowResult, error)
+	GetNewlyUnblockedByClose(ctx context.Context, closedID string) ([]*types.Issue, error)
+	ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error)
+	ClaimReadyWisp(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error)
+	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
+	GetStatistics(ctx context.Context) (*types.Statistics, error)
+}
+
+type CloseRowParams struct {
+	Reason  string
+	Session string
+}
+
+type CloseRowResult struct {
+	Updated       bool
+	AlreadyClosed bool
+	IsWisp        bool
+}
+
+type ReopenRowParams struct {
+	Reason string
+}
+
+type ReopenRowResult struct {
+	Updated     bool
+	AlreadyOpen bool
+	IsWisp      bool
+}
+
+type DeleteIssuesParams struct {
+	IDs                  []string
+	DryRun               bool
+	UpdateTextReferences bool
+}
+
+type DeleteIssuesResult struct {
+	DeletedCount      int
+	DependenciesCount int
+	LabelsCount       int
+	EventsCount       int
+	ReferencesUpdated int
+}
+
+type DeletePreview struct {
+	Issues          map[string]*types.Issue
+	ConnectedIssues map[string]*types.Issue
+	DepRecords      map[string][]*types.Dependency
+	NotFound        []string
 }
 
 type SearchPage struct {
@@ -108,6 +174,25 @@ type GraphApplyResult struct {
 	IDs map[string]string
 }
 
+type ClaimResult struct {
+	AlreadyClaimed bool
+	PriorAssignee  string
+}
+
+type ClaimReadyResult struct {
+	Issue   *types.Issue
+	Claimed bool
+}
+
+type UpdateSpec struct {
+	Fields       map[string]any
+	Claim        bool
+	AddLabels    []string
+	RemoveLabels []string
+	SetLabels    *[]string
+	Reparent     *string
+}
+
 type IssueUseCase interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
@@ -116,18 +201,61 @@ type IssueUseCase interface {
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
+	ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (ClaimReadyResult, error)
+	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
+	GetStatistics(ctx context.Context) (*types.Statistics, error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]any, actor string) error
+	ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error)
+	ClaimIssueIfOpen(ctx context.Context, id, actor string) (ClaimResult, error)
+	CloseIssue(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error)
+	ReopenIssue(ctx context.Context, id string, params ReopenIssueParams, actor string) (ReopenIssueResult, error)
+	CountOpenChildren(ctx context.Context, id string) (int, error)
+	GetNewlyUnblockedByClose(ctx context.Context, closedID string) ([]*types.Issue, error)
+	ApplyUpdate(ctx context.Context, id string, spec UpdateSpec, actor string) (*types.Issue, error)
 	ApplyIssueGraph(ctx context.Context, plan GraphPlan, actor string) (GraphApplyResult, error)
+	AsOf(ctx context.Context, id, ref string) (*types.Issue, error)
+	DeleteIssue(ctx context.Context, id, actor string) (DeleteIssuesResult, error)
+	DeleteIssues(ctx context.Context, params DeleteIssuesParams, actor string) (DeleteIssuesResult, error)
+	PreviewDelete(ctx context.Context, ids []string) (DeletePreview, error)
+	DeleteWisp(ctx context.Context, id, actor string) (DeleteIssuesResult, error)
+	DeleteWisps(ctx context.Context, params DeleteIssuesParams, actor string) (DeleteIssuesResult, error)
+	PreviewDeleteWisp(ctx context.Context, ids []string) (DeletePreview, error)
 
 	GetWisp(ctx context.Context, id string) (*types.Issue, error)
 	GetWispsByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
 	CreateWisp(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateWisps(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
 	UpdateWisp(ctx context.Context, id string, updates map[string]any, actor string) error
+	ClaimWisp(ctx context.Context, id, actor string) (ClaimResult, error)
+	ClaimWispIfOpen(ctx context.Context, id, actor string) (ClaimResult, error)
+	CloseWisp(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error)
+	ReopenWisp(ctx context.Context, id string, params ReopenIssueParams, actor string) (ReopenIssueResult, error)
+	CountOpenWispChildren(ctx context.Context, id string) (int, error)
+	GetNewlyUnblockedByCloseWisp(ctx context.Context, closedID string) ([]*types.Issue, error)
 	ApplyWispGraph(ctx context.Context, plan GraphPlan, actor string) (GraphApplyResult, error)
+	ClaimReadyWisp(ctx context.Context, filter types.WorkFilter, actor string) (ClaimReadyResult, error)
+}
+
+type CloseIssueParams struct {
+	Reason  string
+	Session string
+}
+
+type CloseIssueResult struct {
+	Issue  *types.Issue
+	Closed bool
+}
+
+type ReopenIssueParams struct {
+	Reason string
+}
+
+type ReopenIssueResult struct {
+	Issue    *types.Issue
+	Reopened bool
 }
 
 func NewIssueUseCase(
@@ -137,6 +265,9 @@ func NewIssueUseCase(
 	counterRepo ChildCounterSQLRepository,
 	commentRepo CommentSQLRepository,
 	cfgRepo ConfigSQLRepository,
+	eventsRepo EventsSQLRepository,
+	labelUC LabelUseCase,
+	depUC DependencyUseCase,
 ) IssueUseCase {
 	return &issueUseCaseImpl{
 		issueRepo:   issueRepo,
@@ -145,6 +276,9 @@ func NewIssueUseCase(
 		counterRepo: counterRepo,
 		commentRepo: commentRepo,
 		cfgRepo:     cfgRepo,
+		eventsRepo:  eventsRepo,
+		labelUC:     labelUC,
+		depUC:       depUC,
 	}
 }
 
@@ -155,12 +289,26 @@ type issueUseCaseImpl struct {
 	counterRepo ChildCounterSQLRepository
 	commentRepo CommentSQLRepository
 	cfgRepo     ConfigSQLRepository
+	eventsRepo  EventsSQLRepository
+	labelUC     LabelUseCase
+	depUC       DependencyUseCase
 }
 
 var _ IssueUseCase = (*issueUseCaseImpl)(nil)
 
 func (u *issueUseCaseImpl) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 	return u.get(ctx, id, false)
+}
+
+func (u *issueUseCaseImpl) AsOf(ctx context.Context, id, ref string) (*types.Issue, error) {
+	if id == "" {
+		return nil, fmt.Errorf("as of: id must not be empty")
+	}
+	issue, err := u.issueRepo.AsOf(ctx, id, ref)
+	if err != nil {
+		return nil, fmt.Errorf("as of %s @ %s: %w", id, ref, err)
+	}
+	return issue, nil
 }
 
 func (u *issueUseCaseImpl) GetWisp(ctx context.Context, id string) (*types.Issue, error) {
@@ -212,7 +360,153 @@ func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[st
 	if len(updates) == 0 {
 		return nil
 	}
+	if rawType, ok := updates["issue_type"]; ok {
+		if issueType, ok := rawType.(string); ok && issueType != "" {
+			customTypes, err := u.cfgRepo.GetCustomTypes(ctx)
+			if err != nil {
+				return fmt.Errorf("update: read custom types: %w", err)
+			}
+			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+				return fmt.Errorf("invalid issue type: %s", issueType)
+			}
+		}
+	}
 	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp})
+}
+
+func (u *issueUseCaseImpl) ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error) {
+	return u.claim(ctx, id, actor, false)
+}
+
+func (u *issueUseCaseImpl) ClaimWisp(ctx context.Context, id, actor string) (ClaimResult, error) {
+	return u.claim(ctx, id, actor, true)
+}
+
+func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp bool) (ClaimResult, error) {
+	if id == "" {
+		return ClaimResult{}, fmt.Errorf("claim: id must not be empty")
+	}
+	if actor == "" {
+		return ClaimResult{}, fmt.Errorf("claim: actor must not be empty")
+	}
+	row, err := u.issueRepo.Claim(ctx, id, actor, IssueTableOpts{UseWispsTable: useWisp})
+	if err != nil {
+		return ClaimResult{}, fmt.Errorf("claim %s: %w", id, err)
+	}
+	if row.Updated {
+		return ClaimResult{}, nil
+	}
+	if row.CurrentAssignee == actor && row.CurrentStatus == types.StatusInProgress {
+		return ClaimResult{AlreadyClaimed: true, PriorAssignee: actor}, nil
+	}
+	if row.CurrentAssignee != "" && row.CurrentAssignee != actor {
+		return ClaimResult{}, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, row.CurrentAssignee)
+	}
+	return ClaimResult{}, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, row.CurrentStatus)
+}
+
+func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec UpdateSpec, actor string) (*types.Issue, error) {
+	if id == "" {
+		return nil, fmt.Errorf("ApplyUpdate: id must not be empty")
+	}
+
+	useWisp, err := u.isWispID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
+	}
+
+	if spec.Claim {
+		if useWisp {
+			if _, err := u.ClaimWisp(ctx, id, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if _, err := u.ClaimIssue(ctx, id, actor); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if len(spec.Fields) > 0 {
+		if useWisp {
+			if err := u.UpdateWisp(ctx, id, spec.Fields, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.UpdateIssue(ctx, id, spec.Fields, actor); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if spec.SetLabels != nil {
+		if useWisp {
+			if err := u.labelUC.SetWispLabels(ctx, id, *spec.SetLabels, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.labelUC.SetLabels(ctx, id, *spec.SetLabels, actor); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		if len(spec.AddLabels) > 0 {
+			if useWisp {
+				if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if len(spec.RemoveLabels) > 0 {
+			if useWisp {
+				if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
+	if spec.Reparent != nil {
+		if useWisp {
+			if err := u.depUC.ReparentWisp(ctx, id, *spec.Reparent, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.depUC.Reparent(ctx, id, *spec.Reparent, actor); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	var issue *types.Issue
+	if useWisp {
+		issue, err = u.GetWisp(ctx, id)
+	} else {
+		issue, err = u.GetIssue(ctx, id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ApplyUpdate: re-fetch %s: %w", id, err)
+	}
+	return issue, nil
+}
+
+func (u *issueUseCaseImpl) isWispID(ctx context.Context, id string) (bool, error) {
+	found, err := u.issueRepo.Exists(ctx, id, IssueTableOpts{UseWispsTable: true})
+	if err != nil {
+		if dberrors.IsTableNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("probe wisps table: %w", err)
+	}
+	return found, nil
 }
 
 func (u *issueUseCaseImpl) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error) {
@@ -500,7 +794,10 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 	// already-existing dependencies in the store. This must run before any
 	// dep inserts to catch the violation before we've written anything.
 	parentDepPairs := graphParentDepPairs(plan.Nodes, keyToID)
-	if err := u.validatePlannedBlockingPaths(ctx, plan, keyToID, parentDepPairs, useWisp); err != nil {
+	if err := u.validatePlannedBlockingPaths(ctx, plan, keyToID, parentDepPairs); err != nil {
+		return GraphApplyResult{}, err
+	}
+	if err := u.validatePlannedBlockingCycles(ctx, plan, keyToID); err != nil {
 		return GraphApplyResult{}, err
 	}
 
@@ -509,14 +806,10 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 	//   - Same pair, different type   → error (conflicting edge over a parent-child link).
 	//   - Reverse pair, blocking type → error (creates a parent → child blocking cycle).
 	//
-	// Cycle-check skip optimization (matches embedded executeGraphApply):
-	// when every cycle-relevant edge in the plan is fully local (both
-	// endpoints by key, neither by ID), the CLI-side local cycle validator
-	// has already proven the planned subgraph is acyclic and
-	// validatePlannedBlockingPaths has covered parent-child paths against
-	// live deps. In that case the per-edge HasCycle SQL probe is skipped.
-	// Edges that reference external IDs always pay for HasCycle.
-	planCanSkipCycleCheck := applyGraphPlanCanSkipSQLCycleChecks(plan)
+	// Blocking cycles are already proven absent by validatePlannedBlockingCycles
+	// above (whole-graph preflight over planned + existing blocking edges, the
+	// same strategy as embedded executeGraphApply), so the edge insert loop no
+	// longer runs a per-edge HasCycle SQL probe.
 	for i, edge := range plan.Edges {
 		fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
 		if fromID == "" {
@@ -539,16 +832,6 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 		}
 		if parentDepPairs[depPairKey(toID, fromID)] && cycleRelevantDepType(depType) {
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: edge %d %s->%s creates a blocking reverse of a parent-child relationship", i, fromID, toID)
-		}
-
-		if cycleRelevantDepType(depType) && !(planCanSkipCycleCheck && applyGraphEdgeCanSkipSQLCycleCheck(edge, depType)) {
-			cycle, err := u.depRepo.HasCycle(ctx, fromID, toID)
-			if err != nil {
-				return GraphApplyResult{}, fmt.Errorf("applyGraph: edge %d cycle check: %w", i, err)
-			}
-			if cycle {
-				return GraphApplyResult{}, fmt.Errorf("applyGraph: edge %d (%s -> %s): would create a cycle", i, fromID, toID)
-			}
 		}
 
 		dep := &types.Dependency{
@@ -638,37 +921,15 @@ func cycleRelevantDepType(t types.DependencyType) bool {
 	return t == types.DepBlocks || t == types.DepConditionalBlocks
 }
 
-// applyGraphPlanCanSkipSQLCycleChecks returns true when every cycle-relevant
-// edge in the plan is purely local (both endpoints by key, neither by ID).
-// In that case the CLI-side local cycle validator has already proven the
-// planned subgraph is acyclic, and no per-edge SQL HasCycle probe is needed
-// in applyGraph's edge pass. Non-cycle-relevant edges (e.g. "related") do
-// not gate the skip. Mirrors embedded graphApplyPlanCanSkipSQLCycleChecks.
-func applyGraphPlanCanSkipSQLCycleChecks(plan GraphPlan) bool {
-	for _, edge := range plan.Edges {
-		depType := edge.Type
-		if depType == "" {
-			depType = types.DepBlocks
-		}
-		if !cycleRelevantDepType(depType) {
-			continue
-		}
-		if !applyGraphEdgeCanSkipSQLCycleCheck(edge, depType) {
-			return false
-		}
-	}
-	return true
-}
-
-// applyGraphEdgeCanSkipSQLCycleCheck returns true when the edge is fully
-// local (both endpoints by key, neither by ID) and the dep type is
-// cycle-relevant. An edge that references an external ID always pays for
-// HasCycle because the local validator never saw the external graph.
-func applyGraphEdgeCanSkipSQLCycleCheck(edge GraphEdge, depType types.DependencyType) bool {
-	if edge.FromKey == "" || edge.ToKey == "" || edge.FromID != "" || edge.ToID != "" {
-		return false
-	}
-	return cycleRelevantDepType(depType)
+// readyPathDepType reports whether a dependency type affects ready-work. It is
+// the broad predicate used when walking existing deps for parent→child
+// blocking-path validation, in contrast to the blocking-only
+// cycleRelevantDepType used for pure blocking-cycle detection. The two must
+// stay distinct: narrowing the parent-path walk would miss real ready-work
+// deadlocks, while broadening the blocking-cycle walk would reject edges that
+// plain `bd dep add` accepts.
+func readyPathDepType(t types.DependencyType) bool {
+	return t.AffectsReadyWork()
 }
 
 // resolveEdgeRef returns the ID for an edge endpoint: the keyToID lookup
@@ -693,7 +954,6 @@ func (u *issueUseCaseImpl) validatePlannedBlockingPaths(
 	plan GraphPlan,
 	keyToID map[string]string,
 	parentDepPairs map[string]bool,
-	useWisp bool,
 ) error {
 	adj := make(map[string][]string)
 	for pair := range parentDepPairs {
@@ -707,7 +967,7 @@ func (u *issueUseCaseImpl) validatePlannedBlockingPaths(
 		if depType == "" {
 			depType = types.DepBlocks
 		}
-		if !depType.AffectsReadyWork() {
+		if !readyPathDepType(depType) {
 			continue
 		}
 		fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
@@ -735,7 +995,7 @@ func (u *issueUseCaseImpl) validatePlannedBlockingPaths(
 		if childID == "" || parentID == "" {
 			continue
 		}
-		hasPath, err := u.graphHasPath(ctx, adj, depCache, parentID, childID, useWisp)
+		hasPath, err := u.graphHasPath(ctx, adj, depCache, parentID, childID, readyPathDepType)
 		if err != nil {
 			return err
 		}
@@ -746,16 +1006,79 @@ func (u *issueUseCaseImpl) validatePlannedBlockingPaths(
 	return nil
 }
 
+// validatePlannedBlockingCycles rejects planned blocking edges that would close
+// a blocking-dependency cycle, evaluated whole-graph before any insert. It
+// mirrors embedded validateGraphApplyPlannedBlockingCycles and the storage
+// per-edge SQL cycle check (depRepo.HasCycle): both the planned adjacency and
+// the existing-dep walk are restricted to blocks/conditional-blocks via
+// cycleRelevantDepType, so graph-apply stays consistent with `bd dep add` and
+// does not reject a blocking edge whose return path runs through an existing
+// parent-child or waits-for dep.
+func (u *issueUseCaseImpl) validatePlannedBlockingCycles(
+	ctx context.Context,
+	plan GraphPlan,
+	keyToID map[string]string,
+) error {
+	type plannedEdge struct {
+		index  int
+		fromID string
+		toID   string
+	}
+
+	adj := make(map[string][]string)
+	checks := make([]plannedEdge, 0, len(plan.Edges))
+	for i, edge := range plan.Edges {
+		depType := edge.Type
+		if depType == "" {
+			depType = types.DepBlocks
+		}
+		if !cycleRelevantDepType(depType) {
+			continue
+		}
+		fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
+		toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
+		if fromID == "" || toID == "" {
+			continue
+		}
+		if fromID == toID {
+			return fmt.Errorf("applyGraph: edge %d %s->%s creates a blocking dependency cycle", i, fromID, toID)
+		}
+		adj[fromID] = append(adj[fromID], toID)
+		checks = append(checks, plannedEdge{index: i, fromID: fromID, toID: toID})
+	}
+
+	depCache := make(map[string][]*types.Dependency)
+	for _, edge := range checks {
+		hasPath, err := u.graphHasPath(ctx, adj, depCache, edge.toID, edge.fromID, cycleRelevantDepType)
+		if err != nil {
+			return fmt.Errorf("applyGraph: edge %d %s->%s: checking planned blocking cycle: %w", edge.index, edge.fromID, edge.toID, err)
+		}
+		if hasPath {
+			return fmt.Errorf("applyGraph: edge %d %s->%s creates a blocking dependency cycle", edge.index, edge.fromID, edge.toID)
+		}
+	}
+	return nil
+}
+
 // graphHasPath returns true if fromID can reach toID by following the
 // in-memory adjacency (planned parent-child + planned blocking edges) and
-// existing AffectsReadyWork deps loaded lazily from the store. Per-node
-// dep fetches are cached so each visited node hits the DB at most once.
+// existing deps loaded lazily from the store. followExistingDep selects which
+// existing dep types the walk traverses, so callers can mirror either the
+// blocking-only SQL cycle check or the broader ready-work graph. Per-node dep
+// fetches are cached so each visited node hits the DB at most once.
+//
+// Existing deps are loaded from BOTH dependency tables. The per-edge
+// depRepo.HasCycle probe this walk replaced traversed dependencies ∪
+// wisp_dependencies (and the embedded path's GetDependencyRecords selects the
+// table per node), so a blocking cycle that closes through the other table —
+// e.g. an existing wisp edge reached during a regular graph-apply — must still
+// be detected regardless of which table this graph-apply primarily writes.
 func (u *issueUseCaseImpl) graphHasPath(
 	ctx context.Context,
 	adj map[string][]string,
 	depCache map[string][]*types.Dependency,
 	fromID, toID string,
-	useWisp bool,
+	followExistingDep func(types.DependencyType) bool,
 ) (bool, error) {
 	seen := make(map[string]bool)
 	var visit func(string) (bool, error)
@@ -775,18 +1098,25 @@ func (u *issueUseCaseImpl) graphHasPath(
 		}
 		deps, ok := depCache[id]
 		if !ok {
-			res, err := u.depRepo.ListByIssueIDs(ctx, []string{id}, DepListOpts{
+			regular, err := u.depRepo.ListByIssueIDs(ctx, []string{id}, DepListOpts{
 				Direction:     DepDirectionOut,
-				UseWispsTable: useWisp,
+				UseWispsTable: false,
 			})
 			if err != nil {
 				return false, fmt.Errorf("applyGraph: read existing deps for %s: %w", id, err)
 			}
-			deps = res.Outgoing[id]
+			wisp, err := u.depRepo.ListByIssueIDs(ctx, []string{id}, DepListOpts{
+				Direction:     DepDirectionOut,
+				UseWispsTable: true,
+			})
+			if err != nil {
+				return false, fmt.Errorf("applyGraph: read existing wisp deps for %s: %w", id, err)
+			}
+			deps = append(regular.Outgoing[id], wisp.Outgoing[id]...)
 			depCache[id] = deps
 		}
 		for _, dep := range deps {
-			if !dep.Type.AffectsReadyWork() {
+			if !followExistingDep(dep.Type) {
 				continue
 			}
 			found, err := visit(dep.DependsOnID)
@@ -883,4 +1213,161 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 		}
 	}
 	return "", fmt.Errorf("failed to generate unique ID for prefix %q after lengths %d..%d with 10 nonces each", prefix, baseLength, cfg.MaxLength)
+}
+
+func (u *issueUseCaseImpl) CloseIssue(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error) {
+	return u.close(ctx, id, params, actor, false)
+}
+
+func (u *issueUseCaseImpl) CloseWisp(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error) {
+	return u.close(ctx, id, params, actor, true)
+}
+
+func (u *issueUseCaseImpl) close(ctx context.Context, id string, params CloseIssueParams, actor string, useWisp bool) (CloseIssueResult, error) {
+	if id == "" {
+		return CloseIssueResult{}, fmt.Errorf("close: id must not be empty")
+	}
+	if actor == "" {
+		return CloseIssueResult{}, fmt.Errorf("close: actor must not be empty")
+	}
+	row, err := u.issueRepo.Close(ctx, id, CloseRowParams{Reason: params.Reason, Session: params.Session}, actor, IssueTableOpts{UseWispsTable: useWisp})
+	if err != nil {
+		return CloseIssueResult{}, fmt.Errorf("close %s: %w", id, err)
+	}
+	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: row.IsWisp})
+	if err != nil {
+		return CloseIssueResult{}, fmt.Errorf("close %s: reload: %w", id, err)
+	}
+	return CloseIssueResult{
+		Issue:  issue,
+		Closed: !row.AlreadyClosed,
+	}, nil
+}
+
+func (u *issueUseCaseImpl) ReopenIssue(ctx context.Context, id string, params ReopenIssueParams, actor string) (ReopenIssueResult, error) {
+	return u.reopen(ctx, id, params, actor, false)
+}
+
+func (u *issueUseCaseImpl) ReopenWisp(ctx context.Context, id string, params ReopenIssueParams, actor string) (ReopenIssueResult, error) {
+	return u.reopen(ctx, id, params, actor, true)
+}
+
+func (u *issueUseCaseImpl) reopen(ctx context.Context, id string, params ReopenIssueParams, actor string, useWisp bool) (ReopenIssueResult, error) {
+	if id == "" {
+		return ReopenIssueResult{}, fmt.Errorf("reopen: id must not be empty")
+	}
+	if actor == "" {
+		return ReopenIssueResult{}, fmt.Errorf("reopen: actor must not be empty")
+	}
+	row, err := u.issueRepo.Reopen(ctx, id, ReopenRowParams{Reason: params.Reason}, actor, IssueTableOpts{UseWispsTable: useWisp})
+	if err != nil {
+		return ReopenIssueResult{}, fmt.Errorf("reopen %s: %w", id, err)
+	}
+	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: row.IsWisp})
+	if err != nil {
+		return ReopenIssueResult{}, fmt.Errorf("reopen %s: reload: %w", id, err)
+	}
+	return ReopenIssueResult{
+		Issue:    issue,
+		Reopened: !row.AlreadyOpen,
+	}, nil
+}
+
+func (u *issueUseCaseImpl) ClaimIssueIfOpen(ctx context.Context, id, actor string) (ClaimResult, error) {
+	return u.claim(ctx, id, actor, false)
+}
+
+func (u *issueUseCaseImpl) ClaimWispIfOpen(ctx context.Context, id, actor string) (ClaimResult, error) {
+	return u.claim(ctx, id, actor, true)
+}
+
+func (u *issueUseCaseImpl) CountOpenChildren(ctx context.Context, id string) (int, error) {
+	return u.countOpenChildren(ctx, id, false)
+}
+
+func (u *issueUseCaseImpl) CountOpenWispChildren(ctx context.Context, id string) (int, error) {
+	return u.countOpenChildren(ctx, id, true)
+}
+
+func (u *issueUseCaseImpl) countOpenChildren(ctx context.Context, id string, useWisp bool) (int, error) {
+	if id == "" {
+		return 0, fmt.Errorf("CountOpenChildren: id must not be empty")
+	}
+	children, err := u.depRepo.ListWithIssueMetadata(ctx, id, DepListOpts{
+		Types:         []types.DependencyType{types.DepParentChild},
+		Direction:     DepDirectionIn,
+		UseWispsTable: useWisp,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("CountOpenChildren %s: %w", id, err)
+	}
+	open := 0
+	for _, child := range children {
+		if child.Status != types.StatusClosed {
+			open++
+		}
+	}
+	return open, nil
+}
+
+func (u *issueUseCaseImpl) GetNewlyUnblockedByClose(ctx context.Context, closedID string) ([]*types.Issue, error) {
+	return u.getNewlyUnblockedByClose(ctx, closedID)
+}
+
+func (u *issueUseCaseImpl) GetNewlyUnblockedByCloseWisp(ctx context.Context, closedID string) ([]*types.Issue, error) {
+	return u.getNewlyUnblockedByClose(ctx, closedID)
+}
+
+func (u *issueUseCaseImpl) getNewlyUnblockedByClose(ctx context.Context, closedID string) ([]*types.Issue, error) {
+	if closedID == "" {
+		return nil, fmt.Errorf("GetNewlyUnblockedByClose: closedID must not be empty")
+	}
+	out, err := u.issueRepo.GetNewlyUnblockedByClose(ctx, closedID)
+	if err != nil {
+		return nil, fmt.Errorf("GetNewlyUnblockedByClose %s: %w", closedID, err)
+	}
+	return out, nil
+}
+
+func (u *issueUseCaseImpl) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (ClaimReadyResult, error) {
+	return u.claimReady(ctx, filter, actor, false)
+}
+
+func (u *issueUseCaseImpl) ClaimReadyWisp(ctx context.Context, filter types.WorkFilter, actor string) (ClaimReadyResult, error) {
+	return u.claimReady(ctx, filter, actor, true)
+}
+
+func (u *issueUseCaseImpl) claimReady(ctx context.Context, filter types.WorkFilter, actor string, useWisp bool) (ClaimReadyResult, error) {
+	var (
+		issue *types.Issue
+		err   error
+	)
+	if useWisp {
+		issue, err = u.issueRepo.ClaimReadyWisp(ctx, filter, actor)
+	} else {
+		issue, err = u.issueRepo.ClaimReadyIssue(ctx, filter, actor)
+	}
+	if err != nil {
+		if useWisp {
+			return ClaimReadyResult{}, fmt.Errorf("ClaimReadyWisp: %w", err)
+		}
+		return ClaimReadyResult{}, fmt.Errorf("ClaimReadyIssue: %w", err)
+	}
+	return ClaimReadyResult{Issue: issue, Claimed: issue != nil}, nil
+}
+
+func (u *issueUseCaseImpl) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
+	out, err := u.issueRepo.GetBlockedIssues(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("GetBlockedIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (u *issueUseCaseImpl) GetStatistics(ctx context.Context) (*types.Statistics, error) {
+	out, err := u.issueRepo.GetStatistics(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetStatistics: %w", err)
+	}
+	return out, nil
 }

@@ -20,5 +20,5 @@ Examples:
   bd undefer bd-abc bd-def # Undefer multiple issues
 
 ```
-bd undefer [id...]
+bd undefer [id...] [flags]
 ```

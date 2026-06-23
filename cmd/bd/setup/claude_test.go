@@ -917,42 +917,33 @@ func TestRemoveClaudeScenarios(t *testing.T) {
 	})
 }
 
-func TestClaudeWrappersExit(t *testing.T) {
+func TestClaudeWrappersReturnError(t *testing.T) {
 	t.Run("install provider error", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		stubClaudeEnvProvider(t, claudeEnv{}, errors.New("boom"))
-		InstallClaude(false, false)
-		if !cap.called || cap.code != 1 {
-			t.Fatal("InstallClaude should exit on provider error")
+		if err := InstallClaude(false, false); err == nil {
+			t.Fatal("InstallClaude should return error on provider error")
 		}
 	})
 
 	t.Run("install internal error", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env, _, _ := newClaudeTestEnv(t)
 		env.ensureDir = func(string, os.FileMode) error { return errors.New("boom") }
 		stubClaudeEnvProvider(t, env, nil)
-		// global=false → project-local (default)
-		InstallClaude(false, false)
-		if !cap.called || cap.code != 1 {
-			t.Fatal("InstallClaude should exit when installClaude fails")
+		if err := InstallClaude(false, false); err == nil {
+			t.Fatal("InstallClaude should return error when installClaude fails")
 		}
 	})
 
 	t.Run("check missing hooks", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env, _, _ := newClaudeTestEnv(t)
 		stubClaudeEnvProvider(t, env, nil)
-		CheckClaude()
-		if !cap.called || cap.code != 1 {
-			t.Fatal("CheckClaude should exit when hooks missing")
+		if err := CheckClaude(); err == nil {
+			t.Fatal("CheckClaude should return error when hooks missing")
 		}
 	})
 
 	t.Run("remove parse error", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env, _, _ := newClaudeTestEnv(t)
-		// Write invalid JSON to project settings path (default target)
 		path := projectSettingsPath(env.projectDir)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -961,10 +952,8 @@ func TestClaudeWrappersExit(t *testing.T) {
 			t.Fatalf("write file: %v", err)
 		}
 		stubClaudeEnvProvider(t, env, nil)
-		// global=false → project-local (default)
-		RemoveClaude(false)
-		if !cap.called || cap.code != 1 {
-			t.Fatal("RemoveClaude should exit on parse error")
+		if err := RemoveClaude(false); err == nil {
+			t.Fatal("RemoveClaude should return error on parse error")
 		}
 	})
 }
@@ -1011,6 +1000,36 @@ func TestHasBeadsPlugin(t *testing.T) {
 		env, _, _ := newClaudeTestEnv(t)
 		if hasBeadsPlugin(env) {
 			t.Error("expected no plugin detected")
+		}
+	})
+
+	t.Run("design-to-beads not mistaken for beads plugin", func(t *testing.T) {
+		// GH#4244: a plugin whose name merely contains "beads" (here
+		// design-to-beads) must NOT be taken for the beads hook plugin, or the
+		// SessionStart hook write is wrongly skipped.
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"enabledPlugins": map[string]interface{}{
+				"design-to-beads@xexr-marketplace": true,
+			},
+		})
+		if hasBeadsPlugin(env) {
+			t.Error("design-to-beads should not be detected as the beads plugin")
+		}
+	})
+
+	t.Run("real beads plugin detected past a decoy", func(t *testing.T) {
+		// The exact-name match must still find a real beads@<marketplace> even
+		// when a *beads*-named decoy is enabled too (GH#3192 preserved).
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"enabledPlugins": map[string]interface{}{
+				"design-to-beads@xexr-marketplace": true,
+				"beads@beads-marketplace":          true,
+			},
+		})
+		if !hasBeadsPlugin(env) {
+			t.Error("real beads@beads-marketplace should be detected even alongside a decoy")
 		}
 	})
 }

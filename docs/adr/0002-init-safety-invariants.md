@@ -94,6 +94,7 @@ bd init                         mint, or auto-bootstrap if origin has refs/dolt/
 bd init --reinit-local          local reinit; refuses remote divergence
 bd init --reinit-local \        local reinit, overwrite remote on next push
     --discard-remote            (interactive confirm or --destroy-token required)
+bd init --from-jsonl            local JSONL import; refuses remote divergence
 bd init --force                 deprecated alias for --reinit-local (≥2 releases)
 bd bootstrap                    adopt remote — signposted by init refusal
 ```
@@ -101,7 +102,7 @@ bd bootstrap                    adopt remote — signposted by init refusal
 ### Exit codes (stable, grep-safe)
 
 ```
-10   ExitRemoteDivergenceRefused   --force/--reinit-local without --discard-remote
+10   ExitRemoteDivergenceRefused   local-source init without --discard-remote
 11   ExitLocalExistsRefused        existing local data, declined destroy confirm
 12   ExitDestroyTokenMissing       --discard-remote without valid --destroy-token
 ```

@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -47,7 +46,7 @@ func ParseCommaSeparatedList(value string) []string {
 	return result
 }
 
-func ResolveCustomConfigInTx(ctx context.Context, tx *sql.Tx) (statuses []types.CustomStatus, customTypes []string, err error) {
+func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.CustomStatus, customTypes []string, err error) {
 	statuses, statusesFromTable, err := resolveCustomStatusesFromTableInTx(ctx, tx)
 	if err != nil {
 		return nil, nil, err
@@ -99,7 +98,7 @@ func ResolveCustomConfigInTx(ctx context.Context, tx *sql.Tx) (statuses []types.
 	return statuses, customTypes, nil
 }
 
-func resolveCustomStatusesFromTableInTx(ctx context.Context, tx *sql.Tx) ([]types.CustomStatus, bool, error) {
+func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.CustomStatus, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
 	if err != nil {
 		return nil, false, nil
@@ -122,7 +121,7 @@ func resolveCustomStatusesFromTableInTx(ctx context.Context, tx *sql.Tx) ([]type
 	return result, len(result) > 0, nil
 }
 
-func resolveCustomTypesFromTableInTx(ctx context.Context, tx *sql.Tx) ([]string, bool, error) {
+func resolveCustomTypesFromTableInTx(ctx context.Context, tx DBTX) ([]string, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name FROM custom_types ORDER BY name")
 	if err != nil {
 		return nil, false, nil
@@ -142,7 +141,7 @@ func resolveCustomTypesFromTableInTx(ctx context.Context, tx *sql.Tx) ([]string,
 	return result, len(result) > 0, nil
 }
 
-func getConfigKeysInTx(ctx context.Context, tx *sql.Tx, keys ...string) (map[string]string, error) {
+func getConfigKeysInTx(ctx context.Context, tx DBTX, keys ...string) (map[string]string, error) {
 	if len(keys) == 0 {
 		return map[string]string{}, nil
 	}
@@ -175,7 +174,7 @@ func getConfigKeysInTx(ctx context.Context, tx *sql.Tx, keys ...string) (map[str
 // doesn't exist (pre-migration databases).
 // Returns nil on parse errors (degraded mode). Does not cache or log —
 // callers layer those concerns on top.
-func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx *sql.Tx) ([]types.CustomStatus, error) {
+func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx DBTX) ([]types.CustomStatus, error) {
 	// Try the normalized table first
 	rows, err := tx.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
 	if err == nil {
@@ -239,7 +238,7 @@ func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx *sql.Tx) ([]types
 // whose type is in none still fails cleanly.
 //
 // Does not cache — callers layer caching on top.
-func ResolveCustomTypesInTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
+func ResolveCustomTypesInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	var fromDB []string
 
 	// Try the normalized table first.
@@ -367,7 +366,7 @@ func dedupePreservingOrder(in []string) []string {
 
 // SyncCustomStatusesTable replaces all rows in custom_statuses with parsed config value.
 // Used by both DoltStore and EmbeddedDoltStore when "status.custom" config changes.
-func SyncCustomStatusesTable(ctx context.Context, tx *sql.Tx, value string) error {
+func SyncCustomStatusesTable(ctx context.Context, tx DBTX, value string) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM custom_statuses"); err != nil {
 		return err
 	}
@@ -389,7 +388,7 @@ func SyncCustomStatusesTable(ctx context.Context, tx *sql.Tx, value string) erro
 
 // SyncCustomTypesTable replaces all rows in custom_types with parsed config value.
 // Used by both DoltStore and EmbeddedDoltStore when "types.custom" config changes.
-func SyncCustomTypesTable(ctx context.Context, tx *sql.Tx, value string) error {
+func SyncCustomTypesTable(ctx context.Context, tx DBTX, value string) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM custom_types"); err != nil {
 		return err
 	}
@@ -426,7 +425,7 @@ func parseTypesValue(value string) []string {
 // formula system creates implicitly (e.g. "gate" for async coordination
 // beads) so that operators don't have to run bd config set types.custom
 // manually before pouring a formula with gate steps. See GH#3213.
-func EnsureCustomTypeInTx(ctx context.Context, tx *sql.Tx, name string) error {
+func EnsureCustomTypeInTx(ctx context.Context, tx DBTX, name string) error {
 	if types.IssueType(name).IsValid() {
 		return nil
 	}
@@ -447,7 +446,7 @@ func EnsureCustomTypeInTx(ctx context.Context, tx *sql.Tx, name string) error {
 // falling back to config.yaml then to hardcoded defaults.
 // Returns a map[string]bool for O(1) lookups.
 // Does not cache — callers layer caching on top.
-func ResolveInfraTypesInTx(ctx context.Context, tx *sql.Tx) map[string]bool {
+func ResolveInfraTypesInTx(ctx context.Context, tx DBTX) map[string]bool {
 	var typeList []string
 
 	value, err := GetConfigInTx(ctx, tx, "types.infra")

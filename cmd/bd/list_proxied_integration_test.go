@@ -618,25 +618,20 @@ func TestProxiedServerList(t *testing.T) {
 	// --- M. Pagination across the issues+wisps UNION ALL ---
 
 	t.Run("ready_returns_both_perm_and_wisp", func(t *testing.T) {
-		// The wisps table participates in --ready via the UNION path, but
-		// the ephemeral exclusion applies to it exactly like classic
-		// (bd-6dnrw.44 item 2): non-ephemeral NoHistory wisps surface by
-		// default, true ephemerals stay hidden.
-		noHistory := bdProxiedCreate(t, bd, p.dir, "NoHistory wisp ready", "--no-history")
-		var ephemeralIDs []string
+		// Create three ephemeral wisps as ready candidates. The proxied
+		// union path forces IncludeEphemeral=true on the wisp side, so
+		// these must surface in --ready alongside permanent issues.
+		var wispIDs []string
 		for i := 0; i < 3; i++ {
 			w := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Wisp ready %d", i), "--ephemeral")
-			ephemeralIDs = append(ephemeralIDs, w.ID)
+			wispIDs = append(wispIDs, w.ID)
 		}
 
 		issues := bdProxiedListJSON(t, bd, p, "--ready", "--limit", "0")
 		ids := listIssueIDs(issues)
-		if !containsID(issues, noHistory.ID) {
-			t.Errorf("non-ephemeral wisp %s should appear in --ready (UNION path), got %v", noHistory.ID, ids)
-		}
-		for _, wid := range ephemeralIDs {
-			if containsID(issues, wid) {
-				t.Errorf("ephemeral wisp %s should be excluded from default --ready (classic parity), got %v", wid, ids)
+		for _, wid := range wispIDs {
+			if !containsID(issues, wid) {
+				t.Errorf("ephemeral wisp %s should appear in --ready (UNION path), got %v", wid, ids)
 			}
 		}
 		if !containsID(issues, seed.readyTask) {

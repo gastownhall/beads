@@ -69,17 +69,12 @@ func defaultCodexEnv() (codexEnv, error) {
 	}, nil
 }
 
-// InstallCodex installs Codex integration.
-func InstallCodex(global bool) {
+func InstallCodex(global bool) error {
 	env, err := codexEnvProvider()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := installCodex(env, global); err != nil {
-		setupExit(1)
-	}
+	return installCodex(env, global)
 }
 
 // InstallCodexProject installs project-local Codex integration, returning an
@@ -103,17 +98,12 @@ func installCodex(env codexEnv, global bool) error {
 	return installCodexInstructions(env, global)
 }
 
-// CheckCodex checks if Codex integration is installed.
-func CheckCodex(global bool) {
+func CheckCodex(global bool) error {
 	env, err := codexEnvProvider()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := checkCodex(env, global); err != nil {
-		setupExit(1)
-	}
+	return checkCodex(env, global)
 }
 
 func checkCodex(env codexEnv, global bool) error {
@@ -126,17 +116,12 @@ func checkCodex(env codexEnv, global bool) error {
 	return checkCodexInstructions(env, global)
 }
 
-// RemoveCodex removes Codex integration.
-func RemoveCodex(global bool) {
+func RemoveCodex(global bool) error {
 	env, err := codexEnvProvider()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := removeCodex(env, global); err != nil {
-		setupExit(1)
-	}
+	return removeCodex(env, global)
 }
 
 func removeCodex(env codexEnv, global bool) error {
@@ -458,7 +443,16 @@ func codexConfigEnablesBeadsPlugin(content string) bool {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			table := strings.Trim(trimmed, "[]")
-			inBeadsPlugin = strings.HasPrefix(table, "plugins.") && strings.Contains(strings.ToLower(table), "beads")
+			// Plugin tables are [plugins.<name>] or [plugins."<name>@<marketplace>"]
+			// (TOML quotes a key containing "@"). Match the <name> segment
+			// exactly: a substring test (GH#4244) mistakes any "*beads*" plugin
+			// (e.g. design-to-beads) for the beads hook plugin and wrongly skips
+			// the hooks write.
+			inBeadsPlugin = false
+			if rest, ok := strings.CutPrefix(table, "plugins."); ok {
+				name, _, _ := strings.Cut(strings.ToLower(strings.Trim(rest, "\"'")), "@")
+				inBeadsPlugin = name == "beads"
+			}
 			continue
 		}
 		if inBeadsPlugin && codexConfigLineKey(trimmed) == "enabled" {

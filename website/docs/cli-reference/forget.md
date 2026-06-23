@@ -19,5 +19,5 @@ Examples:
   bd forget auth-jwt
 
 ```
-bd forget <key>
+bd forget <key> [flags]
 ```

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
@@ -1609,4 +1611,119 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 			t.Errorf("did not expect mode=external on bd-managed path, got:\n%s", out)
 		}
 	})
+}
+
+// minimalPullStore implements storage.DoltStorage by embedding the interface
+// (all methods panic on nil) with Pull overridden for controlled testing.
+type minimalPullStore struct {
+	storage.DoltStorage
+	pullCalled bool
+	pullErr    error
+}
+
+func (m *minimalPullStore) Pull(ctx context.Context) error {
+	m.pullCalled = true
+	return m.pullErr
+}
+
+// ListRemotes is exercised by current main's pull failure handling
+// (isConfirmedNoRemote -> st.ListRemotes during error classification). The
+// embedded nil DoltStorage would panic, so report "no remotes": this keeps a
+// simulated pull failure on the benign no-remote path (clean exit) while still
+// proving the no-push guard does not short-circuit bd dolt pull.
+func (m *minimalPullStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return nil, nil
+}
+
+// minimalPushStore implements storage.DoltStorage by embedding the interface
+// (all methods panic on nil) with Push and ForcePush overridden for controlled testing.
+type minimalPushStore struct {
+	storage.DoltStorage
+	pushCalled bool
+}
+
+func (m *minimalPushStore) Push(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func (m *minimalPushStore) ForcePush(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func TestNoPushSkipsDoltPush(t *testing.T) {
+	// no-push guard must exit with a skip message and must NOT call the store's
+	// Push() when no-push: true. Regression guard for PR #4212 guard at
+	// cmd/bd/dolt.go:247-249.
+
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPushStore{}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	out := captureStdout(t, func() error {
+		doltPushCmd.Run(doltPushCmd, nil)
+		return nil
+	})
+
+	if fake.pushCalled {
+		t.Error("bd dolt push must not call Push() when no-push: true; Push() was called")
+	}
+	if !strings.Contains(out, "skipping push") {
+		t.Errorf("expected 'skipping push' output, got: %q", out)
+	}
+}
+
+func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
+	// no-push is a push-only guard. bd dolt pull must contact the remote even when
+	// no-push: true — contributor clones need to receive upstream updates.
+	// Regression guard for be-ve2x6 (PR #4212, maphew review-4382359270).
+
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPullStore{
+		// Return "remote not found" so the command exits cleanly without os.Exit.
+		pullErr: errors.New("remote not found"),
+	}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	out := captureStdout(t, func() error {
+		doltPullCmd.Run(doltPullCmd, nil)
+		return nil
+	})
+
+	if !fake.pullCalled {
+		t.Error("bd dolt pull must attempt the pull even when no-push: true; Pull() was not called")
+	}
+	if strings.Contains(out, "skipping pull") {
+		t.Errorf("bd dolt pull must not skip under no-push: true; got output: %q", out)
+	}
+	if !strings.Contains(out, "Pulling from Dolt remote") {
+		t.Errorf("expected pull attempt output, got: %q", out)
+	}
 }

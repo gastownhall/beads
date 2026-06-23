@@ -253,15 +253,10 @@ func loadEmbeddedCustomTypes() []string {
 	return config.GetCustomTypesFromYAML()
 }
 
-// createIssuesFromGraph handles `bd create --graph <plan-file>`.
-// When dryRun is true, the plan is parsed and validated but no writes occur;
-// a preview is emitted to stdout (JSON when jsonOutput is set, otherwise
-// human-readable). Unknown plan/node/edge fields are reported to stderr in
-// both modes so schema gaps are visible before any writes happen. (GH#3367)
-func createIssuesFromGraph(planFile string, dryRun bool, opts GraphApplyOptions) {
+func createIssuesFromGraph(planFile string, dryRun bool, opts GraphApplyOptions) error {
 	data, err := os.ReadFile(planFile) // #nosec G304 -- user-provided path is intentional
 	if err != nil {
-		FatalError("reading graph plan: %v", err)
+		return HandleErrorRespectJSON("reading graph plan: %v", err)
 	}
 
 	if unknown := detectUnknownGraphFields(data); len(unknown) > 0 {
@@ -270,42 +265,38 @@ func createIssuesFromGraph(planFile string, dryRun bool, opts GraphApplyOptions)
 
 	var plan GraphApplyPlan
 	if err := json.Unmarshal(data, &plan); err != nil {
-		FatalError("parsing graph plan: %v", err)
+		return HandleErrorRespectJSON("parsing graph plan: %v", err)
 	}
 
 	if err := validateGraphApplyPlan(&plan, loadEmbeddedCustomTypes()); err != nil {
-		FatalError("invalid graph plan: %v", err)
+		return HandleErrorRespectJSON("invalid graph plan: %v", err)
 	}
 
 	if dryRun {
-		emitGraphApplyDryRun(&plan)
-		return
+		return emitGraphApplyDryRun(&plan)
 	}
 
 	result, err := executeGraphApply(rootCtx, &plan, opts)
 	if err != nil {
-		FatalError("graph create: %v", err)
+		return HandleErrorRespectJSON("graph create: %v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-	} else {
-		fmt.Printf("Created %d issues\n", len(result.IDs))
-		keys := make([]string, 0, len(result.IDs))
-		for key := range result.IDs {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			fmt.Printf("  %s -> %s\n", key, result.IDs[key])
-		}
+		return outputJSON(result)
 	}
+	fmt.Printf("Created %d issues\n", len(result.IDs))
+	keys := make([]string, 0, len(result.IDs))
+	for key := range result.IDs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Printf("  %s -> %s\n", key, result.IDs[key])
+	}
+	return nil
 }
 
-// emitGraphApplyDryRun prints what `bd create --graph` would do without
-// performing any writes. Mirrors the JSON-vs-human split of the live path.
-// (GH#3367)
-func emitGraphApplyDryRun(plan *GraphApplyPlan) {
+func emitGraphApplyDryRun(plan *GraphApplyPlan) error {
 	parentDeps := 0
 	rows := make([]GraphApplyDryRunRow, 0, len(plan.Nodes))
 	for _, node := range plan.Nodes {
@@ -340,8 +331,7 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) {
 	}
 
 	if jsonOutput {
-		outputJSON(preview)
-		return
+		return outputJSON(preview)
 	}
 
 	fmt.Printf("Dry run: would create %d issue(s) and %d edge(s) (%d parent-child link(s))\n",
@@ -357,6 +347,7 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) {
 		}
 		fmt.Printf("  %s [%s] P%d %q%s\n", row.Key, row.Type, row.Priority, row.Title, parent)
 	}
+	return nil
 }
 
 func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes []string) error {
@@ -450,7 +441,7 @@ func validateGraphApplyLocalCycles(plan *GraphApplyPlan, knownKeys map[string]bo
 	}
 	for _, edge := range plan.Edges {
 		depType := graphApplyDependencyType(edge.Type)
-		if !graphApplyEdgeCanSkipSQLCycleCheck(edge, depType) {
+		if !graphApplyEdgeIsLocalCycleRelevant(edge, depType) {
 			continue
 		}
 		if !knownKeys[edge.FromKey] || !knownKeys[edge.ToKey] {
@@ -586,7 +577,9 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 		if err := validateGraphApplyPlannedParentBlockingPaths(ctx, tx, plan, keyToID, parentDepPairs); err != nil {
 			return err
 		}
-		canSkipLocalCycleChecks := graphApplyPlanCanSkipSQLCycleChecks(plan)
+		if err := validateGraphApplyPlannedBlockingCycles(ctx, tx, plan, keyToID); err != nil {
+			return err
+		}
 
 		// Add dependencies from edges.
 		for i, edge := range plan.Edges {
@@ -608,7 +601,7 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 				Type:        depType,
 			}
 			addOpts := storage.DependencyAddOptions{}
-			if canSkipLocalCycleChecks && graphApplyEdgeCanSkipSQLCycleCheck(edge, depType) {
+			if graphApplyCycleRelevantDependencyType(depType) {
 				addOpts.SkipCycleCheck = true
 			}
 			if err := tx.AddDependencyWithOptions(ctx, dep, actor, addOpts); err != nil {
@@ -652,6 +645,64 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 	return &GraphApplyResult{IDs: keyToID}, nil
 }
 
+// validateGraphApplyPlannedBlockingCycles rejects planned blocking edges that
+// would close a blocking-dependency cycle, evaluated whole-graph before any
+// insert. It mirrors the storage per-edge SQL cycle check
+// (issueops.CheckDependencyCycleInTx), which only traverses blocks and
+// conditional-blocks edges: both the planned adjacency and the existing-dep
+// walk are restricted to cycle-relevant types via
+// graphApplyCycleRelevantDependencyType. This is deliberately narrower than
+// the ready-work traversal used by validateGraphApplyPlannedParentBlockingPaths
+// — graph-apply must not reject a blocking edge whose only return path runs
+// through an existing parent-child or waits-for dep when plain `bd dep add`
+// would allow it.
+func validateGraphApplyPlannedBlockingCycles(ctx context.Context, tx storage.Transaction, plan *GraphApplyPlan, keyToID map[string]string) error {
+	type plannedEdge struct {
+		index  int
+		fromID string
+		toID   string
+	}
+
+	adj := make(map[string][]string)
+	checks := make([]plannedEdge, 0, len(plan.Edges))
+	for i, edge := range plan.Edges {
+		depType := graphApplyDependencyType(edge.Type)
+		if !graphApplyCycleRelevantDependencyType(depType) {
+			continue
+		}
+		fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
+		toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
+		if fromID == "" || toID == "" {
+			continue
+		}
+		if fromID == toID {
+			return fmt.Errorf("edge %d %s->%s creates a blocking dependency cycle", i, fromID, toID)
+		}
+		adj[fromID] = append(adj[fromID], toID)
+		checks = append(checks, plannedEdge{index: i, fromID: fromID, toID: toID})
+	}
+
+	depCache := make(map[string][]*types.Dependency)
+	for _, edge := range checks {
+		hasPath, err := graphApplyHasPath(ctx, tx, adj, depCache, edge.toID, edge.fromID, graphApplyCycleRelevantDependencyType)
+		if err != nil {
+			return fmt.Errorf("edge %d %s->%s: checking planned blocking cycle: %w", edge.index, edge.fromID, edge.toID, err)
+		}
+		if hasPath {
+			return fmt.Errorf("edge %d %s->%s creates a blocking dependency cycle", edge.index, edge.fromID, edge.toID)
+		}
+	}
+	return nil
+}
+
+// validateGraphApplyPlannedParentBlockingPaths rejects plans where a planned
+// blocking edge would create a path from a parent to its child. Unlike
+// validateGraphApplyPlannedBlockingCycles, its existing-dep walk follows the
+// full AffectsReadyWork set (blocks, conditional-blocks, parent-child,
+// waits-for) because a parent→child path closed through any ready-affecting
+// dependency is a real ready-work deadlock. The two predicates must stay
+// distinct: narrowing this one would miss real deadlocks; broadening the
+// blocking-cycle walk would reject edges plain `bd dep add` accepts.
 func validateGraphApplyPlannedParentBlockingPaths(ctx context.Context, tx storage.Transaction, plan *GraphApplyPlan, keyToID map[string]string, parentDepPairs map[string]bool) error {
 	adj := make(map[string][]string)
 	for pair := range parentDepPairs {
@@ -688,7 +739,7 @@ func validateGraphApplyPlannedParentBlockingPaths(ctx context.Context, tx storag
 		if childID == "" || parentID == "" {
 			continue
 		}
-		hasPath, err := graphApplyHasPath(ctx, tx, adj, depCache, parentID, childID)
+		hasPath, err := graphApplyHasPath(ctx, tx, adj, depCache, parentID, childID, graphApplyReadyPathDependencyType)
 		if err != nil {
 			return err
 		}
@@ -699,7 +750,11 @@ func validateGraphApplyPlannedParentBlockingPaths(ctx context.Context, tx storag
 	return nil
 }
 
-func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[string][]string, depCache map[string][]*types.Dependency, fromID, toID string) (bool, error) {
+// graphApplyHasPath reports whether fromID can reach toID by following the
+// in-memory planned adjacency plus existing store dependencies. followExistingDep
+// selects which existing dep types the walk traverses, letting callers mirror
+// either the blocking-only SQL cycle check or the broader ready-work graph.
+func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[string][]string, depCache map[string][]*types.Dependency, fromID, toID string, followExistingDep func(types.DependencyType) bool) (bool, error) {
 	seen := make(map[string]bool)
 	var visit func(string) (bool, error)
 	visit = func(id string) (bool, error) {
@@ -726,7 +781,7 @@ func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[stri
 			depCache[id] = deps
 		}
 		for _, dep := range deps {
-			if !graphApplyReadyPathDependencyType(dep.Type) {
+			if !followExistingDep(dep.Type) {
 				continue
 			}
 			found, err := visit(dep.DependsOnID)
@@ -739,20 +794,12 @@ func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[stri
 	return visit(fromID)
 }
 
-func graphApplyPlanCanSkipSQLCycleChecks(plan *GraphApplyPlan) bool {
-	for _, edge := range plan.Edges {
-		depType := graphApplyDependencyType(edge.Type)
-		if !graphApplyCycleRelevantDependencyType(depType) {
-			continue
-		}
-		if !graphApplyEdgeCanSkipSQLCycleCheck(edge, depType) {
-			return false
-		}
-	}
-	return true
-}
-
-func graphApplyEdgeCanSkipSQLCycleCheck(edge GraphApplyEdge, depType types.DependencyType) bool {
+// graphApplyEdgeIsLocalCycleRelevant reports whether an edge participates in the
+// in-memory local cycle check run by validateGraphApplyLocalCycles: it must be a
+// fully-local edge (both endpoints addressed by key, neither by an existing ID)
+// of a cycle-relevant dependency type. The whole-graph preflight now always skips
+// the storage SQL cycle probe, so this no longer gates that skip.
+func graphApplyEdgeIsLocalCycleRelevant(edge GraphApplyEdge, depType types.DependencyType) bool {
 	if edge.FromKey == "" || edge.ToKey == "" || edge.FromID != "" || edge.ToID != "" {
 		return false
 	}

@@ -69,6 +69,18 @@ signals such as `.beads/` changes or missing tests, and the required
 contributor-protection next steps. It does not replace code review or local
 validation.
 
+## gh-body-lint
+
+Lint Markdown files before posting them with `gh ... --body-file`.
+
+```bash
+./scripts/gh-body-lint body.md
+./scripts/gh-body-lint --fix body.md
+```
+
+The lint catches literal `\n` sequences, which render poorly on GitHub, and
+`GH#123` references, which do not auto-link like `#123` or `owner/repo#123`.
+
 ## release.sh (⭐ The Easy Button)
 
 **One-command release** from version bump to local installation.

@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -125,18 +124,18 @@ type UpdateResult struct {
 // The caller is responsible for Dolt versioning (DOLT_ADD/COMMIT) if needed.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
 	return updateIssueInTx(ctx, tx, id, updates, actor, true)
 }
 
 // UpdateIssueWithoutEventInTx applies normal update semantics without recording
 // an intermediate event. Demotion uses this to preserve the historical event
 // stream: create/update history is copied, then a single demotion event is added.
-func UpdateIssueWithoutEventInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
 	return updateIssueInTx(ctx, tx, id, updates, actor, false)
 }
 
-func updateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
+func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
@@ -267,7 +266,7 @@ func updateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 // RecordFullEventInTable records an event with both old and new values.
 //
 //nolint:gosec // G201: table is from WispTableRouting ("events" or "wisp_events")
-func RecordFullEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
+func RecordFullEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
 		VALUES (?, ?, ?, ?, ?, ?)

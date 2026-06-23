@@ -20,5 +20,5 @@ Federation enables synchronized issue tracking across multiple workspaces,
 each maintaining their own Dolt database while sharing updates via remotes.
 
 ```
-bd federation
+bd federation [flags]
 ```

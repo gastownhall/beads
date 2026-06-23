@@ -53,7 +53,7 @@ Examples:
   bd dolt test
 
 ```
-bd dolt
+bd dolt [flags]
 ```
 
 ### bd dolt clean-databases
@@ -113,7 +113,7 @@ project's Dolt data directory are eligible for cleanup. Other projects'
 servers are preserved.
 
 ```
-bd dolt killall
+bd dolt killall [flags]
 ```
 
 ### bd dolt pull
@@ -172,7 +172,7 @@ Subcommands:
   remove &lt;name&gt;      Remove a remote
 
 ```
-bd dolt remote
+bd dolt remote [flags]
 ```
 
 #### bd dolt remote add
@@ -180,7 +180,7 @@ bd dolt remote
 Add a Dolt remote
 
 ```
-bd dolt remote add <name> <url>
+bd dolt remote add <name> <url> [flags]
 ```
 
 #### bd dolt remote list
@@ -188,7 +188,7 @@ bd dolt remote add <name> <url>
 List configured Dolt remotes
 
 ```
-bd dolt remote list
+bd dolt remote list [flags]
 ```
 
 #### bd dolt remote remove
@@ -196,7 +196,7 @@ bd dolt remote list
 Remove a Dolt remote
 
 ```
-bd dolt remote remove <name>
+bd dolt remote remove <name> [flags]
 ```
 
 ### bd dolt set
@@ -233,7 +233,7 @@ bd dolt set <key> <value> [flags]
 Show current Dolt configuration with connection status
 
 ```
-bd dolt show
+bd dolt show [flags]
 ```
 
 ### bd dolt start
@@ -247,7 +247,7 @@ The server auto-starts transparently when needed, so manual start is rarely
 required. Use this command for explicit control or diagnostics.
 
 ```
-bd dolt start
+bd dolt start [flags]
 ```
 
 ### bd dolt status
@@ -263,7 +263,7 @@ sql-server) — pings the configured endpoint via SQL and reports
 reachability, server version, and database.
 
 ```
-bd dolt status
+bd dolt status [flags]
 ```
 
 ### bd dolt stop
@@ -294,5 +294,5 @@ This verifies that:
 Use this before switching to server mode to ensure the server is running.
 
 ```
-bd dolt test
+bd dolt test [flags]
 ```

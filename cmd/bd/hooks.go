@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -641,14 +642,23 @@ Installed hooks:
   - pre-push: Run chained hooks before push
   - post-checkout: Run chained hooks after branch checkout
   - prepare-commit-msg: Add agent identity trailers (for orchestrator agents)`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-install")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		force, _ := cmd.Flags().GetBool("force")
 		shared, _ := cmd.Flags().GetBool("shared")
 		chain, _ := cmd.Flags().GetBool("chain")
 		beadsHooks, _ := cmd.Flags().GetBool("beads")
 
 		if err := installHooksWithOptions(managedHookNames, force, shared, chain, beadsHooks); err != nil {
-			FatalErrorRespectJSON("installing hooks: %v", err)
+			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
 
 		if jsonOutput {
@@ -680,16 +690,26 @@ Installed hooks:
 				fmt.Printf("  - %s\n", hookName)
 			}
 		}
+		return nil
 	},
 }
 
 var hooksUninstallCmd = &cobra.Command{
-	Use:   "uninstall",
-	Short: "Uninstall bd git hooks",
-	Long:  `Remove bd git hooks from .git/hooks/ directory.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "uninstall",
+	Short:         "Uninstall bd git hooks",
+	Long:          `Remove bd git hooks from .git/hooks/ directory.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-uninstall")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := uninstallHooks(); err != nil {
-			FatalErrorRespectJSON("uninstalling hooks: %v", err)
+			return HandleErrorRespectJSON("uninstalling hooks: %v", err)
 		}
 
 		if jsonOutput {
@@ -702,14 +722,24 @@ var hooksUninstallCmd = &cobra.Command{
 		} else {
 			fmt.Println("✓ Git hooks uninstalled successfully")
 		}
+		return nil
 	},
 }
 
 var hooksListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List installed git hooks status",
-	Long:  `Show the status of bd git hooks (installed, outdated, missing).`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "list",
+	Short:         "List installed git hooks status",
+	Long:          `Show the status of bd git hooks (installed, outdated, missing).`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		statuses := CheckGitHooks()
 
 		if jsonOutput {
@@ -733,6 +763,7 @@ var hooksListCmd = &cobra.Command{
 				}
 			}
 		}
+		return nil
 	},
 }
 
@@ -1645,13 +1676,17 @@ Supported hooks:
 
 The thin shim pattern ensures hook logic is always in sync with the
 installed bd version - upgrading bd automatically updates hook behavior.`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		// Disable terminal color probing to prevent OSC 11 escape sequence leaks (GH#1303).
-		// Our shell shims set BD_GIT_HOOK=1 before invoking bd, but third-party hook
-		// runners (lefthook, husky, etc.) call 'bd hooks run' directly without it.
-		// By this point ui.init() has already run, so we must also reset styles
-		// to suppress ANSI output — the env var alone only helps if set before process start.
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-run")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		_ = os.Setenv("BD_GIT_HOOK", "1")
 		ui.DisableColors()
 
@@ -1671,10 +1706,13 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 		case "prepare-commit-msg":
 			exitCode = runPrepareCommitMsgHook(hookArgs)
 		default:
-			FatalError("unknown hook: %s", hookName)
+			return HandleError("unknown hook: %s", hookName)
 		}
 
-		os.Exit(exitCode)
+		if exitCode != 0 {
+			return &exitError{Code: exitCode}
+		}
+		return nil
 	},
 }
 

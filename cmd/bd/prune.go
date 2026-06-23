@@ -2,6 +2,8 @@ package main
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 var pruneCmd = &cobra.Command{
@@ -33,8 +35,17 @@ EXAMPLES:
   bd prune --older-than 90d --dry-run    # Detailed preview with stats
   bd prune --pattern "*" --force         # Delete all closed regular beads
   bd prune --pattern "gm-temp-*" --force # Scope to a pattern`,
-	Run: func(cmd *cobra.Command, _ []string) {
-		runPurgeOrPrune(cmd, purgeScope{
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("prune")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		return runPurgeOrPrune(cmd, purgeScope{
 			cmdName:        "prune",
 			pastTense:      "pruned",
 			countKey:       "pruned_count",

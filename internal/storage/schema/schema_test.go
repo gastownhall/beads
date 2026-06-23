@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -185,6 +186,127 @@ func TestMigration0035HandlesLegacyWispDependenciesShape(t *testing.T) {
 			t.Fatalf("0035 down migration missing legacy/split branch marker %q", want)
 		}
 	}
+}
+
+func TestMigration0053RepairsRigWispsShape(t *testing.T) {
+	sql, err := os.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	if err != nil {
+		t.Fatalf("read 0053 up migration: %v", err)
+	}
+
+	body := string(sql)
+	for _, want := range []string{
+		"@has_wisps",
+		"INFORMATION_SCHEMA.TABLES",
+		"INSERT IGNORE INTO issues",
+		"FROM wisps WHERE issue_type = ''rig''",
+		"SET ephemeral = 0",
+		"INSERT IGNORE INTO dependencies",
+		"FROM wisp_dependencies wd",
+		"REPLACE INTO dependencies",
+		"REPLACE INTO wisp_dependencies",
+		"wisp_child_counters",
+		"INSERT IGNORE INTO child_counters",
+		"UPDATE child_counters",
+		"DELETE FROM wisps WHERE issue_type = ''rig''",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("0053 migration missing rig repair marker %q", want)
+		}
+	}
+}
+
+func TestMigration0053NoopsWithoutWispTablesThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "rig-repair-no-wisps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-wisps dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	seedSQL := fmt.Sprintf(`
+DROP TABLE IF EXISTS wisp_child_counters;
+DROP TABLE IF EXISTS wisp_comments;
+DROP TABLE IF EXISTS wisp_events;
+DROP TABLE IF EXISTS wisp_dependencies;
+DROP TABLE IF EXISTS wisp_labels;
+DROP TABLE IF EXISTS wisps;
+DELETE FROM schema_migrations WHERE version = %d;
+`, LatestVersion())
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	if err != nil {
+		t.Fatalf("read 0053 migration: %v", err)
+	}
+	runDoltSQL(t, dir, seedSQL+"\n"+string(migrationSQL))
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "0")
+}
+
+func TestMigration0053RepairsRigWispsThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "rig-repair")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create rig repair dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	const rigID = "schema-cli-rig"
+	const targetID = "schema-cli-target"
+	const sourceID = "schema-cli-source"
+	seedSQL := fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS wisp_child_counters (
+    parent_id VARCHAR(255) PRIMARY KEY,
+    last_child INT NOT NULL DEFAULT 0
+);
+DELETE FROM schema_migrations WHERE version = %d;
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES (%s, 'target', '', '', '', '', 'open', 2, 'task'),
+       (%s, 'source', '', '', '', '', 'open', 2, 'task');
+INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral)
+VALUES (%s, 'Rig identity', '', '', '', '', 'open', 1, 'rig', 1);
+INSERT INTO wisp_labels (issue_id, label) VALUES (%s, 'gt:rig');
+INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+VALUES (%s, %s, %s, 'blocks', NOW(), 'tester', JSON_OBJECT());
+INSERT INTO dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+VALUES (%s, %s, %s, 'blocks', NOW(), 'tester', JSON_OBJECT());
+INSERT INTO wisp_events (id, issue_id, event_type, actor, created_at)
+VALUES ('11111111-1111-1111-1111-111111111111', %s, 'created', 'tester', NOW());
+INSERT INTO wisp_comments (id, issue_id, author, text, created_at)
+VALUES ('22222222-2222-2222-2222-222222222222', %s, 'tester', 'durable identity', NOW());
+INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (%s, 7);
+`, LatestVersion(),
+		doltSQLString(targetID), doltSQLString(sourceID), doltSQLString(rigID),
+		doltSQLString(rigID), doltSQLString(depid.New(rigID, targetID)),
+		doltSQLString(rigID), doltSQLString(targetID), doltSQLString(depid.New(sourceID, rigID)),
+		doltSQLString(sourceID), doltSQLString(rigID), doltSQLString(rigID),
+		doltSQLString(rigID), doltSQLString(rigID))
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	if err != nil {
+		t.Fatalf("read 0053 migration: %v", err)
+	}
+	runDoltSQL(t, dir, seedSQL+"\n"+cliCompatibleMigrationSQL("0053_repair_rig_wisps.up.sql", string(migrationSQL)))
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM issues WHERE id = 'schema-cli-rig' AND issue_type = 'rig' AND ephemeral = 0`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisps WHERE id = 'schema-cli-rig'`, "0")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM labels WHERE issue_id = 'schema-cli-rig' AND label = 'gt:rig'`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM dependencies WHERE issue_id = 'schema-cli-rig' AND depends_on_issue_id = 'schema-cli-target'`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM dependencies WHERE issue_id = 'schema-cli-source' AND depends_on_issue_id = 'schema-cli-rig' AND depends_on_wisp_id IS NULL`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM comments WHERE issue_id = 'schema-cli-rig'`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM child_counters WHERE parent_id = 'schema-cli-rig' AND last_child = 7`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisp_child_counters WHERE parent_id = 'schema-cli-rig'`, "0")
 }
 
 func TestMigration0047HandlesLegacyWispDependenciesShape(t *testing.T) {
@@ -365,8 +487,11 @@ func runDoltCommand(t *testing.T, dir string, args ...string) {
 
 func runDoltSQL(t *testing.T, dir, query string) {
 	t.Helper()
-	args := []string{"sql", "-q", query}
-	runDoltCommand(t, dir, args...)
+	sqlFile := filepath.Join(t.TempDir(), "migration-bundle.sql")
+	if err := os.WriteFile(sqlFile, []byte(query), 0o644); err != nil {
+		t.Fatalf("write dolt sql file: %v", err)
+	}
+	runDoltCommand(t, dir, "sql", "-f", sqlFile)
 }
 
 func queryDoltCSV(t *testing.T, dir, query string) []map[string]string {
@@ -406,6 +531,17 @@ func requireDoltNoRows(t *testing.T, dir, query, subject string) {
 	t.Helper()
 	if rows := queryDoltCSV(t, dir, query); len(rows) != 0 {
 		t.Fatalf("%s query returned %d rows, want none: %v", subject, len(rows), rows)
+	}
+}
+
+func requireDoltCount(t *testing.T, dir, query, want string) {
+	t.Helper()
+	rows := queryDoltCSV(t, dir, query)
+	if len(rows) != 1 {
+		t.Fatalf("count query returned %d rows, want 1: %v", len(rows), rows)
+	}
+	if got := rows[0]["c"]; got != want {
+		t.Fatalf("count query returned %s, want %s\nQuery: %s", got, want, query)
 	}
 }
 
