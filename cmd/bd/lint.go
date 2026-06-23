@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/validation"
 )
@@ -41,7 +42,16 @@ Examples:
   bd lint --type bug         # Lint only bugs
   bd lint --status all       # Lint all issues (including closed)
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("lint")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
 		typeFilter, _ := cmd.Flags().GetString("type")
@@ -49,15 +59,11 @@ Examples:
 
 		var issues []*types.Issue
 
-		// Direct mode
-
 		if store == nil {
-			FatalErrorWithHint("database not initialized",
-				diagHint())
+			return HandleErrorWithHint("database not initialized", diagHint())
 		}
 
 		if len(args) > 0 {
-			// Lint specific issues
 			for _, id := range args {
 				issue, err := store.GetIssue(ctx, id)
 				if err != nil {
@@ -71,10 +77,8 @@ Examples:
 				issues = append(issues, issue)
 			}
 		} else {
-			// Lint all matching issues
 			filter := types.IssueFilter{}
 
-			// Default to open issues unless --status specified
 			if statusFilter == "" || statusFilter == "open" {
 				s := types.StatusOpen
 				filter.Status = &s
@@ -91,7 +95,7 @@ Examples:
 			var err error
 			issues, err = store.SearchIssues(ctx, "", filter)
 			if err != nil {
-				FatalError("%v", err)
+				return HandleError("%v", err)
 			}
 		}
 
@@ -101,7 +105,7 @@ Examples:
 		for _, issue := range issues {
 			err := validation.LintIssue(issue)
 			if err == nil {
-				continue // No warnings for this issue
+				continue
 			}
 
 			templateErr, ok := err.(*validation.TemplateError)
@@ -137,13 +141,12 @@ Examples:
 			}
 			data, _ := json.MarshalIndent(output, "", "  ")
 			fmt.Println(string(data))
-			return
+			return nil
 		}
 
-		// Human-readable output
 		if len(results) == 0 {
 			fmt.Printf("✓ No template warnings found (%d issues checked)\n", len(issues))
-			return
+			return nil
 		}
 
 		fmt.Printf("Template warnings (%d issues, %d warnings):\n\n", len(results), totalWarnings)
@@ -155,8 +158,7 @@ Examples:
 			fmt.Println()
 		}
 
-		// Exit with error code if warnings found (useful for CI)
-		os.Exit(1)
+		return SilentExit()
 	},
 }
 

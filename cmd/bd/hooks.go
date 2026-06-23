@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -67,16 +68,25 @@ func generateHookSection(hookName string) string {
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
+		"  _bd_used_perl=0\n" +
 		"  if command -v timeout >/dev/null 2>&1; then\n" +
 		"    timeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
 		"    _bd_exit=$?\n" +
-		"    if [ $_bd_exit -eq 124 ]; then\n" +
-		"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"      _bd_exit=0\n" +
-		"    fi\n" +
+		"  elif command -v gtimeout >/dev/null 2>&1; then\n" +
+		"    gtimeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
+		"    _bd_exit=$?\n" +
+		"  elif command -v perl >/dev/null 2>&1; then\n" +
+		"    _bd_used_perl=1\n" +
+		"    perl -e 'alarm shift; exec @ARGV' \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
+		"    _bd_exit=$?\n" +
 		"  else\n" +
+		"    echo >&2 \"beads: hook '" + hookName + "' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT\"\n" +
 		"    bd hooks run " + hookName + " \"$@\"\n" +
 		"    _bd_exit=$?\n" +
+		"  fi\n" +
+		"  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then\n" +
+		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
+		"    _bd_exit=0\n" +
 		"  fi\n" +
 		"  if [ $_bd_exit -eq 3 ]; then\n" +
 		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
@@ -632,14 +642,23 @@ Installed hooks:
   - pre-push: Run chained hooks before push
   - post-checkout: Run chained hooks after branch checkout
   - prepare-commit-msg: Add agent identity trailers (for orchestrator agents)`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-install")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		force, _ := cmd.Flags().GetBool("force")
 		shared, _ := cmd.Flags().GetBool("shared")
 		chain, _ := cmd.Flags().GetBool("chain")
 		beadsHooks, _ := cmd.Flags().GetBool("beads")
 
 		if err := installHooksWithOptions(managedHookNames, force, shared, chain, beadsHooks); err != nil {
-			FatalErrorRespectJSON("installing hooks: %v", err)
+			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
 
 		if jsonOutput {
@@ -671,16 +690,26 @@ Installed hooks:
 				fmt.Printf("  - %s\n", hookName)
 			}
 		}
+		return nil
 	},
 }
 
 var hooksUninstallCmd = &cobra.Command{
-	Use:   "uninstall",
-	Short: "Uninstall bd git hooks",
-	Long:  `Remove bd git hooks from .git/hooks/ directory.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "uninstall",
+	Short:         "Uninstall bd git hooks",
+	Long:          `Remove bd git hooks from .git/hooks/ directory.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-uninstall")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := uninstallHooks(); err != nil {
-			FatalErrorRespectJSON("uninstalling hooks: %v", err)
+			return HandleErrorRespectJSON("uninstalling hooks: %v", err)
 		}
 
 		if jsonOutput {
@@ -693,14 +722,24 @@ var hooksUninstallCmd = &cobra.Command{
 		} else {
 			fmt.Println("✓ Git hooks uninstalled successfully")
 		}
+		return nil
 	},
 }
 
 var hooksListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List installed git hooks status",
-	Long:  `Show the status of bd git hooks (installed, outdated, missing).`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "list",
+	Short:         "List installed git hooks status",
+	Long:          `Show the status of bd git hooks (installed, outdated, missing).`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		statuses := CheckGitHooks()
 
 		if jsonOutput {
@@ -724,6 +763,7 @@ var hooksListCmd = &cobra.Command{
 				}
 			}
 		}
+		return nil
 	},
 }
 
@@ -1636,13 +1676,17 @@ Supported hooks:
 
 The thin shim pattern ensures hook logic is always in sync with the
 installed bd version - upgrading bd automatically updates hook behavior.`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		// Disable terminal color probing to prevent OSC 11 escape sequence leaks (GH#1303).
-		// Our shell shims set BD_GIT_HOOK=1 before invoking bd, but third-party hook
-		// runners (lefthook, husky, etc.) call 'bd hooks run' directly without it.
-		// By this point ui.init() has already run, so we must also reset styles
-		// to suppress ANSI output — the env var alone only helps if set before process start.
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-run")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		_ = os.Setenv("BD_GIT_HOOK", "1")
 		ui.DisableColors()
 
@@ -1662,10 +1706,13 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 		case "prepare-commit-msg":
 			exitCode = runPrepareCommitMsgHook(hookArgs)
 		default:
-			FatalError("unknown hook: %s", hookName)
+			return HandleError("unknown hook: %s", hookName)
 		}
 
-		os.Exit(exitCode)
+		if exitCode != 0 {
+			return &exitError{Code: exitCode}
+		}
+		return nil
 	},
 }
 

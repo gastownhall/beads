@@ -90,6 +90,45 @@ func TestListBuildIssueTree_ParentChildByDotID(t *testing.T) {
 	}
 }
 
+// Regression test for gastownhall/beads#3936:
+// `relates-to` is a loose graph link, not a hierarchy edge. It must not nest
+// issues under each other in `bd list` — and a bidirectional relates-to between
+// two epics must not collapse both subtrees out of the root set.
+func TestListBuildIssueTree_RelatesToDoesNotNestEpics(t *testing.T) {
+	epicA := &types.Issue{ID: "bd-a", Title: "Epic A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+	epicB := &types.Issue{ID: "bd-b", Title: "Epic B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+
+	t.Run("OneDirection", func(t *testing.T) {
+		allDeps := map[string][]*types.Dependency{
+			"bd-a": {
+				{IssueID: "bd-a", DependsOnID: "bd-b", Type: types.DepRelatesTo},
+			},
+		}
+		roots, children := buildIssueTreeWithDeps([]*types.Issue{epicA, epicB}, allDeps)
+		if len(roots) != 2 {
+			t.Fatalf("expected both epics as roots, got %d: %+v", len(roots), roots)
+		}
+		if len(children["bd-b"]) != 0 {
+			t.Fatalf("relates-to must not nest under target epic, got children: %+v", children["bd-b"])
+		}
+	})
+
+	t.Run("Bidirectional", func(t *testing.T) {
+		allDeps := map[string][]*types.Dependency{
+			"bd-a": {
+				{IssueID: "bd-a", DependsOnID: "bd-b", Type: types.DepRelatesTo},
+			},
+			"bd-b": {
+				{IssueID: "bd-b", DependsOnID: "bd-a", Type: types.DepRelatesTo},
+			},
+		}
+		roots, _ := buildIssueTreeWithDeps([]*types.Issue{epicA, epicB}, allDeps)
+		if len(roots) != 2 {
+			t.Fatalf("bidirectional relates-to must not drop epics from roots, got %d: %+v", len(roots), roots)
+		}
+	})
+}
+
 // Regression test for https://github.com/steveyegge/beads/issues/1446
 // A task with multiple dependencies on the same epic should only appear once.
 func TestListBuildIssueTree_NoDuplicateChildrenFromMultipleDeps(t *testing.T) {

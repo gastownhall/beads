@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/query"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -73,19 +74,26 @@ Examples:
   bd query "created>30d AND status!=closed"
   bd query "label=frontend OR label=backend"
   bd query "title=authentication AND priority=0"`,
-	Run: func(cmd *cobra.Command, args []string) {
-		// Get query from args
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("query")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if len(args) == 0 {
 			fmt.Fprintf(os.Stderr, "Error: query expression is required\n\n")
 			if err := cmd.Help(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
 			}
-			os.Exit(1)
+			return SilentExit()
 		}
 
 		queryStr := strings.Join(args, " ")
 
-		// Get option flags
 		limit, _ := cmd.Flags().GetInt("limit")
 		allFlag, _ := cmd.Flags().GetBool("all")
 		longFormat, _ := cmd.Flags().GetBool("long")
@@ -93,40 +101,34 @@ Examples:
 		reverse, _ := cmd.Flags().GetBool("reverse")
 		parseOnly, _ := cmd.Flags().GetBool("parse-only")
 
-		// Parse the query
 		node, err := query.Parse(queryStr)
 		if err != nil {
-			FatalError("parsing query: %v", err)
+			return HandleErrorRespectJSON("parsing query: %v", err)
 		}
 
-		// If --parse-only, just show the parsed AST
 		if parseOnly {
 			fmt.Printf("Parsed query: %s\n", node.String())
-			return
+			return nil
 		}
 
-		// Evaluate the query to get filter and/or predicate
 		eval := query.NewEvaluator(time.Now())
 		result, err := eval.Evaluate(node)
 		if err != nil {
-			FatalError("evaluating query: %v", err)
+			return HandleErrorRespectJSON("evaluating query: %v", err)
 		}
 
-		// Apply limit if specified
 		if limit > 0 && !result.RequiresPredicate {
 			result.Filter.Limit = limit
 		}
 
-		// By default exclude closed issues unless --all is specified or query explicitly filters by status
 		if !allFlag && result.Filter.Status == nil && !hasExplicitStatusFilter(node) {
 			result.Filter.ExcludeStatus = append(result.Filter.ExcludeStatus, types.StatusClosed)
 		}
 
 		ctx := rootCtx
 
-		// Direct mode
 		if store == nil {
-			FatalError("no storage available")
+			return HandleErrorRespectJSON("no storage available")
 		}
 
 		searchFilter := result.Filter
@@ -140,7 +142,7 @@ Examples:
 		if jsonOutput {
 			iwc, err := store.SearchIssuesWithCounts(ctx, "", searchFilter)
 			if err != nil {
-				FatalError("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			if result.RequiresPredicate && result.Predicate != nil {
 				filtered := make([]*types.IssueWithCounts, 0, len(iwc))
@@ -161,13 +163,12 @@ Examples:
 			if iwc == nil {
 				iwc = []*types.IssueWithCounts{}
 			}
-			outputJSON(iwc)
-			return
+			return outputJSON(iwc)
 		}
 
 		issues, err := store.SearchIssues(ctx, "", searchFilter)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		if result.RequiresPredicate && result.Predicate != nil {
@@ -186,6 +187,7 @@ Examples:
 		sortIssues(issues, sortBy, reverse)
 
 		outputQueryResults(issues, queryStr, longFormat)
+		return nil
 	},
 }
 

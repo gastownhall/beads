@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // TestGitAddFile_InWorktreeHook_StagesCorrectPath is a regression test for
@@ -186,6 +188,28 @@ func TestShouldRunPostCommandAutoExportSkipsReadOnlyCommands(t *testing.T) {
 	}
 	if !shouldRunPostCommandAutoExport(&cobra.Command{Use: "create"}) {
 		t.Fatal("write commands should still trigger post-command auto-export")
+	}
+}
+
+func TestMaybeAutoExportSkipsServerModeBeforeStoreAccess(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	store = &fakeFallbackStore{}
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	if err := maybeAutoExport(context.Background(), true, false); err != nil {
+		t.Fatalf("maybeAutoExport(serverMode=true): %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, ".beads", exportAutoStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("server-mode auto-export wrote state file, stat err=%v", err)
 	}
 }
 
@@ -1006,5 +1030,5 @@ func autoExportDataLossTestEnv(home string) []string {
 		}
 		env = append(env, e)
 	}
-	return append(env, "HOME="+home, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1")
+	return append(env, "HOME="+home, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1", "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
 }

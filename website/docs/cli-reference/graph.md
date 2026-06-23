@@ -60,5 +60,5 @@ Check the dependency graph for cycles, orphans, and other integrity issues.
 Returns exit code 0 if the graph is clean, 1 if issues are found.
 
 ```
-bd graph check
+bd graph check [flags]
 ```

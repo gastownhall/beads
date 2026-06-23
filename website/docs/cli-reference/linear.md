@@ -73,7 +73,7 @@ Examples:
   bd linear status              # Show sync status
 
 ```
-bd linear
+bd linear [flags]
 ```
 
 ### bd linear pull
@@ -120,7 +120,7 @@ Show the current Linear sync status, including:
   - Issues pending push (no external_ref)
 
 ```
-bd linear status
+bd linear status [flags]
 ```
 
 ### bd linear sync
@@ -210,5 +210,5 @@ Example:
   bd config set linear.team_id "12345678-1234-1234-1234-123456789abc"
 
 ```
-bd linear teams
+bd linear teams [flags]
 ```

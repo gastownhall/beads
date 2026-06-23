@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -51,38 +52,42 @@ Examples:
   bd status --json             # JSON format output
   bd status --assigned         # Show issues assigned to current user
   bd stats                     # Alias for bd status`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("status")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		showAll, _ := cmd.Flags().GetBool("all")
 		showAssigned, _ := cmd.Flags().GetBool("assigned")
 		noActivity, _ := cmd.Flags().GetBool("no-activity")
 		jsonFormat, _ := cmd.Flags().GetBool("json")
 
-		// Override global jsonOutput if --json flag is set
 		if jsonFormat {
 			jsonOutput = true
 		}
 
-		// Get statistics
 		var stats *types.Statistics
 		var err error
 
 		ctx := rootCtx
 
-		// Direct mode
 		stats, err = store.GetStatistics(ctx)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		// Filter by assignee if requested (overrides stats with filtered counts)
 		if showAssigned {
 			stats = getAssignedStatistics(actor)
 			if stats == nil {
-				FatalErrorRespectJSON("failed to get assigned statistics")
+				return HandleErrorRespectJSON("failed to get assigned statistics")
 			}
 		}
 
-		// Get recent activity from git history (last 24 hours) unless --no-activity
 		var recentActivity *RecentActivitySummary
 		if !noActivity {
 			recentActivity = getGitActivity(24)
@@ -93,10 +98,8 @@ Examples:
 			RecentActivity: recentActivity,
 		}
 
-		// JSON output
 		if jsonOutput {
-			outputJSON(output)
-			return
+			return outputJSON(output)
 		}
 
 		// Human-readable colorized output using semantic ui package
@@ -135,12 +138,11 @@ Examples:
 			fmt.Printf("  Issues Updated:         %d\n", recentActivity.IssuesUpdated)
 		}
 
-		// Show hint for more details
 		fmt.Printf("\nFor more details, use 'bd list' to see individual issues.\n")
 		fmt.Println()
 
-		// Suppress showAll flag (it's the default behavior, included for CLI familiarity)
 		_ = showAll
+		return nil
 	},
 }
 

@@ -536,40 +536,18 @@ description = """
 Create or verify the Docusaurus snapshot for {{version}} so the published docs
 version dropdown, default docs route, and llms-full artifact match the release.
 
-Install website dependencies if needed:
+This is a single, idempotent script so version.go and the docs snapshot cannot
+drift apart. It installs website deps if needed, creates the versioned snapshot
+(if missing), points `docusaurus.config.ts` lastVersion at it, regenerates the
+CLI reference and llms-full.txt, and verifies consistency.
+
 ```bash
-cd website
-npm ci
+./scripts/snapshot-release-docs.sh {{version}}
 ```
 
-Create the release snapshot if it does not exist yet:
-```bash
-test -d versioned_docs/version-{{version}} || npx docusaurus docs:version {{version}}
-cd ..
-```
-
-Ensure `website/docusaurus.config.ts` selects the new release snapshot:
-```bash
-# macOS
-sed -i '' "s/lastVersion: '[^']*'/lastVersion: '{{version}}'/" website/docusaurus.config.ts
-
-# Linux
-sed -i "s/lastVersion: '[^']*'/lastVersion: '{{version}}'/" website/docusaurus.config.ts
-```
-
-Regenerate docs artifacts from the release snapshot:
-```bash
-CGO_ENABLED=0 go build -tags gms_pure_go -o ./bd-docs ./cmd/bd/
-./scripts/generate-cli-docs.sh ./bd-docs
-./scripts/generate-llms-full.sh
-```
-
-Verify:
-```bash
-./scripts/check-docs-version.sh
-./scripts/check-doc-flags.sh ./bd-docs
-rm -f ./bd-docs
-```
+If `scripts/update-versions.sh {{version}}` was used for the version bump, the
+docs snapshot has already run as part of that step (unless --skip-docs was
+passed) and this step just re-verifies.
 """
 
 [[steps]]

@@ -30,7 +30,7 @@ bd dep [issue-id] [flags]
 
 ```
   -b, --blocks string    Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)
-      --no-cycle-check   Skip cycle detection after adding (use for bulk wiring — run 'bd dep cycles' to verify afterwards)
+      --no-cycle-check   Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit
 ```
 
 ### bd dep add
@@ -75,7 +75,7 @@ bd dep add [issue-id] [depends-on-id] [flags]
       --blocked-by string   Issue ID that blocks the first issue (alternative to positional arg)
       --depends-on string   Issue ID that the first issue depends on (alias for --blocked-by)
       --file string         Read dependency edges from JSONL file, or '-' for stdin
-      --no-cycle-check      Skip cycle detection after adding (use for bulk wiring — run 'bd dep cycles' to verify afterwards)
+      --no-cycle-check      Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit
   -t, --type string         Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes) (default "blocks")
 ```
 
@@ -84,7 +84,7 @@ bd dep add [issue-id] [depends-on-id] [flags]
 Detect dependency cycles
 
 ```
-bd dep cycles
+bd dep cycles [flags]
 ```
 
 ### bd dep list
@@ -129,7 +129,7 @@ Examples:
   bd relate bd-123 bd-456    # Create see-also connection
 
 ```
-bd dep relate <id1> <id2>
+bd dep relate <id1> <id2> [flags]
 ```
 
 ### bd dep remove
@@ -137,7 +137,7 @@ bd dep relate <id1> <id2>
 Remove a dependency
 
 ```
-bd dep remove [issue-id] [depends-on-id]
+bd dep remove [issue-id] [depends-on-id] [flags]
 ```
 
 **Aliases:** rm
@@ -182,5 +182,5 @@ Example:
   bd unrelate bd-abc bd-xyz
 
 ```
-bd dep unrelate <id1> <id2>
+bd dep unrelate <id1> <id2> [flags]
 ```

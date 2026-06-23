@@ -25,24 +25,6 @@ type agentSkillEnv struct {
 	removeFile func(string) error
 }
 
-func defaultAgentSkillEnv() (agentSkillEnv, error) {
-	workDir, err := os.Getwd()
-	if err != nil {
-		return agentSkillEnv{}, fmt.Errorf("working directory: %w", err)
-	}
-	return agentSkillEnv{
-		stdout:     os.Stdout,
-		stderr:     os.Stderr,
-		projectDir: workDir,
-		ensureDir:  EnsureDir,
-		readFile:   os.ReadFile,
-		writeFile: func(path string, data []byte) error {
-			return atomicWriteFile(path, data)
-		},
-		removeFile: os.Remove,
-	}, nil
-}
-
 func agentSkillRootPath(base string) string {
 	return filepath.Join(base, ".agents", "skills", "beads")
 }

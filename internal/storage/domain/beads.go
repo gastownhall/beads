@@ -26,6 +26,8 @@ type BeadsDirFSRepository interface {
 	WriteConfigYAML(ctx context.Context, content []byte) error
 	ReadConfigYAML(ctx context.Context) ([]byte, error)
 	ReadBeadsConfig(ctx context.Context) (*configfile.Config, error)
+	WriteProxiedServerClientInfo(ctx context.Context, info *configfile.ProxiedServerClientInfo) error
+	ReadProxiedServerClientInfo(ctx context.Context) (*configfile.ProxiedServerClientInfo, error)
 }
 
 type BeadsDirFSUseCase interface {
@@ -67,11 +69,12 @@ type BeadsDirTemplates struct {
 }
 
 type InitializeBeadsDirParams struct {
-	MetadataJSONBody      []byte
-	ConfigYAMLBody        []byte
-	WriteProjectGitignore bool
-	SetNoCOW              bool
-	LocalVersion          string
+	MetadataJSONBody        []byte
+	ConfigYAMLBody          []byte
+	ProxiedServerClientInfo *configfile.ProxiedServerClientInfo
+	WriteProjectGitignore   bool
+	SetNoCOW                bool
+	LocalVersion            string
 }
 
 type InitializeBeadsDirResult struct {
@@ -93,6 +96,7 @@ type AgentsFileParams struct {
 	TemplatePath string
 	Profile      string
 	HasRemote    bool
+	NoPush       bool
 }
 
 type BeadsDirFSAdapters struct {
@@ -174,6 +178,11 @@ func (u *beadsDirFSUseCaseImpl) InitializeBeadsDir(ctx context.Context, params I
 	}
 	if len(params.ConfigYAMLBody) > 0 {
 		if err := u.fsRepo.WriteConfigYAML(ctx, params.ConfigYAMLBody); err != nil {
+			return InitializeBeadsDirResult{}, err
+		}
+	}
+	if params.ProxiedServerClientInfo != nil {
+		if err := u.fsRepo.WriteProxiedServerClientInfo(ctx, params.ProxiedServerClientInfo); err != nil {
 			return InitializeBeadsDirResult{}, err
 		}
 	}

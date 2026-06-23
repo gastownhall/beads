@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -84,8 +85,10 @@ Output (--persist):
   - The "template" label for proto identification
   - Child issues for each step
   - Dependencies matching depends_on relationships`,
-	Args: cobra.ExactArgs(1),
-	Run:  runCook,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runCook,
 }
 
 // cookResult holds the result of cooking a formula
@@ -306,8 +309,7 @@ func outputCookEphemeral(resolved *formula.Formula, runtimeMode bool, inputVars 
 		// Substitute variables in the formula
 		substituteFormulaVars(resolved, inputVars)
 	}
-	outputJSON(resolved)
-	return nil
+	return outputJSON(resolved)
 }
 
 // persistCookFormula creates a proto bead in the database (persist mode)
@@ -331,14 +333,13 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 	}
 
 	if jsonOutput {
-		outputJSON(cookResult{
+		return outputJSON(cookResult{
 			ProtoID:    result.ProtoID,
 			Formula:    resolved.Formula,
 			Created:    result.Created,
 			Variables:  vars,
 			BondPoints: bondPoints,
 		})
-		return nil
 	}
 
 	fmt.Printf("%s Cooked proto: %s\n", ui.RenderPass("✓"), result.ProtoID)
@@ -353,34 +354,36 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 	return nil
 }
 
-func runCook(cmd *cobra.Command, args []string) {
-	// Parse and validate flags
+func runCook(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("cook")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	flags, err := parseCookFlags(cmd, args)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
-	// Validate store access for persist mode
 	if flags.persist {
 		CheckReadonly("cook --persist")
 		if store == nil {
-			FatalError("no database connection")
+			return HandleError("no database connection")
 		}
 	}
 
-	// Load and resolve the formula
 	resolved, err := loadAndResolveFormula(flags.formulaPath, flags.searchPaths)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
-	// Apply prefix to proto ID if specified
 	protoID := resolved.Formula
 	if flags.prefix != "" {
 		protoID = flags.prefix + resolved.Formula
 	}
 
-	// Extract variables and bond points
 	vars := formula.ExtractVariables(resolved)
 	var bondPoints []string
 	if resolved.Compose != nil {
@@ -389,24 +392,22 @@ func runCook(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Handle dry-run mode
 	if flags.dryRun {
 		outputCookDryRun(resolved, protoID, flags.runtimeMode, flags.inputVars, vars, bondPoints)
-		return
+		return nil
 	}
 
-	// Handle ephemeral mode (default)
 	if !flags.persist {
 		if err := outputCookEphemeral(resolved, flags.runtimeMode, flags.inputVars, vars); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
-		return
+		return nil
 	}
 
-	// Handle persist mode
 	if err := persistCookFormula(rootCtx, resolved, protoID, flags.force, vars, bondPoints); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
+	return nil
 }
 
 // cookFormulaResult holds the result of cooking

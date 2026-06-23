@@ -22,5 +22,5 @@ Examples:
 
 
 ```
-bd context
+bd context [flags]
 ```

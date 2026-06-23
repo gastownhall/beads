@@ -203,6 +203,15 @@ func TestValidateKVKey(t *testing.T) {
 		{"linear prefix", "linear.key", true, "reserved prefix"},
 		{"export prefix", "export.path", true, "reserved prefix"},
 		{"import prefix", "import.path", true, "reserved prefix"},
+
+		// memory.* is reserved for `bd remember`: a generic kv.memory.* key is
+		// indistinguishable from a memory and the merge resolver auto-resolves it
+		// with --theirs (GH#2474), so it must not be settable via `bd kv set`.
+		{"memory prefix", "memory.foo", true, "reserved for persistent memories"},
+		{"memory prefix slug", "memory.test-wedge", true, "reserved for persistent memories"},
+		// A key that merely contains "memory" but does not start with the prefix
+		// is still valid — only the actual namespace is reserved.
+		{"memory not a prefix", "my.memory.note", false, ""},
 	}
 
 	for _, tc := range testCases {

@@ -81,7 +81,7 @@ Contributors: coffeegoddd (Dustin Brown / DoltHub), matt wilkie (maphew), harry-
 ## Upgrade
 
 ```bash
-brew upgrade bd
+brew upgrade beads
 # or
 curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```

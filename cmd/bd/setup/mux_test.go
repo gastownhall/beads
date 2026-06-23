@@ -29,6 +29,47 @@ func TestInstallMuxCreatesNewFile(t *testing.T) {
 	}
 }
 
+func TestInstallMuxReportsSkippedSymlinkRootInstructions(t *testing.T) {
+	env, stdout, stderr := newFactoryTestEnv(t)
+	target := filepath.Join(filepath.Dir(env.agentsPath), "SHARED_AGENTS.md")
+	if err := os.WriteFile(target, []byte("# Shared instructions\n"), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, env.agentsPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := installMux(env, false, false); err != nil {
+		t.Fatalf("installMux returned error: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Mux hooks installed; managed section skipped") {
+		t.Fatalf("expected partial Mux success message, got:\n%s", out)
+	}
+	if strings.Contains(out, "Mux integration installed") {
+		t.Fatalf("should not report full Mux integration success when root instructions are skipped:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "AGENTS.md is a symlink") {
+		t.Fatalf("expected symlink warning on stderr, got:\n%s", stderr.String())
+	}
+	if !FileExists(muxProjectHookPathsFirst(env.agentsPath)) {
+		t.Fatalf("expected Mux init hook to be installed")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if strings.Contains(string(data), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("symlink target should remain untouched:\n%s", data)
+	}
+}
+
+func muxProjectHookPathsFirst(baseAgentsPath string) string {
+	initPath, _, _ := muxProjectHookPaths(baseAgentsPath)
+	return initPath
+}
+
 func TestCheckMuxMissingFile(t *testing.T) {
 	env, stdout, _ := newFactoryTestEnv(t)
 	err := checkMux(env, false, false)

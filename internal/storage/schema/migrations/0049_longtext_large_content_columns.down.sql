@@ -1,0 +1,4 @@
+-- Reverse of 0043: not reversible without potential data loss. Shrinking
+-- LONGTEXT back to TEXT would silently truncate any content longer than
+-- 65535 bytes that was successfully stored after the migration. Intentional
+-- no-op.

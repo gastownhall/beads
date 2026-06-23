@@ -25,6 +25,17 @@ type ImportOptions struct {
 	DeletionIDs                []string
 	SkipPrefixValidation       bool
 	ProtectLocalExportIDs      map[string]time.Time
+	// ConflictSkip makes the import insert-if-new instead of UPSERT: an
+	// issue whose ID already exists is left untouched. Set only by the
+	// auto-import upgrade-recovery fallback (GH#3955); explicit `bd import`
+	// leaves this false and keeps UPSERT semantics.
+	ConflictSkip bool
+	// AllowStale imports rows even when their updated_at is older than the
+	// local issue's, overwriting newer local state. Required for the
+	// restore-an-older-snapshot recovery workflow, which the default stale
+	// guard otherwise silently no-ops per row (bd-6dnrw.9). Only settable
+	// via explicit `bd import --allow-stale`; auto-import paths never set it.
+	AllowStale bool
 }
 
 // ImportResult describes what an import operation did.
@@ -40,7 +51,25 @@ type ImportResult struct {
 	PrefixMismatch      bool
 	ExpectedPrefix      string
 	MismatchPrefixes    map[string]int
+	ImportedIDs         []string
+	StaleSkippedIDs     []string
 	SkippedDependencies []string
+	// UpdatedIssues lists existing local issues whose row the import
+	// rewrote (incoming strictly newer, content differs), with a
+	// field-level summary, so reverts of local state are visible instead
+	// of silent (bd-hj85c).
+	UpdatedIssues []ImportChange
+	// TieKeptLocalIDs lists incoming rows whose updated_at equals the
+	// local issue's but whose content differs. The upsert keeps the local
+	// row for these (second-granularity timestamp ties, bd-hj85c); their
+	// aux data still merges.
+	TieKeptLocalIDs []string
+}
+
+// ImportChange describes how an import row modified an existing local issue.
+type ImportChange struct {
+	ID      string `json:"id"`
+	Changes string `json:"changes,omitempty"`
 }
 
 // importIssuesCore imports issues into the Dolt store.
@@ -50,11 +79,38 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		return &ImportResult{Skipped: len(issues)}, nil
 	}
 
+	// The stale guard has two halves (bd-pkim8). This pre-filter reports the
+	// rows that are already known stale (StaleSkippedIDs) and keeps their
+	// labels/comments/dependencies out of the batch entirely. It is a separate
+	// read, though, so a local update that commits between it and the batch
+	// write would slip through — RejectStaleUpserts below closes that race by
+	// re-checking updated_at inside the upsert itself.
+	var staleSkippedIDs []string
+	var changePlan importChangePlan
+	if !opts.AllowStale {
+		filtered, skipped, plan, err := filterStaleImportIssues(ctx, store, issues)
+		if err != nil {
+			return nil, err
+		}
+		issues = filtered
+		staleSkippedIDs = skipped
+		changePlan = plan
+		if len(issues) == 0 {
+			return &ImportResult{Skipped: len(staleSkippedIDs), StaleSkippedIDs: staleSkippedIDs}, nil
+		}
+	}
+
 	var skippedDependencies []string
 	skippedDependencySet := make(map[string]struct{})
+	// In-txn half of the stale guard: rows the conditional upsert rejected
+	// (local update committed between the pre-filter read and the batch
+	// write). The transaction may retry, so dedup by ID.
+	staleRejectedSet := make(map[string]struct{})
 	err := store.CreateIssuesWithFullOptions(ctx, issues, getActorWithGit(), storage.BatchCreateOptions{
 		OrphanHandling:                 storage.OrphanAllow,
 		SkipPrefixValidation:           opts.SkipPrefixValidation,
+		ConflictSkip:                   opts.ConflictSkip,
+		RejectStaleUpserts:             !opts.AllowStale,
 		SkipDependencyValidationErrors: true,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 			skipped := fmt.Sprintf("%s -> %s: %s", issueID, dependsOnID, reason)
@@ -64,12 +120,189 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 			skippedDependencySet[skipped] = struct{}{}
 			skippedDependencies = append(skippedDependencies, skipped)
 		},
+		OnStaleRejected: func(issueID string) {
+			staleRejectedSet[issueID] = struct{}{}
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return &ImportResult{Created: len(issues), SkippedDependencies: skippedDependencies}, nil
+	importedIDs := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if _, rejected := staleRejectedSet[issue.ID]; rejected {
+			staleSkippedIDs = append(staleSkippedIDs, issue.ID)
+			continue
+		}
+		importedIDs = append(importedIDs, issue.ID)
+	}
+	// Drop planned updates the in-txn guard rejected (a local update raced
+	// in between the pre-filter read and the batch write).
+	updatedIssues := make([]ImportChange, 0, len(changePlan.Updates))
+	updatedCount := 0
+	for _, change := range changePlan.Updates {
+		if _, rejected := staleRejectedSet[change.ID]; rejected {
+			continue
+		}
+		updatedIssues = append(updatedIssues, change)
+		updatedCount++
+	}
+	return &ImportResult{
+		Created:             len(importedIDs),
+		Updated:             updatedCount,
+		Skipped:             len(staleSkippedIDs),
+		ImportedIDs:         importedIDs,
+		StaleSkippedIDs:     staleSkippedIDs,
+		SkippedDependencies: skippedDependencies,
+		UpdatedIssues:       updatedIssues,
+		TieKeptLocalIDs:     changePlan.TieKeptLocal,
+	}, nil
+}
+
+// importChangePlan reports how the import batch relates to existing local
+// issues, so the import can surface what it changed instead of doing it
+// silently (bd-hj85c).
+type importChangePlan struct {
+	// Updates lists existing issues the batch will rewrite: incoming row
+	// strictly newer and row content differs.
+	Updates []ImportChange
+	// TieKeptLocal lists incoming rows with the same updated_at as the
+	// local issue but different row content. The stale-guarded upsert keeps
+	// every stored column for these (second-granularity timestamp tie),
+	// while their aux data still merges.
+	TieKeptLocal []string
+}
+
+func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, issues []*types.Issue) ([]*types.Issue, []string, importChangePlan, error) {
+	var plan importChangePlan
+	ids := make([]string, 0, len(issues))
+	seen := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		if issue == nil || issue.ID == "" {
+			continue
+		}
+		if _, ok := seen[issue.ID]; ok {
+			continue
+		}
+		seen[issue.ID] = struct{}{}
+		ids = append(ids, issue.ID)
+	}
+	if len(ids) == 0 {
+		return issues, nil, plan, nil
+	}
+
+	localIssues, err := store.GetIssuesByIDs(ctx, ids)
+	if err != nil {
+		return nil, nil, plan, fmt.Errorf("check existing issues before import: %w", err)
+	}
+	localByID := make(map[string]*types.Issue, len(localIssues))
+	for _, issue := range localIssues {
+		if issue != nil && issue.ID != "" && !issue.UpdatedAt.IsZero() {
+			localByID[issue.ID] = issue
+		}
+	}
+	if len(localByID) == 0 {
+		return issues, nil, plan, nil
+	}
+
+	filtered := make([]*types.Issue, 0, len(issues))
+	skippedIDs := make([]string, 0)
+	for _, issue := range issues {
+		if issue == nil || issue.ID == "" || issue.UpdatedAt.IsZero() {
+			filtered = append(filtered, issue)
+			continue
+		}
+		local, ok := localByID[issue.ID]
+		if !ok {
+			filtered = append(filtered, issue)
+			continue
+		}
+		// Compare at second granularity: updated_at is DATETIME(0) in the
+		// store, so a sub-second component on the JSONL side must not turn
+		// a tie into a spurious "newer" classification.
+		incomingAt := issue.UpdatedAt.UTC().Truncate(time.Second)
+		localAt := local.UpdatedAt.UTC().Truncate(time.Second)
+		if incomingAt.Before(localAt) {
+			skippedIDs = append(skippedIDs, issue.ID)
+			continue
+		}
+		if summary := importRowChangeSummary(local, issue); summary != "" {
+			if incomingAt.Equal(localAt) {
+				plan.TieKeptLocal = append(plan.TieKeptLocal, issue.ID)
+			} else {
+				plan.Updates = append(plan.Updates, ImportChange{ID: issue.ID, Changes: summary})
+			}
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered, skippedIDs, plan, nil
+}
+
+// importRowChangeSummary summarizes the differences between the local issue
+// row and the incoming import row, restricted to the columns the import
+// upsert rewrites. Returns "" when none of those fields differ. Status,
+// priority, and type transitions show old → new; long-form fields are listed
+// by name only.
+func importRowChangeSummary(local, incoming *types.Issue) string {
+	var parts []string
+	if local.Status != incoming.Status {
+		parts = append(parts, fmt.Sprintf("status %s → %s", local.Status, incoming.Status))
+	}
+	if local.Priority != incoming.Priority {
+		parts = append(parts, fmt.Sprintf("priority %d → %d", local.Priority, incoming.Priority))
+	}
+	if local.IssueType != incoming.IssueType {
+		parts = append(parts, fmt.Sprintf("type %s → %s", local.IssueType, incoming.IssueType))
+	}
+	if local.Assignee != incoming.Assignee {
+		parts = append(parts, "assignee")
+	}
+	if local.Title != incoming.Title {
+		parts = append(parts, "title")
+	}
+	if local.Description != incoming.Description {
+		parts = append(parts, "description")
+	}
+	if local.Design != incoming.Design {
+		parts = append(parts, "design")
+	}
+	if local.AcceptanceCriteria != incoming.AcceptanceCriteria {
+		parts = append(parts, "acceptance_criteria")
+	}
+	if local.Notes != incoming.Notes {
+		if incoming.Notes == "" {
+			parts = append(parts, "notes cleared")
+		} else {
+			parts = append(parts, "notes")
+		}
+	}
+	if local.CloseReason != incoming.CloseReason {
+		parts = append(parts, "close_reason")
+	}
+	if !stringPtrEqual(local.ExternalRef, incoming.ExternalRef) {
+		parts = append(parts, "external_ref")
+	}
+	if !intPtrEqual(local.EstimatedMinutes, incoming.EstimatedMinutes) {
+		parts = append(parts, "estimate")
+	}
+	if string(local.Metadata) != string(incoming.Metadata) {
+		parts = append(parts, "metadata")
+	}
+	return strings.Join(parts, ", ")
+}
+
+func stringPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // importLocalResult holds counts from a local JSONL import.
@@ -123,6 +356,20 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
 		}
 
+		// Skip the optional beads-jsonl metadata/header record.
+		// Canonical exports produced by the stable-ordering /
+		// git-merge convention prepend a schema+provenance line, e.g.
+		// {"_schema":"beads-jsonl/1","_dolt_branch":"main",
+		// "_dolt_commit":"...","_sort":"stable-v1"}. It carries no
+		// _type and no issue fields; without this guard it falls
+		// through to the issue path, unmarshals into an empty Issue,
+		// and aborts the whole import with "validation failed for
+		// issue : title is required". Identified by the _schema
+		// sentinel, which real issue/memory records never carry.
+		if _, isHeader := peek["_schema"]; isHeader {
+			continue
+		}
+
 		// Check if this is a memory record
 		if rawType, ok := peek["_type"]; ok {
 			var typeStr string
@@ -169,10 +416,28 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 	return issues, configEntries, nil
 }
 
-// importFromLocalJSONLFull imports issues and memories from a local JSONL file.
-// It detects memory records (lines with "_type":"memory") and imports them
-// via SetConfig, while routing regular issue records through the normal path.
+// importFromLocalJSONLFull imports issues and memories from a local JSONL file
+// using UPSERT semantics (an existing issue row is overwritten). Used by the
+// explicit recovery paths: `bd bootstrap` and `bd init --from-jsonl`.
 func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, localPath string) (*importLocalResult, error) {
+	return importFromLocalJSONLWithOpts(ctx, store, localPath, false)
+}
+
+// importFromLocalJSONLConflictSkip is the auto-import upgrade-recovery
+// fallback (GH#3955; the fallbackImporter seam in auto_import_upgrade.go).
+// It is identical to importFromLocalJSONLFull except that an issue whose ID
+// already exists is left untouched instead of being overwritten, so a
+// regressed emptiness guard can never clobber live rows — worst case is a
+// no-op.
+func importFromLocalJSONLConflictSkip(ctx context.Context, store storage.DoltStorage, localPath string) (*importLocalResult, error) {
+	return importFromLocalJSONLWithOpts(ctx, store, localPath, true)
+}
+
+// importFromLocalJSONLWithOpts is the shared implementation. It detects
+// memory records (lines with "_type":"memory") and imports them via
+// SetConfig, while routing regular issue records through the normal path.
+// conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
+func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage, localPath string, conflictSkip bool) (*importLocalResult, error) {
 	issues, configEntries, err := parseJSONLFile(localPath)
 	if err != nil {
 		return nil, err
@@ -203,12 +468,13 @@ func importFromLocalJSONLFull(ctx context.Context, store storage.DoltStorage, lo
 
 		opts := ImportOptions{
 			SkipPrefixValidation: true,
+			ConflictSkip:         conflictSkip,
 		}
-		_, err = importIssuesCore(ctx, "", store, issues, opts)
+		importResult, err := importIssuesCore(ctx, "", store, issues, opts)
 		if err != nil {
 			return nil, err
 		}
-		result.Issues = len(issues)
+		result.Issues = importResult.Created
 	}
 
 	return result, nil

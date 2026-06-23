@@ -6,6 +6,13 @@ on:
       - main
     paths:
       - 'website/**'
+      - 'docs/ANTIVIRUS.md'
+      - 'docs/COMMUNITY_TOOLS.md'
+      - 'docs/LABELS.md'
+      - 'docs/METADATA.md'
+      - 'docs/SYNC_CONCEPTS.md'
+      - 'docs/UNINSTALLING.md'
+      - 'scripts/sync-website-docs.sh'
       - 'scripts/generate-llms-full.sh'
   workflow_dispatch:
 
@@ -25,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -34,16 +41,8 @@ jobs:
           cache: 'npm'
           cache-dependency-path: website/package-lock.json
 
-      - name: Install dependencies
-        working-directory: website
-        run: npm ci
-
-      - name: Generate llms-full.txt
-        run: ./scripts/generate-llms-full.sh
-
-      - name: Build website
-        working-directory: website
-        run: npm run build
+      - name: Run website package gate
+        run: make ci-website
 
       - name: Prepare link check (map baseUrl /beads/ to build output)
         run: |

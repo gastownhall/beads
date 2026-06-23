@@ -26,6 +26,7 @@ else
 fi
 
 echo "[winres] Generating Windows PE resources for bd v${VERSION}"
+PE_VERSION="${VERSION%%-*}"
 
 # Check for go-winres
 if ! command -v go-winres &> /dev/null; then
@@ -37,8 +38,8 @@ fi
 go-winres make \
     --in "$WINRES_DIR/winres.json" \
     --out "$OUT_PREFIX" \
-    --product-version "$VERSION" \
-    --file-version "$VERSION"
+    --product-version "$PE_VERSION" \
+    --file-version "$PE_VERSION"
 
 echo "[winres] Generated:"
 ls -la "$REPO_ROOT"/cmd/bd/rsrc_windows_*.syso 2>/dev/null || echo "[winres] (no .syso files found - check go-winres output)"

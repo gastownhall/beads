@@ -15,7 +15,7 @@ See each sub-command's help for details on how to use the generated script.
 
 
 ```
-bd completion
+bd completion [flags]
 ```
 
 ### bd completion bash

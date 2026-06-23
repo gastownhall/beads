@@ -4,6 +4,8 @@ package doltserver_test
 
 import (
 	"database/sql"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,9 +25,11 @@ import (
 // dolt database. Returns the beadsDir path.
 func setupLifecycleTestDir(t *testing.T) string {
 	t.Helper()
-	integration.RequireDolt(t)
+	doltBin := integration.RequireDolt(t)
 
 	tmpDir := t.TempDir()
+	configureDoltTestIdentity(t, doltBin, tmpDir)
+
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0700); err != nil {
 		t.Fatalf("failed to create beads dir: %v", err)
@@ -36,9 +40,9 @@ func setupLifecycleTestDir(t *testing.T) string {
 		t.Fatalf("failed to create dolt dir: %v", err)
 	}
 
-	cmd := exec.Command("dolt", "init")
+	cmd := exec.Command(doltBin, "init")
 	cmd.Dir = doltDir
-	cmd.Env = append(os.Environ(), "HOME="+tmpDir, "DOLT_ROOT_PATH="+tmpDir)
+	cmd.Env = doltTestEnv(tmpDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("dolt init failed: %v\n%s", err, out)
 	}
@@ -50,16 +54,50 @@ func setupLifecycleTestDir(t *testing.T) string {
 	return beadsDir
 }
 
+func configureDoltTestIdentity(t *testing.T, doltBin, home string) {
+	t.Helper()
+
+	for _, args := range [][]string{
+		{"config", "--global", "--add", "user.name", "beads-test"},
+		{"config", "--global", "--add", "user.email", "beads@test"},
+	} {
+		cmd := exec.Command(doltBin, args...)
+		cmd.Env = doltTestEnv(home)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("dolt %v failed: %v\n%s", args, err, out)
+		}
+	}
+}
+
+func doltTestEnv(home string) []string {
+	return append(os.Environ(), "HOME="+home, "DOLT_ROOT_PATH="+home)
+}
+
 // connectMySQL opens a MySQL connection to the dolt server.
 // Caller is responsible for closing the returned *sql.DB.
 func connectMySQL(t *testing.T, port int) *sql.DB {
 	t.Helper()
-	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String()
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: "dolt"}.String()
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	return db
+}
+
+func waitForPortClosed(t *testing.T, port int, timeout time.Duration) {
+	t.Helper()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("server port %d still accepting connections after %v", port, timeout)
 }
 
 // TestLifecycle_StartStopCycle verifies the basic server lifecycle:
@@ -125,11 +163,9 @@ func TestLifecycle_StartStopCycle(t *testing.T) {
 	}
 	reg.Deregister(state.PID)
 
-	// Verify process is dead.
-	time.Sleep(500 * time.Millisecond)
-	if integration.IsProcessAlive(state.PID) {
-		t.Errorf("process %d is still alive after Stop", state.PID)
-	}
+	// Verify the server is no longer accepting connections. Detached child
+	// PIDs can remain briefly observable as zombies after the listener exits.
+	waitForPortClosed(t, state.Port, 5*time.Second)
 
 	// Verify state files removed.
 	if integration.FileExists(pidFile) {

@@ -551,6 +551,13 @@ func (s *InstrumentedStorage) CountIssues(ctx context.Context, query string, fil
 	return v, err
 }
 
+func (s *InstrumentedStorage) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {
+	ctx, span, t := s.op(ctx, "CountIssuesByGroup")
+	v, err := s.inner.CountIssuesByGroup(ctx, filter, groupBy)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
 func (s *InstrumentedStorage) CountDependents(ctx context.Context, issueID string) (int64, error) {
 	ctx, span, t := s.op(ctx, "CountDependents", attribute.String("issue.id", issueID))
 	v, err := s.inner.CountDependents(ctx, issueID)

@@ -91,6 +91,7 @@ func Initialize() error {
 		// <module-root>/.beads/config.yaml (where module-root is the nearest parent containing go.mod).
 		ignoreRepoConfig := os.Getenv("BEADS_TEST_IGNORE_REPO_CONFIG") != ""
 		var moduleRoot string
+		ignoredRepoConfigPaths := map[string]bool{}
 		if ignoreRepoConfig {
 			// Find module root by walking up to go.mod.
 			for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
@@ -98,6 +99,12 @@ func Initialize() error {
 					moduleRoot = dir
 					break
 				}
+			}
+			if moduleRoot != "" {
+				ignoredRepoConfigPaths[filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))] = true
+			}
+			if fallbackPath := worktreeFallbackConfigPath(cwd); fallbackPath != "" {
+				ignoredRepoConfigPaths[filepath.Clean(fallbackPath)] = true
 			}
 		}
 
@@ -108,12 +115,8 @@ func Initialize() error {
 			if _, err := os.Stat(path); err != nil {
 				return false
 			}
-			if ignoreRepoConfig && moduleRoot != "" {
-				// Only ignore the repo-local config (moduleRoot/.beads/config.yaml).
-				wantIgnore := filepath.Clean(path) == filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))
-				if wantIgnore {
-					return false
-				}
+			if ignoreRepoConfig && ignoredRepoConfigPaths[filepath.Clean(path)] {
+				return false
 			}
 			configPaths = append(configPaths, path)
 			primaryConfigPath = path
@@ -138,7 +141,7 @@ func Initialize() error {
 
 		// Worktree/shared fallback: the active workspace may live outside the
 		// worktree tree, so the parent walk above won't find it.
-		if primaryConfigPath == "" {
+		if primaryConfigPath == "" && beadsEnvConfigPath == "" {
 			p := worktreeFallbackConfigPath(cwd)
 			_ = tryProjectConfig(p)
 		}
@@ -190,6 +193,9 @@ func Initialize() error {
 
 	// Sync configuration defaults (bd-4u8)
 	v.SetDefault("sync.require_confirmation_on_mass_delete", false)
+
+	v.SetDefault("metrics.disabled", false)
+	v.SetDefault("metrics.endpoint", "https://gastownhall-eventsapi.com/mp/collect")
 
 	// Federation configuration (optional Dolt remote)
 	v.SetDefault("federation.remote", "")                          // e.g., dolthub://org/beads, gs://bucket/beads, s3://bucket/beads, az://account.blob.core.windows.net/container/beads

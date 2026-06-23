@@ -357,6 +357,48 @@ daemon.log
 	}
 }
 
+func TestEnsureGitignoreForBeadsDir_AppendsMissingRuntimePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	var stalePatterns []string
+	for _, pattern := range requiredPatterns {
+		if pattern == ".local_version" || pattern == "backup/" {
+			continue
+		}
+		stalePatterns = append(stalePatterns, pattern)
+	}
+	initialContent := "# Local additions\ncustom-local/\n" + strings.Join(stalePatterns, "\n") + "\n"
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(initialContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir failed: %v", err)
+	}
+
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("read .beads/.gitignore: %v", err)
+	}
+	contentStr := string(content)
+	if !strings.HasPrefix(contentStr, initialContent) {
+		t.Fatalf("existing .gitignore content was not preserved:\n%s", contentStr)
+	}
+	for _, pattern := range []string{".local_version", "backup/"} {
+		if !containsGitignorePattern(contentStr, pattern) {
+			t.Errorf("expected appended pattern %q in .beads/.gitignore:\n%s", pattern, contentStr)
+		}
+	}
+	if missing := missingGitignorePatterns(contentStr); len(missing) > 0 {
+		t.Fatalf("expected .beads/.gitignore to be complete after ensure, missing: %s", strings.Join(missing, ", "))
+	}
+}
+
 func TestFixGitignore_PartialPatterns(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -2371,7 +2413,8 @@ func TestContainsGitignorePattern(t *testing.T) {
 		{"# .dolt/ is ignored\n", ".dolt/", false}, // comment, not pattern
 		{"  .dolt/  \n", ".dolt/", true},           // whitespace trimmed
 		{"", ".dolt/", false},
-		{".dolt/foo\n", ".dolt/", false}, // not exact match
+		{".dolt/foo\n", ".dolt/", false},    // not exact match
+		{"embeddeddolt/\n", "dolt/", false}, // substring must not satisfy exact pattern
 	}
 
 	for _, tt := range tests {

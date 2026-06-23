@@ -1,8 +1,13 @@
 package issueops
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -213,6 +218,85 @@ func TestFormatJSONStringArray(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadConfigPrefix(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns trimmed prefix", func(t *testing.T) {
+		t.Parallel()
+
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT value FROM config WHERE `key` = \\?").
+			WithArgs("issue_prefix").
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("gt-"))
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatalf("db.Begin: %v", err)
+		}
+		mock.ExpectRollback()
+		defer func() { _ = tx.Rollback() }()
+
+		got, err := ReadConfigPrefix(context.Background(), tx)
+		if err != nil {
+			t.Fatalf("ReadConfigPrefix returned error: %v", err)
+		}
+		if got != "gt" {
+			t.Fatalf("ReadConfigPrefix() = %q, want %q", got, "gt")
+		}
+	})
+
+	t.Run("missing config row has actionable key naming hint", func(t *testing.T) {
+		t.Parallel()
+
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		mock.ExpectBegin()
+		mock.ExpectQuery("SELECT value FROM config WHERE `key` = \\?").
+			WithArgs("issue_prefix").
+			WillReturnRows(sqlmock.NewRows([]string{"value"}))
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatalf("db.Begin: %v", err)
+		}
+		mock.ExpectRollback()
+		defer func() { _ = tx.Rollback() }()
+
+		_, err = ReadConfigPrefix(context.Background(), tx)
+		if err == nil {
+			t.Fatal("ReadConfigPrefix() returned nil error, want error")
+		}
+		if !errors.Is(err, storage.ErrNotInitialized) {
+			t.Fatalf("ReadConfigPrefix error = %v, want ErrNotInitialized", err)
+		}
+		msg := err.Error()
+		if !containsAll(msg,
+			"issue_prefix config is missing",
+			"issue-prefix",
+			"not 'issue_prefix'",
+		) {
+			t.Fatalf("ReadConfigPrefix error missing key naming guidance: %s", msg)
+		}
+	})
+}
+
+func containsAll(s string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(s, part) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestIsWisp(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 type stubStore struct {
 	checkEligibilityFn func(context.Context, string, int) (bool, string, error)
 	getIssueFn         func(context.Context, string) (*types.Issue, error)
+	snapshotIssueFn    func(context.Context, string, int) error
 	updateIssueFn      func(context.Context, string, map[string]interface{}, string) error
 	applyCompactionFn  func(context.Context, string, int, int, int, string) error
 	addCommentFn       func(context.Context, string, string, string) error
@@ -31,6 +32,13 @@ func (s *stubStore) GetIssue(ctx context.Context, issueID string) (*types.Issue,
 		return s.getIssueFn(ctx, issueID)
 	}
 	return nil, fmt.Errorf("GetIssue not stubbed")
+}
+
+func (s *stubStore) SnapshotIssue(ctx context.Context, issueID string, tier int) error {
+	if s.snapshotIssueFn != nil {
+		return s.snapshotIssueFn(ctx, issueID, tier)
+	}
+	return nil
 }
 
 func (s *stubStore) UpdateIssue(ctx context.Context, issueID string, updates map[string]interface{}, actor string) error {
@@ -138,6 +146,65 @@ func TestCompactTier1_Success(t *testing.T) {
 	}
 	if !updateCalled || !applyCalled {
 		t.Fatalf("expected update/apply to be called")
+	}
+}
+
+// TestCompactTier1_SnapshotBeforeOverwrite is the data-safety guard: the
+// pre-compaction snapshot must be taken BEFORE the destructive UpdateIssue, so
+// compaction is always reversible.
+func TestCompactTier1_SnapshotBeforeOverwrite(t *testing.T) {
+	cleanup := withGitHash(t, "deadbeef\n")
+	t.Cleanup(cleanup)
+
+	var order []string
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		snapshotIssueFn: func(ctx context.Context, id string, tier int) error {
+			if tier != 1 {
+				t.Fatalf("expected snapshot tier 1, got %d", tier)
+			}
+			order = append(order, "snapshot")
+			return nil
+		},
+		updateIssueFn: func(context.Context, string, map[string]interface{}, string) error {
+			order = append(order, "update")
+			return nil
+		},
+	}
+	summary := &stubSummarizer{summary: "short"}
+	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
+
+	if err := c.CompactTier1(context.Background(), "bd-123"); err != nil {
+		t.Fatalf("CompactTier1 unexpected error: %v", err)
+	}
+	if len(order) != 2 || order[0] != "snapshot" || order[1] != "update" {
+		t.Fatalf("expected snapshot before update, got %v", order)
+	}
+}
+
+// TestCompactTier1_SnapshotError verifies that a failed archive aborts the
+// compaction so the original content is never overwritten without a snapshot.
+func TestCompactTier1_SnapshotError(t *testing.T) {
+	updateCalled := false
+	store := &stubStore{
+		checkEligibilityFn: func(context.Context, string, int) (bool, string, error) { return true, "", nil },
+		getIssueFn:         func(context.Context, string) (*types.Issue, error) { return stubIssue(), nil },
+		snapshotIssueFn:    func(context.Context, string, int) error { return errors.New("disk full") },
+		updateIssueFn: func(context.Context, string, map[string]interface{}, string) error {
+			updateCalled = true
+			return nil
+		},
+	}
+	summary := &stubSummarizer{summary: "short"}
+	c := &Compactor{store: store, summarizer: summary, config: &Config{}}
+
+	err := c.CompactTier1(context.Background(), "bd-123")
+	if err == nil || !strings.Contains(err.Error(), "archive pre-compaction snapshot") {
+		t.Fatalf("expected snapshot error, got %v", err)
+	}
+	if updateCalled {
+		t.Fatalf("issue was overwritten despite snapshot failure")
 	}
 }
 

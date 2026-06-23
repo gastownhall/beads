@@ -1098,9 +1098,6 @@ func TestFetchIssueByIdentifierSendsNumericFilter(t *testing.T) {
 }
 
 func TestLinearClientFetchIssues(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1209,9 +1206,6 @@ func TestLinearClientFetchIssues(t *testing.T) {
 }
 
 func TestLinearClientCreateIssue(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for create mutation
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1262,9 +1256,6 @@ func TestLinearClientCreateIssue(t *testing.T) {
 }
 
 func TestLinearClientUpdateIssue(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for update mutation
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1321,9 +1312,6 @@ func TestLinearClientUpdateIssue(t *testing.T) {
 }
 
 func TestLinearClientGetTeamStates(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for team states query
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1378,9 +1366,6 @@ func TestLinearClientGetTeamStates(t *testing.T) {
 }
 
 func TestLinearClientRateLimitHandling(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock server that returns 429 then succeeds
 	attempts := 0
@@ -1437,9 +1422,6 @@ func TestLinearClientRateLimitHandling(t *testing.T) {
 }
 
 func TestLinearClientGraphQLError(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock server that returns a GraphQL error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1636,9 +1618,6 @@ func TestBuildLinearToLocalUpdatesWithClosedAt(t *testing.T) {
 }
 
 func TestLinearClientFetchTeams(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for teams query
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

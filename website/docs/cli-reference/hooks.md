@@ -20,7 +20,7 @@ The hooks provide:
 - prepare-commit-msg: Add agent identity trailers for forensics
 
 ```
-bd hooks
+bd hooks [flags]
 ```
 
 ### bd hooks install
@@ -60,7 +60,7 @@ bd hooks install [flags]
 Show the status of bd git hooks (installed, outdated, missing).
 
 ```
-bd hooks list
+bd hooks list [flags]
 ```
 
 ### bd hooks run
@@ -79,7 +79,7 @@ The thin shim pattern ensures hook logic is always in sync with the
 installed bd version - upgrading bd automatically updates hook behavior.
 
 ```
-bd hooks run <hook-name> [args...]
+bd hooks run <hook-name> [args...] [flags]
 ```
 
 ### bd hooks uninstall
@@ -87,5 +87,5 @@ bd hooks run <hook-name> [args...]
 Remove bd git hooks from .git/hooks/ directory.
 
 ```
-bd hooks uninstall
+bd hooks uninstall [flags]
 ```

@@ -73,12 +73,13 @@ Examples:
   bd config set status.custom "awaiting_review,awaiting_testing"
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
+  bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
   bd config get export.auto
   bd config list
   bd config unset jira.url
 
 ```
-bd config
+bd config [flags]
 ```
 
 ### bd config apply
@@ -130,7 +131,7 @@ Examples:
   bd config drift --json
 
 ```
-bd config drift
+bd config drift [flags]
 ```
 
 ### bd config get
@@ -138,7 +139,7 @@ bd config drift
 Get a configuration value
 
 ```
-bd config get <key>
+bd config get <key> [flags]
 ```
 
 ### bd config list
@@ -146,7 +147,7 @@ bd config get <key>
 List all configuration
 
 ```
-bd config list
+bd config list [flags]
 ```
 
 ### bd config set
@@ -220,7 +221,7 @@ bd config show [flags]
 Delete a configuration value
 
 ```
-bd config unset <key>
+bd config unset <key> [flags]
 ```
 
 ### bd config validate
@@ -238,5 +239,5 @@ Checks:
 	  bd config validate --json
 
 ```
-bd config validate
+bd config validate [flags]
 ```

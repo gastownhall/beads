@@ -137,6 +137,7 @@ func validatePrefixWithAllowed(requestedPrefix, dbPrefix, allowedPrefixes string
 // - id starts with any prefix in allowedPrefixes + "-"
 // Returns an error if none of these conditions are met.
 func ValidateIDPrefixAllowed(id, dbPrefix, allowedPrefixes string, force bool) error {
+	dbPrefix = strings.TrimSuffix(dbPrefix, "-")
 	if force || dbPrefix == "" {
 		return nil
 	}

@@ -28,6 +28,32 @@ func TestEmbeddedReady(t *testing.T) {
 
 	// ===== Default =====
 
+	t.Run("ready_includes_open_issue_with_zero_dependencies", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "GH3268 zero dependency ready issue", "--type", "task", "--label", "gh3268-zero-deps")
+
+		cmd := exec.Command(bd, "ready", "--json", "--label", "gh3268-zero-deps")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var ready []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &ready); err != nil {
+			t.Fatalf("parse ready JSON: %v\n%s", err, stdout.String())
+		}
+		if len(ready) != 1 {
+			t.Fatalf("ready count = %d, want 1: %s", len(ready), stdout.String())
+		}
+		if ready[0].ID != issue.ID {
+			t.Fatalf("ready ID = %s, want %s", ready[0].ID, issue.ID)
+		}
+		if ready[0].DependencyCount != 0 {
+			t.Fatalf("dependency_count = %d, want 0", ready[0].DependencyCount)
+		}
+	})
+
 	t.Run("ready_default", func(t *testing.T) {
 		cmd := exec.Command(bd, "ready")
 		cmd.Dir = dir
@@ -229,6 +255,19 @@ func TestEmbeddedReady(t *testing.T) {
 		out2, err2 := cmd2.CombinedOutput()
 		if err2 == nil {
 			t.Fatalf("second bd ready (no -C) should have failed in tmpDir, got: %s", out2)
+		}
+	})
+
+	t.Run("offset_rejected_outside_proxied", func(t *testing.T) {
+		cmd := exec.Command(bd, "ready", "--offset", "1")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("bd ready --offset 1 in embedded mode should have failed, got: %s", out)
+		}
+		if !strings.Contains(string(out), "--offset is only supported under --proxied-server") {
+			t.Errorf("expected '--offset is only supported under --proxied-server' error, got: %s", out)
 		}
 	})
 }

@@ -72,6 +72,16 @@ func testMainInner(m *testing.M) int {
 		}
 	}
 
+	// Same for the module cache: GOMODCACHE defaults to $HOME/go/pkg/mod,
+	// so without this the in-test `go build` (buildEmbeddedBD) re-downloads
+	// every dependency into the temp HOME on each run — slow, and a hard
+	// failure when the network is unavailable.
+	if os.Getenv("GOMODCACHE") == "" {
+		if out, err := exec.Command("go", "env", "GOMODCACHE").Output(); err == nil {
+			_ = os.Setenv("GOMODCACHE", strings.TrimSpace(string(out)))
+		}
+	}
+
 	_ = os.Setenv("HOME", tmp)
 	_ = os.Setenv("USERPROFILE", tmp) // Windows compatibility
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "xdg-config"))

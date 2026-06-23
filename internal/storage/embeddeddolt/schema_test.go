@@ -3,8 +3,10 @@
 package embeddeddolt_test
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -31,6 +33,17 @@ func TestSchemaAfterInit(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cleanup() })
 
+	// Verify D4v2 indexes exist on the issues table.
+	var ignoredName, createStmt string
+	if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE `issues`").Scan(&ignoredName, &createStmt); err != nil {
+		t.Fatalf("SHOW CREATE TABLE issues: %v", err)
+	}
+	for _, idx := range []string{"idx_issues_status_updated_at", "idx_issues_defer_until"} {
+		if !strings.Contains(createStmt, idx) {
+			t.Errorf("issues table missing index %q", idx)
+		}
+	}
+
 	var maxVersion int
 	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
 		t.Fatalf("reading max schema_migrations version: %v", err)
@@ -45,5 +58,31 @@ func TestSchemaAfterInit(t *testing.T) {
 	}
 	if want := embeddeddolt.LatestIgnoredVersion(); maxIgnoredVersion != want {
 		t.Errorf("ignored_schema_migrations max version: got %d, want %d", maxIgnoredVersion, want)
+	}
+
+	// bd-2rd37: migration 0051 (and ignored/0010 for the wisp twins) drops the
+	// dormant DEFAULT (UUID()) on the aux-table primary keys, so an insert path
+	// that omits id fails loudly instead of silently minting a per-clone-random
+	// key (the #4259 failure class). dependencies.id is the original #4259
+	// table: its DEFAULT (UUID()) is dropped by 0050's prepared ALTER, which
+	// this assertion verifies actually took effect (bd-578h9.17). Scanning
+	// COLUMN_DEFAULT (rather than counting) also fails if the table or column
+	// is missing entirely.
+	for _, table := range []string{
+		"dependencies",
+		"events", "comments", "issue_snapshots", "compaction_snapshots",
+		"wisp_events", "wisp_comments", "wisp_dependencies",
+	} {
+		var columnDefault sql.NullString
+		err := db.QueryRowContext(ctx, `
+			SELECT COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'id'
+		`, table).Scan(&columnDefault)
+		if err != nil {
+			t.Fatalf("reading %s.id default: %v", table, err)
+		}
+		if columnDefault.Valid {
+			t.Errorf("%s.id has DEFAULT %q, want none (migrations 0050/0051 / ignored 0010)", table, columnDefault.String)
+		}
 	}
 }

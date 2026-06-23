@@ -26,5 +26,5 @@ Examples:
   bd priority bd-123 2    # Medium
 
 ```
-bd priority <id> <n>
+bd priority <id> <n> [flags]
 ```

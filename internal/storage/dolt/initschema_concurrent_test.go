@@ -76,7 +76,7 @@ func TestConcurrentInitSchema(t *testing.T) {
 
 			<-ready // wait for all goroutines to be ready
 
-			if err := initSchemaOnDBWithRetry(ctx, db); err != nil {
+			if _, err := initSchemaOnDBWithRetry(ctx, db); err != nil {
 				errs <- fmt.Errorf("goroutine %d: initSchemaOnDB: %w", n, err)
 			}
 		}(i)
@@ -180,7 +180,8 @@ func TestInitSchemaBlocksOnMigrationLock(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- initSchemaOnDBWithRetry(ctx, initDB2)
+		_, err := initSchemaOnDBWithRetry(ctx, initDB2)
+		errCh <- err
 	}()
 
 	waitForMigrationLockWaiter(t, ctx, initDB, lockHolderID, errCh)
@@ -263,7 +264,8 @@ func TestInitSchemaCanceledLockWaitDoesNotBlockFutureInit(t *testing.T) {
 	callerCtx, callerCancel := context.WithCancel(ctx)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- initSchemaOnDBWithRetry(callerCtx, blockedDB)
+		_, err := initSchemaOnDBWithRetry(callerCtx, blockedDB)
+		errCh <- err
 	}()
 
 	waitForMigrationLockWaiter(t, ctx, initDB, lockHolderID, errCh)
@@ -294,7 +296,7 @@ func TestInitSchemaCanceledLockWaitDoesNotBlockFutureInit(t *testing.T) {
 
 	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer verifyCancel()
-	if err := initSchemaOnDBWithRetry(verifyCtx, secondDB); err != nil {
+	if _, err := initSchemaOnDBWithRetry(verifyCtx, secondDB); err != nil {
 		t.Fatalf("second initSchemaOnDB after canceled lock wait: %v", err)
 	}
 }
@@ -355,7 +357,7 @@ func TestMigrationLockReleaseIgnoresCanceledCallerContext(t *testing.T) {
 
 	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer verifyCancel()
-	if err := initSchemaOnDBWithRetry(verifyCtx, secondDB); err != nil {
+	if _, err := initSchemaOnDBWithRetry(verifyCtx, secondDB); err != nil {
 		t.Fatalf("second initSchemaOnDB after canceled-context release: %v", err)
 	}
 }

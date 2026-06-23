@@ -10,6 +10,7 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -238,9 +239,13 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 		}
 	}
 
-	// Commit embedded creates and post-create metadata to Dolt. Without this,
-	// working-set rows are visible locally but absent from HEAD and sync.
-	if !usesSQLServer() || postCreateWrites {
+	// Match bd create: server-mode writes version themselves, while embedded
+	// create commits pending writes only when auto-commit is on.
+	shouldCommit, err := shouldCommitCreatePostWrites(issue, postCreateWrites)
+	if err != nil {
+		return nil, fmt.Errorf("dolt auto-commit: %w", err)
+	}
+	if shouldCommit {
 		commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
 		if postCreateWrites {
 			commitMsg = fmt.Sprintf("bd: create %s (metadata)", issue.ID)
@@ -270,13 +275,23 @@ The form uses keyboard navigation:
   - Enter: Submit the form (on the last field or submit button)
   - Ctrl+C: Cancel and exit
   - Arrow keys: Navigate within select fields`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("create-form")
-		runCreateForm(cmd)
+
+		evt := metrics.NewCommandEvent("create-form")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		return runCreateForm(cmd)
 	},
 }
 
-func runCreateForm(cmd *cobra.Command) {
+func runCreateForm(cmd *cobra.Command) error {
 	parentID, _ := cmd.Flags().GetString("parent")
 
 	// Raw form input - will be populated by the form
@@ -392,26 +407,24 @@ func runCreateForm(cmd *cobra.Command) {
 	if err != nil {
 		if err == huh.ErrUserAborted {
 			fmt.Fprintln(os.Stderr, "Issue creation canceled.")
-			os.Exit(0)
+			return nil
 		}
-		FatalError("form error: %v", err)
+		return HandleError("form error: %v", err)
 	}
 
-	// Parse the form input
 	fv := parseCreateFormInput(raw)
 	fv.ParentID = parentID
 
-	// Direct mode - use the extracted creation function
 	issue, err := CreateIssueFromFormValues(rootCtx, store, fv, actor)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(issue)
-	} else {
-		printCreatedIssue(issue)
+		return outputJSON(issue)
 	}
+	printCreatedIssue(issue)
+	return nil
 }
 
 func printCreatedIssue(issue *types.Issue) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -67,8 +68,10 @@ Examples:
   bd mol bond mol-critical-bug wisp-patrol --pour       # Persist found bug
   bd mol bond mol-temp-check bd-feature --ephemeral          # Ephemeral diagnostic
   bd mol bond mol-arm bd-patrol --ref arm-{{name}} --var name=ace  # Dynamic child ID`,
-	Args: cobra.ExactArgs(2),
-	Run:  runMolBond,
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMolBond,
 }
 
 // BondResult holds the result of a bond operation
@@ -80,15 +83,20 @@ type BondResult struct {
 	IDMapping  map[string]string `json:"id_mapping,omitempty"` // Old ID -> new ID for spawned issues
 }
 
-// runMolBond implements the polymorphic bond command
-func runMolBond(cmd *cobra.Command, args []string) {
+func runMolBond(cmd *cobra.Command, args []string) error {
 	CheckReadonly("mol bond")
+
+	evt := metrics.NewCommandEvent("mol-bond")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	ctx := rootCtx
 
-	// mol bond requires direct store access
 	if store == nil {
-		FatalError("no database connection")
+		return HandleErrorRespectJSON("no database connection")
 	}
 
 	bondType, _ := cmd.Flags().GetString("type")
@@ -99,40 +107,31 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	pour, _ := cmd.Flags().GetBool("pour")
 	childRef, _ := cmd.Flags().GetString("ref")
 
-	// Validate phase flags are not both set
 	if ephemeral && pour {
-		FatalError("cannot use both --ephemeral and --pour")
+		return HandleErrorRespectJSON("cannot use both --ephemeral and --pour")
 	}
 
-	// All issues go in the main store; ephemeral vs pour determines the Wisp flag
-	// --ephemeral: create with Ephemeral=true (ephemeral, stored in dolt_ignore table, excluded from sync)
-	// --pour: create with Ephemeral=false (persistent, synced via Dolt)
-	// Default: follow target's phase (ephemeral if target is ephemeral, otherwise persistent)
-
-	// Validate bond type
 	if bondType != types.BondTypeSequential && bondType != types.BondTypeParallel && bondType != types.BondTypeConditional {
-		FatalError("invalid bond type '%s', must be: sequential, parallel, or conditional", bondType)
+		return HandleErrorRespectJSON("invalid bond type '%s', must be: sequential, parallel, or conditional", bondType)
 	}
 
-	// Parse variables
 	vars := make(map[string]string)
 	for _, v := range varFlags {
 		parts := strings.SplitN(v, "=", 2)
 		if len(parts) != 2 {
-			FatalError("invalid variable format '%s', expected 'key=value'", v)
+			return HandleErrorRespectJSON("invalid variable format '%s', expected 'key=value'", v)
 		}
 		vars[parts[0]] = parts[1]
 	}
 
-	// For dry-run, just check if operands can be resolved (don't cook)
 	if dryRun {
 		issueA, formulaA, err := resolveOrDescribe(ctx, store, args[0])
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		issueB, formulaB, err := resolveOrDescribe(ctx, store, args[1])
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		idA := args[0]
@@ -191,19 +190,16 @@ func runMolBond(cmd *cobra.Command, args []string) {
 		if formulaA != "" || formulaB != "" {
 			fmt.Printf("\n  Note: Cooked formulas are ephemeral and deleted after bonding.\n")
 		}
-		return
+		return nil
 	}
 
-	// Resolve both operands - can be issue IDs or formula names
-	// Formula names are cooked inline to in-memory subgraphs
-	// Pass vars for step condition filtering (bd-7zka.1)
 	subgraphA, cookedA, err := resolveOrCookToSubgraph(ctx, store, args[0], vars)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 	subgraphB, cookedB, err := resolveOrCookToSubgraph(ctx, store, args[1], vars)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	// No cleanup needed - in-memory subgraphs don't pollute the DB
@@ -243,12 +239,11 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	}
 
 	if err != nil {
-		FatalError("bonding: %v", err)
+		return HandleErrorRespectJSON("bonding: %v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-		return
+		return outputJSON(result)
 	}
 
 	fmt.Printf("%s Bonded: %s + %s\n", ui.RenderPass("✓"), idA, idB)
@@ -261,6 +256,7 @@ func runMolBond(cmd *cobra.Command, args []string) {
 	} else if pour {
 		fmt.Printf("  Phase: liquid (persistent, Ephemeral=false)\n")
 	}
+	return nil
 }
 
 // isProto checks if an issue is a proto (has the template label)

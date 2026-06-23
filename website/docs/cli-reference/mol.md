@@ -34,7 +34,7 @@ Commands:
 Use "bd formula list" to list available formulas.
 
 ```
-bd mol
+bd mol [flags]
 ```
 
 **Aliases:** protomolecule
@@ -233,7 +233,7 @@ Examples:
   bd mol last-activity hq-wisp-0laki --json
 
 ```
-bd mol last-activity <molecule-id>
+bd mol last-activity <molecule-id> [flags]
 ```
 
 ### bd mol pour
@@ -297,7 +297,7 @@ Example:
   bd mol progress bd-hanoi-xyz
 
 ```
-bd mol progress [molecule-id]
+bd mol progress [molecule-id] [flags]
 ```
 
 ### bd mol ready
@@ -318,7 +318,7 @@ Examples:
   bd mol ready --gated --json    # JSON output for automation
 
 ```
-bd mol ready --gated
+bd mol ready --gated [flags]
 ```
 
 ### bd mol seed

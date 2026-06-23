@@ -6,10 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -261,6 +264,109 @@ func TestFieldMapperIssueToTracker(t *testing.T) {
 	priority, ok := fields["priority"].(map[string]string)
 	if !ok || priority["name"] != "Highest" {
 		t.Errorf("priority = %v, want Highest", fields["priority"])
+	}
+}
+
+func TestFieldMapperIssueToTrackerIncludesGlobalCustomFields(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		customFields: map[string]interface{}{
+			"customfield_10042": "AI Platform",
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	if fields["customfield_10042"] != "AI Platform" {
+		t.Errorf("customfield_10042 = %v, want %q", fields["customfield_10042"], "AI Platform")
+	}
+}
+
+func TestFieldMapperIssueToTrackerIncludesJSONObjectCustomField(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		customFields: map[string]interface{}{
+			"customfield_10042": map[string]interface{}{"value": "AI Platform"},
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	field, ok := fields["customfield_10042"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("customfield_10042 type = %T, want map[string]interface{}", fields["customfield_10042"])
+	}
+	if field["value"] != "AI Platform" {
+		t.Errorf("customfield_10042.value = %v, want %q", field["value"], "AI Platform")
+	}
+}
+
+func TestFieldMapperIssueToTrackerAppliesPerTypeCustomFields(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		typeCustomFields: map[string]map[string]interface{}{
+			"Story": {
+				"Team": "AI Platform",
+			},
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	if fields["Team"] != "AI Platform" {
+		t.Errorf("Team = %v, want %q", fields["Team"], "AI Platform")
+	}
+}
+
+func TestFieldMapperIssueToTrackerPerTypeCustomFieldsOverrideGlobal(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		customFields: map[string]interface{}{
+			"Team": "Global Team",
+		},
+		typeCustomFields: map[string]map[string]interface{}{
+			"story": {
+				"Team": "Story Team",
+			},
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	if fields["Team"] != "Story Team" {
+		t.Errorf("Team = %v, want %q", fields["Team"], "Story Team")
+	}
+}
+
+func TestFieldMapperIssueToTrackerIgnoresNonMatchingPerTypeCustomFields(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		typeCustomFields: map[string]map[string]interface{}{
+			"Epic": {
+				"Team": "AI Platform",
+			},
+		},
+	}
+
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+
+	if _, ok := fields["Team"]; ok {
+		t.Errorf("Team = %v, want unset for non-matching type", fields["Team"])
 	}
 }
 
@@ -631,6 +737,9 @@ func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error { retur
 func (s *configStore) CountIssues(_ context.Context, _ string, _ types.IssueFilter) (int64, error) {
 	return 0, nil
 }
+func (s *configStore) CountIssuesByGroup(_ context.Context, _ types.IssueFilter, _ string) (map[string]int, error) {
+	return nil, nil
+}
 func (s *configStore) CountDependents(_ context.Context, _ string) (int64, error)   { return 0, nil }
 func (s *configStore) CountDependencies(_ context.Context, _ string) (int64, error) { return 0, nil }
 func (s *configStore) CountIssueComments(_ context.Context, _ string) (int64, error) {
@@ -753,11 +862,12 @@ func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
 }
 
 func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
+	// jira.api_token is yaml-only (secret), so set it via env var.
+	t.Setenv("JIRA_API_TOKEN", "token123")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                    "https://example.atlassian.net",
 			"jira.project":                "PROJ",
-			"jira.api_token":              "token123",
 			"jira.status_map.open":        "Backlog",
 			"jira.status_map.in_progress": "Active Sprint",
 			"jira.status_map.review":      "Code Review", // custom non-standard beads status
@@ -790,11 +900,12 @@ func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 }
 
 func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
+	// jira.api_token is yaml-only (secret), so set it via env var.
+	t.Setenv("JIRA_API_TOKEN", "token123")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":              "https://example.atlassian.net",
 			"jira.project":          "PROJ",
-			"jira.api_token":        "token123",
 			"jira.type_map.story":   "User Story",
 			"jira.type_map.feature": "Feature",
 		},
@@ -839,11 +950,12 @@ func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
 }
 
 func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
+	// jira.api_token is yaml-only (secret), so set it via env var.
+	t.Setenv("JIRA_API_TOKEN", "token123")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":            "https://example.atlassian.net",
 			"jira.project":        "PROJ",
-			"jira.api_token":      "token123",
 			"jira.priority_map.0": "Critical",
 			"jira.priority_map.2": "Normal",
 		},
@@ -862,6 +974,184 @@ func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
 	}
 	if tr.priorityMap["2"] != "Normal" {
 		t.Errorf("priorityMap[\"2\"] = %q, want %q", tr.priorityMap["2"], "Normal")
+	}
+}
+
+func TestInitLoadsCustomFieldsFromAllConfig(t *testing.T) {
+	// jira.api_token is yaml-only (secret), so set it via env var.
+	t.Setenv("JIRA_API_TOKEN", "token123")
+	store := &configStore{
+		data: map[string]string{
+			"jira.url":                                  "https://example.atlassian.net",
+			"jira.project":                              "PROJ",
+			"jira.custom_fields.":                       "ignored",
+			"jira.custom_fields.Empty":                  "",
+			"jira.custom_fields.Whitespace":             "   ",
+			"jira.custom_fields.Team":                   "Global Team",
+			"jira.custom_fields.customfield_10042":      `{"value":"AI Platform"}`,
+			"jira.custom_fields.Story.":                 "ignored",
+			"jira.custom_fields..Team":                  "ignored",
+			"jira.custom_fields.Story.Team":             "Story Team",
+			"jira.custom_fields.Initiative.customfield": "Initiative Value",
+		},
+	}
+
+	tr := &Tracker{}
+	if err := tr.Init(context.Background(), store); err != nil {
+		t.Fatalf("Init error: %v", err)
+	}
+
+	if tr.customFields == nil {
+		t.Fatal("customFields should not be nil after Init with jira.custom_fields.* config")
+	}
+	if tr.customFields["Team"] != "Global Team" {
+		t.Errorf("customFields[\"Team\"] = %v, want %q", tr.customFields["Team"], "Global Team")
+	}
+	if _, ok := tr.customFields[""]; ok {
+		t.Error("customFields should ignore empty field names")
+	}
+	if _, ok := tr.customFields["Empty"]; ok {
+		t.Error("customFields should ignore empty values")
+	}
+	if _, ok := tr.customFields["Whitespace"]; ok {
+		t.Error("customFields should ignore whitespace-only values")
+	}
+	field, ok := tr.customFields["customfield_10042"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("customFields[\"customfield_10042\"] type = %T, want map[string]interface{}", tr.customFields["customfield_10042"])
+	}
+	if field["value"] != "AI Platform" {
+		t.Errorf("customFields[\"customfield_10042\"].value = %v, want %q", field["value"], "AI Platform")
+	}
+
+	if tr.typeCustomFields == nil {
+		t.Fatal("typeCustomFields should not be nil after Init with per-type jira.custom_fields.* config")
+	}
+	if tr.typeCustomFields["Story"]["Team"] != "Story Team" {
+		t.Errorf("typeCustomFields[\"Story\"][\"Team\"] = %v, want %q", tr.typeCustomFields["Story"]["Team"], "Story Team")
+	}
+	if _, ok := tr.typeCustomFields["Story"][""]; ok {
+		t.Error("typeCustomFields should ignore empty per-type field names")
+	}
+	if _, ok := tr.typeCustomFields[""]["Team"]; ok {
+		t.Error("typeCustomFields should ignore empty Jira type names")
+	}
+	if tr.typeCustomFields["Initiative"]["customfield"] != "Initiative Value" {
+		t.Errorf("typeCustomFields[\"Initiative\"][\"customfield\"] = %v, want %q", tr.typeCustomFields["Initiative"]["customfield"], "Initiative Value")
+	}
+
+	mapper := tr.FieldMapper()
+	fields := mapper.IssueToTracker(&types.Issue{
+		Title:     "New feature",
+		Priority:  2,
+		IssueType: types.TypeFeature,
+	})
+	if fields["Team"] != "Story Team" {
+		t.Errorf("FieldMapper Team = %v, want per-type override %q", fields["Team"], "Story Team")
+	}
+	field, ok = fields["customfield_10042"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("FieldMapper customfield_10042 type = %T, want map[string]interface{}", fields["customfield_10042"])
+	}
+	if field["value"] != "AI Platform" {
+		t.Errorf("FieldMapper customfield_10042.value = %v, want %q", field["value"], "AI Platform")
+	}
+}
+
+func TestInitRejectsInvalidCustomFieldJSON(t *testing.T) {
+	// jira.api_token is yaml-only (secret), so set it via env var.
+	t.Setenv("JIRA_API_TOKEN", "token123")
+	store := &configStore{
+		data: map[string]string{
+			"jira.url":                             "https://example.atlassian.net",
+			"jira.project":                         "PROJ",
+			"jira.custom_fields.customfield_10042": `{"value":`,
+		},
+	}
+
+	tr := &Tracker{}
+	err := tr.Init(context.Background(), store)
+	if err == nil {
+		t.Fatal("Init should reject invalid jira.custom_fields JSON")
+	}
+	if !strings.Contains(err.Error(), "parse jira.custom_fields.customfield_10042") {
+		t.Fatalf("Init error = %v, want custom field parse context", err)
+	}
+}
+
+func TestParseJiraCustomFieldValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		check func(t *testing.T, got interface{})
+	}{
+		{
+			name:  "string",
+			value: " AI Platform ",
+			check: func(t *testing.T, got interface{}) {
+				if got != "AI Platform" {
+					t.Errorf("got = %v, want %q", got, "AI Platform")
+				}
+			},
+		},
+		{
+			name:  "empty after trim",
+			value: "   ",
+			check: func(t *testing.T, got interface{}) {
+				if got != "" {
+					t.Errorf("got = %v, want empty string", got)
+				}
+			},
+		},
+		{
+			name:  "object",
+			value: `{"value":"AI Platform"}`,
+			check: func(t *testing.T, got interface{}) {
+				field, ok := got.(map[string]interface{})
+				if !ok {
+					t.Fatalf("got type = %T, want map[string]interface{}", got)
+				}
+				if field["value"] != "AI Platform" {
+					t.Errorf("got.value = %v, want %q", field["value"], "AI Platform")
+				}
+			},
+		},
+		{
+			name:  "array",
+			value: `[{"id":"10042"}]`,
+			check: func(t *testing.T, got interface{}) {
+				values, ok := got.([]interface{})
+				if !ok {
+					t.Fatalf("got type = %T, want []interface{}", got)
+				}
+				if len(values) != 1 {
+					t.Fatalf("len(got) = %d, want 1", len(values))
+				}
+				field, ok := values[0].(map[string]interface{})
+				if !ok {
+					t.Fatalf("got[0] type = %T, want map[string]interface{}", values[0])
+				}
+				if field["id"] != "10042" {
+					t.Errorf("got[0].id = %v, want %q", field["id"], "10042")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseJiraCustomFieldValue(tt.value)
+			if err != nil {
+				t.Fatalf("parseJiraCustomFieldValue error: %v", err)
+			}
+			tt.check(t, got)
+		})
+	}
+}
+
+func TestParseJiraCustomFieldValueInvalidJSON(t *testing.T) {
+	if _, err := parseJiraCustomFieldValue(`{"value":`); err == nil {
+		t.Fatal("parseJiraCustomFieldValue should reject invalid JSON object values")
 	}
 }
 
@@ -939,5 +1229,78 @@ func TestPriorityMapCaseInsensitiveMatch(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("PriorityToBeads(%q) = %d, want %d", tt.name, got, tt.want)
 		}
+	}
+}
+
+// TestGetConfig_YamlOnlyKeyBypassesStore verifies that yaml-only keys
+// (e.g. jira.api_token) bypass the Dolt store entirely. A nil store proves
+// the store is never dereferenced; before the fix this would panic.
+func TestGetConfig_YamlOnlyKeyBypassesStore(t *testing.T) {
+	ctx := context.Background()
+	tr := &Tracker{store: nil}
+
+	t.Run("falls back to env var", func(t *testing.T) {
+		t.Setenv("JIRA_API_TOKEN", "env-token-value")
+		got, err := tr.getConfig(ctx, "jira.api_token", "JIRA_API_TOKEN")
+		if err != nil {
+			t.Fatalf("getConfig returned error: %v", err)
+		}
+		if got != "env-token-value" {
+			t.Errorf("getConfig(jira.api_token) = %q, want %q", got, "env-token-value")
+		}
+	})
+
+	t.Run("returns empty when no value is set", func(t *testing.T) {
+		t.Setenv("JIRA_API_TOKEN", "")
+		got, err := tr.getConfig(ctx, "jira.api_token", "JIRA_API_TOKEN")
+		if err != nil {
+			t.Fatalf("getConfig returned error: %v", err)
+		}
+		if got != "" {
+			t.Errorf("getConfig(jira.api_token) = %q, want empty", got)
+		}
+	})
+}
+
+// TestGetConfig_YamlOnlyKeyReadsFromYaml verifies that jira.api_token is
+// read from .beads/config.yaml when set there, without depending on the
+// JIRA_API_TOKEN env var.
+func TestGetConfig_YamlOnlyKeyReadsFromYaml(t *testing.T) {
+	const wantToken = "yaml-config-token-value"
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	yamlBody := "jira.api_token: \"" + wantToken + "\"\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(yamlBody), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	t.Setenv("JIRA_API_TOKEN", "")
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Chdir(tmpDir)
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	if got := config.GetString("jira.api_token"); got != wantToken {
+		t.Fatalf("config.GetString(jira.api_token) = %q, want %q (yaml not loaded?)", got, wantToken)
+	}
+
+	tr := &Tracker{store: nil}
+	got, err := tr.getConfig(context.Background(), "jira.api_token", "JIRA_API_TOKEN")
+	if err != nil {
+		t.Fatalf("getConfig returned error: %v", err)
+	}
+	if got != wantToken {
+		t.Errorf("getConfig(jira.api_token) = %q, want %q (yaml value)", got, wantToken)
 	}
 }

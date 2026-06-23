@@ -17,9 +17,10 @@ import logging
 import os
 import signal
 import sys
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from types import FrameType
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any, TypeVar
 
 from fastmcp import FastMCP
 
@@ -50,8 +51,8 @@ from beads_mcp.tools import (
     beads_list_issues,
     beads_quickstart,
     beads_ready_work,
-    beads_repair_deps,
     beads_reopen_issue,
+    beads_repair_deps,
     beads_show_issue,
     beads_stats,
     beads_update_issue,
@@ -219,7 +220,8 @@ def require_context(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitabl
             workspace = current_workspace.get() or os.environ.get("BEADS_WORKING_DIR")
             if not workspace:
                 raise ValueError(
-                    "Context not set. Either provide workspace_root parameter or call context(workspace_root='...') first."
+                    "Context not set. Either provide workspace_root parameter or call "
+                    "context(workspace_root='...') first."
                 )
         return await func(*args, **kwargs)
 
@@ -354,7 +356,9 @@ _TOOL_CATALOG = {
 
 @mcp.tool(
     name="discover_tools",
-    description="List available beads tools (names and brief descriptions only). Use get_tool_info() for full details.",
+    description=(
+        "List available beads tools (names and brief descriptions only). Use get_tool_info() for full details."
+    ),
 )
 async def discover_tools() -> dict[str, Any]:
     """Discover available beads tools without loading full schemas.
@@ -391,7 +395,10 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "parameters": {
                 "limit": "int (1-100, default 10) - Max issues to return",
                 "priority": "int (0-4, optional) - Filter by priority",
-                "issue_type": "str (optional) - Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)",
+                "issue_type": (
+                    "str (optional) - Filter by type (task, bug, feature, epic, chore, "
+                    "decision, merge-request, or custom)"
+                ),
                 "assignee": "str (optional) - Filter by assignee",
                 "labels": "list[str] (optional) - AND filter: must have ALL labels",
                 "labels_any": "list[str] (optional) - OR filter: must have at least one",
@@ -556,7 +563,9 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "name": "context",
             "description": "Manage workspace context for beads operations",
             "parameters": {
-                "action": "str (optional) - set|show|init (default: show if no args, set if workspace_root provided)",
+                "action": (
+                    "str (optional) - set|show|init (default: show if no args, set if workspace_root provided)"
+                ),
                 "workspace_root": "str (optional) - Workspace path for set/init actions",
                 "prefix": "str (optional) - Issue ID prefix for init action",
             },
@@ -602,10 +611,7 @@ async def context(
     """
     # Infer action if not explicitly provided
     if action is None:
-        if workspace_root is not None:
-            action = "set"
-        else:
-            action = "show"
+        action = "set" if workspace_root is not None else "show"
 
     action = action.lower()
 
@@ -820,7 +826,10 @@ def _truncate_description(issue: Issue, max_length: int) -> Issue:
 
 @mcp.tool(
     name="ready",
-    description="Find tasks that have no blockers and are ready to be worked on. Returns minimal format for context efficiency.",
+    description=(
+        "Find tasks that have no blockers and are ready to be worked on. "
+        "Returns minimal format for context efficiency."
+    ),
 )
 @with_workspace
 async def ready_work(
@@ -889,7 +898,10 @@ async def ready_work(
             total_count=len(minimal_issues),
             preview=minimal_issues[:PREVIEW_COUNT],
             preview_count=PREVIEW_COUNT,
-            hint=f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} ready issues. Use show(issue_id) for full details.",
+            hint=(
+                f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} ready issues. "
+                "Use show(issue_id) for full details."
+            ),
         )
 
     return minimal_issues
@@ -897,7 +909,9 @@ async def ready_work(
 
 @mcp.tool(
     name="list",
-    description="List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info.",
+    description=(
+        "List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info."
+    ),
 )
 @with_workspace
 async def list_issues(
@@ -969,7 +983,10 @@ async def list_issues(
             total_count=len(minimal_issues),
             preview=minimal_issues[:PREVIEW_COUNT],
             preview_count=PREVIEW_COUNT,
-            hint=f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} issues. Use show(issue_id) for full details or add filters to narrow results.",
+            hint=(
+                f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} issues. "
+                "Use show(issue_id) for full details or add filters to narrow results."
+            ),
         )
 
     return minimal_issues
@@ -1083,8 +1100,6 @@ async def claim_issue(
         brief: If True (default), return minimal OperationResult; if False, return full Issue
     """
     issue = await beads_claim_issue(issue_id=issue_id)
-    if issue is None:
-        return None
     if brief:
         return OperationResult(id=issue.id, action="claimed")
     return issue
@@ -1138,8 +1153,12 @@ async def update_issue(
         external_ref=external_ref,
     )
 
-    if issue is None:
-        return None
+    if isinstance(issue, list):
+        if not issue:
+            return None
+        if brief:
+            return [OperationResult(id=item.id, action="updated") for item in issue]
+        return issue
     if brief:
         return OperationResult(id=issue.id, action="updated")
     return issue

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -27,36 +28,43 @@ The --parallel flag highlights parallelizable steps:
 
 Example:
   bd mol show bd-patrol --parallel`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("mol-show")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
-		// mol show requires direct store access for subgraph loading
 		if store == nil {
-			FatalError("no database connection")
+			return HandleErrorRespectJSON("no database connection")
 		}
 
 		moleculeID, err := utils.ResolvePartialID(ctx, store, args[0])
 		if err != nil {
-			FatalError("molecule '%s' not found", args[0])
+			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
 		}
 
 		subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
 		if err != nil {
-			FatalError("loading molecule: %v", err)
+			return HandleErrorRespectJSON("loading molecule: %v", err)
 		}
 
 		if molShowParallel {
-			showMoleculeWithParallel(subgraph)
-		} else {
-			showMolecule(subgraph)
+			return showMoleculeWithParallel(subgraph)
 		}
+		return showMolecule(subgraph)
 	},
 }
 
-func showMolecule(subgraph *MoleculeSubgraph) {
+func showMolecule(subgraph *MoleculeSubgraph) error {
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"root":         subgraph.Root,
 			"issues":       subgraph.Issues,
 			"dependencies": subgraph.Dependencies,
@@ -64,7 +72,6 @@ func showMolecule(subgraph *MoleculeSubgraph) {
 			"is_compound":  subgraph.Root.IsCompound(),
 			"bonded_from":  subgraph.Root.BondedFrom,
 		})
-		return
 	}
 
 	// Determine molecule type label
@@ -93,6 +100,7 @@ func showMolecule(subgraph *MoleculeSubgraph) {
 	fmt.Printf("\n%s Structure:\n", ui.RenderPass("🌲"))
 	printMoleculeTree(subgraph, subgraph.Root.ID, 0, true)
 	fmt.Println()
+	return nil
 }
 
 // showCompoundBondingInfo displays the bonding lineage for compound molecules.
@@ -406,12 +414,11 @@ func calculateBlockingDepths(subgraph *MoleculeSubgraph, blockedBy map[string]ma
 	return depths
 }
 
-// showMoleculeWithParallel displays molecule structure with parallel annotations
-func showMoleculeWithParallel(subgraph *MoleculeSubgraph) {
+func showMoleculeWithParallel(subgraph *MoleculeSubgraph) error {
 	analysis := analyzeMoleculeParallel(subgraph)
 
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"root":         subgraph.Root,
 			"issues":       subgraph.Issues,
 			"dependencies": subgraph.Dependencies,
@@ -420,7 +427,6 @@ func showMoleculeWithParallel(subgraph *MoleculeSubgraph) {
 			"is_compound":  subgraph.Root.IsCompound(),
 			"bonded_from":  subgraph.Root.BondedFrom,
 		})
-		return
 	}
 
 	// Determine molecule type label
@@ -457,6 +463,7 @@ func showMoleculeWithParallel(subgraph *MoleculeSubgraph) {
 	fmt.Printf("\n%s Structure:\n", ui.RenderPass("🌲"))
 	printMoleculeTreeWithParallel(subgraph, analysis, subgraph.Root.ID, 0, true)
 	fmt.Println()
+	return nil
 }
 
 // printMoleculeTreeWithParallel prints the molecule structure with parallel annotations.
