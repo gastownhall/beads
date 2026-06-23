@@ -1902,3 +1902,46 @@ func BenchmarkGetIssuesByIDs_SmallNLargeW_10_10K(b *testing.B) {
 func BenchmarkGetIssuesByIDs_SmallNLargeW_100_5K(b *testing.B) {
 	benchmarkGetIssuesByIDsSmallN(b, 5000, 100)
 }
+
+// =============================================================================
+// Schema Probe Benchmarks
+// =============================================================================
+
+// BenchmarkContentHashColumnProbe compares the retired INFORMATION_SCHEMA.COLUMNS
+// existence probe against the SHOW COLUMNS probe that replaced it.
+// schema.MigrateUp's migrationWorkNeeded runs this probe twice on every
+// connection. INFORMATION_SCHEMA.COLUMNS forces Dolt to materialize the full
+// column catalog because the predicate is not pushed down; SHOW COLUMNS reads a
+// single table's schema directly. The gap measured here understates production:
+// on a multi-database deployment the old probe was measured at 19-60 ms/conn
+// versus ~0 ms on the new one.
+func BenchmarkContentHashColumnProbe(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	b.Run("InformationSchema", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var count int
+			if err := store.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'content_hash'`,
+				"schema_migrations").Scan(&count); err != nil {
+				b.Fatalf("information_schema probe: %v", err)
+			}
+		}
+	})
+
+	b.Run("ShowColumns", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			rows, err := store.db.QueryContext(ctx, "SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'")
+			if err != nil {
+				b.Fatalf("show columns probe: %v", err)
+			}
+			for rows.Next() { //nolint:revive // draining the result set is the point
+			}
+			_ = rows.Close()
+		}
+	})
+}

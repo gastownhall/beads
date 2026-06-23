@@ -156,6 +156,8 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
+// expectColumnExists mocks the INFORMATION_SCHEMA.COLUMNS probe still used by
+// the dependency/aux id-column re-key paths (dep_id_backfill.go).
 func expectColumnExists(mock sqlmock.Sqlmock, present bool) {
 	n := 0
 	if present {
@@ -166,9 +168,12 @@ func expectColumnExists(mock sqlmock.Sqlmock, present bool) {
 }
 
 // expectContentHashColumnExists mocks the idempotent ensureContentHashColumn
-// probe, reporting that the content_hash column already exists (so no ALTER runs).
+// probe, reporting that the content_hash column already exists (so no ALTER
+// runs). The probe is a single-table SHOW COLUMNS, not an
+// INFORMATION_SCHEMA scan.
 func expectContentHashColumnExists(mock sqlmock.Sqlmock) {
-	expectColumnExists(mock, true)
+	mock.ExpectQuery(`SHOW COLUMNS FROM \w+ LIKE 'content_hash'`).
+		WillReturnRows(showColumnsRows("content_hash"))
 }
 
 func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {
