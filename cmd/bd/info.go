@@ -214,6 +214,18 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.1.0-rc.1",
+		Date:    "2026-06-23",
+		Changes: []string{
+			"RC: v1.0.5 was pulled from the default release path after #4259; this candidate carries the cross-clone data-safety fixes for validation before stable promotion.",
+			"UPGRADE: For multiple clones sharing one Dolt remote, sync every clone before upgrading, designate one machine to migrate and push, then upgrade/pull the remaining clones before doing tracked work.",
+			"NEW: bd refuses silent in-place schema migrations on existing remote-backed databases unless BD_ALLOW_REMOTE_MIGRATE=1 is set by the designated migrator.",
+			"NEW: schema_migrations records per-migration content hashes, and bd doctor reports migration-content skew against the cached remote-tracking ref.",
+			"FIX: dependencies and wisp_dependencies now use deterministic natural-key-derived IDs, with migration 0050 rekeying existing rows and same-edge pull conflicts auto-resolved when only audit columns differ.",
+			"FIX: Dolt primary-key merge refusals are classified with recovery guidance instead of surfacing only a raw Error 1105.",
+		},
+	},
+	{
 		Version: "1.0.5",
 		Date:    "2026-05-28",
 		Changes: []string{
