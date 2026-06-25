@@ -25,6 +25,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd gate list](#bd-gate-list) — List gate issues
   - [bd gate resolve](#bd-gate-resolve) — Manually resolve (close) a gate
   - [bd gate show](#bd-gate-show) — Show a gate issue
+- [bd heartbeat](#bd-heartbeat) — Refresh the lease on an issue you hold in_progress
 - [bd label](#bd-label) — Manage issue labels
   - [bd label add](#bd-label-add) — Add a label to one or more issues
   - [bd label list](#bd-label-list) — List labels for an issue
@@ -43,6 +44,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd promote](#bd-promote) — Promote a wisp to a permanent bead
 - [bd q](#bd-q) — Quick capture: create issue and output only ID
 - [bd query](#bd-query) — Query issues using a simple query language
+- [bd reclaim](#bd-reclaim) — Revert stale-lease in_progress issues back to ready (dead-worker recovery)
 - [bd reopen](#bd-reopen) — Reopen one or more closed issues
 - [bd search](#bd-search) — Search issues by text query
 - [bd set-state](#bd-set-state) — Set operational state (creates event + updates label)
@@ -813,6 +815,31 @@ This is similar to 'bd show' but validates that the issue is a gate.
 bd gate show <gate-id>
 ```
 
+### bd heartbeat
+
+Refresh the lease on an issue you currently hold in_progress.
+
+A claim carries a lease that expires after a TTL. A worker keeps its claim alive
+by heartbeating faster than the TTL; once it stops (because it died), the lease
+goes stale and 'bd reclaim' reverts the issue to ready so another worker can pick
+it up. Heartbeat pushes lease_expires_at forward and stamps heartbeat_at = now.
+
+Only the current owner may heartbeat. If the lease has already been reclaimed or
+the issue closed, heartbeat fails so the worker learns to stop.
+
+Heartbeat writes a Dolt commit, so heartbeat well below the TTL but not so fast
+it bloats history — cadence should be a small fraction of the TTL, not per-op.
+
+Examples:
+  bd heartbeat bd-123
+  bd hb bd-123
+
+```
+bd heartbeat <id>
+```
+
+**Aliases:** hb
+
 ### bd label
 
 Manage issue labels
@@ -1208,6 +1235,37 @@ bd query [expression] [flags]
       --parse-only    Only parse the query and show the AST (for debugging)
   -r, --reverse       Reverse sort order
       --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
+```
+
+### bd reclaim
+
+Revert in_progress issues whose lease has gone stale back to ready.
+
+When a worker claims an issue it takes a lease that expires after a TTL, kept
+alive by 'bd heartbeat'. A worker that dies stops heartbeating, so its lease
+expires and its issue would otherwise stay in_progress forever. reclaim is the
+reaper: it finds in_progress issues whose lease expired more than --older-than
+ago, clears the assignee, and sets them back to open so another worker can
+claim them. The previous owner's stale lease is recorded as a recovery event.
+
+--older-than is a grace window past lease expiry: only leases that expired at
+least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
+is not robbed of live work. Run it from a supervisor on a timer with a window
+of roughly 2× the claim TTL.
+
+Examples:
+  bd reclaim                       # default grace window (2× the lease TTL)
+  bd reclaim --older-than 10m      # reclaim leases expired &gt;10m ago
+  bd reclaim --older-than 0s       # reclaim every currently-expired lease
+
+```
+bd reclaim [flags]
+```
+
+**Flags:**
+
+```
+      --older-than duration   Only reclaim leases that expired at least this long ago (grace window) (default 10m0s)
 ```
 
 ### bd reopen

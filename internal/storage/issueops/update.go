@@ -215,6 +215,14 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
 
+	// Rewrite row_lock on every update so a concurrent lease mutation (heartbeat/
+	// reclaim) collides on this shared cell and is forced to conflict-and-retry
+	// rather than silently cell-merging two writes to different columns of the
+	// same row (see lease.go). This is the "every mutating path writes row_lock"
+	// invariant the lease scheme depends on.
+	setClauses = append(setClauses, "row_lock = ?")
+	args = append(args, freshRowLock())
+
 	args = append(args, id)
 
 	//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)

@@ -49,6 +49,11 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// bundles already have the base wisp tables, and the Dolt CLI test
 		// path needs direct DML for deterministic fixture repair.
 		return cliMigration0053RepairRigWisps
+	case "0054_add_lease_columns.up.sql":
+		// Fresh bundle bakes the lease columns directly: the Dolt CLI does not
+		// apply the prepared ALTER TABLE statements the runtime migration uses
+		// for idempotent re-runs on upgraded databases.
+		return cliMigration0054AddLeaseColumns
 	default:
 		return sqlText
 	}
@@ -67,6 +72,14 @@ const cliMigration0027AddStartedAt = `ALTER TABLE issues ADD COLUMN started_at D
 ALTER TABLE wisps ADD COLUMN started_at DATETIME;`
 
 const cliMigration0032DropSchemaMigrationsAppliedAt = `ALTER TABLE schema_migrations DROP COLUMN applied_at;`
+
+const cliMigration0054AddLeaseColumns = `ALTER TABLE issues ADD COLUMN lease_expires_at DATETIME;
+ALTER TABLE issues ADD COLUMN heartbeat_at DATETIME;
+ALTER TABLE issues ADD COLUMN row_lock BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX idx_issues_lease ON issues (status, lease_expires_at);
+ALTER TABLE wisps ADD COLUMN lease_expires_at DATETIME;
+ALTER TABLE wisps ADD COLUMN heartbeat_at DATETIME;
+ALTER TABLE wisps ADD COLUMN row_lock BIGINT NOT NULL DEFAULT 0;`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

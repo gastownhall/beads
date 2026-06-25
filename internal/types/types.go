@@ -1006,6 +1006,9 @@ const (
 	EventLabelAdded        EventType = "label_added"
 	EventLabelRemoved      EventType = "label_removed"
 	EventCompacted         EventType = "compacted"
+	// EventLeaseReclaimed records that a stale lease was reverted to ready by
+	// bd reclaim (dead-worker recovery). old_value is the previous owner.
+	EventLeaseReclaimed EventType = "lease_reclaimed"
 )
 
 // BlockedIssue extends Issue with blocking information
@@ -1318,6 +1321,15 @@ func (s SortPolicy) IsValid() bool {
 		return true
 	}
 	return false
+}
+
+// ReclaimedLease names an issue whose stale lease was reverted to ready by
+// bd reclaim, together with the owner the lease was taken from. Returned so
+// callers (the CLI, a supervisor) can report which dead workers' work was
+// recovered.
+type ReclaimedLease struct {
+	ID            string
+	PreviousOwner string
 }
 
 // WorkFilter is used to filter ready work queries

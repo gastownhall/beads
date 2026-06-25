@@ -272,6 +272,65 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 	return claimed, nil
 }
 
+// HeartbeatIssue refreshes the lease on an issue actor holds in_progress,
+// pushing lease_expires_at forward and rewriting row_lock (see issueops.lease).
+// Wrapped in withRetryTx so a heartbeat that loses Dolt's optimistic merge to a
+// concurrent reclaim/close on the same row is replayed against a fresh snapshot
+// rather than surfaced — the row_lock collision is what forces that retry.
+func (s *DoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
+	if s.isActiveWisp(ctx, id) {
+		// Wisps are ephemeral and never leased; nothing to heartbeat.
+		return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
+	}
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if err := issueops.HeartbeatIssueInTx(ctx, tx, id, actor); err != nil {
+			return err
+		}
+		// GH#2455: stage only the tables we touched, then commit without -A.
+		for _, table := range []string{"issues"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: heartbeat %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
+}
+
+// ReclaimExpiredLeases reverts in_progress issues whose lease expired more than
+// olderThan ago back to ready, recovering work stranded by dead workers. The
+// reclaim rewrites row_lock so it conflicts with any racing heartbeat/close on
+// the same row; withRetryTx replays the loser. Returns the reclaimed issues.
+func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
+	cutoff := time.Now().UTC().Add(-olderThan)
+	var reclaimed []types.ReclaimedLease
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		reclaimed, err = issueops.ReclaimExpiredLeasesInTx(ctx, tx, cutoff, actor)
+		if err != nil {
+			return err
+		}
+		if len(reclaimed) == 0 {
+			return nil
+		}
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: reclaim %d expired lease(s)", len(reclaimed))
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return reclaimed, nil
+}
+
 // ReopenIssue reopens a closed issue, setting status to open and clearing
 // closed_at and defer_until. If reason is non-empty, it is recorded as a comment.
 // Wraps UpdateIssue for Dolt-specific concerns (wisp routing, DOLT_COMMIT, etc.).
