@@ -1360,6 +1360,16 @@ type WorkFilter struct {
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
+
+	// BriefBodies, when true, narrows the ready/work-probe projection to omit the
+	// heavy free-text/blob "body" columns (description, design, acceptance_criteria,
+	// notes, close_reason, payload, waiters) that the high-frequency supervisor probe
+	// never displays — the measured 7–12x cost driver on the poll path (be-yvci).
+	// Routing-critical columns (metadata, title, status, …) are still projected.
+	// Default false keeps the full-hydration behavior, so existing callers and
+	// `bd ready`/`bd list --json` output are unchanged. The fleet-wide CPU win lands
+	// when the supervisor work_query passes --brief (gascity slice ga-arn).
+	BriefBodies bool
 }
 
 // StaleFilter is used to filter stale issue queries

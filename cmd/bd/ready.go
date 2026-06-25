@@ -132,6 +132,10 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			IncludeEphemeral: includeEphemeral, // bd-i5k5x: allow ephemeral issues (e.g., merge-requests)
 			ExcludeTypes:     excludeTypes,
 		}
+		// be-yvci: --brief narrows the projection to omit heavy body columns on the
+		// high-frequency work-probe path (the seam gascity's supervisor work_query
+		// uses to realize the dolt-CPU win). Bodies remain available via bd show.
+		applyReadyBriefFlag(cmd, &filter)
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
 			priority, _ := cmd.Flags().GetInt("priority")
@@ -312,6 +316,16 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		maybeShowTip(store)
 	},
 }
+
+// applyReadyBriefFlag maps the --brief flag onto WorkFilter.BriefBodies (be-yvci),
+// narrowing the work-probe projection to omit heavy body columns. Extracted so the
+// flag→filter wiring is unit-testable without a store.
+func applyReadyBriefFlag(cmd *cobra.Command, filter *types.WorkFilter) {
+	if brief, _ := cmd.Flags().GetBool("brief"); brief {
+		filter.BriefBodies = true
+	}
+}
+
 var blockedCmd = &cobra.Command{
 	Use:   "blocked",
 	Short: "Show blocked issues",
@@ -745,6 +759,7 @@ func init() {
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	readyCmd.Flags().Bool("claim", false, "Atomically claim the first ready issue matching the filters")
+	readyCmd.Flags().Bool("brief", false, "Omit heavy body columns (description/design/notes/...) from the projection for high-frequency machine probes (e.g. the supervisor work_query); fetch bodies via bd show (be-yvci)")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")

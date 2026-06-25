@@ -21,7 +21,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	if err != nil {
 		return nil, err
 	}
-	out, err := runSearchQueryInTx(ctx, tx, IssuesFilterTables, issuePreds.whereSQL, issuePreds.orderBySQL, issuePreds.limitSQL, issuePreds.args, wispDepsExist, false)
+	out, err := runSearchQueryInTx(ctx, tx, IssuesFilterTables, issuePreds.whereSQL, issuePreds.orderBySQL, issuePreds.limitSQL, issuePreds.args, wispDepsExist, false, filter.BriefBodies)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	if err != nil {
 		return nil, err
 	}
-	wisps, err := runSearchQueryInTx(ctx, tx, WispsFilterTables, wispPreds.whereSQL, wispPreds.orderBySQL, wispPreds.limitSQL, wispPreds.args, true, false)
+	wisps, err := runSearchQueryInTx(ctx, tx, WispsFilterTables, wispPreds.whereSQL, wispPreds.orderBySQL, wispPreds.limitSQL, wispPreds.args, true, false, filter.BriefBodies)
 	if err != nil {
 		if isTableNotExistError(err) {
 			return out, nil
@@ -100,15 +100,21 @@ func sortIssuesWithCountsByPolicy(items []*types.IssueWithCounts, policy types.S
 	copy(items, sorted)
 }
 
-var readyWorkIssueColumns = func() string {
-	raw := strings.ReplaceAll(IssueSelectColumns, "\n", " ")
+func aliasIssueColumns(cols string) string {
+	raw := strings.ReplaceAll(cols, "\n", " ")
 	raw = strings.ReplaceAll(raw, "\t", " ")
 	parts := strings.Split(raw, ",")
 	for i, p := range parts {
 		parts[i] = "i." + strings.TrimSpace(p)
 	}
 	return strings.Join(parts, ", ")
-}()
+}
+
+var readyWorkIssueColumns = aliasIssueColumns(IssueSelectColumns)
+
+// briefReadyWorkIssueColumns is the i.-aliased brief projection (body columns
+// dropped) used by the work-probe path when WorkFilter.BriefBodies is set (be-yvci).
+var briefReadyWorkIssueColumns = aliasIssueColumns(IssueSelectColumnsBrief)
 
 const readyWorkDepJSONObject = `JSON_OBJECT(
 	'issue_id', issue_id,
@@ -121,6 +127,19 @@ const readyWorkDepJSONObject = `JSON_OBJECT(
 )`
 
 func scanReadyWorkRowWithCounts(rows *sql.Rows) (*types.IssueWithCounts, error) {
+	return scanReadyWorkRowWithScanner(rows, ScanIssueFrom)
+}
+
+// scanReadyWorkBriefRowWithCounts scans a row from the brief work-probe projection
+// (briefReadyWorkIssueColumns): the same composite dep/label/count extras, but the
+// issue columns are the body-stripped brief set (be-yvci). Sharing
+// scanReadyWorkRowWithScanner guarantees the trailing extras are appended in the
+// identical order for both projections.
+func scanReadyWorkBriefRowWithCounts(rows *sql.Rows) (*types.IssueWithCounts, error) {
+	return scanReadyWorkRowWithScanner(rows, ScanIssueBriefFrom)
+}
+
+func scanReadyWorkRowWithScanner(rows *sql.Rows, scanIssue func(IssueScanner) (*types.Issue, error)) (*types.IssueWithCounts, error) {
 	var labelsJSON, depsJSON sql.NullString
 	var parentID sql.NullString
 	var depCount, rdepCount, commentCount sql.NullInt64
@@ -136,7 +155,7 @@ func scanReadyWorkRowWithCounts(rows *sql.Rows) (*types.IssueWithCounts, error) 
 			&depsJSON,
 		},
 	}
-	issue, err := ScanIssueFrom(composite)
+	issue, err := scanIssue(composite)
 	if err != nil {
 		return nil, fmt.Errorf("scan issue with counts: %w", err)
 	}

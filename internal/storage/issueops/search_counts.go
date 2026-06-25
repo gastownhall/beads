@@ -91,11 +91,21 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 		limitSQL = fmt.Sprintf("LIMIT %d", filter.Limit)
 	}
 	const orderBy = "ORDER BY i.priority ASC, i.created_at DESC, i.id ASC"
-	return runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, filter.SkipLabels)
+	// Search always hydrates full bodies (callers display them); only the
+	// work-probe path opts into the brief projection (be-yvci).
+	return runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, filter.SkipLabels, false)
 }
 
 //nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes
-func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, whereSQL, orderBySQL, limitSQL string, args []interface{}, includeWispReverseDeps bool, skipLabels bool) ([]*types.IssueWithCounts, error) {
+func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, whereSQL, orderBySQL, limitSQL string, args []interface{}, includeWispReverseDeps bool, skipLabels bool, brief bool) ([]*types.IssueWithCounts, error) {
+	// brief (be-yvci): project the body-stripped column set on the high-frequency
+	// work-probe path; default (wide) path is byte-for-byte unchanged.
+	issueColumns := readyWorkIssueColumns
+	scanRow := scanReadyWorkRowWithCounts
+	if brief {
+		issueColumns = briefReadyWorkIssueColumns
+		scanRow = scanReadyWorkBriefRowWithCounts
+	}
 	reverseBlockerSelect := `
 				SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS dep_id
 				FROM dependencies WHERE type = 'blocks'
@@ -162,7 +172,7 @@ func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, wh
 		%s
 		%s
 	`,
-		readyWorkIssueColumns,
+		issueColumns,
 		labelsSelect,
 		tables.Main,
 		labelsJoin,
@@ -186,7 +196,7 @@ func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, wh
 	var out []*types.IssueWithCounts
 	seen := make(map[string]bool)
 	for rows.Next() {
-		iwc, scanErr := scanReadyWorkRowWithCounts(rows)
+		iwc, scanErr := scanRow(rows)
 		if scanErr != nil {
 			return nil, scanErr
 		}

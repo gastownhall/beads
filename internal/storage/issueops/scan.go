@@ -3,6 +3,7 @@ package issueops
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -21,6 +22,36 @@ const IssueSelectColumns = `id, content_hash, title, description, design, accept
 	       event_kind, actor, target, payload,
 	       due_at, defer_until,
 	       work_type, source_system, metadata`
+
+// bodyColumnsOmittedInBrief are the heavy free-text/blob columns dropped from the
+// brief work-probe projection (be-yvci). They are the measured 7–12x cost driver
+// on the high-frequency poll path and are never displayed by the probe.
+// ScanIssueBriefFrom leaves the corresponding Issue fields zero-valued.
+var bodyColumnsOmittedInBrief = []string{
+	"description", "design", "acceptance_criteria", "notes", "close_reason", "payload", "waiters",
+}
+
+// IssueSelectColumnsBrief is IssueSelectColumns with the bodyColumnsOmittedInBrief
+// columns removed, preserving the original column order. It is derived (not a hand-
+// maintained parallel constant) so it can never drift from IssueSelectColumns.
+// ScanIssueBriefFrom must scan exactly these columns in this order.
+var IssueSelectColumnsBrief = func() string {
+	omit := make(map[string]struct{}, len(bodyColumnsOmittedInBrief))
+	for _, c := range bodyColumnsOmittedInBrief {
+		omit[c] = struct{}{}
+	}
+	raw := strings.ReplaceAll(IssueSelectColumns, "\n", " ")
+	raw = strings.ReplaceAll(raw, "\t", " ")
+	kept := make([]string, 0)
+	for _, p := range strings.Split(raw, ",") {
+		name := strings.TrimSpace(p)
+		if _, drop := omit[name]; drop {
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return strings.Join(kept, ", ")
+}()
 
 // IssueScanner is the common interface between *sql.Row and *sql.Rows,
 // allowing a single scan function to work with both single-row and
@@ -171,6 +202,149 @@ func ScanIssueFrom(s IssueScanner) (*types.Issue, error) {
 		issue.SourceSystem = sourceSystem.String
 	}
 	// Custom metadata field (GH#1406)
+	if metadata.Valid && metadata.String != "" && metadata.String != "{}" {
+		issue.Metadata = []byte(metadata.String)
+	}
+
+	return &issue, nil
+}
+
+// ScanIssueBriefFrom scans an issue from a source that selected exactly
+// IssueSelectColumnsBrief in order — i.e. IssueSelectColumns minus the
+// bodyColumnsOmittedInBrief (description, design, acceptance_criteria, notes,
+// close_reason, payload, waiters). Those seven fields are left zero-valued.
+// Used by the brief work-probe path (be-yvci) so the high-frequency poll never
+// pulls the heavy free-text/blob columns it does not display; routing-critical
+// columns including metadata are scanned exactly as in ScanIssueFrom.
+func ScanIssueBriefFrom(s IssueScanner) (*types.Issue, error) {
+	var issue types.Issue
+	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
+	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
+	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
+	var createdBy sql.NullString
+	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
+	var contentHash, sourceRepo sql.NullString
+	var workType, sourceSystem sql.NullString
+	var sender, wispType, molType, eventKind, actor, target sql.NullString
+	var awaitType, awaitID sql.NullString
+	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
+	var metadata sql.NullString
+
+	// Scan order MUST match IssueSelectColumnsBrief exactly (IssueSelectColumns
+	// with description, design, acceptance_criteria, notes, close_reason, waiters,
+	// payload removed). Those fields are intentionally not scanned and stay zero.
+	if err := s.Scan(
+		&issue.ID, &contentHash, &issue.Title, &issue.Status,
+		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
+		&createdAtStr, &createdBy, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo,
+		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
+		&awaitType, &awaitID, &timeoutNs,
+		&molType,
+		&eventKind, &actor, &target,
+		&dueAt, &deferUntil,
+		&workType, &sourceSystem, &metadata,
+	); err != nil {
+		return nil, err
+	}
+
+	if createdAtStr.Valid {
+		issue.CreatedAt = ParseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		issue.UpdatedAt = ParseTimeString(updatedAtStr.String)
+	}
+	if contentHash.Valid {
+		issue.ContentHash = contentHash.String
+	}
+	if startedAt.Valid {
+		issue.StartedAt = &startedAt.Time
+	}
+	if closedAt.Valid {
+		issue.ClosedAt = &closedAt.Time
+	}
+	if estimatedMinutes.Valid {
+		mins := int(estimatedMinutes.Int64)
+		issue.EstimatedMinutes = &mins
+	}
+	if assignee.Valid {
+		issue.Assignee = assignee.String
+	}
+	if createdBy.Valid {
+		issue.CreatedBy = createdBy.String
+	}
+	if owner.Valid {
+		issue.Owner = owner.String
+	}
+	if externalRef.Valid {
+		issue.ExternalRef = &externalRef.String
+	}
+	if specID.Valid {
+		issue.SpecID = specID.String
+	}
+	if compactedAt.Valid {
+		issue.CompactedAt = &compactedAt.Time
+	}
+	if compactedAtCommit.Valid {
+		issue.CompactedAtCommit = &compactedAtCommit.String
+	}
+	if originalSize.Valid {
+		issue.OriginalSize = int(originalSize.Int64)
+	}
+	if sourceRepo.Valid {
+		issue.SourceRepo = sourceRepo.String
+	}
+	if sender.Valid {
+		issue.Sender = sender.String
+	}
+	if ephemeral.Valid && ephemeral.Int64 != 0 {
+		issue.Ephemeral = true
+	}
+	if noHistory.Valid && noHistory.Int64 != 0 {
+		issue.NoHistory = true
+	}
+	if wispType.Valid {
+		issue.WispType = types.WispType(wispType.String)
+	}
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
+	}
+	if isTemplate.Valid && isTemplate.Int64 != 0 {
+		issue.IsTemplate = true
+	}
+	if awaitType.Valid {
+		issue.AwaitType = awaitType.String
+	}
+	if awaitID.Valid {
+		issue.AwaitID = awaitID.String
+	}
+	if timeoutNs.Valid {
+		issue.Timeout = time.Duration(timeoutNs.Int64)
+	}
+	if molType.Valid {
+		issue.MolType = types.MolType(molType.String)
+	}
+	if eventKind.Valid {
+		issue.EventKind = eventKind.String
+	}
+	if actor.Valid {
+		issue.Actor = actor.String
+	}
+	if target.Valid {
+		issue.Target = target.String
+	}
+	if dueAt.Valid {
+		issue.DueAt = &dueAt.Time
+	}
+	if deferUntil.Valid {
+		issue.DeferUntil = &deferUntil.Time
+	}
+	if workType.Valid {
+		issue.WorkType = types.WorkType(workType.String)
+	}
+	if sourceSystem.Valid {
+		issue.SourceSystem = sourceSystem.String
+	}
 	if metadata.Valid && metadata.String != "" && metadata.String != "{}" {
 		issue.Metadata = []byte(metadata.String)
 	}
