@@ -175,30 +175,27 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 		return s.DemoteToWisp(ctx, id, updates, actor)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	// Wrap in withRetryTx so a concurrent writer that loses Dolt's optimistic
+	// commit-time merge (MySQL 1213/1205, guaranteed server-side rollback) is
+	// retried rather than surfaced as a hard failure. Dolt has no real row
+	// locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
+	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
+	// only safety net. withRetryTx owns BeginTx and the final Commit.
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+			return err
+		}
 
-	_, err = issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
-	if err != nil {
-		return err
-	}
-
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: update %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit update issue", err)
-	}
-	return nil
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: update %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
 }
 
 // ClaimIssue atomically claims an issue using compare-and-swap semantics.
@@ -213,60 +210,64 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 		return s.claimWisp(ctx, id, actor)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	// Wrap in withRetryTx so a concurrent claim that loses Dolt's optimistic
+	// commit-time merge (MySQL 1213/1205, guaranteed server-side rollback) is
+	// retried instead of surfaced as a hard failure. Dolt has no real row
+	// locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
+	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
+	// only safety net under concurrent claimants. The body stays a single tx
+	// (CAS + DOLT_COMMIT); withRetryTx owns BeginTx and the final Commit.
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
+			return err
+		}
 
-	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
-		return err
-	}
-
-	// Dolt versioning for permanent issues.
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: claim %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit claim issue", err)
-	}
-	return nil
+		// Dolt versioning for permanent issues.
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: claim %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
 }
 
 // ClaimReadyIssue atomically claims the first ready issue matching filter.
 func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	// Wrap in withRetryTx: under concurrent workers the loser of Dolt's
+	// optimistic commit-time merge gets MySQL 1213/1205 (guaranteed server-side
+	// rollback). Retrying re-scans the ready front from a fresh snapshot and
+	// claims the next available issue instead of failing the dequeue. Dolt has
+	// no real row locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
+	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
+	// safety net. withRetryTx owns BeginTx and the final Commit.
+	var claimed *types.Issue
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		claimed, err = issueops.ClaimReadyIssueInTx(ctx, tx, filter, actor)
+		if err != nil {
+			return err
+		}
+		if claimed == nil {
+			return nil
+		}
 
-	claimed, err := issueops.ClaimReadyIssueInTx(ctx, tx, filter, actor)
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: claim ready %s", claimed.ID)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	if claimed == nil {
-		return nil, nil
-	}
-
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: claim ready %s", claimed.ID)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return nil, fmt.Errorf("dolt commit: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, wrapTransactionError("commit claim ready issue", err)
 	}
 	return claimed, nil
 }
@@ -306,31 +307,29 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		return s.closeWisp(ctx, id, reason, actor, session)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	// Wrap in withRetryTx so a concurrent writer that loses Dolt's optimistic
+	// commit-time merge (MySQL 1213/1205, guaranteed server-side rollback) is
+	// retried rather than surfaced as a hard failure. Dolt has no real row
+	// locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
+	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
+	// only safety net. withRetryTx owns BeginTx and the final Commit.
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
+			return err
+		}
 
-	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
-		return err
-	}
-
-	// Dolt versioning for permanent issues.
-	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: close %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit close issue", err)
-	}
-	return nil
+		// Dolt versioning for permanent issues.
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: close %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
 }
 
 // DeleteIssue permanently removes an issue
