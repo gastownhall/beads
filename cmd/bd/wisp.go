@@ -536,6 +536,38 @@ func formatTimeAgo(t time.Time) string {
 	}
 }
 
+// formatTimeUntil returns a human-readable relative time for a future instant,
+// the forward-looking mirror of formatTimeAgo. Used for lease expiry in bd show.
+// A past (or present) instant renders as "expired".
+func formatTimeUntil(t time.Time) string {
+	d := time.Until(t)
+	if d <= 0 {
+		return "expired"
+	}
+	switch {
+	case d < time.Minute:
+		return "in <1 min"
+	case d < time.Hour:
+		mins := int(d.Minutes())
+		if mins == 1 {
+			return "in 1 min"
+		}
+		return fmt.Sprintf("in %d mins", mins)
+	case d < 24*time.Hour:
+		hours := int(d.Hours())
+		if hours == 1 {
+			return "in 1 hour"
+		}
+		return fmt.Sprintf("in %d hours", hours)
+	default:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "in 1 day"
+		}
+		return fmt.Sprintf("in %d days", days)
+	}
+}
+
 var wispGCCmd = &cobra.Command{
 	Use:   "gc",
 	Short: "Garbage collect old/abandoned wisps",

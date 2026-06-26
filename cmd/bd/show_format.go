@@ -123,6 +123,16 @@ func formatIssueMetadata(issue *types.Issue) string {
 		lines = append(lines, strings.Join(timeParts, " · "))
 	}
 
+	// Lease line: only when an active lease is held (in_progress + non-null
+	// lease_expires_at). row_lock is internal and never surfaced.
+	if issue.Status == types.StatusInProgress && issue.LeaseExpiresAt != nil {
+		leaseLine := fmt.Sprintf("Lease: expires %s", formatTimeUntil(*issue.LeaseExpiresAt))
+		if issue.HeartbeatAt != nil {
+			leaseLine += fmt.Sprintf(" (heartbeat %s)", formatTimeAgo(*issue.HeartbeatAt))
+		}
+		lines = append(lines, ui.RenderMuted(leaseLine))
+	}
+
 	// Line 3: Close reason (if closed)
 	if issue.Status == types.StatusClosed && issue.CloseReason != "" {
 		lines = append(lines, ui.RenderMuted(fmt.Sprintf("Close reason: %s", issue.CloseReason)))
