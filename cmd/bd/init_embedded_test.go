@@ -1455,6 +1455,9 @@ func TestEmbeddedInit(t *testing.T) {
 		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "agents", "openai.yaml"))
 		requireFile(t, filepath.Join(dir, ".codex", "config.toml"))
 		requireFile(t, filepath.Join(dir, ".codex", "hooks.json"))
+		// Cursor integration is auto-installed by bd init too (rules + hooks).
+		requireFile(t, filepath.Join(dir, ".cursor", "rules", "beads.mdc"))
+		requireFile(t, filepath.Join(dir, ".cursor", "hooks.json"))
 
 		content, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
 		if err != nil {

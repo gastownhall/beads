@@ -651,7 +651,24 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, bdPathCheck)
 	// Don't fail overall check for missing bd in PATH, just warn
 
-	// Check 11e: Documentation bd prime references match installed version
+	// Check 11e: Cursor integration (agent hooks)
+	cursorCheck := convertWithCategory(doctor.CheckCursor(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorCheck)
+	// Don't fail overall check for missing Cursor integration, just warn
+
+	// Check 11f: Cursor hooks file health (malformed JSON detection)
+	cursorSettingsCheck := convertWithCategory(doctor.CheckCursorSettingsHealth(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorSettingsCheck)
+	if cursorSettingsCheck.Status == statusError {
+		result.OverallOK = false // Malformed hooks.json is a real problem
+	}
+
+	// Check 11g: Cursor hook completeness (all three lifecycle events)
+	cursorHookCheck := convertWithCategory(doctor.CheckCursorHookCompleteness(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorHookCheck)
+	// Don't fail overall check for incomplete hooks, just warn
+
+	// Check 11h: Documentation bd prime references match installed version
 	bdPrimeDocsCheck := convertWithCategory(doctor.CheckDocumentationBdPrimeReference(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeDocsCheck)
 	// Don't fail overall check for doc mismatch, just warn

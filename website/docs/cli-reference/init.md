@@ -90,7 +90,7 @@ bd init [flags]
       --server-user string                             Dolt server MySQL user (default: root)
       --setup-exclude                                  Configure .git/info/exclude to keep beads files local (for forks)
       --shared-server                                  Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)
-      --skip-agents                                    Skip AGENTS.md and Claude/Codex setup generation
+      --skip-agents                                    Skip AGENTS.md and Claude/Codex/Cursor setup generation
       --skip-hooks                                     Skip git hooks installation
       --stealth                                        Enable stealth mode: global gitattributes and gitignore, no local repo tracking
       --team                                           Run team workflow setup wizard

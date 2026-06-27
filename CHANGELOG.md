@@ -13,6 +13,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BD_ALLOW_REMOTE_MIGRATE=1` for bypassing the remote-migrate gate (#4259)
   as the single designated migrator; process-local so it cannot leak into
   child processes (git hooks, dolt subprocesses).
+- **Cursor agent hooks.** `bd setup cursor` now installs `.cursor/hooks.json`
+  alongside the existing rules file, wiring three Cursor lifecycle events to a
+  new hidden `bd cursor-hook` command:
+  - `sessionStart` injects full `bd prime` context into every new agent session.
+  - `preCompact` arms a one-shot refresh marker (and notifies the user).
+  - `postToolUse` re-injects `bd prime` exactly once after a compaction, then
+    no-ops.
+
+  This brings Cursor (IDE and recent `cursor-agent` CLI builds — verified on the
+  2026.06 line; early-2026 CLI builds only fired shell hooks) to parity with
+  the Claude Code / Codex hook integrations, so Beads context survives context
+  compaction instead of being forgotten. Existing user hooks in
+  `.cursor/hooks.json` are preserved, and `bd setup cursor --remove` only
+  removes the Beads-managed entries.
+
+  The integration now matches Claude/Codex on several more fronts:
+  - **`bd init` auto-installs Cursor** (rules + skill + hooks) the same way it
+    auto-sets up Claude Code and Codex, and stages `.cursor/` for commit.
+  - **`bd setup cursor --global`** writes hooks to `~/.cursor/hooks.json` (and the
+    agent skill to `~/.agents/skills/beads`) so they apply to every project.
+    (Global scope is hooks + skill only; Cursor has no reliable file-based global
+    *rules* location — those live in Cursor Settings.)
+  - **Canonical rules content.** `.cursor/rules/beads.mdc` now wraps the shared
+    `recipes.Template` (the same content every other file-based recipe uses)
+    instead of a hand-maintained copy, so it no longer drifts or omits the Issue
+    Types / Priorities / git-authority sections.
+  - **Agent skill.** `bd setup cursor` installs the shared
+    `.agents/skills/beads/SKILL.md` (which Cursor loads natively), so Cursor-only
+    users get the same progressive-disclosure skill Codex installs. The skill is
+    shared with Codex and is only removed once no integration still relies on it.
+  - **`bd doctor`** reports `Cursor Integration`, `Cursor Settings Health`
+    (malformed `.cursor/hooks.json` → error), and `Cursor Hook Completeness`
+  (all three lifecycle events present) checks — with agent-mode enrichment —
+  paralleling the Claude integration checks.
 
 ### Changed
 

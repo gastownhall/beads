@@ -1574,8 +1574,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// Auto-setup Claude hooks and Codex project integration. Skip in stealth
-		// mode or when agents are skipped.
+		// Auto-setup Claude hooks, Codex, and Cursor project integration. Skip in
+		// stealth mode or when agents are skipped.
 		if !stealth && !skipAgents && !isBareGitRepo() {
 			if err := setup.InstallClaudeProject(stealth); err != nil {
 				if !quiet {
@@ -1586,6 +1586,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if err := setup.InstallCodexProject(); err != nil {
 				if !quiet {
 					fmt.Fprintf(os.Stderr, "Warning: failed to setup Codex integration: %v\n", err)
+				}
+				// Non-fatal - continue with init
+			}
+			if err := setup.InstallCursorProject(); err != nil {
+				if !quiet {
+					fmt.Fprintf(os.Stderr, "Warning: failed to setup Cursor integration: %v\n", err)
 				}
 				// Non-fatal - continue with init
 			}
@@ -1614,8 +1620,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					claudeMdCmd := exec.Command("git", "add", "CLAUDE.md")
 					_ = claudeMdCmd.Run()
 				}
-				// Also stage Codex project integration files if created by setup
-				for _, path := range []string{".agents", ".codex"} {
+				// Also stage Codex and Cursor project integration files if created
+				// by setup. Cursor project hooks/rules are meant to be committed
+				// (a no-op git add if .cursor/ is gitignored in this repo).
+				for _, path := range []string{".agents", ".codex", ".cursor"} {
 					if _, statErr := os.Stat(path); statErr == nil {
 						codexCmd := exec.Command("git", "add", path)
 						_ = codexCmd.Run()
@@ -1744,7 +1752,7 @@ func init() {
 	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: global gitattributes and gitignore, no local repo tracking")
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
-	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude/Codex setup generation")
+	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude/Codex/Cursor setup generation")
 	initCmd.Flags().Bool("force", false, "Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').")
 	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
