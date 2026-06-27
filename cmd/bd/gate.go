@@ -45,11 +45,16 @@ Examples:
 
 // gateListCmd lists gate issues
 var gateListCmd = &cobra.Command{
-	Use:   "list",
+	Use:   "list [issue-id]",
 	Short: "List gate issues",
-	Long: `List all gate issues in the current beads database.
+	Long: `List gate issues.
+
+With no argument, lists all gate issues in the current beads database.
+With an [issue-id] argument, lists ONLY the gates that block that issue
+(its own dependency gates) — not every gate in the database.
 
 By default, shows only open gates. Use --all to include closed gates.`,
+	Args:          cobra.MaximumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,6 +68,29 @@ By default, shows only open gates. Use --all to include closed gates.`,
 		allFlag, _ := cmd.Flags().GetBool("all")
 		limit, _ := cmd.Flags().GetInt("limit")
 
+		ctx := rootCtx
+
+		// Bead-scoped: list only the gates that block this specific issue
+		// (its dependency gates), never the whole database. Without this an
+		// issue-id argument was silently ignored and the DB-wide list was
+		// returned, which could lead a caller to act on unrelated gates.
+		if len(args) == 1 {
+			target, err := store.GetIssue(ctx, args[0])
+			if err != nil {
+				return HandleErrorRespectJSON("issue not found: %s", args[0])
+			}
+			deps, err := store.GetDependencies(ctx, target.ID)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+			gates := filterIssueGates(deps, allFlag, limit)
+			if jsonOutput {
+				return outputJSON(gates)
+			}
+			displayGates(gates, allFlag)
+			return nil
+		}
+
 		gateType := types.IssueType("gate")
 		filter := types.IssueFilter{
 			IssueType: &gateType,
@@ -72,8 +100,6 @@ By default, shows only open gates. Use --all to include closed gates.`,
 		if !allFlag {
 			filter.ExcludeStatus = []types.Status{types.StatusClosed}
 		}
-
-		ctx := rootCtx
 
 		issues, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {
@@ -87,6 +113,27 @@ By default, shows only open gates. Use --all to include closed gates.`,
 		displayGates(issues, allFlag)
 		return nil
 	},
+}
+
+// filterIssueGates selects the gate-type issues from an issue's dependency set,
+// honoring the same open/closed and limit semantics as the DB-wide list path.
+// Pulled out as a pure helper so the bead-scoping logic is unit-testable without
+// a live store.
+func filterIssueGates(deps []*types.Issue, all bool, limit int) []*types.Issue {
+	var gates []*types.Issue
+	for _, d := range deps {
+		if d == nil || d.IssueType != types.IssueType("gate") {
+			continue
+		}
+		if !all && d.Status == types.StatusClosed {
+			continue
+		}
+		gates = append(gates, d)
+		if limit > 0 && len(gates) >= limit {
+			break
+		}
+	}
+	return gates
 }
 
 // displayGates formats and displays gate issues, separating open and closed gates
