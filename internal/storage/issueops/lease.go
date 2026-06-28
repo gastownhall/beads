@@ -44,13 +44,22 @@ func leaseTTL(ctx context.Context) time.Duration {
 // that touch DIFFERENT cells of the same issue row (a heartbeat writing
 // heartbeat_at, a close writing status) merge silently instead of conflicting —
 // which would let a reclaim quietly revert an issue the owner just closed. By
-// having EVERY mutating path rewrite this one shared cell to a fresh random
-// value, concurrent writers always collide on row_lock, surfacing the 1213/1205
-// serialization conflict that withRetryTx replays. The value's only job is to
-// differ from whatever a concurrent writer wrote, so any source of entropy
-// works; we use crypto/rand to avoid seeding concerns. Never 0 (the column
-// default) so a freshly-claimed row is always distinguishable from a never-
-// touched one.
+// having every status/ownership/lease-mutating path rewrite this one shared cell
+// to a fresh random value, those writers always collide on row_lock, surfacing
+// the 1213/1205 serialization conflict that withRetryTx replays. The value's
+// only job is to differ from whatever a concurrent writer wrote, so any source
+// of entropy works; we use crypto/rand to avoid seeding concerns. Never 0 (the
+// column default) so a freshly-claimed row is always distinguishable from a
+// never-touched one.
+//
+// INVARIANT: any path that mutates status, assignee, started_at, or the lease
+// columns on an in_progress issue MUST rewrite row_lock — that is the set the
+// reclaim/heartbeat races care about (claim, close, updateIssueInTx, heartbeat,
+// reclaim all do). Paths that touch only orthogonal cells (is_blocked,
+// compaction_level, dependency metadata, rename, or reopen — which acts on
+// closed rows) are safe to merge with a reclaim and intentionally do NOT rewrite
+// it. Adding a new path that sets status/assignee/lease outside updateIssueInTx
+// without rewriting row_lock would silently reintroduce the zombie-merge bug.
 func freshRowLock() int64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
