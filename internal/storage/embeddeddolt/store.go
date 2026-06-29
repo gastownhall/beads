@@ -287,8 +287,12 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr,
 				"Warning: %v\n"+
 					"  Read-only command: continuing on schema v%d without migrating.\n"+
-					"  To resolve, the ONE designated migrator runs: %s=1 bd migrate && bd dolt push\n"+
-					"  Everyone else adopts the migrated database: bd bootstrap\n",
+					"  Writes are blocked until the schema is reconciled. This is a\n"+
+					"  coordination decision, not an auto-fix — do NOT run a migration unless\n"+
+					"  you are the single designated migrator (only ONE clone may migrate a\n"+
+					"  shared remote, else the schema forks; #4259):\n"+
+					"    • designated migrator (only ONE machine): %s=1 bd migrate && bd dolt push\n"+
+					"    • every other clone (another already migrated): bd bootstrap\n",
 				gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
 			return nil
 		}

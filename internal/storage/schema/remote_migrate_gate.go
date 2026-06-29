@@ -80,6 +80,51 @@ func (e *RemoteMigrateGateError) EscapeHint() string {
 	return AllowRemoteMigrateEnv + "=1 bd migrate"
 }
 
+// AgentDirective is the non-runnable instruction surfaced to agents in place of
+// a ready-to-run migrate command. Migrating a shared remote is a coordination
+// decision — only ONE clone may migrate, and a second clone migrating
+// independently forks the schema unrecoverably (#4259) — so bd deliberately does
+// NOT hand an agent an auto-runnable "fix". The agent should surface the options
+// to the operator and let them choose, per the AgentDiagnostic contract ("Go
+// observes and reports, the agent decides and acts").
+func (e *RemoteMigrateGateError) AgentDirective() string {
+	return "Coordination decision required: only ONE clone may migrate a shared remote; " +
+		"a second clone migrating independently forks the schema unrecoverably (#4259). " +
+		"Do NOT auto-run a migration — surface remote_migrate_gate.options to the operator and let them choose."
+}
+
+// GateOption is one conditional remediation path for the remote-migrate gate.
+// It is intentionally conditional (When) and carries its Risk, so an agent
+// cannot treat any single command as the unconditional fix.
+type GateOption struct {
+	ID       string   `json:"id"`
+	When     string   `json:"when"`
+	Commands []string `json:"commands"`
+	Risk     string   `json:"risk"`
+}
+
+// Options returns the two mutually-exclusive remediation paths — migrate (as the
+// single designated migrator) or adopt (re-clone the already-migrated DB) — each
+// gated on its precondition and annotated with its risk. The migrate command is
+// present but reachable only through its "single designated migrator" condition,
+// never as a top-level hint.
+func (e *RemoteMigrateGateError) Options() []GateOption {
+	return []GateOption{
+		{
+			ID:       "migrate",
+			When:     "you are the single designated migrator (only ONE machine, confirmed with the operator) and no other clone has migrated yet",
+			Commands: []string{AllowRemoteMigrateEnv + "=1 bd migrate", "bd dolt push"},
+			Risk:     "if another clone also migrates independently, the schema forks unrecoverably (#4259)",
+		},
+		{
+			ID:       "adopt",
+			When:     "another machine has already migrated and pushed",
+			Commands: []string{"bd bootstrap"},
+			Risk:     "re-clones and replaces the local database; push or export unpushed work first or it is lost",
+		},
+	}
+}
+
 // IsRemoteMigrateGateError reports whether err (or any error it wraps) is a
 // *RemoteMigrateGateError.
 func IsRemoteMigrateGateError(err error) bool {
