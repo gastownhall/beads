@@ -151,7 +151,6 @@ type SyncItemDetail struct {
 	ExternalID   string            `json:"external_id"`
 	Direction    string            `json:"direction"`
 	Outcome      string            `json:"outcome"`
-	StatusCode   int               `json:"status_code,omitempty"`
 	DurationMs   int64             `json:"duration_ms,omitempty"`
 	BeforeValues map[string]string `json:"before_values,omitempty"`
 	AfterValues  map[string]string `json:"after_values,omitempty"`
@@ -160,11 +159,10 @@ type SyncItemDetail struct {
 
 // Sync item outcome constants.
 const (
-	OutcomeCreated  = "created"
-	OutcomeUpdated  = "updated"
-	OutcomeSkipped  = "skipped"
-	OutcomeFailed   = "failed"
-	OutcomeArchived = "archived"
+	OutcomeCreated = "created"
+	OutcomeUpdated = "updated"
+	OutcomeSkipped = "skipped"
+	OutcomeFailed  = "failed"
 )
 
 // BatchPushItem describes one local issue handled by a tracker batch push.

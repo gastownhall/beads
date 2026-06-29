@@ -21,25 +21,22 @@ type SyncRun struct {
 	IssuesUpdated      int       `json:"issues_updated"`
 	IssuesSkipped      int       `json:"issues_skipped"`
 	IssuesFailed       int       `json:"issues_failed"`
-	IssuesArchived     int       `json:"issues_archived"`
 	ConflictResolution string    `json:"conflict_resolution,omitempty"`
 	ErrorMessage       string    `json:"error_message,omitempty"`
 }
 
 // SyncItem represents a per-issue outcome row in linear_sync_items.
 type SyncItem struct {
-	ID            string            `json:"id"`
-	SyncRunID     string            `json:"sync_run_id"`
-	BeadID        string            `json:"bead_id"`
-	LinearID      string            `json:"linear_id"`
-	Direction     string            `json:"direction"`
-	AttemptNumber int               `json:"attempt_number"`
-	Outcome       string            `json:"outcome"`
-	StatusCode    int               `json:"status_code"`
-	DurationMs    int64             `json:"duration_ms"`
-	BeforeValues  map[string]string `json:"before_values,omitempty"`
-	AfterValues   map[string]string `json:"after_values,omitempty"`
-	ErrorMessage  string            `json:"error_message,omitempty"`
+	ID           string            `json:"id"`
+	SyncRunID    string            `json:"sync_run_id"`
+	BeadID       string            `json:"bead_id"`
+	LinearID     string            `json:"linear_id"`
+	Direction    string            `json:"direction"`
+	Outcome      string            `json:"outcome"`
+	DurationMs   int64             `json:"duration_ms"`
+	BeforeValues map[string]string `json:"before_values,omitempty"`
+	AfterValues  map[string]string `json:"after_values,omitempty"`
+	ErrorMessage string            `json:"error_message,omitempty"`
 }
 
 // SyncHistoryDB provides read/write access to the linear_sync_history tables.
@@ -63,11 +60,11 @@ func (h *SyncHistoryDB) RecordSyncRun(ctx context.Context, run *SyncRun, items [
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO linear_sync_runs (sync_run_id, started_at, completed_at, direction, dry_run,
-			issues_created, issues_updated, issues_skipped, issues_failed, issues_archived,
+			issues_created, issues_updated, issues_skipped, issues_failed,
 			conflict_resolution, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.SyncRunID, run.StartedAt, run.CompletedAt, run.Direction, run.DryRun,
-		run.IssuesCreated, run.IssuesUpdated, run.IssuesSkipped, run.IssuesFailed, run.IssuesArchived,
+		run.IssuesCreated, run.IssuesUpdated, run.IssuesSkipped, run.IssuesFailed,
 		run.ConflictResolution, run.ErrorMessage,
 	)
 	if err != nil {
@@ -77,9 +74,9 @@ func (h *SyncHistoryDB) RecordSyncRun(ctx context.Context, run *SyncRun, items [
 	if len(items) > 0 {
 		stmt, err := tx.PrepareContext(ctx,
 			`INSERT INTO linear_sync_items (sync_run_id, bead_id, linear_id, direction,
-				attempt_number, outcome, status_code, duration_ms,
+				outcome, duration_ms,
 				before_values, after_values, error_message)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return fmt.Errorf("prepare item insert: %w", err)
 		}
@@ -91,7 +88,7 @@ func (h *SyncHistoryDB) RecordSyncRun(ctx context.Context, run *SyncRun, items [
 
 			_, err := stmt.ExecContext(ctx,
 				run.SyncRunID, item.BeadID, item.LinearID, item.Direction,
-				item.AttemptNumber, item.Outcome, item.StatusCode, item.DurationMs,
+				item.Outcome, item.DurationMs,
 				beforeJSON, afterJSON, item.ErrorMessage,
 			)
 			if err != nil {
@@ -109,7 +106,7 @@ func (h *SyncHistoryDB) RecordSyncRun(ctx context.Context, run *SyncRun, items [
 // ListSyncRuns returns sync runs matching the filter criteria.
 func (h *SyncHistoryDB) ListSyncRuns(ctx context.Context, since *time.Time, limit int) ([]SyncRun, error) {
 	query := `SELECT sync_run_id, started_at, completed_at, direction, dry_run,
-		issues_created, issues_updated, issues_skipped, issues_failed, issues_archived,
+		issues_created, issues_updated, issues_skipped, issues_failed,
 		conflict_resolution, error_message
 		FROM linear_sync_runs`
 	var args []interface{}
@@ -133,7 +130,7 @@ func (h *SyncHistoryDB) ListSyncRuns(ctx context.Context, since *time.Time, limi
 	for rows.Next() {
 		var r SyncRun
 		if err := rows.Scan(&r.SyncRunID, &r.StartedAt, &r.CompletedAt, &r.Direction, &r.DryRun,
-			&r.IssuesCreated, &r.IssuesUpdated, &r.IssuesSkipped, &r.IssuesFailed, &r.IssuesArchived,
+			&r.IssuesCreated, &r.IssuesUpdated, &r.IssuesSkipped, &r.IssuesFailed,
 			&r.ConflictResolution, &r.ErrorMessage); err != nil {
 			return nil, fmt.Errorf("scan sync run: %w", err)
 		}
@@ -146,7 +143,7 @@ func (h *SyncHistoryDB) ListSyncRuns(ctx context.Context, since *time.Time, limi
 func (h *SyncHistoryDB) GetSyncRunItems(ctx context.Context, syncRunID string) ([]SyncItem, error) {
 	rows, err := h.db.QueryContext(ctx,
 		`SELECT id, sync_run_id, bead_id, linear_id, direction,
-			attempt_number, outcome, status_code, duration_ms,
+			outcome, duration_ms,
 			before_values, after_values, error_message
 		FROM linear_sync_items
 		WHERE sync_run_id = ?
@@ -161,7 +158,7 @@ func (h *SyncHistoryDB) GetSyncRunItems(ctx context.Context, syncRunID string) (
 		var item SyncItem
 		var beforeJSON, afterJSON sql.NullString
 		if err := rows.Scan(&item.ID, &item.SyncRunID, &item.BeadID, &item.LinearID,
-			&item.Direction, &item.AttemptNumber, &item.Outcome, &item.StatusCode,
+			&item.Direction, &item.Outcome,
 			&item.DurationMs, &beforeJSON, &afterJSON, &item.ErrorMessage); err != nil {
 			return nil, fmt.Errorf("scan sync item: %w", err)
 		}
@@ -181,11 +178,11 @@ func (h *SyncHistoryDB) GetSyncRun(ctx context.Context, syncRunID string) (*Sync
 	var r SyncRun
 	err := h.db.QueryRowContext(ctx,
 		`SELECT sync_run_id, started_at, completed_at, direction, dry_run,
-			issues_created, issues_updated, issues_skipped, issues_failed, issues_archived,
+			issues_created, issues_updated, issues_skipped, issues_failed,
 			conflict_resolution, error_message
 		FROM linear_sync_runs WHERE sync_run_id = ?`, syncRunID).
 		Scan(&r.SyncRunID, &r.StartedAt, &r.CompletedAt, &r.Direction, &r.DryRun,
-			&r.IssuesCreated, &r.IssuesUpdated, &r.IssuesSkipped, &r.IssuesFailed, &r.IssuesArchived,
+			&r.IssuesCreated, &r.IssuesUpdated, &r.IssuesSkipped, &r.IssuesFailed,
 			&r.ConflictResolution, &r.ErrorMessage)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -238,16 +235,14 @@ func BuildSyncItemsFromResult(result *tracker.SyncResult) []SyncItem {
 
 func syncItemFromDetail(d tracker.SyncItemDetail) SyncItem {
 	return SyncItem{
-		BeadID:        d.BeadID,
-		LinearID:      d.ExternalID,
-		Direction:     d.Direction,
-		AttemptNumber: 1,
-		Outcome:       d.Outcome,
-		StatusCode:    d.StatusCode,
-		DurationMs:    d.DurationMs,
-		BeforeValues:  d.BeforeValues,
-		AfterValues:   d.AfterValues,
-		ErrorMessage:  d.ErrorMsg,
+		BeadID:       d.BeadID,
+		LinearID:     d.ExternalID,
+		Direction:    d.Direction,
+		Outcome:      d.Outcome,
+		DurationMs:   d.DurationMs,
+		BeforeValues: d.BeforeValues,
+		AfterValues:  d.AfterValues,
+		ErrorMessage: d.ErrorMsg,
 	}
 }
 
