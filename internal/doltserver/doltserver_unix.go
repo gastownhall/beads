@@ -21,12 +21,6 @@ const portConflictHint = "lsof -i :%d"
 // Used in error messages when too many dolt servers are running.
 const processListHint = "pgrep -la 'dolt sql-server'"
 
-// procAttrDetached returns SysProcAttr to detach a child process from the parent
-// process group so it survives parent exit.
-func procAttrDetached() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setpgid: true}
-}
-
 // findPIDOnPort returns the PID of the process listening on a TCP port.
 // Uses lsof to look up the listener. Returns 0 if no process found or on error.
 func findPIDOnPort(port int) int {

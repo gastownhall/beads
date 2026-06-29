@@ -1961,3 +1961,27 @@ func TestEnsureGlobalDatabase_ServerNotReachable(t *testing.T) {
 		t.Error("expected error when server is not reachable")
 	}
 }
+
+func TestKillOnParentDeath(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{"unset", "", false},
+		{"one", "1", true},
+		{"true lowercase", "true", true},
+		{"true uppercase", "TRUE", true},
+		{"zero", "0", false},
+		{"false", "false", false},
+		{"other", "yes", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_KILL_ON_PARENT_DEATH", tt.env)
+			if got := killOnParentDeath(); got != tt.want {
+				t.Errorf("killOnParentDeath() with env=%q = %v, want %v", tt.env, got, tt.want)
+			}
+		})
+	}
+}

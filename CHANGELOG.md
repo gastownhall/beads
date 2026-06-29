@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`BEADS_DOLT_KILL_ON_PARENT_DEATH` — test/controller knob to kill the managed
+  dolt sql-server when the parent dies.** When set ("1"/"true"), the dolt child
+  is spawned on Linux with a kernel-enforced `PR_SET_PDEATHSIG = SIGKILL` in
+  addition to the usual process-group detach, so a real-dolt test that is
+  `SIGKILL`ed or hits a `go test` timeout no longer leaks an orphaned
+  `sql-server` reparented to `systemd --user`. Production behavior is unchanged
+  by default — the child still detaches and the orchestrator/systemd owns its
+  lifecycle (be-0eyj / #3550). No-op on non-Linux (only Linux's
+  `syscall.SysProcAttr` carries `Pdeathsig`).
+  ([#4505](https://github.com/gastownhall/beads/issues/4505))
+
 ## [1.1.0] - 2026-07-04
 
 First stable release of the 1.1.0 line. It consolidates everything from

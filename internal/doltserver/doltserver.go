@@ -122,6 +122,22 @@ func IsDebugMode() bool {
 	return config.GetBool("dolt.debug")
 }
 
+// killOnParentDeath reports whether the managed dolt sql-server child should be
+// spawned with a kernel-enforced PR_SET_PDEATHSIG (Linux only), set via the
+// BEADS_DOLT_KILL_ON_PARENT_DEATH env var ("1" or "true").
+//
+// This is a TEST/CONTROLLER-ONLY knob. Production leaves it unset: the
+// orchestrator/systemd owns the dolt lifecycle by design and the child detaches
+// (CHANGELOG be-0eyj / #3550). When set, the kernel kills the dolt child if the
+// parent dies by ANY means — including SIGKILL and a `go test` timeout, where no
+// userspace teardown runs — so real-dolt tests cannot leak an orphaned
+// sql-server reparented to systemd --user (GH#4505). No-op on non-Linux: only
+// Linux's syscall.SysProcAttr carries Pdeathsig.
+func killOnParentDeath() bool {
+	v := os.Getenv("BEADS_DOLT_KILL_ON_PARENT_DEATH")
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 func DebugProfileDir(beadsDir string) string {
 	p := filepath.Join(resolveServerDir(beadsDir), "dolt-pprof")
 	if abs, err := filepath.Abs(p); err == nil {
