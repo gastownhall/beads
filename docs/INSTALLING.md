@@ -596,6 +596,16 @@ bd hooks install
 bd version
 ```
 
+If your database syncs to a Dolt remote (a single clone or several), upgrading
+across a schema migration needs an explicit, ordered procedure — `bd` refuses
+to silently migrate a remote-backed database, so replacing the binary alone is
+not enough. See [Upgrading bd — remote-backed databases and multiple
+clones](../website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones).
+
+Prereleases (e.g. release candidates) are published only as GitHub prereleases
+and are not pushed to the stable Homebrew/npm/PyPI channels, so `brew upgrade`
+and friends will not move you onto them — fetch the prerelease build explicitly.
+
 ## Uninstalling
 
 To completely remove Beads from a repository, see [UNINSTALLING.md](UNINSTALLING.md).
