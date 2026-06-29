@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -54,7 +55,10 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 		return fmt.Errorf("get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("issue not found: %s", id)
+		// Wrap the sentinel so callers can errors.Is(..., storage.ErrNotFound),
+		// matching GetIssue/UpdateIssue. The storage conformance suite asserts
+		// this parity across not-found paths.
+		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 	}
 	if isWisp {
 		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
