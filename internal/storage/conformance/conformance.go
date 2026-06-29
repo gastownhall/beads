@@ -12,7 +12,6 @@ package conformance
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -699,7 +698,3 @@ func testTransaction(t *testing.T, f Factory) {
 		t.Errorf("label 'from-tx' not found, got %v", labels)
 	}
 }
-
-// Ensure unused imports don't cause issues.
-var _ = fmt.Sprintf
-var _ = time.Now
