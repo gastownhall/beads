@@ -322,10 +322,7 @@ func removeCursor(env cursorEnv) error {
 
 // InstallCursor installs Cursor IDE integration.
 func InstallCursor() error {
-	if err := installCursor(defaultCursorEnv()); err != nil {
-		return HandleError("%v", err)
-	}
-	return nil
+	return installCursor(defaultCursorEnv())
 }
 
 // CheckCursor checks if Cursor integration is installed.
@@ -335,8 +332,5 @@ func CheckCursor() error {
 
 // RemoveCursor removes Cursor integration.
 func RemoveCursor() error {
-	if err := removeCursor(defaultCursorEnv()); err != nil {
-		return HandleError("%v", err)
-	}
-	return nil
+	return removeCursor(defaultCursorEnv())
 }

@@ -603,19 +603,40 @@ func TestInstallCursorIdempotent(t *testing.T) {
 
 	if string(firstRules) != string(secondRules) {
 		t.Error("rules content changed on second install")
+	}
+	if string(firstMCP) != string(secondMCP) {
+		t.Error("mcp.json content changed on second install")
+	}
+}
 
-	// Verify file exists
-	rulesPath := ".cursor/rules/beads.mdc"
-	if !FileExists(rulesPath) {
-		t.Fatal("File should exist before removal")
+func TestRemoveCursor(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
 	}
 
-	// Remove
-	RemoveCursor()
+	tmpDir := t.TempDir()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to change to temp directory: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Fatalf("failed to restore working directory: %v", err)
+		}
+	}()
 
-	// Verify file is gone
-	if FileExists(rulesPath) {
-		t.Error("File should have been removed")
+	if err := InstallCursor(); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !FileExists(cursorRulesPath) {
+		t.Fatal("rules file should exist before removal")
+	}
+
+	if err := RemoveCursor(); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if FileExists(cursorRulesPath) {
+		t.Error("rules file should have been removed")
 	}
 }
 
@@ -660,29 +681,6 @@ func TestCheckCursor_NotInstalled(t *testing.T) {
 	}
 }
 
-func TestCheckCursor_Installed(t *testing.T) {
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get working directory: %v", err)
-	}
-
-	tmpDir := t.TempDir()
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("failed to change to temp directory: %v", err)
-	}
-	defer func() {
-		if err := os.Chdir(origDir); err != nil {
-			t.Fatalf("failed to restore working directory: %v", err)
-		}
-	}()
-
-	// Install first
-	InstallCursor()
-
-	// Should not panic or exit
-	CheckCursor()
-}
-
 func TestCursorRulesPath(t *testing.T) {
 	// Verify the path is correct for Cursor IDE
 	expectedPath := ".cursor/rules/beads.mdc"
@@ -712,24 +710,15 @@ func TestCursorRulesPath(t *testing.T) {
 }
 
 func TestCursorTemplateFormatting(t *testing.T) {
-	// Verify template is well-formed
 	template := cursorRulesTemplate
 
-	// Should have both markers
-	if !strings.Contains(template, "BEGIN BEADS INTEGRATION") {
-		t.Error("Missing BEGIN marker")
+	if !strings.Contains(template, "@beads-managed") {
+		t.Error("Missing @beads-managed marker")
 	}
-	if !strings.Contains(template, "END BEADS INTEGRATION") {
-		t.Error("Missing END marker")
+	if !strings.Contains(template, "## Agent Safety") {
+		t.Error("Missing Agent Safety section")
 	}
-
-	// Should have workflow section
 	if !strings.Contains(template, "## Workflow") {
 		t.Error("Missing Workflow section")
-	}
-
-	// Should have context loading section
-	if !strings.Contains(template, "## Context Loading") {
-		t.Error("Missing Context Loading section")
 	}
 }
