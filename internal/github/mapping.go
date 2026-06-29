@@ -3,11 +3,9 @@ package github
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"sort"
-	"strconv"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -251,21 +249,12 @@ func PushContentHash(local *types.Issue, config *MappingConfig) string {
 
 	desiredLabels, _ := BeadsIssueToGitHubFields(local, config)["labels"].([]string)
 	sortedLabels := append([]string(nil), desiredLabels...)
-	sort.Strings(sortedLabels)
+	slices.Sort(sortedLabels)
 
 	h := sha256.New()
-	writeField := func(s string) {
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
-		_, _ = h.Write(n[:])
+	for _, s := range []string{local.Title, local.Description, desiredState, strings.Join(sortedLabels, "\x00")} {
 		_, _ = h.Write([]byte(s))
-	}
-	writeField(local.Title)
-	writeField(local.Description)
-	writeField(desiredState)
-	writeField(strconv.Itoa(len(sortedLabels)))
-	for _, l := range sortedLabels {
-		writeField(l)
+		_, _ = h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -276,17 +265,11 @@ func labelSetsEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	counts := make(map[string]int, len(a))
-	for _, l := range a {
-		counts[l]++
-	}
-	for _, l := range b {
-		counts[l]--
-		if counts[l] < 0 {
-			return false
-		}
-	}
-	return true
+	as := append([]string(nil), a...)
+	bs := append([]string(nil), b...)
+	slices.Sort(as)
+	slices.Sort(bs)
+	return slices.Equal(as, bs)
 }
 
 // priorityToLabel converts beads priority (0-4) to GitHub priority label value.
