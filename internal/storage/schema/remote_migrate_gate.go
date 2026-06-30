@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 )
@@ -36,43 +37,104 @@ type RemoteMigrateGateError struct {
 	// typo'd escape hatch fails with a hint instead of silently staying locked
 	// (bd-6dnrw.34).
 	UnrecognizedEnv string
+
+	// Decision records why the smart gate (#4516) stopped, when it is enabled.
+	// Empty is the default blunt #4515 stop (also used for the smart gate's
+	// "undetermined"/"below-floor" fallbacks); the messaging below is then
+	// byte-identical to #4515. "adopt" and "fork-skew" tailor the guidance.
+	Decision string
+	// SkewVersions lists the migration versions whose content diverged between
+	// this clone and the remote (Decision == "fork-skew").
+	SkewVersions []int
 }
+
+const (
+	gateDecisionAdopt    = "adopt"
+	gateDecisionForkSkew = "fork-skew"
+)
 
 func (e *RemoteMigrateGateError) Error() string {
 	unit := "migrations"
 	if e.Pending == 1 {
 		unit = "migration"
 	}
-	return fmt.Sprintf("refusing to auto-apply %d pending schema %s to a remote-backed database (v%d -> v%d): migrating clones independently forks the schema (#4259)",
-		e.Pending, unit, e.CurrentVersion, e.LatestVersion)
+	switch e.Decision {
+	case gateDecisionAdopt:
+		return fmt.Sprintf("refusing to migrate a remote-backed database (v%d -> v%d): the remote is already migrated — adopt it instead of migrating here (#4259)",
+			e.CurrentVersion, e.LatestVersion)
+	case gateDecisionForkSkew:
+		return fmt.Sprintf("refusing to migrate a remote-backed database (v%d -> v%d): this clone and the remote applied different content for migration(s) %s — the schema has already forked (#4259)",
+			e.CurrentVersion, e.LatestVersion, FormatMigrationVersions(e.SkewVersions))
+	default:
+		return fmt.Sprintf("refusing to auto-apply %d pending schema %s to a remote-backed database (v%d -> v%d): migrating clones independently forks the schema (#4259)",
+			e.Pending, unit, e.CurrentVersion, e.LatestVersion)
+	}
+}
+
+// FormatMigrationVersions renders migration versions as zero-padded 4-digit ids.
+func FormatMigrationVersions(versions []int) string {
+	if len(versions) == 0 {
+		return ""
+	}
+	parts := make([]string, len(versions))
+	for i, v := range versions {
+		parts[i] = fmt.Sprintf("%04d", v)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // UserMessage returns the full multi-line error block for terminal output.
 func (e *RemoteMigrateGateError) UserMessage() string {
-	msg := e.Error() + "\n" +
-		"\n" +
-		"  This database syncs with a remote. Applying schema migrations on more than\n" +
-		"  one clone independently forks the schema so `bd dolt pull` can no longer\n" +
-		"  merge — the break is silent and unrecoverable.\n" +
-		"\n" +
-		"  Choose one:\n" +
-		"    • You are the designated migrator (only ONE machine should be): migrate,\n" +
-		"      then publish the migrated database to the remote:\n" +
-		"        " + AllowRemoteMigrateEnv + "=1 bd migrate\n" +
-		"        bd dolt push\n" +
-		"    • Another machine has already migrated: adopt its database instead of\n" +
-		"      migrating here — re-clone from the remote so you receive the migrated\n" +
-		"      schema:\n" +
-		"        bd bootstrap\n" +
-		"      Re-cloning replaces your local database: any local issues you have not\n" +
-		"      pushed are LOST. Push first (`bd dolt push`) or save a copy\n" +
-		"      (`bd export --all -o backup.jsonl`) before re-cloning.\n"
+	msg := e.Error() + "\n" + e.userBody()
 	if e.UnrecognizedEnv != "" {
 		msg += "\n" +
 			"  Note: " + AllowRemoteMigrateEnv + "=" + e.UnrecognizedEnv + " is set but was not recognized —\n" +
 			"  use " + AllowRemoteMigrateEnv + "=1 to unlock.\n"
 	}
 	return msg
+}
+
+// userBody returns the decision-specific guidance block. The default (blunt
+// #4515) body is byte-identical to before the smart gate existed.
+func (e *RemoteMigrateGateError) userBody() string {
+	switch e.Decision {
+	case gateDecisionAdopt:
+		return "\n" +
+			"  The remote has already been migrated by another clone. Do NOT migrate here —\n" +
+			"  adopt the remote's migrated database instead:\n" +
+			"        bd bootstrap\n" +
+			"  Re-cloning replaces your local database: any local issues you have not pushed\n" +
+			"  are LOST. Push first (`bd dolt push`) or save a copy\n" +
+			"  (`bd export --all -o backup.jsonl`) before re-cloning.\n"
+	case gateDecisionForkSkew:
+		return "\n" +
+			"  This clone and the remote already applied DIFFERENT content for migration(s) " +
+			FormatMigrationVersions(e.SkewVersions) + ".\n" +
+			"  The schema has forked (#4259); `bd dolt pull` can no longer merge. Migrating\n" +
+			"  cannot un-fork it. This is a data-loss decision, not an auto-fix:\n" +
+			"    • Pick ONE clone as canonical, then re-bootstrap every other clone from it —\n" +
+			"      unpushed work on the discarded clones is LOST. Export it first\n" +
+			"      (`bd export --all -o backup.jsonl`) if you need it.\n" +
+			"        bd bootstrap\n"
+	default:
+		return "\n" +
+			"  This database syncs with a remote. Applying schema migrations on more than\n" +
+			"  one clone independently forks the schema so `bd dolt pull` can no longer\n" +
+			"  merge — the break is silent and unrecoverable.\n" +
+			"\n" +
+			"  Choose one:\n" +
+			"    • You are the designated migrator (only ONE machine should be): migrate,\n" +
+			"      then publish the migrated database to the remote:\n" +
+			"        " + AllowRemoteMigrateEnv + "=1 bd migrate\n" +
+			"        bd dolt push\n" +
+			"    • Another machine has already migrated: adopt its database instead of\n" +
+			"      migrating here — re-clone from the remote so you receive the migrated\n" +
+			"      schema:\n" +
+			"        bd bootstrap\n" +
+			"      Re-cloning replaces your local database: any local issues you have not\n" +
+			"      pushed are LOST. Push first (`bd dolt push`) or save a copy\n" +
+			"      (`bd export --all -o backup.jsonl`) before re-cloning.\n"
+	}
 }
 
 // EscapeHint returns the escape-hatch string for JSON error output.
@@ -88,9 +150,21 @@ func (e *RemoteMigrateGateError) EscapeHint() string {
 // to the operator and let them choose, per the AgentDiagnostic contract ("Go
 // observes and reports, the agent decides and acts").
 func (e *RemoteMigrateGateError) AgentDirective() string {
-	return "Coordination decision required: only ONE clone may migrate a shared remote; " +
-		"a second clone migrating independently forks the schema unrecoverably (#4259). " +
-		"Do NOT auto-run a migration — surface remote_migrate_gate.options to the operator and let them choose."
+	switch e.Decision {
+	case gateDecisionAdopt:
+		return "Adopt, do NOT migrate: the remote is already migrated, so migrating here would fork it (#4259). " +
+			"Adoption re-clones and replaces the local database (unpushed local work is lost), so it is a destructive " +
+			"operator decision — surface remote_migrate_gate.options to the operator, do NOT auto-run bd bootstrap."
+	case gateDecisionForkSkew:
+		return "Do NOT migrate: this clone and the remote already applied different content for migration(s) " +
+			FormatMigrationVersions(e.SkewVersions) + " — the schema has forked (#4259) and migrating cannot un-fork it. " +
+			"Resolving requires picking a canonical clone and re-bootstrapping the others, discarding their unpushed " +
+			"work — a data-loss decision. Surface remote_migrate_gate.options to the operator; do NOT auto-run anything."
+	default:
+		return "Coordination decision required: only ONE clone may migrate a shared remote; " +
+			"a second clone migrating independently forks the schema unrecoverably (#4259). " +
+			"Do NOT auto-run a migration — surface remote_migrate_gate.options to the operator and let them choose."
+	}
 }
 
 // GateOption is one conditional remediation path for the remote-migrate gate.
@@ -109,19 +183,36 @@ type GateOption struct {
 // present but reachable only through its "single designated migrator" condition,
 // never as a top-level hint.
 func (e *RemoteMigrateGateError) Options() []GateOption {
-	return []GateOption{
-		{
-			ID:       "migrate",
-			When:     "you are the single designated migrator (only ONE machine, confirmed with the operator) and no other clone has migrated yet",
-			Commands: []string{AllowRemoteMigrateEnv + "=1 bd migrate", "bd dolt push"},
-			Risk:     "if another clone also migrates independently, the schema forks unrecoverably (#4259)",
-		},
-		{
-			ID:       "adopt",
-			When:     "another machine has already migrated and pushed",
-			Commands: []string{"bd bootstrap"},
-			Risk:     "re-clones and replaces the local database; push or export unpushed work first or it is lost",
-		},
+	adopt := GateOption{
+		ID:       "adopt",
+		When:     "another machine has already migrated and pushed",
+		Commands: []string{"bd bootstrap"},
+		Risk:     "re-clones and replaces the local database; push or export unpushed work first or it is lost",
+	}
+	switch e.Decision {
+	case gateDecisionAdopt:
+		// Remote is confirmed ahead: migrate is not a valid path, only adopt.
+		adopt.When = "the remote is already migrated (confirmed by the gate) — adopt it"
+		return []GateOption{adopt}
+	case gateDecisionForkSkew:
+		// Already forked: neither migrate nor a plain adopt is unconditionally
+		// safe; the operator must choose a canonical clone first.
+		return []GateOption{{
+			ID:       "reconcile-fork",
+			When:     "the schema has already forked (different content for migration(s) " + FormatMigrationVersions(e.SkewVersions) + "); choose ONE clone as canonical",
+			Commands: []string{"bd export --all -o backup.jsonl", "bd bootstrap"},
+			Risk:     "re-bootstrapping the non-canonical clones discards their unpushed work; export it first",
+		}}
+	default:
+		return []GateOption{
+			{
+				ID:       "migrate",
+				When:     "you are the single designated migrator (only ONE machine, confirmed with the operator) and no other clone has migrated yet",
+				Commands: []string{AllowRemoteMigrateEnv + "=1 bd migrate", "bd dolt push"},
+				Risk:     "if another clone also migrates independently, the schema forks unrecoverably (#4259)",
+			},
+			adopt,
+		}
 	}
 }
 
@@ -214,9 +305,45 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, extraHasRemote func(
 		}
 	}
 
+	latest := LatestVersion()
+
+	// Smart gate (#4516): opt-in. Once the blunt gate would fire and the
+	// designated-migrator escape hatch is not set, consult the remote's cached
+	// schema state and auto-resolve the one provably-safe case (first-mover
+	// migrate). The undetermined/below-floor verdicts fall through to the blunt
+	// #4515 block below, so disabling smart mode (or an unreadable remote ref)
+	// is always at least as safe as before.
+	if SmartGateEnabled() {
+		decision, skew := routeSmartGate(ctx, db, current)
+		switch decision {
+		case smartAutoMigrate:
+			smartGateAllowMigrate(len(pending), current)
+			return nil
+		case smartAdopt:
+			return &RemoteMigrateGateError{
+				CurrentVersion:  current,
+				LatestVersion:   latest,
+				Pending:         len(pending),
+				UnrecognizedEnv: unrecognizedEnv,
+				Decision:        gateDecisionAdopt,
+			}
+		case smartForkSkew:
+			return &RemoteMigrateGateError{
+				CurrentVersion:  current,
+				LatestVersion:   latest,
+				Pending:         len(pending),
+				UnrecognizedEnv: unrecognizedEnv,
+				Decision:        gateDecisionForkSkew,
+				SkewVersions:    skew,
+			}
+		case smartUndetermined, smartBelowFloor:
+			// fall through to the blunt block
+		}
+	}
+
 	return &RemoteMigrateGateError{
 		CurrentVersion:  current,
-		LatestVersion:   LatestVersion(),
+		LatestVersion:   latest,
 		Pending:         len(pending),
 		UnrecognizedEnv: unrecognizedEnv,
 	}

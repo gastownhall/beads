@@ -30,7 +30,7 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 				"risk":     o.Risk,
 			})
 		}
-		m["remote_migrate_gate"] = map[string]interface{}{
+		gate := map[string]interface{}{
 			"current_version":         e.CurrentVersion,
 			"latest_version":          e.LatestVersion,
 			"pending":                 e.Pending,
@@ -41,6 +41,20 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 			"options":                 opts,
 			"docs":                    "https://github.com/gastownhall/beads/blob/main/website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones",
 		}
+		// Smart gate (#4516): when a state-aware decision narrowed the stop,
+		// tell the agent which case it is and (for a fork) which versions skewed.
+		switch e.Decision {
+		case "adopt":
+			gate["decision"] = "adopt"
+			gate["observed"] = "the remote is already migrated; migrating here would fork it"
+			gate["expected"] = "adopt the remote's migrated database (destructive re-clone — operator decision)"
+		case "fork-skew":
+			gate["decision"] = "fork-skew"
+			gate["observed"] = fmt.Sprintf("this clone and the remote applied different content for migration(s) %s — already forked", schema.FormatMigrationVersions(e.SkewVersions))
+			gate["expected"] = "pick one canonical clone and re-bootstrap the others (data-loss decision)"
+			gate["skew_versions"] = e.SkewVersions
+		}
+		m["remote_migrate_gate"] = gate
 	}
 	encoder := json.NewEncoder(os.Stderr)
 	encoder.SetIndent("", "  ")
