@@ -159,22 +159,6 @@ archives:
       - README.md
       - CHANGELOG.md
 
-brews:
-  - name: bd
-    repository:
-      owner: gastownhall
-      name: homebrew-beads
-    directory: Formula
-    # Disabled: macOS archives are built by a separate CI job (goreleaser-macos),
-    # so goreleaser can't generate a complete formula. The update-homebrew-formula
-    # job in release.yml generates the formula after all archives are uploaded.
-    skip_upload: true
-    homepage: "https://github.com/gastownhall/beads"
-    description: "AI-supervised issue tracker for coding workflows"
-    license: "MIT"
-    install: |
-      bin.install "bd"
-
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
