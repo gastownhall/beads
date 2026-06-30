@@ -19,10 +19,11 @@ import (
 // permanently costs nothing on the common open path.
 const SmartGateEnv = "BD_SMART_GATE"
 
-// smartGateRemote is the sync remote the smart gate compares against. It matches
-// the doctor migration-skew check's default; the gate reads the *cached*
-// remote-tracking ref (remotes/<remote>/<branch>) and never fetches.
-const smartGateRemote = "origin"
+// smartGateDefaultRemote is the sync remote the smart gate compares against
+// when the caller does not know a more specific configured default. The gate
+// reads the *cached* remote-tracking ref (remotes/<remote>/<branch>) and never
+// fetches.
+const smartGateDefaultRemote = "origin"
 
 // LastNonDeterministicMigration is the highest migration version whose content is
 // genuinely non-deterministic across clones (random UUID() primary keys: 0004,
@@ -81,15 +82,18 @@ const (
 // routing verdict plus the content-skew versions (for smartForkSkew). It performs
 // no network I/O: it reads only the already-cached remote-tracking ref, exactly
 // like the doctor migration-skew check. current is the local schema version.
-func routeSmartGate(ctx context.Context, db DBConn, current int) (smartGateDecision, []int) {
+func routeSmartGate(ctx context.Context, db DBConn, current int, remoteName string) (smartGateDecision, []int) {
 	local, err := ReadMigrationContentHashes(ctx, db, "")
 	if err != nil || len(local) == 0 {
 		// No local hashes to compare (old database) — cannot assess safely.
 		return smartUndetermined, nil
 	}
 
+	if remoteName == "" {
+		remoteName = smartGateDefaultRemote
+	}
 	branch := smartGateActiveBranch(ctx, db)
-	ref := "remotes/" + smartGateRemote + "/" + branch
+	ref := "remotes/" + remoteName + "/" + branch
 	remote, err := ReadMigrationContentHashes(ctx, db, ref)
 	if err != nil {
 		// Cached ref absent/stale (never pushed/pulled) or pre-content_hash:
@@ -104,11 +108,18 @@ func routeSmartGate(ctx context.Context, db DBConn, current int) (smartGateDecis
 		return smartForkSkew, skew
 	}
 
-	if maxVersion(remote) > current {
+	remoteMax := maxVersion(remote)
+	if remoteMax > current {
 		return smartAdopt, nil // remote already migrated — adopt, don't migrate
 	}
+	if remoteMax < current {
+		// The cached remote is behind this clone. That is not the first-mover
+		// state the smart gate is allowed to auto-resolve, so keep the human
+		// coordination block rather than silently moving farther ahead.
+		return smartUndetermined, nil
+	}
 
-	// remote == local on every shared version and is not ahead: a first-mover.
+	// remote == local on every shared version and at the same max version: a first-mover.
 	if current >= LastNonDeterministicMigration {
 		return smartAutoMigrate, nil
 	}

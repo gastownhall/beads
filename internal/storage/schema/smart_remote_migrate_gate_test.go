@@ -32,13 +32,23 @@ func hashRows(hashes map[int]string) *sqlmock.Rows {
 
 // expectSmartRemoteRead mocks the three reads the smart router issues: local
 // content hashes (HEAD), active_branch(), and remote content hashes (AS OF).
-func expectSmartRemoteRead(mock sqlmock.Sqlmock, local, remote map[int]string) {
+func expectSmartRemoteReadForRemote(mock sqlmock.Sqlmock, remoteName string, local, remote map[int]string) {
+	if remoteName == "" {
+		remoteName = smartGateDefaultRemote
+	}
 	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations$`).
 		WillReturnRows(hashRows(local))
 	mock.ExpectQuery(`SELECT active_branch\(\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"active_branch()"}).AddRow("main"))
-	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations AS OF 'remotes/origin/main'`).
+	mock.ExpectQuery(`SELECT version, content_hash FROM schema_migrations AS OF 'remotes/` + remoteName + `/main'`).
 		WillReturnRows(hashRows(remote))
+}
+
+// expectSmartRemoteRead mocks the three reads the smart router issues using the
+// default remote: local content hashes (HEAD), active_branch(), and remote
+// content hashes (AS OF remotes/origin/main).
+func expectSmartRemoteRead(mock sqlmock.Sqlmock, local, remote map[int]string) {
+	expectSmartRemoteReadForRemote(mock, "", local, remote)
 }
 
 func TestSmartGateRouting(t *testing.T) {
@@ -87,6 +97,47 @@ func TestSmartGateRouting(t *testing.T) {
 					t.Errorf("adopt decision must not surface the migrate escape command, got %q", c)
 				}
 			}
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("remote behind local: not a first-mover → blunt block", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		current := floor + 1
+		expectSmartFiringGate(mock, current)
+		local := map[int]string{floor: "h1", current: "h2"}
+		remote := map[int]string{floor: "h1"}
+		expectSmartRemoteRead(mock, local, remote)
+
+		err := CheckRemoteMigrateGate(context.Background(), db)
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != "" {
+			t.Errorf("remote-behind should fall back to the blunt block (Decision \"\"), got %q", gateErr.Decision)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("uses configured remote for smart read", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "h"}
+		expectSmartRemoteReadForRemote(mock, "upstream", hashes, hashes)
+
+		if err := CheckRemoteMigrateGateForRemoteWithRemoteCheck(context.Background(), db, "upstream", nil); err != nil {
+			t.Fatalf("safe first-mover on configured remote should be allowed, got %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)

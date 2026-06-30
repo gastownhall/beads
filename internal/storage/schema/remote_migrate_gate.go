@@ -231,7 +231,7 @@ func IsRemoteMigrateGateError(err error) bool {
 // store open. Embedded mode uses this form: its dolt_remotes table already
 // reflects remotes persisted in .dolt/config on a fresh open.
 func CheckRemoteMigrateGate(ctx context.Context, db DBConn) error {
-	return checkRemoteMigrateGate(ctx, db, nil)
+	return checkRemoteMigrateGate(ctx, db, "", nil)
 }
 
 // CheckRemoteMigrateGateWithRemoteCheck is CheckRemoteMigrateGate plus an on-disk
@@ -250,10 +250,18 @@ func CheckRemoteMigrateGate(ctx context.Context, db DBConn) error {
 // SQL table shows no remote, so the (subprocess-backed) filesystem probe stays off
 // the common open path. A nil extraHasRemote disables the fallback.
 func CheckRemoteMigrateGateWithRemoteCheck(ctx context.Context, db DBConn, extraHasRemote func() bool) error {
-	return checkRemoteMigrateGate(ctx, db, extraHasRemote)
+	return checkRemoteMigrateGate(ctx, db, "", extraHasRemote)
 }
 
-func checkRemoteMigrateGate(ctx context.Context, db DBConn, extraHasRemote func() bool) error {
+// CheckRemoteMigrateGateForRemoteWithRemoteCheck is CheckRemoteMigrateGate plus
+// an explicit sync remote name for the smart gate's cached remote-ref read.
+// The blunt gate still trips when any Dolt remote exists; the remote name only
+// chooses which remote-tracking ref the opt-in smart router compares against.
+func CheckRemoteMigrateGateForRemoteWithRemoteCheck(ctx context.Context, db DBConn, remoteName string, extraHasRemote func() bool) error {
+	return checkRemoteMigrateGate(ctx, db, remoteName, extraHasRemote)
+}
+
+func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, extraHasRemote func() bool) error {
 	// CurrentVersion treats a missing schema_migrations table as version 0, so a
 	// brand-new database falls through the current==0 check below — nothing to fork.
 	current, err := CurrentVersion(ctx, db)
@@ -314,7 +322,7 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, extraHasRemote func(
 	// #4515 block below, so disabling smart mode (or an unreadable remote ref)
 	// is always at least as safe as before.
 	if SmartGateEnabled() {
-		decision, skew := routeSmartGate(ctx, db, current)
+		decision, skew := routeSmartGate(ctx, db, current, remoteName)
 		switch decision {
 		case smartAutoMigrate:
 			smartGateAllowMigrate(len(pending), current)

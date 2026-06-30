@@ -1607,7 +1607,7 @@ func (s *DoltStore) initSchema(ctx context.Context) error {
 	// (GH#2315), so an SQL-only check would miss the remote on the first write
 	// open after an upgrade.
 	gate := func(ctx context.Context, db *sql.DB) error {
-		return schema.CheckRemoteMigrateGateWithRemoteCheck(ctx, db, s.hasPersistedCLIRemote)
+		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheck(ctx, db, s.remote, s.hasPersistedCLIRemote)
 	}
 	_, err = initSchemaOnDBWithRetryAndGate(ctx, migDB, gate)
 	return err
