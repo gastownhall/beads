@@ -426,9 +426,7 @@ func (s *testSuite) eventsDeleteAllRemoves() {
 	s.seedIssueRow("bd-del-evt-c")
 	r := s.eventsRepo()
 	for _, id := range []string{"bd-del-evt-a", "bd-del-evt-a", "bd-del-evt-b", "bd-del-evt-c"} {
-		s.Require().NoError(r.Record(s.Ctx(),
-			domain.Event{IssueID: id, Type: types.EventCreated, Actor: "tester"},
-			domain.RecordEventOpts{}))
+		s.seedLegacyEventRow(id, types.EventCreated, false)
 	}
 
 	n, err := r.DeleteAllForIDs(s.Ctx(),
@@ -445,9 +443,7 @@ func (s *testSuite) eventsDeleteAllRemoves() {
 func (s *testSuite) eventsDeleteAllWispRouting() {
 	s.seedWispRow("bd-del-wevt-1")
 	r := s.eventsRepo()
-	s.Require().NoError(r.Record(s.Ctx(),
-		domain.Event{IssueID: "bd-del-wevt-1", Type: types.EventUpdated, Actor: "tester"},
-		domain.RecordEventOpts{UseWispsTable: true}))
+	s.seedLegacyEventRow("bd-del-wevt-1", types.EventUpdated, true)
 
 	n, err := r.DeleteAllForIDs(s.Ctx(), []string{"bd-del-wevt-1"},
 		domain.RecordEventOpts{UseWispsTable: true})
@@ -466,9 +462,7 @@ func (s *testSuite) eventsCountAllCounts() {
 	s.seedIssueRow("bd-del-ec-b")
 	r := s.eventsRepo()
 	for _, id := range []string{"bd-del-ec-a", "bd-del-ec-a", "bd-del-ec-b"} {
-		s.Require().NoError(r.Record(s.Ctx(),
-			domain.Event{IssueID: id, Type: types.EventCreated, Actor: "tester"},
-			domain.RecordEventOpts{}))
+		s.seedLegacyEventRow(id, types.EventCreated, false)
 	}
 
 	n, err := r.CountAllForIDs(s.Ctx(), []string{"bd-del-ec-a", "bd-del-ec-b"}, domain.RecordEventOpts{})
@@ -479,9 +473,7 @@ func (s *testSuite) eventsCountAllCounts() {
 func (s *testSuite) eventsCountAllWispRouting() {
 	s.seedWispRow("bd-del-wec-1")
 	r := s.eventsRepo()
-	s.Require().NoError(r.Record(s.Ctx(),
-		domain.Event{IssueID: "bd-del-wec-1", Type: types.EventUpdated, Actor: "tester"},
-		domain.RecordEventOpts{UseWispsTable: true}))
+	s.seedLegacyEventRow("bd-del-wec-1", types.EventUpdated, true)
 
 	n, err := r.CountAllForIDs(s.Ctx(), []string{"bd-del-wec-1"},
 		domain.RecordEventOpts{UseWispsTable: true})

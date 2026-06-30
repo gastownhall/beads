@@ -88,7 +88,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		return result, err
 	}
 
-	issueTable, eventTable := TableRouting(issue)
+	issueTable, _ := TableRouting(issue)
 
 	if issue.ID == "" {
 		prefix := bc.ConfigPrefix
@@ -116,7 +116,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		return result, nil
 	}
 
-	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
+	_, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
 	if err != nil {
 		return result, err
 	}
@@ -132,14 +132,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 	}
 	result.markChanged(issueTable)
 
-	if isNew {
-		if err := RecordEventInTable(ctx, tx, eventTable, issue.ID, types.EventCreated, actor, ""); err != nil {
-			return result, fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
-		}
-		result.markChanged(eventTable)
-	}
-
-	labelResult, err := PersistLabels(ctx, tx, issue, actor, eventTable)
+	labelResult, err := PersistLabels(ctx, tx, issue)
 	if err != nil {
 		return result, err
 	}
@@ -564,7 +557,7 @@ func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue 
 	return existingCount == 0, false, nil
 }
 
-func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
+func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Labels) == 0 {
 		return result, nil
@@ -595,15 +588,6 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 			continue
 		}
 		result.markChanged(labelTable)
-		comment := "Added label: " + label
-		//nolint:gosec // G201: eventTable is determined by ephemeral flag
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (id, issue_id, event_type, actor, comment)
-			VALUES (?, ?, ?, ?, ?)
-		`, eventTable), NewEventID(), issue.ID, types.EventLabelAdded, actor, comment); err != nil {
-			return result, fmt.Errorf("failed to record label event %q for %s: %w", label, issue.ID, err)
-		}
-		result.markChanged(eventTable)
 	}
 	return result, nil
 }

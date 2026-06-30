@@ -509,14 +509,14 @@ func TestUpdateIssueIDRenamesWisp(t *testing.T) {
 		t.Fatalf("expected %q to be an active wisp", oldID)
 	}
 
-	// Verify creation event was recorded in wisp_events
+	// Verify creation did not record a wisp_events audit row.
 	var eventCount int
 	err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisp_events WHERE issue_id = ?`, oldID).Scan(&eventCount)
 	if err != nil {
 		t.Fatalf("failed to count wisp_events: %v", err)
 	}
-	if eventCount != 1 {
-		t.Fatalf("expected 1 wisp_events row for old ID, got %d", eventCount)
+	if eventCount != 0 {
+		t.Fatalf("expected 0 wisp_events rows for old ID, got %d", eventCount)
 	}
 
 	// Add a label to the wisp
@@ -541,14 +541,14 @@ func TestUpdateIssueIDRenamesWisp(t *testing.T) {
 		t.Fatal("new wisp ID should exist in wisps table after rename")
 	}
 
-	// Verify wisp_events were updated (1 creation + 1 label_added + 1 rename = 3)
+	// Verify rename did not append wisp_events audit rows.
 	var newEventCount int
 	err = store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisp_events WHERE issue_id = ?`, newID).Scan(&newEventCount)
 	if err != nil {
 		t.Fatalf("failed to count wisp_events for new ID: %v", err)
 	}
-	if newEventCount != 3 {
-		t.Fatalf("expected 3 wisp_events rows for new ID (creation + label_added + rename), got %d", newEventCount)
+	if newEventCount != 0 {
+		t.Fatalf("expected 0 wisp_events rows for new ID, got %d", newEventCount)
 	}
 
 	// Verify no events left under old ID
@@ -624,13 +624,13 @@ func TestUpdateIssueIDStillWorksForRegularIssues(t *testing.T) {
 		t.Fatalf("expected original title, got %q", got.Title)
 	}
 
-	// Verify rename event in events table
+	// Verify rename did not append an event row.
 	var eventCount int
 	err = store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'renamed'`, newID).Scan(&eventCount)
 	if err != nil {
 		t.Fatalf("failed to count rename events: %v", err)
 	}
-	if eventCount != 1 {
-		t.Fatalf("expected 1 rename event for new ID, got %d", eventCount)
+	if eventCount != 0 {
+		t.Fatalf("expected 0 rename events for new ID, got %d", eventCount)
 	}
 }

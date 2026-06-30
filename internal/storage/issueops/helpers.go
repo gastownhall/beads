@@ -139,17 +139,10 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 	return nil
 }
 
-// RecordEventInTable records an event in the specified events table.
-//
-//nolint:gosec // G201: table is a hardcoded constant ("events" or "wisp_events")
+// RecordEventInTable is kept as a compatibility hook for legacy callers.
+// Audit events are no longer appended to Dolt event tables; user-visible
+// comments belong in comments/wisp_comments.
 func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, newValue string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, table), NewEventID(), issueID, eventType, actor, "", newValue)
-	if err != nil {
-		return fmt.Errorf("record event in %s: %w", table, err)
-	}
 	return nil
 }
 

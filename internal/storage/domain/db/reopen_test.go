@@ -43,7 +43,7 @@ func (s *testSuite) reopenMutatesRow() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-ro-row", string(types.EventReopened)).Scan(&evtCount))
-	s.Equal(1, evtCount)
+	s.Equal(0, evtCount)
 }
 
 func (s *testSuite) reopenIdempotent() {
@@ -110,7 +110,7 @@ func (s *testSuite) reopenRoutesWisp() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ? AND event_type = ?",
 		"bd-ro-wisp", string(types.EventReopened)).Scan(&evtCount))
-	s.Equal(1, evtCount)
+	s.Equal(0, evtCount)
 }
 
 func (s *testSuite) reopenAppendsComment() {
@@ -126,8 +126,8 @@ func (s *testSuite) reopenAppendsComment() {
 
 	var comment string
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT comment FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ro-cmt", string(types.EventCommented)).Scan(&comment))
+		"SELECT text FROM comments WHERE issue_id = ?",
+		"bd-ro-cmt").Scan(&comment))
 	s.Equal("regression spotted", comment)
 }
 
@@ -144,7 +144,7 @@ func (s *testSuite) reopenNoCommentEmptyReason() {
 
 	var cmtCount int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ro-nocmt", string(types.EventCommented)).Scan(&cmtCount))
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ?",
+		"bd-ro-nocmt").Scan(&cmtCount))
 	s.Equal(0, cmtCount)
 }

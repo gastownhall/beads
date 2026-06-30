@@ -14,7 +14,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("RoundTripWithGet", s.issueInsertRoundTrip)
 		s.Run("RequiresExplicitID", s.issueInsertRequiresID)
 		s.Run("IdempotentOnDuplicateKey", s.issueInsertIdempotent)
-		s.Run("RecordsCreatedEvent", s.issueInsertRecordsEvent)
+		s.Run("DoesNotRecordCreatedEvent", s.issueInsertDoesNotRecordEvent)
 		s.Run("RoutesToWispsTable", s.issueInsertWispRouting)
 		s.Run("ComputesContentHashWhenMissing", s.issueInsertComputesHash)
 	})
@@ -38,7 +38,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("ConflictReturnsForeignAssignee", s.issueClaimConflict)
 		s.Run("NotClaimableWhenClosed", s.issueClaimClosed)
 		s.Run("EmptyIDReturnsError", s.issueClaimEmptyID)
-		s.Run("RecordsClaimedEvent", s.issueClaimRecordsEvent)
+		s.Run("DoesNotRecordClaimedEvent", s.issueClaimDoesNotRecordEvent)
 	})
 	s.Run("Get", func() {
 		s.Run("MissingIDReturnsErrNoRows", s.issueGetMissing)
@@ -136,7 +136,7 @@ func (s *testSuite) issueInsertIdempotent() {
 	s.Equal("added on second pass", out.Description)
 }
 
-func (s *testSuite) issueInsertRecordsEvent() {
+func (s *testSuite) issueInsertDoesNotRecordEvent() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-test-evt", "event check"), "tester", domain.InsertIssueOpts{}))
 
@@ -145,7 +145,7 @@ func (s *testSuite) issueInsertRecordsEvent() {
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-test-evt", string(types.EventCreated),
 	).Scan(&count))
-	s.Equal(1, count, "expected exactly one created event")
+	s.Equal(0, count, "insert must not append audit rows to events")
 }
 
 func (s *testSuite) issueInsertWispRouting() {
@@ -165,7 +165,7 @@ func (s *testSuite) issueInsertWispRouting() {
 		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ?",
 		"bd-test-wisp",
 	).Scan(&count))
-	s.Equal(1, count, "expected created event in wisp_events")
+	s.Equal(0, count, "wisp insert must not append audit rows to wisp_events")
 }
 
 func (s *testSuite) issueInsertComputesHash() {
@@ -358,12 +358,12 @@ func (s *testSuite) issueWispUpdate() {
 	s.Require().NoError(err)
 	s.Equal("after", out.Title)
 
-	// The update event should land in wisp_events, not events.
+	// Updates should not append audit rows to either event table.
 	var wispEvtCount, permEvtCount int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ? AND event_type = ?",
 		"bd-iss-wisp-upd", string(types.EventUpdated)).Scan(&wispEvtCount))
-	s.Equal(1, wispEvtCount)
+	s.Equal(0, wispEvtCount)
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-iss-wisp-upd", string(types.EventUpdated)).Scan(&permEvtCount))
@@ -638,7 +638,7 @@ func (s *testSuite) issueClaimEmptyID() {
 	s.Contains(err.Error(), "id must not be empty")
 }
 
-func (s *testSuite) issueClaimRecordsEvent() {
+func (s *testSuite) issueClaimDoesNotRecordEvent() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-evt", "x"), "tester", domain.InsertIssueOpts{}))
 
@@ -650,5 +650,5 @@ func (s *testSuite) issueClaimRecordsEvent() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-claim-evt", "claimed").Scan(&count))
-	s.Equal(1, count, "successful claim must record exactly one 'claimed' event")
+	s.Equal(0, count, "successful claim must not append audit rows to events")
 }

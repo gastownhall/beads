@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // GetLabelsInTx retrieves all labels for an issue within an existing transaction.
@@ -128,7 +126,7 @@ func getLabelsIntoFromTable(ctx context.Context, tx DBTX, labelTable string, ids
 	return nil
 }
 
-// AddLabelInTx adds a label to an issue and records an event within an existing
+// AddLabelInTx adds a label to an issue within an existing
 // transaction. Automatically routes to wisp tables if the ID is an active wisp.
 // Uses INSERT IGNORE for idempotency.
 func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
@@ -146,18 +144,11 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)`, labelTable), issueID, label); err != nil {
 		return fmt.Errorf("add label: %w", err)
 	}
-	comment := "Added label: " + label
-	//nolint:gosec // G201: eventTable is from WispTableRouting ("events" or "wisp_events")
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)`, eventTable),
-		NewEventID(), issueID, types.EventLabelAdded, actor, comment); err != nil {
-		return fmt.Errorf("add label: record event: %w", err)
-	}
 	return nil
 }
 
-// RemoveLabelInTx removes a label from an issue and records an event within
-// an existing transaction. Automatically routes to wisp tables if the ID is
-// an active wisp.
+// RemoveLabelInTx removes a label from an issue within an existing transaction.
+// Automatically routes to wisp tables if the ID is an active wisp.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
@@ -173,11 +164,6 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label); err != nil {
 		return fmt.Errorf("remove label: %w", err)
-	}
-	comment := "Removed label: " + label
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)`, eventTable),
-		NewEventID(), issueID, types.EventLabelRemoved, actor, comment); err != nil {
-		return fmt.Errorf("remove label: record event: %w", err)
 	}
 	return nil
 }

@@ -10,25 +10,10 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// AddComment adds a comment event to an issue
+// AddComment adds a structured comment to an issue.
 func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	isWisp := s.isActiveWisp(ctx, issueID)
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit add comment event", err)
-	}
-	if isWisp {
-		return nil
-	}
-	return s.doltAddAndCommit(ctx, []string{"events"}, fmt.Sprintf("bd: comment %s", issueID))
+	_, err := s.AddIssueComment(ctx, issueID, actor, comment)
+	return err
 }
 
 // GetEvents retrieves events for an issue

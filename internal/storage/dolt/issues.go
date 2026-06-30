@@ -186,7 +186,7 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 		return err
 	}
 
-	for _, table := range []string{"issues", "events"} {
+	for _, table := range []string{"issues"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
 	commitMsg := fmt.Sprintf("bd: update %s", id)
@@ -225,7 +225,7 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 
 	// Dolt versioning for permanent issues.
 	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
+	for _, table := range []string{"issues"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
 	commitMsg := fmt.Sprintf("bd: claim %s", id)
@@ -256,7 +256,7 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 		return nil, nil
 	}
 
-	for _, table := range []string{"issues", "events"} {
+	for _, table := range []string{"issues"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
 	commitMsg := fmt.Sprintf("bd: claim ready %s", claimed.ID)
@@ -318,7 +318,7 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 
 	// Dolt versioning for permanent issues.
 	// GH#2455: Stage only the tables we modified, then commit without -A.
-	for _, table := range []string{"issues", "events"} {
+	for _, table := range []string{"issues"} {
 		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 	}
 	commitMsg := fmt.Sprintf("bd: close %s", id)
@@ -457,14 +457,6 @@ func doltBuildSQLInClause(ids []string) (string, []interface{}) {
 // =============================================================================
 // Helper functions
 // =============================================================================
-
-func recordEvent(ctx context.Context, tx *sql.Tx, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, issueops.NewEventID(), issueID, eventType, actor, oldValue, newValue)
-	return wrapExecError("record event", err)
-}
 
 // seedCounterFromExistingIssuesTx scans existing issues to find the highest numeric suffix
 // for the given prefix, then seeds the issue_counter table if no row exists yet.

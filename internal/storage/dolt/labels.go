@@ -20,7 +20,7 @@ func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) 
 	if isWisp {
 		return nil
 	}
-	return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label add %s", issueID))
+	return s.doltAddAndCommit(ctx, []string{"labels"}, fmt.Sprintf("bd: label add %s", issueID))
 }
 
 // RemoveLabel removes a label from an issue.
@@ -35,7 +35,7 @@ func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor strin
 	if isWisp {
 		return nil
 	}
-	return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label remove %s", issueID))
+	return s.doltAddAndCommit(ctx, []string{"labels"}, fmt.Sprintf("bd: label remove %s", issueID))
 }
 
 // GetLabels retrieves all labels for an issue

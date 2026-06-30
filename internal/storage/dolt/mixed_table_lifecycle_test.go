@@ -95,7 +95,6 @@ func TestDemoteToWispRollsBackWhenAuxiliaryCopyFails(t *testing.T) {
 	}{
 		{"labels", "wisp_labels", "copy labels for demoted issue", "mixed-demote-labels-fail"},
 		{"dependencies", "wisp_dependencies", "copy dependencies for demoted issue", "mixed-demote-dependencies-fail"},
-		{"events", "wisp_events", "copy events for demoted issue", "mixed-demote-events-fail"},
 		{"comments", "wisp_comments", "copy comments for demoted issue", "mixed-demote-comments-fail"},
 	}
 
@@ -342,7 +341,6 @@ func TestPromoteFromEphemeralRollsBackWhenAuxiliaryCopyFails(t *testing.T) {
 	}{
 		{"labels", "labels", "copy labels for promoted wisp", "mixed-promote-labels-fail"},
 		{"dependencies", "dependencies", "copy dependencies for promoted wisp", "mixed-promote-dependencies-fail"},
-		{"events", "events", "copy events for promoted wisp", "mixed-promote-events-fail"},
 		{"comments", "comments", "copy comments for promoted wisp", "mixed-promote-comments-fail"},
 	}
 
@@ -772,7 +770,7 @@ func TestDeleteIssuesCascadeDeletesNoHistoryWispDependent(t *testing.T) {
 	}
 }
 
-func TestDemoteToWispRecordsOnlyCreateAndDemotionEvents(t *testing.T) {
+func TestDemoteToWispDoesNotRecordEvents(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -791,20 +789,8 @@ func TestDemoteToWispRecordsOnlyCreateAndDemotionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetEvents: %v", err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("event count = %d, want create plus demotion only: %+v", len(events), events)
-	}
-	foundDemotion := false
-	for _, event := range events {
-		if event.NewValue != nil && *event.NewValue == "demoted to wisp" {
-			foundDemotion = true
-		}
-		if event.NewValue != nil && strings.Contains(*event.NewValue, "no_history") {
-			t.Fatalf("found intermediate update event in demotion stream: %+v", event)
-		}
-	}
-	if !foundDemotion {
-		t.Fatalf("events = %+v, want demotion marker", events)
+	if len(events) != 0 {
+		t.Fatalf("event count = %d, want 0: %+v", len(events), events)
 	}
 }
 

@@ -95,7 +95,7 @@ func (s *testSuite) uccReopenReasonComment() {
 
 	var comment string
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT comment FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ucc-ro-cmt", string(types.EventCommented)).Scan(&comment))
+		"SELECT text FROM comments WHERE issue_id = ?",
+		"bd-ucc-ro-cmt").Scan(&comment))
 	s.Equal("qa found a regression", comment)
 }

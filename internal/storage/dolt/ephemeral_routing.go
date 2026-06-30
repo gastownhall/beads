@@ -177,7 +177,7 @@ func (s *DoltStore) batchWispExists(ctx context.Context, ids []string) map[strin
 // clearing the Ephemeral flag. Used by bd promote and mol squash to crystallize wisps.
 //
 // Uses direct SQL inserts to bypass IsEphemeralID routing, which would otherwise
-// redirect label/dependency/event writes back to wisp tables.
+// redirect label/dependency writes back to wisp tables.
 func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor string) error {
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		if err := issueops.PromoteFromEphemeralInTx(ctx, tx, id, actor); err != nil {
@@ -237,15 +237,8 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 			return fmt.Errorf("delete copied dependencies for demoted issue %s: %w", id, err)
 		}
 
-		if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value, comment, created_at)
-		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
-		FROM events WHERE issue_id = ?
-	`, id); err != nil {
-			return fmt.Errorf("copy events for demoted issue %s: %w", id, err)
-		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, id); err != nil {
-			return fmt.Errorf("delete copied events for demoted issue %s: %w", id, err)
+			return fmt.Errorf("delete legacy events for demoted issue %s: %w", id, err)
 		}
 
 		if _, err := tx.ExecContext(ctx, `
@@ -257,13 +250,6 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id); err != nil {
 			return fmt.Errorf("delete copied comments for demoted issue %s: %w", id, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, `
-		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, issueops.NewEventID(), id, types.EventUpdated, actor, "", "demoted to wisp"); err != nil {
-			return fmt.Errorf("record demotion event for demoted issue %s: %w", id, err)
 		}
 
 		if err := issueops.RetargetInboundDependenciesToWispInTx(ctx, tx, id); err != nil {

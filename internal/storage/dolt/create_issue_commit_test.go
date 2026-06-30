@@ -66,8 +66,8 @@ func TestCreateIssueCommitsInitialRelationalData(t *testing.T) {
 	).Scan(&labelEventCount); err != nil {
 		t.Fatalf("count committed label events: %v", err)
 	}
-	if labelEventCount != 2 {
-		t.Fatalf("committed label_added event count = %d, want 2", labelEventCount)
+	if labelEventCount != 0 {
+		t.Fatalf("committed label_added event count = %d, want 0", labelEventCount)
 	}
 
 	var dirtyRelationalTables int

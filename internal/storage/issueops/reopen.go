@@ -17,7 +17,7 @@ type ReopenResult struct {
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func ReopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string) (*ReopenResult, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
-	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
+	issueTable, _, _, _ := WispTableRouting(isWisp)
 
 	var affectedIssues, affectedWisps []string
 	var aerr error
@@ -59,10 +59,6 @@ func ReopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string) (*R
 			return &ReopenResult{IsWisp: isWisp, AlreadyOpen: true}, nil
 		}
 		return nil, fmt.Errorf("failed to reopen issue: %s", id)
-	}
-
-	if err := RecordEventInTable(ctx, tx, eventTable, id, types.EventReopened, actor, reason); err != nil {
-		return nil, fmt.Errorf("failed to record event: %w", err)
 	}
 
 	if reason != "" {

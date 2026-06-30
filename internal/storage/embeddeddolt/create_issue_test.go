@@ -339,7 +339,7 @@ func TestCreateIssue(t *testing.T) {
 		te.assertIssueTitle(t, ctx, "issues", "up-dup1", "Updated title")
 	})
 
-	t.Run("event_recorded", func(t *testing.T) {
+	t.Run("event_not_recorded", func(t *testing.T) {
 		te := newTestEnv(t, "ev")
 		ctx := t.Context()
 
@@ -355,7 +355,7 @@ func TestCreateIssue(t *testing.T) {
 			t.Fatalf("CreateIssue: %v", err)
 		}
 
-		te.assertEventCount(t, ctx, "events", "ev-evt1", "created", 1)
+		te.assertEventCount(t, ctx, "events", "ev-evt1", "created", 0)
 	})
 
 	t.Run("ephemeral_routes_to_wisps", func(t *testing.T) {
@@ -830,7 +830,7 @@ func TestCreateIssues(t *testing.T) {
 		}
 	})
 
-	t.Run("upsert_skips_duplicate_events", func(t *testing.T) {
+	t.Run("upsert_does_not_record_events", func(t *testing.T) {
 		te := newTestEnv(t, "ud")
 		ctx := t.Context()
 
@@ -841,7 +841,7 @@ func TestCreateIssues(t *testing.T) {
 			t.Fatalf("first CreateIssues: %v", err)
 		}
 
-		te.assertEventCount(t, ctx, "events", "ud-dup", "created", 1)
+		te.assertEventCount(t, ctx, "events", "ud-dup", "created", 0)
 
 		// Re-import same ID — should upsert without extra event.
 		issues2 := []*types.Issue{
@@ -852,10 +852,10 @@ func TestCreateIssues(t *testing.T) {
 		}
 
 		te.assertIssueTitle(t, ctx, "issues", "ud-dup", "Updated")
-		te.assertEventCount(t, ctx, "events", "ud-dup", "created", 1) // still just 1
+		te.assertEventCount(t, ctx, "events", "ud-dup", "created", 0)
 	})
 
-	t.Run("upsert_records_events_for_new_labels", func(t *testing.T) {
+	t.Run("upsert_adds_new_labels_without_events", func(t *testing.T) {
 		te := newTestEnv(t, "ul")
 		ctx := t.Context()
 
@@ -872,7 +872,7 @@ func TestCreateIssues(t *testing.T) {
 		if err := te.store.CreateIssues(ctx, issues, "tester"); err != nil {
 			t.Fatalf("first CreateIssues: %v", err)
 		}
-		te.assertEventCount(t, ctx, "events", "ul-dup", string(types.EventLabelAdded), 1)
+		te.assertEventCount(t, ctx, "events", "ul-dup", string(types.EventLabelAdded), 0)
 
 		issues2 := []*types.Issue{
 			{
@@ -889,7 +889,7 @@ func TestCreateIssues(t *testing.T) {
 		}
 
 		te.assertLabelCount(t, ctx, "labels", "ul-dup", 2)
-		te.assertEventCount(t, ctx, "events", "ul-dup", string(types.EventLabelAdded), 2)
+		te.assertEventCount(t, ctx, "events", "ul-dup", string(types.EventLabelAdded), 0)
 	})
 
 	t.Run("all_ephemeral", func(t *testing.T) {

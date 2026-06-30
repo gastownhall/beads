@@ -737,7 +737,7 @@ func TestExportByteStabilityAllRecordTypes(t *testing.T) {
 	}
 
 	// Comments: several per issue. AddIssueComment writes to the comments table
-	// that export reads (AddComment records an event instead and would not show).
+	// that export reads.
 	for _, issue := range issues {
 		for _, c := range []string{"first note", "second note", "third note"} {
 			if _, err := s.AddIssueComment(ctx, issue.ID, "test", c); err != nil {

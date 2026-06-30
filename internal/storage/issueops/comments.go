@@ -110,14 +110,14 @@ func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 // Routes to comments or wisp_comments based on wisp status.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
-func AddIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string) (*types.Comment, error) {
+func AddIssueCommentInTx(ctx context.Context, tx DBTX, issueID, author, text string) (*types.Comment, error) {
 	return ImportIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC())
 }
 
 // ImportIssueCommentInTx adds a comment preserving the original timestamp.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
-func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+func ImportIssueCommentInTx(ctx context.Context, tx DBTX, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 	commentTable := "comments"
@@ -153,19 +153,9 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 	}, nil
 }
 
-// AddCommentEventInTx adds a comment as an event to an issue within a transaction.
-// Routes to events or wisp_events based on wisp status.
-//
-//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+// AddCommentEventInTx is the legacy annotation API. It now stores the text as a
+// structured issue comment instead of appending to events/wisp_events.
 func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment string) error {
-	isWisp := IsActiveWispInTx(ctx, tx, issueID)
-	_, _, eventTable, _ := WispTableRouting(isWisp)
-
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?, ?)
-	`, eventTable), NewEventID(), issueID, types.EventCommented, actor, comment); err != nil {
-		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
-	}
-	return nil
+	_, err := AddIssueCommentInTx(ctx, tx, issueID, actor, comment)
+	return err
 }

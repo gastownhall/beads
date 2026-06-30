@@ -92,8 +92,8 @@ func TestRunInTransactionWispCreatePersistsInitialSideTables(t *testing.T) {
 	).Scan(&labelEventCount); err != nil {
 		t.Fatalf("query wisp label events for %s: %v", wisp.ID, err)
 	}
-	if labelEventCount != 2 {
-		t.Fatalf("wisp label event count for %s = %d, want 2", wisp.ID, labelEventCount)
+	if labelEventCount != 0 {
+		t.Fatalf("wisp label event count for %s = %d, want 0", wisp.ID, labelEventCount)
 	}
 }
 

@@ -97,25 +97,14 @@ func (h *labelTestHelper) assertNotHasLabel(issueID, label string) {
 	}
 }
 
-func (h *labelTestHelper) assertLabelEvent(issueID string, eventType types.EventType, labelName string) {
+func (h *labelTestHelper) assertNoLabelEvents(issueID string) {
 	events, err := h.s.GetEvents(h.ctx, issueID, 100)
 	if err != nil {
 		h.t.Fatalf("Failed to get events: %v", err)
 	}
-
-	expectedComment := ""
-	if eventType == types.EventLabelAdded {
-		expectedComment = "Added label: " + labelName
-	} else if eventType == types.EventLabelRemoved {
-		expectedComment = "Removed label: " + labelName
+	if len(events) != 0 {
+		h.t.Errorf("Expected no label audit events for %s, got %d", issueID, len(events))
 	}
-
-	for _, e := range events {
-		if e.EventType == eventType && e.Comment != nil && *e.Comment == expectedComment {
-			return
-		}
-	}
-	h.t.Errorf("Expected to find event %s for label %s", eventType, labelName)
 }
 
 func TestLabelCommands(t *testing.T) {
@@ -183,12 +172,11 @@ func TestLabelCommands(t *testing.T) {
 		h.assertLabelCount(issue.ID, 0)
 	})
 
-	t.Run("label operations create events", func(t *testing.T) {
+	t.Run("label operations do not create events", func(t *testing.T) {
 		issue := h.createIssue("Event Test", types.TypeTask, 1)
 		h.addLabel(issue.ID, "test-label")
 		h.removeLabel(issue.ID, "test-label")
-		h.assertLabelEvent(issue.ID, types.EventLabelAdded, "test-label")
-		h.assertLabelEvent(issue.ID, types.EventLabelRemoved, "test-label")
+		h.assertNoLabelEvents(issue.ID)
 	})
 
 	t.Run("labels persist after issue update", func(t *testing.T) {

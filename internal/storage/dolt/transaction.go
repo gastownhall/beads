@@ -927,18 +927,14 @@ func (t *doltTransaction) GetIssueComments(ctx context.Context, issueID string) 
 	return comments, rows.Err()
 }
 
-// AddComment adds a comment within the transaction
+// AddComment adds a structured comment within the transaction.
 func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	table := "events"
+	table := "comments"
 	if t.isActiveWisp(ctx, issueID) {
-		table = "wisp_events"
+		table = "wisp_comments"
 	}
 
-	//nolint:gosec // G201: table is hardcoded
-	_, err := t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?, ?)
-	`, table), issueops.NewEventID(), issueID, types.EventCommented, actor, comment)
+	_, err := issueops.AddIssueCommentInTx(ctx, t.txFor(table), issueID, actor, comment)
 	if err == nil {
 		t.dirty.MarkDirty(table)
 	}

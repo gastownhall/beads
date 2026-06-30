@@ -7,10 +7,9 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestGetAllEventsSince_UnionBothTables verifies that GetAllEventsSince returns
-// events from both the events table (permanent issues) and wisp_events table
-// (ephemeral/wisp issues), ordered by created_at.
-func TestGetAllEventsSince_UnionBothTables(t *testing.T) {
+// TestGetAllEventsSince_NoMutationEvents verifies that ordinary issue creation
+// no longer appends audit rows to events/wisp_events.
+func TestGetAllEventsSince_NoMutationEvents(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -19,7 +18,6 @@ func TestGetAllEventsSince_UnionBothTables(t *testing.T) {
 
 	since := time.Now().UTC().Add(-1 * time.Second)
 
-	// Create a permanent issue (events go to 'events' table)
 	perm := &types.Issue{
 		ID:        "test-ev-perm",
 		Title:     "Permanent Issue",
@@ -31,7 +29,6 @@ func TestGetAllEventsSince_UnionBothTables(t *testing.T) {
 		t.Fatalf("failed to create permanent issue: %v", err)
 	}
 
-	// Create an ephemeral issue (events go to 'wisp_events' table)
 	wisp := &types.Issue{
 		ID:        "test-ev-wisp",
 		Title:     "Wisp Issue",
@@ -44,35 +41,12 @@ func TestGetAllEventsSince_UnionBothTables(t *testing.T) {
 		t.Fatalf("failed to create wisp issue: %v", err)
 	}
 
-	// Query events since before both were created
 	events, err := store.GetAllEventsSince(ctx, since)
 	if err != nil {
 		t.Fatalf("GetAllEventsSince failed: %v", err)
 	}
-
-	// Should have events from both tables (at least one 'created' event each)
-	permFound, wispFound := false, false
-	for _, e := range events {
-		if e.IssueID == perm.ID {
-			permFound = true
-		}
-		if e.IssueID == wisp.ID {
-			wispFound = true
-		}
-	}
-	if !permFound {
-		t.Error("expected event from permanent issue (events table), not found")
-	}
-	if !wispFound {
-		t.Error("expected event from wisp issue (wisp_events table), not found")
-	}
-
-	// Verify chronological ordering
-	for i := 1; i < len(events); i++ {
-		if events[i].CreatedAt.Before(events[i-1].CreatedAt) {
-			t.Errorf("events not in chronological order: [%d] %v > [%d] %v",
-				i-1, events[i-1].CreatedAt, i, events[i].CreatedAt)
-		}
+	if len(events) != 0 {
+		t.Fatalf("expected no audit events from issue creation, got %d: %+v", len(events), events)
 	}
 }
 

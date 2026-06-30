@@ -3,7 +3,6 @@ package issueops
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -30,7 +29,7 @@ type ClaimResult struct {
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*ClaimResult, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
-	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
+	issueTable, _, _, _ := WispTableRouting(isWisp)
 
 	// Read old issue inside the transaction for event recording.
 	oldIssue, err := GetIssueInTx(ctx, tx, id)
@@ -91,18 +90,6 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 			return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
 		}
 		return nil, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, currentStatus)
-	}
-
-	// Record the claim event.
-	oldData, _ := json.Marshal(oldIssue)
-	newUpdates := map[string]interface{}{
-		"assignee": actor,
-		"status":   "in_progress",
-	}
-	newData, _ := json.Marshal(newUpdates)
-
-	if err := RecordFullEventInTable(ctx, tx, eventTable, id, "claimed", actor, string(oldData), string(newData)); err != nil {
-		return nil, fmt.Errorf("failed to record claim event: %w", err)
 	}
 
 	return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil

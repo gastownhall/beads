@@ -15,8 +15,8 @@ type CloseResult struct {
 	AlreadyClosed bool
 }
 
-// CloseIssueInTx closes an issue within a transaction, setting status to closed
-// and recording the close event. Routes to the correct table (issues/wisps)
+// CloseIssueInTx closes an issue within a transaction, setting status to closed.
+// Routes to the correct table (issues/wisps)
 // automatically. The caller is responsible for Dolt versioning if needed.
 func CloseIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string) (*CloseResult, error) {
 	return closeIssueInTx(ctx, tx, id, reason, actor, session, true)
@@ -27,9 +27,9 @@ func CloseIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, reason,
 }
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string, recordEvent bool) (*CloseResult, error) {
+func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, _ string, session string, _ bool) (*CloseResult, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
-	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
+	issueTable, _, _, _ := WispTableRouting(isWisp)
 
 	var affectedIssues, affectedWisps []string
 	var aerr error
@@ -71,12 +71,6 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 			return &CloseResult{IsWisp: isWisp, AlreadyClosed: true}, nil
 		}
 		return nil, fmt.Errorf("failed to close issue: %s", id)
-	}
-
-	if recordEvent {
-		if err := RecordEventInTable(ctx, tx, eventTable, id, types.EventClosed, actor, reason); err != nil {
-			return nil, fmt.Errorf("failed to record event: %w", err)
-		}
 	}
 
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {

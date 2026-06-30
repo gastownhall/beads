@@ -217,12 +217,12 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 //nolint:gosec // G201: table names are hardcoded
 func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
 	if IsActiveWispInTx(ctx, tx, oldID) {
-		return updateWispIDInTx(ctx, tx, oldID, newID, issue, actor)
+		return updateWispIDInTx(ctx, tx, oldID, newID, issue)
 	}
-	return updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor)
+	return updateIssueIDInTx(ctx, tx, oldID, newID, issue)
 }
 
-func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
+func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue) error {
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE issues
@@ -240,14 +240,10 @@ func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 		return err
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, 'renamed', ?, ?, ?)
-	`, NewEventID(), newID, actor, oldID, newID)
-	return err
+	return nil
 }
 
-func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
+func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue) error {
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE wisps
@@ -259,13 +255,6 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 	}
 	if rows, _ := result.RowsAffected(); rows == 0 {
 		return fmt.Errorf("wisp not found: %s", oldID)
-	}
-
-	if _, err = tx.ExecContext(ctx, `
-		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, 'renamed', ?, ?, ?)
-	`, NewEventID(), newID, actor, oldID, newID); err != nil {
-		return err
 	}
 
 	return UpdateWispIDInDependenciesInTx(ctx, tx, oldID, newID)

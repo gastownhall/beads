@@ -1060,8 +1060,8 @@ func TestCreateIssueAfterPull(t *testing.T) {
 		t.Fatalf("source Push failed: %v", err)
 	}
 
-	// Simulate a second peer via CLI: clone, add data with UUID
-	// rows (issue + event), commit, and push back to the shared remote.
+	// Simulate a second peer via CLI: clone, add data with a legacy UUID event
+	// row, commit, and push back to the shared remote.
 	cloneDir := filepath.Join(setup.baseDir, "clone-ai")
 	doltClone(t, setup.remoteURL, cloneDir)
 	sourceInsertIssue(t, cloneDir, "ai-clone-001", "Clone issue generating events")
@@ -1094,10 +1094,10 @@ func TestCreateIssueAfterPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to count events: %v", err)
 	}
-	// At least 3 events: source created (ai-src-001), clone created (ai-clone-001),
-	// post-pull created (ai-src-002)
-	if eventCount < 3 {
-		t.Errorf("expected at least 3 events, got %d", eventCount)
+	// Only the manually inserted legacy event should remain; normal CreateIssue
+	// no longer appends audit rows.
+	if eventCount != 1 {
+		t.Errorf("expected 1 legacy event, got %d", eventCount)
 	}
 
 	for _, id := range []string{"ai-src-001", "ai-clone-001", "ai-src-002"} {

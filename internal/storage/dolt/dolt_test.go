@@ -1022,7 +1022,7 @@ func TestDoltStoreEvents(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Create an issue (this creates a creation event)
+	// Create an issue (this no longer creates an audit event)
 	issue := &types.Issue{
 		ID:          "test-event-issue",
 		Title:       "Issue with Events",
@@ -1036,18 +1036,24 @@ func TestDoltStoreEvents(t *testing.T) {
 		t.Fatalf("failed to create issue: %v", err)
 	}
 
-	// Add a comment event
+	// Add a structured comment through the legacy annotation API.
 	if err := store.AddComment(ctx, issue.ID, "user1", "A comment"); err != nil {
 		t.Fatalf("failed to add comment: %v", err)
 	}
 
-	// Get events
 	events, err := store.GetEvents(ctx, issue.ID, 10)
 	if err != nil {
 		t.Fatalf("failed to get events: %v", err)
 	}
-	if len(events) < 2 {
-		t.Errorf("expected at least 2 events, got %d", len(events))
+	if len(events) != 0 {
+		t.Errorf("expected no audit events, got %d", len(events))
+	}
+	comments, err := store.GetIssueComments(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("failed to get comments: %v", err)
+	}
+	if len(comments) != 1 || comments[0].Text != "A comment" {
+		t.Fatalf("structured comments = %+v, want one comment with text %q", comments, "A comment")
 	}
 }
 

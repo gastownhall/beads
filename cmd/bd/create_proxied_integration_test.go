@@ -640,8 +640,8 @@ A new feature
 			id, types.EventLabelAdded).Scan(&eventCount); err != nil {
 			t.Fatalf("count label events: %v", err)
 		}
-		if eventCount != 2 {
-			t.Fatalf("label_added event count = %d, want 2", eventCount)
+		if eventCount != 0 {
+			t.Fatalf("label_added event count = %d, want 0", eventCount)
 		}
 	})
 }

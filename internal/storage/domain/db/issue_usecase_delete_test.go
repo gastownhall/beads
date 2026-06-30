@@ -145,9 +145,7 @@ func (s *testSuite) iucDeleteCleansAuxiliaryTables() {
 		"bd-iuc-aux-a", "tag1", "tester", domain.LabelOpts{}))
 	s.Require().NoError(s.labelRepo().Insert(s.Ctx(),
 		"bd-iuc-aux-a", "tag2", "tester", domain.LabelOpts{}))
-	s.Require().NoError(s.eventsRepo().Record(s.Ctx(),
-		domain.Event{IssueID: "bd-iuc-aux-a", Type: types.EventCreated, Actor: "tester"},
-		domain.RecordEventOpts{}))
+	s.seedLegacyEventRow("bd-iuc-aux-a", types.EventCreated, false)
 
 	res, err := s.issueUseCase().DeleteIssue(s.Ctx(), "bd-iuc-aux-a", "tester")
 	s.Require().NoError(err)

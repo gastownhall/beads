@@ -128,17 +128,16 @@ func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	return updateIssueInTx(ctx, tx, id, updates, actor, true)
 }
 
-// UpdateIssueWithoutEventInTx applies normal update semantics without recording
-// an intermediate event. Demotion uses this to preserve the historical event
-// stream: create/update history is copied, then a single demotion event is added.
+// UpdateIssueWithoutEventInTx applies normal update semantics through the
+// compatibility path that used to skip audit event writes.
 func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
 	return updateIssueInTx(ctx, tx, id, updates, actor, false)
 }
 
-func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
+func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, _ string, _ bool) (*UpdateResult, error) {
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
-	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
+	issueTable, _, _, _ := WispTableRouting(isWisp)
 
 	// Read old issue inside the transaction for consistency.
 	oldIssue, err := GetIssueInTx(ctx, tx, id)
@@ -223,16 +222,6 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		return nil, fmt.Errorf("failed to update issue: %w", err)
 	}
 
-	if recordEvent {
-		oldData, _ := json.Marshal(oldIssue)
-		newData, _ := json.Marshal(updates)
-		eventType := DetermineEventType(oldIssue, updates)
-
-		if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
-			return nil, fmt.Errorf("failed to record event: %w", err)
-		}
-	}
-
 	if rawStatus, hasStatus := updates["status"]; hasStatus {
 		var newStatus string
 		switch v := rawStatus.(type) {
@@ -263,16 +252,8 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 }
 
-// RecordFullEventInTable records an event with both old and new values.
-//
-//nolint:gosec // G201: table is from WispTableRouting ("events" or "wisp_events")
+// RecordFullEventInTable is kept as a compatibility hook for legacy callers.
+// Audit events are no longer appended to Dolt event tables.
 func RecordFullEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, table), NewEventID(), issueID, eventType, actor, oldValue, newValue)
-	if err != nil {
-		return fmt.Errorf("record event in %s: %w", table, err)
-	}
 	return nil
 }

@@ -757,7 +757,8 @@ func (s *EmbeddedDoltStore) FindWispDependentsRecursive(ctx context.Context, ids
 
 func (s *EmbeddedDoltStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.AddCommentEventInTx(ctx, tx, issueID, actor, comment)
+		_, err := issueops.AddIssueCommentInTx(ctx, tx, issueID, actor, comment)
+		return err
 	})
 }
 

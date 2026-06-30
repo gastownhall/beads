@@ -51,7 +51,7 @@ func (s *testSuite) closeMutatesRow() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-cl-row", string(types.EventClosed)).Scan(&evtCount))
-	s.Equal(1, evtCount)
+	s.Equal(0, evtCount)
 }
 
 func (s *testSuite) closeIdempotent() {
@@ -77,7 +77,7 @@ func (s *testSuite) closeIdempotent() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-cl-idem", string(types.EventClosed)).Scan(&evtCount))
-	s.Equal(1, evtCount)
+	s.Equal(0, evtCount)
 }
 
 func (s *testSuite) closeRecomputesIsBlocked() {

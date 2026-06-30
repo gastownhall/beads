@@ -2,15 +2,15 @@ package db
 
 import (
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func (s *testSuite) TestEventsSQLRepository() {
 	s.Run("Record", func() {
-		s.Run("WritesToEventsTable", s.eventsRecordEvents)
-		s.Run("WritesToWispEventsTable", s.eventsRecordWispEvents)
-		s.Run("FieldsRoundTrip", s.eventsRecordRoundTrip)
-		s.Run("MissingIssueIDFailsFKConstraint", s.eventsRecordFKViolation)
+		s.Run("DoesNotWriteEventsTable", s.eventsRecordDoesNotWriteEvents)
+		s.Run("DoesNotWriteWispEventsTable", s.eventsRecordDoesNotWriteWispEvents)
+		s.Run("MissingIssueIDNoops", s.eventsRecordMissingIssueNoops)
 	})
 }
 
@@ -35,7 +35,19 @@ func (s *testSuite) seedWispRow(id string) {
 	s.Require().NoError(err)
 }
 
-func (s *testSuite) eventsRecordEvents() {
+func (s *testSuite) seedLegacyEventRow(issueID string, eventType types.EventType, useWisps bool) {
+	table := "events"
+	if useWisps {
+		table = "wisp_events"
+	}
+	//nolint:gosec // G201: table is selected from two hardcoded constants.
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO "+table+" (id, issue_id, event_type, actor) VALUES (?, ?, ?, ?)",
+		issueops.NewEventID(), issueID, string(eventType), "tester")
+	s.Require().NoError(err)
+}
+
+func (s *testSuite) eventsRecordDoesNotWriteEvents() {
 	s.seedIssueRow("bd-evt-1")
 
 	r := s.eventsRepo()
@@ -47,10 +59,10 @@ func (s *testSuite) eventsRecordEvents() {
 
 	var count int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-evt-1", string(types.EventCreated),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ?",
+		"bd-evt-1",
 	).Scan(&count))
-	s.Equal(1, count, "expected one row in events table")
+	s.Equal(0, count, "Record must not append audit rows to events")
 
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ?",
@@ -59,7 +71,7 @@ func (s *testSuite) eventsRecordEvents() {
 	s.Equal(0, count, "no row should be in wisp_events")
 }
 
-func (s *testSuite) eventsRecordWispEvents() {
+func (s *testSuite) eventsRecordDoesNotWriteWispEvents() {
 	r := s.eventsRepo()
 	s.Require().NoError(r.Record(s.Ctx(), domain.Event{
 		IssueID: "bd-evt-wisp",
@@ -69,10 +81,10 @@ func (s *testSuite) eventsRecordWispEvents() {
 
 	var count int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ? AND event_type = ?",
-		"bd-evt-wisp", string(types.EventUpdated),
+		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ?",
+		"bd-evt-wisp",
 	).Scan(&count))
-	s.Equal(1, count, "expected one row in wisp_events table")
+	s.Equal(0, count, "Record must not append audit rows to wisp_events")
 
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ?",
@@ -81,37 +93,11 @@ func (s *testSuite) eventsRecordWispEvents() {
 	s.Equal(0, count, "no row should be in events table")
 }
 
-func (s *testSuite) eventsRecordRoundTrip() {
-	s.seedIssueRow("bd-evt-rt")
-
+func (s *testSuite) eventsRecordMissingIssueNoops() {
 	r := s.eventsRepo()
-	in := domain.Event{
-		IssueID:  "bd-evt-rt",
-		Type:     types.EventStatusChanged,
-		Actor:    "alice",
-		OldValue: "open",
-		NewValue: "in_progress",
-	}
-	s.Require().NoError(r.Record(s.Ctx(), in, domain.RecordEventOpts{}))
-
-	var gotIssueID, gotType, gotActor, gotOld, gotNew string
-	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT issue_id, event_type, actor, old_value, new_value FROM events WHERE issue_id = ?",
-		in.IssueID,
-	).Scan(&gotIssueID, &gotType, &gotActor, &gotOld, &gotNew))
-	s.Equal(in.IssueID, gotIssueID)
-	s.Equal(string(in.Type), gotType)
-	s.Equal(in.Actor, gotActor)
-	s.Equal(in.OldValue, gotOld)
-	s.Equal(in.NewValue, gotNew)
-}
-
-func (s *testSuite) eventsRecordFKViolation() {
-	r := s.eventsRepo()
-	err := r.Record(s.Ctx(), domain.Event{
+	s.Require().NoError(r.Record(s.Ctx(), domain.Event{
 		IssueID: "bd-evt-no-such-issue",
 		Type:    types.EventCreated,
 		Actor:   "tester",
-	}, domain.RecordEventOpts{})
-	s.Require().Error(err, "expected FK violation when issue_id does not exist")
+	}, domain.RecordEventOpts{}))
 }

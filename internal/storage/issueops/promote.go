@@ -63,15 +63,8 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 		return fmt.Errorf("delete copied wisp dependencies for promoted wisp %s: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO events (id, issue_id, event_type, actor, old_value, new_value, comment, created_at)
-		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
-		FROM wisp_events WHERE issue_id = ?
-	`, id); err != nil {
-		return fmt.Errorf("copy events for promoted wisp %s: %w", id, err)
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM wisp_events WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied wisp events for promoted wisp %s: %w", id, err)
+		return fmt.Errorf("delete legacy wisp events for promoted wisp %s: %w", id, err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `

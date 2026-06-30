@@ -9,14 +9,14 @@ func (s *testSuite) TestLabelSQLRepository() {
 	s.Run("Insert", func() {
 		s.Run("RoundTripWithList", s.labelInsertRoundTrip)
 		s.Run("IdempotentDuplicate", s.labelInsertIdempotent)
-		s.Run("RecordsLabelAddedEvent", s.labelInsertRecordsEvent)
+		s.Run("DoesNotRecordLabelAddedEvent", s.labelInsertDoesNotRecordEvent)
 		s.Run("RejectsEmptyIssueID", s.labelInsertEmptyIssueID)
 		s.Run("RejectsEmptyLabel", s.labelInsertEmptyLabel)
 		s.Run("MissingIssueIDFailsFK", s.labelInsertFKViolation)
 	})
 	s.Run("Delete", func() {
 		s.Run("RemovesLabelRow", s.labelDeleteRemoves)
-		s.Run("RecordsLabelRemovedEvent", s.labelDeleteRecordsEvent)
+		s.Run("DoesNotRecordLabelRemovedEvent", s.labelDeleteDoesNotRecordEvent)
 		s.Run("MissingLabelIsNoop", s.labelDeleteMissingNoop)
 		s.Run("OnlyTargetLabelRemoved", s.labelDeleteSpecificLabel)
 		s.Run("RejectsEmptyIssueID", s.labelDeleteEmptyIssueID)
@@ -34,7 +34,7 @@ func (s *testSuite) TestLabelSQLRepository() {
 	})
 	s.Run("Wisp", func() {
 		s.Run("InsertRoutesToWispLabels", s.labelWispInsertRouting)
-		s.Run("InsertRecordsEventInWispEvents", s.labelWispInsertEvent)
+		s.Run("InsertDoesNotRecordWispEvent", s.labelWispInsertNoEvent)
 		s.Run("ListReadsFromWispLabels", s.labelWispListIsolated)
 		s.Run("ListByIssueIDsReadsFromWispLabels", s.labelWispBulkIsolated)
 	})
@@ -69,21 +69,20 @@ func (s *testSuite) labelInsertIdempotent() {
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-lbl-dup", string(types.EventLabelAdded),
 	).Scan(&count))
-	s.Equal(2, count)
+	s.Equal(0, count)
 }
 
-func (s *testSuite) labelInsertRecordsEvent() {
+func (s *testSuite) labelInsertDoesNotRecordEvent() {
 	s.seedIssueRow("bd-lbl-evt")
 	r := s.labelRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-evt", "perf", "alice", domain.LabelOpts{}))
 
-	var actor, newValue string
+	var count int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT actor, new_value FROM events WHERE issue_id = ? AND event_type = ?",
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-lbl-evt", string(types.EventLabelAdded),
-	).Scan(&actor, &newValue))
-	s.Equal("alice", actor)
-	s.Equal("perf", newValue, "event new_value should carry the label name")
+	).Scan(&count))
+	s.Equal(0, count)
 }
 
 func (s *testSuite) labelInsertEmptyIssueID() {
@@ -166,7 +165,7 @@ func (s *testSuite) labelWispInsertRouting() {
 	s.Equal(0, permCount, "wisp-routed insert must not write to labels")
 }
 
-func (s *testSuite) labelWispInsertEvent() {
+func (s *testSuite) labelWispInsertNoEvent() {
 	s.seedWispRow("bd-lbl-wisp-evt")
 	r := s.labelRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-wisp-evt", "audit", "alice", domain.LabelOpts{UseWispsTable: true}))
@@ -176,7 +175,7 @@ func (s *testSuite) labelWispInsertEvent() {
 		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ? AND event_type = ?",
 		"bd-lbl-wisp-evt", string(types.EventLabelAdded),
 	).Scan(&wispEvtCount))
-	s.Equal(1, wispEvtCount)
+	s.Equal(0, wispEvtCount)
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-lbl-wisp-evt", string(types.EventLabelAdded),
@@ -236,19 +235,18 @@ func (s *testSuite) labelDeleteRemoves() {
 	s.Empty(out, "deleted label should no longer appear in List")
 }
 
-func (s *testSuite) labelDeleteRecordsEvent() {
+func (s *testSuite) labelDeleteDoesNotRecordEvent() {
 	s.seedIssueRow("bd-lbl-del-evt")
 	r := s.labelRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-del-evt", "perf", "alice", domain.LabelOpts{}))
 	s.Require().NoError(r.Delete(s.Ctx(), "bd-lbl-del-evt", "perf", "bob", domain.LabelOpts{}))
 
-	var actor, oldValue string
+	var count int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT actor, old_value FROM events WHERE issue_id = ? AND event_type = ?",
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-lbl-del-evt", string(types.EventLabelRemoved),
-	).Scan(&actor, &oldValue))
-	s.Equal("bob", actor)
-	s.Equal("perf", oldValue, "event old_value should carry the removed label name (symmetric with Insert's new_value)")
+	).Scan(&count))
+	s.Equal(0, count)
 }
 
 func (s *testSuite) labelDeleteMissingNoop() {
@@ -307,10 +305,10 @@ func (s *testSuite) labelDeleteWispRouting() {
 		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ? AND event_type = ?",
 		"bd-lbl-del-cross-wisp", string(types.EventLabelRemoved),
 	).Scan(&wispEvt))
-	s.Equal(1, wispEvt)
+	s.Equal(0, wispEvt)
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-lbl-del-cross-wisp", string(types.EventLabelRemoved),
 	).Scan(&permEvt))
-	s.Equal(0, permEvt, "wisp-routed Delete must record the event in wisp_events, not events")
+	s.Equal(0, permEvt, "wisp-routed Delete must not append audit rows to events")
 }

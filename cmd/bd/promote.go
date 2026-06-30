@@ -19,7 +19,7 @@ var promoteCmd = &cobra.Command{
 	Long: `Promote a wisp (ephemeral issue) to a permanent bead.
 
 This copies the issue from the wisps table (dolt_ignored) to the permanent
-issues table (Dolt-versioned), preserving labels, dependencies, events, and
+issues table (Dolt-versioned), preserving labels, dependencies, and
 comments. The original ID is preserved so all links keep working.
 
 A comment is added recording the promotion and optional reason.
@@ -65,10 +65,13 @@ Examples:
 			return HandleErrorRespectJSON("%s is not a wisp (already persistent)", fullID)
 		}
 
+		// Promote: copy from wisps to issues table, preserving labels/deps/comments
 		if err := store.PromoteFromEphemeral(ctx, fullID, actor); err != nil {
 			return HandleErrorRespectJSON("promoting %s: %v", fullID, err)
 		}
 
+		// Add promotion comment (issue is now in permanent table, AddComment
+		// writes a structured comment).
 		comment := "Promoted from wisp to permanent bead"
 		if reason != "" {
 			comment += ": " + reason

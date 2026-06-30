@@ -82,17 +82,17 @@ func (h *reopenTestHelper) assertClosedAtNil(issueID string) {
 }
 
 func (h *reopenTestHelper) assertCommentEvent(issueID, comment string) {
-	events, err := h.s.GetEvents(h.ctx, issueID, 100)
+	comments, err := h.s.GetIssueComments(h.ctx, issueID)
 	if err != nil {
-		h.t.Fatalf("Failed to get events: %v", err)
+		h.t.Fatalf("Failed to get comments: %v", err)
 	}
 
-	for _, e := range events {
-		if e.EventType == types.EventCommented && e.Comment != nil && *e.Comment == comment {
+	for _, c := range comments {
+		if c.Text == comment {
 			return
 		}
 	}
-	h.t.Errorf("Expected to find comment event with reason '%s'", comment)
+	h.t.Errorf("Expected to find structured comment with reason '%s'", comment)
 }
 
 func TestReopenCommand(t *testing.T) {
