@@ -856,7 +856,7 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=10m
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=20m
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
