@@ -1,14 +1,21 @@
 // Package dolt — iter_issues.go
 //
-// Streaming iterator over the issues table. Holds a DEDICATED *sql.Conn
-// for the cursor's lifetime so per-row label hydration can run on a SECOND
-// pool connection without deadlocking against the cursor connection
-// (be-jaavsb §4.1, §4.3).
+// Iterator over the issues table. Issue rows and their labels are read inside
+// a SINGLE read transaction (one *sql.Conn), then wrapped in a SliceIter.
+//
+// Why not a streaming cursor with per-row label hydration: server-mode Dolt
+// pins each store to MaxOpenConns=1 because branch isolation is session-level
+// (DOLT_CHECKOUT applies to the connection, see dolt_test.go setupTestStore).
+// A streaming cursor holds that one connection for *sql.Rows, so hydrating
+// labels per row needs a SECOND connection that can never be granted — the
+// classic pool deadlock (mybd-2pcb). Buffer-then-hydrate keeps everything on
+// the cursor's own connection: read all rows, close the cursor, batch-fetch
+// labels with WHERE issue_id IN (...), then release the connection before the
+// caller walks the slice.
 //
 // This iterator queries only the `issues` table — wisp routing happens in
-// the slice-returning SearchIssues which merges wisps and issues. The
-// streaming path matches PG semantics: callers that need wisps stream
-// IterWisps separately.
+// the slice-returning SearchIssues which merges wisps and issues. Callers that
+// need wisps stream IterWisps separately.
 package dolt
 
 import (
@@ -22,29 +29,12 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// doltIssueIter is a streaming iterator over the issues table.
+// IterIssues returns issues matching the filter from the `issues` table.
 //
-// It holds a dedicated *sql.Conn for its lifetime: the cursor is busy
-// holding *sql.Rows so per-row label hydration must run on a SECOND
-// connection from the *sql.DB pool. Forgetting this is the classic
-// deadlock — the iterator is locked, the hydration query waits for the
-// same conn, and the pool blocks forever. The dedicated-conn pattern is
-// pinned by the parity test (concurrent iterators).
-type doltIssueIter struct {
-	s      *DoltStore
-	conn   *sql.Conn
-	rows   *sql.Rows
-	cur    *types.Issue
-	err    error
-	closed bool
-}
-
-// IterIssues streams issues matching the filter from the `issues` table.
-//
-// The streaming path queries only the issues table (wisps are streamed
-// separately via IterWisps). The slice path SearchIssues merges both for
-// backward compatibility — that merge defeats streaming because the wisp
-// pass needs a seen-set keyed by ID across the full issues result set.
+// The path queries only the issues table (wisps are returned separately via
+// IterWisps). The slice path SearchIssues merges both for backward
+// compatibility — that merge needs a seen-set keyed by ID across the full
+// issues result set, so it stays separate from this issues-only iterator.
 func (s *DoltStore) IterIssues(ctx context.Context, query string, filter types.IssueFilter) (storage.Iter[types.Issue], error) {
 	if s.closed.Load() {
 		return nil, ErrStoreClosed
@@ -66,86 +56,41 @@ func (s *DoltStore) IterIssues(ctx context.Context, query string, filter types.I
 	q := fmt.Sprintf(`SELECT %s FROM issues %s ORDER BY priority ASC, created_at DESC, id ASC%s`,
 		issueops.IssueSelectColumns, whereSQL, limitSQL)
 
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("iter issues: acquire conn: %w", err)
-	}
-	rows, err := conn.QueryContext(ctx, q, args...)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("iter issues: query: %w", err)
-	}
-	return &doltIssueIter{s: s, conn: conn, rows: rows}, nil
-}
-
-func (it *doltIssueIter) Next(ctx context.Context) bool {
-	if it.err != nil || it.closed {
-		return false
-	}
-	if err := ctx.Err(); err != nil {
-		it.err = err
-		return false
-	}
-	if !it.rows.Next() {
-		it.err = it.rows.Err()
-		return false
-	}
-	iss, err := issueops.ScanIssueFrom(it.rows)
-	if err != nil {
-		it.err = fmt.Errorf("iter issues: scan: %w", err)
-		return false
-	}
-	// Hydrate labels on a SEPARATE pool connection (NOT it.conn — the
-	// cursor conn is busy holding it.rows). s.db.QueryContext acquires a
-	// fresh conn from the pool for the duration of the label query.
-	labels, err := iterFetchLabels(ctx, it.s.db, "labels", iss.ID)
-	if err != nil {
-		it.err = fmt.Errorf("iter issues: hydrate labels: %w", err)
-		return false
-	}
-	iss.Labels = labels
-	it.cur = iss
-	return true
-}
-
-func (it *doltIssueIter) Value() *types.Issue { return it.cur }
-func (it *doltIssueIter) Err() error          { return it.err }
-
-func (it *doltIssueIter) Close() error {
-	if it.closed {
-		return nil
-	}
-	it.closed = true
-	if it.rows != nil {
-		_ = it.rows.Close()
-	}
-	if it.conn != nil {
-		_ = it.conn.Close()
-	}
-	return nil
-}
-
-// iterFetchLabels reads labels for a single issue ID from the named label
-// table on a fresh pool connection. Used by streaming iterators where the
-// cursor connection is busy holding *sql.Rows.
-//
-//nolint:gosec // G201: labelTable is a hardcoded constant from caller ("labels" or "wisp_labels")
-func iterFetchLabels(ctx context.Context, db *sql.DB, labelTable, issueID string) ([]string, error) {
-	rows, err := db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT label FROM %s WHERE issue_id = ? ORDER BY label`, labelTable),
-		issueID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch labels from %s: %w", labelTable, err)
-	}
-	defer rows.Close()
-
-	var labels []string
-	for rows.Next() {
-		var label string
-		if err := rows.Scan(&label); err != nil {
-			return nil, fmt.Errorf("fetch labels: scan: %w", err)
+	var issues []*types.Issue
+	txErr := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("iter issues: query: %w", err)
 		}
-		labels = append(labels, label)
+		defer func() { _ = rows.Close() }()
+		ids := make([]string, 0)
+		for rows.Next() {
+			iss, scanErr := issueops.ScanIssueFrom(rows)
+			if scanErr != nil {
+				return fmt.Errorf("iter issues: scan: %w", scanErr)
+			}
+			issues = append(issues, iss)
+			ids = append(ids, iss.ID)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iter issues: rows: %w", err)
+		}
+		// A *sql.Tx is bound to one connection, so the cursor must be closed
+		// before the label query can run on it (idempotent with the defer).
+		_ = rows.Close()
+		labelMap, err := issueops.GetLabelsForIssuesFromTableInTx(ctx, tx, "labels", ids)
+		if err != nil {
+			return fmt.Errorf("iter issues: hydrate labels: %w", err)
+		}
+		for _, iss := range issues {
+			if labels, ok := labelMap[iss.ID]; ok {
+				iss.Labels = labels
+			}
+		}
+		return nil
+	})
+	if txErr != nil {
+		return nil, txErr
 	}
-	return labels, rows.Err()
+	return storage.NewSliceIter(issues), nil
 }
