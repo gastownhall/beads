@@ -185,17 +185,25 @@ func TestCheckSchemaSkew_MissingTable_NoError(t *testing.T) {
 // (so the embedded writable path can pass a pinned *sql.Conn) and still reports
 // forward drift.
 func TestCheckForwardDrift_Conn_Ahead(t *testing.T) {
+	ctx := context.Background()
+
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer db.Close()
 
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+
 	dbVersion := LatestVersion() + 2
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
-	got := CheckForwardDrift(context.Background(), db)
+	got := CheckForwardDrift(ctx, conn)
 	if !IsSchemaSkewError(got) {
 		t.Fatalf("CheckForwardDrift = %v (%T), want *SchemaSkewError", got, got)
 	}
