@@ -1154,12 +1154,17 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		autoStartedServerDir: autoStartedDir,
 	}
 
-	if cfg.ReadOnly {
-		if err := schema.CheckForwardDrift(ctx, db); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-	} else {
+	// Forward-drift guard runs on read-only AND writable opens. A binary older
+	// than the database's schema cannot migrate it forward: MigrateUp no-ops
+	// when the DB is already past the binary's latest migration (atLatest uses
+	// >=), so without this guard a writable open would proceed and later queries
+	// would fail with cryptic unknown-column errors instead of a clear
+	// "upgrade bd" message (the stale-binary incident behind #4135/#4137).
+	if err := schema.CheckForwardDrift(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if !cfg.ReadOnly {
 		if err := store.initSchema(ctx); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
