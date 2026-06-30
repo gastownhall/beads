@@ -52,6 +52,8 @@ irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 brew upgrade beads
 ```
 
+<!-- Canonical Homebrew tap-migration snippet. The installation page links
+     here; docs/INSTALLING.md mirrors this block. Keep all three in sync. -->
 If you still have the old tap formula installed as `bd`, switch to the
 Homebrew core formula:
 

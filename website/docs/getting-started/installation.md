@@ -6,6 +6,11 @@ sidebar_position: 1
 
 # Installing bd
 
+<!-- This website install page and the GitHub-rendered docs/INSTALLING.md are
+     deliberate parallel docs for different audiences. When you change platform
+     commands or install methods here, update docs/INSTALLING.md too so they do
+     not drift. -->
+
 Complete installation guide for all platforms.
 
 ## Quick Install (Recommended)
@@ -17,14 +22,9 @@ brew install beads
 ```
 
 Homebrew core's `beads` formula is the supported Homebrew package. If you
-previously installed the old tap formula as `bd`, migrate to the core formula:
-
-```bash
-brew uninstall bd
-brew untap gastownhall/beads 2>/dev/null || true
-brew untap steveyegge/beads 2>/dev/null || true
-brew install beads
-```
+previously installed the old tap formula as `bd`, see
+[Migrating from the old Homebrew tap](/getting-started/upgrading#homebrew) to
+switch to the core formula.
 
 **Why Homebrew?**
 - Simple one-command install
