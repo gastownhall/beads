@@ -67,6 +67,12 @@ var BuiltinRecipes = map[string]Recipe{
 		Type:        TypeFile,
 		Description: "Kilo Code rules file",
 	},
+	"kiro": {
+		Name:        "Kiro CLI",
+		Path:        ".kiro/steering/beads.md",
+		Type:        TypeFile,
+		Description: "Kiro steering file",
+	},
 	"claude": {
 		Name:        "Claude Code",
 		Type:        TypeHooks,

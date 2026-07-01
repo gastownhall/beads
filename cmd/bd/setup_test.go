@@ -189,6 +189,35 @@ func TestRunRecipe_BuiltinFileRecipeWorksWithoutWorkspace(t *testing.T) {
 	}
 }
 
+func TestRunRecipe_KiroWorksWithoutWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	out := captureStdout(t, func() error {
+		runRecipe("kiro")
+		return nil
+	})
+
+	if !strings.Contains(out, "Installing Kiro CLI integration") {
+		t.Fatalf("expected install output, got:\n%s", out)
+	}
+
+	installedPath := filepath.Join(tmpDir, ".kiro", "steering", "beads.md")
+	data, err := os.ReadFile(installedPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", installedPath, err)
+	}
+	if string(data) != recipes.Template {
+		t.Fatalf("installed Kiro recipe contents did not match template")
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("expected no local .beads directory to be created, got err=%v", err)
+	}
+}
+
 func TestRunRecipe_CopilotWorksWithoutWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
 
