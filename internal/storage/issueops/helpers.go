@@ -379,25 +379,11 @@ func ComputeAdaptiveLength(numIssues int, cfg AdaptiveIDConfig) int {
 
 // GetCustomStatusesTx reads custom statuses from config within a transaction.
 func GetCustomStatusesTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	var raw string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "status.custom").Scan(&raw)
-	if err == sql.ErrNoRows || raw == "" {
-		return nil, nil
-	}
+	detailed, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read status.custom config: %w", err)
+		return nil, err
 	}
-	var statuses []string
-	if err := json.Unmarshal([]byte(raw), &statuses); err != nil {
-		// Try comma-separated fallback
-		for _, s := range strings.Split(raw, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				statuses = append(statuses, s)
-			}
-		}
-	}
-	return statuses, nil
+	return types.CustomStatusNames(detailed), nil
 }
 
 // GetCustomTypesTx reads custom types from config within a transaction.
