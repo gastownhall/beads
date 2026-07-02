@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.2] - 2026-07-02
+
+Second release candidate for 1.1.0. Fixes the two upgrade-breaking migration
+regressions reported against rc.1 (#4502, #4534), hardens the remote-migrate
+gate that rc.1 introduced, and ships the validated upgrade documentation.
+
 ### Upgrade Notes
 
 - **Back up before migrating.** The upgrade guide's remote-backed recipes now
@@ -43,6 +49,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ON DELETE CASCADE` would have removed had it been in force. Runs
   automatically on the next command with the new binary; already-bitten
   databases are healed in place.
+- **Old binaries fail fast on writable opens of a schema-newer database**
+  instead of proceeding against a schema they do not understand
+  ([#4531](https://github.com/gastownhall/beads/pull/4531)) — the guard rail
+  for the mixed-version window during multi-clone upgrades.
+- **Prerelease GitHub releases now ship prerelease-correct install
+  instructions.** The release notes header previously showed the stable
+  install methods (brew, install scripts), three of which do not deliver a
+  prerelease ([#4530](https://github.com/gastownhall/beads/pull/4530)).
+- **`bd remember` no longer clobbers a memory whose content is its own key**,
+  and a bare `bd remember <existing-key>` now recalls instead of overwriting.
+
+### Added
+
+- **Smarter remote-migrate gate.** The gate introduced in rc.1 is now
+  state-aware and agent-safe: cases that are provably safe to migrate
+  auto-resolve instead of stopping every agent at the wall, while genuinely
+  risky states still require the designated migrator
+  ([#4515](https://github.com/gastownhall/beads/pull/4515),
+  [#4516](https://github.com/gastownhall/beads/pull/4516)).
+- **Backend-agnostic storage conformance test suite**
+  ([#4414](https://github.com/gastownhall/beads/pull/4414)).
+
+### Documentation
+
+- **Validated upgrade recipe for remote-backed / multi-clone databases** in
+  the upgrade guide, exercised end-to-end on a live database
+  ([#4514](https://github.com/gastownhall/beads/pull/4514)), plus a
+  consolidated Homebrew tap-migration snippet across install docs, a README
+  pointer to the upgrade guide, and a pre-migrate backup step in the
+  recipes (this release).
 
 ## [1.1.0-rc.1] - 2026-06-23
 
